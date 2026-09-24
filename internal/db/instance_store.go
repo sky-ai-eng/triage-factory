@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -54,4 +55,12 @@ type InstanceStore interface {
 	// write the heartbeat deliberately never performs (see
 	// domain.InstanceHeartbeat). matched is false when id is unknown.
 	SetDraining(ctx context.Context, id string, draining bool) (matched bool, err error)
+
+	// DeleteStaleSystem deletes every instance row whose last heartbeat is
+	// older than olderThan, and returns how many went. claims.executor_id
+	// carries no foreign key to instances, so a deleted row takes no claim
+	// history with it, and an id that comes back simply re-registers at boot
+	// epoch 1. Postgres measures on database time; SQLite is one process and
+	// measures on its own clock, the one its heartbeats are stamped with.
+	DeleteStaleSystem(ctx context.Context, olderThan time.Duration) (int, error)
 }

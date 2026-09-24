@@ -938,11 +938,11 @@ type ConversationStore interface {
 	//
 	// The unfenced twin resolves "the conversation's active claim" and mints
 	// one when there is none, which is what makes it unsafe for an engagement
-	// to call: setup can outlast a claim, so a conversation reaped mid-clone whose
-	// process then comes up would re-stamp the SUCCESSOR's claim with a dead
-	// executor's id and boot epoch. Nothing reads that column back to the
-	// process, so the corruption is silent until the reaper reads it and
-	// declares a live engagement's executor lost.
+	// to call: setup can outlast a claim, so a conversation taken over mid-clone
+	// whose process then comes up would re-stamp the SUCCESSOR's claim with a
+	// dead executor's id and boot epoch. Nothing reads that column back to the
+	// process, so the corruption is silent until that executor's next boot
+	// reset reads it and releases a live engagement's claim as its own.
 	//
 	// Two properties, and only one of them is the fence.
 	//

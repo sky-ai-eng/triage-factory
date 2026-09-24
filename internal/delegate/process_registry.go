@@ -289,9 +289,10 @@ func (s *Spawner) deregisterProc(conversationID string) {
 // ownership is a forward-compat hook, not a correctness gate at N=1.
 //
 // Fenced on claimID, because "the process is live" is a claim about ownership
-// and setup is where ownership is most likely to have moved on: a run reaped
-// mid-clone whose process then comes up would otherwise stamp a dead executor
-// onto the successor's claim, and the reaper reads that column. Empty claimID
+// and setup is where ownership is most likely to have moved on: a run taken
+// over mid-clone whose process then comes up would otherwise stamp a dead
+// executor onto the successor's claim, and that executor's next boot reset
+// would release it as its own. Empty claimID
 // keeps the unfenced active-claim write for callers with no engagement in
 // scope. A refusal is logged loudly and nothing else changes — the engagement
 // carries on to its first transcript write, which meets the same fence and

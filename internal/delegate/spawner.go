@@ -455,21 +455,16 @@ type Spawner struct {
 	identityFenced atomic.Bool
 	// partitionFenced latches (NOT sticky — clears on the next successful
 	// heartbeat write) when this instance fails to WRITE its heartbeat for
-	// longer than selfFenceDeadline: the reaper can't tell a partitioned
-	// executor from a dead one, so the protocol makes them equivalent —
-	// stop claiming and kill live sandboxes, same reaction as
-	// identityFenced, but reversible (connectivity may return) and never
-	// exits the process (a restart would lose warm worktrees for
-	// nothing). See checkPartitionSelfFence / PartitionFenced
-	// (instance_heartbeat.go, TFAC-586).
+	// longer than selfFenceDeadline: a host that cannot reach the registry
+	// claims nothing new until it can. Live engagements are left alone —
+	// each one's claim lease decides whether it keeps running. See
+	// checkPartitionSelfFence / PartitionFenced (instance_heartbeat.go).
 	partitionFenced atomic.Bool
-	// selfFenceDeadline is TF_SELF_FENCE_SEC (default DefaultSelfFenceDeadline):
-	// the own-monotonic-clock deadline since the last successful heartbeat
-	// write past which this instance self-fences the partition case. Zero
-	// (the NewSpawner default) falls back to DefaultSelfFenceDeadline —
-	// mirrors memFloorMB's "zero means use the default" shape. Set once at
-	// startup via SetSelfFenceDeadline; boot refuses a value >=
-	// TF_REAPER_STALE_SEC (internal/app cross-validates both).
+	// selfFenceDeadline overrides DefaultSelfFenceDeadline, the own-
+	// monotonic-clock deadline since the last successful heartbeat write past
+	// which this instance latches the partition fence. Zero (the NewSpawner
+	// default, and the product's only value) falls back to the constant; the
+	// field exists so tests can drive the fence at test speed.
 	selfFenceDeadline time.Duration
 	// claimRenewInterval / claimSelfFenceDeadline / claimLease are how often
 	// each engagement renews its claim's lease, the own-monotonic deadline
@@ -478,13 +473,18 @@ type Spawner struct {
 	// falls back to the package constants at use time, like selfFenceDeadline
 	// above — and that fallback is the product's only path, since the three
 	// are constants and only tests override them.
-	//
-	// Beside selfFenceDeadline rather than replacing it: that one is the
-	// instance-wide fence on the heartbeat, which kills every cell on the
-	// host, and these are the finer per-claim fence next to it.
 	claimRenewInterval     time.Duration
 	claimSelfFenceDeadline time.Duration
 	claimLease             time.Duration
+	// maxClaimLosses is the loss budget, TF_MAX_CLAIM_ATTEMPTS: how many
+	// engagements of one conversation may be lost in a row before its next
+	// claim fails it. Zero (the NewSpawner default) falls back to
+	// DefaultMaxClaimLosses. Set once at startup via SetMaxClaimLosses.
+	maxClaimLosses int
+	// cellsConfirmedClean records whether a previous boot's cells were
+	// confirmed torn down before the dispatcher started; the boot reset runs
+	// only when they were. See SetCellsConfirmedClean.
+	cellsConfirmedClean atomic.Bool
 	// onSupersessionFence is invoked once, synchronously, right after
 	// fenceIdentity kills this instance's live sandboxes on a supersession
 	// (identityFenced) — the second half of fence completion (spec

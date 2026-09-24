@@ -264,8 +264,9 @@ flicker and the age is not:
 tf_claims_oldest_expired_age_seconds > 120                                      # for 5m: a dead engagement nobody has released
 ```
 
-A claim past expiry for minutes means the recovery that should release it is
-not running.
+Every dispatcher takes expired claims over at the top of its pass, whether or
+not it has capacity to claim anything, so a claim past expiry for minutes means
+no dispatcher in the fleet is running.
 
 ### Slack ingest
 
@@ -415,8 +416,10 @@ sharing `conversation.id`, told apart by `claim.attempt`.
 The root's `outcome` says how the attempt ended, and the distinctions are the
 ones you actually filter on: `agent_live` reached the agent; `cancelled` was
 stopped by someone; `shutdown` stood down because its executor was going away,
-leaving the claim for the boot reconcile; `fenced` lost the conversation to a
-successor; `setup_failed` is the only one that also carries an error status, so
+leaving the claim for the shutdown release to hand back; `fenced` lost the
+conversation to a successor; `loss_budget_spent` failed the conversation without
+running it, because its engagements had been lost `TF_MAX_CLAIM_ATTEMPTS` times
+in a row; `setup_failed` is the only one that also carries an error status, so
 "traces with errors" stays a list of things that are wrong rather than a list
 of runs that were stopped.
 

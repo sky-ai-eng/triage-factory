@@ -33,9 +33,10 @@ const (
 	// against it. The run is parked, not failed. Anticipated, never an error.
 	engagementCancelled = "cancelled"
 	// engagementShutdown — the dispatcher's own context ended mid-setup, so
-	// this engagement stood down and left the claim for the boot reconcile to
-	// requeue. Distinct from engagementCancelled because the run is untouched
-	// and coming back, where a cancel is a disposition someone asked for.
+	// this engagement stood down and left the claim for the shutdown release
+	// to hand back. Distinct from engagementCancelled because the run is
+	// untouched and coming back, where a cancel is a disposition someone
+	// asked for.
 	engagementShutdown = "shutdown"
 	// engagementNoMessage — a follow-up claim on a finished blueprint that
 	// carried nothing to deliver, parked back.
@@ -48,6 +49,10 @@ const (
 	// engagementSetupFailed — setup genuinely failed. The only outcome that
 	// also carries an error status.
 	engagementSetupFailed = "setup_failed"
+	// engagementLost — the conversation's previous engagements were lost as
+	// many times in a row as the loss budget allows, so this claim failed it
+	// instead of running it.
+	engagementLost = "loss_budget_spent"
 )
 
 // engagement is one claim attempt's root span, plus the SpanContext that

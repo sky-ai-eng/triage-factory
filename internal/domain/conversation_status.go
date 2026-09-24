@@ -162,8 +162,7 @@ const (
 	// ParkReasonUserCancelled — a person stopped this conversation.
 	ParkReasonUserCancelled ParkReason = "user_cancelled"
 	// ParkReasonSystemCancelled — TF stopped it with no user asking: a task
-	// closing its conversations, a team archive's force-stop cascade, the reaper
-	// finalizing a cancel-requested step under a dead executor.
+	// closing its conversations, a team archive's force-stop cascade.
 	ParkReasonSystemCancelled ParkReason = "system_cancelled"
 	// ParkReasonBlueprintCancelled — the blueprint behind the step was
 	// cancelled, so the step it would have run is moot.

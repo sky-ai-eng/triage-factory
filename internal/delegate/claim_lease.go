@@ -64,7 +64,7 @@ func leaseFenced(ctx context.Context) bool {
 
 // setClaimLease overrides the three claim-lease timings. Zero on any of them
 // falls back to that timing's package default at use time, the same shape
-// SetSelfFenceDeadline has. Nothing in the running product calls it: the
+// selfFenceDeadline has. Nothing in the running product calls it: the
 // defaults above are the values, and this exists so the renewal loop can be
 // driven at test speed.
 func (s *Spawner) setClaimLease(renew, selfFence, lease time.Duration) {

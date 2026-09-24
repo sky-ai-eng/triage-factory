@@ -8,9 +8,6 @@ package delegate
 
 import (
 	"context"
-	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -21,10 +18,11 @@ import (
 // renews this instance's registry row. Within the spec's ~3-5s window.
 const DefaultInstanceHeartbeatInterval = 4 * time.Second
 
-// DefaultSelfFenceDeadline is TF_SELF_FENCE_SEC's default: the own-
-// monotonic-clock deadline since the last successful heartbeat WRITE past
-// which an instance self-fences the partition case (spec §4.3's pre-made
-// numbers — 4s heartbeat < 15s self-fence < 30s reaper staleness).
+// DefaultSelfFenceDeadline is the own-monotonic-clock deadline since the
+// last successful heartbeat WRITE past which an instance latches the partition
+// fence and stops claiming new work. A constant: it gates claiming only, and
+// nothing about a claim's ownership depends on it — each claim's own lease
+// decides whether its engagement keeps running.
 const DefaultSelfFenceDeadline = 15 * time.Second
 
 // defaultHeartbeatWriteTimeout caps how long a single heartbeat WRITE may
@@ -34,18 +32,16 @@ const DefaultSelfFenceDeadline = 15 * time.Second
 // silently black-holed connection (a partition with no RST — packets just
 // vanish, as opposed to a refused/reset connection, which fails fast on its
 // own) can hang the call indefinitely: the ticker loop stalls, and
-// checkPartitionSelfFence never runs at all, defeating the whole mechanism
-// — the reaper can requeue this instance's claimed runs while it sits here
-// still "trying" forever. See heartbeatWriteTimeout for how this scales
-// with a configured TF_SELF_FENCE_SEC.
+// checkPartitionSelfFence never runs at all, so a host that cannot reach the
+// registry keeps claiming. See heartbeatWriteTimeout for how this scales
+// with the self-fence deadline.
 const defaultHeartbeatWriteTimeout = 5 * time.Second
 
 // heartbeatWriteTimeout derives the per-call write timeout from the
-// configured self-fence deadline: capped at defaultHeartbeatWriteTimeout so
-// a single hung write can never block for minutes, and floored at 1s so an
-// aggressively short TF_SELF_FENCE_SEC (tests, or an unusually tight
-// deployment) doesn't shrink it to something that fails healthy-but-slow
-// writes. A third of the deadline leaves room for at least a couple of
+// self-fence deadline: capped at defaultHeartbeatWriteTimeout so a single
+// hung write can never block for minutes, and floored at 1s so an
+// aggressively short deadline (tests) doesn't shrink it to something that
+// fails healthy-but-slow writes. A third of the deadline leaves room for at least a couple of
 // timed-out attempts before the deadline itself elapses — a SINGLE timeout
 // consuming the whole deadline would let one hung write silently absorb
 // the entire tolerance window with no chance to retry.
@@ -58,32 +54,6 @@ func (s *Spawner) heartbeatWriteTimeout() time.Duration {
 		return time.Second
 	}
 	return d
-}
-
-// ParseSelfFenceDeadline parses TF_SELF_FENCE_SEC. Empty maps to
-// DefaultSelfFenceDeadline; anything else must parse as a positive integer
-// second count. internal/app cross-validates the result against the
-// reaper's staleness threshold (TF_REAPER_STALE_SEC) — this function only
-// knows its own env var, mirroring internal/lease's per-knob parsers.
-func ParseSelfFenceDeadline(raw string) (time.Duration, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return DefaultSelfFenceDeadline, nil
-	}
-	n, err := strconv.Atoi(s)
-	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("invalid TF_SELF_FENCE_SEC=%q (want a positive integer number of seconds)", raw)
-	}
-	return time.Duration(n) * time.Second, nil
-}
-
-// SetSelfFenceDeadline installs the partition self-fence deadline. Zero (the
-// NewSpawner default) falls back to DefaultSelfFenceDeadline at check time —
-// see selfFenceDeadlineOrDefault.
-func (s *Spawner) SetSelfFenceDeadline(d time.Duration) {
-	s.mu.Lock()
-	s.selfFenceDeadline = d
-	s.mu.Unlock()
 }
 
 func (s *Spawner) selfFenceDeadlineOrDefault() time.Duration {
@@ -172,17 +142,16 @@ func (s *Spawner) RunInstanceHeartbeat(ctx context.Context, interval time.Durati
 // duplicated state root (cloned volume, copied ~/.triagefactory, a second
 // host mounting the same directory over a share) that the boot-time flock
 // cannot see. That is the split-identity case: two live processes now own
-// one identity, and the newer boot's self-sweep will requeue rows this
-// process is still executing. fenceIdentity() reacts: stop claiming,
+// one identity, and the newer boot's boot reset releases claims this
+// process is still driving. fenceIdentity() reacts: stop claiming,
 // refuse resumes, kill this process's live sandboxes (the "existing
 // cancel machinery" fence completion re-uses), then exit — see
 // fenceIdentity and SetOnSupersessionFence.
 //
 // A heartbeat WRITE FAILURE (the error branch, distinct from the
 // zero-rows-matched supersession case above) instead feeds
-// checkPartitionSelfFence: the reaper can't tell a partitioned executor
-// from a dead one, so past a deadline this instance self-fences the same
-// way — but reversibly, and without exiting (see PartitionFenced).
+// checkPartitionSelfFence: past a deadline this instance stops claiming new
+// work until a write lands again (see PartitionFenced).
 func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	id, bootEpoch := s.executorIdentity()
 	if id == "" {
@@ -238,12 +207,10 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 	// partitioned: if the write took long enough to land AFTER the
 	// self-fence deadline had already elapsed since our last known-good
 	// contact (a slow-but-not-fully-severed connection, or this goroutine
-	// itself stalled for a while before the call returned), the reaper may
-	// already have requeued this instance's claimed runs while the write
-	// was still in flight. Measure the gap BEFORE overwriting the
-	// baseline, so a late success still gets caught and reacts exactly
-	// like a live-detected partition (kill sandboxes) instead of silently
-	// resuming as if nothing happened.
+	// itself stalled for a while before the call returned), the gap is a
+	// partition that ended before anything noticed it. Measure it BEFORE
+	// overwriting the baseline, so a late success still latches the fence
+	// and logs the episode, then clears it below like any other recovery.
 	s.mu.Lock()
 	gap := time.Since(s.lastGoodContactAt)
 	s.lastGoodContactAt = time.Now()
@@ -280,9 +247,9 @@ func (s *Spawner) heartbeatOnce(ctx context.Context) bool {
 // Fence completion (spec §4.1(4), second half): kill every live sandbox
 // via the same cancel machinery Cancel(conversationID) uses, THEN invoke
 // onSupersessionFence (wired by internal/app to a loud log + os.Exit with
-// a distinct code) — so a zombie's in-flight work can't keep running and
-// double the reaper-requeued attempt's external writes. Ordered
-// deliberately: kill before exit, never the reverse.
+// a distinct code) — so a zombie's in-flight work can't keep running beside
+// the newer boot of this identity, whose boot reset releases the claims it
+// holds. Ordered deliberately: kill before exit, never the reverse.
 func (s *Spawner) fenceIdentity(id string, bootEpoch int64) {
 	if !s.identityFenced.CompareAndSwap(false, true) {
 		return
@@ -307,16 +274,15 @@ func (s *Spawner) IdentityFenced() bool {
 	return s.identityFenced.Load()
 }
 
-// checkPartitionSelfFence reacts once elapsed — the caller-computed time
-// since this instance's last known-good contact with the registry
-// (lastGoodContactAt: a successful write, or loop start) — crosses
-// selfFenceDeadline: this instance self-fences the partition case, same
-// reaction as fenceIdentity (kill live sandboxes, stop claiming), but
-// reversible (heartbeatOnce un-fences on the next successful write, often
-// the very next line after the call that triggered this) and never exits:
-// connectivity may return, and a restart would lose warm worktrees for
-// nothing. Idempotent per episode via CompareAndSwap — a burst of
-// deadline-crossing calls kills sandboxes only once, not on every one.
+// checkPartitionSelfFence latches the partition fence once elapsed — the
+// caller-computed time since this instance's last known-good contact with
+// the registry (lastGoodContactAt: a successful write, or loop start) —
+// crosses the self-fence deadline. The fence stops claiming and nothing else:
+// a live engagement renews its own claim, fences itself when it cannot, and
+// is taken over when its lease lapses, so whether it keeps running is its
+// lease's question rather than the host's. Reversible (heartbeatOnce clears
+// it on the next successful write) and never exits: connectivity may return.
+// Idempotent per episode via CompareAndSwap, so an episode logs once.
 //
 // elapsed is measured by the caller (heartbeatOnce) against
 // lastGoodContactAt — a plain time.Time under s.mu, deliberately NOT an
@@ -336,9 +302,8 @@ func (s *Spawner) checkPartitionSelfFence(id string, elapsed time.Duration) {
 	if !s.partitionFenced.CompareAndSwap(false, true) {
 		return
 	}
-	killed := s.killAllLiveSandboxes()
-	dispatchLog.Error("instance heartbeat exceeded the self-fence deadline — fencing: live sandboxes killed to avoid a duplicate execution; the reaper may already have requeued this instance's claimed conversations",
-		"instance", id, "self_fence_deadline", deadline, "elapsed_since_last_good_contact", elapsed, "sandboxes_killed", killed)
+	dispatchLog.Error("instance heartbeat exceeded the self-fence deadline — fencing: no new conversations will be claimed until a heartbeat write lands; live engagements keep running on their own claim leases",
+		"instance", id, "self_fence_deadline", deadline, "elapsed_since_last_good_contact", elapsed)
 }
 
 // PartitionFenced reports whether the partition self-fence has latched.
@@ -352,11 +317,11 @@ func (s *Spawner) PartitionFenced() bool {
 // killAllLiveSandboxes SIGKILLs every run this instance currently has a
 // live process for, via the same registered ctx-cancel handle
 // inProcessController.Cancel uses for a single run (process_registry.go) —
-// fence completion (spec §4.1(4)) reuses the existing cancel machinery
-// rather than inventing a second kill path. Returns the count killed. A
-// control pod (which never populates s.cancels for delegated runs — it
-// runs no dispatcher) or an executor with nothing in flight kills zero,
-// harmlessly. The goroutine actually running each cancelled step observes
+// identity-supersession fence completion (spec §4.1(4)) reuses the existing
+// cancel machinery rather than inventing a second kill path. Returns the
+// count killed. A control pod (which never populates s.cancels for delegated
+// runs — it runs no dispatcher) or an executor with nothing in flight kills
+// zero, harmlessly. The goroutine actually running each cancelled step observes
 // ctx.Err() and parks its own run (parkConversationOpen) exactly as a
 // user-initiated Cancel does; this function only fires the signal.
 func (s *Spawner) killAllLiveSandboxes() int {

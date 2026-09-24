@@ -139,8 +139,8 @@ func seedCIFailedTaskOnEntity(t *testing.T, r *Router, database *sql.DB, sourceI
 // The kill fails after the close commits — the window that used to be
 // retry-unrepairable, since a replay finds no active task and never walks back
 // to the run. The intent rode the close transaction, so the run is called off
-// anyway: the claim gate refuses it, which is what lets the reaper's cancel arm
-// finish the job once its executor is gone.
+// anyway: the claim gate refuses it, which is what lets the dispatcher's
+// settlement finish the job once no claim holds its step.
 func TestCloseCancelIntent_KillFailureStillLeavesTheRunCalledOff(t *testing.T) {
 	database := newTestDB(t)
 	r := newQueueWorkerRouter(t, database)

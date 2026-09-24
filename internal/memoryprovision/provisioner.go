@@ -9,7 +9,7 @@
 // something has to settle it, and the transcript is all that settling takes.
 // No filesystem, no snapshot, no cross-pod choreography.
 //
-// Manager is a brain-unit member the same way the fleet reaper and the
+// Manager is a brain-unit member the same way the registry GC and the
 // credential provisioner are (internal/app's startBrain/stopBrain), with one
 // difference: it is constructed for every brain-capable role INCLUDING local,
 // because local is always the brain and the same code runs at N=1.

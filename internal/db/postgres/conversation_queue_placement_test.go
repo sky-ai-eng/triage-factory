@@ -271,7 +271,7 @@ func TestPlacementClaim_RequeueClearsPreferred(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("claim: (%+v, %v)", claimed, err)
 	}
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	if got, ok := readPreferred(t, h, conversationID); ok {

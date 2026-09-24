@@ -21,8 +21,9 @@ const shutdownDrainTimeout = 15 * time.Second
 
 // drainDispatches is the shutdown join: it stops this process answering ready,
 // latches the drain flag, and blocks until every dispatch goroutine has
-// returned or the deadline expires. Run calls it after the blocking listener
-// unwinds and before main's deferred Close releases the pools.
+// returned or the deadline expires, then hands back the claims whose
+// engagements returned. Run calls it after the blocking listener unwinds and
+// before main's deferred Close releases the pools.
 //
 // Only dispatches are joined — see startWorkers for why the rest of the worker
 // set deliberately is not.
@@ -43,6 +44,13 @@ func (a *App) drainDispatches(ctx context.Context) {
 		return
 	}
 	a.awaitDispatches(a.spawner.WaitForDispatches, shutdownDrainTimeout)
+	// After the join, whether or not it finished: a claim whose engagement
+	// returned is handed back as a deliberate stop, claimable at once and
+	// charged to no budget, while one whose engagement is still running keeps
+	// its claim and is found later as the loss it then is. Bounded inside
+	// (delegate.ShutdownClaimReleaseTimeout); a failure is logged and the
+	// process exits anyway.
+	a.spawner.ReleaseOwnClaimsOnShutdown()
 }
 
 // awaitDispatches performs the drain sequence against an injected join and
@@ -77,7 +85,7 @@ func (a *App) awaitDispatches(wait func(context.Context) bool, timeout time.Dura
 	// running are the un-cancellable ones, so there is nothing to abort, and
 	// holding the process open past the orchestrator's grace period just moves
 	// the same truncation behind a SIGKILL where no line explains it.
-	appLog.Warn("shutdown drain deadline expired; dispatches are still in flight and their terminal writes may fail against the closing pool — the next boot's reconcile re-queues them",
+	appLog.Warn("shutdown drain deadline expired; dispatches are still in flight and their terminal writes may fail against the closing pool — their claims lapse and are taken over, or released by the next boot's reset",
 		"timeout", timeout)
 	return false
 }

@@ -33,12 +33,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// maxClaimAttempts caps how many times the dispatcher re-claims one queue
-// episode before giving up on it. A healthy engagement starts on attempt 1;
-// consecutive failures with nothing ever started mean a deterministic fault,
-// and stopping there is what keeps the dispatcher from spinning one row while
-// the rest of the queue waits. What "giving up" means then is not one thing —
-// see disposeOfExhaustedConversation.
+// maxClaimAttempts is the setup budget: how many engagements of one queue
+// episode may fail before their agent runs (Conversation.SetupFailures, plus
+// the one failing now) before the dispatcher gives up on it. A healthy
+// engagement starts on attempt 1; consecutive failures with nothing ever
+// started mean a deterministic fault, and stopping there is what keeps the
+// dispatcher from spinning one row while the rest of the queue waits. What
+// "giving up" means then is not one thing — see disposeOfExhaustedConversation.
+// Lost engagements spend a separate budget (TF_MAX_CLAIM_ATTEMPTS, see
+// SetMaxClaimLosses).
 //
 // At the scan interval this is about ten seconds of automatic retry, which is
 // the shape of the transient infrastructure faults it exists for. A fault that
@@ -112,33 +115,17 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	}
 }
 
-// reconcileConversationQueue is the boot crash-recovery sweep (decision #4). Runs left
-// mid-flight by a crash (claimed/running/setup statuses) are re-queued so the
-// dispatcher re-claims and re-runs them; a mid-flight blueprint thus resumes by
-// re-running its current step. Dormant `open` runs are left parked — they resume
-// through their own paths, not the queue.
+// reconcileConversationQueue is the boot crash-recovery sweep. Every claim an
+// earlier boot of this executor left unreleased is released (the boot reset),
+// so a mid-flight blueprint resumes by re-running its current step, and the
+// boot checks report the shapes no writer should produce.
 func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
-	// No step-plan handling needed: a re-queued mid-flight run is re-claimed by
-	// dispatchClaimedConversation, which reads the plan frozen on its blueprint_run (off
-	// br.StepPlan), so the resumed step runs the same program it was minted with.
-	//
-	// Ownership-scoped (TFAC-578): this only sweeps rows this instance itself
-	// claimed during an earlier boot (executorIdentity()), never a live
-	// sibling's claimed/running work — see ConversationQueueStore.ResetProcessingConversations.
-	executorID, bootEpoch := s.executorIdentity()
-	n, err := s.conversationQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
-	if err != nil {
-		dispatchLog.Error("boot reconcile: reset in-flight conversations failed", "error", err)
-		return
-	}
-	if n > 0 {
-		dispatchLog.Info("boot reconcile: re-queued in-flight conversations stranded by a crash", "count", n)
-	}
+	s.resetPriorBootClaims(ctx)
 
 	// Mirror sweep for the opposite desync — child conversations left
-	// non-terminal under an already-terminal blueprint_run. ResetProcessingConversations
-	// above only requeues under a *running* parent, so these orphans are
-	// invisible to it; left alone, an orphan still reading as claimable keeps
+	// non-terminal under an already-terminal blueprint_run. The reset above
+	// releases claims and writes no status, so these orphans still read as
+	// mid-flight after it; left alone, an orphan still reading as claimable keeps
 	// the dispatcher on phantom work and pins its feature branch in a worktree, requeuing any
 	// sibling fetch forever. Cancel them so the row stops looking live (the
 	// worktree.Cleanup sweep already reclaimed the on-disk dir for non-parked
@@ -172,13 +159,41 @@ func (s *Spawner) reconcileConversationQueue(ctx context.Context) {
 	}
 }
 
-// settleUnclaimedStops parks every stop-requested conversation no live claim
-// holds, and cancels the blueprint run behind one whose cancel was requested.
-// It is the settlement for work that is queued, parked, or whose executor died
-// after the stop was asked for; a live engagement settles its own.
+// resetPriorBootClaims releases the claims an earlier boot of this executor
+// left behind, as losses (ConversationQueueStore.ResetProcessingConversations).
+// The flock proves that process is gone; it does not prove its cells are, so
+// the reset runs only when the caller confirmed their teardown
+// (SetCellsConfirmedClean). Unconfirmed, the claims lapse and are taken over
+// after their lease, by which time an old cell has had the whole lease to die.
+//
+// No step-plan handling needed: a released mid-flight step is re-claimed by
+// dispatchClaimedConversation, which reads the plan frozen on its
+// blueprint_run, so the resumed step runs the same program it was minted with.
+func (s *Spawner) resetPriorBootClaims(ctx context.Context) {
+	if !s.cellsConfirmedClean.Load() {
+		dispatchLog.Warn("boot reset skipped: the previous boot's cells were not confirmed torn down; its claims will be taken over once their leases lapse")
+		return
+	}
+	executorID, bootEpoch := s.executorIdentity()
+	n, err := s.conversationQueue.ResetProcessingConversations(ctx, executorID, bootEpoch)
+	if err != nil {
+		dispatchLog.Error("boot reset: release the previous boot's claims failed; they will be taken over once their leases lapse", "error", err)
+		return
+	}
+	if n > 0 {
+		dispatchLog.Info("boot reset: released claims a previous boot of this executor left behind", "count", n)
+	}
+}
+
+// settleUnclaimedStops is the dispatcher's settlement pass over conversations
+// no live claim holds: a stop-requested one parks and cancels a run whose
+// cancel was requested, and a step a run's cancel never reached parks and
+// cancels its run (ConversationQueueStore.SettleUnclaimedStopsSystem). It is
+// the settlement for work that is queued, parked, or whose engagement was
+// lost; a live engagement settles its own.
 //
 // Every executor runs it; concurrent passes skip each other's rows, and a row
-// already settled carries no intent to match.
+// already settled matches neither arm.
 func (s *Spawner) settleUnclaimedStops(ctx context.Context) {
 	if s.conversationQueue == nil {
 		return
@@ -245,7 +260,7 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 	}
 	bgCtx := context.WithoutCancel(ctx)
 	for _, st := range settled {
-		dispatchLog.Info("settled a stop on an unclaimed conversation",
+		dispatchLog.Info("settled an unclaimed conversation",
 			"conversation", st.ConversationID, "org_id", st.OrgID, "blueprint_run_cancelled", st.BlueprintRunID)
 		// The status the settlement left, read back rather than assumed: a
 		// conversation that concluded before its stop was settled keeps its
@@ -280,12 +295,17 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
 func (s *Spawner) drainConversationQueue(ctx context.Context) {
-	// Settlement first, ahead of every gate below: a stop on a conversation
-	// nobody holds needs no capacity to settle, so a full host or a memory
-	// gate must not hold it back. The expired-claim release runs before it
-	// so a stop on a conversation whose engagement fenced settles this pass.
+	// Recovery first, ahead of every gate below: none of it needs a slot, so a
+	// saturated host or a memory gate must not hold it back, and every
+	// executor runs it, so a fleet recovers as long as any one of them is
+	// dispatching. The releases run before the settlement so a stop or a
+	// cancel on a conversation whose engagement was lost settles this pass:
+	// this executor's own expired claims first (only it can tell a finished
+	// engagement from one still tearing down), then everyone else's.
 	s.releaseOwnExpiredClaims(ctx)
+	s.takeOverExpiredClaims(ctx)
 	s.settleUnclaimedStops(ctx)
+	s.replayStrandedRuns(ctx)
 
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
@@ -312,8 +332,8 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		}
 		// Partition self-fence: a heartbeat WRITE failure past the
 		// self-fence deadline (checkPartitionSelfFence) — reversible, un-
-		// fences on the next successful write; in-flight runs at the
-		// moment of fencing were already killed by killAllLiveSandboxes.
+		// fences on the next successful write. In-flight runs are untouched;
+		// their own leases decide whether they keep running.
 		if s.PartitionFenced() {
 			return
 		}
@@ -327,8 +347,8 @@ func (s *Spawner) drainConversationQueue(ctx context.Context) {
 		// Acquire a concurrency slot BEFORE claiming, so we never flip a run to
 		// 'running' that then sits idle waiting for a slot. Blocks at capacity
 		// until a finishing run releases its slot; a shutdown breaks the wait
-		// (in-flight runs are ctx-cancelled, and the boot reconcile re-queues
-		// anything left mid-flight). The try-then-block split exists only to
+		// (in-flight runs are ctx-cancelled, and the shutdown release hands
+		// back anything left mid-flight). The try-then-block split exists only to
 		// observe which of the two happened: saturation episodes are
 		// transition-logged so a backlog of queued runs is diagnosable from
 		// the log rather than reading as a silent hang.
@@ -459,8 +479,8 @@ func (s *Spawner) waitForDispatcherStop(ctx context.Context) bool {
 //
 // Context split: the pre-agent setup reads honor the dispatcher ctx so a
 // shutdown (or a future timeout) cancels them cleanly — a ctx-cancelled read
-// returns early and leaves the claimed run 'running' for the next boot's
-// reconcile to re-queue, never failing the blueprint on a clean shutdown. The
+// returns early and leaves the claim for the shutdown release to hand back,
+// never failing the blueprint on a clean shutdown. The
 // terminal/reactor writes below deliberately stay on a detached
 // context.Background(): once the agent has run, the blueprint MUST be advanced
 // or finalized to avoid stranding it, so those must not be abortable by a
@@ -494,6 +514,17 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		leaseCtx, stopLease := context.WithCancel(ctx)
 		defer stopLease()
 		go s.renewClaimLease(leaseCtx, conv, claimedAt, claimFence)
+	}
+
+	// The loss budget, ahead of every gate: a conversation whose engagements
+	// were lost this many times in a row is failed without being run, because
+	// running it again is how a conversation that kills its executor takes
+	// down the next one. The count is this claim's, read in the claim
+	// statement, so it names exactly the losses since the last engagement
+	// that got anywhere.
+	if conv.LostEngagements >= s.maxClaimLossesOrDefault() {
+		s.disposeOfLostConversation(ctx, conv)
+		return
 	}
 
 	// The claim-validity gates: two DB round trips and a queue peek, every one
@@ -537,7 +568,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		if ctx.Err() != nil {
 			closeGate(engagementShutdown, nil)
 			s.endEngagement(conv.ID, engagementShutdown)
-			return // dispatcher shutting down — leave the claimed run for boot reconcile
+			return // dispatcher shutting down — leave the claim for the shutdown release
 		}
 		if fencedAtGate() {
 			return
@@ -787,7 +818,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if err != nil {
 		if ctx.Err() != nil {
 			s.endEngagement(conv.ID, engagementShutdown)
-			return // dispatcher shutting down — leave the claimed run for boot reconcile
+			return // dispatcher shutting down — leave the claim for the shutdown release
 		}
 		if disposedDuringBringUp() {
 			return
@@ -1066,8 +1097,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// An early exit (missing fields / workspace failure / cancel
 		// before processCompletion) leaves the step terminal but the
 		// blueprint un-finalized. Without this, the blueprint strands
-		// 'running' and its snapshot is orphaned (the reaper skips it
-		// once the run is no longer resumable). ResumeBlueprintAfterResume
+		// 'running' until the stranded-run replay finds it. ResumeBlueprintAfterResume
 		// is the safe single authority: a cancelled/failed step maps to a
 		// terminal blueprint (terminateBlueprint discards the snapshot); a
 		// still-parked (open) step or an already-terminal blueprint
@@ -1339,7 +1369,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 // resumeParkContext is the park a cancelled resume writes. A resume is always
 // user-initiated whatever the run's original trigger, so it routes as manual
 // under the resuming user; conv.ClaimID puts the write through the claim fence,
-// because a resume whose executor was reaped mid-turn must not park the
+// because a resume whose claim was taken over mid-turn must not park the
 // conversation its successor has picked up.
 //
 // The caller fills namespace/claudeCwd when there is a workspace worth
@@ -2056,18 +2086,32 @@ type engagementDisposition struct {
 //
 // The budget is what stops a deterministic failure from spinning the queue,
 // and it is spent per queue episode, not per lifetime (see Conversation.
-// Attempts) — a healthy engagement resets it, so a conversation resumed four
-// times still meets its next hiccup with a full budget.
+// SetupFailures) — a healthy engagement resets it, so a conversation resumed
+// four times still meets its next hiccup with a full budget.
+//
+// A credentials wait that timed out is handed back without spending it: the
+// brain's provisioner did not answer, which says nothing about this
+// conversation, and a budget spent on it would fail a conversation for a
+// control-plane outage. It shows on the phase ladder as awaiting_credentials
+// while it waits, which is where that outage is watched.
 //
 // Returns whether the conversation survived. A requeue and an exhausted park
 // both leave the step live, so whatever this claim staged for it on disk is
 // the next claim's to re-mount; false is the poison pill, and the step is over.
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
-	if conv.Attempts >= maxClaimAttempts {
+	if errors.Is(cause, errAwaitingCredentialsTimeout) {
+		dispatchLog.Warn("credential bundle never arrived; handing the conversation back without spending its setup budget", "conversation", conv.ID, "error", cause)
+		if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, cause.Error()); err != nil {
+			dispatchLog.Warn("requeue conversation after a credentials timeout failed", "conversation", conv.ID, "error", err)
+		}
+		return true
+	}
+	attempt := conv.SetupFailures + 1
+	if attempt >= maxClaimAttempts {
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
-	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", conv.Attempts, "error", cause)
-	if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, cause.Error()); err != nil {
+	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", attempt, "error", cause)
+	if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, cause.Error()); err != nil {
 		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
 	}
 	return true
@@ -2096,11 +2140,11 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if br == nil || s.conversationHasWork(orgID, conv.ID) {
 		dispatchLog.Error("the runtime failed to start on every attempt; parking the conversation instead of failing it",
-			"conversation", conv.ID, "attempts", conv.Attempts, "error", cause)
+			"conversation", conv.ID, "attempts", conv.SetupFailures+1, "error", cause)
 		s.parkAfterLaunchExhaustion(orgID, conv, cause)
 		return true
 	}
-	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", conv.ID, "attempts", conv.Attempts, "error", cause)
+	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", conv.ID, "attempts", conv.SetupFailures+1, "error", cause)
 	s.failClaimedConversation(orgID, &conv, cause.Error())
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
@@ -2153,7 +2197,7 @@ func (s *Spawner) conversationHasWork(orgID, conversationID string) bool {
 // budget would buy nothing at all.
 func (s *Spawner) parkAfterLaunchExhaustion(orgID string, conv domain.Conversation, cause error) {
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
-		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.Attempts, cause),
+		fmt.Sprintf("The runtime failed to start after %d attempts: %s. Send a message to retry.", conv.SetupFailures+1, cause),
 		fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), truncateToastMsg(cause.Error(), 160)))
 }
 

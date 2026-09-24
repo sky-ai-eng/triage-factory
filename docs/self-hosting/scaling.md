@@ -73,8 +73,14 @@ pod that is leaving instead of one that has already gone.
 The wait exists because a dispatch's last act is un-cancellable by design — the
 blueprint it just ran must be advanced or finalized, so that write deliberately
 ignores the shutdown. Closing the database pools underneath it turns a completed
-agent turn into a failed write; the next boot re-queues the conversation and
-re-runs it, which costs an attempt and an API bill for work already done.
+agent turn into a failed write, and the conversation is re-run, which costs an
+API bill for work already done.
+
+Once the wait returns, the executor hands back every claim whose dispatch has
+finished. A conversation it was driving is claimable by another executor at
+once, and a restart does not count against its `TF_MAX_CLAIM_ATTEMPTS` budget —
+that budget is for engagements that were lost, and a deliberate stop is not
+one.
 
 Two things to set alongside it:
 
@@ -82,10 +88,12 @@ Two things to set alongside it:
   whether or not TF is still waiting. The shutdown sequence is bounded at 25s
   (15s drain, then 5s to stop the healthz listener and 5s to flush traces), so
   the compose default of 30s covers it with room to spare. If the drain
-  deadline does expire, TF logs one WARN naming it and closes anyway — the next
-  boot's reconcile recovers the work. Reaching it at all means something is
-  wrong: the wait is for already-cancelled goroutines to unwind, which takes
-  seconds.
+  deadline does expire, TF logs one WARN naming it and closes anyway. A
+  dispatch still running then keeps its claim, which another executor takes
+  over once its 75s lease lapses (or the executor's own next boot releases),
+  and that does count as a lost engagement. Reaching the deadline at all means
+  something is wrong: the wait is for already-cancelled goroutines to unwind,
+  which takes seconds.
 - **Drain first for a long turn.** The shutdown wait is bounded by work already
   claimed, and an agent turn can outlast any sane grace period. To retire an
   executor cleanly, mark it draining (it stops claiming while live runs finish

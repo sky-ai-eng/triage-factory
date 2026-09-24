@@ -247,6 +247,18 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx); err != nil {
 			t.Errorf("ConversationQueue.SettleUnclaimedStopsSystem: %v", err)
 		}
+		// The recovery passes every executor's dispatcher runs: the takeover
+		// finds nothing expired and the stranded read nothing concluded, which
+		// still proves the grants for the same reason as above.
+		if _, err := stores.ConversationQueue.TakeOverExpiredClaimsSystem(ctx, executorID, 1, 100); err != nil {
+			t.Errorf("ConversationQueue.TakeOverExpiredClaimsSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.StrandedBlueprintRunsSystem(ctx, time.Minute, 20); err != nil {
+			t.Errorf("ConversationQueue.StrandedBlueprintRunsSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.LiveClaimsOfExecutorSystem(ctx, executorID, 1); err != nil {
+			t.Errorf("ConversationQueue.LiveClaimsOfExecutorSystem: %v", err)
+		}
 
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
@@ -275,6 +287,9 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 		if _, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 1); err != nil {
 			t.Errorf("ConversationQueue.ResetProcessingConversations: %v", err)
+		}
+		if _, err := stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, executorID, 1, []string{conversationID}); err != nil {
+			t.Errorf("ConversationQueue.ReleaseOwnClaimsOnShutdownSystem: %v", err)
 		}
 	})
 

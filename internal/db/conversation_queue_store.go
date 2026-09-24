@@ -76,6 +76,41 @@ type ClaimRef struct {
 	ClaimID, OrgID, ConversationID string
 }
 
+// RequeueOutcome is the claim outcome RequeueConversation releases with. It
+// is typed because the two values spend different budgets: a setup failure
+// counts toward the dispatcher's setup budget, and a credentials wait that
+// timed out counts toward nothing (see domain.Conversation.SetupFailures).
+type RequeueOutcome string
+
+const (
+	// RequeueSetupFailure hands back an engagement that failed before its
+	// agent ran: a workspace that would not build, a jail that would not
+	// start. Counts toward the setup budget.
+	RequeueSetupFailure RequeueOutcome = "requeued"
+	// RequeueAwaitingCredentials hands back an engagement whose credential
+	// bundle never arrived. Nothing about the conversation failed — the
+	// brain's provisioner did not answer — so it counts toward no budget.
+	RequeueAwaitingCredentials RequeueOutcome = "requeued_credentials"
+)
+
+// ErrInvalidRequeueOutcome refuses a RequeueConversation call naming an
+// outcome outside the RequeueOutcome vocabulary. claims.outcome carries no
+// CHECK in either dialect, so this refusal is the only thing keeping an
+// unknown value out of the episode counts.
+var ErrInvalidRequeueOutcome = errors.New("db: invalid requeue outcome")
+
+// Valid reports whether o is one of the RequeueOutcome values.
+func (o RequeueOutcome) Valid() bool {
+	return o == RequeueSetupFailure || o == RequeueAwaitingCredentials
+}
+
+// StrandedRun names a running blueprint run whose current step concluded
+// without its reactor running, with the step conversation the reactor has to
+// be replayed for.
+type StrandedRun struct {
+	OrgID, BlueprintRunID, ConversationID string
+}
+
 // SettledStop is one conversation SettleUnclaimedStopsSystem settled.
 // BlueprintRunID names a run this settlement cancelled, on exactly one of the
 // conversations it settled under that run, so a caller cleaning up after the
@@ -199,10 +234,11 @@ type ConversationQueueStore interface {
 	// deliberately never claimed — the sequence-level cancel is honored here
 	// (decision: a queued-not-started step cancels with zero work).
 	//
-	// The returned Attempts is the retry budget's counter, scoped to the
-	// conversation's current queue episode rather than its lifetime — see
-	// the dialect implementations' episodeAttemptsSQL for the model, which
-	// the SQL is the definition of.
+	// The returned Attempts, SetupFailures and LostEngagements are scoped to
+	// the conversation's current queue episode rather than its lifetime — see
+	// the dialects' EpisodeSetupFailuresSQL / EpisodeLostEngagementsSQL for
+	// the model, which the SQL is the definition of. The last two are the
+	// dispatcher's two budgets.
 	//
 	// lease is how long the minted claim's authority lasts before the holder
 	// must have renewed it: lease_expires_at = database now + lease, stamped
@@ -228,24 +264,39 @@ type ConversationQueueStore interface {
 	// cancel handle and the cross-pod signal both missed it.
 	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (ClaimRenewal, error)
 
-	// SettleUnclaimedStopsSystem parks every stop-requested conversation that
-	// no live claim holds, marks a cancel-requested blueprint run behind one
-	// cancelled, and clears the intent, in one transaction. A terminal
-	// conversation with a stale intent has only the intent cleared. Returns
-	// the conversations settled, with the blueprint runs cancelled, for the
+	// SettleUnclaimedStopsSystem is the dispatcher's settlement pass over
+	// conversations no live claim holds. It settles two shapes, in one
+	// transaction:
+	//
+	//   - A stop-requested conversation parks `open` with the reason its
+	//     intent implies, a cancel-requested blueprint run behind it is
+	//     cancelled, and the intent is cleared. A terminal conversation with
+	//     a stale intent has only the intent cleared.
+	//   - A non-terminal conversation (mid-flight or `open`) under a running,
+	//     cancel-requested run, with no intent at all, parks `open` as
+	//     blueprint_cancelled and the run is cancelled with the columns a
+	//     reactor's cancel writes (abort_reason 'cancelled'). This is the
+	//     step a cancel never reached — minted after the cancel listed the
+	//     run's steps, or left behind by a cascade that failed after its
+	//     commit — which the claim gate refuses and nothing else would end.
+	//
+	// An intent on the row wins over the second shape. Returns the
+	// conversations settled, with the blueprint runs cancelled, for the
 	// caller's worktree cleanup and its firing wake.
 	//
 	// A plain stop leaves the blueprint running: that is what keeps the parked
-	// step resumable. Only a run whose cancel was already requested is
-	// cancelled, with the columns MarkRunStatusSystem writes for a cancel.
+	// step resumable.
 	//
 	// "No live claim" is released_at alone, not the lease: a claim whose
-	// holder is gone is released by the executor that minted it
-	// (ReleaseExpiredClaimSystem) or, when that executor is gone too, by the
-	// reaper (internal/reaper). Both leave a stop-requested row otherwise
-	// untouched, and the next pass settles it.
-	// Cross-org system sweep on the admin pool; concurrent passes skip each
-	// other's rows.
+	// holder is gone is released first (ReleaseExpiredClaimSystem by the
+	// executor that minted it, TakeOverExpiredClaimsSystem by any other),
+	// and the release leaves the row for this pass.
+	//
+	// Lock order is run before conversation, the order a run's terminal
+	// write (BlueprintStore.MarkRunStatus) takes them in, so the two cannot
+	// deadlock; a run another writer holds is skipped and settled on the
+	// next pass. Cross-org system sweep on the admin pool; concurrent passes
+	// skip each other's rows.
 	SettleUnclaimedStopsSystem(ctx context.Context) ([]SettledStop, error)
 
 	// SettleUnclaimedStopsForTaskSystem is SettleUnclaimedStopsSystem over
@@ -278,17 +329,58 @@ type ConversationQueueStore interface {
 	// the lease lapsed, not that its holder has finished tearing down.
 	ReleaseExpiredClaimSystem(ctx context.Context, orgID, conversationID, claimID string) (released bool, err error)
 
+	// TakeOverExpiredClaimsSystem releases, as 'reaped', up to limit live claims
+	// whose lease has lapsed on database time and which this executor boot did
+	// not mint. The release is the takeover: a conversation with no live claim
+	// matches the needs-driving predicate again, and a stop or a cancel pending
+	// on it is settled by the settlement pass that follows. Claims under a
+	// holder's fence read are skipped and taken on a later pass. Returns the
+	// conversations released.
+	//
+	// Every expired claim qualifies, whatever its conversation's state: a
+	// parked or terminal row's lapsed claim holds nothing up but the gauge,
+	// and releasing it is the only thing that clears it. This executor boot's
+	// own claims are excluded because only this process can tell a finished
+	// engagement from one still tearing down — ReleaseExpiredClaimSystem is
+	// their release. The released conversations' preferred_executor_id is
+	// cleared in the same transaction: the stamp names the executor that just
+	// lost them.
+	TakeOverExpiredClaimsSystem(ctx context.Context, executorID string, bootEpoch int64, limit int) ([]ClaimRef, error)
+
+	// LiveClaimsOfExecutorSystem lists every unreleased claim one executor
+	// boot minted, lease lapsed or not, oldest first. The clean-shutdown
+	// release reads it to find the claims whose engagements have returned.
+	LiveClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]ClaimRef, error)
+
+	// ReleaseOwnClaimsOnShutdownSystem releases, as 'requeued_shutdown', the
+	// live claims this executor boot minted on the named conversations: the
+	// ones whose engagements the caller has seen return. A deliberate stop is
+	// not a loss: it spends neither budget, and the conversation is claimable
+	// at once rather than after its lease lapses. Returns the count released.
+	ReleaseOwnClaimsOnShutdownSystem(ctx context.Context, executorID string, bootEpoch int64, conversationIDs []string) (int, error)
+
+	// StrandedBlueprintRunsSystem returns running blueprint runs whose current
+	// step's conversation reached completed or failed more than grace ago and
+	// holds no unreleased claim. The reactor that should have advanced or ended
+	// each one never ran. A claim released inside the grace keeps its run out
+	// too, so a conversation resumed and concluded again is measured from its
+	// latest engagement, not from a completion stamp an earlier one left.
+	// `open` steps are never stranded: a plain stop leaves the run running on
+	// purpose. Cross-org system read, oldest run first.
+	StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]StrandedRun, error)
+
 	// RequeueConversation hands a claimed conversation back after a transient
 	// dispatcher failure — a workspace setup hiccup, a runtime that failed to
-	// launch, a handoff nobody on this instance could take — recording
-	// lastErr for visibility. Releasing the claim IS the requeue: the
-	// conversation is mid-flight, so the moment it has no claim it matches
-	// the needs-driving predicate again. The claim releases 'requeued', which
-	// is also what keeps the current queue episode open, so the next claim's
-	// Attempts counts this try and the dispatcher can stop retrying a conversation
-	// that fails the same way every time. Guarded on a mid-flight
-	// conversation with a live claim, so a stale call can't act on a terminal
-	// or parked row.
+	// launch, a credentials wait that timed out — recording lastErr for
+	// visibility. Releasing the claim IS the requeue: the conversation is
+	// mid-flight, so the moment it has no claim it matches the needs-driving
+	// predicate again. The claim releases with outcome, which keeps the
+	// current queue episode open either way; RequeueSetupFailure is what the
+	// next claim's SetupFailures counts, so the dispatcher can stop retrying
+	// a conversation that fails the same way every time. An outcome outside
+	// the vocabulary is refused with ErrInvalidRequeueOutcome and nothing is
+	// written. Guarded on a mid-flight conversation with a live claim, so a
+	// stale call can't act on a terminal or parked row.
 	//
 	// Returns the requeued row (ConversationStore.Get/GetSystem's
 	// projection), or nil when the guard declined — nothing mid-flight with a
@@ -296,23 +388,26 @@ type ConversationQueueStore interface {
 	// EntityStore.Close shape: a second requeue of an already-requeued
 	// conversation is not an error, and the caller that wants to know whether
 	// this call was the one that requeued it now can.
-	RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) (*domain.Conversation, error)
+	RequeueConversation(ctx context.Context, orgID, conversationID string, outcome RequeueOutcome, lastErr string) (*domain.Conversation, error)
 
-	// ResetProcessingConversations is the boot reconcile sweep: every conversation
-	// left mid-flight by a crash (no outcome written, a claim still live) has
-	// that claim released, which is all it takes for the dispatcher to
-	// re-claim and re-drive it. Parked (`open`) and terminal conversations
-	// are not mid-flight and stay put — they resume through their own paths.
-	// attempts is retained so a conversation that keeps hard-crashing the
-	// process eventually fails out rather than crash-looping the boot.
+	// ResetProcessingConversations is the boot reset: every claim this
+	// executor minted in a strictly earlier boot (executor_id = executorID AND
+	// boot_epoch < bootEpoch) and never released is released as 'reaped',
+	// whatever its conversation's state, and the conversation's
+	// preferred_executor_id is cleared. The instance-id flock proves the
+	// process that minted them is gone, and a clean shutdown releases its own
+	// claims on the way out, so everything this finds belongs to a process
+	// that died — which is why it counts toward the loss budget: a
+	// conversation that kills its process is failed after
+	// TF_MAX_CLAIM_ATTEMPTS boots rather than crash-looping forever. A
+	// mid-flight conversation it releases is claimable at once; a parked or
+	// terminal one only stops holding a claim it should not.
 	//
-	// Ownership-scoped (TFAC-578): only rows stamped executor_id = executorID
-	// AND boot_epoch < bootEpoch are reset — i.e. this instance's own orphans
-	// from a strictly earlier boot of itself. A live sibling instance's
-	// claimed/running rows (a different executor_id) are never touched, which
-	// is what makes a rolling deploy / two-replica boot safe: the booting
-	// process only ever sweeps its own prior-boot mess, never work another
-	// still-live process owns. Returns the count reset.
+	// A live sibling instance's claims carry a different executor_id and are
+	// never touched, which is what makes a rolling deploy or a two-replica
+	// boot safe. The caller skips this entirely when the prior boot's cells
+	// could not be confirmed torn down: those claims then lapse and are taken
+	// over after their lease. Returns the count released.
 	ResetProcessingConversations(ctx context.Context, executorID string, bootEpoch int64) (int, error)
 
 	// MarkAwaitingCredentials parks a freshly-claimed conversation's ACTIVE claim in
@@ -386,13 +481,13 @@ type ConversationQueueStore interface {
 	// same posture as ClaimNextConversation (SQLite is N=1 — at most the one local org).
 	FleetQueueShares(ctx context.Context) ([]OrgQueueShare, error)
 
-	// ReconcileOrphanedConversations is the boot self-heal mirror of
+	// ReconcileOrphanedConversations is the boot self-heal beside
 	// ResetProcessingConversations: every child conversation left non-terminal under a
 	// blueprint_run that is already terminal (completed/aborted/failed/
 	// cancelled) is flipped to 'cancelled' with a completed_at stamp. Such a
 	// child is unreachable by the dispatcher — the claim only takes rows
-	// under a running parent, and so does ResetProcessingConversations — so it would
-	// otherwise sit mid-flight forever, keeping the dispatcher on phantom
+	// under a running parent, and the reset releases claims without writing
+	// a status — so it would otherwise sit mid-flight forever, keeping the dispatcher on phantom
 	// work and pinning its feature branch in a worktree (any sibling fetch
 	// then requeues forever). The atomic cancel in
 	// BlueprintStore.MarkRunStatus prevents the desync going forward; this

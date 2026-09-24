@@ -129,7 +129,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// RequeueConversation puts it back to queued (attempts retained), re-claimable.
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -183,7 +183,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, org, convID)
@@ -200,7 +200,12 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 	}
 }
 
-func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
+// TestConversationQueueStore_SQLite_ResetReleasesADormantClaimAndLeavesTheParkAlone
+// pins the widened boot reset on a parked row: a prior boot's claim on it is
+// released, because the process that held it is gone and nothing else would
+// ever release it, but the row itself stays exactly as parked as it was — the
+// reset writes claims and the placement stamp, never a status.
+func TestConversationQueueStore_SQLite_ResetReleasesADormantClaimAndLeavesTheParkAlone(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
@@ -209,13 +214,6 @@ func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "rqd-br", BlueprintID: bpID, TaskID: taskID, WorktreePath: "/tmp/wt-rqd",
 	})
-	// A parked (dormant) conversation — directly insert with status open, then stamp
-	// it as owned by THIS instance from an EARLIER boot (epoch 0 < the
-	// sweep's epoch). Without the stamp the ownership predicate alone would
-	// exclude the row and this test would pass even with 'open' dropped
-	// from the status exclusion list; with it, only the status list
-	// protects the row — which is exactly the invariant being pinned
-	// (parked rows stay parked through a self-sweep of prior-boot orphans).
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
 		ID: "rqd-run-0", TaskID: taskID, PromptID: promptID, Status: "open",
@@ -227,10 +225,18 @@ func TestConversationQueueStore_SQLite_ResetLeavesDormantAlone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResetProcessingConversations: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("ResetProcessingConversations reset %d rows, want 0 (dormant conversation must stay parked)", n)
+	if n != 1 {
+		t.Fatalf("ResetProcessingConversations released %d claims, want 1 (a prior boot's claim on a parked row)", n)
 	}
-	// And it is not claimable (it's not 'queued').
+	var outcome sql.NullString
+	var status sql.NullString
+	if err := conn.QueryRow(`SELECT cl.outcome, r.status FROM claims cl JOIN conversations r ON r.id = cl.conversation_id WHERE cl.conversation_id = 'rqd-run-0'`).Scan(&outcome, &status); err != nil {
+		t.Fatalf("read claim and status: %v", err)
+	}
+	if outcome.String != "reaped" || status.String != "open" {
+		t.Errorf("after the reset: claim outcome %q, status %q; want reaped, open", outcome.String, status.String)
+	}
+	// Still not claimable: it is parked with nothing waking it.
 	if got, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease); err != nil || got != nil {
 		t.Fatalf("ClaimNextConversation = (%v, %v), want (nil, nil)", got, err)
 	}
@@ -432,7 +438,7 @@ func TestConversationQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", "x"); err == nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", db.RequeueSetupFailure, "x"); err == nil {
 		t.Errorf("RequeueConversation with non-local orgID should error")
 	}
 }
@@ -475,7 +481,7 @@ func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.Get(ctx, org, convID)
@@ -820,6 +826,12 @@ func TestStopIntent_SQLite(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, sqliteClaimLeaseFixture)
 }
 
+// TestClaimTakeover_SQLite runs the shared recovery-pass conformance on the
+// same fixture the claim-lease suite uses.
+func TestClaimTakeover_SQLite(t *testing.T) {
+	dbtest.RunClaimTakeoverConformance(t, sqliteClaimLeaseFixture)
+}
+
 func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 	t.Helper()
 	conn := openSQLiteForTest(t)
@@ -890,6 +902,25 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 				status, by, conversationID,
 			); err != nil {
 				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
+			}
+		},
+		SetStoredStatus: func(t *testing.T, conversationID, status string) {
+			t.Helper()
+			if _, err := conn.Exec(`UPDATE conversations SET status = NULLIF(?, '') WHERE id = ?`, status, conversationID); err != nil {
+				t.Fatalf("set stored status on %s: %v", conversationID, err)
+			}
+		},
+		BackdateConclusion: func(t *testing.T, conversationID string, ago time.Duration) {
+			t.Helper()
+			// Bound as Go times, the way the terminal write and the claim
+			// release stamp both columns, so the backdate lands in the layout
+			// the reads compare against.
+			at := time.Now().UTC().Add(-ago)
+			if _, err := conn.Exec(`UPDATE conversations SET completed_at = ? WHERE id = ?`, at, conversationID); err != nil {
+				t.Fatalf("backdate completed_at on %s: %v", conversationID, err)
+			}
+			if _, err := conn.Exec(`UPDATE claims SET released_at = ? WHERE conversation_id = ? AND released_at IS NOT NULL`, at, conversationID); err != nil {
+				t.Fatalf("backdate claim releases on %s: %v", conversationID, err)
 			}
 		},
 	}

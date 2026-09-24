@@ -39,7 +39,7 @@ func RefreshCadenceForTTL(llmTTL time.Duration) (interval, refreshAfter time.Dur
 // RunAwaitingSweep is the backstop for every conversation whose active claim
 // is parked in phase='awaiting_credentials' but whose cred_request tf_ctl
 // notification the lossy relay dropped — leader-gated, started/stopped
-// alongside the rest of the brain exactly like reaper.RunReaper. One sweep
+// alongside the rest of the brain exactly like instance.RunRegistryGC. One sweep
 // serves both surfaces (see sweepAwaiting). mgr nil is a no-op (the same
 // nil-checked shape every other brain-unit member uses).
 func RunAwaitingSweep(ctx context.Context, mgr *Manager, interval time.Duration) {

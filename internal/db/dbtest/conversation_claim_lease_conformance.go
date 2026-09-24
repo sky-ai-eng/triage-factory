@@ -45,6 +45,18 @@ type ClaimLeaseFixture struct {
 	// method produces — a terminal row still carrying an intent — which the
 	// dispatcher's settlement has to clear without touching the status.
 	StageStaleStopIntent func(t *testing.T, conversationID, status, by string)
+
+	// SetStoredStatus raw-writes conversations.status and nothing else, ""
+	// meaning SQL NULL. It stages a status under a live claim — the shape a
+	// previous boot or a lost engagement leaves behind — which no store
+	// method writes, since every status write releases its claim.
+	SetStoredStatus func(t *testing.T, conversationID, status string)
+
+	// BackdateConclusion moves a conversation's completed_at, and the release
+	// of every claim of it already released, `ago` into the past, on the
+	// clock and in the layout each dialect stamps them with. It stages a
+	// conclusion old enough to be outside a grace no test can wait out.
+	BackdateConclusion func(t *testing.T, conversationID string, ago time.Duration)
 }
 
 // ClaimLeaseFactory builds a fresh fixture per subtest.
@@ -177,7 +189,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		})
 
 		t.Run("released", func(t *testing.T) {
-			if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, "transient"); err != nil {
+			if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			before, _, ok := f.Lease(t, conv.ClaimID)
@@ -299,7 +311,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("oldest past expiry = %s, want about %s", age, past)
 		}
 
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, "transient"); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		if n, age, err := f.Stores.ConversationQueue.ExpiredClaimsSystem(ctx); err != nil || n != 0 || age != 0 {

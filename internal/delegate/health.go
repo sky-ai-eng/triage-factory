@@ -21,8 +21,8 @@ func (s *Spawner) DispatcherAlive() bool {
 // heartbeat write succeeded, and whether one has ever succeeded. The
 // executor healthz flips to 503 when this age exceeds 3× the heartbeat
 // interval (the process is alive enough to answer HTTP but no longer
-// renewing its fleet-registry liveness — a partial failure the reaper
-// would otherwise have to wait out).
+// renewing its fleet-registry liveness — a partial failure the lease
+// takeover would otherwise have to wait out).
 func (s *Spawner) LastHeartbeatWriteAge() (age time.Duration, everWritten bool) {
 	ns := s.lastHeartbeatWriteNanos.Load()
 	if ns == 0 {

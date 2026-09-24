@@ -334,6 +334,9 @@ func (f *toggleableInstanceStore) List(context.Context) ([]domain.Instance, erro
 func (f *toggleableInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
 	return false, nil
 }
+func (f *toggleableInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
 func (f *toggleableInstanceStore) setFail(v bool) {
 	f.mu.Lock()
 	f.fail = v
@@ -376,18 +379,18 @@ func (f *delayedInstanceStore) List(context.Context) ([]domain.Instance, error) 
 func (f *delayedInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
 	return false, nil
 }
+func (f *delayedInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
 
-// TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences is
-// the direct regression test for the bug this ticket's review found: a
+// TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences: a
 // heartbeat write against a silently black-holed connection (no RST —
 // packets just vanish) must NOT be able to block heartbeatOnce forever.
 // Without a per-call timeout, the ticker loop stalls and
-// checkPartitionSelfFence never runs at all, so the self-fence deadline is
-// never evaluated and the reaper could requeue this instance's claimed
-// runs while its sandboxes are still live — the exact double-external-
-// write hazard the self-fence exists to prevent. Run on a goroutine with a
-// test-level timeout so a regression fails this test within 5s instead of
-// hanging until the whole test binary's own (much longer) timeout.
+// checkPartitionSelfFence never runs at all, so a host that cannot reach the
+// registry never stops claiming. Run on a goroutine with a test-level timeout
+// so a regression fails this test within 5s instead of hanging until the
+// whole test binary's own (much longer) timeout.
 func TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
@@ -396,14 +399,9 @@ func TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences(t *t
 	// A 2s self-fence deadline derives a 1s per-call write timeout
 	// (deadline/3, floored at 1s) — two bounded, timed-out calls are
 	// enough to cross the deadline, keeping this test's wall time small.
-	s.SetSelfFenceDeadline(2 * time.Second)
+	setSelfFenceDeadline(s, 2*time.Second)
 	s.mu.Lock()
 	s.lastGoodContactAt = time.Now()
-	s.mu.Unlock()
-
-	killed := false
-	s.mu.Lock()
-	s.cancels["run-hung"] = func() { killed = true }
 	s.mu.Unlock()
 
 	done := make(chan struct{})
@@ -419,22 +417,18 @@ func TestHeartbeatOnce_WriteTimeoutBoundsAHungConnectionAndEventuallyFences(t *t
 
 	select {
 	case <-done:
-		if !killed {
-			t.Error("expected the self-fence to kill live sandboxes once it fired")
-		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("partition self-fence never fired within 5s against a permanently hung heartbeat write — the per-call write timeout isn't actually bounding the call, defeating the whole self-fence mechanism")
+		t.Fatal("partition self-fence never fired within 5s against a permanently hung heartbeat write — the per-call write timeout isn't actually bounding the call, so a host that cannot reach the registry keeps claiming")
 	}
 }
 
-// TestHeartbeatOnce_LateSuccessPastDeadlineStillFences pins the second
-// variant the review found: a write that eventually SUCCEEDS, but only
-// after taking long enough that the self-fence deadline had already
-// elapsed since the last known-good contact, must still react (kill live
-// sandboxes) — a bare "it succeeded" is not proof this instance was never
-// partitioned for long enough that the reaper could have already requeued
-// its claimed work while the write was still in flight.
-func TestHeartbeatOnce_LateSuccessPastDeadlineStillFences(t *testing.T) {
+// TestHeartbeatOnce_LateSuccessPastDeadlineLeavesEngagementsRunning pins the
+// late-success variant: a write that SUCCEEDS only after the self-fence
+// deadline already elapsed is a partition that ended before anything noticed
+// it. It latches and clears the fence in the same call, and it cancels
+// nothing — a live engagement's own lease is what decides whether it was
+// taken over while the host was unreachable.
+func TestHeartbeatOnce_LateSuccessPastDeadlineLeavesEngagementsRunning(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	// The write itself takes 100ms — comfortably longer than the 30ms
@@ -442,7 +436,7 @@ func TestHeartbeatOnce_LateSuccessPastDeadlineStillFences(t *testing.T) {
 	// has already elapsed.
 	s.instances = &delayedInstanceStore{delay: 100 * time.Millisecond}
 	s.SetExecutorID("late-instance", 1)
-	s.SetSelfFenceDeadline(30 * time.Millisecond)
+	setSelfFenceDeadline(s, 30*time.Millisecond)
 	s.mu.Lock()
 	s.lastGoodContactAt = time.Now()
 	s.mu.Unlock()
@@ -455,24 +449,26 @@ func TestHeartbeatOnce_LateSuccessPastDeadlineStillFences(t *testing.T) {
 	if !s.heartbeatOnce(context.Background()) {
 		t.Fatal("a successful heartbeat must keep the loop running")
 	}
-	if !killed {
-		t.Error("a write that succeeds only after the self-fence deadline already elapsed must still kill live sandboxes defensively")
+	if killed {
+		t.Error("a late heartbeat success cancelled a live engagement; the engagement's own lease decides that")
+	}
+	if s.PartitionFenced() {
+		t.Error("a successful write must leave the fence clear, whatever the gap before it")
 	}
 }
 
-// TestCheckPartitionSelfFence_KillsSandboxesReversibly pins the partition
-// self-fence (TFAC-586): a heartbeat WRITE FAILURE that persists past
-// selfFenceDeadline latches PartitionFenced and kills live sandboxes — the
-// same reaction as identity supersession — but, unlike IdentityFenced,
-// un-fences automatically the moment a heartbeat write succeeds again, and
-// never invokes the supersession exit hook.
-func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
+// TestCheckPartitionSelfFence_GatesClaimingOnlyAndReversibly pins the
+// partition fence: a heartbeat WRITE FAILURE that persists past the deadline
+// latches PartitionFenced — which the claim loop reads — and cancels no live
+// engagement, never invokes the supersession exit hook, and un-fences the
+// moment a heartbeat write succeeds again.
+func TestCheckPartitionSelfFence_GatesClaimingOnlyAndReversibly(t *testing.T) {
 	database := newDelegateTestDB(t)
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "")
 	store := &toggleableInstanceStore{}
 	s.instances = store
 	s.SetExecutorID("partition-instance", 1)
-	s.SetSelfFenceDeadline(30 * time.Millisecond)
+	setSelfFenceDeadline(s, 30*time.Millisecond)
 	s.mu.Lock()
 	s.lastGoodContactAt = time.Now()
 	s.mu.Unlock()
@@ -494,9 +490,6 @@ func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
 	if s.PartitionFenced() {
 		t.Fatal("must not fence before the self-fence deadline elapses")
 	}
-	if killed {
-		t.Fatal("must not kill sandboxes before the deadline elapses")
-	}
 
 	time.Sleep(40 * time.Millisecond)
 	if !s.heartbeatOnce(ctx) {
@@ -505,8 +498,8 @@ func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
 	if !s.PartitionFenced() {
 		t.Fatal("expected the partition self-fence to latch past the deadline")
 	}
-	if !killed {
-		t.Error("expected killAllLiveSandboxes to have cancelled the registered run")
+	if killed {
+		t.Error("the partition fence cancelled a live engagement; it gates claiming and nothing else")
 	}
 	if exitCalls != 0 {
 		t.Errorf("onSupersessionFence called %d times, want 0 — a partition must never exit the process", exitCalls)
@@ -519,4 +512,12 @@ func TestCheckPartitionSelfFence_KillsSandboxesReversibly(t *testing.T) {
 	if s.PartitionFenced() {
 		t.Error("a successful heartbeat write must un-fence the partition case")
 	}
+}
+
+// setSelfFenceDeadline drives the partition fence at test speed; the product
+// runs on DefaultSelfFenceDeadline.
+func setSelfFenceDeadline(s *Spawner, d time.Duration) {
+	s.mu.Lock()
+	s.selfFenceDeadline = d
+	s.mu.Unlock()
 }

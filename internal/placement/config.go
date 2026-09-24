@@ -18,9 +18,9 @@ const (
 	// DefaultLiveness is the heartbeat-staleness window past which a stamped
 	// preferred executor is treated as dead (immediate spillover, no aging
 	// wait). Wider than one heartbeat so a single missed beat doesn't
-	// prematurely abandon affinity, narrower than the reaper's 30s so a
-	// genuinely dead owner's conversations spill before the reaper even
-	// requeues them.
+	// prematurely abandon affinity. It governs conversations still waiting
+	// in the queue; one a dead owner had already claimed comes back through
+	// the takeover of its lapsed lease instead.
 	DefaultLiveness = 12 * time.Second
 )
 

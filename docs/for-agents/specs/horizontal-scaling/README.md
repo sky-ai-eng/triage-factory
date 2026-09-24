@@ -520,6 +520,10 @@ metrics plumbing.
 
 ### 4.2 Claiming work
 
+> **Superseded:** lease takeover replaced the leader reaper described here —
+> every dispatcher releases expired claims it does not own, on database time.
+> See [durable-work §5 D3](../durable-work/README.md#d3-give-claims-leases-and-takeover).
+
 The dispatcher loop is unchanged in shape (mem-gate → semaphore →
 claim → execute); three additions to the claim:
 
@@ -551,6 +555,10 @@ claim → execute); three additions to the claim:
    executor simply doesn't claim.
 
 ### 4.3 Run death and recovery
+
+> **Superseded:** lease takeover replaced the leader reaper described here —
+> every dispatcher releases expired claims it does not own, on database time.
+> See [durable-work §5 D3](../durable-work/README.md#d3-give-claims-leases-and-takeover).
 
 - **Executor restarts**: sweeps only its own rows (above); its parked
   runs stay parked (snapshots are in S3, worktrees preserved where

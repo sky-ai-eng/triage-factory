@@ -71,9 +71,10 @@ func TestEnsureIdentity_EmptyFileReMints(t *testing.T) {
 
 // TestEnsureIdentity_CorruptFileFailsLoudly pins that non-UUID content is
 // a boot error, not a silently adopted new identity: accepting garbage
-// would permanently orphan every row stamped with the real id (there is
-// no reaper to collect them), so the operator must decide — restore the
-// file or delete it to knowingly re-mint.
+// would silently abandon every row stamped with the real id (its claims
+// would come back only through lease takeover, counted as lost
+// engagements), so the operator must decide — restore the file or delete
+// it to knowingly re-mint.
 func TestEnsureIdentity_CorruptFileFailsLoudly(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, idFileName), []byte("d3adbeef-torn-write"), 0o600); err != nil {

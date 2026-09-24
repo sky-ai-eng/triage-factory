@@ -144,29 +144,44 @@ func taskLiveConversationSQL(orgExpr, taskExpr string) string {
 		LIMIT 1)`
 }
 
-// handedBackOutcomesSQL / episodeAttemptsSQL count the claim being minted
-// within the conversation's CURRENT queue episode — the run of consecutive
-// claims handed back without the engagement ever recording anything. The
-// Postgres twin carries the model; this is the same predicate in the other
-// dialect.
-const handedBackOutcomesSQL = `'requeued','reaped'`
+// handedBackOutcomesSQL is every claim outcome that records nothing about the
+// conversation, so none of them ends a queue episode. The Postgres twin
+// carries what each one means and which budget it spends.
+const handedBackOutcomesSQL = `'requeued','requeued_credentials','reaped','requeued_shutdown'`
 
-const episodeAttemptsSQL = `
-	SELECT COUNT(*) + 1 FROM claims c2
-	WHERE c2.conversation_id = ?
-	  AND c2.outcome IN (` + handedBackOutcomesSQL + `)
+// episodeHandBacksSQL counts the current queue episode's hand-backs whose
+// outcome is in outcomesSQL, against the conversation alias convAlias. The one
+// definition of where an episode starts, shared by every count below so they
+// cannot disagree about it; the Postgres twin carries the model.
+func episodeHandBacksSQL(convAlias, outcomesSQL string) string {
+	return `(SELECT COUNT(*) FROM claims c2
+	WHERE c2.conversation_id = ` + convAlias + `.id
+	  AND c2.outcome IN (` + outcomesSQL + `)
 	  AND NOT EXISTS (
 	      SELECT 1 FROM claims c3
 	      WHERE c3.conversation_id = c2.conversation_id
 	        AND c3.outcome IS NOT NULL
 	        AND c3.outcome NOT IN (` + handedBackOutcomesSQL + `)
-	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at))`
+	        AND c3.claimed_at >= COALESCE(c2.released_at, c2.claimed_at)))`
+}
+
+// EpisodeSetupFailuresSQL is the setup budget's unit: the current episode's
+// 'requeued' hand-backs, against the conversation alias convAlias.
+func EpisodeSetupFailuresSQL(convAlias string) string {
+	return episodeHandBacksSQL(convAlias, `'requeued'`)
+}
+
+// EpisodeLostEngagementsSQL is the loss budget's unit: the current episode's
+// 'reaped' hand-backs, against the conversation alias convAlias.
+func EpisodeLostEngagementsSQL(convAlias string) string {
+	return episodeHandBacksSQL(convAlias, `'reaped'`)
+}
 
 // conversationQueueClaimCols is the column list ClaimNextConversation returns, shared with the
 // scan helper. visibility is left at its row default by the mint; team_id is
 // surfaced so the construction-path ConversationInfo built off a claimed
 // conversation carries the owning team for the capture writers. The claim
-// identity fields (ExecutorID/ClaimedAt/Attempts) are hydrated from the
+// identity fields (ExecutorID/ClaimedAt) and the episode counts are hydrated from the
 // freshly minted claims row, not this projection.
 const conversationQueueClaimCols = `r.id, r.org_id, COALESCE(r.type, ''), COALESCE(r.task_id, ''), COALESCE(r.prompt_id, ''),
 	COALESCE(r.model, ''), COALESCE(r.runtime, ''),
@@ -291,13 +306,18 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			return err
 		}
 		claimed.ClaimID = claimID
-		var attempts int
-		if err := q.QueryRowContext(ctx, episodeAttemptsSQL, claimed.ID).Scan(&attempts); err != nil {
+		var handBacks int
+		if err := q.QueryRowContext(ctx, `
+			SELECT `+episodeHandBacksSQL("r", handedBackOutcomesSQL)+`,
+			       `+EpisodeSetupFailuresSQL("r")+`,
+			       `+EpisodeLostEngagementsSQL("r")+`
+			FROM conversations r WHERE r.id = ?
+		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements); err != nil {
 			return err
 		}
 		claimed.ExecutorID = executorID
 		claimed.ClaimedAt = &claimedAt
-		claimed.Attempts = attempts
+		claimed.Attempts = handBacks + 1
 		conv = claimed
 		return nil
 	})
@@ -317,17 +337,20 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 // itself (matched only when the owning conversation's status IS NULL), so
 // checking RowsAffected there tells the whole guard's outcome without a
 // separate probe.
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, lastErr string) (*domain.Conversation, error) {
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, lastErr string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
+	}
+	if !outcome.Valid() {
+		return nil, fmt.Errorf("%w: %q", db.ErrInvalidRequeueOutcome, outcome)
 	}
 	var result *domain.Conversation
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE claims SET released_at = ?, outcome = 'requeued'
+			UPDATE claims SET released_at = ?, outcome = ?
 			WHERE conversation_id = ? AND released_at IS NULL
 			  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.status IS NULL)
-		`, time.Now().UTC(), conversationID)
+		`, time.Now().UTC(), string(outcome), conversationID)
 		if err != nil {
 			return err
 		}
@@ -485,25 +508,17 @@ func scanAwaitingCredentialsConversations(rows *sql.Rows) ([]db.AwaitingCredenti
 }
 
 func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Context, executorID string, bootEpoch int64) (int, error) {
-	// The boot self-sweep, ownership-scoped through claims: only ACTIVE
-	// claims this instance itself holds (executor_id = ?) from a strictly
-	// earlier boot (boot_epoch < ?) on mid-flight conversations (status NULL
-	// — nothing wrote an outcome, so the engagement was cut off) are
-	// released ('reaped'). The release IS the requeue. Parked (`open`) and
-	// terminal conversations are not mid-flight and stay untouched. SQLite is
-	// N=1, so there is never a live sibling to protect, but the same
-	// predicate keeps the two backends' semantics identical.
+	// Every live claim this executor minted in an earlier boot, whatever its
+	// conversation's state. The Postgres twin carries why the boot epoch, not
+	// the lease, is the guard.
 	var count int
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT cl.id, cl.conversation_id
-			FROM claims cl
-			JOIN conversations r ON r.id = cl.conversation_id
-			WHERE cl.released_at IS NULL
-			  AND cl.executor_id = ?
-			  AND cl.boot_epoch < ?
-			  AND r.status IS NULL
-			  AND r.blueprint_run_id IN (SELECT id FROM blueprint_runs WHERE status = 'running')
+			SELECT id, conversation_id
+			FROM claims
+			WHERE released_at IS NULL
+			  AND executor_id = ?
+			  AND boot_epoch < ?
 		`, executorID, bootEpoch)
 		if err != nil {
 			return err
@@ -518,13 +533,8 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 			claimIDs = append(claimIDs, claimID)
 			convIDs = append(convIDs, convID)
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		if err := rows.Close(); err != nil {
 			return err
-		}
-		rows.Close()
-		if len(convIDs) == 0 {
-			return nil
 		}
 		now := time.Now().UTC()
 		for i := range claimIDs {
@@ -539,7 +549,7 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 				return err
 			}
 		}
-		count = len(convIDs)
+		count = len(claimIDs)
 		return nil
 	})
 	return count, err
@@ -589,10 +599,10 @@ func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.Org
 
 func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Context) (int, db.OrphanedStepCheck, error) {
 	// Boot self-heal: park child conversations left mid-flight under a
-	// blueprint_run that is already terminal. This is the mirror of ResetProcessingConversations
-	// (which requeues active conversations under a *running* parent): a child
-	// alive under a terminal parent will never be claimed (ClaimNextConversation gates on a
-	// running parent) nor reset, so without this it sits mid-flight forever —
+	// blueprint_run that is already terminal. The boot reset beside it
+	// releases claims and writes no status, and a child alive under a
+	// terminal parent will never be claimed (ClaimNextConversation gates on a
+	// running parent), so without this it sits mid-flight forever —
 	// the dispatcher treats it as live work and its worktree pins the feature
 	// branch, requeuing any sibling fetch into a forever-failing loop.
 	//
@@ -945,8 +955,9 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 }
 
 // SettleUnclaimedStopsSystem is the Postgres twin's settlement as a read then
-// per-row writes on one transaction; the single connection serializes it
-// against the claim, so no row lock is needed.
+// per-row writes on one transaction. The IMMEDIATE transaction serializes it
+// against every other writer on the file, so neither the row locks nor the
+// run-first lock order the twin needs have anything to do here.
 func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
 	return s.settleUnclaimedStops(ctx, "")
 }
@@ -958,11 +969,12 @@ func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.C
 	return s.settleUnclaimedStops(ctx, `AND r.task_id = ?`, taskID)
 }
 
-// settleUnclaimedStops runs the settlement over the pending stops scope
+// settleUnclaimedStops runs the settlement over the conversations scope
 // narrows to; scope is an AND-clause over the victims' alias r, binding args.
 func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	type victim struct {
 		id, orgID, status, by string
+		intent                bool
 		runID                 sql.NullString
 		step                  sql.NullInt64
 	}
@@ -970,10 +982,13 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
 			SELECT r.id, r.org_id, COALESCE(r.status, ''), COALESCE(r.stop_requested_by, ''),
-			       r.blueprint_run_id, r.blueprint_step_index
+			       r.stop_requested_at IS NOT NULL, r.blueprint_run_id, r.blueprint_step_index
 			FROM conversations r
-			WHERE r.stop_requested_at IS NOT NULL
-			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
+			WHERE NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
+			  AND (r.stop_requested_at IS NOT NULL
+			       OR ((r.status IS NULL OR r.status = 'open')
+			           AND br.status = 'running' AND br.cancel_requested = 1))
 			  `+scope+`
 			ORDER BY r.id
 		`, args...)
@@ -983,7 +998,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		var victims []victim
 		for rows.Next() {
 			var v victim
-			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.runID, &v.step); err != nil {
+			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.intent, &v.runID, &v.step); err != nil {
 				rows.Close()
 				return err
 			}
@@ -995,9 +1010,15 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		now := time.Now().UTC()
 		for _, v := range victims {
 			terminal := v.status == "completed" || v.status == "failed"
-			reason := "user_cancelled"
-			if v.by == "" {
-				reason = "system_cancelled"
+			// An intent names who stopped the row; a row with none is here
+			// because its run's cancel never reached it, and the reactor's
+			// cancel is what it records.
+			parkReason, abortReason := "user_cancelled", "user_cancelled"
+			switch {
+			case !v.intent:
+				parkReason, abortReason = "blueprint_cancelled", "cancelled"
+			case v.by == "":
+				parkReason, abortReason = "system_cancelled", "system_cancelled"
 			}
 			if terminal {
 				if _, err := q.ExecContext(ctx, `
@@ -1013,7 +1034,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL
 				WHERE id = ?
-			`, now, reason, v.id); err != nil {
+			`, now, parkReason, v.id); err != nil {
 				return err
 			}
 			st := db.SettledStop{OrgID: v.orgID, ConversationID: v.id}
@@ -1026,7 +1047,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 					UPDATE blueprint_runs
 					SET status = 'cancelled', completed_at = ?, abort_reason = ?, aborted_at_step = ?
 					WHERE id = ? AND status = 'running' AND cancel_requested = 1
-				`, now, reason, sqliteNullInt(st.StepIndex), v.runID.String)
+				`, now, abortReason, sqliteNullInt(st.StepIndex), v.runID.String)
 				if err != nil {
 					return err
 				}
@@ -1107,6 +1128,158 @@ func (s *conversationQueueStore) ReleaseExpiredClaimSystem(ctx context.Context, 
 		return false, err
 	}
 	return n == 1, nil
+}
+
+// TakeOverExpiredClaimsSystem is the Postgres twin's takeover as a read then
+// per-row guarded releases on one transaction. The guard repeats the read's
+// predicate, so a claim renewed or released between the two is left alone and
+// not reported.
+func (s *conversationQueueStore) TakeOverExpiredClaimsSystem(ctx context.Context, executorID string, bootEpoch int64, limit int) ([]db.ClaimRef, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	var out []db.ClaimRef
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		rows, err := q.QueryContext(ctx, `
+			SELECT id, org_id, conversation_id
+			FROM claims
+			WHERE released_at IS NULL
+			  AND lease_expires_at <= `+sqliteNowExpr+`
+			  AND NOT (executor_id = ? AND boot_epoch = ?)
+			ORDER BY lease_expires_at, id
+			LIMIT ?
+		`, executorID, bootEpoch, limit)
+		if err != nil {
+			return err
+		}
+		var candidates []db.ClaimRef
+		for rows.Next() {
+			var c db.ClaimRef
+			if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+				rows.Close()
+				return err
+			}
+			candidates = append(candidates, c)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		for _, c := range candidates {
+			res, err := q.ExecContext(ctx, `
+				UPDATE claims SET released_at = ?, outcome = 'reaped'
+				WHERE id = ? AND released_at IS NULL AND lease_expires_at <= `+sqliteNowExpr+`
+			`, now, c.ClaimID)
+			if err != nil {
+				return err
+			}
+			if n, err := res.RowsAffected(); err != nil {
+				return err
+			} else if n == 0 {
+				continue
+			}
+			if _, err := q.ExecContext(ctx, `
+				UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
+			`, c.ConversationID); err != nil {
+				return err
+			}
+			out = append(out, c)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *conversationQueueStore) LiveClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]db.ClaimRef, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT id, org_id, conversation_id
+		FROM claims
+		WHERE executor_id = ? AND boot_epoch = ? AND released_at IS NULL
+		ORDER BY claimed_at, id
+	`, executorID, bootEpoch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.ClaimRef
+	for rows.Next() {
+		var c db.ClaimRef
+		if err := rows.Scan(&c.ClaimID, &c.OrgID, &c.ConversationID); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Context, executorID string, bootEpoch int64, conversationIDs []string) (int, error) {
+	if len(conversationIDs) == 0 {
+		return 0, nil
+	}
+	var count int
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		now := time.Now().UTC()
+		for _, id := range conversationIDs {
+			res, err := q.ExecContext(ctx, `
+				UPDATE claims SET released_at = ?, outcome = 'requeued_shutdown'
+				WHERE executor_id = ? AND boot_epoch = ? AND released_at IS NULL AND conversation_id = ?
+			`, now, executorID, bootEpoch, id)
+			if err != nil {
+				return err
+			}
+			n, err := res.RowsAffected()
+			if err != nil {
+				return err
+			}
+			count += int(n)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+// StrandedBlueprintRunsSystem measures the grace on this process's clock,
+// bound as a time the way completed_at and released_at are written, so each
+// comparison is one layout against itself.
+func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]db.StrandedRun, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	cutoff := time.Now().UTC().Add(-grace)
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT r.org_id, br.id, r.id
+		FROM blueprint_runs br
+		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
+		WHERE br.status = 'running'
+		  AND r.status IN (`+conversationTerminalStatusesSQL+`)
+		  AND COALESCE(r.completed_at, r.started_at) <= ?
+		  AND NOT EXISTS (
+		      SELECT 1 FROM claims cl
+		      WHERE cl.conversation_id = r.id
+		        AND (cl.released_at IS NULL OR cl.released_at > ?)
+		  )
+		ORDER BY br.started_at, br.id
+		LIMIT ?
+	`, cutoff, cutoff, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []db.StrandedRun
+	for rows.Next() {
+		var r db.StrandedRun
+		if err := rows.Scan(&r.OrgID, &r.BlueprintRunID, &r.ConversationID); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 func scanSqliteExecutorClaims(rows *sql.Rows) ([]domain.ExecutorClaim, error) {

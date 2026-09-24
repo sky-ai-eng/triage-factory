@@ -55,7 +55,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
 		}
 
-		conv, err := queue.RequeueConversation(ctx, orgID, conversationID, "transient rr failure")
+		conv, err := queue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient rr failure")
 		if err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
@@ -68,7 +68,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 		// The guard-declined shape: the call above already released the only
 		// claim, so there is nothing mid-flight-with-a-live-claim left to hand
 		// back.
-		declined, err := queue.RequeueConversation(ctx, orgID, conversationID, "duplicate")
+		declined, err := queue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "duplicate")
 		if err != nil {
 			t.Fatalf("RequeueConversation (duplicate): %v", err)
 		}
@@ -80,7 +80,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 	t.Run("RequeueConversation_declines_on_a_missing_conversation", func(t *testing.T) {
 		queue, _, orgID, _ := mk(t)
 		missingID := uuid.New().String()
-		conv, err := queue.RequeueConversation(ctx, orgID, missingID, "x")
+		conv, err := queue.RequeueConversation(ctx, orgID, missingID, db.RequeueSetupFailure, "x")
 		if err != nil || conv != nil {
 			t.Errorf("RequeueConversation on a missing conversation id = (%+v, %v), want (nil, nil) — the guard declining", conv, err)
 		}

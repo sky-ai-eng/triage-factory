@@ -75,12 +75,12 @@ const (
 	// ConversationFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).
 	ConversationFailureAgentError ConversationFailureKind = "agent_error"
-	// ConversationFailureExecutorLost — the conversation's owning executor's
-	// registry heartbeat went stale past the leader reaper's threshold and
-	// the conversation had already exhausted TF_MAX_CLAIM_ATTEMPTS, so the
-	// reaper terminal-failed it instead of requeuing (TFAC-586, spec §4.3).
-	// A conversation that still had attempts left is requeued and re-claimed
-	// instead — this kind only marks the case that ran out of retries.
+	// ConversationFailureExecutorLost — the conversation's engagement was
+	// lost (its claim's lease lapsed and another dispatcher took it over, or
+	// a boot reset released it) as many times in a row as
+	// TF_MAX_CLAIM_ATTEMPTS allows, so the claim after the last loss failed
+	// it instead of running it. A conversation with losses to spare is
+	// simply re-claimed — this kind only marks the one whose budget ran out.
 	ConversationFailureExecutorLost ConversationFailureKind = "executor_lost"
 	// ConversationFailureSessionLost — a resume could not continue because the
 	// conversation's Claude session transcript was not on disk after the workspace
@@ -499,10 +499,11 @@ type Conversation struct {
 	// before branching on it.
 	//
 	//   - ConversationQueueStore.ClaimNextConversation fills it with the CURRENT queue episode:
-	//     this claim plus the consecutive hand-backs behind it ('requeued' /
-	//     'reaped' — see the dialects' episodeAttemptsSQL). This is the retry
-	//     budget's counter and the only meaning anything branches on
-	//     (delegate.handlePreAgentFailure). An engagement that got anywhere
+	//     this claim plus every consecutive hand-back behind it, whatever
+	//     handed it back. It is telemetry (the engagement's claim.attempt
+	//     attribute), and nothing branches on it: the two budgets are
+	//     SetupFailures and LostEngagements below, each counting one kind of
+	//     hand-back over the same episode. An engagement that got anywhere
 	//     ends the episode, so a conversation resumed four times still claims
 	//     at 1.
 	//   - The display reads (Get / GetSystem / the list projections) fill it
@@ -518,6 +519,20 @@ type Conversation struct {
 	// 0 for never-claimed conversations, and on projections that don't select
 	// it.
 	Attempts int `json:"attempts,omitempty"`
+
+	// SetupFailures and LostEngagements are the dispatcher's two retry
+	// budgets, filled only by ConversationQueueStore.ClaimNextConversation
+	// and counted over the same episode Attempts is. SetupFailures counts the
+	// episode's 'requeued' hand-backs — engagements that failed before their
+	// agent ran — against delegate's setup budget. LostEngagements counts its
+	// 'reaped' hand-backs — engagements whose lease lapsed with nobody
+	// driving them — against TF_MAX_CLAIM_ATTEMPTS. They are separate because
+	// the two failures are: a host that cannot build a workspace says nothing
+	// about whether a conversation kills its executor, and neither a
+	// credentials wait nor a clean shutdown says anything about either, which
+	// is why those hand-backs count toward neither.
+	SetupFailures   int `json:"-"`
+	LostEngagements int `json:"-"`
 
 	// OrgID is the conversation's owning tenant. Populated only by
 	// ConversationQueueStore.ClaimNextConversation (a cross-org system claim that returns the row
@@ -878,7 +893,8 @@ type Claim struct {
 	// ReleasedAt nil = this claim is live. Stamped exactly once.
 	ReleasedAt *time.Time `json:"released_at,omitempty"`
 	// Outcome is how the engagement ended: "completed" | "failed" |
-	// "cancelled" | "requeued" | "parked" | "reaped". Empty while live.
+	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
+	// "reaped" | "requeued_shutdown". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -917,7 +933,8 @@ type ExecutorClaim struct {
 	// would have lapsed. nil only on a row written before the column existed.
 	LeaseExpiresAt *time.Time
 	// Outcome is how the engagement ended ("completed" | "failed" |
-	// "cancelled" | "requeued" | "parked" | "reaped"); empty while live.
+	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
+	// "reaped" | "requeued_shutdown"); empty while live.
 	Outcome string
 
 	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the

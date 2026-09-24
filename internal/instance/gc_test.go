@@ -1,30 +1,30 @@
-package reaper
+package instance
 
 import (
 	"context"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
-// countingStore is a Store seam that records DeleteStaleInstances calls. Every
-// other method is unused by RunRegistryGC and panics if reached, so a stray
-// call surfaces as a test failure rather than a silent no-op.
+// countingStore records DeleteStaleSystem calls. Every other InstanceStore
+// method is the nil embedded interface, so a stray call panics and surfaces as
+// a test failure rather than a silent no-op.
 type countingStore struct {
+	db.InstanceStore
+
 	mu        sync.Mutex
 	gcCalls   int
 	lastStale time.Duration
 }
 
-func (s *countingStore) ReapDeadExecutors(context.Context, time.Duration, int) (Counts, error) {
-	panic("ReapDeadExecutors not expected from RunRegistryGC")
-}
-
-func (s *countingStore) DeleteStaleInstances(_ context.Context, staleAfter time.Duration) (int, error) {
+func (s *countingStore) DeleteStaleSystem(_ context.Context, olderThan time.Duration) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.gcCalls++
-	s.lastStale = staleAfter
+	s.lastStale = olderThan
 	return 0, nil
 }
 
@@ -47,7 +47,7 @@ func TestRunRegistryGC_SweepsAtStart(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunRegistryGC(ctx, store, time.Hour, 7*24*time.Hour)
+		RunRegistryGC(ctx, store, RegistryGCStaleAfter, time.Hour)
 	}()
 
 	deadline := time.After(2 * time.Second)
@@ -62,8 +62,8 @@ func TestRunRegistryGC_SweepsAtStart(t *testing.T) {
 	if got := store.calls(); got != 1 {
 		t.Fatalf("start sweep count = %d; want exactly 1 before the interval elapses", got)
 	}
-	if store.lastStale != 7*24*time.Hour {
-		t.Errorf("start sweep staleAfter = %v; want the configured 7d threshold", store.lastStale)
+	if store.lastStale != RegistryGCStaleAfter {
+		t.Errorf("start sweep olderThan = %v; want the %v threshold", store.lastStale, RegistryGCStaleAfter)
 	}
 
 	cancel()
@@ -86,7 +86,7 @@ func TestRunRegistryGC_CancelledBeforeStartSkipsSweep(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunRegistryGC(ctx, store, time.Hour, 7*24*time.Hour)
+		RunRegistryGC(ctx, store, RegistryGCStaleAfter, time.Hour)
 	}()
 
 	select {
@@ -99,13 +99,13 @@ func TestRunRegistryGC_CancelledBeforeStartSkipsSweep(t *testing.T) {
 	}
 }
 
-// TestRunRegistryGC_NilStoreIsNoop keeps the nil-seam contract (local mode /
-// TF_ROLE=executor wire no store) a logged no-op rather than a panic.
+// TestRunRegistryGC_NilStoreIsNoop keeps the nil-seam contract a logged no-op
+// rather than a panic.
 func TestRunRegistryGC_NilStoreIsNoop(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunRegistryGC(context.Background(), nil, time.Hour, time.Hour)
+		RunRegistryGC(context.Background(), nil, RegistryGCStaleAfter, time.Hour)
 	}()
 	select {
 	case <-done:
@@ -113,6 +113,3 @@ func TestRunRegistryGC_NilStoreIsNoop(t *testing.T) {
 		t.Fatal("RunRegistryGC with a nil store did not return immediately")
 	}
 }
-
-// Ensure the fake actually satisfies the seam the loop consumes.
-var _ Store = (*countingStore)(nil)
