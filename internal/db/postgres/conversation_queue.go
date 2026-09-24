@@ -1233,31 +1233,37 @@ func (s *conversationQueueStore) ResetProcessingConversations(ctx context.Contex
 	// Scoped by boot epoch rather than by lease — the epoch is the stronger
 	// proof here, and a claim of the previous boot can still carry a lease
 	// its dead holder renewed seconds ago.
-	var count int
-	err := s.conn.QueryRowContext(ctx, `
-		WITH victims AS (
-			SELECT cl.id AS claim_id, cl.conversation_id
-			FROM claims cl
-			WHERE cl.released_at IS NULL
-			  AND cl.executor_id = $1
-			  AND cl.boot_epoch < $2
-		),
-		clr AS (
-			UPDATE conversations SET preferred_executor_id = NULL
-			FROM victims WHERE conversations.id = victims.conversation_id
-			RETURNING conversations.id
-		),
-		rel AS (
+	//
+	// Claims first and the stamp second, the takeover's order: a run's
+	// terminal locks a conversation and then its claim, so the clear takes
+	// each conversation's lock with SKIP LOCKED (clearPreferredExecutor).
+	var released []string
+	err := inTx(ctx, s.conn, func(q queryer) error {
+		rows, err := q.QueryContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = 'reaped'
-			FROM victims WHERE claims.id = victims.claim_id
-			RETURNING claims.id
-		)
-		SELECT count(*) FROM rel
-	`, executorID, bootEpoch).Scan(&count)
+			WHERE released_at IS NULL AND executor_id = $1 AND boot_epoch < $2
+			RETURNING conversation_id::text
+		`, executorID, bootEpoch)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			released = append(released, id)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		return clearPreferredExecutor(ctx, q, released)
+	})
 	if err != nil {
 		return 0, err
 	}
-	return count, nil
+	return len(released), nil
 }
 
 func (s *conversationQueueStore) FleetQueueShares(ctx context.Context) ([]db.OrgQueueShare, error) {

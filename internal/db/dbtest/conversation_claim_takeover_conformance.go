@@ -253,6 +253,20 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("Requeue_RefusesAnOutcomeThatIsNotAHandBackAndWritesNothing", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		for _, outcome := range []db.RequeueOutcome{"", "reaped", "requeued_shutdown", "completed"} {
+			got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, outcome, "boom")
+			if !errors.Is(err, db.ErrInvalidRequeueOutcome) || got != nil {
+				t.Errorf("RequeueConversation(%q) = (%+v, %v), want ErrInvalidRequeueOutcome", outcome, got, err)
+			}
+		}
+		if released, _ := claimState(t, f, c.ClaimID); released {
+			t.Error("a refused requeue released the claim")
+		}
+	})
+
 	t.Run("BootReset_ReleasesAPriorBootsClaimWhateverTheRowsState", func(t *testing.T) {
 		f := mk(t)
 		open := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)

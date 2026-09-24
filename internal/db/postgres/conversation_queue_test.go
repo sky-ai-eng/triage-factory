@@ -1259,6 +1259,94 @@ func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
 	}
 }
 
+// TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal holds the lock order a
+// run's terminal takes on its children — the conversation, then its claim —
+// across the boot reset, deterministically rather than by racing: the
+// conversation is locked first, the reset is let run into it, and only then
+// is the claim taken. A reset that locks the claim and then waits on the
+// conversation closes the cycle, and Postgres aborts one side with 40P01.
+func TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+
+	const executorID = "boot-reset-order"
+	taskID := seedPgTask(t, h, orgID, userID)
+	conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != conv.ID {
+		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, conv.ID)
+	}
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = $1 WHERE id = $2`, executorID, conv.ID)
+
+	// The terminal's first lock.
+	terminal, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = terminal.Rollback() }()
+	if _, err := terminal.ExecContext(ctx, `SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, conv.ID); err != nil {
+		t.Fatalf("lock the conversation: %v", err)
+	}
+
+	resetDone := make(chan error, 1)
+	go func() {
+		_, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 2)
+		resetDone <- err
+	}()
+
+	// Let the reset run until it has either finished or is waiting on a lock.
+	var resetErr error
+	finished := false
+	deadline := time.Now().Add(10 * time.Second)
+	for !finished && time.Now().Before(deadline) {
+		select {
+		case resetErr = <-resetDone:
+			finished = true
+		case <-time.After(20 * time.Millisecond):
+			var waiting int
+			if err := h.AdminDB.QueryRowContext(ctx, `
+				SELECT count(*) FROM pg_stat_activity
+				WHERE wait_event_type = 'Lock' AND query LIKE '%outcome = ''reaped''%'
+			`).Scan(&waiting); err != nil {
+				t.Fatalf("read pg_stat_activity: %v", err)
+			}
+			if waiting > 0 {
+				deadline = time.Now()
+			}
+		}
+	}
+
+	// The terminal's second lock.
+	_, claimErr := terminal.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = 'cancelled'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, conv.ID)
+	commitErr := terminal.Commit()
+	if !finished {
+		resetErr = <-resetDone
+	}
+
+	for name, err := range map[string]error{"the terminal's claim release": claimErr, "the terminal's commit": commitErr, "ResetProcessingConversations": resetErr} {
+		if err == nil {
+			continue
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+			t.Fatalf("%s deadlocked against the other writer: %v", name, err)
+		}
+		t.Fatalf("%s: %v", name, err)
+	}
+	if live, err := stores.ConversationQueue.LiveClaimsOfExecutorSystem(ctx, executorID, 1); err != nil || len(live) != 0 {
+		t.Errorf("live claims after both writes = (%+v, %v), want none", live, err)
+	}
+}
+
 // TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal pins the
 // lock order the settlement shares with a run's terminal write. The terminal
 // (markBlueprintRunStatus) locks the run and then parks its children; a
