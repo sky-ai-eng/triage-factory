@@ -97,3 +97,46 @@ describe('TelemetryRail token readouts', () => {
     expect(screen.queryByText(/cache·/)).not.toBeInTheDocument()
   })
 })
+
+// The idle readout is the live claim's activity stamp against the rail's own
+// clock. The stamp sits a minute after StartedAt so the idle value (2m 0s)
+// never matches the running readout (3m 0s).
+describe('TelemetryRail idle readout', () => {
+  const at3m = T0 + 180_000
+
+  it('shows the idle duration and the operation in flight while running', () => {
+    renderRail({ claim_last_activity_at: iso(60_000), claim_current_op: 'tool:bash' }, at3m)
+    expect(screen.getByText('idle')).toBeInTheDocument()
+    expect(screen.getByText('2m 0s · tool:bash')).toBeInTheDocument()
+  })
+
+  it('shows the idle duration alone when nothing is in flight', () => {
+    renderRail({ claim_last_activity_at: iso(60_000) }, at3m)
+    expect(screen.getByText('idle')).toBeInTheDocument()
+    expect(screen.getByText('2m 0s')).toBeInTheDocument()
+  })
+
+  it('shows while the engagement is still setting up', () => {
+    renderRail(
+      { Status: 'cloning', claim_last_activity_at: iso(60_000), claim_current_op: 'clone' },
+      at3m,
+    )
+    expect(screen.getByText('idle')).toBeInTheDocument()
+    expect(screen.getByText('2m 0s · clone')).toBeInTheDocument()
+  })
+
+  it('is hidden once the engagement is not live', () => {
+    renderRail(
+      { Status: 'open', claim_last_activity_at: iso(60_000), claim_current_op: 'tool:bash' },
+      at3m,
+    )
+    expect(screen.queryByText('idle')).not.toBeInTheDocument()
+    expect(screen.queryByText(/tool:bash/)).not.toBeInTheDocument()
+  })
+
+  it('is hidden when the claim has not stamped any activity', () => {
+    renderRail({ claim_current_op: 'provider' }, at3m)
+    expect(screen.queryByText('idle')).not.toBeInTheDocument()
+    expect(screen.queryByText(/provider/)).not.toBeInTheDocument()
+  })
+})

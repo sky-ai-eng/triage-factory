@@ -55,6 +55,23 @@ type StreamState struct {
 	// call that never resolves (an interrupted turn) leaves its mark behind;
 	// the map is bounded by the tool calls of one process's stream.
 	toolDispatchedAt map[string]time.Time
+
+	// observer, when set, hears about tool calls and turn ends as they are
+	// parsed rather than when a message is flushed. Set once by the reader
+	// before the first line, and read only on the reader goroutine.
+	observer StreamObserver
+}
+
+// observeSink installs sink as this stream's observer when it implements
+// StreamObserver, and returns it (nil otherwise) for the reader's own
+// per-line calls.
+func (s *StreamState) observeSink(sink Sink) StreamObserver {
+	o, ok := sink.(StreamObserver)
+	if !ok {
+		return nil
+	}
+	s.observer = o
+	return o
 }
 
 // NewStreamState returns a fresh state ready for ParseLine, with the
@@ -210,6 +227,9 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 		if flushed := s.flush(); flushed != nil {
 			out = append(out, flushed)
 		}
+		if s.observer != nil {
+			s.observer.OnTurnEnd()
+		}
 		return out, parseResult(raw)
 	}
 
@@ -298,6 +318,9 @@ func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*dom
 			// is the dispatch its result is measured against.
 			if toolID != "" {
 				s.toolDispatchedAt[toolID] = s.now()
+				if s.observer != nil {
+					s.observer.OnToolUse(toolID, toolName)
+				}
 			}
 		}
 	}
@@ -363,6 +386,10 @@ func (s *StreamState) parseToolResult(raw map[string]any, traceID string) []*dom
 			if r, ok := raw["tool_use_result"].(string); ok {
 				content = r
 			}
+		}
+
+		if s.observer != nil && toolUseID != "" {
+			s.observer.OnToolResult(toolUseID)
 		}
 
 		var durationMs *int

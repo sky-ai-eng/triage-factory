@@ -499,7 +499,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			-- Every park column clears together — see the SQLite twin for why
 			-- park_reason in particular must not survive its own park.
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
-			                         stop_requested_at = NULL, stop_requested_by = NULL
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			FROM candidate
 			WHERE conversations.id = candidate.id AND conversations.status IS NOT NULL
 			RETURNING conversations.id
@@ -553,7 +553,7 @@ func isActiveClaimConflict(err error) bool {
 	return pgErr.Code == "23505" && pgErr.ConstraintName == "idx_claims_one_active"
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (db.ClaimRenewal, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
 	// A malformed id is a caller wiring fault, and the honest answer to it is
 	// the one the fence gives for every other way of not being the owner:
 	// Postgres would otherwise reject the bind (22P02) and the loop would read
@@ -570,16 +570,23 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// The guard's expiry term is what makes a late renewal terminal: an
 	// already-lapsed lease matches nothing, and the caller gets the same
 	// ErrClaimReleased a released claim gives. Authority does not come back.
+	//
+	// last_activity_at is measured back from the same statement_timestamp()
+	// the lease is measured forward from, so the idle the executor read on its
+	// monotonic clock lands as a database timestamp with no executor wall
+	// clock in it.
 	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
-		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1)
+		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1),
+		    last_activity_at = statement_timestamp() - make_interval(secs => $5),
+		    current_op = NULLIF($6, '')
 		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
 		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		RETURNING lease_expires_at,
 		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
-	`, lease.Seconds(), claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	`, lease.Seconds(), claimID, orgID, conversationID, idle.Seconds(), op).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
@@ -615,7 +622,7 @@ func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.C
 func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	rows, err := s.conn.QueryContext(ctx, `
 		WITH victims AS (
-			SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index, r.status, r.stop_requested_by
+			SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index, r.status, r.stop_requested_by, r.stop_requested_reason
 			FROM conversations r
 			WHERE r.stop_requested_at IS NOT NULL
 			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
@@ -628,17 +635,21 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			SET status = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN v.status ELSE 'open' END,
 			    parked_at = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.parked_at ELSE COALESCE(c.parked_at, now()) END,
 			    park_reason = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.park_reason
+			                       WHEN v.stop_requested_reason IS NOT NULL THEN v.stop_requested_reason
 			                       WHEN v.stop_requested_by IS NULL THEN 'system_cancelled'
 			                       ELSE 'user_cancelled' END,
 			    stop_requested_at = NULL,
-			    stop_requested_by = NULL
+			    stop_requested_by = NULL,
+			    stop_requested_reason = NULL
 			FROM victims v WHERE c.id = v.id
-			RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.status AS was, v.stop_requested_by
+			RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.status AS was, v.stop_requested_by, v.stop_requested_reason
 		),
 		cancelled AS (
 			UPDATE blueprint_runs br
 			SET status = 'cancelled', completed_at = now(),
-			    abort_reason = CASE WHEN s.stop_requested_by IS NULL THEN 'system_cancelled' ELSE 'user_cancelled' END,
+			    abort_reason = CASE WHEN s.stop_requested_reason IS NOT NULL THEN s.stop_requested_reason
+			                        WHEN s.stop_requested_by IS NULL THEN 'system_cancelled'
+			                        ELSE 'user_cancelled' END,
 			    aborted_at_step = s.blueprint_step_index
 			FROM settled s
 			WHERE br.id = s.blueprint_run_id AND br.status = 'running' AND br.cancel_requested = true
@@ -687,6 +698,26 @@ func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, 
 		return 0, 0, wrapAdminPoolPermErr(err, "conversation_queue.ExpiredClaimsSystem")
 	}
 	return count, time.Duration(oldestSeconds * float64(time.Second)), nil
+}
+
+func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (time.Duration, error) {
+	// max() over no rows is NULL, and so is the subtraction with it; the
+	// COALESCE collapses that to the zero the empty case wants. A claim that
+	// has not renewed yet carries no stamp and is not counted.
+	var seconds float64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COALESCE(EXTRACT(EPOCH FROM (statement_timestamp() - min(last_activity_at))), 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
+		  AND last_activity_at IS NOT NULL
+	`).Scan(&seconds)
+	if err != nil {
+		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestIdleClaimSystem")
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func (s *conversationQueueStore) ExpiredClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]db.ClaimRef, error) {
@@ -1000,7 +1031,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 				    parked_at = COALESCE(parked_at, now()),
 				    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 				    result_summary = COALESCE(NULLIF(result_summary, ''), $1),
-				    stop_requested_at = NULL, stop_requested_by = NULL
+				    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 				WHERE status IS NULL
 				  AND blueprint_run_id IN (
 				      SELECT id FROM blueprint_runs
@@ -1260,7 +1291,8 @@ var executorClaimSelectCols = `
 	c.claimed_at, c.released_at, c.lease_expires_at, COALESCE(c.outcome, ''),
 	c.peak_mem_mb, c.cpu_usec,
 	COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
-	COALESCE(v.failure_kind, '')`
+	COALESCE(v.failure_kind, ''),
+	c.last_activity_at, COALESCE(c.current_op, '')`
 
 // claimLeaseLiveSQL is one claims row's own liveness, for the alias the
 // caller gave it: unreleased AND its lease still in the future. An expired
@@ -1341,14 +1373,19 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt, leaseExpiresAt sql.NullTime
+	var releasedAt, leaseExpiresAt, lastActivityAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+		&lastActivityAt, &c.CurrentOp,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
+	}
+	if lastActivityAt.Valid {
+		v := lastActivityAt.Time
+		c.LastActivityAt = &v
 	}
 	if releasedAt.Valid {
 		v := releasedAt.Time

@@ -518,8 +518,22 @@ export function useConversationDetail(conversationID: string | undefined): Conve
         })
         .catch(() => {})
     }
+    // A live conversation's row is re-read every tick too. Its claim's
+    // activity stamp moves with every lease renewal and nothing broadcasts
+    // that, so without the read the run station's idle readout would keep
+    // counting up from whatever stamp the page loaded with.
+    const refreshLiveConversation = () => {
+      const current = conversationRef.current
+      if (!current || !isActiveConversation(current)) return
+      apiJSON<Conversation>(`/api/agent/conversations/${conversationID}`)
+        .then((data) => {
+          if (!cancelled && conversationID === lastConversationIDRef.current) setConversation(data)
+        })
+        .catch(() => {})
+    }
     const poll = () => {
       reconcileMessages()
+      refreshLiveConversation()
       apiJSON<{ updated?: number }>(
         `/api/agent/conversations/${conversationID}/artifacts/refresh`,
         {

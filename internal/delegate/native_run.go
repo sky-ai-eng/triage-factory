@@ -74,7 +74,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 		}, "")
@@ -200,7 +200,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if err != nil {
 		return launchFailed(fmt.Errorf("connect to tool host: %w", err))
 	}
-	tools := agentloop.NewToolHost(conn, 0)
+	timings := s.resolvedActivityTimings()
+	tools := agentloop.NewToolHost(conn, timings.toolSocket())
 	defer func() { _ = tools.Close() }()
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
@@ -235,6 +236,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
 			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg),
+		},
+		Activity: engineActivity{s.activityFor(conversationID)},
+		ActivityBounds: agentloop.ActivityBounds{
+			Provider: timings.providerByte,
+			Tool:     timings.toolCall,
 		},
 		Log: delegateLog,
 	}
@@ -728,7 +734,7 @@ func (s *Spawner) recordNativeResult(
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
 		}, "")

@@ -223,6 +223,7 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   blueprint_terminal: 'workflow ended first',
   launch_failed: 'the runtime could not start',
   model_not_enabled: 'its model is no longer one this team can pick',
+  stalled: 'stalled',
   drained: 'the executor was drained',
 }
 
@@ -355,4 +356,22 @@ export function formatElapsed(dateStr: string, now: number = Date.now()): string
   if (minutes < 60) return `${minutes}m ${secs}s`
   const hours = Math.floor(minutes / 60)
   return `${hours}h ${minutes % 60}m`
+}
+
+// claimIdleReadout — how long a claim's engagement has gone without anything
+// its stall watchdog counts as activity, then the operation it had in flight:
+// "3m 0s · tool:bash", or "3m 0s" with nothing in flight. Both inputs are what
+// the holder's last lease renewal stamped. Null without a stamp: there is no
+// claim, or it has not renewed yet. A browser clock behind the server's reads
+// as zero rather than a negative duration. The caller decides whether the
+// claim is live: a released claim keeps its last reading, which says nothing
+// about now.
+export function claimIdleReadout(
+  lastActivityAt: string | undefined,
+  currentOp: string | undefined,
+  now: number,
+): string | null {
+  if (!lastActivityAt) return null
+  const idle = formatDurationMs(Math.max(0, now - new Date(lastActivityAt).getTime()))
+  return currentOp ? `${idle} · ${currentOp}` : idle
 }

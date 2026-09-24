@@ -412,6 +412,12 @@ type sandboxClaimDTO struct {
 	Status      string `json:"status,omitempty"`
 	FailureKind string `json:"failure_kind,omitempty"`
 	Outcome     string `json:"outcome,omitempty"`
+	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
+	// when the engagement last did anything its stall watchdog counts, and
+	// the operation in flight then. Absent before the first renewal; on a
+	// released claim they are the last reading it took.
+	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
+	CurrentOp      string     `json:"current_op,omitempty"`
 }
 
 type sandboxesDTO struct {
@@ -491,6 +497,7 @@ func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
 		ClaimedAt: c.ClaimedAt, ReleasedAt: c.ReleasedAt, Live: c.ReleasedAt == nil,
 		PeakMemMB: c.PeakMemMB, CPUUsec: c.CPUUsec,
 		Status: c.Status, FailureKind: c.FailureKind, Outcome: c.Outcome,
+		LastActivityAt: c.LastActivityAt, CurrentOp: c.CurrentOp,
 	}
 	end := now
 	if c.ReleasedAt != nil {

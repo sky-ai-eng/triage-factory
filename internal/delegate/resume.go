@@ -572,10 +572,8 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 
 	// Resume executes as a LiveRun (re-registered in procs, so a resumed run
 	// is interruptible/steerable), falling back to the one-shot sandbox path
-	// in multi mode. idleTimeout 0 runs it without the idle backstop: a
-	// resume is one turn (plus whatever a steer queues behind it), bounded
-	// by the process itself — its result, its exit, or a stop — rather than
-	// by a clock.
+	// in multi mode. It runs under the same engagement as the claim that
+	// routed it here, so the same stall watchdog bounds it.
 	var out liveOutcome
 	if agentproc.InteractiveSupported() {
 		out = s.runLiveAndDrive(ctx, liveRunSpec{
@@ -588,11 +586,10 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 				runtime:        domain.ConversationRuntimeSDK,
 				mirror:         opts.mirror,
 			},
-			opts:        baseOpts,
-			perms:       perms,
-			sink:        sink,
-			mirror:      opts.mirror,
-			idleTimeout: 0,
+			opts:   baseOpts,
+			perms:  perms,
+			sink:   sink,
+			mirror: opts.mirror,
 		})
 	} else {
 		out = s.runOneShot(ctx, baseOpts, sink)

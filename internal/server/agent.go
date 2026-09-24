@@ -548,6 +548,16 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 	if conv.StopRequestedAt != nil {
 		out["stop_requested_at"] = *conv.StopRequestedAt
 	}
+	// The live claim's activity as its last renewal stamped it: when the
+	// engagement last did anything its stall watchdog counts, and what it had
+	// in flight. Absent with no live claim or before the first renewal, read
+	// off presence like the keys above.
+	if conv.ClaimLastActivityAt != nil {
+		out["claim_last_activity_at"] = *conv.ClaimLastActivityAt
+	}
+	if conv.ClaimCurrentOp != "" {
+		out["claim_current_op"] = conv.ClaimCurrentOp
+	}
 	if artifactCount == 0 || len(arts) > 0 {
 		prCount, reviewCount := domain.UnresolvedArtifactCounts(arts)
 		out["has_unresolved_artifacts"] = prCount > 0 || reviewCount > 0

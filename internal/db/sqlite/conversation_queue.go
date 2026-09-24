@@ -271,7 +271,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// conversation as "stopped by user" on a conversation nobody stopped.
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
-			                         stop_requested_at = NULL, stop_requested_by = NULL
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE id = ? AND status IS NOT NULL
 		`, claimed.ID); err != nil {
 			return err
@@ -615,7 +615,7 @@ func (s *conversationQueueStore) ReconcileOrphanedConversations(ctx context.Cont
 			    parked_at = COALESCE(parked_at, ?),
 			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), ?),
-			    stop_requested_at = NULL, stop_requested_by = NULL
+			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE status IS NULL
 			  AND blueprint_run_id IN (
 			      SELECT id FROM blueprint_runs
@@ -865,7 +865,8 @@ var executorClaimCols = `
 	       c.claimed_at, c.released_at, c.lease_expires_at, COALESCE(c.outcome, ''),
 	       c.peak_mem_mb, c.cpu_usec,
 	       COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
-	       COALESCE(v.failure_kind, '')
+	       COALESCE(v.failure_kind, ''),
+	       c.last_activity_at, COALESCE(c.current_op, '')
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
 
@@ -910,7 +911,7 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (db.ClaimRenewal, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.ClaimRenewal{}, err
 	}
@@ -925,16 +926,22 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	//
 	// Both sides of the comparison are strftime-rendered text in the layout
 	// the column stores, so the `>` is one layout against itself.
+	//
+	// last_activity_at is database now offset back by the idle the executor
+	// read on its monotonic clock, in the same layout and through the same
+	// modifier rendering as the lease stamp.
 	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
-		SET lease_expires_at = `+sqliteNowPlusExpr+`
+		SET lease_expires_at = `+sqliteNowPlusExpr+`,
+		    last_activity_at = `+sqliteNowPlusExpr+`,
+		    current_op = NULLIF(?, '')
 		WHERE id = ? AND org_id = ? AND conversation_id = ?
 		  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		RETURNING lease_expires_at,
 		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
-	`, sqliteLeaseModifier(lease), claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	`, sqliteLeaseModifier(lease), sqliteLeaseModifier(-idle), op, claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
@@ -962,15 +969,15 @@ func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.C
 // narrows to; scope is an AND-clause over the victims' alias r, binding args.
 func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	type victim struct {
-		id, orgID, status, by string
-		runID                 sql.NullString
-		step                  sql.NullInt64
+		id, orgID, status, by, reason string
+		runID                         sql.NullString
+		step                          sql.NullInt64
 	}
 	var out []db.SettledStop
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
 			SELECT r.id, r.org_id, COALESCE(r.status, ''), COALESCE(r.stop_requested_by, ''),
-			       r.blueprint_run_id, r.blueprint_step_index
+			       COALESCE(r.stop_requested_reason, ''), r.blueprint_run_id, r.blueprint_step_index
 			FROM conversations r
 			WHERE r.stop_requested_at IS NOT NULL
 			  AND NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
@@ -983,7 +990,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		var victims []victim
 		for rows.Next() {
 			var v victim
-			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.runID, &v.step); err != nil {
+			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.reason, &v.runID, &v.step); err != nil {
 				rows.Close()
 				return err
 			}
@@ -996,12 +1003,15 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		for _, v := range victims {
 			terminal := v.status == "completed" || v.status == "failed"
 			reason := "user_cancelled"
-			if v.by == "" {
+			switch {
+			case v.reason != "":
+				reason = v.reason
+			case v.by == "":
 				reason = "system_cancelled"
 			}
 			if terminal {
 				if _, err := q.ExecContext(ctx, `
-					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL WHERE id = ?
+					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL WHERE id = ?
 				`, v.id); err != nil {
 					return err
 				}
@@ -1011,7 +1021,8 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				    parked_at = COALESCE(parked_at, ?),
 				    park_reason = ?,
 				    stop_requested_at = NULL,
-				    stop_requested_by = NULL
+				    stop_requested_by = NULL,
+				    stop_requested_reason = NULL
 				WHERE id = ?
 			`, now, reason, v.id); err != nil {
 				return err
@@ -1065,6 +1076,26 @@ func (s *conversationQueueStore) ExpiredClaimsSystem(ctx context.Context) (int, 
 		oldestSeconds = 0
 	}
 	return int(count), time.Duration(oldestSeconds) * time.Second, nil
+}
+
+func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (time.Duration, error) {
+	// Seconds at millisecond resolution: julianday keeps the %f fraction the
+	// stamp carries. min() over no rows is NULL, and the COALESCE collapses it
+	// to the zero the empty case wants. A claim that has not renewed yet
+	// carries no stamp and is not counted.
+	var seconds float64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COALESCE((julianday('now') - julianday(min(last_activity_at))) * 86400.0, 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
+		  AND last_activity_at IS NOT NULL`).Scan(&seconds)
+	if err != nil {
+		return 0, err
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 func (s *conversationQueueStore) ExpiredClaimsOfExecutorSystem(ctx context.Context, executorID string, bootEpoch int64) ([]db.ClaimRef, error) {
@@ -1132,14 +1163,19 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt, leaseExpiresAt sql.NullTime
+	var releasedAt, leaseExpiresAt, lastActivityAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
+		&lastActivityAt, &c.CurrentOp,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
+	}
+	if lastActivityAt.Valid {
+		v := lastActivityAt.Time
+		c.LastActivityAt = &v
 	}
 	if releasedAt.Valid {
 		v := releasedAt.Time

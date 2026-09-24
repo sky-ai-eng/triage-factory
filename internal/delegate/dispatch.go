@@ -490,6 +490,14 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// killAllLiveSandboxes and the signal apply loop are untouched.
 	claimCtx, claimFence := context.WithCancelCause(ctx)
 	defer claimFence(nil)
+
+	// The stall watchdog, on its own timer beside the lease loop and cancelling
+	// the same handle. The lease proves this executor can still reach the
+	// database; this proves the engagement is still doing something. It is
+	// registered before the lease loop starts because each renewal copies its
+	// activity onto the claim.
+	stopActivity := s.startActivityTracker(conv, claimFence)
+	defer stopActivity()
 	if s.conversationQueue != nil && conv.ClaimID != "" {
 		leaseCtx, stopLease := context.WithCancel(ctx)
 		defer stopLease()
@@ -758,12 +766,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 			s.endEngagement(conv.ID, engagementFenced)
 			return true
 		}
-		s.endEngagement(conv.ID, engagementCancelled)
+		s.endEngagement(conv.ID, cancelOutcome(stepCtx))
 		if s.markConversationOpen(stepCtx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conv.ID,
 			claimID:        conv.ClaimID,
-			reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+			reason:         db.ParkStopped(stopParkReason(stepCtx), ""),
 			runtime:        conv.Runtime,
 		}) {
 			return true
@@ -1117,7 +1125,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// No workspace rehydrated yet, so markConversationOpen (the no-snapshot park)
 		// rather than parkConversationOpen: there is nothing on disk to capture.
 		s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
-		disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, userID))
+		disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 		return
 	}
 
@@ -1167,7 +1175,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 			// A stop, not a failure: cause is whatever the bring-up was doing
 			// when the cancel landed, which is not why this engagement ended.
 			s.endEngagementIfStopped(conv.ID, ctx, stepCtx)
-			disposed = s.markConversationOpen(ctx, resumeParkContext(orgID, conv, userID))
+			disposed = s.markConversationOpen(ctx, resumeParkContext(stepCtx, orgID, conv, userID))
 			return
 		}
 		s.failEngagement(conv.ID, cause)
@@ -1298,7 +1306,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		// The agent worked in the rehydrated tree before the kill, so this
 		// park snapshots it — the whole point of a stop being a park is that
 		// the work survives the gesture.
-		park := resumeParkContext(orgID, conv, userID)
+		park := resumeParkContext(stepCtx, orgID, conv, userID)
 		park.namespace, park.claudeCwd, park.mirror = namespace, resumeCwd, mirror
 		if outcome != nil {
 			park.costUSD = outcome.CostUSD
@@ -1343,13 +1351,14 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 // conversation its successor has picked up.
 //
 // The caller fills namespace/claudeCwd when there is a workspace worth
-// snapshotting — see the two call sites, which differ on exactly that.
-func resumeParkContext(orgID string, conv *domain.Conversation, userID string) liveParkContext {
+// snapshotting — see the two call sites, which differ on exactly that. ctx is
+// the resume's cancelled step context, whose cause decides the reason.
+func resumeParkContext(ctx context.Context, orgID string, conv *domain.Conversation, userID string) liveParkContext {
 	return liveParkContext{
 		orgID:          orgID,
 		conversationID: conv.ID,
 		claimID:        conv.ClaimID,
-		reason:         db.ParkStopped(domain.ParkReasonUserCancelled, ""),
+		reason:         db.ParkStopped(stopParkReason(ctx), ""),
 		runtime:        conv.Runtime,
 	}
 }

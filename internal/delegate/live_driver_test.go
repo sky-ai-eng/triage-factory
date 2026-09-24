@@ -6,7 +6,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -123,7 +122,7 @@ func TestDriveLiveConversation_TerminalResultClosesAndReturns(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want %+v", out.result, want)
@@ -145,7 +144,7 @@ func TestDriveLiveConversation_CtxCancelReturnsErr(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	out := s.driveLiveConversation(ctx, liveParkContext{}, proc, make(chan *agentproc.Result), make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(ctx, liveParkContext{}, proc, make(chan *agentproc.Result))
 
 	if out.err == nil {
 		t.Error("expected a ctx error on cancel")
@@ -168,7 +167,7 @@ func TestDriveLiveConversation_ProcessExitCarriesResult(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"exited"}`}
 	proc.exit(want, nil) // process already gone, Done() closed, with a result set
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result))
 
 	if out.result != want {
 		t.Errorf("result = %+v, want %+v", out.result, want)
@@ -187,89 +186,13 @@ func TestDriveLiveConversation_ProcessExitCarriesErr(t *testing.T) {
 	wantErr := errors.New("agent runtime exited with error")
 	proc.exit(nil, wantErr)
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result), make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, make(chan *agentproc.Result))
 
 	if out.result != nil {
 		t.Errorf("result = %+v, want nil on a crash exit", out.result)
 	}
 	if !errors.Is(out.err, wantErr) {
 		t.Errorf("err = %v, want %v", out.err, wantErr)
-	}
-}
-
-// TestDriveLiveConversation_IdleHibernates is the acceptance check for idle
-// hibernation: a live run quiet past the (injected short) threshold closes
-// its process and parks to `open`, keeping the worktree.
-func TestDriveLiveConversation_IdleHibernates(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-idle", "sess-idle", "/tmp/wt-idle")
-	claimID := markEngaged(t, database, "r-idle")
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-
-	var taskID string
-	if err := database.QueryRow(`SELECT task_id FROM conversations WHERE id='r-idle'`).Scan(&taskID); err != nil {
-		t.Fatalf("read task_id: %v", err)
-	}
-	proc := newFakeLiveProc("sess-idle")
-	park := liveParkContext{
-		orgID: runmode.LocalDefaultOrgID, conversationID: "r-idle", claimID: claimID,
-		namespace: "seedbpr-r-idle", claudeCwd: "/tmp/wt-idle",
-	}
-
-	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
-
-	if !out.hibernated {
-		t.Fatalf("expected hibernation, got %+v", out)
-	}
-	if !proc.wasClosed() {
-		t.Error("expected the idle hibernation to close the process")
-	}
-	var status string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id='r-idle'`).Scan(&status); err != nil {
-		t.Fatalf("read status: %v", err)
-	}
-	if status != "open" {
-		t.Errorf("status = %q, want open (idle hibernation flips to open)", status)
-	}
-}
-
-// TestDriveLiveConversation_ActivityDefersHibernation pins the activity-reset: a
-// slow-but-working agent (steady stream activity) must NOT hibernate. We pump
-// activity well past the idle window, then deliver a terminal result — if the
-// timer reset correctly the run returns the result rather than hibernating.
-func TestDriveLiveConversation_ActivityDefersHibernation(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	results := make(chan *agentproc.Result, 1)
-	activity := make(chan struct{}, 8)
-
-	done := make(chan liveOutcome, 1)
-	go func() {
-		done <- s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, activity, 100*time.Millisecond)
-	}()
-
-	// Pump activity every 20ms for 400ms — 4x the idle window. If the reset
-	// works, no hibernation fires in that span.
-	deadline := time.After(400 * time.Millisecond)
-	pump := time.NewTicker(20 * time.Millisecond)
-	defer pump.Stop()
-pumping:
-	for {
-		select {
-		case <-deadline:
-			break pumping
-		case <-pump.C:
-			activity <- struct{}{}
-		}
-	}
-	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"ok"}`}
-
-	out := <-done
-	if out.hibernated {
-		t.Error("steady activity should reset the idle timer; expected a terminal result, got hibernation")
-	}
-	if out.result == nil {
-		t.Error("expected the terminal result after activity stopped")
 	}
 }
 
@@ -286,7 +209,7 @@ func TestDriveLiveConversation_NoneClosesAndHandsBack(t *testing.T) {
 	results <- prose
 	results <- &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.result != prose {
 		t.Errorf("result = %+v, want the no-conclusion turn handed back", out.result)
@@ -320,7 +243,7 @@ func TestDriveLiveConversation_QueuedTurnOutlivesTheTurnEnd(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
@@ -342,7 +265,7 @@ func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
 	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"done"}`}
 	results <- want
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.result != want {
 		t.Errorf("result = %+v, want the conclusion the queued turn produced", out.result)
@@ -367,7 +290,7 @@ func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T
 	proc.onSend = func(int) { results <- invalid } // every correction yields another invalid turn
 	results <- invalid                             // the initial invalid turn
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.err != nil {
 		t.Fatalf("expected the unfixed result handed back, got err %v", out.err)
@@ -383,49 +306,6 @@ func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T
 	}
 }
 
-// TestDriveLiveConversation_BoundedResumeRepromptsInvalid: a bounded resume (idleTimeout
-// 0) holds a live process too, so it re-prompts an invalid envelope in place
-// just like an autonomous run — the fix for the asymmetry where a resume used
-// to accept an invalid envelope uncorrected.
-func TestDriveLiveConversation_BoundedResumeRepromptsInvalid(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	results := make(chan *agentproc.Result, 8)
-	want := &agentproc.Result{Result: `{"outcome":"finish","summary":"fixed"}`}
-	proc.onSend = func(int) { results <- want } // the correction lands a valid conclusion
-	results <- &agentproc.Result{Result: `{"outcome":"abort"}`}
-
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), 0)
-
-	if out.result != want {
-		t.Errorf("result = %+v, want the corrected valid conclusion", out.result)
-	}
-	if proc.sends() != 1 {
-		t.Errorf("sends = %d, want 1 (resume re-prompts invalid once, then accepts)", proc.sends())
-	}
-}
-
-// TestDriveLiveConversation_BoundedResumeNoneHandsBack: with no idle backstop
-// armed (idleTimeout 0, the resume's shape) a no-conclusion turn takes the same
-// exit as with one — the process is closed and the result handed back for
-// processCompletion to park.
-func TestDriveLiveConversation_BoundedResumeNoneHandsBack(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess")
-	results := make(chan *agentproc.Result, 1)
-	none := &agentproc.Result{Result: "prose, no envelope"}
-	results <- none
-
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), 0)
-
-	if out.result != none {
-		t.Errorf("result = %+v, want the no-conclusion result handed back", out.result)
-	}
-	if !proc.wasClosed() {
-		t.Error("expected the process closed on the no-conclusion turn")
-	}
-}
-
 // TestDriveLiveConversation_InvalidThenValidReturns: an invalid conclusion is re-prompted
 // once and the corrected turn is a valid conclusion → the driver returns it
 // (no failure).
@@ -437,7 +317,7 @@ func TestDriveLiveConversation_InvalidThenValidReturns(t *testing.T) {
 	proc.onSend = func(int) { results <- want } // the correction lands a valid conclusion
 	results <- &agentproc.Result{Result: `{"outcome":"finish"}`}
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{}, proc, results)
 
 	if out.err != nil {
 		t.Fatalf("expected success after one correction, got err %v", out.err)
@@ -489,7 +369,7 @@ func TestDriveLiveConversation_NoneLeavesTheClaimForCompletion(t *testing.T) {
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), park, proc, results)
 	if out.result != none {
 		t.Fatalf("result = %+v, want the no-conclusion turn handed back", out.result)
 	}
@@ -542,7 +422,7 @@ func TestDriveLiveConversation_InterruptParksOpenNotTerminal(t *testing.T) {
 		claimID: claimID, reason: db.ParkIdle(), runtime: domain.ConversationRuntimeSDK,
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), park, proc, results)
 	if !out.hibernated {
 		t.Fatalf("a pause with nothing queued should park open (hibernated), got %+v", out)
 	}
@@ -574,30 +454,12 @@ func TestDriveLiveConversation_ErrorWithoutInterruptStaysTerminal(t *testing.T) 
 	r := &agentproc.Result{IsError: true, Subtype: "error_during_execution"}
 	results <- r
 
-	out := s.driveLiveConversation(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-err"}, proc, results, make(chan struct{}), time.Minute)
+	out := s.driveLiveConversation(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-err"}, proc, results)
 	if out.result != r {
 		t.Fatalf("expected the error result back, got %+v", out)
 	}
 	if !proc.wasClosed() {
 		t.Error("a terminal error should close the process")
-	}
-}
-
-// TestDriveLiveConversation_InterruptBoundedResumeParksOpen: a pause with no
-// idle backstop armed (the resume's shape) takes the same exit — the driver
-// closes the process and parks the run open to a durable resume.
-func TestDriveLiveConversation_InterruptBoundedResumeParksOpen(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	proc := newFakeLiveProc("sess-bounded")
-
-	results := make(chan *agentproc.Result, 1)
-	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
-	out := s.driveLiveConversation(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: "r-bounded"}, proc, results, make(chan struct{}), 0)
-	if !out.hibernated {
-		t.Fatalf("bounded-resume pause should park open (hibernated), got %+v", out)
-	}
-	if !proc.wasClosed() {
-		t.Error("bounded-resume pause should close the process")
 	}
 }
 
@@ -631,12 +493,12 @@ func TestFoldAccounting_PauseDoesNotPoisonConclusion(t *testing.T) {
 	}
 }
 
-// TestDriveLiveConversation_IdleParkSettlesProcessSpend: a run that goes
+// TestDriveLiveConversation_PausedParkSettlesProcessSpend: a run that goes
 // dormant carries what its process reported spending into the park, settled
 // as this engagement's lump on its own claim's row — so the ledger, and every
 // usage read over it, counts the run from the moment it parks rather than
 // from whenever a later resume concludes.
-func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
+func TestDriveLiveConversation_PausedParkSettlesProcessSpend(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-idle-spend", "sess-idle-spend", "/tmp/wt-idle-spend")
 	claimID := markEngaged(t, database, "r-idle-spend")
@@ -659,7 +521,9 @@ func TestDriveLiveConversation_IdleParkSettlesProcessSpend(t *testing.T) {
 		namespace: "seedbpr-r-idle-spend", claudeCwd: "/tmp/wt-idle-spend",
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
+	results := make(chan *agentproc.Result, 1)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	out := s.driveLiveConversation(context.Background(), park, proc, results)
 
 	if !out.hibernated {
 		t.Fatalf("expected hibernation, got %+v", out)
@@ -708,7 +572,9 @@ func TestDriveLiveConversation_FencedParkStillSettlesSpend(t *testing.T) {
 		orgID: runmode.LocalDefaultOrgID, conversationID: "r-fenced-spend", claimID: claimID,
 	}
 
-	out := s.driveLiveConversation(context.Background(), park, proc, make(chan *agentproc.Result), make(chan struct{}), 20*time.Millisecond)
+	results := make(chan *agentproc.Result, 1)
+	results <- &agentproc.Result{IsError: true, Subtype: "error_during_execution", Interrupted: true}
+	out := s.driveLiveConversation(context.Background(), park, proc, results)
 
 	if !out.fenced {
 		t.Fatalf("expected the fenced park to report fenced, got %+v", out)

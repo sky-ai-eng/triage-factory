@@ -603,8 +603,8 @@ type TeamSettings struct {
 	// off-allowlist tool prompt with no answer-capable, focused tab present in
 	// the conversation's org, the backend denies after this grace window (ms) instead of waiting the full
 	// permTimeout(). When off, the prompt keeps the full-timeout behavior exactly.
-	// The grace is clamped at spawn to [1s, permTimeout()) so it can never invert
-	// the "total wait < idleTimeout()" invariant.
+	// The grace is clamped at spawn to [1s, permTimeout()) so the absent wait
+	// can never outlast the full one.
 	PermissionAbsentGraceMS         int
 	PermissionAbsentAutodenyEnabled bool
 

@@ -123,7 +123,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		conv := claim(t, f, conversationID)
 		f.SetLease(t, conv.ClaimID, time.Second)
 
-		got, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease)
+		got, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, "")
 		if err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
@@ -154,7 +154,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		t.Run("expired", func(t *testing.T) {
 			f.SetLease(t, conv.ClaimID, -time.Second)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew of an expired lease = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -167,7 +167,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			// Back to live so the refusal is the conversation and nothing else.
 			f.SetLease(t, conv.ClaimID, testClaimLease)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew naming another conversation = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -184,7 +184,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			if !ok {
 				t.Fatal("release cleared lease_expires_at; the row must keep recording when the lease would have lapsed")
 			}
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew of a released claim = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -271,6 +271,124 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		peak := 512
 		if got, err := conversations.RecordClaimSandboxStatsSystem(ctx, f.OrgID, conv.ClaimID, &peak, nil); err != nil || got == nil {
 			t.Fatalf("RecordClaimSandboxStatsSystem on an expired claim = (%v, %v), want the written row", got, err)
+		}
+	})
+
+	t.Run("Renew_StampsActivityFromTheIdleItIsPassed", func(t *testing.T) {
+		// The mint leaves both columns NULL; the renewal stamps
+		// last_activity_at as database now minus the idle it is handed, and
+		// current_op as the operation, "" clearing it.
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+
+		minted, err := q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if err != nil || minted == nil {
+			t.Fatalf("ClaimByIDSystem = (%+v, %v)", minted, err)
+		}
+		if minted.LastActivityAt != nil || minted.CurrentOp != "" {
+			t.Errorf("minted claim activity = (%v, %q), want both empty until the first renewal", minted.LastActivityAt, minted.CurrentOp)
+		}
+
+		const idle = 40 * time.Second
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, idle, "tool:bash"); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		_, now, _ := f.Lease(t, conv.ClaimID)
+		got, err := q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if err != nil || got == nil {
+			t.Fatalf("ClaimByIDSystem = (%+v, %v)", got, err)
+		}
+		if got.LastActivityAt == nil {
+			t.Fatal("renewal left last_activity_at NULL")
+		}
+		if drift := got.LastActivityAt.Sub(now.Add(-idle)); drift > time.Second || drift < -time.Second {
+			t.Errorf("last_activity_at = %s, want within 1s of database now - %s (drift %s)", got.LastActivityAt, idle, drift)
+		}
+		if got.CurrentOp != "tool:bash" {
+			t.Errorf("current_op = %q, want tool:bash", got.CurrentOp)
+		}
+		// The conversation carries the live claim's stamps.
+		cv, err := f.Stores.Conversations.GetSystem(ctx, f.OrgID, conversationID)
+		if err != nil || cv == nil {
+			t.Fatalf("GetSystem = (%+v, %v)", cv, err)
+		}
+		if cv.ClaimLastActivityAt == nil || !cv.ClaimLastActivityAt.Equal(*got.LastActivityAt) || cv.ClaimCurrentOp != "tool:bash" {
+			t.Errorf("conversation claim activity = (%v, %q), want (%v, tool:bash)", cv.ClaimLastActivityAt, cv.ClaimCurrentOp, got.LastActivityAt)
+		}
+
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		_, now, _ = f.Lease(t, conv.ClaimID)
+		got, _ = q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if got.CurrentOp != "" {
+			t.Errorf("current_op after a renewal with none in flight = %q, want cleared", got.CurrentOp)
+		}
+		if got.LastActivityAt == nil || now.Sub(*got.LastActivityAt) > time.Second {
+			t.Errorf("last_activity_at after an idle-0 renewal = %v, want within 1s of database now %s", got.LastActivityAt, now)
+		}
+
+		// Released, the conversation no longer reports a live claim's stamps.
+		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		cv, _ = f.Stores.Conversations.GetSystem(ctx, f.OrgID, conversationID)
+		if cv.ClaimLastActivityAt != nil || cv.ClaimCurrentOp != "" {
+			t.Errorf("conversation claim activity after release = (%v, %q), want empty", cv.ClaimLastActivityAt, cv.ClaimCurrentOp)
+		}
+	})
+
+	t.Run("OldestIdleClaimSystem_ReadsTheLongestIdleLiveLease", func(t *testing.T) {
+		f := mk(t)
+		q := f.Stores.ConversationQueue
+		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
+			t.Fatalf("OldestIdleClaimSystem with no claims = (%s, %v), want (0s, nil)", d, err)
+		}
+
+		first, _ := f.StageStep(t)
+		a := claim(t, f, first)
+		// A live claim that has not renewed carries no stamp and is not read.
+		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
+			t.Fatalf("OldestIdleClaimSystem before any renewal = (%s, %v), want (0s, nil)", d, err)
+		}
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, first, a.ClaimID, testClaimLease, 30*time.Second, ""); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		second, _ := f.StageStep(t)
+		b := claim(t, f, second)
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, second, b.ClaimID, testClaimLease, 5*time.Second, "provider"); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		d, err := q.OldestIdleClaimSystem(ctx)
+		if err != nil {
+			t.Fatalf("OldestIdleClaimSystem: %v", err)
+		}
+		if d < 29*time.Second || d > 35*time.Second {
+			t.Errorf("oldest idle = %s, want about 30s (the longer of the two)", d)
+		}
+
+		// An expired lease is not a live engagement, whatever its stamp says.
+		f.SetLease(t, a.ClaimID, -time.Second)
+		d, err = q.OldestIdleClaimSystem(ctx)
+		if err != nil {
+			t.Fatalf("OldestIdleClaimSystem: %v", err)
+		}
+		if d < 4*time.Second || d > 10*time.Second {
+			t.Errorf("oldest idle with the 30s claim expired = %s, want about 5s", d)
+		}
+		f.SetLease(t, a.ClaimID, testClaimLease)
+
+		// Released claims are not read either.
+		if _, err := q.RequeueConversation(ctx, f.OrgID, first, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		if _, err := q.RequeueConversation(ctx, f.OrgID, second, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
+			t.Errorf("OldestIdleClaimSystem after release = (%s, %v), want (0s, nil)", d, err)
 		}
 	})
 

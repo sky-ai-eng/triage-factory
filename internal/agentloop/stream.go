@@ -39,6 +39,11 @@ const (
 // streamWithRetry makes one provider call, retrying only transient classes
 // (rate limits, 5xx, network timeouts) with bounded exponential backoff.
 // Exhaustion returns the last error; the caller fails the conversation.
+//
+// Each attempt is its own operation for Activity, so a run of retries never
+// shares one deadline, and every chunk the stream delivers extends the
+// attempt's deadline: a first byte has the provider bound, and so does each
+// byte after the one before it.
 func (e *Engine) streamWithRetry(ctx context.Context, client Provider, req inference.Request) (*inference.Completion, error) {
 	p := e.Retry
 	if p.MaxAttempts <= 0 {
@@ -55,10 +60,17 @@ func (e *Engine) streamWithRetry(ctx context.Context, client Provider, req infer
 		sleep = sleepCtx
 	}
 
+	if e.Activity != nil {
+		bound := e.ActivityBounds.Provider
+		req.OnChunk = func() { e.Activity.Progress(bound) }
+	}
+
 	delay := p.BaseDelay
 	var lastErr error
 	for attempt := 1; attempt <= p.MaxAttempts; attempt++ {
+		end := e.beginActivity("provider", e.ActivityBounds.Provider)
 		completion, err := client.Stream(ctx, req)
+		end()
 		if err == nil {
 			return completion, nil
 		}

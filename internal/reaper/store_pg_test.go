@@ -410,7 +410,7 @@ func TestReapDeadExecutors_PendingStopIsReleasedToTheSettlement(t *testing.T) {
 
 	fx := seedReaperFixture(t, h)
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
-	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, "", ""); err != nil || !ok {
 		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
 	}
 
@@ -465,7 +465,7 @@ func TestReapDeadExecutors_PendingStopUnderACancelRequestedRunSettlesTheRun(t *t
 	fx := seedReaperFixture(t, h)
 	backdateHeartbeat(t, h, fx.executorID, time.Hour)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET cancel_requested = true WHERE id = $1`, fx.blueprintRunID)
-	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, ""); err != nil || !ok {
+	if ok, err := stores.Conversations.RequestStopSystem(ctx, fx.orgID, fx.conversationID, fx.userID, "", ""); err != nil || !ok {
 		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
 	}
 

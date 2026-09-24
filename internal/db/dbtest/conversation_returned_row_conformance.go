@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -101,6 +102,21 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 			t.Fatalf("SetWorktreePathForClaimSystem: %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "SetWorktreePathForClaimSystem", *conv, readConv)
+
+		// A renewal stamps the claim's activity columns, so every returned
+		// row below carries them set rather than NULL and the projections are
+		// compared on a value.
+		if _, err := queue.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimID, db.DefaultClaimLease, 7*time.Second, "tool:bash"); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		conv, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/rr-4")
+		if err != nil {
+			t.Fatalf("SetWorktreePathForClaimSystem after renewal: %v", err)
+		}
+		if conv.ClaimLastActivityAt == nil || conv.ClaimCurrentOp != "tool:bash" {
+			t.Errorf("conversation after renewal = (last activity %v, op %q), want the live claim's stamp and tool:bash", conv.ClaimLastActivityAt, conv.ClaimCurrentOp)
+		}
+		AssertWriteReturnedStoredRow(t, "SetWorktreePathForClaimSystem (renewed claim)", *conv, readConv)
 
 		claim, err = store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "cloning")
 		if err != nil {

@@ -245,6 +245,15 @@ export interface Conversation {
   // settled (the park clears it) or when nobody asked. The run page keeps its
   // stop controls disabled while it is set on a non-terminal conversation.
   stop_requested_at?: string
+  // claim_last_activity_at is when the live claim's engagement last did
+  // anything its stall watchdog counts as activity, as the claim's last lease
+  // renewal stamped it. Absent with no live claim, or before its first
+  // renewal.
+  claim_last_activity_at?: string
+  // claim_current_op is the operation the live claim had in flight at that
+  // renewal ('provider', 'tool:bash', 'clone', 'rehydrate', 'permission', …).
+  // Absent when nothing was in flight.
+  claim_current_op?: string
   // Outcome is the parsed terminal-envelope outcome
   // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
   // an infra-error conversation or a step that ended without a recognized conclusion.
@@ -1562,6 +1571,14 @@ export interface FleetSandboxClaim {
   /** How the ENGAGEMENT ended (completed | failed | cancelled | requeued |
    *  parked | reaped) — a claim vocabulary of its own, not a conversation status. */
   outcome?: string
+  /** When the engagement last did anything its stall watchdog counts as
+   *  activity, as the holder's last lease renewal stamped it. Absent before
+   *  the first renewal; a released claim keeps its last reading, so only a
+   *  live claim's stamp describes now. */
+  last_activity_at?: string
+  /** The operation in flight at that renewal ('provider', 'tool:bash',
+   *  'clone', …). Absent when nothing was in flight. */
+  current_op?: string
 }
 
 export interface FleetSandboxes {

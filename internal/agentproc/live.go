@@ -474,7 +474,7 @@ func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc
 
 	// Wait has taken the cgroup read, so the engagement's actuals are final
 	// here — for every disposition alike, including a cancelled run (whose
-	// ctx is already dead; the stamp detaches) and an idle hibernation.
+	// ctx is already dead; the stamp detaches) and a turn-end close.
 	recordSandboxActuals(runCtx, opts, proc)
 
 	l.mu.Lock()
@@ -509,9 +509,9 @@ func (l *LiveRun) readLoop(runCtx context.Context, opts RunOptions, proc runProc
 	// after the stream fully drained, never concurrently with the read
 	// (StdoutPipe forbids Wait before the reader finishes; the ordering above
 	// guarantees it). Once-guarded and a no-op for direct/local runs, so the
-	// local path stays byte-identical. Idle hibernation reaches here via
-	// Close()'s graceful end → the wrapper exits → cmd.Wait returns, so the
-	// subnet slot frees automatically. The pathological Close kill-timeout
+	// local path stays byte-identical. A park reaches here via Close()'s
+	// graceful end → the wrapper exits → cmd.Wait returns, so the subnet slot
+	// frees automatically. The pathological Close kill-timeout
 	// path (reader wedged in a slow sink/handler) never reaches this line;
 	// the startup sandbox.ReapOrphans backstop covers that exactly as it
 	// covers a crash.
@@ -535,6 +535,7 @@ func (l *LiveRun) runCleanup() {
 // so the returned Result reflects the whole conversation.
 func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *StreamState, perms PermissionHandler, onResult func(*Result), traceID string) (*Result, error) {
 	reader := bufio.NewReader(stdout)
+	observer := stream.observeSink(sink)
 
 	sessionDelivered := false
 	interruptPending := false
@@ -543,6 +544,9 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 	for {
 		line, readErr := readLine(reader, maxStreamLineBytes)
 		if len(line) > 0 {
+			if observer != nil {
+				observer.OnLine()
+			}
 			if ctl, ok := parseControlLine(line); ok {
 				switch ctl.Subtype {
 				case "ready":
@@ -559,7 +563,12 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 					// the wait belongs to the approval, not to the tool that
 					// runs once it clears.
 					gateAt := stream.Now()
+					permissionDone := func() {}
+					if observer != nil {
+						permissionDone = observer.OnPermission(ctl.ToolCallID)
+					}
 					l.handlePermission(ctl, perms)
+					permissionDone()
 					stream.DiscountGate(gateAt)
 				}
 				// Control lines are not sink content.

@@ -44,15 +44,22 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 	}
 	request := func(t *testing.T, f ClaimLeaseFixture, conversationID, by string) {
 		t.Helper()
-		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, conversationID, by, "")
+		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, conversationID, by, "", "")
 		if err != nil || !ok {
 			t.Fatalf("RequestStopSystem(%s, by=%q) = (%v, %v), want (true, nil)", conversationID, by, ok, err)
 		}
 	}
+	requestStall := func(t *testing.T, f ClaimLeaseFixture, conversationID string) {
+		t.Helper()
+		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, conversationID, "", "", domain.ParkReasonStalled)
+		if err != nil || !ok {
+			t.Fatalf("RequestStopSystem(%s, stalled) = (%v, %v), want (true, nil)", conversationID, ok, err)
+		}
+	}
 	assertNoIntent := func(t *testing.T, f ClaimLeaseFixture, conversationID, after string) {
 		t.Helper()
-		if got := get(t, f, conversationID); got.StopRequestedAt != nil || got.StopRequestedBy != "" {
-			t.Errorf("after %s: stop intent = (%v, %q), want cleared", after, got.StopRequestedAt, got.StopRequestedBy)
+		if got := get(t, f, conversationID); got.StopRequestedAt != nil || got.StopRequestedBy != "" || got.StopRequestedReason != "" {
+			t.Errorf("after %s: stop intent = (%v, %q, reason %q), want cleared", after, got.StopRequestedAt, got.StopRequestedBy, got.StopRequestedReason)
 		}
 	}
 	claimOutcome := func(t *testing.T, f ClaimLeaseFixture, claimID string) (released bool, outcome string) {
@@ -142,7 +149,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
-		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, stopTestUser, "")
+		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, stopTestUser, "", "")
 		if err != nil || ok {
 			t.Errorf("RequestStopSystem on a terminal row = (%v, %v), want (false, nil)", ok, err)
 		}
@@ -249,12 +256,12 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		r, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease)
+		r, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, 0, "")
 		if err != nil || r.StopRequested || r.StopRequestedBy != "" {
 			t.Fatalf("renewal with no stop = (%+v, %v), want no stop", r, err)
 		}
 		request(t, f, id, stopTestUser)
-		r, err = f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease)
+		r, err = f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, 0, "")
 		if err != nil || !r.StopRequested || r.StopRequestedBy != stopTestUser {
 			t.Errorf("renewal after a user stop = (%+v, %v), want StopRequested by %s", r, err, stopTestUser)
 		}
@@ -372,6 +379,145 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if released, _ := claimOutcome(t, f, conv.ClaimID); released {
 			t.Error("the settlement released a live claim")
 		}
+	})
+
+	t.Run("Request_StoresAReasonAndTheFirstStands", func(t *testing.T) {
+		f := mk(t)
+		stalled, _ := f.StageStep(t)
+		requestStall(t, f, stalled)
+		if got := get(t, f, stalled); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
+			t.Errorf("stall intent = (%v, by %q, reason %q), want set, no actor, stalled", got.StopRequestedAt, got.StopRequestedBy, got.StopRequestedReason)
+		}
+		// A user stop after the stall keeps the stall's reason and actor.
+		request(t, f, stalled, stopTestUser)
+		if got := get(t, f, stalled); got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
+			t.Errorf("stall intent after a user request = (by %q, reason %q), want the stall's", got.StopRequestedBy, got.StopRequestedReason)
+		}
+
+		// A user stop first: the stall after it records no reason.
+		user, _ := f.StageStep(t)
+		request(t, f, user, stopTestUser)
+		requestStall(t, f, user)
+		if got := get(t, f, user); got.StopRequestedReason != "" || got.StopRequestedBy != stopTestUser {
+			t.Errorf("user intent after a stall request = (by %q, reason %q), want the user's with no reason", got.StopRequestedBy, got.StopRequestedReason)
+		}
+	})
+
+	t.Run("Park_DerivesTheStoredReasonFirst", func(t *testing.T) {
+		f := mk(t)
+		id, _ := f.StageStep(t)
+		conv := claim(t, f, id)
+		requestStall(t, f, id)
+		// The caller passes user_cancelled, as a holder that did not see the
+		// stall's cause would; the stored reason wins.
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+			t.Fatalf("park: (%v, %v)", ok, err)
+		}
+		if got := get(t, f, id); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonStalled {
+			t.Errorf("after the park = (%q, %q), want (open, stalled)", got.Status, got.ParkReason)
+		}
+		assertNoIntent(t, f, id, "the park")
+		if released, outcome := claimOutcome(t, f, conv.ClaimID); !released || outcome != "cancelled" {
+			t.Errorf("claim after the stall park = (released %v, %q), want (true, cancelled)", released, outcome)
+		}
+
+		// No intent: a holder that read the cause itself passes stalled, and
+		// it lands as passed.
+		g := mk(t)
+		other, _ := g.StageStep(t)
+		c := claim(t, g, other)
+		if ok, err := g.Stores.Conversations.ParkOpenForClaimSystem(ctx, g.OrgID, other, c.ClaimID, db.ParkStopped(domain.ParkReasonStalled, "")); err != nil || !ok {
+			t.Fatalf("park: (%v, %v)", ok, err)
+		}
+		if got := get(t, g, other); got.ParkReason != domain.ParkReasonStalled {
+			t.Errorf("park_reason with no intent = %q, want the caller's stalled", got.ParkReason)
+		}
+	})
+
+	t.Run("Settle_DerivesTheStoredReasonForTheStepAndTheRun", func(t *testing.T) {
+		f := mk(t)
+		plain, _ := f.StageStep(t)
+		requestStall(t, f, plain)
+		if _, ok := settledFor(t, f, plain); !ok {
+			t.Fatal("the settlement did not take the stalled conversation")
+		}
+		if got := get(t, f, plain); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonStalled {
+			t.Errorf("plain stall after settlement = (%q, %q), want (open, stalled)", got.Status, got.ParkReason)
+		}
+		assertNoIntent(t, f, plain, "the settlement")
+		if br := runOf(t, f, plain); br.Status != domain.BlueprintRunStatusRunning {
+			t.Errorf("run behind a plain stall = %q, want running", br.Status)
+		}
+
+		cancelled, _ := f.StageStep(t)
+		br := runOf(t, f, cancelled)
+		if _, err := f.Stores.Blueprints.RequestRunCancelSystem(ctx, f.OrgID, br.ID); err != nil {
+			t.Fatalf("RequestRunCancelSystem: %v", err)
+		}
+		requestStall(t, f, cancelled)
+		if st, ok := settledFor(t, f, cancelled); !ok || st.BlueprintRunID != br.ID {
+			t.Fatalf("settled = (%+v, %v), want run %s cancelled", st, ok, br.ID)
+		}
+		if got := get(t, f, cancelled); got.ParkReason != domain.ParkReasonStalled {
+			t.Errorf("stalled step under a cancel-requested run = %q, want stalled", got.ParkReason)
+		}
+		if after := runOf(t, f, cancelled); after.Status != domain.BlueprintRunStatusCancelled || after.AbortReason != string(domain.ParkReasonStalled) {
+			t.Errorf("run after settlement = (%q, %q), want (cancelled, stalled)", after.Status, after.AbortReason)
+		}
+	})
+
+	t.Run("StatusWrites_ClearTheReason", func(t *testing.T) {
+		f := mk(t)
+		done, _ := f.StageStep(t)
+		conv := claim(t, f, done)
+		requestStall(t, f, done)
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, done, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		assertNoIntent(t, f, done, "CompleteForClaimSystem")
+
+		failed, _ := f.StageStep(t)
+		conv = claim(t, f, failed)
+		requestStall(t, f, failed)
+		if ok, err := f.Stores.Conversations.MarkFailedIfActiveForClaimSystem(ctx, f.OrgID, failed, conv.ClaimID, string(domain.ConversationFailureCrash)); err != nil || !ok {
+			t.Fatalf("mark failed: (%v, %v)", ok, err)
+		}
+		assertNoIntent(t, f, failed, "MarkFailedIfActiveForClaimSystem")
+
+		resumed, _ := f.StageStep(t)
+		conv = claim(t, f, resumed)
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, resumed, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+			t.Fatalf("park: (%v, %v)", ok, err)
+		}
+		requestStall(t, f, resumed)
+		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, resumed); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume: (%v, %v)", ok, err)
+		}
+		assertNoIntent(t, f, resumed, "MarkQueuedForResume")
+
+	})
+
+	t.Run("Settle_ParksAReleasedStallAsStalled", func(t *testing.T) {
+		// The holder wrote the stall's intent and then lost the claim before
+		// its own park: the release writes no status and leaves the intent
+		// whole, and the settlement parks the row with the stored reason.
+		f := mk(t)
+		id, _ := f.StageStep(t)
+		claim(t, f, id)
+		requestStall(t, f, id)
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, id, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		if got := get(t, f, id); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) {
+			t.Fatalf("intent after the release = (%v, reason %q), want the stall's intact", got.StopRequestedAt, got.StopRequestedReason)
+		}
+		if _, ok := settledFor(t, f, id); !ok {
+			t.Fatal("the settlement did not take the released stall")
+		}
+		if got := get(t, f, id); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonStalled {
+			t.Errorf("after settlement = (%q, %q), want (open, stalled)", got.Status, got.ParkReason)
+		}
+		assertNoIntent(t, f, id, "the settlement")
 	})
 
 	t.Run("SettleForTask_SettlesThatTaskAlone", func(t *testing.T) {

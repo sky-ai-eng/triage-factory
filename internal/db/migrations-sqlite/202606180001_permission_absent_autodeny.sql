@@ -8,8 +8,8 @@
 --                                         reconnect / tab focus / navigation before
 --                                         denying with "no operator available".
 --                                         Default 15s. Clamped at spawn to
---                                         [1s, permTimeout()) so it can never invert
---                                         the "total wait < idleTimeout()" invariant.
+--                                         [1s, permTimeout()) so the absent wait can
+--                                         never outlast the full one.
 --   permission_absent_autodeny_enabled — master toggle. When 0 (off) the prompt keeps
 --                                         today's behavior exactly (full permTimeout()),
 --                                         so this is a byte-for-byte no-op when disabled.

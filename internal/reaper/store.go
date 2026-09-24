@@ -188,7 +188,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 		// of a reaper throwing it away the instant a host went quiet.
 		parkedBlueprintIDs, parkedIDs, err := reapUpdateConversations(ctx, tx, staleSecs, nil, `
 			UPDATE conversations SET status = 'open', parked_at = COALESCE(parked_at, now()), park_reason = 'system_cancelled',
-				stop_requested_at = NULL, stop_requested_by = NULL,
+				stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 				result_summary = 'Stopped: owning blueprint run was cancel-requested after its executor engagement was lost (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
@@ -231,7 +231,7 @@ func (s *pgStore) ReapDeadExecutors(ctx context.Context, staleThreshold time.Dur
 			-- rather than having it relabelled as this failure.
 			UPDATE conversations SET status = 'failed', failure_kind = 'executor_lost', completed_at = now(),
 				ended_at = COALESCE(ended_at, now()), ended_reason = COALESCE(ended_reason, 'failed'),
-				stop_requested_at = NULL, stop_requested_by = NULL,
+				stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 				result_summary = 'Failed: the executor engagement was lost repeatedly (no heartbeat, or a lapsed claim lease) and the retry budget (TF_MAX_CLAIM_ATTEMPTS) for this loss episode is exhausted (reaper)'
 			WHERE id IN (
 				SELECT r.id `+reapCandidateJoin+`
