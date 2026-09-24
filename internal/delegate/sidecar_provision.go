@@ -247,8 +247,14 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	ctx, bringUpSpan := tracer.Start(ctx, "engagement.sandbox.bringup")
 	defer bringUpSpan.End()
 
+	// Each broker round trip below is its own operation for the stall
+	// watchdog, with a deadline past the broker's own per-call bound: the
+	// bound fires first and fails the bring-up as the error it is.
+	activity := s.activityFor(conv.ID)
 	netCtx, netSpan := tracer.Start(ctx, "sandbox.network.setup")
+	endNet := activity.begin("sidecar", sidecarOpDeadline)
 	net, err := sandbox.SetupRunNetwork(netCtx, conv.ID)
+	endNet()
 	recordSpanError(netSpan, err)
 	netSpan.End()
 	if err != nil {
@@ -256,7 +262,9 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		return nil, fmt.Errorf("set up run network: %w", err)
 	}
 	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
+	endLaunch := activity.begin("sidecar", sidecarOpDeadline)
 	sc, err := sandbox.LaunchSidecar(scCtx, sandbox.SidecarConfig{ConversationID: conv.ID, SubnetIdx: net.Idx})
+	endLaunch()
 	recordSpanError(scSpan, err)
 	scSpan.End()
 	if err != nil {
@@ -338,7 +346,11 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		},
 	}
 
+	// The provisioning inside this call replaces the operation with the
+	// credentials wait for as long as it lasts (sidecarProvisionFor).
+	endBringUp := activity.begin("sidecar", sidecarOpDeadline)
 	res, conn, err := agentproc.BringUpRunSidecar(ctx, sc, s.sidecarProvisionFor(orgID, conv.ID), params)
+	endBringUp()
 	if err != nil {
 		recordSpanError(bringUpSpan, err)
 		_ = sc.Close()
@@ -596,6 +608,9 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 
 		timeout, pollInterval := s.awaitingCredentialsKnobs()
 		deadline := time.Now().Add(timeout)
+		// The wait's own deadline fails it first; the watchdog's operation
+		// sits past it as the backstop.
+		defer s.activityFor(conversationID).begin("awaiting_credentials", timeout+backstopMargin)()
 		ticker := time.NewTicker(pollInterval)
 		defer ticker.Stop()
 		polls := 0

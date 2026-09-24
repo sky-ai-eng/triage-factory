@@ -204,7 +204,8 @@ func completeConversationReturning(ctx context.Context, q queryer, conversationI
 		    outcome_reason = ?,
 		    failure_kind = ?,
 		    stop_requested_at = NULL,
-		    stop_requested_by = NULL
+		    stop_requested_by = NULL,
+		    stop_requested_reason = NULL
 		WHERE id = ?
 		RETURNING `+sqliteConversationReturningColumns, status, time.Now().UTC(), resultSummary,
 		nullIfEmpty(outcome), nullIfEmpty(outcomeReason), nullIfEmpty(failureKind),
@@ -283,12 +284,14 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, ?),
 		    park_reason = CASE
+		        WHEN stop_requested_at IS NOT NULL AND stop_requested_reason IS NOT NULL THEN stop_requested_reason
 		        WHEN stop_requested_at IS NOT NULL AND stop_requested_by IS NULL THEN 'system_cancelled'
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF(?, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF(?, ''), result_summary),
 		    stop_requested_at = NULL,
-		    stop_requested_by = NULL
+		    stop_requested_by = NULL,
+		    stop_requested_reason = NULL
 		WHERE id = ?
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
@@ -324,7 +327,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL,
 			                parked_at = NULL, park_reason = NULL,
-			                stop_requested_at = NULL, stop_requested_by = NULL,
+			                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 			                queued_at = ?,
 			                preferred_executor_id = (
 			                    SELECT c.executor_id FROM claims c
@@ -395,7 +398,8 @@ var sqliteClaimReturningColumns = `
 		(SELECT v.status FROM conversations v WHERE v.id = claims.conversation_id),
 		CASE WHEN ` + claimLeaseLiveSQL("claims") + ` THEN 'running' ELSE 'queued' END,
 		''),
-	COALESCE((SELECT v.failure_kind FROM conversations v WHERE v.id = claims.conversation_id), '')
+	COALESCE((SELECT v.failure_kind FROM conversations v WHERE v.id = claims.conversation_id), ''),
+	last_activity_at, COALESCE(current_op, '')
 `
 
 // SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a
@@ -575,7 +579,7 @@ func (s *conversationStore) markFailedIfActive(ctx context.Context, orgID, conve
 		res, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, ?),
 			    failure_kind = ?,
-			    stop_requested_at = NULL, stop_requested_by = NULL
+			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE id = ?
 			  AND (status IS NULL
 			       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
@@ -702,10 +706,11 @@ func (s *conversationStore) EndConversationSystem(ctx context.Context, orgID, co
 // spells the null-safe comparison SQLite's way (Postgres uses IS DISTINCT
 // FROM) — see pgConversationColumns for why the source alone answers it.
 // The claim-derived columns (claimed_at / executor_id / attempts /
-// duration_ms / num_turns) are correlated subselects over
-// claims and the accounting columns (cost + tokens) subselects over the
-// messages ledger; claimed_at loses its declared column type inside the
-// subselect, so it scans as text and parses via parseDBDatetime. Status is
+// duration_ms / num_turns / last_activity_at / current_op) are correlated
+// subselects over claims and the accounting columns (cost + tokens)
+// subselects over the messages ledger; claimed_at and last_activity_at lose
+// their declared column type inside the subselect, so they scan as text and
+// parse via parseDBDatetime. Status is
 // the derived display ladder (sqliteDisplayStatusSQL) rather than the stored
 // column.
 //
@@ -739,7 +744,9 @@ const sqliteConversationColumns = `
 	(COALESCE(rm.source, '') <> 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, ''),
-	r.stop_requested_at, COALESCE(r.stop_requested_by, '')
+	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
+	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL) AS last_activity_at,
+	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL), '') AS current_op
 `
 
 // sqliteDisplayStatusSQL is the wire status: the SQLite mirror of the
@@ -861,7 +868,9 @@ const sqliteConversationReturningColumns = `
 	(COALESCE((SELECT rm.source FROM conversation_memory rm WHERE rm.conversation_id = conversations.id), '') <> 'agent') AS memory_missing,
 	COALESCE((SELECT a.display_name FROM agents a WHERE a.id = conversations.actor_agent_id), '') AS actor_agent_name,
 	ended_at, COALESCE(ended_reason, ''),
-	stop_requested_at, COALESCE(stop_requested_by, '')
+	stop_requested_at, COALESCE(stop_requested_by, ''), COALESCE(stop_requested_reason, ''),
+	(SELECT cl.last_activity_at FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL) AS last_activity_at,
+	COALESCE((SELECT cl.current_op FROM claims cl WHERE cl.conversation_id = conversations.id AND cl.released_at IS NULL), '') AS current_op
 `
 
 // sqliteReturningDisplayStatusSQL is sqliteDisplayStatusSQL rewritten against
@@ -1286,7 +1295,7 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 // conversation_signals table, and its holder is reached through the
 // in-process cancel handle, so the signal target is ignored. Both columns key
 // on stop_requested_at for the reason the Postgres twin gives.
-func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, _ string) (bool, error) {
+func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, _ string, reason domain.ParkReason) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
@@ -1295,11 +1304,13 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 		UPDATE conversations
 		SET stop_requested_at = COALESCE(stop_requested_at, ?),
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
-		                             THEN NULLIF(?, '') ELSE stop_requested_by END
+		                             THEN NULLIF(?, '') ELSE stop_requested_by END,
+		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
+		                                 THEN NULLIF(?, '') ELSE stop_requested_reason END
 		WHERE id = ?
 		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 		RETURNING id
-	`, time.Now().UTC(), by, conversationID).Scan(&id)
+	`, time.Now().UTC(), by, string(reason), conversationID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -2457,7 +2468,7 @@ type conversationScanner interface {
 // scanConversation scans sqliteConversationColumns into r.
 func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 	var queuedAt, completedAt, endedAt, stopRequestedAt sql.NullTime
-	var claimedAt sql.NullString
+	var claimedAt, lastActivityAt sql.NullString
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var parkReason, worktreePath, model, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, creatorUserID, executorID, blueprintRunID sql.NullString
@@ -2469,13 +2480,21 @@ func scanConversation(sc conversationScanner, r *domain.Conversation) error {
 		&resultSummary, &outcome, &outcomeReason, &failureKind, &sessionID, &actorAgentID, &r.TriggerType, &creatorUserID, &r.TeamID, &executorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
-		&stopRequestedAt, &r.StopRequestedBy,
+		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
+		&lastActivityAt, &r.ClaimCurrentOp,
 	); err != nil {
 		return err
 	}
 	r.EndedReason = domain.EndedReason(endedReason)
 	if stopRequestedAt.Valid {
 		r.StopRequestedAt = &stopRequestedAt.Time
+	}
+	if lastActivityAt.Valid && lastActivityAt.String != "" {
+		at, err := parseDBDatetime(lastActivityAt.String)
+		if err != nil {
+			return fmt.Errorf("parse claim last_activity_at %q: %w", lastActivityAt.String, err)
+		}
+		r.ClaimLastActivityAt = &at
 	}
 	return finalizeConversation(r, queuedAt, claimedAt, completedAt, endedAt, costUSD, durationMs, numTurns, blueprintStep,
 		model, parkReason, worktreePath, resultSummary, outcome, outcomeReason, failureKind, sessionID, actorAgentID, blueprintRunID, creatorUserID, executorID)

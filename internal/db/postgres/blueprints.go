@@ -1297,7 +1297,7 @@ func parkOrphanedChildConversationsWithClaims(ctx context.Context, q queryer, or
 			    parked_at = COALESCE(parked_at, now()),
 			    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 			    result_summary = COALESCE(NULLIF(result_summary, ''), $3),
-			    stop_requested_at = NULL, stop_requested_by = NULL
+			    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 			WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 			RETURNING id
 		)
@@ -1318,7 +1318,7 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, orgID, bluep
 		    parked_at = COALESCE(parked_at, now()),
 		    park_reason = COALESCE(park_reason, 'blueprint_terminal'),
 		    result_summary = COALESCE(NULLIF(result_summary, ''), $3),
-		    stop_requested_at = NULL, stop_requested_by = NULL
+		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 		WHERE org_id = $1 AND blueprint_run_id = $2 AND status IS NULL
 		RETURNING id
 	`, orgID, blueprintRunID, "Stopped: owning blueprint run reached a terminal state")

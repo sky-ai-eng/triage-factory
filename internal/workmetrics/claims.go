@@ -10,12 +10,15 @@ import (
 
 // ExpiredClaimSource is what the claim observer needs: the store read that
 // counts live claims past their expiry deployment-wide and says how far past
-// expiry the oldest is. db.ConversationQueueStore satisfies it.
+// expiry the oldest is, and the one that says how long the idlest live
+// engagement has gone without activity. db.ConversationQueueStore satisfies
+// it.
 //
 // The narrow interface is what keeps this package off the store bundle, the
 // same reason DepthSource is narrow.
 type ExpiredClaimSource interface {
 	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
+	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
 }
 
 // ClaimObserver measures expired claims on a ticker and reports the result
@@ -33,6 +36,10 @@ type ClaimObserver struct {
 	oldest  time.Duration
 	reg     metric.Registration
 	sampled bool
+	// idle is sampled on its own: the two reads fail independently, and a
+	// failure of one must not withhold the other's fresh value.
+	idle        time.Duration
+	idleSampled bool
 }
 
 // NewClaimObserver creates the gauges against a provider and registers the
@@ -56,6 +63,13 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		return c
 	}
 
+	idle, err := m.Int64ObservableGauge("claims.oldest_idle",
+		metric.WithDescription("Seconds since the idlest live engagement last did anything the stall watchdog counts as activity, as its last renewal stamped it."), metric.WithUnit("s"))
+	if err != nil {
+		log.Error("claim gauge setup failed", "instrument", "claims.oldest_idle", "error", err)
+		return c
+	}
+
 	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -63,13 +77,15 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		// this process has not established would read as "no dead
 		// engagements", which is the one answer the alert must not be given
 		// for free.
-		if !c.sampled {
-			return nil
+		if c.sampled {
+			o.ObserveInt64(expired, int64(c.count))
+			o.ObserveInt64(oldest, int64(c.oldest.Seconds()))
 		}
-		o.ObserveInt64(expired, int64(c.count))
-		o.ObserveInt64(oldest, int64(c.oldest.Seconds()))
+		if c.idleSampled {
+			o.ObserveInt64(idle, int64(c.idle.Seconds()))
+		}
 		return nil
-	}, expired, oldest)
+	}, expired, oldest, idle)
 	if err != nil {
 		log.Error("claim gauge callback registration failed", "error", err)
 		return c
@@ -101,14 +117,20 @@ func (c *ClaimObserver) Tick(ctx context.Context) {
 	if c.src == nil {
 		return
 	}
-	count, oldest, err := c.src.ExpiredClaimsSystem(ctx)
-	if err != nil {
+	if count, oldest, err := c.src.ExpiredClaimsSystem(ctx); err != nil {
 		log.Error("expired-claim measure failed; keeping the previous values", "error", err)
-		return
+	} else {
+		c.mu.Lock()
+		c.count, c.oldest, c.sampled = count, oldest, true
+		c.mu.Unlock()
 	}
-	c.mu.Lock()
-	c.count, c.oldest, c.sampled = count, oldest, true
-	c.mu.Unlock()
+	if idle, err := c.src.OldestIdleClaimSystem(ctx); err != nil {
+		log.Error("idle-claim measure failed; keeping the previous value", "error", err)
+	} else {
+		c.mu.Lock()
+		c.idle, c.idleSampled = idle, true
+		c.mu.Unlock()
+	}
 }
 
 // Run ticks until ctx is cancelled, then unregisters the gauges for a caller

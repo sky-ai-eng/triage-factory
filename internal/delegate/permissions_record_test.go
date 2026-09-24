@@ -222,8 +222,8 @@ func TestBrowserPermissionHandler_DenyPathsAreDistinguishable(t *testing.T) {
 
 	t.Run("watched but unanswered", func(t *testing.T) {
 		f := newPermRecordFixture(t)
-		// permTimeout() is idleTimeout()/2, so a tiny idle gives a tiny window.
-		f.spawner.SetIdleHibernateTimeout(60 * time.Millisecond)
+		// A tiny injected prompt deadline gives a tiny window.
+		f.spawner.setActivityTimings(activityTimings{permission: 30 * time.Millisecond})
 		h := f.spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, f.conversationID, f.claimID, AbsentAutoDeny{})
 
 		d := h(agentproc.PermissionRequest{ToolCallID: "toolu_timeout", ToolName: "Bash"})

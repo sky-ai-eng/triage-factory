@@ -419,6 +419,7 @@ function TranscriptHarness() {
       <div data-testid="transcript">{messages.map((m) => m.content).join('|')}</div>
       <div data-testid="cost">{conversation ? String(conversation.TotalCostUSD ?? '') : ''}</div>
       <div data-testid="status">{conversation?.Status ?? ''}</div>
+      <div data-testid="op">{conversation?.claim_current_op ?? ''}</div>
     </>
   )
 }
@@ -556,7 +557,11 @@ describe('useConversationDetail transcript reconciliation', () => {
     await waitFor(() => expect(transcript()).toBe('first'))
     expect(screen.getByTestId('cost').textContent).toBe('0.2')
 
+    // The server's SUM carries the row it just gained, as a real read's
+    // would: the same tick re-reads the live conversation's row, and the fold
+    // and that read have to agree.
     serverMessages.push(message({ id: 12, content: 'second', cost_usd: 0.05 }))
+    serverConversation = conversation({ TotalCostUSD: 0.25 })
     await tick()
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
 
@@ -567,6 +572,31 @@ describe('useConversationDetail transcript reconciliation', () => {
       data: message({ id: 12, content: 'second', cost_usd: 0.05 }),
     })
     expect(screen.getByTestId('cost').textContent).toBe('0.25')
+  })
+
+  it('re-reads a live conversation every tick, so its claim activity moves', async () => {
+    serverConversation = conversation({ TotalCostUSD: 0.2, claim_current_op: 'provider' })
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(screen.getByTestId('op').textContent).toBe('provider'))
+
+    serverConversation = conversation({ TotalCostUSD: 0.2, claim_current_op: 'tool:bash' })
+    await tick()
+    expect(screen.getByTestId('op').textContent).toBe('tool:bash')
+  })
+
+  it('does not re-read a settled conversation on the tick', async () => {
+    serverConversation = conversation({ Status: 'completed', TotalCostUSD: 0.2 })
+    const fetchMock = mockFetch()
+    render(<TranscriptHarness />)
+    await waitFor(() => expect(transcript()).toBe('first'))
+    fetchMock.mockClear()
+
+    await tick()
+    expect(
+      fetchMock.mock.calls.some(([url]) =>
+        String(url).endsWith(`/conversations/${CONVERSATION_ID}`),
+      ),
+    ).toBe(false)
   })
 
   it('issues no repair reads for a conversation already settled when the station opened', async () => {

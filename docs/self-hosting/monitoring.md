@@ -248,20 +248,49 @@ actually lapsed belongs to an engagement that has stopped. The three timings
 are constants, not knobs: their ordering is what makes a takeover safe, so
 they move together or not at all.
 
-Both gauges are read from the database by the control pod's background brain,
-deliberately not by any dispatcher: a stuck dispatcher is what produces these
-rows, so it must not be what reports them.
+Each renewal also stamps what the engagement is doing: when it last did
+anything its stall watchdog counts as activity, and the operation it has in
+flight. The watchdog runs in the executor beside the engagement and stops it
+when it **stalls**: idle for 10 minutes with nothing in flight, or one
+operation past its own deadline.
+
+| Operation | Deadline |
+| -- | -- |
+| `provider` | 150s without a byte from the model provider. |
+| `tool:<name>` | 30 minutes for one tool call. |
+| `clone`, `rehydrate` | 10 minutes. |
+| `permission` | 150s waiting on a person to answer a permission prompt. |
+| `sidecar`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. |
+
+A stalled engagement is parked `open` with park reason `stalled`, and nothing
+retries it: it stays parked until someone sends it a message, which resumes it.
+
+The three gauges below are read from the database by the control pod's
+background brain, deliberately not by any dispatcher: a stuck dispatcher is
+what produces these rows, so it must not be what reports them.
 
 | Metric | Meaning |
 | -- | -- |
 | `tf_claims_expired` | Unreleased claims past their lease. **Zero is the steady state**; a brief nonzero is a dead engagement between its expiry and its recovery. |
 | `tf_claims_oldest_expired_age_seconds` | Seconds past expiry of the oldest such claim. |
+| `tf_claims_oldest_idle_seconds` | The longest any live claim with an unexpired lease has gone without activity, as its last renewal stamped it. A claim that has not renewed yet is not counted. A tool call counts as activity only when it starts and when it returns, so one long tool call can hold this past 600 without being a stall. |
 
-One alert, on the age rather than the count, because the count is expected to
-flicker and the age is not:
+One counter comes from the executors rather than the brain, incremented by the
+executor that ran the engagement. It is per process, so `sum` across executor
+pods:
+
+| Metric | Meaning |
+| -- | -- |
+| `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`), or `idle` when nothing was in flight. |
+
+The expired-claim alert is on the age rather than the count, because the count
+is expected to flicker and the age is not. Every stall is a conversation that
+stopped and waits for a person, so the stall alert fires on the first one:
 
 ```
 tf_claims_oldest_expired_age_seconds > 120                                      # for 5m: a dead engagement nobody has released
+sum(rate(tf_engagements_stalled_total[15m])) > 0                                # any stall: a conversation parked until someone sends it a message
+sum by (op) (rate(tf_engagements_stalled_total[1h]))                            # not an alert: the stall rate by operation
 ```
 
 A claim past expiry for minutes means the recovery that should release it is

@@ -132,8 +132,14 @@ func (k *conversationSink) OnSession(sessionID string) error {
 // The one failure that is not per-row is the fence: a refused write means
 // this engagement no longer owns the conversation, and every row after it
 // would interleave with a successor's. That one abandons the run.
+//
+// The reader goroutine calling this has no caller context, so the write gets
+// its own bound: a statement that blocks would otherwise hold the stream, and
+// a stall stop could not cancel it. A write that runs out of time is one more
+// per-row failure, not a fence trip.
 func (k *conversationSink) OnMessage(msg *domain.Message) error {
-	bgCtx := context.Background()
+	bgCtx, cancel := context.WithTimeout(context.Background(), detachedWriteDeadline)
+	defer cancel()
 	var id int64
 	switch {
 	case k.claimID != "":

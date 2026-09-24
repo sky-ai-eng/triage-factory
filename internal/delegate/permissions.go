@@ -171,14 +171,14 @@ func permKey(conversationID, toolCallID string) string {
 	return conversationID + "\x00" + toolCallID
 }
 
-// permTimeout is how long a surfaced prompt waits for an answer before denying.
-// It is kept strictly below idleTimeout() so a pending prompt always resolves
-// before the run could idle-hibernate mid-prompt (which would tear the warm
-// process down with the reader goroutine still parked in the handler). Half the
-// idle window is a clean strictly-less value for any idle, including the short
-// ones tests inject.
+// permTimeout is how long a surfaced prompt waits for an answer before denying:
+// permissionPromptDeadline, unless a test set a shorter one. The stall
+// watchdog brackets the same wait as a "permission" operation whose deadline
+// sits backstopMargin past this one (activitySink.OnPermission), so the
+// denial always lands first and the watchdog only stops a wait that ignores
+// its own clock.
 func (s *Spawner) permTimeout() time.Duration {
-	return s.idleTimeout() / 2
+	return s.resolvedActivityTimings().permission
 }
 
 // AbsentAutoDeny captures the per-run, presence-gated fast-deny policy
@@ -191,8 +191,7 @@ func (s *Spawner) permTimeout() time.Duration {
 //   - enabled == true → an unattended prompt (no answer-capable, focused tab in
 //     the run's org) is denied after grace instead of the full window; presence
 //     re-arms the wait to the full timeout. grace is pre-clamped to
-//     [1s, permTimeout()) so the absent path can never exceed the full window —
-//     the "total wait < idleTimeout()" invariant holds either way.
+//     [1s, permTimeout()) so the absent path can never exceed the full window.
 type AbsentAutoDeny struct {
 	enabled bool
 	grace   time.Duration
@@ -223,19 +222,19 @@ func (s *Spawner) resolveAbsentAutoDeny(ctx context.Context, teamID string) Abse
 // grace window the team setting exposes (the slider range in the UI and the
 // clamp the settings API applies). The floor mirrors clampGrace's 1s minimum;
 // the ceiling is the largest whole second strictly below the production
-// permTimeout() (DefaultIdleHibernateTimeout / 2), so any value a user can pick
-// round-trips through clampGrace unchanged under the default idle timeout. The
-// runtime clampGrace still re-clamps against the LIVE permTimeout() as defense
-// in depth (and to absorb a test-injected short idle), so these are the
-// advertised UI/HTTP bounds, not the only line of defense.
+// permTimeout() (permissionPromptDeadline), so any value a user can pick
+// round-trips through clampGrace unchanged. The runtime clampGrace still
+// re-clamps against the LIVE permTimeout() as defense in depth (and to absorb
+// a test-injected short deadline), so these are the advertised UI/HTTP
+// bounds, not the only line of defense.
 const (
 	AbsentGraceMinSeconds = 1
-	AbsentGraceMaxSeconds = int(DefaultIdleHibernateTimeout/time.Second)/2 - 1
+	AbsentGraceMaxSeconds = int(permissionPromptDeadline/time.Second) - 1
 )
 
 // clampGrace keeps the absent-deny grace in [1s, full) so it can neither
 // collapse to an instant deny on a bad value nor invert the load-bearing
-// "absent wait ≤ full ≤ permTimeout() < idleTimeout()" ordering. full is
+// "absent wait ≤ full ≤ permTimeout()" ordering. full is
 // permTimeout() (minutes in production), so the upper guard only ever bites a
 // misconfigured value; the lower floor of 1s mirrors the HTTP-layer floor.
 func clampGrace(grace, full time.Duration) time.Duration {
@@ -245,7 +244,7 @@ func clampGrace(grace, full time.Duration) time.Duration {
 	}
 	if grace >= full {
 		// full is unusually short (only realistic under a test's tiny injected
-		// idle). Pull grace strictly below it; never return a non-positive value.
+		// deadline). Pull grace strictly below it; never return a non-positive value.
 		grace = full - full/10
 		if grace <= 0 {
 			grace = full / 2
@@ -476,8 +475,9 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, c
 
 	// Explicit timers fire the deadlines exactly (no up-to-one-tick overshoot):
 	//   - fullTimer is the hard ceiling, armed for the whole window so the total
-	//     wait never exceeds permTimeout() — the load-bearing "< idleTimeout()"
-	//     invariant holds precisely, not within a poll interval.
+	//     wait never exceeds permTimeout() — precisely, not within a poll
+	//     interval, which is what keeps it ahead of the stall watchdog's
+	//     backstop on the same wait.
 	//   - graceTimer is the absent deadline, armed only while unattended. The
 	//     ticker's sole job is to re-read presence and arm/disarm + reset this
 	//     timer on the present↔absent edges, so a present→absent flip restarts

@@ -11,15 +11,57 @@ import (
 
 // fakeExpiredClaims is the store read as the claim observer sees it.
 type fakeExpiredClaims struct {
-	count  int
-	oldest time.Duration
-	err    error
-	calls  int
+	count   int
+	oldest  time.Duration
+	err     error
+	calls   int
+	idle    time.Duration
+	idleErr error
 }
 
 func (f *fakeExpiredClaims) ExpiredClaimsSystem(context.Context) (int, time.Duration, error) {
 	f.calls++
 	return f.count, f.oldest, f.err
+}
+
+func (f *fakeExpiredClaims) OldestIdleClaimSystem(context.Context) (time.Duration, error) {
+	return f.idle, f.idleErr
+}
+
+// TestClaimObserver_ReportsTheOldestIdleEngagement: the idle gauge reports
+// what the store read, keeps its last value across a failed read, and does so
+// independently of the expired-claim read failing beside it.
+func TestClaimObserver_ReportsTheOldestIdleEngagement(t *testing.T) {
+	src := &fakeExpiredClaims{}
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := NewClaimObserver(provider, src)
+	defer c.Close()
+	ctx := context.Background()
+
+	if _, ok := gaugeWith(t, collect(t, reader), "claims.oldest_idle"); ok {
+		t.Error("claims.oldest_idle reported before any measure")
+	}
+	src.idle = 7 * time.Minute
+	c.Tick(ctx)
+	if got, ok := gaugeWith(t, collect(t, reader), "claims.oldest_idle"); !ok || got != 420 {
+		t.Errorf("claims.oldest_idle = %d (present=%v), want 420", got, ok)
+	}
+
+	src.idleErr = errors.New("database unreachable")
+	src.idle = 0
+	c.Tick(ctx)
+	if got, _ := gaugeWith(t, collect(t, reader), "claims.oldest_idle"); got != 420 {
+		t.Errorf("claims.oldest_idle = %d after a failed read, want the previous 420 kept", got)
+	}
+
+	// The expired read failing does not hold the idle read back.
+	src.idleErr, src.err = nil, errors.New("expired read failed")
+	src.idle = 30 * time.Second
+	c.Tick(ctx)
+	if got, _ := gaugeWith(t, collect(t, reader), "claims.oldest_idle"); got != 30 {
+		t.Errorf("claims.oldest_idle = %d with the expired read failing, want the fresh 30", got)
+	}
 }
 
 // TestClaimObserver_ReportsCountsAndKeepsThemAcrossAFailure covers the whole

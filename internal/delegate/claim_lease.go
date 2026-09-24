@@ -43,10 +43,16 @@ const (
 // read a pending stop off the conversation, so the engagement settles it as a
 // deliberate stop, exactly as it settles a local cancel. The lease is still
 // held, which is what lets that fenced park land.
+//
+// errStalled is the stall watchdog's cause (activity.go), and a stop for the
+// same reason: the engagement still holds its claim and settles it through
+// its fenced park, which is why leaseFenced does not match it. It differs
+// from a requested stop only in the reason the park records (stopParkReason).
 var (
 	errClaimLeaseLost  = errors.New("delegate: claim lease lost")
 	errClaimSelfFenced = errors.New("delegate: claim self-fenced after renewal failures")
 	errStopRequested   = errors.New("delegate: stop requested")
+	errStalled         = errors.New("delegate: engagement stalled")
 )
 
 // leaseFenced reports whether ctx was cancelled by the claim's lease rather
@@ -205,8 +211,12 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		// over-count the elapsed window, never under-count it, which is the
 		// direction a self-fence deadline has to err in.
 		issuedAt := time.Now()
+		// The engagement's activity rides the renewal, so the claim row shows
+		// how long it has been idle and what it is waiting on without a
+		// second write. A conversation with no tracker reports none.
+		idle, op := s.activityFor(conv.ID).snapshot()
 		callCtx, cancel := context.WithTimeout(ctx, renewalCallTimeout(cadence))
-		renewal, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease)
+		renewal, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease, idle, op)
 		cancel()
 
 		switch {

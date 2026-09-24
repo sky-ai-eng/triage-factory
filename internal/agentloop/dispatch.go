@@ -129,6 +129,7 @@ func (e *Engine) callTool(ctx context.Context, call domain.ToolCall) (ToolOutcom
 		return ToolOutcome{}, fmt.Errorf("agentloop: no tool host wired")
 	}
 	_ = ctx // the socket round trip carries its own deadline; ctx cancellation is observed by the caller between calls
+	defer e.beginActivity("tool:"+call.Name, e.ActivityBounds.Tool)()
 	return e.Tools.Call(call.Name, call.Input)
 }
 

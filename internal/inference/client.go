@@ -134,6 +134,12 @@ type Request struct {
 	// can match, so the default (on, for a conversation that grows by
 	// appending) is a pure loss for a conversation that does not.
 	NoConversationCacheBreakpoint bool
+
+	// OnChunk, when set, is called for every chunk the stream delivers, on
+	// the goroutine that called Stream, before the chunk is folded in. It is
+	// how a caller learns a stream is still producing while the completion is
+	// being assembled. It must not block.
+	OnChunk func()
 }
 
 // Completion is a reassembled provider response: one neutral assistant
@@ -178,7 +184,7 @@ func (c *Client) Stream(ctx context.Context, req Request) (*Completion, error) {
 	if berr != nil {
 		return nil, c.wrapProviderError(req.Provider, berr)
 	}
-	completion, err := reassembleStream(ch)
+	completion, err := reassembleStream(ch, req.OnChunk)
 	if err != nil {
 		return nil, c.annotateEndpoint(req.Provider, err)
 	}
@@ -299,7 +305,7 @@ func buildChatRequest(req Request) (*schemas.BifrostChatRequest, error) {
 // on the closing delta lands on the right block); tool-call deltas merge by
 // index (id/name first, arguments concatenated). Usage and finish reason come
 // from the terminal chunks. A mid-stream error chunk aborts with that error.
-func reassembleStream(ch chan *schemas.BifrostStreamChunk) (*Completion, error) {
+func reassembleStream(ch chan *schemas.BifrostStreamChunk, onChunk func()) (*Completion, error) {
 	var content strings.Builder
 	reasoning := newReasoningAccumulator()
 	tools := newToolCallAccumulator()
@@ -310,6 +316,9 @@ func reassembleStream(ch chan *schemas.BifrostStreamChunk) (*Completion, error) 
 	for chunk := range ch {
 		if chunk == nil {
 			continue
+		}
+		if onChunk != nil {
+			onChunk()
 		}
 		if chunk.BifrostError != nil {
 			// Drain the rest so the producer goroutine isn't left blocked.

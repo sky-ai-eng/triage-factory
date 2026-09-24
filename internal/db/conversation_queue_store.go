@@ -226,7 +226,12 @@ type ConversationQueueStore interface {
 	// The same statement reads the conversation's stop intent back, so the
 	// holder learns of a pending stop within one renewal even when the local
 	// cancel handle and the cross-pod signal both missed it.
-	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration) (ClaimRenewal, error)
+	//
+	// idle and op are the engagement's activity as its stall tracker reads
+	// it: last_activity_at is stamped as database now minus idle, so the
+	// executor's monotonic reading becomes a database timestamp without the
+	// executor's wall clock entering it, and current_op as op, "" clearing it.
+	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (ClaimRenewal, error)
 
 	// SettleUnclaimedStopsSystem parks every stop-requested conversation that
 	// no live claim holds, marks a cancel-requested blueprint run behind one
@@ -261,6 +266,13 @@ type ConversationQueueStore interface {
 	// collecting it outside the dispatcher loop is what keeps a stuck
 	// dispatcher from suppressing its own alarm.
 	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
+
+	// OldestIdleClaimSystem reports the longest any live claim with an
+	// unexpired lease has gone without activity, measured from the
+	// last_activity_at its renewal stamped to database now. Zero when no such
+	// claim has stamped one. Cross-org, for the brain's gauge, like
+	// ExpiredClaimsSystem beside it.
+	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
 
 	// ExpiredClaimsOfExecutorSystem lists the live claims one executor boot
 	// minted whose lease has lapsed on database time, oldest first. Only the

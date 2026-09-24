@@ -1,9 +1,11 @@
 import { useMemo } from 'react'
 import type { Message, Conversation } from '../../types'
 import {
+  claimIdleReadout,
   completionGloss,
   formatDurationMs,
   formatElapsed,
+  isActiveConversation,
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   parkReasonLabel,
@@ -64,6 +66,12 @@ export function TelemetryRail({
         ? formatElapsed(workStart, now)
         : null
   const dwellMs = queueDwellMs(conversation, now)
+  // Shown for a live engagement, setting up or running: a clone or a
+  // credentials wait is an operation the watchdog bounds as much as a tool
+  // call is.
+  const idle = isActiveConversation(conversation)
+    ? claimIdleReadout(conversation.claim_last_activity_at, conversation.claim_current_op, now)
+    : null
 
   return (
     <aside className="hidden w-[256px] shrink-0 overflow-y-auto border-l border-line-1 bg-tint-1 px-4 py-4 lg:block">
@@ -109,6 +117,7 @@ export function TelemetryRail({
         {duration && (conversation.DurationMs != null || !isQueued) && (
           <Readout k={conversation.DurationMs != null ? 'elapsed' : 'running'} v={duration} />
         )}
+        {idle && <Readout k="idle" v={idle} />}
         {dwellMs != null && (isQueued || dwellMs >= QUEUE_DWELL_VISIBLE_MS) && (
           <Readout
             k="queued"

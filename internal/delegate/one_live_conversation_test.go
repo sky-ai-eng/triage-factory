@@ -225,7 +225,7 @@ func TestCheckTaskUnheld_NamesAHeldTaskAndAStoppingOne(t *testing.T) {
 	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); !errors.Is(err, ErrTaskHeld) {
 		t.Fatalf("CheckTaskUnheld on a held step = %v, want ErrTaskHeld", err)
 	}
-	if ok, err := s.conversations.RequestStopSystem(ctx, runmode.LocalDefaultOrgID, convs[0].ID, runmode.LocalDefaultUserID, ""); err != nil || !ok {
+	if ok, err := s.conversations.RequestStopSystem(ctx, runmode.LocalDefaultOrgID, convs[0].ID, runmode.LocalDefaultUserID, "", ""); err != nil || !ok {
 		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
 	}
 	if err := s.CheckTaskUnheld(ctx, runmode.LocalDefaultOrgID, task.ID); !errors.Is(err, ErrTaskStopping) {

@@ -463,6 +463,29 @@ type Sink interface {
 	OnMessage(msg *domain.Message) error
 }
 
+// StreamObserver is an optional extension of Sink, for a caller that has to
+// know the stream is moving while nothing is being persisted. The parser holds
+// an assistant message until it is complete, and a tool call that is running
+// produces no line at all, so the Sink alone can say nothing about either. A
+// Sink that also implements this is told about the stream as it is read.
+//
+// Every method is called on the reader goroutine and must not block: a
+// blocked observer stalls the stream it is observing.
+type StreamObserver interface {
+	// OnLine reports a line read off the stream, whatever it carried.
+	OnLine()
+	// OnToolUse reports an assistant line handing tool call id to the
+	// harness, which runs it as soon as the block lands.
+	OnToolUse(id, name string)
+	// OnToolResult reports the result of tool call id arriving.
+	OnToolResult(id string)
+	// OnTurnEnd reports a turn's terminal result line.
+	OnTurnEnd()
+	// OnPermission reports that the reader is about to wait on a permission
+	// decision for tool call id; done is called once the decision is in.
+	OnPermission(toolCallID string) (done func())
+}
+
 // Outcome bundles what Run observed: the terminal Result (nil if no
 // `result` event was seen), the captured session id (empty if the
 // stream never emitted system/init), and the captured stderr buffer
@@ -776,6 +799,7 @@ const maxStreamLineBytes = 64 * 1024 * 1024
 // newline-less stream still fails fast rather than OOMing the process.
 func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID string) (*Result, error) {
 	reader := bufio.NewReader(stdout)
+	observer := stream.observeSink(sink)
 
 	sessionDelivered := false
 
@@ -786,6 +810,9 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 		// the bytes before reacting to the error so a final unterminated
 		// event isn't dropped.
 		if len(line) > 0 {
+			if observer != nil {
+				observer.OnLine()
+			}
 			messages, result := stream.ParseLine(line, traceID)
 
 			if !sessionDelivered {

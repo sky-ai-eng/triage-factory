@@ -250,7 +250,8 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 		    outcome_reason = NULLIF($5, ''),
 		    failure_kind = NULLIF($6, ''),
 		    stop_requested_at = NULL,
-		    stop_requested_by = NULL
+		    stop_requested_by = NULL,
+		    stop_requested_reason = NULL
 		WHERE org_id = $7 AND id = $8
 		RETURNING *
 	`, status, time.Now().UTC(), resultSummary, outcome, outcomeReason, failureKind, orgID, conversationID)
@@ -328,12 +329,14 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		SET status = 'open',
 		    parked_at = COALESCE(parked_at, $1),
 		    park_reason = CASE
+		        WHEN stop_requested_at IS NOT NULL AND stop_requested_reason IS NOT NULL THEN stop_requested_reason
 		        WHEN stop_requested_at IS NOT NULL AND stop_requested_by IS NULL THEN 'system_cancelled'
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF($2, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF($3, ''), result_summary),
 		    stop_requested_at = NULL,
-		    stop_requested_by = NULL
+		    stop_requested_by = NULL,
+		    stop_requested_reason = NULL
 		WHERE org_id = $4 AND id = $5
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
@@ -392,7 +395,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 	res, err := s.q.ExecContext(ctx, `
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL,
+		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 		                queued_at = now(),
 		                preferred_executor_id = (
 		                    SELECT c.executor_id FROM claims c
@@ -974,7 +977,7 @@ func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, f
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, ''),
-		    stop_requested_at = NULL, stop_requested_by = NULL
+		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 		WHERE org_id = $3 AND id = $4
 		  AND (status IS NULL
 		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
@@ -1118,7 +1121,8 @@ const pgConversationColumns = `
 	(rm.source IS DISTINCT FROM 'agent') AS memory_missing,
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, ''),
-	r.stop_requested_at, COALESCE(r.stop_requested_by, '')
+	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
+	cl.last_activity_at, COALESCE(cl.current_op, '')
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
@@ -1254,10 +1258,11 @@ const pgConversationAttentionSQL = `(
 
 // conversationClaimLateral derives the claim-facing Conversation fields from claims:
 // ClaimedAt is the latest claim's claimed_at, Attempts the count of
-// engagements, ExecutorID and phase the active (unreleased) claim's, and
+// engagements, ExecutorID, phase and the renewal's activity stamps the active
+// (unreleased) claim's, and
 // duration_ms/num_turns the SUM of the per-engagement telemetry. The
 // aggregate lateral always yields exactly one row, so a never-claimed
-// conversation reads (NULL, 0, NULL, NULL, NULL, NULL).
+// conversation reads (NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL).
 //
 // `attempts` here is the LIFETIME claim count — engagement history for a
 // human, matching the lifetime sums beside it. It is deliberately not the
@@ -1271,6 +1276,8 @@ const conversationClaimLateral = `
 		       COUNT(*)::int      AS attempts,
 		       MAX(c2.executor_id) FILTER (WHERE c2.released_at IS NULL) AS executor_id,
 		       MAX(c2.phase)       FILTER (WHERE c2.released_at IS NULL) AS phase,
+		       MAX(c2.last_activity_at) FILTER (WHERE c2.released_at IS NULL) AS last_activity_at,
+		       MAX(c2.current_op)       FILTER (WHERE c2.released_at IS NULL) AS current_op,
 		       SUM(c2.duration_ms)::bigint AS duration_ms,
 		       SUM(c2.num_turns)::bigint   AS num_turns
 		FROM claims c2
@@ -1386,8 +1393,9 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 // cross-pod cancel signal on one admin-pool transaction. stop_requested_at is
 // what marks a stop as already asked for, and both columns key on it: a
 // system stop leaves the actor NULL, so COALESCE on the actor would let a
-// later user request claim a stop the system made first.
-func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string) (bool, error) {
+// later user request claim a stop the system made first. The reason keys on
+// it the same way, so the first request's reason stands.
+func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (bool, error) {
 	requested := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		var id string
@@ -1395,11 +1403,13 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 			UPDATE conversations
 			SET stop_requested_at = COALESCE(stop_requested_at, now()),
 			    stop_requested_by = CASE WHEN stop_requested_at IS NULL
-			                             THEN NULLIF($1, '') ELSE stop_requested_by END
+			                             THEN NULLIF($1, '') ELSE stop_requested_by END,
+			    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
+			                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
 			WHERE org_id = $2 AND id = $3
 			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
 			RETURNING id
-		`, by, orgID, conversationID).Scan(&id)
+		`, by, orgID, conversationID, string(reason)).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -2482,7 +2492,7 @@ type conversationScanner interface {
 // destinations for whatever a caller appended to that list — the list read's
 // queue position, today — in the order it appended them.
 func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
-	var queuedAt, claimedAt, completedAt, endedAt, stopRequestedAt sql.NullTime
+	var queuedAt, claimedAt, completedAt, endedAt, stopRequestedAt, lastActivityAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
@@ -2494,13 +2504,17 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 		&r.ResultSummary, &r.Outcome, &r.OutcomeReason, &failureKind, &r.SessionID, &r.ActorAgentID, &r.TriggerType, &r.CreatorUserID, &r.TeamID, &r.ExecutorID, &r.Attempts, &blueprintRunID, &blueprintStep,
 		&r.InputTokens, &r.OutputTokens, &r.CacheReadTokens, &r.CacheCreationTokens,
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
-		&stopRequestedAt, &r.StopRequestedBy,
+		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
+		&lastActivityAt, &r.ClaimCurrentOp,
 	}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
 	}
 	if stopRequestedAt.Valid {
 		r.StopRequestedAt = &stopRequestedAt.Time
+	}
+	if lastActivityAt.Valid {
+		r.ClaimLastActivityAt = &lastActivityAt.Time
 	}
 	r.FailureKind = domain.ConversationFailureKind(failureKind)
 	r.ParkReason = domain.ParkReason(parkReason)

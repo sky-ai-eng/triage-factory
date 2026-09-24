@@ -35,7 +35,7 @@ func TestRequestStopSystem_Postgres_IntentAndSignalCommitTogether(t *testing.T) 
 	ctx := context.Background()
 
 	id, _ := f.StageStep(t)
-	ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, "user-x", "exec-owner")
+	ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, "user-x", "exec-owner", "")
 	if err != nil || !ok {
 		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
 	}
@@ -51,7 +51,7 @@ func TestRequestStopSystem_Postgres_IntentAndSignalCommitTogether(t *testing.T) 
 	// transaction must not survive.
 	failWritesTo(t, h, "conversation_signals", "INSERT")
 	other, _ := f.StageStep(t)
-	if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, other, "user-x", "exec-owner"); err == nil || ok {
+	if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, other, "user-x", "exec-owner", ""); err == nil || ok {
 		t.Fatalf("RequestStopSystem with the signal insert failing = (%v, %v), want an error", ok, err)
 	}
 	got, err := f.Stores.Conversations.GetSystem(ctx, f.OrgID, other)
@@ -76,7 +76,7 @@ func TestParkOpenForClaimSystem_Postgres_ParkAndReleaseAreOneTransaction(t *test
 	if err != nil || conv == nil || conv.ID != id {
 		t.Fatalf("claim = (%+v, %v)", conv, err)
 	}
-	if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, "user-x", ""); err != nil || !ok {
+	if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, "user-x", "", ""); err != nil || !ok {
 		t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
 	}
 

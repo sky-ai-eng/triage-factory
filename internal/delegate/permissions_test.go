@@ -148,10 +148,10 @@ func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
 }
 
 // TestBrowserPermissionHandler_TimeoutDenies: with no answer, the prompt denies
-// once permTimeout elapses (made tiny here via a short idle window).
+// once permTimeout elapses (made tiny here via an injected deadline).
 func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetIdleHibernateTimeout(10 * time.Millisecond) // permTimeout = 5ms
+	s.setActivityTimings(activityTimings{permission: 5 * time.Millisecond})
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-1", "", AbsentAutoDeny{})
 
 	d := h(agentproc.PermissionRequest{ToolCallID: "req-timeout", ToolName: "Bash"})
@@ -167,17 +167,18 @@ func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {
 	}
 }
 
-// TestPermTimeoutBelowIdle pins the load-bearing ordering: the per-prompt wait
-// is strictly below the idle-hibernate window, so a prompt never blocks past
-// hibernation. Holds for the default and an injected idle.
-func TestPermTimeoutBelowIdle(t *testing.T) {
+// TestPermTimeoutIsThePromptDeadline pins the prompt's wait to the named
+// constant the stall watchdog brackets it with, and to an injected value when
+// a test sets one. The ordering against the watchdog's idle limit is held by
+// TestActivityTimings.
+func TestPermTimeoutIsThePromptDeadline(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if s.permTimeout() >= s.idleTimeout() {
-		t.Errorf("permTimeout %v must be < idleTimeout %v (default)", s.permTimeout(), s.idleTimeout())
+	if got := s.permTimeout(); got != permissionPromptDeadline {
+		t.Errorf("permTimeout = %v, want permissionPromptDeadline %v", got, permissionPromptDeadline)
 	}
-	s.SetIdleHibernateTimeout(2 * time.Second)
-	if s.permTimeout() >= s.idleTimeout() {
-		t.Errorf("permTimeout %v must be < idleTimeout %v (injected)", s.permTimeout(), s.idleTimeout())
+	s.setActivityTimings(activityTimings{permission: 2 * time.Second})
+	if got := s.permTimeout(); got != 2*time.Second {
+		t.Errorf("permTimeout = %v after injecting 2s, want 2s", got)
 	}
 }
 
@@ -193,7 +194,7 @@ func TestPermTimeoutBelowIdle(t *testing.T) {
 // (loaded runner) is the same after-deadline case, asserted inline.
 func TestResolvePermission_AcknowledgedResolveNeverDropped(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetIdleHibernateTimeout(4 * time.Millisecond) // permTimeout = 2ms
+	s.setActivityTimings(activityTimings{permission: 2 * time.Millisecond})
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-race", "", AbsentAutoDeny{})
 
 	for i := 0; i < 50; i++ {
@@ -248,7 +249,7 @@ func TestResolvePermission_NoPending(t *testing.T) {
 // run/tenant the entry was registered for.
 func TestResolvePermission_WrongRun(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetIdleHibernateTimeout(2 * time.Second) // bound the goroutine if cleanup is missed
+	s.setActivityTimings(activityTimings{permission: time.Second}) // bound the goroutine if cleanup is missed
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-A", "", AbsentAutoDeny{})
 	done := make(chan agentproc.PermissionDecision, 1)
 	go func() { done <- h(agentproc.PermissionRequest{ToolCallID: "req-x"}) }()
@@ -370,7 +371,7 @@ const presenceTestOrg = "00000000-0000-0000-0000-0000000000aa"
 // the full permTimeout().
 func TestBrowserPermissionHandler_AbsentDeniesAfterGrace(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetIdleHibernateTimeout(30 * time.Second) // permTimeout = 15s (the full ceiling)
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second}) // the full ceiling
 	s.SetPresencePollInterval(5 * time.Millisecond)
 	const grace = 40 * time.Millisecond
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", "", AbsentAutoDeny{enabled: true, grace: grace})
@@ -400,7 +401,7 @@ func TestBrowserPermissionHandler_PresentWaitsFullTimeout(t *testing.T) {
 	defer cleanup()
 
 	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
-	s.SetIdleHibernateTimeout(20 * time.Second) // permTimeout = 10s
+	s.setActivityTimings(activityTimings{permission: 10 * time.Second})
 	s.SetPresencePollInterval(5 * time.Millisecond)
 
 	// Become present BEFORE the prompt is raised so the handler's prompt-time
@@ -444,7 +445,7 @@ func TestBrowserPermissionHandler_PresenceDuringGraceExtends(t *testing.T) {
 	defer cleanup()
 
 	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
-	s.SetIdleHibernateTimeout(20 * time.Second) // permTimeout = 10s
+	s.setActivityTimings(activityTimings{permission: 10 * time.Second})
 	s.SetPresencePollInterval(5 * time.Millisecond)
 
 	// Absent at prompt time (the dialed client hasn't reported presence yet).
@@ -484,7 +485,7 @@ func TestBrowserPermissionHandler_PresentThenAbsentDeniesAfterGrace(t *testing.T
 	defer cleanup()
 
 	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
-	s.SetIdleHibernateTimeout(30 * time.Second) // permTimeout = 15s (far above grace)
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second}) // far above grace
 	s.SetPresencePollInterval(5 * time.Millisecond)
 
 	// Present at prompt time, so only the full window is armed.
@@ -522,7 +523,7 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 	defer cleanup()
 
 	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
-	s.SetIdleHibernateTimeout(30 * time.Second) // permTimeout = 15s
+	s.setActivityTimings(activityTimings{permission: 15 * time.Second})
 	s.SetPresencePollInterval(5 * time.Millisecond)
 
 	// A present, focused board tab — but in the wrong org.
@@ -550,7 +551,7 @@ func TestBrowserPermissionHandler_PresentOtherOrgDenies(t *testing.T) {
 // elapses it denies with the surfaced-but-unanswered reason.
 func TestBrowserPermissionHandler_ToggleOffIgnoresPresence(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	s.SetIdleHibernateTimeout(120 * time.Millisecond) // permTimeout = 60ms
+	s.setActivityTimings(activityTimings{permission: 60 * time.Millisecond})
 	s.SetPresencePollInterval(5 * time.Millisecond)
 	h := s.BrowserPermissionHandler(presenceTestOrg, "run-1", "", AbsentAutoDeny{}) // disabled
 
@@ -712,7 +713,7 @@ func TestBrowserPermissionHandler_TimeoutBroadcastsResolved(t *testing.T) {
 	defer cleanup()
 
 	s := NewSpawner(nil, db.Stores{}, nil, hub, "")
-	s.SetIdleHibernateTimeout(100 * time.Millisecond) // permTimeout = 50ms
+	s.setActivityTimings(activityTimings{permission: 50 * time.Millisecond})
 
 	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-1", "", AbsentAutoDeny{})
 	d := h(agentproc.PermissionRequest{ToolCallID: "req-timeout", ToolName: "Bash"})

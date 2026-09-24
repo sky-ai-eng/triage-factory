@@ -417,7 +417,7 @@ func (s *Spawner) requestStop(ctx context.Context, orgID, conversationID, userID
 	if s.crossPodSignalsWired() && !s.hasLocalCancelHandle(conversationID) {
 		target, _ = s.resolveLiveOwner(ctx, orgID, conversationID)
 	}
-	requested, err := s.conversations.RequestStopSystem(ctx, orgID, conversationID, userID, target)
+	requested, err := s.conversations.RequestStopSystem(ctx, orgID, conversationID, userID, target, "")
 	if err != nil {
 		return fmt.Errorf("record stop intent: %w", err)
 	}
