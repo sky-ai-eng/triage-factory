@@ -5407,6 +5407,11 @@ CREATE TABLE public.claims (
     -- last renewal, or NULL. Stamped by the renewal only.
     last_activity_at timestamp with time zone,
     current_op text,
+    -- When the engagement's workspace was last covered by a stored checkpoint,
+    -- on database time: the last checkpoint written or found unchanged, or the
+    -- agent loop's start before the first. NULL for an engagement that does
+    -- not checkpoint. Stamped by the renewal only.
+    last_checkpoint_at timestamp with time zone,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 

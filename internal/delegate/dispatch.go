@@ -1279,7 +1279,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// is dropped here rather than threaded on to nothing. No fresh-workspace
 	// builder either, for the same reason: that session file lived in the
 	// snapshot, so a tree built without one has nothing to reconnect to.
-	resumeCwd, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar, localGit), nil)
+	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar, localGit), nil)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -1885,14 +1885,14 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
 		// sandbox is already up (dispatchClaimedConversation brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.
-		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit),
+		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit),
 			func(ctx context.Context) (string, error) {
 				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
 			})
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
+		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
 		// This conversation gets its own conversation_worktrees row for the
 		// task's PR repo. Push authority is per conversation: the gate reads
 		// the rows keyed to the one pushing and derives the ref from each
@@ -1928,26 +1928,26 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
 		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
 		cfg.hasWT = false
-		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
+		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {
 				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
 			})
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
+		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
 		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
 		cfg.hasWT = false
-		wt, prov, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
+		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
 			func(ctx context.Context) (string, error) {
 				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
 			})
 		if err != nil {
 			return runConfig{}, err
 		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace = wt, wt, prov
+		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
 	default:
 		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}

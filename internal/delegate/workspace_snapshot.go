@@ -42,9 +42,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -138,6 +140,32 @@ type snapshotManifest struct {
 	// no explanation — and absent on blobs written before the exclusion, which
 	// carry their logs as ordinary scratch members and restore them normally.
 	CILogsOmitted bool `json:"ci_logs_omitted,omitempty"`
+	// CapturedAt is when the tree was read. Absent on blobs written before it
+	// was recorded.
+	CapturedAt time.Time `json:"captured_at,omitzero"`
+	// TranscriptPosition is the transcript ordering key (COALESCE(seq, id)) of
+	// the last row whose effects the captured tree carries, and ConversationID
+	// is the conversation whose transcript it is a position in. A checkpoint
+	// taken mid-engagement records both. A park or a conclusion covers the
+	// whole transcript and records neither, and so does every blob written
+	// before checkpoints existed.
+	//
+	// The pair travels together because the blob is the task's: a later
+	// step's conversation can restore it, and a position in another
+	// conversation's transcript says nothing about its own.
+	TranscriptPosition *float64 `json:"transcript_position,omitempty"`
+	ConversationID     string   `json:"conversation_id,omitempty"`
+}
+
+// positionFor is the transcript position this manifest's tree reflects for
+// conversationID, or nil when it reflects the whole transcript — a snapshot
+// taken at an ending, or a checkpoint of some other conversation on the task.
+func (m snapshotManifest) positionFor(conversationID string) *float64 {
+	if m.TranscriptPosition == nil || m.ConversationID != conversationID {
+		return nil
+	}
+	pos := *m.TranscriptPosition
+	return &pos
 }
 
 // snapshotKey is the storage key for a parked workspace's snapshot blob. keyID
@@ -158,19 +186,41 @@ func snapshotKey(orgID, keyID string) string {
 // have to agree or it recognizes none of the blobs it is there to move.
 const snapshotBlobLeaf = "workspace.tar"
 
-// snapshotWorkspace writes a parked run's non-recoverable workspace state — the
-// git delta, the ephemeral _tfac subdirs, and the Claude session transcript
-// — to durable storage under the run's snapshot key, so a resume that lands
-// without the warm on-disk worktree can rebuild it (see ensureWorkspace). It
-// runs identically in both modes: local writes the same blob through fsStorage
-// under the state-root, multi through the object store.
-//
-// runtime is the conversation's engine (domain.ConversationRuntimeSDK |
-// ConversationRuntimeNative), carried onto the span family because the blob's
-// members are not runtime-agnostic: only a delegated SDK-runtime conversation
-// snapshots a session transcript, so transcript sizes read without the
-// attribute would look like a property of all snapshots. Empty is a caller that doesn't know
-// (a fixture), and simply omits the attribute.
+// Why a snapshot is written, on the workspace.snapshot span. An ending covers
+// the whole transcript; a checkpoint covers it up to a position.
+const (
+	snapshotReasonPark       = "park"
+	snapshotReasonConclusion = "conclusion"
+	snapshotReasonShutdown   = "shutdown"
+	snapshotReasonCheckpoint = "checkpoint"
+)
+
+// snapshotWrite names one persist: whose tree, under which key, for which
+// engagement, and why.
+type snapshotWrite struct {
+	orgID, conversationID, keyID, claimID string
+	wtPath, sessionID                     string
+	// runtime is the conversation's engine (domain.ConversationRuntimeSDK |
+	// ConversationRuntimeNative), carried onto the span family because the
+	// blob's members are not runtime-agnostic: only a delegated SDK-runtime
+	// conversation snapshots a session transcript, so transcript sizes read
+	// without the attribute would look like a property of all snapshots. Empty
+	// is a caller that doesn't know (a fixture), and simply omits the
+	// attribute.
+	runtime string
+	// reason is one of the snapshotReason values.
+	reason string
+	// position is the transcript position a checkpoint's capture covers, and
+	// nil for an ending, which covers all of it.
+	position *float64
+}
+
+// snapshotWorkspace writes a finished engagement's non-recoverable workspace
+// state — the git delta, the ephemeral _tfac subdirs, and the Claude session
+// transcript — to durable storage under the run's snapshot key, so a resume
+// that lands without the warm on-disk worktree can rebuild it (see
+// ensureWorkspace). It runs identically in both modes: local writes the same
+// blob through fsStorage under the state-root, multi through the object store.
 //
 // claimID is the engagement writing this snapshot, and it is what makes the
 // blob's lifecycle knowable and its ordering safe. The write is bracketed by a
@@ -189,42 +239,37 @@ const snapshotBlobLeaf = "workspace.tar"
 // path and the snapshot is the durable backstop, only read when that cache is
 // gone.
 func (s *Spawner) snapshotWorkspace(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string) error {
-	return s.persistWorkspaceSnapshot(ctx, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime, false)
+	return s.persistWorkspaceSnapshot(ctx, snapshotWrite{
+		orgID: orgID, conversationID: conversationID, keyID: keyID, claimID: claimID,
+		wtPath: wtPath, sessionID: sessionID, runtime: runtime, reason: snapshotReasonConclusion,
+	}, false)
 }
 
-// persistWorkspaceSnapshot is snapshotWorkspace's body with the lifecycle
-// bracket's opening move made optional. leaseHeld says the caller already
-// opened the record and holds it, which a park does so the record exists
-// before the status flip a waiter reads; false opens one here — including for
-// a caller whose own open failed, since an untracked persist is precisely what
-// a resume cannot read.
-func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, orgID, conversationID, keyID, claimID, wtPath, sessionID, runtime string, leaseHeld bool) (err error) {
+// persistWorkspaceSnapshot is an ending's whole persist: open the record,
+// capture, archive, upload, close the record. leaseHeld says the caller
+// already opened the record and holds it, which a park does so the record
+// exists before the status flip a waiter reads; false opens one here —
+// including for a caller whose own open failed, since an untracked persist is
+// precisely what a resume cannot read.
+//
+// A checkpoint runs the same three phases in a different order around the
+// record (checkpoint.go), which is why they are separate functions.
+func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite, leaseHeld bool) (err error) {
 	blobs := s.Storage()
 	if blobs == nil {
 		return nil // no store wired (tests / a configuration without the seam)
 	}
 
-	// Punctual and linked, not a child: this runs at a park or a terminal,
-	// arbitrarily long after the engagement's setup span ended. It is also
-	// the one piece of run teardown with an unbounded cost — a git bundle, a
-	// tar of the whole scratch tree, and a blob PUT — so a park that took a
-	// minute is answerable here rather than only in the log. The three phase
-	// children below split that answer: whether the time went to the capture,
-	// the compression, or the upload decides three different fixes.
-	attrs := []attribute.KeyValue{telemetry.OrgID(orgID)}
-	if runtime != "" {
-		attrs = append(attrs, telemetry.Runtime(runtime))
-	}
-	ctx, span := s.startPunctual(ctx, conversationID, "workspace.snapshot", attrs...)
+	ctx, span := s.startSnapshotSpan(ctx, w)
 	defer func() {
 		recordSpanError(span, err)
 		span.End()
 	}()
 
-	if keyID == "" {
+	if w.keyID == "" {
 		return fmt.Errorf("snapshot: empty key id")
 	}
-	if wtPath == "" {
+	if w.wtPath == "" {
 		return fmt.Errorf("snapshot: empty worktree path")
 	}
 
@@ -244,7 +289,7 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, orgID, conversat
 	// pending forever and a later resume waiting out its full bound on a
 	// persist nobody is producing.
 	stateCtx := context.WithoutCancel(ctx)
-	owned := leaseHeld || s.beginSnapshotState(stateCtx, orgID, keyID, claimID)
+	owned := leaseHeld || s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
 	defer func() {
 		// A durable 'failed' is what lets a waiting resume stop waiting and
 		// fall back, so every error exit below lands here rather than leaving
@@ -253,80 +298,175 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, orgID, conversat
 		// writes nothing at all — the row is the successor's now, and its
 		// outcome is the successor's to record.
 		if err != nil && owned {
-			s.finishSnapshotState(stateCtx, orgID, keyID, claimID, false)
+			s.finishSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID, false)
 		}
 	}()
 
-	// Non-recoverable state — the git delta (nil for a non-git run-root, e.g. a
-	// Jira lazy run) AND the session transcript. In multi mode both are read
-	// inside a dropped-privilege, network-isolated child running as the sandbox
-	// uid: the git capture's filter-honoring commands never execute
-	// agent-planted drivers as root, and the SDK's owner-only transcript is
-	// readable there when it is not to the orchestrator (see captureWorkspaceGit).
-	// That child is one of the privileged operations that never trace
-	// themselves, so this executor-side span IS its measurement; in local mode
-	// the same span covers the in-process capture.
-	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", runtime)
-	captured, cleanupCapture, err := captureWorkspaceGit(capCtx, wtPath, sessionID)
+	captured, err := captureSnapshot(ctx, w)
 	if err != nil {
+		return err
+	}
+	defer captured.release()
+	staged, err := archiveSnapshot(ctx, w, captured)
+	// The capture's staging is spent once the archive has read it, so it is
+	// released before the upload rather than held across it.
+	captured.release()
+	if err != nil {
+		return err
+	}
+	defer staged.discard()
+
+	written, err := s.uploadSnapshot(ctx, w, staged, owned)
+	if err != nil || !written {
+		return err
+	}
+	span.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
+	if owned {
+		s.finishSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID, true)
+	}
+	return nil
+}
+
+// startSnapshotSpan opens the workspace.snapshot span for one persist.
+//
+// Punctual and linked, not a child: this runs at a park, a terminal or a
+// checkpoint, arbitrarily long after the engagement's setup span ended. It is
+// also the one piece of run teardown with an unbounded cost — a git bundle, a
+// tar of the whole scratch tree, and a blob PUT — so a park that took a minute
+// is answerable here rather than only in the log. The three phase children
+// split that answer: whether the time went to the capture, the compression,
+// or the upload decides three different fixes. The reason separates the
+// checkpoints, which run beside a live agent, from the endings.
+func (s *Spawner) startSnapshotSpan(ctx context.Context, w snapshotWrite) (context.Context, trace.Span) {
+	attrs := []attribute.KeyValue{telemetry.OrgID(w.orgID)}
+	if w.runtime != "" {
+		attrs = append(attrs, telemetry.Runtime(w.runtime))
+	}
+	if w.reason != "" {
+		attrs = append(attrs, telemetry.Reason(w.reason))
+	}
+	return s.startPunctual(ctx, w.conversationID, "workspace.snapshot", attrs...)
+}
+
+// capturedSnapshot is a tree read and not yet archived: the git delta and the
+// transcript the capture produced, staged on disk in multi mode, and when the
+// tree was read.
+type capturedSnapshot struct {
+	state   worktree.CapturedState
+	at      time.Time
+	cleanup func()
+}
+
+// release removes the capture's staging. Idempotent, and safe on a capture
+// that staged nothing.
+func (c *capturedSnapshot) release() {
+	if c != nil && c.cleanup != nil {
+		c.cleanup()
+		c.cleanup = nil
+	}
+}
+
+// captureSnapshot reads the tree's non-recoverable state — the git delta (nil
+// for a non-git run-root, e.g. a Jira lazy run) AND the session transcript. In
+// multi mode both are read inside a dropped-privilege, network-isolated child
+// running as the sandbox uid: the git capture's filter-honoring commands never
+// execute agent-planted drivers as root, and the SDK's owner-only transcript
+// is readable there when it is not to the orchestrator (see
+// captureWorkspaceGit). That child is one of the privileged operations that
+// never trace themselves, so this executor-side span IS its measurement; in
+// local mode the same span covers the in-process capture.
+//
+// The capture stages into a throwaway index (captureUncommittedTo) and reads
+// status without optional locks, so it takes nothing a live agent's git
+// holds: a checkpoint can run it beside the agent.
+func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot, err error) {
+	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", w.runtime)
+	defer func() {
 		recordSpanError(capSpan, err)
 		capSpan.End()
-		return fmt.Errorf("snapshot: capture: %w", err)
-	}
-	if cleanupCapture != nil {
-		defer func() {
-			if cleanupCapture != nil {
-				cleanupCapture()
-			}
-		}()
-	}
-	bundleBytes, err := capturedMemberSize(captured.Delta, captured.BundlePath, true)
+	}()
+	at := time.Now()
+	state, cleanup, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
 	if err != nil {
-		recordSpanError(capSpan, err)
-		capSpan.End()
-		return fmt.Errorf("snapshot: capture bundle size: %w", err)
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, fmt.Errorf("snapshot: capture: %w", err)
 	}
-	patchBytes, err := capturedMemberSize(captured.Delta, captured.PatchPath, false)
+	captured := &capturedSnapshot{state: state, at: at, cleanup: cleanup}
+	bundleBytes, err := capturedMemberSize(state.Delta, state.BundlePath, true)
 	if err != nil {
-		recordSpanError(capSpan, err)
-		capSpan.End()
-		return fmt.Errorf("snapshot: capture patch size: %w", err)
+		captured.release()
+		return nil, fmt.Errorf("snapshot: capture bundle size: %w", err)
 	}
-	transcriptBytes, err := capturedBytesSize(captured.Transcript, captured.TranscriptPath)
+	patchBytes, err := capturedMemberSize(state.Delta, state.PatchPath, false)
 	if err != nil {
-		recordSpanError(capSpan, err)
-		capSpan.End()
-		return fmt.Errorf("snapshot: capture transcript size: %w", err)
+		captured.release()
+		return nil, fmt.Errorf("snapshot: capture patch size: %w", err)
+	}
+	transcriptBytes, err := capturedBytesSize(state.Transcript, state.TranscriptPath)
+	if err != nil {
+		captured.release()
+		return nil, fmt.Errorf("snapshot: capture transcript size: %w", err)
 	}
 	capSpan.SetAttributes(
 		telemetry.SnapshotBundleBytes(bundleBytes),
 		telemetry.SnapshotPatchBytes(patchBytes),
 		telemetry.SnapshotTranscriptBytes(transcriptBytes),
 	)
-	capSpan.End()
+	return captured, nil
+}
 
-	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", runtime)
-	f, rawBytes, compressedBytes, err := stageSnapshotArchive(captured, wtPath)
-	if err != nil {
+// stagedSnapshot is an archived blob on local disk, ready to upload.
+type stagedSnapshot struct {
+	f                         *os.File
+	rawBytes, compressedBytes int64
+}
+
+// discard closes and removes the staged file. Idempotent.
+func (st *stagedSnapshot) discard() {
+	if st == nil || st.f == nil {
+		return
+	}
+	_ = st.f.Close()
+	_ = os.Remove(st.f.Name())
+	st.f = nil
+}
+
+// archiveSnapshot compresses the capture and the tree's _tfac scratch into one
+// staged blob. It still reads the tree — the scratch is walked here, not in
+// the capture — so a checkpoint counts it as part of its quiet-point work.
+func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSnapshot) (_ *stagedSnapshot, err error) {
+	_, archSpan := snapshotPhase(ctx, "workspace.snapshot.archive", w.runtime)
+	defer func() {
 		recordSpanError(archSpan, err)
 		archSpan.End()
-		return fmt.Errorf("snapshot: archive: %w", err)
-	}
-	if cleanupCapture != nil {
-		cleanupCapture()
-		cleanupCapture = nil
-	}
-	defer func() {
-		_ = f.Close()
-		_ = os.Remove(f.Name())
 	}()
+	man := snapshotManifest{CapturedAt: captured.at.UTC()}
+	if w.position != nil {
+		pos := *w.position
+		man.TranscriptPosition = &pos
+		man.ConversationID = w.conversationID
+	}
+	f, rawBytes, compressedBytes, err := stageSnapshotArchive(ctx, captured.state, w.wtPath, man)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot: archive: %w", err)
+	}
 	// Raw bytes in against compressed bytes out: the pair is the codec's
 	// report card — ratio from the two sizes, throughput from either against
 	// the phase duration — so a compression change can prove itself from the
 	// field rather than a benchmark.
 	archSpan.SetAttributes(telemetry.SnapshotRawBytes(rawBytes), telemetry.SizeBytes(compressedBytes))
-	archSpan.End()
+	return &stagedSnapshot{f: f, rawBytes: rawBytes, compressedBytes: compressedBytes}, nil
+}
 
+// uploadSnapshot puts a staged blob under the key, reporting false with no
+// error when a newer engagement has taken the key over and the blob is not
+// written at all. It reads only the staged file, never the tree.
+//
+// owned says this engagement opened the key's record and so may ask whether
+// it still holds it.
+func (s *Spawner) uploadSnapshot(ctx context.Context, w snapshotWrite, staged *stagedSnapshot, owned bool) (written bool, err error) {
 	// Pre-Put guard: a newer engagement may have taken the key over while this
 	// teardown was capturing — a cross-pod stop releases the claim the instant
 	// the user asks, and the successor can be running, parking, and writing its
@@ -343,29 +483,24 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, orgID, conversat
 	// capture -> put inside a window measured in microseconds, and the
 	// successor's next park overwrites it again. Closing it completely means
 	// versioned blob keys, which changes key derivation everywhere.
-	if owned && s.snapshotSuperseded(stateCtx, orgID, keyID, claimID) {
+	if owned && s.snapshotSuperseded(context.WithoutCancel(ctx), w.orgID, w.keyID, w.claimID) {
 		delegateLog.Info("snapshot superseded by a newer engagement; not writing",
-			"conversation", conversationID, "key", snapshotKey(orgID, keyID), "claim_id", claimID)
-		return nil
+			"conversation", w.conversationID, "key", snapshotKey(w.orgID, w.keyID), "claim_id", w.claimID, "reason", w.reason)
+		return false, nil
 	}
 
-	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", runtime)
-	putSpan.SetAttributes(telemetry.SizeBytes(compressedBytes))
-	putErr := blobs.Put(putCtx, snapshotKey(orgID, keyID), f)
+	putCtx, putSpan := snapshotPhase(ctx, "workspace.snapshot.put", w.runtime)
+	putSpan.SetAttributes(telemetry.SizeBytes(staged.compressedBytes))
+	putErr := s.Storage().Put(putCtx, snapshotKey(w.orgID, w.keyID), staged.f)
 	recordSpanError(putSpan, putErr)
 	putSpan.End()
 	if putErr != nil {
-		return fmt.Errorf("snapshot: put: %w", putErr)
+		return false, fmt.Errorf("snapshot: put: %w", putErr)
 	}
 	// Parked-window storage cost is a live sizing question; log every
 	// snapshot's real compressed footprint so it's answerable from the field.
-	// On the span too, where it explains the duration beside it.
-	span.SetAttributes(telemetry.SizeBytes(compressedBytes))
-	if owned {
-		s.finishSnapshotState(stateCtx, orgID, keyID, claimID, true)
-	}
-	delegateLog.Info("snapshot written", "key", snapshotKey(orgID, keyID), "bytes_compressed", compressedBytes)
-	return nil
+	delegateLog.Info("snapshot written", "key", snapshotKey(w.orgID, w.keyID), "reason", w.reason, "bytes_compressed", staged.compressedBytes)
+	return true, nil
 }
 
 // beginSnapshotState records that claimID owes a snapshot for this key and
@@ -468,7 +603,10 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 // transcript and ci-logs members that dominate the blob are highly
 // compressible text — without touching the member-by-member streaming inside
 // writeSnapshotTar.
-func stageSnapshotArchive(captured worktree.CapturedState, wtPath string) (_ *os.File, rawBytes, compressedBytes int64, err error) {
+//
+// man is the manifest's identity half — when the tree was read and, for a
+// checkpoint, the position it covers; the rest is filled in from the capture.
+func stageSnapshotArchive(ctx context.Context, captured worktree.CapturedState, wtPath string, man snapshotManifest) (_ *os.File, rawBytes, compressedBytes int64, err error) {
 	f, err := os.CreateTemp("", "tf-snapshot-*.tar.zst")
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
@@ -484,7 +622,7 @@ func stageSnapshotArchive(captured worktree.CapturedState, wtPath string) (_ *os
 		return nil, 0, 0, fmt.Errorf("open zstd: %w", err)
 	}
 	cw := countingWriter{w: zw}
-	if err = writeSnapshotTar(&cw, captured, wtPath); err != nil {
+	if err = writeSnapshotTar(ctx, &cw, captured, wtPath, man); err != nil {
 		_ = zw.Close()
 		return nil, 0, 0, err
 	}
@@ -521,11 +659,11 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 // writeSnapshotTar streams the snapshot members into w as one tar: the
 // potentially unbounded git bundle + uncommitted patch,
 // the ephemeral _tfac tree (streamed file by file), the Claude session
-// transcript, and the manifest.
-func writeSnapshotTar(w io.Writer, captured worktree.CapturedState, wtPath string) error {
+// transcript, and the manifest, built on man.
+func writeSnapshotTar(ctx context.Context, w io.Writer, captured worktree.CapturedState, wtPath string, man snapshotManifest) error {
 	tw := tar.NewWriter(w)
 	delta := captured.Delta
-	man := snapshotManifest{SessionID: captured.SessionID}
+	man.SessionID = captured.SessionID
 	if delta != nil {
 		man.HasGit = true
 		man.Branch = delta.Branch
@@ -541,7 +679,7 @@ func writeSnapshotTar(w io.Writer, captured worktree.CapturedState, wtPath strin
 			}
 		}
 	}
-	omittedCILogs, err := tarScratch(tw, wtPath)
+	omittedCILogs, err := tarScratch(ctx, tw, wtPath)
 	if err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
 	}
@@ -730,12 +868,17 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // one are the same directory, and what the agent is told about its own prior
 // work turns on the difference.
 //
+// asOf is the other half of that answer for a rehydrated tree: the transcript
+// position the blob's capture covers, when a checkpoint of this conversation
+// wrote it. Nil on every other rung, and for a blob an ending wrote, which
+// covers the whole transcript.
+//
 // conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path,
 // and that write is this engagement's to make only while it still holds the
 // conversation. Every caller is a claimed dispatch, so it is populated at both
 // — including the config the step builder synthesizes, which copies it across
 // for exactly this reason.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, err error) {
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
 	// The provenance IS the interesting part of this span — nothing downstream
 	// can tell the three rungs apart, since past here they are the same
 	// directory. Recorded from the named result so every exit below carries it
@@ -763,13 +906,13 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
-			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil // warm: worktree still on disk
+			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil, nil // warm: worktree still on disk
 		}
 	}
 
 	blobs := s.Storage()
 	if blobs == nil {
-		return "", "", fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
+		return "", "", nil, fmt.Errorf("worktree %q missing and no blob store to rehydrate from", conv.WorktreePath)
 	}
 
 	// Past the warm check the tree is rebuilt from the store: one workspace
@@ -814,7 +957,8 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		endWait()
 		span.SetAttributes(telemetry.SnapshotWaitedMs(waited.Milliseconds()))
 		if !appeared {
-			return s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+			wt, prov, err := s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+			return wt, prov, nil, err
 		}
 		opCtx, endOp = beginRehydrate()
 		rc, err = blobs.Get(opCtx, snapshotKey(orgID, keyID))
@@ -825,21 +969,26 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 			// failure would have.
 			delegateLog.Warn("rehydrate: the snapshot the wait saw could not be fetched; falling back",
 				"conversation", conv.ID, "key_id", keyID, "error", err)
-			return s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+			wt, prov, err := s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+			return wt, prov, nil, err
 		}
 	} else if err != nil {
-		return "", "", fmt.Errorf("rehydrate: get snapshot: %w", err)
+		return "", "", nil, fmt.Errorf("rehydrate: get snapshot: %w", err)
 	}
 	defer func() { _ = rc.Close() }()
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
 	wtDir := worktree.RunRoot(keyID)
-	if rErr := s.rehydrateFromSnapshot(opCtx, wtDir, seed, rc); rErr != nil {
-		return "", "", rErr
+	man, rErr := s.rehydrateFromSnapshot(opCtx, wtDir, seed, rc)
+	if rErr != nil {
+		return "", "", nil, rErr
 	}
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)
-	return wtDir, domain.WorkspaceProvenanceRehydrated, nil
+	asOf = man.positionFor(conv.ID)
+	delegateLog.Info("workspace rehydrated from snapshot", "conversation", conv.ID, "key_id", keyID,
+		"captured_at", man.CapturedAt, "checkpoint", asOf != nil)
+	return wtDir, domain.WorkspaceProvenanceRehydrated, asOf, nil
 }
 
 // workspaceFromNothing is the ladder's last rung: there is no workspace to
@@ -898,17 +1047,20 @@ func (s *Spawner) restampWorktreePath(ctx context.Context, orgID string, conv *d
 // RestoreWorkspaceGit runs below), then moved into place with one rename. This
 // mirrors the snapshot side's temp-file staging so neither direction buffers a
 // large workspace whole.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed gitSeed, r io.Reader) error {
+//
+// It returns the blob's manifest, which is what says how much of the
+// transcript the rebuilt tree reflects.
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed gitSeed, r io.Reader) (_ snapshotManifest, err error) {
 	var man snapshotManifest
 	var bundle, patch, session []byte
 
 	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
-		return fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
 	}
 	// Sibling of wtDir → the post-restore move is an intra-filesystem rename.
 	scratchStaging, err := os.MkdirTemp(filepath.Dir(wtDir), ".scratch-rehydrate-*")
 	if err != nil {
-		return fmt.Errorf("rehydrate: scratch staging: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: scratch staging: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
 	sawScratch := false
@@ -918,7 +1070,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	// the manifest that describes the tar is inside the compressed stream.
 	cr, codec, err := snapshotReader(r)
 	if err != nil {
-		return fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
 	}
 	defer func() { _ = cr.Close() }()
 	tr := tar.NewReader(cr)
@@ -928,32 +1080,32 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("rehydrate: read tar: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: read tar: %w", err)
 		}
 		switch {
 		case hdr.Name == snapManifest:
 			data, err := io.ReadAll(tr)
 			if err != nil {
-				return fmt.Errorf("rehydrate: read manifest: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read manifest: %w", err)
 			}
 			if err := json.Unmarshal(data, &man); err != nil {
-				return fmt.Errorf("rehydrate: manifest: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: manifest: %w", err)
 			}
 		case hdr.Name == snapBundle:
 			if bundle, err = io.ReadAll(tr); err != nil {
-				return fmt.Errorf("rehydrate: read bundle: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read bundle: %w", err)
 			}
 		case hdr.Name == snapPatch:
 			if patch, err = io.ReadAll(tr); err != nil {
-				return fmt.Errorf("rehydrate: read patch: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read patch: %w", err)
 			}
 		case hdr.Name == snapSession:
 			if session, err = io.ReadAll(tr); err != nil {
-				return fmt.Errorf("rehydrate: read session: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read session: %w", err)
 			}
 		case strings.HasPrefix(hdr.Name, snapScratchPrefix):
 			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr); err != nil {
-				return err
+				return snapshotManifest{}, err
 			}
 			sawScratch = true
 		}
@@ -968,7 +1120,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	// means the snapshot is corrupt, so fail the rehydrate rather than rebuild
 	// onto untrustworthy state.
 	if _, err := io.Copy(io.Discard, cr); err != nil {
-		return fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
 	}
 
 	if man.HasGit {
@@ -983,13 +1135,13 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		// network on every cold rehydrate of a private repo, not just a fresh
 		// host. Each mode therefore supplies its engagement's proxy route.
 		if err := restoreWorkspaceGit(ctx, seed.owner, seed.repo, wtDir, delta, seed.cloneURL, seed.auth); err != nil {
-			return fmt.Errorf("rehydrate: restore git: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: restore git: %w", err)
 		}
 	} else {
 		// Non-git run-root (Jira lazy): just recreate the parent directory; the
 		// agent re-materializes per-repo worktrees via `workspace add`.
 		if err := os.MkdirAll(wtDir, 0o700); err != nil {
-			return fmt.Errorf("rehydrate: make run root: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: make run root: %w", err)
 		}
 		// The git path plants this inside RestoreWorkspaceGit; do the same here so
 		// a rehydrated Jira run root carries the jail's skills symlink too. The
@@ -1004,7 +1156,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		// The fresh worktree has no _tfac (git-excluded), so move the staged
 		// tree in wholesale.
 		if err := os.Rename(scratchStaging, filepath.Join(wtDir, worktree.ScratchDir)); err != nil {
-			return fmt.Errorf("rehydrate: install scratch: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
 	if man.CILogsOmitted {
@@ -1028,10 +1180,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	}
 	if len(session) > 0 && man.SessionID != "" {
 		if err := restoreSessionTranscript(wtDir, man.SessionID, session); err != nil {
-			return err
+			return snapshotManifest{}, err
 		}
 	}
-	return nil
+	return man, nil
 }
 
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
@@ -1085,21 +1237,46 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 	}
 }
 
-// tarScratch walks wtPath/_tfac and writes every regular file under the
-// snapScratchPrefix, skipping the scratchExcludes subtrees. A missing _tfac is
-// fine (nothing to capture).
+// tarScratch writes every scratch file a snapshot carries (walkScratch) under
+// the snapScratchPrefix, reporting whether a populated ci-logs subtree was
+// left out — the manifest's CILogsOmitted and the gate on the rehydrate's
+// notice.
+func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
+	return walkScratch(ctx, wtPath, func(rel, path string, fi os.FileInfo) error {
+		// Stream each file into the tar rather than reading it whole — the
+		// agent's own intermediates are unbounded even with the log archives
+		// excluded.
+		err := writeTarFile(tw, snapScratchPrefix+rel, path, fi.Size())
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	})
+}
+
+// walkScratch visits every regular file under wtPath/_tfac that a snapshot
+// carries, in lexical order, skipping the scratchExcludes subtrees — the one
+// definition of "the scratch a snapshot carries" that both the archive and the
+// fingerprint read. A missing _tfac visits nothing.
 //
-// It reports whether a ci-logs subtree with something in it was skipped, which
-// is the manifest's CILogsOmitted and the gate on the rehydrate's notice. An
-// empty ci-logs directory reports false: nothing was dropped, so there is
-// nothing to explain.
-func tarScratch(tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
+// It reports whether a ci-logs subtree with something in it was skipped. An
+// entry that vanishes between the listing and the visit is skipped: a
+// checkpoint walks a tree a background process may still be changing, and an
+// entry removed a moment later is the same torn capture as one removed a
+// moment earlier. ctx is checked per entry.
+func walkScratch(ctx context.Context, wtPath string, visit func(rel, path string, fi os.FileInfo) error) (omittedCILogs bool, err error) {
 	root := filepath.Join(wtPath, worktree.ScratchDir)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
 		return false, nil
 	}
 	err = filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
 			return walkErr
 		}
 		rel, err := filepath.Rel(root, path)
@@ -1125,10 +1302,7 @@ func tarScratch(tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
 		if !fi.Mode().IsRegular() {
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
-		// Stream each file into the tar rather than reading it whole — the
-		// agent's own intermediates are unbounded even with the log archives
-		// excluded.
-		return writeTarFile(tw, snapScratchPrefix+filepath.ToSlash(rel), path, fi.Size())
+		return visit(filepath.ToSlash(rel), path, fi)
 	})
 	return omittedCILogs, err
 }
@@ -1218,10 +1392,13 @@ func writeTarBytes(tw *tar.Writer, name string, data []byte) error {
 }
 
 // writeTarFile streams a file into the snapshot tar without buffering it whole.
-// size is the header length; the run is parked (dormant) when a snapshot is
-// taken, so _tfac isn't being written concurrently and the on-disk size is
-// stable. If a short read still occurs, io.Copy's count mismatch surfaces as a
-// tar error rather than silent corruption.
+// size is the header length, from the walk's stat. An ending's snapshot reads
+// a dormant tree, where that size is stable; a checkpoint reads a live one, where
+// a background writer may still be appending. So exactly size bytes are copied:
+// a file that grew since the stat is captured as it was at the stat, and one
+// that shrank is a short read that fails the archive rather than a member
+// padded with bytes the file never held. A file that vanished before the open
+// fails with an error matching fs.ErrNotExist, which the walk skips.
 func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
 	f, err := os.Open(path)
 	if err != nil {
@@ -1236,7 +1413,7 @@ func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
 	}); err != nil {
 		return fmt.Errorf("tar header %s: %w", name, err)
 	}
-	if _, err := io.Copy(tw, f); err != nil {
+	if _, err := io.CopyN(tw, f, size); err != nil {
 		return fmt.Errorf("tar copy %s: %w", name, err)
 	}
 	return nil

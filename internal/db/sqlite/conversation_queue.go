@@ -876,7 +876,7 @@ var executorClaimCols = `
 	       c.peak_mem_mb, c.cpu_usec,
 	       COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	       COALESCE(v.failure_kind, ''),
-	       c.last_activity_at, COALESCE(c.current_op, '')
+	       c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
 
@@ -921,7 +921,7 @@ func (s *conversationQueueStore) ClaimByIDSystem(ctx context.Context, claimID st
 	return &out[0], nil
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return db.ClaimRenewal{}, err
 	}
@@ -937,21 +937,27 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// Both sides of the comparison are strftime-rendered text in the layout
 	// the column stores, so the `>` is one layout against itself.
 	//
-	// last_activity_at is database now offset back by the idle the executor
-	// read on its monotonic clock, in the same layout and through the same
-	// modifier rendering as the lease stamp.
+	// last_activity_at and last_checkpoint_at are database now offset back
+	// by the ages the executor read on its monotonic clock, in the same layout
+	// and through the same modifier rendering as the lease stamp. A NULL
+	// checkpoint age stamps NULL.
+	var checkpointAge any
+	if activity.CheckpointAge != nil {
+		checkpointAge = sqliteLeaseModifier(-*activity.CheckpointAge)
+	}
 	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
 		SET lease_expires_at = `+sqliteNowPlusExpr+`,
 		    last_activity_at = `+sqliteNowPlusExpr+`,
-		    current_op = NULLIF(?, '')
+		    current_op = NULLIF(?, ''),
+		    last_checkpoint_at = CASE WHEN ? IS NULL THEN NULL ELSE `+sqliteNowPlusExpr+` END
 		WHERE id = ? AND org_id = ? AND conversation_id = ?
 		  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		RETURNING lease_expires_at,
 		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
-	`, sqliteLeaseModifier(lease), sqliteLeaseModifier(-idle), op, claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	`, sqliteLeaseModifier(lease), sqliteLeaseModifier(-activity.Idle), activity.Op, checkpointAge, checkpointAge, claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}
@@ -1110,6 +1116,24 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 		FROM claims
 		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		  AND last_activity_at IS NOT NULL`).Scan(&seconds)
+	if err != nil {
+		return 0, err
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error) {
+	// The same shape as OldestIdleClaimSystem: a claim whose engagement does
+	// not checkpoint carries no stamp and is not counted.
+	var seconds float64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COALESCE((julianday('now') - julianday(min(last_checkpoint_at))) * 86400.0, 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
+		  AND last_checkpoint_at IS NOT NULL`).Scan(&seconds)
 	if err != nil {
 		return 0, err
 	}
@@ -1365,19 +1389,23 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt, leaseExpiresAt, lastActivityAt sql.NullTime
+	var releasedAt, leaseExpiresAt, lastActivityAt, lastCheckpointAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
-		&lastActivityAt, &c.CurrentOp,
+		&lastActivityAt, &c.CurrentOp, &lastCheckpointAt,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
 	}
 	if lastActivityAt.Valid {
 		v := lastActivityAt.Time
 		c.LastActivityAt = &v
+	}
+	if lastCheckpointAt.Valid {
+		v := lastCheckpointAt.Time
+		c.LastCheckpointAt = &v
 	}
 	if releasedAt.Valid {
 		v := releasedAt.Time

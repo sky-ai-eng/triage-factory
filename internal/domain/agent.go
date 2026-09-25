@@ -953,6 +953,11 @@ type ExecutorClaim struct {
 	// ("" for none). nil before the first renewal.
 	LastActivityAt *time.Time
 	CurrentOp      string
+	// LastCheckpointAt is when the engagement's tree was last covered by a
+	// stored workspace checkpoint, as its last renewal stamped it: the last
+	// checkpoint written or found unchanged, or the agent loop's start before
+	// the first. Nil for an engagement that does not checkpoint.
+	LastCheckpointAt *time.Time
 
 	// PeakMemMB / CPUUsec are the claim's end-state actuals, read from the
 	// jail's cgroup at teardown. These are the billing-grade record; a

@@ -18,7 +18,7 @@ import type {
   FleetTimeseries,
   ConversationStatusValue,
 } from '../types'
-import { claimIdleReadout, isActiveStatus } from '../lib/conversationStatus'
+import { claimCheckpointReadout, claimIdleReadout, isActiveStatus } from '../lib/conversationStatus'
 
 // Fleet — the sandbox-fleet administration console (TFAC-589). Operator-gated,
 // EE-licensed (FeatureFleet). A DB-backed live view over the instances registry,
@@ -759,6 +759,7 @@ function SandboxRow({ claim, now }: { claim: FleetSandboxClaim; now: number }) {
   const [open, setOpen] = useState(false)
   const cores = claim.cpu_usec != null ? averageCores(claim.cpu_usec, claim.duration_seconds) : null
   const idle = claim.live ? claimIdleReadout(claim.last_activity_at, claim.current_op, now) : null
+  const checkpoint = claim.live ? claimCheckpointReadout(claim.last_checkpoint_at, now) : null
   return (
     <tbody className="border-t border-line-1/40">
       <tr className="hover:bg-raised/30">
@@ -788,6 +789,9 @@ function SandboxRow({ claim, now }: { claim: FleetSandboxClaim; now: number }) {
         <td className="whitespace-nowrap py-1.5 pr-3 text-right align-top text-ink-2">
           {idle ?? '—'}
         </td>
+        <td className="whitespace-nowrap py-1.5 pr-3 text-right align-top text-ink-2">
+          {checkpoint ?? '—'}
+        </td>
         <td className="py-1.5 pr-3 text-right align-top text-ink-2">{fmtMem(claim.peak_mem_mb)}</td>
         <td className="py-1.5 pr-3 text-right align-top text-ink-2">
           {claim.cpu_usec != null ? `${coreMinutes(claim.cpu_usec).toFixed(2)}` : '—'}
@@ -798,7 +802,7 @@ function SandboxRow({ claim, now }: { claim: FleetSandboxClaim; now: number }) {
       </tr>
       {open && (
         <tr>
-          <td colSpan={9} className="pb-3 pl-6 pr-2">
+          <td colSpan={10} className="pb-3 pl-6 pr-2">
             <SandboxSeries claim={claim} />
           </td>
         </tr>
@@ -844,14 +848,15 @@ function SandboxBreakdown({ instanceId }: { instanceId: string }) {
                   <th className="py-1 pr-3 font-normal">state</th>
                   <th className="py-1 pr-3 text-right font-normal">duration</th>
                   <th className="py-1 pr-3 text-right font-normal">idle</th>
+                  <th className="py-1 pr-3 text-right font-normal">checkpoint</th>
                   <th className="py-1 pr-3 text-right font-normal">peak mem</th>
                   <th className="py-1 pr-3 text-right font-normal">core-min</th>
                   <th className="py-1 text-right font-normal">avg cores</th>
                 </tr>
               </thead>
-              {/* Idle is measured against the read's own generated_at, the
-                  server clock duration_seconds was taken on, not the
-                  browser's. */}
+              {/* Idle and checkpoint age are measured against the read's own
+                  generated_at, the server clock duration_seconds was taken
+                  on, not the browser's. */}
               {data.sandboxes.map((s) => (
                 <SandboxRow key={s.id} claim={s} now={Date.parse(data.generated_at)} />
               ))}

@@ -375,3 +375,16 @@ export function claimIdleReadout(
   const idle = formatDurationMs(Math.max(0, now - new Date(lastActivityAt).getTime()))
   return currentOp ? `${idle} · ${currentOp}` : idle
 }
+
+// claimCheckpointReadout — how long a claim's engagement has gone since its
+// workspace was last covered by a stored checkpoint: the work a hard kill of
+// its executor would lose. Null without a stamp — an engagement that does not
+// checkpoint, or one that has not renewed yet. Skew clamps to zero, and the
+// caller decides liveness, both as claimIdleReadout does.
+export function claimCheckpointReadout(
+  lastCheckpointAt: string | undefined,
+  now: number,
+): string | null {
+  if (!lastCheckpointAt) return null
+  return formatDurationMs(Math.max(0, now - new Date(lastCheckpointAt).getTime()))
+}

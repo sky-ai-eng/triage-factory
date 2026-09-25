@@ -23,6 +23,7 @@ type renewalRecord struct {
 	at                             time.Time
 	idle                           time.Duration
 	op                             string
+	checkpointAge                  *time.Duration
 }
 
 // fakeRenewalStore stands in for the conversation queue on the one verb the
@@ -50,9 +51,9 @@ type fakeRenewalStore struct {
 	stop *db.ClaimRenewal
 }
 
-func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
+func (f *fakeRenewalStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
 	f.mu.Lock()
-	f.calls = append(f.calls, renewalRecord{orgID, conversationID, claimID, lease, time.Now(), idle, op})
+	f.calls = append(f.calls, renewalRecord{orgID, conversationID, claimID, lease, time.Now(), activity.Idle, activity.Op, activity.CheckpointAge})
 	block, err, gate, stop := f.block, f.err, f.refuseAfter, f.stop
 	f.mu.Unlock()
 	if block != nil {

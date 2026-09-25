@@ -135,7 +135,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		conv := claim(t, f, conversationID)
 		f.SetLease(t, conv.ClaimID, time.Second)
 
-		got, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, "")
+		got, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{})
 		if err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
@@ -166,7 +166,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		t.Run("expired", func(t *testing.T) {
 			f.SetLease(t, conv.ClaimID, -time.Second)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew of an expired lease = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -179,7 +179,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			// Back to live so the refusal is the conversation and nothing else.
 			f.SetLease(t, conv.ClaimID, testClaimLease)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew naming another conversation = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -196,7 +196,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			if !ok {
 				t.Fatal("release cleared lease_expires_at; the row must keep recording when the lease would have lapsed")
 			}
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
 				t.Fatalf("renew of a released claim = %v, want ErrClaimReleased", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
@@ -304,7 +304,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		const idle = 40 * time.Second
-		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, idle, "tool:bash"); err != nil {
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{Idle: idle, Op: "tool:bash"}); err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
 		_, now, _ := f.Lease(t, conv.ClaimID)
@@ -330,7 +330,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("conversation claim activity = (%v, %q), want (%v, tool:bash)", cv.ClaimLastActivityAt, cv.ClaimCurrentOp, got.LastActivityAt)
 		}
 
-		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, 0, ""); err != nil {
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
 		_, now, _ = f.Lease(t, conv.ClaimID)
@@ -365,12 +365,12 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
 			t.Fatalf("OldestIdleClaimSystem before any renewal = (%s, %v), want (0s, nil)", d, err)
 		}
-		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, first, a.ClaimID, testClaimLease, 30*time.Second, ""); err != nil {
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, first, a.ClaimID, testClaimLease, db.ClaimActivity{Idle: 30 * time.Second}); err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
 		second, _ := f.StageStep(t)
 		b := claim(t, f, second)
-		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, second, b.ClaimID, testClaimLease, 5*time.Second, "provider"); err != nil {
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, second, b.ClaimID, testClaimLease, db.ClaimActivity{Idle: 5 * time.Second, Op: "provider"}); err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
 		d, err := q.OldestIdleClaimSystem(ctx)
@@ -401,6 +401,107 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
 			t.Errorf("OldestIdleClaimSystem after release = (%s, %v), want (0s, nil)", d, err)
+		}
+	})
+
+	t.Run("Renew_StampsTheCheckpointAgeAndClearsItWithNone", func(t *testing.T) {
+		// A checkpointing engagement reports how long its workspace has gone
+		// uncovered; the renewal stamps it back from database now, the way it
+		// stamps idle. An engagement that does not checkpoint reports none,
+		// which stamps NULL.
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+
+		minted, err := q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if err != nil || minted == nil {
+			t.Fatalf("ClaimByIDSystem = (%+v, %v)", minted, err)
+		}
+		if minted.LastCheckpointAt != nil {
+			t.Errorf("minted claim last_checkpoint_at = %v, want NULL until a renewal reports one", minted.LastCheckpointAt)
+		}
+
+		age := 90 * time.Second
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{CheckpointAge: &age}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		_, now, _ := f.Lease(t, conv.ClaimID)
+		got, err := q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if err != nil || got == nil {
+			t.Fatalf("ClaimByIDSystem = (%+v, %v)", got, err)
+		}
+		if got.LastCheckpointAt == nil {
+			t.Fatal("renewal left last_checkpoint_at NULL")
+		}
+		if drift := got.LastCheckpointAt.Sub(now.Add(-age)); drift > time.Second || drift < -time.Second {
+			t.Errorf("last_checkpoint_at = %s, want within 1s of database now - %s (drift %s)", got.LastCheckpointAt, age, drift)
+		}
+		if got.LastActivityAt == nil || now.Sub(*got.LastActivityAt) > time.Second {
+			t.Errorf("the checkpoint age must not move last_activity_at: %v", got.LastActivityAt)
+		}
+
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		got, _ = q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if got.LastCheckpointAt != nil {
+			t.Errorf("last_checkpoint_at after a renewal reporting none = %v, want NULL", got.LastCheckpointAt)
+		}
+	})
+
+	t.Run("OldestCheckpointAgeSystem_ReadsTheLongestLiveAge", func(t *testing.T) {
+		f := mk(t)
+		q := f.Stores.ConversationQueue
+		if d, err := q.OldestCheckpointAgeSystem(ctx); err != nil || d != 0 {
+			t.Fatalf("OldestCheckpointAgeSystem with no claims = (%s, %v), want (0s, nil)", d, err)
+		}
+
+		first, _ := f.StageStep(t)
+		a := claim(t, f, first)
+		second, _ := f.StageStep(t)
+		b := claim(t, f, second)
+		third, _ := f.StageStep(t)
+		c := claim(t, f, third)
+		long, short := 120*time.Second, 10*time.Second
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, first, a.ClaimID, testClaimLease, db.ClaimActivity{CheckpointAge: &long}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, second, b.ClaimID, testClaimLease, db.ClaimActivity{CheckpointAge: &short}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		// An engagement that does not checkpoint carries no stamp and is not
+		// read, however long it has been running.
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, third, c.ClaimID, testClaimLease, db.ClaimActivity{Idle: time.Hour}); err != nil {
+			t.Fatalf("RenewClaimLeaseSystem: %v", err)
+		}
+		d, err := q.OldestCheckpointAgeSystem(ctx)
+		if err != nil {
+			t.Fatalf("OldestCheckpointAgeSystem: %v", err)
+		}
+		if d < 119*time.Second || d > 125*time.Second {
+			t.Errorf("oldest checkpoint age = %s, want about 120s (the longer of the two that checkpoint)", d)
+		}
+
+		// An expired lease is not a live engagement.
+		f.SetLease(t, a.ClaimID, -time.Second)
+		d, err = q.OldestCheckpointAgeSystem(ctx)
+		if err != nil {
+			t.Fatalf("OldestCheckpointAgeSystem: %v", err)
+		}
+		if d < 9*time.Second || d > 15*time.Second {
+			t.Errorf("oldest checkpoint age with the 120s claim expired = %s, want about 10s", d)
+		}
+		f.SetLease(t, a.ClaimID, testClaimLease)
+
+		// Nor is a released one.
+		for _, id := range []string{first, second, third} {
+			if _, err := q.RequeueConversation(ctx, f.OrgID, id, db.RequeueSetupFailure, "transient"); err != nil {
+				t.Fatalf("RequeueConversation: %v", err)
+			}
+		}
+		if d, err := q.OldestCheckpointAgeSystem(ctx); err != nil || d != 0 {
+			t.Errorf("OldestCheckpointAgeSystem after release = (%s, %v), want (0s, nil)", d, err)
 		}
 	})
 

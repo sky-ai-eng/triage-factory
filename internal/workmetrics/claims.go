@@ -10,15 +10,17 @@ import (
 
 // ExpiredClaimSource is what the claim observer needs: the store read that
 // counts live claims past their expiry deployment-wide and says how far past
-// expiry the oldest is, and the one that says how long the idlest live
-// engagement has gone without activity. db.ConversationQueueStore satisfies
-// it.
+// expiry the oldest is, the one that says how long the idlest live engagement
+// has gone without activity, and the one that says how long the longest-
+// uncheckpointed one has gone without its workspace being stored.
+// db.ConversationQueueStore satisfies it.
 //
 // The narrow interface is what keeps this package off the store bundle, the
 // same reason DepthSource is narrow.
 type ExpiredClaimSource interface {
 	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
 	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
+	OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error)
 }
 
 // ClaimObserver measures expired claims on a ticker and reports the result
@@ -36,10 +38,13 @@ type ClaimObserver struct {
 	oldest  time.Duration
 	reg     metric.Registration
 	sampled bool
-	// idle is sampled on its own: the two reads fail independently, and a
-	// failure of one must not withhold the other's fresh value.
-	idle        time.Duration
-	idleSampled bool
+	// idle and checkpointAge are each sampled on their own: the reads fail
+	// independently, and a failure of one must not withhold another's fresh
+	// value.
+	idle                 time.Duration
+	idleSampled          bool
+	checkpointAge        time.Duration
+	checkpointAgeSampled bool
 }
 
 // NewClaimObserver creates the gauges against a provider and registers the
@@ -70,6 +75,13 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		return c
 	}
 
+	checkpointAge, err := m.Int64ObservableGauge("claims.oldest_checkpoint_age",
+		metric.WithDescription("Seconds since the live engagement longest without one last had its workspace covered by a stored checkpoint: the work a hard kill would lose now."), metric.WithUnit("s"))
+	if err != nil {
+		log.Error("claim gauge setup failed", "instrument", "claims.oldest_checkpoint_age", "error", err)
+		return c
+	}
+
 	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -84,8 +96,11 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		if c.idleSampled {
 			o.ObserveInt64(idle, int64(c.idle.Seconds()))
 		}
+		if c.checkpointAgeSampled {
+			o.ObserveInt64(checkpointAge, int64(c.checkpointAge.Seconds()))
+		}
 		return nil
-	}, expired, oldest, idle)
+	}, expired, oldest, idle, checkpointAge)
 	if err != nil {
 		log.Error("claim gauge callback registration failed", "error", err)
 		return c
@@ -129,6 +144,13 @@ func (c *ClaimObserver) Tick(ctx context.Context) {
 	} else {
 		c.mu.Lock()
 		c.idle, c.idleSampled = idle, true
+		c.mu.Unlock()
+	}
+	if age, err := c.src.OldestCheckpointAgeSystem(ctx); err != nil {
+		log.Error("checkpoint-age measure failed; keeping the previous value", "error", err)
+	} else {
+		c.mu.Lock()
+		c.checkpointAge, c.checkpointAgeSampled = age, true
 		c.mu.Unlock()
 	}
 }

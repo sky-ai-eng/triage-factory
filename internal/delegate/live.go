@@ -446,7 +446,7 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 // out, which threw away the one thing a user who just killed a wedged run is
 // likely to want back. A stop is a park with a reason attached.
 func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
-	if s.leaveConversation(ctx, park, sessionID, s.markConversationOpen) {
+	if s.leaveConversation(ctx, park, sessionID, snapshotReasonPark, s.markConversationOpen) {
 		return true
 	}
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
@@ -470,15 +470,20 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 // Parking instead would record a stop nobody made, and a parked conversation
 // waits for a message nobody is going to send.
 func (s *Spawner) handBackOnShutdown(ctx context.Context, park liveParkContext, sessionID string) (fenced bool) {
-	return s.leaveConversation(ctx, park, sessionID, s.releaseClaimOnShutdown)
+	return s.leaveConversation(ctx, park, sessionID, snapshotReasonShutdown, s.releaseClaimOnShutdown)
 }
 
 // leaveConversation is the ordered ending both of the above share, and
 // release is the one step where they differ: the write that lets go of the
 // claim. It returns release's answer — fenced when the engagement no longer
 // held the claim, so nothing was written and the caller must not act on the
-// conversation's state.
-func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, sessionID string, release func(context.Context, liveParkContext) bool) (fenced bool) {
+// conversation's state. reason names the ending on the snapshot's span.
+//
+// A native engagement's checkpointer has already been stopped and joined by
+// the time this runs (recordNativeResult does it first): its record writes and
+// its upload are the same writer to the key as the snapshot below, and one
+// still in flight would close this ending's record or overwrite its blob.
+func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, sessionID, reason string, release func(context.Context, liveParkContext) bool) (fenced bool) {
 	// Before anything else this ending writes: the agent's memory file, one
 	// last time. It is an ending the agent may have written right up to, and
 	// the snapshot below is not a substitute — it puts the file where only an
@@ -526,7 +531,10 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	fenced = release(ctx, park)
 
 	if willSnapshot {
-		if err := s.persistWorkspaceSnapshot(snapCtx, park.orgID, park.conversationID, park.namespace, park.claimID, park.claudeCwd, sessionID, park.runtime, leaseHeld); err != nil {
+		if err := s.persistWorkspaceSnapshot(snapCtx, snapshotWrite{
+			orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
+			wtPath: park.claudeCwd, sessionID: sessionID, runtime: park.runtime, reason: reason,
+		}, leaseHeld); err != nil {
 			delegateLog.Warn("snapshot workspace on leaving the conversation failed", "conversation", park.conversationID, "error", err)
 		}
 	}

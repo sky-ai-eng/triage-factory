@@ -116,12 +116,57 @@ Two things to set alongside it:
   their turn end), wait for `active_runs` on its healthz to reach 0, then stop
   it.
 
-An executor that dies without SIGTERM (SIGKILL, a lost node) hands nothing
-back. Its claims are taken over once their 75s leases lapse, each counted as a
-lost engagement, and the workspace comes back from the last snapshot taken
-before the loss, or from what was pushed to the remote if there is none. The
-transcript is intact either way, so the agent continues from where it was and
-is told what its workspace lost.
+An executor that dies without SIGTERM (SIGKILL, an OOM kill, a lost node)
+hands nothing back. Its claims are taken over once their 75s leases lapse, each
+counted as a lost engagement, and the workspace comes back from the last
+snapshot taken before the loss — usually a workspace checkpoint (below) — or
+from what was pushed to the remote if there is none. The transcript is intact
+either way, so the agent continues from where it was and is told what its
+workspace lost: after a checkpoint, the notice names the tool calls that came
+after it.
+
+## Workspace checkpoints
+
+A running native engagement snapshots its workspace to the blob store every
+`TF_SNAPSHOT_INTERVAL_SEC` (default 300), so a hard kill loses at most that
+interval plus the tool call that was running. A checkpoint is taken only at a
+tool-batch boundary, and only when a tool has run since the last one:
+
+- **When.** Once a batch of tool calls has every result recorded and the
+  interval has passed since the last checkpoint started, the executor reads the
+  tree while the model works out its next call. If the model answers first,
+  its next tool call waits for the read to finish; it never waits for the
+  upload. A checkpoint is never taken during a tool call, which can run for up
+  to 30 minutes, so the worst case is the interval plus the longest tool call.
+- **What it costs.** The same blob a park writes, overwriting the one before
+  it: one blob per task, so storage stays flat and the cost is upload bandwidth
+  and executor CPU. A tree unchanged since the last checkpoint (the agent only
+  read files) costs one git capture and uploads nothing. At most two
+  checkpoints capture at once per executor; one that finds no slot, or finds
+  its engagement's previous checkpoint still uploading, is skipped until the
+  next boundary.
+- **What it misses.** Background processes the agent started can still be
+  writing while the tree is read, so their files can be captured part-way,
+  exactly as they would be at a park. Anything outside the workspace (a push, a
+  comment) is not in the tree at all; the restored agent is told to verify
+  those before repeating them.
+- **Turning it off.** `TF_SNAPSHOT_INTERVAL_SEC=0` disables checkpoints; hard
+  kills then fall back to the last park or step boundary. Local mode never
+  checkpoints: its workspace is on the executor's own disk and survives a
+  process crash.
+
+`tf_claims_oldest_checkpoint_age_seconds` is the workspace at risk right now,
+and `tf_workspace_checkpoints_total{outcome}` counts what checkpoints came to
+(see [Monitoring](monitoring.md#claims)). The fleet console's claim
+table shows each live claim's checkpoint age beside its idle time.
+
+An upload killed part-way through leaves the previous blob in place, since
+neither the filesystem store (write then rename) nor an object store (a
+multipart upload, visible only when completed) exposes a partial one. What the
+object store does keep is the **incomplete multipart upload**, which is billed
+and never cleaned up on its own. Give the snapshot bucket a lifecycle rule that
+aborts incomplete multipart uploads after a day or so (on S3,
+`AbortIncompleteMultipartUpload`; SeaweedFS and MinIO have equivalents).
 
 Control pods claim nothing, so none of this applies to them: they shut down on
 their HTTP server's own graceful drain.
