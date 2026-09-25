@@ -3,11 +3,11 @@ package delegate
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
 )
 
 // DefaultClaimRenewInterval, DefaultClaimSelfFenceDeadline and
@@ -152,10 +152,12 @@ func renewalCallTimeout(cadence time.Duration) time.Duration {
 // can only make the watchdog fire early and never late. Every later re-arm
 // takes the same posture, anchoring on the renewal's issue time.
 //
-// fence is the claim context's cancel. Nothing else holds it: cancelling it
-// cancels the engagement's step context, which is exactly what a stop does —
-// the runtime returns, the sidecar and jail are torn down on the way out, the
-// subprocess is killed. Killing the cell needs nothing new.
+// claimCtx is the claim context and fence its cancel. Nothing else holds the
+// cancel: cancelling it cancels the engagement's step context, which is
+// exactly what a stop does — the runtime returns, the sidecar and jail are
+// torn down on the way out, the subprocess is killed. Killing the cell needs
+// nothing new. The loop reads claimCtx only to see whether it was already
+// fenced by its lease, which no recovery may undo.
 //
 // A renewal that reads a pending stop cancels the claim context with
 // errStopRequested and keeps renewing: the engagement settles the stop through
@@ -163,27 +165,23 @@ func renewalCallTimeout(cadence time.Duration) time.Duration {
 // lands. ctx is not the claim context, so a stop does not end this loop; a
 // fired watchdog does.
 //
+// A renewal refused because the lease lapsed is not always the end. The loop
+// registers its lease on the spawner and, like every fenced write, asks
+// recoverClaimLease whether the lapse was a system suspend it can take the
+// claim back from; only when the answer is no does it fence. It also reads
+// the suspend clock every suspendPollInterval and renews at once when the
+// reading has moved, so a woken engagement takes its claim back within a
+// second of wake rather than at its next tick.
+//
 // The loop stops when the engagement returns, so a renewal can be in flight
 // at the moment the engagement's own terminal write releases the claim. That
 // renewal is then refused, logged as a lost lease, and fences a context
 // nothing is using any more. It is accurate — the lease really is gone — and
 // harmless, so it is not special-cased.
-func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation, anchor time.Time, fence context.CancelCauseFunc) {
+func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation, anchor time.Time, claimCtx context.Context, fence context.CancelCauseFunc) {
 	cadence := s.claimRenewIntervalOrDefault()
 	deadline := s.claimSelfFenceDeadlineOrDefault()
 	lease := s.claimLeaseOrDefault()
-
-	// lastRenewal is the issue time of the most recent renewal the database
-	// accepted, and the watchdog below decides on it rather than on having
-	// been rescheduled. Reset cannot unschedule a callback the runtime has
-	// already dispatched — that is what its false return means, by which
-	// point the callback may be running — so a renewal that succeeds right at
-	// the deadline would otherwise fence a healthy engagement that still owns
-	// its claim. A pointer, not a unix count: the monotonic reading has to
-	// survive the round trip or the comparison is at the mercy of the wall
-	// clock.
-	var lastRenewal atomic.Pointer[time.Time]
-	lastRenewal.Store(&anchor)
 
 	// A fired watchdog is terminal for this holder, so it ends the loop as
 	// well as the engagement. A renewal that kept going would extend the
@@ -193,31 +191,76 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 	ctx, stopRenewing := context.WithCancel(ctx)
 	defer stopRenewing()
 
+	// st.lastRenewal is the issue time of the most recent renewal the
+	// database accepted, and the watchdog below decides on it rather than on
+	// having been rescheduled. Reset cannot unschedule a callback the runtime
+	// has already dispatched — that is what its false return means, by which
+	// point the callback may be running — so a renewal that succeeds right at
+	// the deadline would otherwise fence a healthy engagement that still owns
+	// its claim.
+	st := newClaimLeaseState(conv, anchor, claimCtx, fence, deadline, lease, renewalCallTimeout(cadence))
+
 	// A separate timer rather than a second case in the select below, and
 	// rather than a check inside the loop body: a renewal call that blocks
 	// past its own deadline — a driver that ignores its context, a
 	// black-holed connection — would starve any check sharing this
 	// goroutine, and that is precisely the failure the fence exists for. The
 	// runtime's timer fires regardless of what this goroutine is doing.
-	watchdog := time.AfterFunc(time.Until(anchor.Add(deadline)), func() {
-		if elapsed := time.Since(*lastRenewal.Load()); elapsed < deadline {
+	//
+	// It runs on the monotonic clock, which a system suspend stops, so a
+	// sleep does not fire it; the lapse a suspend causes is met by the
+	// refusal and recovered from there.
+	st.watchdog = time.AfterFunc(time.Until(anchor.Add(deadline)), func() {
+		if elapsed := time.Since(*st.lastRenewal.Load()); elapsed < deadline {
 			return
 		}
 		dispatchLog.Warn("claim lease could not be renewed within the self-fence deadline; fencing this engagement",
 			"conversation", conv.ID, "claim", conv.ClaimID, "deadline", deadline)
-		fence(errClaimSelfFenced)
+		st.fenceWith(errClaimSelfFenced)
 		stopRenewing()
 	})
-	defer watchdog.Stop()
+	defer st.stopWatchdog()
+	s.registerClaimLease(st)
+	defer s.deregisterClaimLease(st)
+
+	// The suspend poll. A platform that cannot report suspended time gets no
+	// poll at all, and the loop is exactly its cadence.
+	var suspendTick <-chan time.Time
+	lastSeen, canSee := suspendclock.Suspended()
+	if canSee {
+		t := time.NewTicker(suspendPollInterval)
+		defer t.Stop()
+		suspendTick = t.C
+	}
 
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
 	stopObserved := false
+	observeStop := func(renewal db.ClaimRenewal) {
+		if renewal.StopRequested && !stopObserved {
+			stopObserved = true
+			dispatchLog.Info("claim renewal observed a pending stop; stopping this engagement",
+				"conversation", conv.ID, "claim", conv.ClaimID, "requested_by", renewal.StopRequestedBy)
+			fence(errStopRequested)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-suspendTick:
+			seen, ok := suspendclock.Suspended()
+			if !ok {
+				continue
+			}
+			slept := seen - lastSeen
+			lastSeen = seen
+			if slept < suspendThreshold {
+				continue
+			}
+			dispatchLog.Info("system suspend observed; renewing the claim lease now",
+				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
 		}
 		// A select with both cases ready picks either; a tick buffered while
 		// the previous call blocked must not outvote the stop.
@@ -227,8 +270,12 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 
 		// Issue time, not response time: time.Since on it can only
 		// over-count the elapsed window, never under-count it, which is the
-		// direction a self-fence deadline has to err in.
+		// direction a self-fence deadline has to err in. The suspend reading
+		// is taken at the same instant, so a sleep that starts while the call
+		// is out counts against the base this renewal sets.
 		issuedAt := time.Now()
+		suspended, suspendOK := suspendclock.Suspended()
+		reacquired := st.reacquired.Load()
 		// The engagement's activity rides the renewal, so the claim row shows
 		// how long it has been idle and what it is waiting on without a
 		// second write. A conversation with no tracker reports none.
@@ -239,27 +286,28 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 
 		switch {
 		case err == nil:
-			// Published BEFORE the re-arm, so a callback dispatched in
-			// between reads this renewal and stands down rather than fencing
-			// on the deadline it was armed for.
-			lastRenewal.Store(&issuedAt)
-			// Re-arm from the issue time, so the network delay this call
-			// already spent counts against the next deadline.
-			watchdog.Reset(deadline - time.Since(issuedAt))
+			st.accepted(issuedAt, suspended, suspendOK)
 			dispatchLog.Debug("claim lease renewed", "conversation", conv.ID, "claim", conv.ClaimID, "expires_at", renewal.ExpiresAt)
-			if renewal.StopRequested && !stopObserved {
-				stopObserved = true
-				dispatchLog.Info("claim renewal observed a pending stop; stopping this engagement",
-					"conversation", conv.ID, "claim", conv.ClaimID, "requested_by", renewal.StopRequestedBy)
-				fence(errStopRequested)
+			observeStop(renewal)
+		case errors.Is(err, db.ErrClaimLeaseExpired):
+			if taken, ok := s.recoverClaimLease(ctx, st, reacquired); ok {
+				observeStop(taken)
+				continue
 			}
+			if st.fenced.Load() {
+				// The recovery tried, failed, and fenced; it said why.
+				return
+			}
+			dispatchLog.Info("claim lease lapsed; fencing this engagement",
+				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
+			st.fenceWith(errClaimLeaseLost)
+			return
 		case errors.Is(err, db.ErrClaimReleased):
-			// Definite: the lease is gone on database time. A retry cannot
-			// bring authority back, and there may be no successor at all —
-			// expiry alone ends ownership.
+			// Definite: the claim is gone on database time. A retry cannot
+			// bring authority back, and there may be no successor at all.
 			dispatchLog.Info("claim lease lost; fencing this engagement",
 				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
-			fence(errClaimLeaseLost)
+			st.fenceWith(errClaimLeaseLost)
 			return
 		case ctx.Err() != nil:
 			return

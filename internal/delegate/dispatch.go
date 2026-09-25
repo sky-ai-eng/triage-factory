@@ -529,7 +529,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	if s.conversationQueue != nil && conv.ClaimID != "" {
 		leaseCtx, stopLease := context.WithCancel(ctx)
 		defer stopLease()
-		go s.renewClaimLease(leaseCtx, conv, claimedAt, claimFence)
+		go s.renewClaimLease(leaseCtx, conv, claimedAt, claimCtx, claimFence)
 	}
 
 	// The loss budget, ahead of every gate: a conversation whose engagements

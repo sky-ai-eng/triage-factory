@@ -124,7 +124,10 @@ func TestRenewClaimLease_RenewsAtTheCadence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan struct{})
-	go func() { defer close(done); s.renewClaimLease(ctx, conv, time.Now(), func(error) {}) }()
+	go func() {
+		defer close(done)
+		s.renewClaimLease(ctx, conv, time.Now(), context.Background(), func(error) {})
+	}()
 
 	deadline := time.After(5 * time.Second)
 	for len(fake.seen()) < 3 {
@@ -157,7 +160,7 @@ func TestRenewClaimLease_LostLeaseFencesOnce(t *testing.T) {
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
 	done := make(chan struct{})
-	go func() { defer close(done); s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), cancel) }()
+	go func() { defer close(done); s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), ctx, cancel) }()
 
 	select {
 	case <-done:
@@ -187,7 +190,7 @@ func TestRenewClaimLease_WatchdogFiresThroughABlockedCall(t *testing.T) {
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	go s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), cancel)
+	go s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), ctx, cancel)
 
 	select {
 	case <-ctx.Done():
@@ -216,7 +219,7 @@ func TestRenewClaimLease_SelfFenceEndsTheLoop(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.renewClaimLease(context.Background(), leaseTestConversation(), time.Now(), cancel)
+		s.renewClaimLease(context.Background(), leaseTestConversation(), time.Now(), ctx, cancel)
 	}()
 
 	select {
@@ -262,7 +265,7 @@ func TestRenewClaimLease_KeepsRenewingPastTheLease(t *testing.T) {
 
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	go s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), cancel)
+	go s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), ctx, cancel)
 
 	select {
 	case <-ctx.Done():
@@ -289,7 +292,7 @@ func TestRenewClaimLease_StopsWithTheEngagement(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), func(err error) { fenced <- err })
+		s.renewClaimLease(ctx, leaseTestConversation(), time.Now(), context.Background(), func(err error) { fenced <- err })
 	}()
 
 	for len(fake.seen()) == 0 {
@@ -401,7 +404,10 @@ func TestRenewClaimLease_PendingStopCancelsAndKeepsRenewing(t *testing.T) {
 	defer fence(nil)
 	loopCtx, stopLoop := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); s.renewClaimLease(loopCtx, leaseTestConversation(), time.Now(), fence) }()
+	go func() {
+		defer close(done)
+		s.renewClaimLease(loopCtx, leaseTestConversation(), time.Now(), claimCtx, fence)
+	}()
 
 	select {
 	case <-claimCtx.Done():

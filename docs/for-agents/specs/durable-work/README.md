@@ -501,6 +501,18 @@ A paused process can miss its cleanup deadline. Database generation and expiry c
 reject its writes. Test a paused holder returning after takeover. External requests already in
 flight remain outside this contract (§3).
 
+A whole-system suspend (laptop sleep, `systemctl suspend`, hibernate) is the one pause a claim
+holder may recover from. The monotonic clock the watchdog runs on stops while the machine sleeps,
+so the watchdog does not fire, but the lease lapses on database time. On wake, a fenced write or
+renewal refused on the lapsed lease re-acquires the claim when `internal/suspendclock` measured a
+suspend since the last accepted renewal, that renewal is younger than the self-fence deadline on
+the monotonic clock, and the holder has not fenced itself. The re-acquire is a compare-and-set on
+the claim being unreleased and minted by the holder's own executor boot, which is proof no
+successor exists: every release is guarded on expiry or a dead boot, and a mint requires the prior
+claim released. A claim taken over during the suspend refuses the re-acquire and the holder fences
+as above. A stopped process (SIGSTOP) is not a suspend: its monotonic clock kept running, so it
+fails the deadline condition and is refused like any other paused holder.
+
 #### Run health
 
 Healthy runs have no automatic total-duration limit. Claim age alone must not stop a run; this

@@ -13,6 +13,10 @@ import (
 // claim must still be live and must be the one holding this conversation, or
 // the engagement write behind it is refused with db.ErrClaimReleased.
 //
+// An unreleased claim whose lease lapsed is refused as db.ErrClaimLeaseExpired,
+// which is still db.ErrClaimReleased to every caller that asks only that; the
+// suspend recovery is the one caller that tells them apart.
+//
 // Live means unreleased AND holding an unexpired lease. Authority is a lease
 // on database time, renewed by the holder on a timer; a holder that cannot
 // renew fences its own engagement before the lease lapses, and every write it
@@ -47,15 +51,40 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 	if claimID == "" {
 		return fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
 	}
-	var one int
+	return claimRefusal(ctx, q, orgID, conversationID, claimID)
+}
+
+// claimRefusal reads the named claim's state and answers whether a holder
+// write against it would be refused: nil while it is live,
+// db.ErrClaimReleased when there is no such claim on the conversation (org
+// joined as the fence joins it) or it is released, and
+// db.ErrClaimLeaseExpired when it is unreleased with a lapsed lease. It is
+// the Postgres twin's classification, and answers identically.
+//
+// "live" is exactly the guard every holder write and the renewal test, so the
+// classification never passes a claim the guard would refuse. This schema
+// cannot carry the live-has-lease CHECK, so an unreleased claim with no lease
+// is possible in principle; it reads as released, which never recovers,
+// rather than expired, which might.
+func claimRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+	var state string
 	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM claims cl
+		SELECT CASE
+		         WHEN cl.released_at IS NULL AND cl.lease_expires_at > `+sqliteNowExpr+` THEN 'live'
+		         WHEN cl.released_at IS NULL AND cl.lease_expires_at IS NOT NULL THEN 'expired'
+		         ELSE 'released'
+		       END
+		FROM claims cl
 		JOIN conversations c ON c.id = cl.conversation_id AND c.org_id = cl.org_id
 		WHERE cl.id = ? AND cl.org_id = ? AND cl.conversation_id = ?
-		  AND cl.released_at IS NULL AND cl.lease_expires_at > `+sqliteNowExpr+`
-	`, claimID, orgID, conversationID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
+	`, claimID, orgID, conversationID).Scan(&state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) || (err == nil && state == "released"):
 		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+	case err != nil:
+		return err
+	case state == "expired":
+		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimLeaseExpired, claimID, conversationID)
 	}
-	return err
+	return nil
 }

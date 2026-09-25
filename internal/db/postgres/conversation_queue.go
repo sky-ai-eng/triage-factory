@@ -589,8 +589,11 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// written here is measured from the very instant the guard tested.
 	//
 	// The guard's expiry term is what makes a late renewal terminal: an
-	// already-lapsed lease matches nothing, and the caller gets the same
-	// ErrClaimReleased a released claim gives. Authority does not come back.
+	// already-lapsed lease matches nothing, and the caller gets
+	// ErrClaimLeaseExpired, which is the ErrClaimReleased a released claim
+	// gives to every caller that asks only that. Authority does not come back
+	// through the renewal; ReacquireClaimLeaseSystem is a separate verb with
+	// its own proof obligation.
 	//
 	// last_activity_at is measured back from the same statement_timestamp()
 	// the lease is measured forward from, so the idle the executor read on its
@@ -609,10 +612,60 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
 	`, lease.Seconds(), claimID, orgID, conversationID, idle.Seconds(), op).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
 	}
 	if err != nil {
 		return db.ClaimRenewal{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
+	}
+	return out, nil
+}
+
+// renewalRefusal classifies a renewal its guard refused, with one follow-up
+// read of the claim. It runs only on the refusal path, so the renewal itself
+// stays the one guarded statement it has to be.
+//
+// A claim the follow-up finds live was restored between the two statements,
+// and the only write that takes an unreleased claim from lapsed to live is
+// ReacquireClaimLeaseSystem: the refusal this renewal met was still the lapse.
+// A follow-up that fails answers the unclassified refusal, which is what every
+// caller treated a refusal as before the lapse had its own name.
+func renewalRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+	err := claimRefusal(ctx, q, orgID, conversationID, claimID, "")
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimLeaseExpired, claimID, conversationID)
+	case errors.Is(err, db.ErrClaimReleased):
+		return err
+	}
+	return fmt.Errorf("%w: claim %s on conversation %s (classifying the refusal failed: %v)", db.ErrClaimReleased, claimID, conversationID, err)
+}
+
+// ReacquireClaimLeaseSystem is the renewal's statement with the expiry term
+// dropped from the guard and the owner terms added. The row lock the UPDATE
+// takes is what serializes it against the takeover, whose CTE locks the
+// expired rows it releases: whichever commits first decides, and the other
+// re-reads a row that no longer matches it. The activity columns are left to
+// the next renewal, which the caller makes within one cadence.
+func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64, lease time.Duration) (db.ClaimRenewal, error) {
+	if claimID == "" || !isValidUUID(claimID) || !isValidUUID(conversationID) {
+		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
+	var out db.ClaimRenewal
+	err := s.conn.QueryRowContext(ctx, `
+		UPDATE claims
+		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1)
+		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
+		  AND executor_id = $5 AND boot_epoch = $6
+		  AND released_at IS NULL
+		RETURNING lease_expires_at,
+		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
+		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
+	`, lease.Seconds(), claimID, orgID, conversationID, executorID, bootEpoch).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+	}
+	if err != nil {
+		return db.ClaimRenewal{}, wrapAdminPoolPermErr(err, "conversation_queue.ReacquireClaimLeaseSystem")
 	}
 	return out, nil
 }

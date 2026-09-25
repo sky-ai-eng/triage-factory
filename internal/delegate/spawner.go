@@ -479,6 +479,11 @@ type Spawner struct {
 	claimRenewInterval     time.Duration
 	claimSelfFenceDeadline time.Duration
 	claimLease             time.Duration
+	// claimLeases is every running engagement's lease, keyed by claim id and
+	// registered by its renewal loop for the loop's lifetime. It is what a
+	// fenced write refused on a lapsed lease consults (see
+	// leaseRecoveringConversations). Guarded by mu.
+	claimLeases map[string]*claimLeaseState
 	// maxClaimLosses is the loss budget, TF_MAX_CLAIM_ATTEMPTS: how many
 	// engagements of one conversation may be lost in a row before its next
 	// claim fails it. Zero (the NewSpawner default) falls back to
@@ -574,7 +579,6 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		conversationQueue:     stores.ConversationQueue,
 		claimCredentials:      stores.ClaimCredentials,
 		tasks:                 stores.Tasks,
-		conversations:         stores.Conversations,
 		entities:              stores.Entities,
 		artifacts:             stores.Artifacts,
 		stagedInjections:      stores.StagedInjections,
@@ -601,6 +605,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		cancels:               make(map[string]context.CancelFunc),
 		engagements:           make(map[string]*engagement),
 		activity:              make(map[string]*activityTracker),
+		claimLeases:           make(map[string]*claimLeaseState),
 		dispatchWake:          make(chan struct{}, 1),
 		procs:                 make(map[string]*liveRunHandle),
 		permPending:           make(map[string]*pendingPermission),
@@ -610,6 +615,13 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		memAvailMB:            hostmem.AvailableMB,
 	}
 	s.controller = inProcessController{s: s}
+	// Every engagement write goes through s.conversations, from both runtimes,
+	// so wrapping the handle here is what routes each claim-fenced write's
+	// lapsed-lease refusal through the suspend recovery. A nil store stays nil:
+	// callers test for it.
+	if stores.Conversations != nil {
+		s.conversations = &leaseRecoveringConversations{ConversationStore: stores.Conversations, s: s}
+	}
 	// Report capacity by default (executor/all); a pure-control pod flips
 	// this off via SetReportCapacity so its registry row carries no
 	// misleading dispatcher-capacity numbers.

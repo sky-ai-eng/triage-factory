@@ -931,8 +931,9 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// One statement, guard and write together: splitting them would open a
 	// window in which an expired lease renews. The guard's expiry term is what
 	// makes a late renewal terminal — an already-lapsed lease matches nothing
-	// and the caller gets the same ErrClaimReleased a released claim gives.
-	// Authority does not come back.
+	// and the caller gets ErrClaimLeaseExpired, which is ErrClaimReleased to
+	// every caller that asks only that. Authority does not come back through
+	// the renewal; ReacquireClaimLeaseSystem is a separate verb.
 	//
 	// Both sides of the comparison are strftime-rendered text in the layout
 	// the column stores, so the `>` is one layout against itself.
@@ -952,6 +953,53 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
 	`, sqliteLeaseModifier(lease), sqliteLeaseModifier(-idle), op, claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
+	}
+	if err != nil {
+		return db.ClaimRenewal{}, err
+	}
+	return out, nil
+}
+
+// renewalRefusal is the Postgres twin's classification of a refused renewal,
+// by the same follow-up read and with the same two edge answers: a claim
+// found live was restored by a re-acquire between the statements, so the
+// refusal was the lapse; a follow-up that fails answers the unclassified
+// refusal.
+func renewalRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+	err := claimRefusal(ctx, q, orgID, conversationID, claimID)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimLeaseExpired, claimID, conversationID)
+	case errors.Is(err, db.ErrClaimReleased):
+		return err
+	}
+	return fmt.Errorf("%w: claim %s on conversation %s (classifying the refusal failed: %v)", db.ErrClaimReleased, claimID, conversationID, err)
+}
+
+// ReacquireClaimLeaseSystem is the renewal's statement with the expiry term
+// dropped from the guard and the owner terms added. One statement is one
+// write transaction, and SQLite admits one writer at a time, so it serializes
+// against every release on the file with nothing for a row lock to add.
+func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64, lease time.Duration) (db.ClaimRenewal, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return db.ClaimRenewal{}, err
+	}
+	if claimID == "" {
+		return db.ClaimRenewal{}, fmt.Errorf("%w: no claim id supplied", db.ErrClaimReleased)
+	}
+	var out db.ClaimRenewal
+	err := s.conn.QueryRowContext(ctx, `
+		UPDATE claims
+		SET lease_expires_at = `+sqliteNowPlusExpr+`
+		WHERE id = ? AND org_id = ? AND conversation_id = ?
+		  AND executor_id = ? AND boot_epoch = ?
+		  AND released_at IS NULL
+		RETURNING lease_expires_at,
+		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
+		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
+	`, sqliteLeaseModifier(lease), claimID, orgID, conversationID, executorID, bootEpoch).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ClaimRenewal{}, fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 	}

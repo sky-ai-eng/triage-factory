@@ -272,6 +272,9 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.ConversationQueue.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimed.ClaimID, db.DefaultClaimLease, 0, ""); err != nil {
 			t.Errorf("ConversationQueue.RenewClaimLeaseSystem: %v", err)
 		}
+		if _, err := stores.ConversationQueue.ReacquireClaimLeaseSystem(ctx, orgID, conversationID, claimed.ClaimID, executorID, 1, db.DefaultClaimLease); err != nil {
+			t.Errorf("ConversationQueue.ReacquireClaimLeaseSystem: %v", err)
+		}
 		if _, err := stores.ConversationQueue.ExpiredClaimsOfExecutorSystem(ctx, executorID, 1); err != nil {
 			t.Errorf("ConversationQueue.ExpiredClaimsOfExecutorSystem: %v", err)
 		}
