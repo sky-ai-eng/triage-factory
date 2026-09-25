@@ -46,6 +46,11 @@ func (a *App) openStores(ctx context.Context) error {
 		// start and idle cleanly with zero tenant rows.
 		a.database = database
 		a.stores = sqlitestore.New(database)
+		// Nothing a previous local boot ran can outlive it: the bubblewrap
+		// jail runs with --die-with-parent and the SDK process group dies
+		// with its parent, so there are no cells to confirm and the boot
+		// reset may release that boot's claims at once.
+		a.cellsConfirmedClean = true
 
 	case runmode.ModeMulti:
 		// Multi-mode boot wires two Postgres pools against the same
@@ -153,7 +158,10 @@ func (a *App) openStores(ctx context.Context) error {
 
 		// Best-effort startup cleanup of orphaned sandboxes from a prior
 		// hard-crashed TF process. Never fatal — failure here just means
-		// orphaned resources stick around until the next boot.
+		// orphaned resources stick around until the next boot. Its result is
+		// also what the dispatcher's boot reset is gated on: a prior boot's
+		// claims are released at once only when its cells are confirmed gone,
+		// and otherwise lapse and are taken over after their lease.
 		//
 		// Skipped on a control pod: it never launches a sandbox, so it has
 		// nothing of its own to reap, and it holds no broker to route the
@@ -163,7 +171,9 @@ func (a *App) openStores(ctx context.Context) error {
 		// iptables) and die with the container's recreation.
 		if a.plan.role != runmode.RoleControl {
 			if err := sandbox.ReapOrphans(ctx); err != nil {
-				sandboxLog.Warn("reap orphans at boot failed", "error", err)
+				sandboxLog.Warn("reap orphans at boot failed; the previous boot's claims will be taken over after their leases rather than released now", "error", err)
+			} else {
+				a.cellsConfirmedClean = true
 			}
 		}
 

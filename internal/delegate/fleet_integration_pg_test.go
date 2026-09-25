@@ -12,13 +12,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 )
 
 // fleetFixture mints a full org/team/task/prompt/blueprint chain and fires one
-// delegation on it against real Postgres — the two-Spawner harness
-// TFAC-586 calls for ("the reaper needs it anyway"): boot-overlap,
-// reaper-requeue, fence, and drain scenarios all start from the same
+// delegation on it against real Postgres — the two-Spawner harness:
+// boot-overlap, takeover, fence, and drain scenarios all start from the same
 // realistic shape, then diverge in how they manipulate/observe it.
 type fleetFixture struct {
 	stores                 db.Stores
@@ -193,20 +191,23 @@ func TestFleet_BootOverlap_TwoInstancesRegisterConcurrently(t *testing.T) {
 	}
 }
 
-// TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor is the ticket's
-// headline acceptance criterion end to end: instance A claims the fixture's
-// run, goes silent (heartbeat backdated past the threshold — standing in
-// for `kill -9`), the leader reaper requeues its row, and instance B — a
-// SEPARATE Spawner against the SAME Postgres — successfully claims and
-// would complete it. Exactly one live owner at a time; the dead owner's
+// TestFleet_Takeover_DeadExecutorConversationClaimedBySurvivor is the takeover
+// end to end: instance A claims the fixture's run and dies (its claim's lease
+// backdated past expiry — standing in for `kill -9`, after which nothing
+// renews it), instance B's dispatch pass takes the claim over, and B — a
+// SEPARATE Spawner against the SAME Postgres — claims the conversation with
+// one loss on its budget. Exactly one live owner at a time; the dead owner's
 // claim never resurfaces.
-func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testing.T) {
+//
+// A's heartbeat is left fresh on purpose: a lease lapses whatever the
+// instance registry says, and the takeover reads nothing else.
+func TestFleet_Takeover_DeadExecutorConversationClaimedBySurvivor(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 	fx := seedFleetFixture(t, h)
 	ctx := context.Background()
 
-	const idA, idB = "fleet-reap-a", "fleet-reap-b"
+	const idA, idB = "fleet-takeover-a", "fleet-takeover-b"
 	sA := newFleetSpawner(t, h, fx, idA)
 	sB := newFleetSpawner(t, h, fx, idB)
 
@@ -216,26 +217,37 @@ func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testin
 		t.Fatalf("A claims: claimed=%v err=%v", claimed, err)
 	}
 
-	// A goes dark: kill -9 stops its heartbeat loop entirely, so its
-	// registry row simply stops advancing.
-	backdateFleetHeartbeat(t, h, idA, time.Hour)
+	// A dies: nothing renews its claim, and the lease runs out.
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE claims SET lease_expires_at = statement_timestamp() - interval '1 second' WHERE id = $1`, claimed.ClaimID)
 
-	reap := reaper.NewPostgresStore(h.AdminDB)
-	counts, err := reap.ReapDeadExecutors(ctx, 30*time.Second, 2)
-	if err != nil {
-		t.Fatalf("ReapDeadExecutors: %v", err)
+	// A's own pass never takes over its own current-boot claim: only the
+	// process that minted it can tell a finished engagement from one still
+	// tearing down, and that release is a different door.
+	sA.takeOverExpiredClaims(ctx)
+	if !pgFleetClaimLive(t, h, claimed.ClaimID) {
+		t.Fatal("A's own takeover pass released its own current-boot claim")
 	}
-	if counts.Requeued != 1 {
-		t.Fatalf("counts = %+v, want {Requeued:1}", counts)
+
+	sB.takeOverExpiredClaims(ctx)
+	var outcome string
+	if err := h.AdminDB.QueryRowContext(ctx, `SELECT COALESCE(outcome, '') FROM claims WHERE id = $1`, claimed.ClaimID).Scan(&outcome); err != nil {
+		t.Fatalf("read A's claim: %v", err)
+	}
+	if outcome != "reaped" {
+		t.Fatalf("A's claim outcome after B's takeover = %q, want reaped", outcome)
 	}
 
 	execB, epochB := sB.executorIdentity()
 	claimedByB, err := fx.stores.ConversationQueue.ClaimNextConversation(ctx, execB, epochB, db.ClaimPlacement{}, db.DefaultClaimLease)
 	if err != nil || claimedByB == nil || claimedByB.ID != fx.conversationID {
-		t.Fatalf("B claims after reap: claimed=%v err=%v", claimedByB, err)
+		t.Fatalf("B claims after the takeover: claimed=%v err=%v", claimedByB, err)
+	}
+	if claimedByB.LostEngagements != 1 || claimedByB.SetupFailures != 0 {
+		t.Errorf("B's claim budgets = (lost %d, setup %d), want (1, 0) — a takeover is a loss and nothing else", claimedByB.LostEngagements, claimedByB.SetupFailures)
 	}
 	if claimedByB.Attempts != 2 {
-		t.Errorf("attempts after A's claim + reap-requeue + B's claim = %d, want 2 (the reaper itself must not bump attempts — only claims do)", claimedByB.Attempts)
+		t.Errorf("attempts after A's claim + takeover + B's claim = %d, want 2", claimedByB.Attempts)
 	}
 
 	var executorID string
@@ -245,6 +257,15 @@ func TestFleet_ReaperRequeue_DeadExecutorConversationClaimedBySurvivor(t *testin
 	if executorID != execB {
 		t.Errorf("active claim executor_id = %q, want B's id %q — A's dead claim must never resurface", executorID, execB)
 	}
+}
+
+func pgFleetClaimLive(t *testing.T, h *pgtest.Harness, claimID string) bool {
+	t.Helper()
+	var live bool
+	if err := h.AdminDB.QueryRow(`SELECT released_at IS NULL FROM claims WHERE id = $1`, claimID).Scan(&live); err != nil {
+		t.Fatalf("read claim %s: %v", claimID, err)
+	}
+	return live
 }
 
 // TestFleet_Fence_SupersededInstanceStopsClaimingAndKillsSandboxes pins the

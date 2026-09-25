@@ -210,7 +210,7 @@ func SeedActiveClaim(tb testing.TB, database *sql.DB, conversationID, executorID
 // SeedExpiredClaimLease backdates a claim's lease to just past now, staging
 // the dead-engagement shape: unreleased, but with no authority left. The
 // holder of such a claim writes nothing, the display reads it as queued, and
-// the reaper's lease arm releases it.
+// the takeover releases it.
 func SeedExpiredClaimLease(tb testing.TB, database *sql.DB, claimID string) {
 	tb.Helper()
 	if _, err := database.Exec(`

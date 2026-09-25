@@ -7,9 +7,10 @@ import (
 
 // shutdownDrainTimeout bounds how long shutdown waits for in-flight dispatches
 // before the pools close under them. A backstop, not a budget: the wait is for
-// already-cancelled goroutines to unwind and land their terminal write, which
-// takes seconds, so reaching this deadline means something is wrong rather than
-// something is slow.
+// already-cancelled goroutines to unwind — hand their conversations back and
+// upload the workspace snapshots that go with them, or land a terminal write —
+// which takes seconds, so reaching this deadline means something is wrong
+// rather than something is slow.
 //
 // Bounded rather than indefinite, because the orchestrator's grace period is
 // the real ceiling — a SIGKILL truncates the write whether or not we are still
@@ -21,8 +22,9 @@ const shutdownDrainTimeout = 15 * time.Second
 
 // drainDispatches is the shutdown join: it stops this process answering ready,
 // latches the drain flag, and blocks until every dispatch goroutine has
-// returned or the deadline expires. Run calls it after the blocking listener
-// unwinds and before main's deferred Close releases the pools.
+// returned or the deadline expires, then hands back the claims whose
+// engagements returned. Run calls it after the blocking listener unwinds and
+// before main's deferred Close releases the pools.
 //
 // Only dispatches are joined — see startWorkers for why the rest of the worker
 // set deliberately is not.
@@ -43,6 +45,14 @@ func (a *App) drainDispatches(ctx context.Context) {
 		return
 	}
 	a.awaitDispatches(a.spawner.WaitForDispatches, shutdownDrainTimeout)
+	// After the join, whether or not it finished. An engagement whose runtime
+	// came up hands its own claim back on the way out; this catches the ones
+	// that stood down before it did, and releases their claims the same way —
+	// claimable at once and charged to no budget. One whose engagement is
+	// still running keeps its claim and is found later as the loss it then
+	// is. Bounded inside (delegate.ShutdownClaimReleaseTimeout); a failure is
+	// logged and the process exits anyway.
+	a.spawner.ReleaseOwnClaimsOnShutdown()
 }
 
 // awaitDispatches performs the drain sequence against an injected join and
@@ -77,7 +87,7 @@ func (a *App) awaitDispatches(wait func(context.Context) bool, timeout time.Dura
 	// running are the un-cancellable ones, so there is nothing to abort, and
 	// holding the process open past the orchestrator's grace period just moves
 	// the same truncation behind a SIGKILL where no line explains it.
-	appLog.Warn("shutdown drain deadline expired; dispatches are still in flight and their terminal writes may fail against the closing pool — the next boot's reconcile re-queues them",
+	appLog.Warn("shutdown drain deadline expired; dispatches are still in flight and their terminal writes may fail against the closing pool — their claims lapse and are taken over, or released by the next boot's reset",
 		"timeout", timeout)
 	return false
 }

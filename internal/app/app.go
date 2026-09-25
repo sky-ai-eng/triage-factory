@@ -47,7 +47,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
-	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
 	"github.com/sky-ai-eng/triage-factory/internal/repoprofile"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
@@ -185,15 +184,12 @@ type App struct {
 	// elects (see startBrain's direct call in Run and isBrainHolder).
 	leaseElector *lease.Manager
 
-	// reaperStore is the fleet reaper's Postgres store (TFAC-586, spec
-	// §4.3) — non-nil only for brain-capable roles in multi mode (buildReaper).
-	// startBrain/stopBrain start/stop RunReaper + RunRegistryGC against it,
-	// nil-checked the same way a.wsBackplane is. reaperStaleThreshold /
-	// reaperMaxAttempts are the resolved TF_REAPER_STALE_SEC /
-	// TF_MAX_CLAIM_ATTEMPTS knobs those loops run with.
-	reaperStore          reaper.Store
-	reaperStaleThreshold time.Duration
-	reaperMaxAttempts    int
+	// cellsConfirmedClean records whether openStores confirmed that every
+	// cell a previous boot of this executor left behind is torn down: always
+	// in local mode, where nothing a boot runs outlives it, and in multi mode
+	// only when the boot-time orphan reap succeeded. buildClaims hands it to
+	// the spawner, whose boot reset runs only when it is true.
+	cellsConfirmedClean bool
 
 	// credProvisioner is the brain-side sealed-credential-bundle
 	// provisioner (TFAC-614, spec's "channel") — resolves a run's LLM/
@@ -201,7 +197,7 @@ type App struct {
 	// published pubkey, and writes claim_credentials. Non-nil only for
 	// brain-capable roles in multi mode (buildCredProvisioner), started/
 	// stopped alongside the rest of the brain in startBrain/stopBrain,
-	// nil-checked the same way a.reaperStore is.
+	// nil-checked the same way a.wsBackplane is.
 	credProvisioner *credprovision.Manager
 
 	// memoryProvisioner generates the memory a conversation owes when it
@@ -209,7 +205,7 @@ type App struct {
 	// task's memory_pending state and lets its next conversation open.
 	// Non-nil for every brain-capable role in BOTH modes
 	// (buildMemoryProvisioner), swept alongside the rest of the brain in
-	// startBrain/stopBrain, and nil-checked the same way a.reaperStore is.
+	// startBrain/stopBrain, and nil-checked the same way a.wsBackplane is.
 	memoryProvisioner *memoryprovision.Manager
 
 	// metricsAddr is the resolved /metrics bind address telemetry.Init
@@ -225,6 +221,11 @@ type App struct {
 	// role=all) can derive a cancellable brain-lifetime context from it
 	// without threading ctx through the lease callback signature.
 	runCtx context.Context
+
+	// stopHeartbeat ends the instance heartbeat and waits for its loop to
+	// return. The heartbeat is not bound to runCtx (see startWorkers); Run
+	// calls this once the drain is over. nil before startWorkers.
+	stopHeartbeat func()
 
 	// brainMu guards brainRunning/brainCancel — the background brain's
 	// start/stop state (TFAC-583, brain.go). Transitions happen from the
@@ -389,11 +390,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildExecution(); err != nil { // delegation spawner
 		return nil, err
 	}
-	// Fleet reaper knobs + (brain roles, multi mode) the reaper Store
-	// (TFAC-586). Runs after buildExecution: it wires the spawner's
-	// partition self-fence deadline and supersession exit hook, both of
-	// which need a.spawner to exist.
-	if err = a.buildReaper(); err != nil {
+	// Claim recovery: the loss budget, the boot-reset gate and the
+	// supersession exit hook. Runs after buildExecution, since all three are
+	// spawner settings.
+	if err = a.buildClaims(); err != nil {
 		return nil, err
 	}
 	// Placement affinity (TFAC-587): the rendezvous resolver + the spawner's
@@ -403,10 +403,10 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildPlacement(); err != nil {
 		return nil, err
 	}
-	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — same
-	// brain-capable-roles-in-multi-mode gate as buildReaper, and must run
-	// after it exists so the conversation-signal/instance/conversation-queue
-	// stores it reads (a.stores) are already the real bundle.
+	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — brain-
+	// capable roles in multi mode only. After buildExecution, so the
+	// conversation-signal/instance/conversation-queue stores it reads
+	// (a.stores) are already the real bundle.
 	if err = a.buildCredProvisioner(); err != nil {
 		return nil, err
 	}
@@ -445,6 +445,7 @@ func (a *App) Run(ctx context.Context) error {
 
 	a.runStartupTasks(ctx)
 	a.startWorkers(ctx)
+	defer a.stopHeartbeat()
 	if a.metricsAddr != "" {
 		// Fire-and-forget on every role: Serve logs its own bind failure and
 		// a dead metrics listener must never take the process with it.
@@ -479,7 +480,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	// Executor: no user HTTP. Serve the localhost healthz and block until
-	// shutdown; the dispatcher + heartbeat + reapers run as workers. The drain
+	// shutdown; the dispatcher + heartbeat run as workers. The drain
 	// is handed to the healthz rather than run after it, so the probe is still
 	// answering (503) while in-flight dispatches finish.
 	return a.runExecutorHealthz(ctx, func() { a.drainDispatches(ctx) })

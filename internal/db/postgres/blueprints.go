@@ -1199,9 +1199,9 @@ func (s *blueprintStore) MarkRunStatusSystem(ctx context.Context, orgID, id stri
 // claims), so the release lands on that admin-backed queryer AFTER the tx
 // work. The children it releases are parked, not terminal, so a release lost
 // between the two commits leaves a claim whose lease lapses and which the
-// executor that minted it then releases (ReleaseExpiredClaimSystem). The
-// reaper does not: it looks only at conversations still queued under a
-// running blueprint.
+// executor that minted it then releases (ReleaseExpiredClaimSystem), or any
+// other dispatcher takes over (TakeOverExpiredClaimsSystem) once that
+// executor is gone too.
 func markBlueprintRunStatus(ctx context.Context, q, adjacentClaims queryer, orgID, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (bool, error) {
 	if !isValidUUID(id) {
 		return false, nil

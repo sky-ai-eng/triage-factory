@@ -505,7 +505,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		id, _ := f.StageStep(t)
 		claim(t, f, id)
 		requestStall(t, f, id)
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, id, "transient"); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, id, db.RequeueSetupFailure, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		if got := get(t, f, id); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) {

@@ -23,7 +23,7 @@ type handler struct {
 
 // staleAfter is how long since an instance's last heartbeat before the console
 // flags it stale (dead/fenced). Comfortably above the ~4s heartbeat cadence and
-// the reaper's own staleness window, so a healthy pod never flickers stale.
+// placement's liveness window, so a healthy pod never flickers stale.
 const staleAfter = 30 * time.Second
 
 // gate enforces the composed fleet-console authorization: a signed-in caller

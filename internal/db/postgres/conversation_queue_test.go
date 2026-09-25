@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -69,7 +70,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	}
 
 	// Requeue → re-claimable, attempts retained.
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -747,7 +748,7 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -797,7 +798,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -1131,6 +1132,14 @@ func TestStopIntent_Postgres(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
 }
 
+// TestClaimTakeover_Postgres runs the shared recovery-pass conformance — the
+// takeover, the shutdown release, the boot reset, the widened settlement and
+// the stranded-run read — on the claim-lease fixture.
+func TestClaimTakeover_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunClaimTakeoverConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
 func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixture {
 	t.Helper()
 	h.Reset(t)
@@ -1188,6 +1197,19 @@ func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixtu
 				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
 			}
 		},
+		SetStoredStatus: func(t *testing.T, conversationID, status string) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = NULLIF($1, '') WHERE id = $2`, status, conversationID)
+		},
+		BackdateConclusion: func(t *testing.T, conversationID string, ago time.Duration) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB,
+				`UPDATE conversations SET completed_at = now() - make_interval(secs => $1) WHERE id = $2`,
+				ago.Seconds(), conversationID)
+			pgtest.MustExec(t, h.AdminDB,
+				`UPDATE claims SET released_at = now() - make_interval(secs => $1) WHERE conversation_id = $2 AND released_at IS NOT NULL`,
+				ago.Seconds(), conversationID)
+		},
 	}
 }
 
@@ -1234,5 +1256,168 @@ func TestClaimFence_Postgres_ReadsFreshDatabaseTime(t *testing.T) {
 	// And the store's own fenced write, on its own connection, agrees.
 	if _, err := stores.Conversations.SetSessionForClaimSystem(ctx, orgID, conv.ID, claimed.ClaimID, "sess-late"); !errors.Is(err, db.ErrClaimReleased) {
 		t.Fatalf("SetSessionForClaimSystem after the lease lapsed = %v, want ErrClaimReleased", err)
+	}
+}
+
+// TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal holds the lock order a
+// run's terminal takes on its children — the conversation, then its claim —
+// across the boot reset, deterministically rather than by racing: the
+// conversation is locked first, the reset is let run into it, and only then
+// is the claim taken. A reset that locks the claim and then waits on the
+// conversation closes the cycle, and Postgres aborts one side with 40P01.
+func TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+
+	const executorID = "boot-reset-order"
+	taskID := seedPgTask(t, h, orgID, userID)
+	conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+		PromptID: promptID, CreatorUserID: userID,
+	})
+	claimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, executorID, 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != conv.ID {
+		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, conv.ID)
+	}
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET preferred_executor_id = $1 WHERE id = $2`, executorID, conv.ID)
+
+	// The terminal's first lock.
+	terminal, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = terminal.Rollback() }()
+	if _, err := terminal.ExecContext(ctx, `SELECT 1 FROM conversations WHERE id = $1 FOR UPDATE`, conv.ID); err != nil {
+		t.Fatalf("lock the conversation: %v", err)
+	}
+
+	resetDone := make(chan error, 1)
+	go func() {
+		_, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 2)
+		resetDone <- err
+	}()
+
+	// Let the reset run until it has either finished or is waiting on a lock.
+	var resetErr error
+	finished := false
+	deadline := time.Now().Add(10 * time.Second)
+	for !finished && time.Now().Before(deadline) {
+		select {
+		case resetErr = <-resetDone:
+			finished = true
+		case <-time.After(20 * time.Millisecond):
+			var waiting int
+			if err := h.AdminDB.QueryRowContext(ctx, `
+				SELECT count(*) FROM pg_stat_activity
+				WHERE wait_event_type = 'Lock' AND query LIKE '%outcome = ''reaped''%'
+			`).Scan(&waiting); err != nil {
+				t.Fatalf("read pg_stat_activity: %v", err)
+			}
+			if waiting > 0 {
+				deadline = time.Now()
+			}
+		}
+	}
+
+	// The terminal's second lock.
+	_, claimErr := terminal.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = 'cancelled'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, conv.ID)
+	commitErr := terminal.Commit()
+	if !finished {
+		resetErr = <-resetDone
+	}
+
+	for name, err := range map[string]error{"the terminal's claim release": claimErr, "the terminal's commit": commitErr, "ResetProcessingConversations": resetErr} {
+		if err == nil {
+			continue
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+			t.Fatalf("%s deadlocked against the other writer: %v", name, err)
+		}
+		t.Fatalf("%s: %v", name, err)
+	}
+	if live, err := stores.ConversationQueue.LiveClaimsOfExecutorSystem(ctx, executorID, 1); err != nil || len(live) != 0 {
+		t.Errorf("live claims after both writes = (%+v, %v), want none", live, err)
+	}
+}
+
+// TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal pins the
+// lock order the settlement shares with a run's terminal write. The terminal
+// (markBlueprintRunStatus) locks the run and then parks its children; a
+// settlement that locked a stop-pending child first and then wrote its
+// cancel-requested run would wait on the terminal while the terminal waited on
+// the child, and Postgres would kill one of them with 40P01. Both now take the
+// run first, so racing them many times produces no deadlock and no error.
+func TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	orgID, userID := seedPgOrgForBlueprints(t, h)
+	bpID, _, promptID := seedPgConversationQueueFixture(t, h, orgID, userID)
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		taskID := seedPgTask(t, h, orgID, userID)
+		conv := firePgStep(t, h, stores, orgID, bpID, taskID, domain.Conversation{
+			PromptID: promptID, CreatorUserID: userID,
+		})
+		if _, err := stores.Blueprints.RequestRunCancelSystem(ctx, orgID, conv.BlueprintRunID); err != nil {
+			t.Fatalf("iteration %d: RequestRunCancelSystem: %v", i, err)
+		}
+		if ok, err := stores.Conversations.RequestStopSystem(ctx, orgID, conv.ID, userID, "", ""); err != nil || !ok {
+			t.Fatalf("iteration %d: RequestStopSystem = (%v, %v)", i, ok, err)
+		}
+
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		var markErr, settleErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, markErr = stores.Blueprints.MarkRunStatusSystem(ctx, orgID, conv.BlueprintRunID, domain.BlueprintRunStatusFailed, "raced", nil)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, settleErr = stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+		}()
+		close(start)
+		wg.Wait()
+
+		for name, err := range map[string]error{"MarkRunStatusSystem": markErr, "SettleUnclaimedStopsSystem": settleErr} {
+			if err == nil {
+				continue
+			}
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+				t.Fatalf("iteration %d: %s deadlocked against the other writer: %v", i, name, err)
+			}
+			t.Fatalf("iteration %d: %s: %v", i, name, err)
+		}
+
+		// Exactly one of the two ended the run, and either way the child is
+		// parked with its intent cleared: the loser found nothing to do.
+		br, err := stores.Blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
+		if err != nil || br == nil {
+			t.Fatalf("iteration %d: GetRunSystem = (%+v, %v)", i, br, err)
+		}
+		if br.Status != domain.BlueprintRunStatusFailed && br.Status != domain.BlueprintRunStatusCancelled {
+			t.Fatalf("iteration %d: run status = %q, want failed or cancelled", i, br.Status)
+		}
+		got, err := stores.Conversations.GetSystem(ctx, orgID, conv.ID)
+		if err != nil || got == nil {
+			t.Fatalf("iteration %d: GetSystem = (%+v, %v)", i, got, err)
+		}
+		if got.Status != domain.StatusOpen {
+			t.Fatalf("iteration %d: child status = %q, want open", i, got.Status)
+		}
 	}
 }

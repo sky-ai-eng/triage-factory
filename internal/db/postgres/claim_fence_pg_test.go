@@ -17,11 +17,11 @@ import (
 // The claim fence: the DB-layer backstop that refuses an executor's writes
 // once its claim has been released. The refusal itself is a both-dialect
 // contract and lives in the conformance suite; what is Postgres-specific, and
-// what this file covers, is the shape of the rival — a reaper releasing the
+// what this file covers, is the shape of the rival — a takeover releasing the
 // claim from another connection while the writer is mid-transaction — and the
 // row locking that keeps that release and the fenced write from interleaving.
 //
-// Everything here is driven through the public store methods. The reaper's
+// Everything here is driven through the public store methods. The takeover's
 // side is a raw UPDATE on a separate connection, which is what it genuinely
 // is from the fenced writer's point of view: another process, another
 // transaction, taking the row lock.
@@ -75,7 +75,7 @@ func seedSecondConversation(t *testing.T, fx fenceFixture) string {
 	})
 }
 
-// reap is the fleet reaper's release, from a connection of its own.
+// reap is a takeover's release, from a connection of its own.
 func reap(t *testing.T, conn *sql.DB, orgID, conversationID string) {
 	t.Helper()
 	res, err := conn.Exec(`
@@ -302,7 +302,8 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 	t.Run("SetExecutor", func(t *testing.T) {
 		// The go-live ownership stamp. A run reaped mid-setup whose process
 		// then comes up would re-stamp the successor's claim with a dead
-		// executor's identity — which the reaper reads back as executor loss.
+		// executor's identity — which that executor's next boot reset reads
+		// back as its own claim to release.
 		fx := newFenceFixture(t, h, "exec-fence-executor")
 		if _, err := fx.store.SetExecutorForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "exec-fence-executor-live", 4); err != nil {
 			t.Fatalf("executor stamp while claimed: %v", err)
@@ -423,7 +424,7 @@ func TestClaimFence_ReleasedClaimRefusesEveryEngagementWrite(t *testing.T) {
 // TestClaimFence_SerializesAgainstAConcurrentRelease is the property a plain
 // EXISTS check cannot provide, on two connections.
 //
-// The reaper holds its release open, so it owns the claim row's lock. A
+// The takeover holds its release open, so it owns the claim row's lock. A
 // fenced write starting in that window must BLOCK on the locking read rather
 // than read around it — and once the release commits, it must see the
 // release rather than the version its own statement snapshot started with.
@@ -434,17 +435,17 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 	ctx := context.Background()
 	fx := newFenceFixture(t, h, "exec-fence-race")
 
-	// The reaper's release, held open on its own connection.
-	reaperTx, err := h.AdminDB.BeginTx(ctx, nil)
+	// The takeover's release, held open on its own connection.
+	takeoverTx, err := h.AdminDB.BeginTx(ctx, nil)
 	if err != nil {
-		t.Fatalf("begin reaper tx: %v", err)
+		t.Fatalf("begin takeover tx: %v", err)
 	}
-	defer func() { _ = reaperTx.Rollback() }()
-	if _, err := reaperTx.ExecContext(ctx, `
+	defer func() { _ = takeoverTx.Rollback() }()
+	if _, err := takeoverTx.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = 'reaped'
 		WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
 	`, fx.orgID, fx.conversationID); err != nil {
-		t.Fatalf("reaper release: %v", err)
+		t.Fatalf("takeover release: %v", err)
 	}
 
 	// The zombie's write, racing it.
@@ -463,8 +464,8 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 		// Blocked, as required.
 	}
 
-	if err := reaperTx.Commit(); err != nil {
-		t.Fatalf("commit reaper tx: %v", err)
+	if err := takeoverTx.Commit(); err != nil {
+		t.Fatalf("commit takeover tx: %v", err)
 	}
 
 	select {
@@ -566,8 +567,8 @@ func TestClaimFence_SuccessorWritesWhileTheZombieIsRefused(t *testing.T) {
 // is true about the ZOMBIE and false about the conversation, which by then
 // belongs to somebody else. The damage is silent — nothing reads these columns
 // back until the next wake, which then resumes into a dead session, in a
-// directory on a host that isn't running the work, under an executor the
-// reaper has already buried.
+// directory on a host that isn't running the work, under an executor whose
+// claim has already been taken over.
 func TestClaimFence_ZombieCannotCorruptTheSuccessorsResumeCoordinate(t *testing.T) {
 	h := pgtest.Shared(t)
 	ctx := context.Background()

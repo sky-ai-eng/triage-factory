@@ -217,8 +217,8 @@ func TestPreAgentFailure_HandsTheClaimBackAndDestroysNothing(t *testing.T) {
 	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after requeue = (%v, %v), want the same conversation", reclaimed, err)
 	}
-	if reclaimed.Attempts != 2 {
-		t.Errorf("re-claim attempts = %d, want 2 — the hand-back counts toward the budget", reclaimed.Attempts)
+	if reclaimed.SetupFailures != 1 || reclaimed.LostEngagements != 0 {
+		t.Errorf("re-claim budgets = (setup %d, lost %d), want (1, 0) — the hand-back counts toward the setup budget alone", reclaimed.SetupFailures, reclaimed.LostEngagements)
 	}
 }
 
@@ -242,7 +242,7 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	}
 
 	spent := f.conv
-	spent.Attempts = maxClaimAttempts
+	spent.SetupFailures = maxClaimAttempts - 1
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("connect to tool host: runsc: exit status 128"))
 
@@ -294,8 +294,8 @@ func TestPreAgentFailure_ExhaustedOnAConversationWithATranscript_Parks(t *testin
 	if err != nil || reclaimed == nil || reclaimed.ID != f.conv.ID {
 		t.Fatalf("re-claim after the follow-up = (%v, %v), want the same conversation", reclaimed, err)
 	}
-	if reclaimed.Attempts != 1 {
-		t.Errorf("re-claim attempts = %d, want 1 — the park ended the episode", reclaimed.Attempts)
+	if reclaimed.Attempts != 1 || reclaimed.SetupFailures != 0 {
+		t.Errorf("re-claim = (attempts %d, setup %d), want (1, 0) — the park ended the episode", reclaimed.Attempts, reclaimed.SetupFailures)
 	}
 }
 
@@ -308,7 +308,7 @@ func TestPreAgentFailure_ExhaustedOnAFirstEngagement_StillPoisonPills(t *testing
 	f := newLaunchFixture(t, "poison")
 
 	spent := f.conv
-	spent.Attempts = maxClaimAttempts
+	spent.SetupFailures = maxClaimAttempts - 1
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
 		errors.New("workspace setup: clone: repository not found"))
 
@@ -332,7 +332,7 @@ func TestPreAgentFailure_WithNoBlueprintInScope_Parks(t *testing.T) {
 	f := newLaunchFixture(t, "resume")
 
 	spent := f.conv
-	spent.Attempts = maxClaimAttempts
+	spent.SetupFailures = maxClaimAttempts - 1
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, nil, spent,
 		errors.New("ensure workspace before resume failed: snapshot fetch: connection reset"))
 
@@ -408,7 +408,7 @@ func TestParkAfterLaunchExhaustion_FencedClaimRecordsNothing(t *testing.T) {
 	f.s.conversations = fenced
 
 	spent := f.conv
-	spent.Attempts = maxClaimAttempts
+	spent.SetupFailures = maxClaimAttempts - 1
 	f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent, errors.New("launch tool host: no route to broker"))
 
 	if fenced.inserts != 1 {

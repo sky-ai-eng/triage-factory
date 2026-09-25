@@ -42,7 +42,8 @@ import "errors"
 // engagement — deliberately, since the whole point of a stop is to override
 // whichever executor holds the run — and an engagement still bringing its
 // runtime up when that lands reaches its next write as exactly the zombie
-// described above. Local mode has no reaper and no second executor, so the
-// stop verb is the only thing that can trip its fence, and the refusal it
-// gets is the ordinary shape of every stop that catches a run mid-setup.
+// described above. Local mode has no second executor, so apart from its own
+// lease lapsing the stop verb is the only thing that can trip its fence, and
+// the refusal it gets is the ordinary shape of every stop that catches a run
+// mid-setup.
 var ErrClaimReleased = errors.New("db: claim released — this engagement no longer owns the conversation")

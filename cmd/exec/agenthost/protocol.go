@@ -636,8 +636,8 @@ type memoryLoadResult struct {
 // orchestrator at bring-up, the jailed client is a bind-mount of the
 // broker's own running executable (sandbox.TrustedTFBinaryPath), and a
 // restart takes the supervision stream, the cell, and the engagement with
-// it — the reaper requeues the row rather than a new orchestrator
-// adopting a live cell.
+// it — the claim goes back to the queue, handed back or taken over, rather
+// than a new orchestrator adopting a live cell.
 const (
 	methodLookupConversation                  = "LookupConversation"
 	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"

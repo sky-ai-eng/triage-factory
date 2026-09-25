@@ -50,7 +50,8 @@ import (
 // closeTaskWithAudit): the durable stop INTENT commits with the task close, so
 // the obligation covers it, while the kill that acts on it stays best-effort
 // out here. A kill that never lands no longer strands anything — the claim
-// gate refuses a cancel-requested blueprint and the reaper finalizes it — so
+// gate refuses a cancel-requested blueprint and the dispatcher's settlement
+// finalizes it, intent or not — so
 // there is nothing left for a replay to owe. The task_events audit row moved
 // into the close tx for the same reason it always sat next to the close, and
 // it is INSERT-or-nothing, so a replay still cannot double it.

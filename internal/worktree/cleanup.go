@@ -59,7 +59,7 @@ func Cleanup() {
 type CleanupOptions struct {
 	// SkipClaudeProjectCleanup turns OFF deletion of every
 	// ~/.claude/projects entry. Used at startup in non-local modes,
-	// where the parked-worktree preserve set is keyed by the synthetic
+	// where the resumable-worktree preserve set is keyed by the synthetic
 	// sentinel org and has no real-tenant rows: rather than risk wiping
 	// a session JSONL we should have kept, skip ALL project-dir cleanup
 	// for this sweep. The worktree dir removal and bare-repo pruning
@@ -68,21 +68,22 @@ type CleanupOptions struct {
 
 	// PreserveWorktreeFor names worktree directories that must survive the
 	// sweep WHOLE — the directory AND its ~/.claude/projects session JSONL —
-	// because the run parked `open` and the
-	// worktree is the warm cache an eventual resume reuses. Unlike
+	// because its conversation will be continued (parked `open`, or
+	// mid-flight when the process stopped) and the worktree is the warm cache
+	// the next engagement reuses. Unlike
 	// PreserveClaudeProjectFor (which keeps only the JSONL while still deleting
 	// the worktree dir), a matching entry here skips removal of both.
 	//
 	// Keys are worktree directory names — i.e. filepath.Base(worktree_path),
 	// which is the run tree's root key: the task id, since a task's
-	// conversations share one tree. A swept (un-preserved) parked workspace
+	// conversations share one tree. A swept (un-preserved) workspace
 	// still resumes via snapshot rehydrate, so this is the fast path, not a
 	// correctness gate. Ignored for any dir not present here.
 	PreserveWorktreeFor map[string]bool
 }
 
 // CleanupWithOptions is the parameterized Cleanup the startup sweep uses
-// to keep parked runs' warm worktrees alive across restarts — see
+// to keep resumable conversations' warm worktrees alive across restarts — see
 // CleanupOptions.PreserveWorktreeFor.
 func CleanupWithOptions(opts CleanupOptions) {
 	// Orphaned-worktree (temp-dir) cleanup. A missing runs dir just means
@@ -97,10 +98,10 @@ func CleanupWithOptions(opts CleanupOptions) {
 			if e.IsDir() {
 				fullPath := filepath.Join(runsBase, e.Name())
 				rootKey := strings.TrimSuffix(e.Name(), "-nocwd")
-				// Parked runs keep their worktree WHOLE — the dir and its
-				// session JSONL — as the warm resume cache, so skip them
-				// entirely (no project-dir delete, no dir removal). A swept one
-				// still resumes via snapshot rehydrate.
+				// Resumable conversations keep their worktree WHOLE — the dir
+				// and its session JSONL — as the warm resume cache, so skip
+				// them entirely (no project-dir delete, no dir removal). A
+				// swept one still resumes via snapshot rehydrate.
 				if opts.PreserveWorktreeFor[rootKey] {
 					continue
 				}
@@ -164,7 +165,7 @@ func CleanupWithOptions(opts CleanupOptions) {
 // so a match is not expected; the check is honored anyway, because the keep
 // set is the caller's answer about what is still in use and this sweep is not
 // the place to decide it knows better. Moot in the only mode that stages at
-// all: multi passes no preserve set, so its parked worktrees are swept here
+// all: multi passes no preserve set, so its resumable worktrees are swept here
 // regardless and rehydrate from snapshot.
 func sweepOrphanedStagingDirs(preserve map[string]bool) {
 	for _, base := range []string{sandbox.SkillStagingBase(), sandbox.MemoryStagingBase()} {

@@ -84,7 +84,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if first.ClaimID == "" {
 			t.Fatal("ClaimNextConversation returned no claim id; teardown has nothing to stamp")
 		}
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		second := claim(t, store, conversationID)
@@ -200,7 +200,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// failure requeues it.
 		seed.SetActivePhase(t, conversationID, "")
 
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, "transient"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, conversationID)
@@ -230,7 +230,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		}
 
 		// Requeue straight from the parked shape the failed bring-up leaves.
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, "sidecar bring-up failed"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "sidecar bring-up failed"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, conversationID)

@@ -3,7 +3,9 @@ package sqlite_test
 import (
 	"context"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -305,4 +307,22 @@ func TestInstanceStore_SQLite_GetUnknownIDReturnsNil(t *testing.T) {
 	if got != nil {
 		t.Fatalf("expected nil for an unregistered id, got %+v", got)
 	}
+}
+
+// TestInstanceStore_SQLite_GCConformance runs the shared registry GC suite.
+func TestInstanceStore_SQLite_GCConformance(t *testing.T) {
+	dbtest.RunInstanceGCConformance(t, func(t *testing.T) dbtest.InstanceGCFixture {
+		conn := newSQLiteForArtifactTest(t)
+		stores := sqlitestore.New(conn)
+		return dbtest.InstanceGCFixture{
+			Store: stores.Instances,
+			BackdateHeartbeat: func(t *testing.T, id string, ago time.Duration) {
+				t.Helper()
+				// A Go time, the way Heartbeat stamps the column.
+				if _, err := conn.Exec(`UPDATE instances SET last_heartbeat_at = ? WHERE id = ?`, time.Now().UTC().Add(-ago), id); err != nil {
+					t.Fatalf("backdate heartbeat of %s: %v", id, err)
+				}
+			},
+		}
+	})
 }

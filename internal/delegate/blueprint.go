@@ -113,17 +113,32 @@ func (s *Spawner) terminateBlueprint(
 	skipCleanup bool,
 ) {
 	bgCtx := context.Background()
-	var markErr error
+	var (
+		changed bool
+		markErr error
+	)
 	if triggerType == "manual" {
 		markErr = s.tx.SyntheticClaimsWithTx(bgCtx, orgID, creatorUserID, func(ts db.TxStores) error {
-			_, mErr := ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
+			c, mErr := ts.Blueprints.MarkRunStatus(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
+			changed = c
 			return mErr
 		})
 	} else {
-		_, markErr = s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
+		changed, markErr = s.blueprints.MarkRunStatusSystem(bgCtx, orgID, blueprintRunID, status, abortReason, abortedAtStep)
 	}
 	if markErr != nil {
 		blueprintLog.Error("mark blueprint_run status failed; skipping cleanup to keep blueprint row consistent", "blueprint_run", blueprintRunID, "status", status, "error", markErr)
+		return
+	}
+	// Everything below belongs to the write that ended the run. A run already
+	// terminal was ended by another writer — a replay of a stranded run racing
+	// its late reactor, two executors replaying one run, a cancel that landed
+	// first — and that writer ran them. Running them twice would close a task
+	// the other terminal decided to leave open, or remove a worktree a
+	// follow-up has since been given.
+	if !changed {
+		blueprintLog.Info("blueprint_run already terminal; its terminal side effects belong to the write that ended it",
+			"blueprint_run", blueprintRunID, "status", status)
 		return
 	}
 

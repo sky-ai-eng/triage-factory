@@ -1812,21 +1812,23 @@ func (s *conversationStore) NewestWorktreePathForTaskSystem(ctx context.Context,
 	return path, err
 }
 
-// ListParkedWorktreePathsSystem returns the worktree dirs the startup sweep must
-// keep warm — parked `open` runs whose owning blueprint_run is still 'running'. A
-// parked run under an already-terminal blueprint_run is NOT resumable (every
-// resume path gates on cr.Status == running), so its worktree must NOT be
-// preserved: preserving it would leave a checked-out branch on disk that the
+// ListResumableWorktreePathsSystem returns the worktree dirs the startup sweep
+// must keep warm — conversations parked `open` or left mid-flight (a stored
+// status of NULL: an engagement was driving it when the process stopped, and
+// the next claim continues it), whose owning blueprint_run is still 'running'.
+// A conversation under an already-terminal blueprint_run is NOT resumable
+// (every resume path gates on cr.Status == running), so its worktree must NOT
+// be preserved: preserving it would leave a checked-out branch on disk that the
 // boot reconcile then orphans by cancelling the row, reviving the "refusing to
 // fetch into a branch checked out in a worktree" loop.
-func (s *conversationStore) ListParkedWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
+func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context, orgID string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx,
 		`SELECT r.worktree_path FROM conversations r
 		 LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
-		 WHERE r.status = 'open'
+		 WHERE (r.status = 'open' OR r.status IS NULL)
 		   AND COALESCE(r.worktree_path, '') != ''
 		   AND (br.id IS NULL OR br.status = 'running')`)
 	if err != nil {

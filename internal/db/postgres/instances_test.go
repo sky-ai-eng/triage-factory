@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -304,5 +306,48 @@ func TestInstanceStore_Postgres_GetUnknownIDReturnsNil(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("expected nil for an unregistered id, got %+v", got)
+	}
+}
+
+// TestInstanceStore_Postgres_GCConformance runs the shared registry GC suite
+// on the superuser connection, the role a control pod's admin pool binds and
+// the only one the GC runs as. That tf_system is refused the same delete is
+// pinned by TestTfSystem_RegistryGCIsControlPlaneOnly.
+func TestInstanceStore_Postgres_GCConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunInstanceGCConformance(t, func(t *testing.T) dbtest.InstanceGCFixture {
+		h.Reset(t)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		return dbtest.InstanceGCFixture{
+			Store: stores.Instances,
+			BackdateHeartbeat: func(t *testing.T, id string, ago time.Duration) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB,
+					`UPDATE instances SET last_heartbeat_at = now() - make_interval(secs => $1) WHERE id = $2`, ago.Seconds(), id)
+			},
+		}
+	})
+}
+
+// TestClaimsExecutorID_HasNoForeignKeyToInstances pins the schema invariant
+// the registry GC's safety depends on: claims.executor_id is a plain text
+// column with no FK constraint into instances, so deleting an instances row
+// can never cascade into (or be blocked by) claims.
+func TestClaimsExecutorID_HasNoForeignKeyToInstances(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+
+	var count int
+	if err := h.AdminDB.QueryRow(`
+		SELECT COUNT(*)
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+		WHERE tc.table_name = 'claims' AND kcu.column_name = 'executor_id' AND tc.constraint_type = 'FOREIGN KEY'
+	`).Scan(&count); err != nil {
+		t.Fatalf("query constraints: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("claims.executor_id has %d foreign key constraint(s), want 0 — a FK here would make GC deletes cascade into (or be blocked by) audit history", count)
 	}
 }

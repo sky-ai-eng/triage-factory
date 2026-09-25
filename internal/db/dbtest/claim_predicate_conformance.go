@@ -123,9 +123,11 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	}
 	// release ends the conversation's active claim through the same
 	// production primitive that produces each outcome: RequeueConversation
-	// ('requeued'), ResetProcessingConversations ('reaped' — scoped to this
-	// suite's fixed claimant, so it never touches another subtest's claim),
-	// the holder's park ('parked'), and its terminal ('completed' / 'failed'). Each of
+	// ('requeued', 'requeued_credentials'), ResetProcessingConversations
+	// ('reaped' — scoped to this suite's fixed claimant, so it never touches
+	// another subtest's claim), ReleaseOwnClaimsOnShutdownSystem
+	// ('requeued_shutdown'), the holder's park ('parked'), and its terminal
+	// ('completed' / 'failed'). Each of
 	// these already carries the write ReleaseActiveTurnSystem used to make on
 	// the caller's behalf; every subtest that cares about the resulting
 	// conversations.status writes it explicitly afterward via
@@ -135,7 +137,11 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		var err error
 		switch outcome {
 		case "requeued":
-			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, "")
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueSetupFailure, "")
+		case "requeued_credentials":
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueAwaitingCredentials, "")
+		case "requeued_shutdown":
+			_, err = h.Stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, predicateExecutorID, predicateBootEpoch, []string{convID})
 		case "reaped":
 			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
 		case "parked":
@@ -534,6 +540,45 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if got := mustClaim(t, h, convID); got.Attempts != 1 {
 					t.Fatalf("claim after a healthy engagement = %d attempts, want 1", got.Attempts)
 				}
+			})
+
+			t.Run("Budgets_SplitSetupFailuresFromLosses", func(t *testing.T) {
+				// The two budgets the dispatcher enforces, read off the claim.
+				// A setup failure spends only the setup budget, a lost
+				// engagement only the loss budget, and a credentials wait or a
+				// clean shutdown spends neither — but none of the four ends the
+				// episode, so every count keeps accumulating across them until
+				// an engagement records an outcome of its own.
+				h := mk(t)
+				convID := h.StageDelegation(t, runtime)
+				type want struct{ attempts, setup, lost int }
+				check := func(t *testing.T, after string, w want) {
+					t.Helper()
+					got := mustClaim(t, h, convID)
+					if got.Attempts != w.attempts || got.SetupFailures != w.setup || got.LostEngagements != w.lost {
+						t.Fatalf("claim after %s = (attempts %d, setup %d, lost %d), want (%d, %d, %d)",
+							after, got.Attempts, got.SetupFailures, got.LostEngagements, w.attempts, w.setup, w.lost)
+					}
+				}
+
+				check(t, "nothing", want{1, 0, 0})
+				release(t, h, h.OrgID, convID, "requeued")
+				check(t, "a setup failure", want{2, 1, 0})
+				release(t, h, h.OrgID, convID, "reaped")
+				check(t, "a loss", want{3, 1, 1})
+				release(t, h, h.OrgID, convID, "requeued_credentials")
+				check(t, "a credentials timeout", want{4, 1, 1})
+				release(t, h, h.OrgID, convID, "requeued_shutdown")
+				check(t, "a clean shutdown", want{5, 1, 1})
+				release(t, h, h.OrgID, convID, "reaped")
+				check(t, "a second loss", want{6, 1, 2})
+
+				// An engagement that recorded an outcome of its own ends the
+				// episode: both budgets start over.
+				release(t, h, h.OrgID, convID, "parked")
+				h.SetStoredStatus(t, convID, "open")
+				h.InsertRow(t, convID, userRow("keep going", false))
+				check(t, "an engagement that parked", want{1, 0, 0})
 			})
 
 			t.Run("Attempts_ACoarseClockNeverOverCounts", func(t *testing.T) {

@@ -1568,8 +1568,9 @@ export interface FleetSandboxClaim {
    *  than inline literals. */
   status?: ConversationStatusValue
   failure_kind?: string
-  /** How the ENGAGEMENT ended (completed | failed | cancelled | requeued |
-   *  parked | reaped) — a claim vocabulary of its own, not a conversation status. */
+  /** How the ENGAGEMENT ended (completed | failed | cancelled | parked |
+   *  requeued | requeued_credentials | reaped | requeued_shutdown) — a claim
+   *  vocabulary of its own, not a conversation status. */
   outcome?: string
   /** When the engagement last did anything its stall watchdog counts as
    *  activity, as the holder's last lease renewal stamped it. Absent before

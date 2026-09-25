@@ -52,10 +52,9 @@ const tfCtlChannel = "tf_ctl"
 // be before resolveLiveOwner treats that executor as gone rather than a
 // viable signal target. Deliberately generous relative to the ~4s
 // heartbeat cadence (RunInstanceHeartbeat) — this is a routing decision
-// ("is it worth trying"), not the fleet reaper's dead-executor
-// determination (TFAC-586 owns that stricter fencing deadline); a false
-// "still live" here just costs a timed-out signal wait, never corrupts
-// state.
+// ("is it worth trying"), not a determination that the executor's work is
+// lost (each claim's own lease decides that); a false "still live" here just
+// costs a timed-out signal wait, never corrupts state.
 const instanceStaleThreshold = 15 * time.Second
 
 // defaultAckPollInterval is the waiting control pod's backstop poll
@@ -560,10 +559,11 @@ func (s *Spawner) drainSignals(ctx context.Context) {
 		// A fenced instance must not apply signals — the same gate the claim
 		// loop uses (dispatch.go). Identity-fenced: this process's identity is
 		// superseded, so acting on a run races the replacement. Partition-
-		// fenced: it already killed its live sandboxes and its rows may have
-		// been requeued, so a late apply would double-write against the new
-		// owner. The next successful heartbeat clears the partition fence and
-		// the scan resumes.
+		// fenced: this host cannot write its registry row, so the ack every
+		// apply ends with is unlikely to land either, and a stop still reaches
+		// each live engagement through its claim renewal, which reads the
+		// pending intent back. The next successful heartbeat clears the
+		// partition fence and the scan resumes.
 		return
 	}
 	executorID, _ := s.executorIdentity()

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -119,6 +120,39 @@ func TestTfSystem_MemoryAttemptsAreReadOnly(t *testing.T) {
 
 	_, err = h.SystemDB.Exec(`DELETE FROM conversation_memory_attempts`)
 	assertPgCode(t, err, "42501", "tf_system DELETE conversation_memory_attempts")
+}
+
+// TestTfSystem_RegistryGCIsControlPlaneOnly pins the one instances write an
+// executor must not have. Its grant covers its own row's register, heartbeat
+// and drain flag; deleting rows is the registry GC's, which the brain runs on a
+// control pod. A compromised executor that could delete registry rows could
+// take other instances off the fleet view, so the refusal is the property, and
+// it is asserted through the store method so the test names the caller that
+// would break if the GC were ever wired onto an executor.
+func TestTfSystem_RegistryGCIsControlPlaneOnly(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	const id = "gc-target-instance"
+	if _, err := pgstore.NewInstanceStore(h.AdminDB).Register(ctx, id, domain.InstanceRoleExecutor, "v1", ""); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	MustExec(t, h.AdminDB, `UPDATE instances SET last_heartbeat_at = now() - interval '8 days' WHERE id = $1`, id)
+
+	n, err := pgstore.NewInstanceStore(h.SystemDB).DeleteStaleSystem(ctx, 7*24*time.Hour)
+	assertPgCode(t, err, "42501", "tf_system Instances.DeleteStaleSystem")
+	if n != 0 {
+		t.Errorf("DeleteStaleSystem as tf_system reported %d rows deleted, want 0", n)
+	}
+
+	var still bool
+	if err := h.AdminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM instances WHERE id = $1)`, id).Scan(&still); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !still {
+		t.Error("the stale row is gone after a refused delete")
+	}
 }
 
 // TestTfSystem_CrossOrgSystemReadSucceeds pins that BYPASSRLS is REQUIRED
@@ -247,6 +281,18 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx); err != nil {
 			t.Errorf("ConversationQueue.SettleUnclaimedStopsSystem: %v", err)
 		}
+		// The recovery passes every executor's dispatcher runs: the takeover
+		// finds nothing expired and the stranded read nothing concluded, which
+		// still proves the grants for the same reason as above.
+		if _, err := stores.ConversationQueue.TakeOverExpiredClaimsSystem(ctx, executorID, 1, 100); err != nil {
+			t.Errorf("ConversationQueue.TakeOverExpiredClaimsSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.StrandedBlueprintRunsSystem(ctx, time.Minute, 20); err != nil {
+			t.Errorf("ConversationQueue.StrandedBlueprintRunsSystem: %v", err)
+		}
+		if _, err := stores.ConversationQueue.LiveClaimsOfExecutorSystem(ctx, executorID, 1); err != nil {
+			t.Errorf("ConversationQueue.LiveClaimsOfExecutorSystem: %v", err)
+		}
 
 		if _, err := stores.Conversations.SetExecutorSystem(ctx, orgID, conversationID, executorID, 1); err != nil {
 			t.Errorf("Conversations.SetExecutorSystem: %v", err)
@@ -275,6 +321,14 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 		if _, err := stores.ConversationQueue.ResetProcessingConversations(ctx, executorID, 1); err != nil {
 			t.Errorf("ConversationQueue.ResetProcessingConversations: %v", err)
+		}
+		if _, err := stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, executorID, 1, []string{conversationID}); err != nil {
+			t.Errorf("ConversationQueue.ReleaseOwnClaimsOnShutdownSystem: %v", err)
+		}
+		// A released claim is the fence's answer, not a grant failure: the
+		// statement ran under tf_system and found nothing live to release.
+		if err := stores.ConversationQueue.ReleaseClaimOnShutdownSystem(ctx, orgID, conversationID, uuid.NewString()); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+			t.Errorf("ConversationQueue.ReleaseClaimOnShutdownSystem: %v", err)
 		}
 	})
 

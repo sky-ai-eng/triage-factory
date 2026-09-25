@@ -5,9 +5,9 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
-	"github.com/sky-ai-eng/triage-factory/internal/reaper"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
@@ -84,8 +84,7 @@ func (a *App) startBrain(term int64) {
 	// terminal snapshot, past the grace, no close in flight — and the tasks
 	// open on closed entities, and records both on gauges. Zero is the
 	// steady state; nonzero is an alarm, not a repair, which the poll owns.
-	// Minutes-cadence: a rare-divergence count, not a hot path. Kept its
-	// own goroutine, apart from the reaper below.
+	// Minutes-cadence: a rare-divergence count, not a hot path.
 	go a.router.RunTerminalInvariantChecker(brainCtx, routing.DefaultTerminalCheckInterval)
 	// Work-queue depth gauges: one measure per registered kind per tick,
 	// reported at scrape time. Brain-gated for the same reason as the checker
@@ -145,14 +144,12 @@ func (a *App) startBrain(term int64) {
 	if a.plan.serveHTTP {
 		a.srv.StartBrainExtensionWorkers(brainCtx)
 	}
-	// Fleet reaper (dead-executor requeue/fail/cancel-finalize) + registry
-	// GC (TFAC-586, spec §4.3/§4.1(5)) — leader-only, singleton sweeps
-	// exactly like the firing worker above. nil in local mode and at
-	// TF_ROLE=executor (buildReaper never constructs a.reaperStore there).
-	if a.reaperStore != nil {
-		go reaper.RunReaper(brainCtx, a.reaperStore, reaper.DefaultReapInterval, a.reaperStaleThreshold, a.reaperMaxAttempts)
-		go reaper.RunRegistryGC(brainCtx, a.reaperStore, reaper.DefaultGCInterval, reaper.DefaultGCStaleAfter)
-	}
+	// Registry GC: deletes instance rows abandoned long enough that they can
+	// never come back. A singleton sweep like the firing worker above, in
+	// both modes — local's one row is its own and always fresh, so there it
+	// deletes nothing. Recovering a dead executor's claims is not the brain's
+	// job: every dispatcher takes over expired claims on its own pass.
+	go instance.RunRegistryGC(brainCtx, a.stores.Instances, instance.RegistryGCStaleAfter, instance.RegistryGCInterval)
 	// Sealed-credential-bundle provisioner sweeps (TFAC-614): the backstop
 	// for a dropped cred_request notification, and the periodic refresh of
 	// hour-lived GitHub tokens on long-running runs. nil in local mode and
@@ -182,13 +179,11 @@ func (a *App) startBrain(term int64) {
 	// before its successor starts. That attempt's row keeps completed_at NULL:
 	// abandonment is derived from started_at, never stamped.
 	//
-	// It is also the reaper's doorbell, and deliberately its only one. Every
-	// other boundary stamper rings memoryOwed because it runs in a DIFFERENT
-	// process from the brain — a request handler on whichever control pod took
-	// the PATCH, an executor's failure — and the relay is what crosses that
-	// gap. The reaper runs right here, on a longer tick than this sweep, so a
-	// conversation it fails is picked up within one interval regardless; a
-	// doorbell would buy it nothing and cost it a fleet-wide re-sweep per tick.
+	// Every boundary stamper rings memoryOwed because it runs in a
+	// DIFFERENT process from the brain — a request handler on whichever
+	// control pod took the PATCH, an executor's failure, a dispatcher that
+	// failed a conversation whose loss budget was spent — and the relay is
+	// what crosses that gap; the sweep is the floor for a dropped ring.
 	//
 	// Not go-prefixed because Run spawns its own loop and returns: it arms the
 	// doorbell on the way, which has to have happened by the time this function

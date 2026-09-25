@@ -5754,7 +5754,8 @@ GRANT USAGE, SELECT ON SEQUENCE public.ws_outbox_id_seq TO tf_system;
 -- SELECT for the PresentFor fast-deny fallback, DELETE for the presence
 -- reaper. Executors never INSERT: the upserting heartbeat runs on HTTP pods.
 GRANT SELECT, DELETE ON TABLE public.ws_presence TO tf_system;
--- Fleet registry: this instance's own register + heartbeat + drain flag.
+-- Fleet registry: this instance's own register + heartbeat + drain flag. No
+-- DELETE: the registry GC is brain-gated, control-side only.
 GRANT SELECT, INSERT, UPDATE ON TABLE public.instances TO tf_system;
 -- The per-pod sampler INSERTs a row a minute and the reaper DELETEs the tail.
 GRANT SELECT, INSERT, DELETE ON TABLE public.instance_stats TO tf_system;

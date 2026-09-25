@@ -58,6 +58,20 @@ func (s *instanceStore) Register(ctx context.Context, id, role, version, pubkey 
 	return bootEpoch, err
 }
 
+// DeleteStaleSystem measures staleness on this process's clock, bound as a
+// time the way Heartbeat stamps last_heartbeat_at, so the comparison is one
+// layout against itself.
+func (s *instanceStore) DeleteStaleSystem(ctx context.Context, olderThan time.Duration) (int, error) {
+	res, err := s.q.ExecContext(ctx, `
+		DELETE FROM instances WHERE last_heartbeat_at < ?
+	`, time.Now().UTC().Add(-olderThan))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 func (s *instanceStore) Heartbeat(ctx context.Context, id string, bootEpoch int64, hb domain.InstanceHeartbeat) (bool, bool, error) {
 	// draining and labels_json are deliberately not in the SET list — they
 	// hold operator/control-plane intent and the heartbeat must not clobber

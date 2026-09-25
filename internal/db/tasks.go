@@ -711,8 +711,9 @@ type TaskStore interface {
 	// afterwards leaves no active task for a replay to find, so nothing walks
 	// back to the runs; stamping here means the system cannot forget it meant
 	// to stop them. From the flag alone the rest finishes on its own — the
-	// claim gate refuses to drive a cancel-requested step, and the reaper's
-	// cancel arm finalizes it once its executor is gone.
+	// claim gate refuses to drive a cancel-requested step, and the
+	// dispatcher's settlement parks it and cancels its run once no claim
+	// holds it, whether or not a stop intent ever reached it.
 	//
 	// The returned conversation ids are that same then-active set, read
 	// inside the tx: every non-terminal conversation on the task,

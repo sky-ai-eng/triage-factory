@@ -566,7 +566,7 @@ func TestRecordNativeResult_SelfFencedLeaseRecordsNothing(t *testing.T) {
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: "claim-1"},
 		"ns-"+conversationID, t.TempDir(), "event", "", time.Now(),
 		agentloop.Result{Kind: agentloop.ResultConcluded, Outcome: domain.ConversationOutcomeFinish, ResultSummary: "done"},
-		nil); !fenced {
+		nil).fenced; !fenced {
 		t.Fatal("a self-fenced conclusion reported unfenced; the caller would advance the blueprint off a result nobody owns")
 	}
 	if stub.completes != 0 {

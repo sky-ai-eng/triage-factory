@@ -405,6 +405,7 @@ type stallFixture struct {
 	claimID        string
 	task           domain.Task
 	claimCtx       context.Context
+	fence          context.CancelCauseFunc
 }
 
 func newStallFixture(t *testing.T, conversationID string, timings activityTimings) stallFixture {
@@ -424,7 +425,7 @@ func newStallFixture(t *testing.T, conversationID string, timings activityTiming
 	t.Cleanup(func() { fence(nil) })
 	stop := s.startActivityTracker(&domain.Conversation{ID: conversationID, OrgID: runmode.LocalDefaultOrgID, ClaimID: claimID}, fence)
 	t.Cleanup(stop)
-	return stallFixture{s: s, database: database, conversationID: conversationID, claimID: claimID, task: loadTask(t, s, taskID), claimCtx: claimCtx}
+	return stallFixture{s: s, database: database, conversationID: conversationID, claimID: claimID, task: loadTask(t, s, taskID), claimCtx: claimCtx, fence: fence}
 }
 
 // assertParkedStalled reads the conversation and its claim back.
@@ -505,10 +506,10 @@ func TestNativeStall_ProviderWithNoFirstByteParksStalled(t *testing.T) {
 		t.Errorf("provider attempts = %d, want 1 — a stall stops the engagement, it does not retry", n)
 	}
 
-	if fenced := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
+	if disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); fenced {
-		t.Fatal("the stalled engagement reported a fence; it still holds its claim")
+		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); disp.fenced || disp.handedBack {
+		t.Fatalf("the stalled engagement reported %+v; it still holds its claim and parks", disp)
 	}
 	f.assertParkedStalled(t)
 	if got := stalls("provider"); got != 1 {
@@ -541,10 +542,10 @@ func TestNativeStall_BlockedToolParksStalledNotFailed(t *testing.T) {
 		t.Fatalf("result = %v (err %v), want cancelled", result.Kind, result.Err)
 	}
 
-	if fenced := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
+	if disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); fenced {
-		t.Fatal("the stalled engagement reported a fence; it still holds its claim")
+		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); disp.fenced || disp.handedBack {
+		t.Fatalf("the stalled engagement reported %+v; it still holds its claim and parks", disp)
 	}
 	if got := storedStatus(t, f.database, f.conversationID); got == "failed" {
 		t.Fatal("a slow tool failed the conversation; it should park as a stall")

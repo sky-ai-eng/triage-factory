@@ -357,7 +357,7 @@ func TestRecordNativeResult_FailureFilesTheAgentsMemoryFile(t *testing.T) {
 		runConfig{orgID: runmode.LocalDefaultOrgID, blueprintRunID: "bpr-" + conversationID, claimID: holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID)},
 		"bpr-"+conversationID, cwd, "event", "", time.Now(),
 		agentloop.Result{Kind: agentloop.ResultFailed, FailureKind: domain.ConversationFailureAgentError}, mirror,
-	); fenced {
+	).fenced; fenced {
 		t.Fatal("recordNativeResult reported a fence trip on an unfenced store")
 	}
 

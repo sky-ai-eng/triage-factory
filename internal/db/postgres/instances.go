@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -138,6 +139,19 @@ func (s *instanceStore) SetDraining(ctx context.Context, id string, draining boo
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// DeleteStaleSystem measures staleness on database time, the clock every
+// heartbeat is stamped with.
+func (s *instanceStore) DeleteStaleSystem(ctx context.Context, olderThan time.Duration) (int, error) {
+	res, err := s.admin.ExecContext(ctx, `
+		DELETE FROM instances WHERE last_heartbeat_at < now() - make_interval(secs => $1)
+	`, olderThan.Seconds())
+	if err != nil {
+		return 0, wrapAdminPoolPermErr(err, "instances.DeleteStaleSystem")
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (s *instanceStore) Get(ctx context.Context, id string) (*domain.Instance, error) {

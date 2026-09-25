@@ -579,10 +579,10 @@ func gitAuthorizeOutcome(dec gitproxy.Decision) string {
 // back. The orchestrator never opens them; only the sidecar holds the matching
 // private key. This is what replaces the pre-sandbox awaitCredentials unseal.
 //
-// A timeout (brain down at claim time) surfaces as an error, failing the
-// bring-up; the dispatcher then requeues the run's setup like any transient
-// setup failure. Only the executor role reaches here (bringUpRunSidecar
-// returns nil otherwise).
+// A timeout (brain down at claim time) surfaces as errAwaitingCredentialsTimeout,
+// failing the bring-up; the dispatcher then hands the claim back without
+// spending the setup budget (handlePreAgentFailure). Only the executor role
+// reaches here (bringUpRunSidecar returns nil otherwise).
 func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.SidecarProvisionFunc {
 	myID, myBootEpoch := s.executorIdentity()
 	return func(provCtx context.Context, sidecarPubKeyB64 string) ([]byte, int64, error) {
@@ -641,7 +641,7 @@ func (s *Spawner) sidecarProvisionFor(orgID, conversationID string) agentproc.Si
 				return nil, 0, provCtx.Err()
 			case <-ticker.C:
 				if time.Now().After(deadline) {
-					err := fmt.Errorf("timed out waiting for conversation %s credential bundle (brain not provisioning)", conversationID)
+					err := fmt.Errorf("%w: conversation %s after %s (brain not provisioning)", errAwaitingCredentialsTimeout, conversationID, timeout)
 					span.SetAttributes(telemetry.Count(polls))
 					recordSpanError(span, err)
 					return nil, 0, err

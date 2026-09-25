@@ -136,6 +136,9 @@ func (f *fakeInstanceStore) List(context.Context) ([]domain.Instance, error) {
 func (f *fakeInstanceStore) SetDraining(context.Context, string, bool) (bool, error) {
 	return false, nil
 }
+func (f *fakeInstanceStore) DeleteStaleSystem(context.Context, time.Duration) (int, error) {
+	return 0, nil
+}
 
 // taskIDForConversation reads the task_id a seedConversation fixture's
 // conversation row belongs to — which is also its workspace key, so the tests

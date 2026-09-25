@@ -5,8 +5,8 @@
 // key (credseal), and writes the result to claim_credentials for that
 // executor to unseal.
 //
-// Manager is brain-unit member the same way the fleet reaper and drain
-// sweeper are (internal/app's startBrain/stopBrain): constructed only for
+// Manager is a brain-unit member the same way the registry GC and the drain
+// worker are (internal/app's startBrain/stopBrain): constructed only for
 // brain-capable roles in multi mode, nil-checked everywhere else.
 package credprovision
 
@@ -163,15 +163,16 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if inst.BootEpoch != claim.BootEpoch {
 		// The claiming executor has restarted since it claimed this conversation —
 		// a new boot, a new ephemeral keypair, a new epoch. Nothing in
-		// this boot is waiting on this conversation; the reaper's stale-
-		// heartbeat sweep is what recovers it (TFAC-586), not this
-		// function. Sealing against the new epoch here would be wrong:
+		// this boot is waiting on this conversation; the new boot's reset
+		// releases the claim, or another dispatcher takes it over once its
+		// lease lapses, not this function. Sealing against the new epoch
+		// here would be wrong:
 		// the executor compares a bundle's epoch against its OWN current
 		// one, and inst.BootEpoch (the pubkey's owner) is authoritative,
 		// but writing it under a claim that names an EARLIER epoch would
 		// desync the executor's understanding of which claim this bundle
-		// answers. Skip and let the reaper requeue.
-		log.Warn("claiming executor's boot epoch has moved on since this conversation was claimed; skipping (reaper will requeue)",
+		// answers. Skip, and let the claim's release return it to the queue.
+		log.Warn("claiming executor's boot epoch has moved on since this conversation was claimed; skipping (the claim is released by that executor's boot reset or taken over after its lease)",
 			"conversation", conversationID, "executor", claim.ExecutorID, "claim_epoch", claim.BootEpoch, "instance_epoch", inst.BootEpoch)
 		span.SetAttributes(telemetry.Outcome("stale_boot_epoch"))
 		return nil

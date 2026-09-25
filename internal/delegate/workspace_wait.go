@@ -97,7 +97,13 @@ func (s *Spawner) snapshotPoll() time.Duration {
 // just have arrived.
 //
 // Returns immediately when nothing is owed — no record, or a terminal one.
-func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (appeared bool, waited time.Duration) {
+//
+// superseding says a blob was already under the key when the wait began, left
+// by an earlier persist. Its presence then says nothing about the one in
+// flight, so it cannot end the wait: only the record leaving pending, the
+// writer going silent, or the bound can, and appeared then reports whatever
+// blob is there — the new one if it landed, the earlier one if it did not.
+func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string, superseding bool) (appeared bool, waited time.Duration) {
 	if s.Storage() == nil {
 		return false, 0
 	}
@@ -124,7 +130,7 @@ func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (a
 	tick := time.NewTicker(s.snapshotPoll())
 	defer tick.Stop()
 	for {
-		if s.snapshotBlobExists(ctx, orgID, keyID) {
+		if !superseding && s.snapshotBlobExists(ctx, orgID, keyID) {
 			return true, time.Since(started)
 		}
 
@@ -163,6 +169,19 @@ func (s *Spawner) awaitSnapshotBlob(ctx context.Context, orgID, keyID string) (a
 		case <-tick.C:
 		}
 	}
+}
+
+// snapshotPersistPending reports whether a persist for the key is in flight.
+// A read that fails answers no: the caller already holds a blob, and an
+// unreadable record is not evidence that a newer one is coming.
+func (s *Spawner) snapshotPersistPending(ctx context.Context, orgID, keyID string) bool {
+	state, err := s.snapshotStateFor(ctx, orgID, keyID)
+	if err != nil {
+		delegateLog.Warn("resume: workspace snapshot state read failed; rehydrating from the blob already there",
+			"org", orgID, "key_id", keyID, "error", err)
+		return false
+	}
+	return state != nil && state.State == domain.WorkspaceSnapshotPending
 }
 
 // snapshotBlobExists is the wait's one real question. A store error answers
