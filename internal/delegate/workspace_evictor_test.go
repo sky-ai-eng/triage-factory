@@ -87,7 +87,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	}
 
 	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: wsKey}
-	got, prov, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
+	got, prov, _, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace after eviction: %v", err)
 	}

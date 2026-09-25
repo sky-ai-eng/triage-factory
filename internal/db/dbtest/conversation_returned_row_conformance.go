@@ -106,7 +106,7 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 		// A renewal stamps the claim's activity columns, so every returned
 		// row below carries them set rather than NULL and the projections are
 		// compared on a value.
-		if _, err := queue.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimID, db.DefaultClaimLease, 7*time.Second, "tool:bash"); err != nil {
+		if _, err := queue.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimID, db.DefaultClaimLease, db.ClaimActivity{Idle: 7 * time.Second, Op: "tool:bash"}); err != nil {
 			t.Fatalf("RenewClaimLeaseSystem: %v", err)
 		}
 		conv, err = store.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, "/tmp/rr-4")

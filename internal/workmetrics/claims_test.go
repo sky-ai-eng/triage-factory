@@ -17,6 +17,8 @@ type fakeExpiredClaims struct {
 	calls   int
 	idle    time.Duration
 	idleErr error
+	ckpt    time.Duration
+	ckptErr error
 }
 
 func (f *fakeExpiredClaims) ExpiredClaimsSystem(context.Context) (int, time.Duration, error) {
@@ -26,6 +28,44 @@ func (f *fakeExpiredClaims) ExpiredClaimsSystem(context.Context) (int, time.Dura
 
 func (f *fakeExpiredClaims) OldestIdleClaimSystem(context.Context) (time.Duration, error) {
 	return f.idle, f.idleErr
+}
+
+func (f *fakeExpiredClaims) OldestCheckpointAgeSystem(context.Context) (time.Duration, error) {
+	return f.ckpt, f.ckptErr
+}
+
+// TestClaimObserver_ReportsTheOldestCheckpointAge: the checkpoint-age gauge
+// reports what the store read, keeps its last value across a failed read, and
+// is independent of the idle read failing beside it.
+func TestClaimObserver_ReportsTheOldestCheckpointAge(t *testing.T) {
+	src := &fakeExpiredClaims{}
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := NewClaimObserver(provider, src)
+	defer c.Close()
+	ctx := context.Background()
+
+	if _, ok := gaugeWith(t, collect(t, reader), "claims.oldest_checkpoint_age"); ok {
+		t.Error("claims.oldest_checkpoint_age reported before any measure")
+	}
+	src.ckpt = 4 * time.Minute
+	c.Tick(ctx)
+	if got, ok := gaugeWith(t, collect(t, reader), "claims.oldest_checkpoint_age"); !ok || got != 240 {
+		t.Errorf("claims.oldest_checkpoint_age = %d (present=%v), want 240", got, ok)
+	}
+
+	src.ckptErr, src.ckpt = errors.New("database unreachable"), 0
+	c.Tick(ctx)
+	if got, _ := gaugeWith(t, collect(t, reader), "claims.oldest_checkpoint_age"); got != 240 {
+		t.Errorf("claims.oldest_checkpoint_age = %d after a failed read, want the previous 240 kept", got)
+	}
+
+	src.ckptErr, src.idleErr = nil, errors.New("idle read failed")
+	src.ckpt = 90 * time.Second
+	c.Tick(ctx)
+	if got, _ := gaugeWith(t, collect(t, reader), "claims.oldest_checkpoint_age"); got != 90 {
+		t.Errorf("claims.oldest_checkpoint_age = %d with the idle read failing, want the fresh 90", got)
+	}
 }
 
 // TestClaimObserver_ReportsTheOldestIdleEngagement: the idle gauge reports

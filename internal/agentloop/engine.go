@@ -82,6 +82,15 @@ type Hooks struct {
 	// the outcome as dispatched and returns the outcome to record.
 	AfterToolCall func(ctx context.Context, call domain.ToolCall, out ToolOutcome) ToolOutcome
 
+	// AfterToolBatch runs once a batch that did not end the run has every
+	// result persisted, before the next provider call. position is the
+	// assembly key (COALESCE(seq, id)) of the last result the batch wrote:
+	// every call at or before it has finished, and nothing the loop
+	// dispatches touches the workspace again until the next BeforeToolCall.
+	// It admits nothing, so it is not a Guard, and it must not block — the
+	// next call is the model thinking, and anything slow belongs beside it.
+	AfterToolBatch func(ctx context.Context, position float64)
+
 	// ShouldStopAfterTurn runs when the model would conclude (an assistant
 	// message with no tool calls). A non-empty nudge is inserted as pending
 	// input and the loop continues instead of concluding; "" lets the
@@ -174,6 +183,14 @@ type Params struct {
 	// different executor. Read alongside Workspace: it only ever adds a
 	// sentence to a notice a restore already earned.
 	ExecutorChanged bool
+
+	// WorkspaceAsOf is the transcript position a restored workspace reflects,
+	// read only when Workspace is rehydrated: the effects of every tool call
+	// at or before it are in the tree, and none after it are. A checkpoint
+	// taken mid-engagement records one. Nil is a snapshot that covers the
+	// whole transcript, which is what a park or a conclusion writes, and what
+	// a snapshot written before positions were recorded reads as.
+	WorkspaceAsOf *float64
 }
 
 // ResultKind is how an engagement ended.
@@ -608,9 +625,12 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		// 8. Dispatch. Flow-control calls resolve loop-side; everything
 		// else goes into the jail, serially, in call order.
 		if len(calls) > 0 {
-			outcome, terminated, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls)
+			outcome, terminated, position, err := e.dispatchBatch(ctx, params, assistantRow.ID, calls)
 			if err != nil {
 				return e.failed(ctx, started, turn, err)
+			}
+			if !terminated && e.Hooks.AfterToolBatch != nil {
+				e.Hooks.AfterToolBatch(ctx, position)
 			}
 			if terminated {
 				// stop_blueprint's summary argument is the account of the
@@ -817,7 +837,7 @@ func (e *Engine) checkGuards(ctx context.Context, params Params, turn int) strin
 func (e *Engine) answerUndispatchedCalls(ctx context.Context, params Params, ownerID int, calls []domain.ToolCall, notice string) error {
 	at := toolResultPositions(ownerID, len(calls))
 	for i, call := range calls {
-		if err := e.insertToolResult(ctx, params, call, notice, true, at(i)); err != nil {
+		if _, err := e.insertToolResult(ctx, params, call, notice, true, at(i)); err != nil {
 			return err
 		}
 	}

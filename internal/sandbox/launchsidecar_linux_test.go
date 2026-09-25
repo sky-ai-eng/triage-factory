@@ -107,7 +107,11 @@ func TestLaunchSidecarProcess_KillTerminatesAndWaitReturns(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root: even a same-uid Credential triggers setgroups(), which needs CAP_SETGID")
 	}
-	withStubSidecarBinary(t, "sleep 60\n")
+	// exec, not a plain command: the sidecar this stands in for is one
+	// process, and a shell that forked sleep would leave it running past the
+	// kill, holding the stderr pipe Wait drains until it exits — a minute
+	// later, whenever the kill landed after the fork.
+	withStubSidecarBinary(t, "exec sleep 60\n")
 
 	parent, child := socketpairFiles(t)
 	defer parent.Close()

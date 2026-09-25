@@ -153,7 +153,10 @@ func toolResultPositions(ownerID, n int) func(int) *float64 {
 // regardless of origin, and its answer sits under the call whatever else took
 // an id in between. A nil seq is the tail, and every caller that passes one
 // has established that the tail IS the position under the call.
-func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64) error {
+//
+// It returns the row's assembly key, which is how a batch learns the position
+// of the last row it wrote.
+func (e *Engine) insertToolResult(ctx context.Context, params Params, call domain.ToolCall, content string, isErr bool, seq *float64) (float64, error) {
 	row := &domain.Message{
 		ConversationID: params.ConversationID,
 		Role:           "tool",
@@ -164,10 +167,10 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
-		return fmt.Errorf("insert tool result for %s: %w", call.ID, err)
+		return 0, fmt.Errorf("insert tool result for %s: %w", call.ID, err)
 	}
 	row.ID = id
-	return nil
+	return assemblyKey(*row), nil
 }
 
 // insertToolResultWithImages is insertToolResult for a tool that returned
@@ -175,7 +178,7 @@ func (e *Engine) insertToolResult(ctx context.Context, params Params, call domai
 // Content column so the display path is unchanged, and the image rides
 // ContentBlocks, which is what the assembly bijection replays to the
 // provider.
-func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage, seq *float64) error {
+func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, call domain.ToolCall, content string, images []ToolImage, seq *float64) (float64, error) {
 	blocks := make([]domain.ContentBlock, 0, len(images))
 	for _, img := range images {
 		blocks = append(blocks, domain.ContentBlock{
@@ -198,10 +201,10 @@ func (e *Engine) insertToolResultWithImages(ctx context.Context, params Params, 
 	}
 	id, err := e.Transcript.Insert(ctx, params.OrgID, row)
 	if err != nil {
-		return fmt.Errorf("insert tool result for %s: %w", call.ID, err)
+		return 0, fmt.Errorf("insert tool result for %s: %w", call.ID, err)
 	}
 	row.ID = id
-	return nil
+	return assemblyKey(*row), nil
 }
 
 // sanitizeForStore strips NUL from text bound for the messages table.

@@ -282,6 +282,19 @@ func (a *App) buildExecution() error {
 		a.spawner.SetSnapshotWaitTimeout(wait)
 		appLog.Info("workspace snapshot wait configured", "wait", wait, "env", "TF_SNAPSHOT_WAIT_SEC")
 	}
+	// How often a live native engagement checkpoints its workspace, bounding
+	// what a hard-killed executor loses. Resolved on every role: only an
+	// engagement reads it, and a control pod runs none.
+	interval, ierr := delegate.ParseSnapshotInterval(os.Getenv("TF_SNAPSHOT_INTERVAL_SEC"))
+	if ierr != nil {
+		appLog.Warn("workspace checkpoint interval", "error", ierr)
+	}
+	a.spawner.SetSnapshotInterval(interval)
+	if interval == 0 {
+		appLog.Info("workspace checkpoints disabled (TF_SNAPSHOT_INTERVAL_SEC=0)")
+	} else if interval != delegate.DefaultSnapshotInterval {
+		appLog.Info("workspace checkpoint interval configured", "interval", interval, "env", "TF_SNAPSHOT_INTERVAL_SEC")
+	}
 	floor, err := delegate.ParseDispatchMemFloorMB(os.Getenv("TF_DISPATCH_MEM_FLOOR_MB"))
 	a.spawner.SetDispatchMemFloor(floor)
 	if err != nil {

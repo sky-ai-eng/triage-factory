@@ -63,6 +63,10 @@ type runConfig struct {
 	// downstream can tell a warm tree from a reconstruction of one. Empty on
 	// paths that build no workspace.
 	workspace domain.WorkspaceProvenance
+	// workspaceAsOf is the transcript position a rehydrated tree reflects,
+	// when a checkpoint of this conversation wrote the blob it came from; nil
+	// otherwise. The native loop names the tool calls after it.
+	workspaceAsOf *float64
 
 	extraAllowedTools string // comma-separated extra tools from prompt.AllowedTools + agent scans; merged into --allowedTools at spawn time
 
