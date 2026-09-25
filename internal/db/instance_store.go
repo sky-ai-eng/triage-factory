@@ -62,5 +62,9 @@ type InstanceStore interface {
 	// history with it, and an id that comes back simply re-registers at boot
 	// epoch 1. Postgres measures on database time; SQLite is one process and
 	// measures on its own clock, the one its heartbeats are stamped with.
+	//
+	// Control-plane only: the registry GC runs in the brain, and tf_system,
+	// the role an executor's admin pool connects as, holds no DELETE on
+	// instances, so on an executor this fails with a permission error.
 	DeleteStaleSystem(ctx context.Context, olderThan time.Duration) (int, error)
 }

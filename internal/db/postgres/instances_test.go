@@ -310,7 +310,9 @@ func TestInstanceStore_Postgres_GetUnknownIDReturnsNil(t *testing.T) {
 }
 
 // TestInstanceStore_Postgres_GCConformance runs the shared registry GC suite
-// against the admin pool, the only pool the instances table is written on.
+// on the superuser connection, the role a control pod's admin pool binds and
+// the only one the GC runs as. That tf_system is refused the same delete is
+// pinned by TestTfSystem_RegistryGCIsControlPlaneOnly.
 func TestInstanceStore_Postgres_GCConformance(t *testing.T) {
 	h := pgtest.Shared(t)
 	dbtest.RunInstanceGCConformance(t, func(t *testing.T) dbtest.InstanceGCFixture {

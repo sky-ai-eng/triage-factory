@@ -122,6 +122,39 @@ func TestTfSystem_MemoryAttemptsAreReadOnly(t *testing.T) {
 	assertPgCode(t, err, "42501", "tf_system DELETE conversation_memory_attempts")
 }
 
+// TestTfSystem_RegistryGCIsControlPlaneOnly pins the one instances write an
+// executor must not have. Its grant covers its own row's register, heartbeat
+// and drain flag; deleting rows is the registry GC's, which the brain runs on a
+// control pod. A compromised executor that could delete registry rows could
+// take other instances off the fleet view, so the refusal is the property, and
+// it is asserted through the store method so the test names the caller that
+// would break if the GC were ever wired onto an executor.
+func TestTfSystem_RegistryGCIsControlPlaneOnly(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+
+	const id = "gc-target-instance"
+	if _, err := pgstore.NewInstanceStore(h.AdminDB).Register(ctx, id, domain.InstanceRoleExecutor, "v1", ""); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	MustExec(t, h.AdminDB, `UPDATE instances SET last_heartbeat_at = now() - interval '8 days' WHERE id = $1`, id)
+
+	n, err := pgstore.NewInstanceStore(h.SystemDB).DeleteStaleSystem(ctx, 7*24*time.Hour)
+	assertPgCode(t, err, "42501", "tf_system Instances.DeleteStaleSystem")
+	if n != 0 {
+		t.Errorf("DeleteStaleSystem as tf_system reported %d rows deleted, want 0", n)
+	}
+
+	var still bool
+	if err := h.AdminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM instances WHERE id = $1)`, id).Scan(&still); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !still {
+		t.Error("the stale row is gone after a refused delete")
+	}
+}
+
 // TestTfSystem_CrossOrgSystemReadSucceeds pins that BYPASSRLS is REQUIRED
 // semantics for a granted table, not accidental — a *System read for one
 // org must succeed when called with a different org's context bound
