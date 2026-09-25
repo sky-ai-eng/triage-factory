@@ -168,13 +168,19 @@ const describedCallMaxRunes = 80
 // describeToolCall renders a call as `name: argument` from the one argument
 // that identifies it — a command, a search pattern, a path — on one line,
 // clipped, with no backtick left to break the code span it is quoted in.
+//
+// The argument is the agent's own, and may carry text from hostile content it
+// read, while the notice it lands in is a <system-note> the model trusts. So
+// angle brackets are replaced with look-alikes: no argument can close the note
+// and open one of its own.
 func describeToolCall(call domain.ToolCall) string {
 	for _, key := range []string{"command", "pattern", "path"} {
 		v, ok := call.Input[key].(string)
 		if !ok {
 			continue
 		}
-		v = strings.Join(strings.Fields(strings.ReplaceAll(v, "`", "'")), " ")
+		v = noteArgReplacer.Replace(v)
+		v = strings.Join(strings.Fields(v), " ")
 		if v == "" {
 			continue
 		}
@@ -185,6 +191,10 @@ func describeToolCall(call domain.ToolCall) string {
 	}
 	return call.Name
 }
+
+// noteArgReplacer neutralizes the characters a quoted argument could use to
+// break out of the code span or the note around it.
+var noteArgReplacer = strings.NewReplacer("`", "'", "<", "‹", ">", "›")
 
 // repairTranscript makes the conversation's transcript legal and honest
 // before this engagement reads it. It runs unconditionally on every claim

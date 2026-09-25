@@ -54,6 +54,12 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 		t.Skipf("no tool host binary at %s (set TF_TEST_TOOLHOST_BIN to a static build)", toolHost)
 	}
 
+	// The answer is gVisor's, and can change between releases: say which one
+	// gave it. Executors run the version docker/Dockerfile pins.
+	if out, err := exec.Command("runsc", "--version").Output(); err == nil {
+		t.Logf("runsc: %s", strings.SplitN(string(out), "\n", 2)[0])
+	}
+
 	suffix := randomProbeSuffix(t)
 	rootfs := probeRootfs(t, busybox, toolHost)
 	netnsPath := probeNetns(t, "tfprobe-"+suffix)
