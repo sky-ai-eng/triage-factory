@@ -1580,6 +1580,11 @@ export interface FleetSandboxClaim {
   /** The operation in flight at that renewal ('provider', 'tool:bash',
    *  'clone', …). Absent when nothing was in flight. */
   current_op?: string
+  /** When the engagement's workspace was last covered by a stored
+   *  checkpoint, as the holder's last renewal stamped it. Absent for an
+   *  engagement that does not checkpoint; like last_activity_at, only a live
+   *  claim's stamp describes now. */
+  last_checkpoint_at?: string
 }
 
 export interface FleetSandboxes {

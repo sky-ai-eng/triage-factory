@@ -574,7 +574,7 @@ func isActiveClaimConflict(err error) bool {
 	return pgErr.Code == "23505" && pgErr.ConstraintName == "idx_claims_one_active"
 }
 
-func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
+func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
 	// A malformed id is a caller wiring fault, and the honest answer to it is
 	// the one the fence gives for every other way of not being the owner:
 	// Postgres would otherwise reject the bind (22P02) and the loop would read
@@ -595,22 +595,28 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	// through the renewal; ReacquireClaimLeaseSystem is a separate verb with
 	// its own proof obligation.
 	//
-	// last_activity_at is measured back from the same statement_timestamp()
-	// the lease is measured forward from, so the idle the executor read on its
-	// monotonic clock lands as a database timestamp with no executor wall
-	// clock in it.
+	// last_activity_at and last_checkpoint_at are measured back from the same
+	// statement_timestamp() the lease is measured forward from, so the ages
+	// the executor read on its monotonic clock land as database timestamps
+	// with no executor wall clock in them. A NULL checkpoint age stamps NULL.
+	var checkpointAge any
+	if activity.CheckpointAge != nil {
+		checkpointAge = activity.CheckpointAge.Seconds()
+	}
 	var out db.ClaimRenewal
 	err := s.conn.QueryRowContext(ctx, `
 		UPDATE claims
 		SET lease_expires_at = statement_timestamp() + make_interval(secs => $1),
 		    last_activity_at = statement_timestamp() - make_interval(secs => $5),
-		    current_op = NULLIF($6, '')
+		    current_op = NULLIF($6, ''),
+		    last_checkpoint_at = CASE WHEN $7::float8 IS NULL THEN NULL
+		                              ELSE statement_timestamp() - make_interval(secs => $7::float8) END
 		WHERE id = $2 AND org_id = $3 AND conversation_id = $4
 		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		RETURNING lease_expires_at,
 		          (SELECT r.stop_requested_at IS NOT NULL FROM conversations r WHERE r.id = claims.conversation_id),
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
-	`, lease.Seconds(), claimID, orgID, conversationID, idle.Seconds(), op).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
+	`, lease.Seconds(), claimID, orgID, conversationID, activity.Idle.Seconds(), activity.Op, checkpointAge).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
 	}
@@ -854,6 +860,25 @@ func (s *conversationQueueStore) OldestIdleClaimSystem(ctx context.Context) (tim
 	`).Scan(&seconds)
 	if err != nil {
 		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestIdleClaimSystem")
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
+}
+
+func (s *conversationQueueStore) OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error) {
+	// The same shape as OldestIdleClaimSystem: a claim whose engagement does
+	// not checkpoint carries no stamp and is not counted.
+	var seconds float64
+	err := s.conn.QueryRowContext(ctx, `
+		SELECT COALESCE(EXTRACT(EPOCH FROM (statement_timestamp() - min(last_checkpoint_at))), 0)
+		FROM claims
+		WHERE released_at IS NULL AND lease_expires_at > statement_timestamp()
+		  AND last_checkpoint_at IS NOT NULL
+	`).Scan(&seconds)
+	if err != nil {
+		return 0, wrapAdminPoolPermErr(err, "conversation_queue.OldestCheckpointAgeSystem")
 	}
 	if seconds < 0 {
 		seconds = 0
@@ -1634,7 +1659,7 @@ var executorClaimSelectCols = `
 	c.peak_mem_mb, c.cpu_usec,
 	COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	COALESCE(v.failure_kind, ''),
-	c.last_activity_at, COALESCE(c.current_op, '')`
+	c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at`
 
 // claimLeaseLiveSQL is one claims row's own liveness, for the alias the
 // caller gave it: unreleased AND its lease still in the future. An expired
@@ -1715,19 +1740,23 @@ type executorClaimScanner interface {
 
 func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error) {
 	var c domain.ExecutorClaim
-	var releasedAt, leaseExpiresAt, lastActivityAt sql.NullTime
+	var releasedAt, leaseExpiresAt, lastActivityAt, lastCheckpointAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
-		&lastActivityAt, &c.CurrentOp,
+		&lastActivityAt, &c.CurrentOp, &lastCheckpointAt,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
 	}
 	if lastActivityAt.Valid {
 		v := lastActivityAt.Time
 		c.LastActivityAt = &v
+	}
+	if lastCheckpointAt.Valid {
+		v := lastCheckpointAt.Time
+		c.LastCheckpointAt = &v
 	}
 	if releasedAt.Valid {
 		v := releasedAt.Time

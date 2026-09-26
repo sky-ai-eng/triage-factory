@@ -76,6 +76,7 @@ const SANDBOXES: FleetSandboxes = {
       // A released claim keeps its last reading; the table must not show it.
       last_activity_at: '2026-07-30T11:01:30Z',
       current_op: 'provider',
+      last_checkpoint_at: '2026-07-30T11:01:00Z',
     },
     {
       id: UNMEASURED_CLAIM,
@@ -88,6 +89,8 @@ const SANDBOXES: FleetSandboxes = {
       // Three minutes before the read's generated_at.
       last_activity_at: '2026-07-30T11:57:00Z',
       current_op: 'tool:bash',
+      // Four and a half minutes before it.
+      last_checkpoint_at: '2026-07-30T11:55:30Z',
     },
   ],
 }
@@ -242,8 +245,20 @@ describe('Fleet sandbox breakdown', () => {
     expect(sandboxRow('run-cccccccc-dddd').getByText('3m 0s · tool:bash')).toBeInTheDocument()
 
     const released = sandboxRow('run-aaaaaaaa-bbbb')
-    expect(released.getByText('—')).toBeInTheDocument()
+    // Idle and checkpoint age both dash out on a released claim.
+    expect(released.getAllByText('—')).toHaveLength(2)
     expect(released.queryByText(/provider/)).not.toBeInTheDocument()
+  })
+
+  it('shows a live claim’s checkpoint age and a dash for a released one', async () => {
+    const user = userEvent.setup()
+    await renderFleet()
+    await user.click(screen.getByRole('button', { name: 'sandboxes on executor-alpha-01' }))
+    await screen.findByText('2 most recent')
+
+    expect(within(screen.getByRole('table')).getByText('checkpoint')).toBeInTheDocument()
+    expect(sandboxRow('run-cccccccc-dddd').getByText('4m 30s')).toBeInTheDocument()
+    expect(sandboxRow('run-aaaaaaaa-bbbb').queryByText(/1m/)).not.toBeInTheDocument()
   })
 
   it('collapsing stops the breakdown from refetching', async () => {

@@ -71,6 +71,22 @@ type ClaimRenewal struct {
 	StopRequestedBy string
 }
 
+// ClaimActivity is what a holder's renewal reports about its engagement,
+// copied onto the claim row.
+type ClaimActivity struct {
+	// Idle and Op are the stall tracker's reading: last_activity_at is stamped
+	// as database now minus Idle, so the executor's monotonic reading becomes
+	// a database timestamp without the executor's wall clock entering it, and
+	// current_op as Op, "" clearing it.
+	Idle time.Duration
+	Op   string
+	// CheckpointAge is how long the engagement's tree has gone without being
+	// covered by a stored workspace checkpoint, stamped as last_checkpoint_at
+	// the same way. Nil for an engagement that does not checkpoint, which
+	// stamps NULL.
+	CheckpointAge *time.Duration
+}
+
 // ClaimRef names one claim and the conversation it holds.
 type ClaimRef struct {
 	ClaimID, OrgID, ConversationID string
@@ -265,11 +281,9 @@ type ConversationQueueStore interface {
 	// holder learns of a pending stop within one renewal even when the local
 	// cancel handle and the cross-pod signal both missed it.
 	//
-	// idle and op are the engagement's activity as its stall tracker reads
-	// it: last_activity_at is stamped as database now minus idle, so the
-	// executor's monotonic reading becomes a database timestamp without the
-	// executor's wall clock entering it, and current_op as op, "" clearing it.
-	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (ClaimRenewal, error)
+	// activity is the engagement's own report — see ClaimActivity — stamped
+	// in the same statement.
+	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity ClaimActivity) (ClaimRenewal, error)
 
 	// ReacquireClaimLeaseSystem restores the lease on a claim this executor
 	// boot minted and nobody has released, whatever its expiry says, and
@@ -340,6 +354,14 @@ type ConversationQueueStore interface {
 	// claim has stamped one. Cross-org, for the brain's gauge, like
 	// ExpiredClaimsSystem beside it.
 	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
+
+	// OldestCheckpointAgeSystem reports the longest any live claim with an
+	// unexpired lease has gone since its engagement's tree was last covered by
+	// a stored checkpoint, measured from the last_checkpoint_at its renewal
+	// stamped to database now: the workspace a hard kill would lose right now.
+	// Zero when no such claim has stamped one. Cross-org, for the brain's
+	// gauge.
+	OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error)
 
 	// ExpiredClaimsOfExecutorSystem lists the live claims one executor boot
 	// minted whose lease has lapsed on database time, oldest first. Only the

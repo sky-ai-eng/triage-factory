@@ -7,6 +7,7 @@ import {
   activeProse,
   canResumeConversation,
   chainPosition,
+  claimCheckpointReadout,
   claimIdleReadout,
   completionGloss,
   completionKind,
@@ -379,5 +380,21 @@ describe('claimIdleReadout', () => {
 
   it('clamps clock skew to zero rather than going negative', () => {
     expect(claimIdleReadout('2026-07-16T10:03:05Z', 'provider', now)).toBe('0s · provider')
+  })
+})
+
+describe('claimCheckpointReadout', () => {
+  const now = T('2026-07-16T10:05:00Z')
+
+  it('reads the time since the workspace was last covered', () => {
+    expect(claimCheckpointReadout('2026-07-16T10:00:30Z', now)).toBe('4m 30s')
+  })
+
+  it('is null for an engagement that does not checkpoint', () => {
+    expect(claimCheckpointReadout(undefined, now)).toBeNull()
+  })
+
+  it('clamps clock skew to zero rather than going negative', () => {
+    expect(claimCheckpointReadout('2026-07-16T10:05:05Z', now)).toBe('0s')
   })
 })

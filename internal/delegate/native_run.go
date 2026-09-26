@@ -229,18 +229,26 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// resolvable.
 	coldModel := agentloop.DefaultColdCompactionModel
 
+	// Checkpoints, for as long as the loop runs and not a moment longer.
+	// recordNativeResult stops this before any ending writes, because a
+	// checkpoint still in flight is the same writer to the key as that
+	// ending's snapshot; the deferred stop only covers an exit that never
+	// reaches it.
+	ckpt := s.startCheckpointer(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd)
+	defer ckpt.stop()
+
 	engine := &agentloop.Engine{
 		Transcript:  transcript,
 		Credentials: s.nativeCredentials(cfg, model, coldModel),
 		Tools:       tools,
 		Guards:      []agentloop.Guard{&spendGuard{spawner: s, orgID: orgID, teamID: cfg.teamID}},
-		Hooks: agentloop.Hooks{
+		Hooks: checkpointHooks(ckpt, agentloop.Hooks{
 			BeforeToolCall: s.ghCommandGate(orgID, conversationID),
 			// Every tool call is a chance the agent just wrote its memory
 			// file, so every tool call is where the mirror looks.
 			AfterToolCall:       mirror.afterToolCall,
 			ShouldStopAfterTurn: s.artifactContractNudge(orgID, conversationID, task, cfg),
-		},
+		}),
 		Activity: engineActivity{s.activityFor(conversationID)},
 		ActivityBounds: agentloop.ActivityBounds{
 			Provider: timings.providerByte,
@@ -262,6 +270,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		UserID:              creatorUserID,
 		ColdCompactionModel: coldModel,
 		Workspace:           cfg.workspace,
+		WorkspaceAsOf:       cfg.workspaceAsOf,
 		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
 	})
 
@@ -693,9 +702,8 @@ func nativeBashMemBudgetMB(ceilingMB int) int {
 // recordNativeResult maps an engagement's terminal disposition onto the
 // existing bookkeeping. Every graceful release — a conclusion, a guard park,
 // a flow-control terminal — snapshots the workspace first, exactly as the
-// SDK path does at its own dormancy points, which is what keeps the
-// crash-loss window bounded to the current engagement and lets the next
-// claim cold-rehydrate on another executor.
+// SDK path does at its own dormancy points, which lets the next claim
+// cold-rehydrate on another executor.
 //
 // The disposition is fenced when the engagement's writes were refused because
 // its claim is released: nothing further is recorded and nothing is reacted
@@ -712,6 +720,15 @@ func (s *Spawner) recordNativeResult(
 	result agentloop.Result,
 	mirror *memoryMirror,
 ) engagementDisposition {
+	// Every ending below starts here, and the engagement's checkpointer stops
+	// before any of them writes: cancelled, and waited for through its last
+	// record write. A checkpoint still uploading is the same writer to the key
+	// as the ending's snapshot — its Finish would mark the ending's pending
+	// record written while the ending's blob is still on its way, or its Put
+	// would land after the ending's and put the older tree back. A fenced
+	// ending writes no snapshot, but a checkpoint must not outlive it either.
+	s.checkpointerFor(conversationID).stop()
+
 	// A fence trip inside the loop (a transcript insert, a drain flush)
 	// surfaces as the engagement's failure. It is not a failure to record:
 	// the refusal IS the record, and writing a terminal here is exactly what

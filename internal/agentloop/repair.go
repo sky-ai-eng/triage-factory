@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop/tooldefs"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -20,10 +22,20 @@ import (
 // tree — no restore, no move — and a result that asserted either would be
 // telling the agent to distrust a workspace that is exactly as its last call
 // left it.
-func interruptedToolResult(prov domain.WorkspaceProvenance, executorChanged bool) string {
+//
+// afterCheckpoint says the tree was restored from a checkpoint taken before
+// this call's batch. That is the one restore where the tree's half of the
+// answer is known rather than possible: none of the call's workspace effects
+// are there. What it did outside the workspace is still unknown.
+func interruptedToolResult(prov domain.WorkspaceProvenance, executorChanged, afterCheckpoint bool) string {
 	s := "interrupted: the engagement running this call ended before its result was recorded"
 	if executorChanged {
 		s += " and this one runs on a different executor"
+	}
+	if prov == domain.WorkspaceProvenanceRehydrated && afterCheckpoint {
+		return s + "; the workspace was restored to a checkpoint taken before this call ran, so none of its effects on the " +
+			"workspace are present, but anything it did outside the workspace (a push, a comment, an API request) may " +
+			"have happened — verify before repeating any side-effectful action."
 	}
 	switch prov {
 	case domain.WorkspaceProvenanceRehydrated:
@@ -57,6 +69,23 @@ const builtFreshBody = "Your workspace was built from scratch — there was no s
 	"and it is why the tree may not match it. " +
 	"Check the working tree and git log before building on what you remember doing."
 
+// checkpointRestoredLead opens the restore from a checkpoint taken during the
+// engagement that was interrupted. Unlike a park's snapshot, part of that
+// engagement's work IS present, so the generic body's "any changes made after
+// it are not present" would tell the agent to redo work it still has. What is
+// missing is exactly the tool calls after the checkpoint, and the transcript
+// names them.
+const checkpointRestoredLead = "Your workspace was restored from a checkpoint taken during the interrupted engagement. " +
+	"Everything up to that checkpoint is present, including uncommitted and untracked files. "
+
+// checkpointSummarizedSentence covers the calls a compaction took out of the
+// window: a summary written after the checkpoint may describe work made
+// between the two, and those calls are no longer rows this notice can name.
+const checkpointSummarizedSentence = "The conversation summary above was written after this checkpoint, so some of " +
+	"the work it describes may not be present either. "
+
+const rebuiltNoticeCheck = "Check the working tree and git log before building on what you remember doing."
+
 // executorChangedSentence is said only when a predecessor engagement
 // demonstrably ran elsewhere. It is a separate sentence rather than part of
 // either body because it is a separate fact: a workspace can be rebuilt on the
@@ -80,6 +109,92 @@ func workspaceRebuiltNotice(prov domain.WorkspaceProvenance, executorChanged boo
 	}
 	return notice + body + "\n</system-note>"
 }
+
+// checkpointRestoredNotice is the claim-time notice for a tree restored from
+// a mid-engagement checkpoint at asOf. It names the first tool call after the
+// checkpoint and counts the rest, read from rows — the window this claim
+// assembles from — so what the agent is told is missing is what it can see it
+// did. Flow-control calls are left out: they resolve in the loop and never
+// touch the workspace.
+func checkpointRestoredNotice(rows []domain.Message, asOf float64, executorChanged, hasBlueprint bool) string {
+	var after []domain.ToolCall
+	summarizedSince := false
+	for _, r := range rows {
+		if assemblyKey(r) <= asOf {
+			continue
+		}
+		if r.Role == "user" && r.Subtype == domain.MessageSubtypeInjectionCompactionResult {
+			summarizedSince = true
+		}
+		if r.Role != "assistant" {
+			continue
+		}
+		for _, call := range r.ToolCalls {
+			if _, loopSide := tooldefs.LoopSide(call.Name, hasBlueprint); loopSide {
+				continue
+			}
+			after = append(after, call)
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("<system-note>\n")
+	if executorChanged {
+		b.WriteString(executorChangedSentence)
+	}
+	b.WriteString(checkpointRestoredLead)
+	switch len(after) {
+	case 0:
+		b.WriteString("It was taken after your most recent tool call, so the workspace reflects every tool call above. ")
+	case 1:
+		fmt.Fprintf(&b, "`%s` came after the checkpoint; whatever it changed in the workspace is not present. ", describeToolCall(after[0]))
+	case 2:
+		fmt.Fprintf(&b, "`%s` and the tool call after it came after the checkpoint; whatever they changed in the workspace is not present. ", describeToolCall(after[0]))
+	default:
+		fmt.Fprintf(&b, "`%s` and the %d tool calls after it came after the checkpoint; whatever they changed in the workspace is not present. ", describeToolCall(after[0]), len(after)-1)
+	}
+	if summarizedSince {
+		b.WriteString(checkpointSummarizedSentence)
+	}
+	b.WriteString(rebuiltNoticeCheck)
+	b.WriteString("\n</system-note>")
+	return b.String()
+}
+
+// describedCallMaxRunes bounds the argument a notice quotes: enough to tell
+// one command from another, not a reprint of a heredoc.
+const describedCallMaxRunes = 80
+
+// describeToolCall renders a call as `name: argument` from the one argument
+// that identifies it — a command, a search pattern, a path — on one line,
+// clipped, with no backtick left to break the code span it is quoted in.
+//
+// The argument is the agent's own, and may carry text from hostile content it
+// read, while the notice it lands in is a <system-note> the model trusts. So
+// angle brackets are replaced with look-alikes: no argument can close the note
+// and open one of its own.
+func describeToolCall(call domain.ToolCall) string {
+	for _, key := range []string{"command", "pattern", "path"} {
+		v, ok := call.Input[key].(string)
+		if !ok {
+			continue
+		}
+		v = noteArgReplacer.Replace(v)
+		v = strings.Join(strings.Fields(v), " ")
+		if v == "" {
+			continue
+		}
+		if r := []rune(v); len(r) > describedCallMaxRunes {
+			v = string(r[:describedCallMaxRunes-1]) + "…"
+		}
+		return call.Name + ": " + v
+	}
+	return call.Name
+}
+
+// noteArgReplacer neutralizes the characters a quoted argument could use to
+// break out of the code span or the note around it.
+var noteArgReplacer = strings.NewReplacer("`", "'", "<", "‹", ">", "›")
 
 // repairTranscript makes the conversation's transcript legal and honest
 // before this engagement reads it. It runs unconditionally on every claim
@@ -157,7 +272,11 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 		// Every interrupted assistant turn anchors to its own call, so a
 		// transcript carrying several of them (crash, resume, crash again)
 		// repairs each in place instead of stacking every answer at one point.
-		repairs = append(repairs, placeAfterAnswers(ordered, i, missing)...)
+		placed := placeAfterAnswers(ordered, i, missing)
+		for j := range placed {
+			placed[j].ownerKey = assemblyKey(r)
+		}
+		repairs = append(repairs, placed...)
 	}
 	if len(repairs) == 0 {
 		return nil
@@ -166,7 +285,9 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 	e.info("repairing interrupted tool calls on claim",
 		"conversation", params.ConversationID, "count", len(repairs))
 	for _, rep := range repairs {
-		if err := e.insertToolResult(ctx, params, rep.call, interruptedToolResult(params.Workspace, params.ExecutorChanged), true, rep.seq); err != nil {
+		afterCheckpoint := params.WorkspaceAsOf != nil && rep.ownerKey > *params.WorkspaceAsOf
+		content := interruptedToolResult(params.Workspace, params.ExecutorChanged, afterCheckpoint)
+		if _, err := e.insertToolResult(ctx, params, rep.call, content, true, rep.seq); err != nil {
 			return fmt.Errorf("insert synthetic result for %s: %w", rep.call.ID, err)
 		}
 	}
@@ -174,10 +295,12 @@ func (e *Engine) repairDanglingToolCalls(ctx context.Context, params Params, row
 }
 
 // toolResultPlacement is one synthetic result and where it assembles: a
-// fractional seq, or nil for an ordinary tail append.
+// fractional seq, or nil for an ordinary tail append. ownerKey is the
+// assembly key of the assistant row that made the call.
 type toolResultPlacement struct {
-	call domain.ToolCall
-	seq  *float64
+	call     domain.ToolCall
+	seq      *float64
+	ownerKey float64
 }
 
 // placeAfterAnswers positions one assistant row's synthetic results directly
@@ -262,7 +385,11 @@ func (e *Engine) noticeWorkspaceRebuilt(ctx context.Context, params Params, rows
 			return nil
 		}
 	}
-	return e.insertPending(ctx, params, workspaceRebuiltNotice(params.Workspace, params.ExecutorChanged), domain.MessageSubtypeInjectionExecutorChanged)
+	notice := workspaceRebuiltNotice(params.Workspace, params.ExecutorChanged)
+	if params.Workspace == domain.WorkspaceProvenanceRehydrated && params.WorkspaceAsOf != nil {
+		notice = checkpointRestoredNotice(rows, *params.WorkspaceAsOf, params.ExecutorChanged, params.HasBlueprint)
+	}
+	return e.insertPending(ctx, params, notice, domain.MessageSubtypeInjectionExecutorChanged)
 }
 
 // isDelivered mirrors the schema default: nil means delivered, only an

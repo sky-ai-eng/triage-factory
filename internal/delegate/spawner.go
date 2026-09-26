@@ -433,6 +433,18 @@ type Spawner struct {
 	// the blob store. Zero means snapshotWaitPoll; tests shrink it so a wait
 	// with a real ladder behind it still runs in milliseconds.
 	snapshotWaitPollInterval time.Duration
+	// snapshotInterval is how often a live native engagement checkpoints its
+	// workspace (checkpoint.go). Zero disables checkpoints. NewSpawner sets
+	// DefaultSnapshotInterval; SetSnapshotInterval (TF_SNAPSHOT_INTERVAL_SEC)
+	// overrides it once at startup.
+	snapshotInterval time.Duration
+	// checkpointSlots is the host-wide bound on checkpoints capturing at
+	// once, made on first use.
+	checkpointSlots chan struct{}
+	// checkpointers holds each running native engagement's checkpointer,
+	// keyed by conversation id, so the claim renewal can read how long its
+	// tree has gone uncovered.
+	checkpointers map[string]*checkpointer
 	// memFloorMB is the dispatch memory guardrail: when available memory
 	// (hostmem.AvailableMB — cgroup-scoped when confined)
 	// drops below this, drainConversationQueue defers claims (runs stay queued)
@@ -613,6 +625,7 @@ func NewSpawner(database *sql.DB, stores db.Stores, ghClient *ghclient.Client, w
 		signalApplyWake:       make(chan struct{}, 1),
 		runSem:                make(chan struct{}, DefaultMaxConcurrentClaims),
 		memAvailMB:            hostmem.AvailableMB,
+		snapshotInterval:      DefaultSnapshotInterval,
 	}
 	s.controller = inProcessController{s: s}
 	// Every engagement write goes through s.conversations, from both runtimes,

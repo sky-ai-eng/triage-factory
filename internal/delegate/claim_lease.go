@@ -277,11 +277,17 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		suspended, suspendOK := suspendclock.Suspended()
 		reacquired := st.reacquired.Load()
 		// The engagement's activity rides the renewal, so the claim row shows
-		// how long it has been idle and what it is waiting on without a
-		// second write. A conversation with no tracker reports none.
-		idle, op := s.activityFor(conv.ID).snapshot()
+		// how long it has been idle, what it is waiting on, and how much of
+		// its workspace a hard kill would lose, without a second write. A
+		// conversation with no tracker reports none, and one that does not
+		// checkpoint reports no checkpoint age.
+		var activity db.ClaimActivity
+		activity.Idle, activity.Op = s.activityFor(conv.ID).snapshot()
+		if age, ok := s.checkpointerFor(conv.ID).age(); ok {
+			activity.CheckpointAge = &age
+		}
 		callCtx, cancel := context.WithTimeout(ctx, renewalCallTimeout(cadence))
-		renewal, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease, idle, op)
+		renewal, err := s.conversationQueue.RenewClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, lease, activity)
 		cancel()
 
 		switch {

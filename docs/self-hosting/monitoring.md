@@ -260,12 +260,12 @@ operation past its own deadline.
 | `tool:<name>` | 30 minutes for one tool call. With parallel calls in flight, 30 minutes without one of them returning, named for the oldest still running. |
 | `clone`, `rehydrate` | 10 minutes. |
 | `permission` | 150s waiting on a person to answer a permission prompt. |
-| `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. |
+| `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `fetch_pr`, `awaiting_credentials`, `snapshot_wait`, `checkpoint` | 30s past the timeout the operation already has, so its own timeout fires first. `snapshot_wait` is a cold resume waiting on another executor's workspace snapshot, bounded by `TF_SNAPSHOT_WAIT_SEC`. `checkpoint` is a tool call waiting for a workspace checkpoint to finish reading the tree, bounded by the checkpoint's 5-minute capture timeout. |
 
 A stalled engagement is parked `open` with park reason `stalled`, and nothing
 retries it: it stays parked until someone sends it a message, which resumes it.
 
-The three gauges below are read from the database by the control pod's
+The four gauges below are read from the database by the control pod's
 background brain, deliberately not by any dispatcher: a stuck dispatcher is
 what produces these rows, so it must not be what reports them.
 
@@ -274,14 +274,16 @@ what produces these rows, so it must not be what reports them.
 | `tf_claims_expired` | Unreleased claims past their lease. **Zero is the steady state**; a brief nonzero is a dead engagement between its expiry and its recovery. |
 | `tf_claims_oldest_expired_age_seconds` | Seconds past expiry of the oldest such claim. |
 | `tf_claims_oldest_idle_seconds` | The longest any live claim with an unexpired lease has gone without activity, as its last renewal stamped it. A claim that has not renewed yet is not counted. A tool call counts as activity only when it starts and when it returns, so one long tool call can hold this past 600 without being a stall. |
+| `tf_claims_oldest_checkpoint_age_seconds` | The longest any live claim with an unexpired lease has gone since its engagement's workspace was last covered by a stored checkpoint, as its last renewal stamped it: the workspace a hard kill of its executor would lose right now. Covered means a checkpoint written, or one that found the tree unchanged since the last; before the first, the age runs from when the agent loop started. Only native engagements with checkpoints enabled stamp it (see [Workspace checkpoints](scaling.md#workspace-checkpoints)); the others are not counted. |
 
-One counter comes from the executors rather than the brain, incremented by the
-executor that ran the engagement. It is per process, so `sum` across executor
+Two counters come from the executors rather than the brain, incremented by the
+executor that ran the engagement. They are per process, so `sum` across executor
 pods:
 
 | Metric | Meaning |
 | -- | -- |
-| `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`), or `idle` when nothing was in flight. |
+| `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`, `checkpoint`), or `idle` when nothing was in flight. |
+| `tf_workspace_checkpoints_total{outcome}` | Workspace checkpoints that came due in a live engagement. `written`: stored. `skipped_unchanged`: the tree matched the last one stored, so nothing was uploaded. `skipped_busy`: the engagement's previous checkpoint was still uploading, or the executor already had two checkpoints capturing; the next tool-batch boundary tries again. `failed`: the capture or the upload failed, and the last checkpoint written still stands. |
 
 The expired-claim alert is on the age rather than the count, because the count
 is expected to flicker and the age is not. Every stall is a conversation that
@@ -291,7 +293,13 @@ stopped and waits for a person, so the stall alert fires on the first one:
 tf_claims_oldest_expired_age_seconds > 120                                      # for 5m: a dead engagement nobody has released
 sum(rate(tf_engagements_stalled_total[15m])) > 0                                # any stall: a conversation parked until someone sends it a message
 sum by (op) (rate(tf_engagements_stalled_total[1h]))                            # not an alert: the stall rate by operation
+tf_claims_oldest_checkpoint_age_seconds > 3 * 300                               # for 15m: an engagement whose workspace is not being checkpointed (use your TF_SNAPSHOT_INTERVAL_SEC)
+sum(rate(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0             # checkpoints failing: read the workspace.snapshot spans with reason=checkpoint
 ```
+
+The checkpoint age is not an alarm on its own: a single tool call can run for
+up to 30 minutes, and no checkpoint is taken while one runs, so a long test
+suite holds the age up legitimately. Alert on it staying high.
 
 Every dispatcher takes expired claims over at the top of its pass, whether or
 not it has capacity to claim anything, so a claim past expiry for minutes means
@@ -470,10 +478,15 @@ WORKING after you pressed stop. It splits into three children naming where:
 `workspace.snapshot.capture` (the git delta plus
 the session-transcript read, with `snapshot.bundle_bytes` /
 `snapshot.patch_bytes` / `snapshot.transcript_bytes`),
-`workspace.snapshot.archive` (the tar walk plus gzip, with
+`workspace.snapshot.archive` (the tar walk plus compression, with
 `snapshot.raw_bytes` in against `size_bytes` out — the compression ratio),
-and `workspace.snapshot.put` (the blob write). Every span in the family
-carries `runtime`, and it is load-bearing: only a delegated SDK run snapshots
+and `workspace.snapshot.put` (the blob write). Its `reason` says what took it:
+`park`, `conclusion`, `shutdown` (a hand-back), or `checkpoint` (a live
+engagement at a tool-batch boundary). A checkpoint's span also carries
+`outcome`, the counter's label above; its `capture` and `archive` are what the
+agent's next tool call waits for, and its `put` runs while the agent works, so
+read the first two when the question is what checkpoints cost the agent.
+Every span in the family carries `runtime`, and it is load-bearing: only a delegated SDK run snapshots
 a transcript, so transcript sizes are SDK-run data, not a property of all
 snapshots. The family is identical in both modes save for what `capture`
 covers — local runs the capture in-process, multi routes it through the

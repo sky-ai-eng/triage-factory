@@ -32,7 +32,7 @@ type recordingQueue struct {
 	beforeReacquire func()
 }
 
-func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease, idle time.Duration, op string) (db.ClaimRenewal, error) {
+func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
 	q.mu.Lock()
 	before := q.before
 	q.before = nil
@@ -40,7 +40,7 @@ func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conve
 	if before != nil {
 		before()
 	}
-	r, err := q.ConversationQueueStore.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimID, lease, idle, op)
+	r, err := q.ConversationQueueStore.RenewClaimLeaseSystem(ctx, orgID, conversationID, claimID, lease, activity)
 	q.mu.Lock()
 	if err == nil {
 		q.renewed++
@@ -206,7 +206,7 @@ func (f *suspendFixture) runLoop(t *testing.T, anchor time.Time) {
 	t.Cleanup(func() { stop(); <-done })
 }
 
-func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) {
+func waitUntil(t *testing.T, within time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(within)
 	for !cond() {
@@ -230,7 +230,7 @@ func TestSuspendRecovery_RefusedRenewalReacquires(t *testing.T) {
 	}
 	f.runLoop(t, time.Now().Add(-10*time.Second))
 
-	waitFor(t, 5*time.Second, "a renewal after the re-acquire", func() bool {
+	waitUntil(t, 5*time.Second, "a renewal after the re-acquire", func() bool {
 		renewed, _, reacquires := f.queue.counts()
 		return reacquires == 1 && renewed >= 1
 	})
@@ -289,7 +289,7 @@ func TestSuspendRecovery_NoSuspendFencesAsToday(t *testing.T) {
 	f.queue.before = func() { f.lapse(t) }
 	f.runLoop(t, time.Now().Add(-10*time.Second))
 
-	waitFor(t, 5*time.Second, "the fence", func() bool { return f.claimCtx.Err() != nil })
+	waitUntil(t, 5*time.Second, "the fence", func() bool { return f.claimCtx.Err() != nil })
 	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errClaimLeaseLost) {
 		t.Errorf("fence cause = %v, want errClaimLeaseLost", cause)
 	}
@@ -450,14 +450,14 @@ func TestSuspendRecovery_PollRenewsOnWake(t *testing.T) {
 	// The product's timings: the cadence tick is twenty seconds out, so a
 	// renewal inside the next few is the poll's.
 	f.runLoop(t, time.Now())
-	waitFor(t, 5*time.Second, "the loop to register its lease", func() bool {
+	waitUntil(t, 5*time.Second, "the loop to register its lease", func() bool {
 		return f.s.claimLeaseFor(f.conv.ClaimID) != nil
 	})
 
 	f.lapse(t)
 	f.sleep(120 * time.Second)
 	woke := time.Now()
-	waitFor(t, 3*suspendPollInterval, "the wake renewal", func() bool {
+	waitUntil(t, 3*suspendPollInterval, "the wake renewal", func() bool {
 		_, _, reacquires := f.queue.counts()
 		return reacquires == 1
 	})

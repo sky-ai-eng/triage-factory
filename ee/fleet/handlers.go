@@ -418,6 +418,10 @@ type sandboxClaimDTO struct {
 	// released claim they are the last reading it took.
 	LastActivityAt *time.Time `json:"last_activity_at,omitempty"`
 	CurrentOp      string     `json:"current_op,omitempty"`
+	// LastCheckpointAt is when the engagement's workspace was last covered by
+	// a stored checkpoint, as the holder's last renewal stamped it. Absent for
+	// an engagement that does not checkpoint, and before the first renewal.
+	LastCheckpointAt *time.Time `json:"last_checkpoint_at,omitempty"`
 }
 
 type sandboxesDTO struct {
@@ -498,6 +502,7 @@ func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
 		PeakMemMB: c.PeakMemMB, CPUUsec: c.CPUUsec,
 		Status: c.Status, FailureKind: c.FailureKind, Outcome: c.Outcome,
 		LastActivityAt: c.LastActivityAt, CurrentOp: c.CurrentOp,
+		LastCheckpointAt: c.LastCheckpointAt,
 	}
 	end := now
 	if c.ReleasedAt != nil {

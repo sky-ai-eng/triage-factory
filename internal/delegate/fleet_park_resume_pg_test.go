@@ -396,13 +396,14 @@ func (f *parkFleet) awaitUpload(t *testing.T) {
 
 func (f *parkFleet) ensureOn(t *testing.T, s *Spawner, conv *domain.Conversation, fresh freshWorkspaceBuilder) (string, domain.WorkspaceProvenance, error) {
 	t.Helper()
-	return s.ensureWorkspace(context.Background(), f.orgID, &domain.Conversation{
+	wt, prov, _, err := s.ensureWorkspace(context.Background(), f.orgID, &domain.Conversation{
 		ID:           f.conversationID,
 		ClaimID:      conv.ClaimID,
 		WorktreePath: f.storedWorktreePath(t),
 		TaskID:       f.keyID,
 		Runtime:      conv.Runtime,
 	}, gitSeed{owner: f.owner, repo: f.repo}, fresh)
+	return wt, prov, err
 }
 
 // assertInvariants carries the cross-cutting checks through every scenario:

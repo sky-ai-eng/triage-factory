@@ -256,12 +256,12 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		r, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, 0, "")
+		r, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, db.ClaimActivity{})
 		if err != nil || r.StopRequested || r.StopRequestedBy != "" {
 			t.Fatalf("renewal with no stop = (%+v, %v), want no stop", r, err)
 		}
 		request(t, f, id, stopTestUser)
-		r, err = f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, 0, "")
+		r, err = f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, id, conv.ClaimID, testClaimLease, db.ClaimActivity{})
 		if err != nil || !r.StopRequested || r.StopRequestedBy != stopTestUser {
 			t.Errorf("renewal after a user stop = (%+v, %v), want StopRequested by %s", r, err, stopTestUser)
 		}
