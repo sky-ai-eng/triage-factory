@@ -166,8 +166,11 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		t.Run("expired", func(t *testing.T) {
 			f.SetLease(t, conv.ClaimID, -time.Second)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
-				t.Fatalf("renew of an expired lease = %v, want ErrClaimReleased", err)
+			// Named as a lapse, and still a refusal to every caller that asks
+			// only whether it was refused.
+			_, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{})
+			if !errors.Is(err, db.ErrClaimLeaseExpired) || !errors.Is(err, db.ErrClaimReleased) {
+				t.Fatalf("renew of an expired lease = %v, want ErrClaimLeaseExpired (which is ErrClaimReleased)", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
 			if !after.Equal(before) {
@@ -179,8 +182,9 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			// Back to live so the refusal is the conversation and nothing else.
 			f.SetLease(t, conv.ClaimID, testClaimLease)
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
-				t.Fatalf("renew naming another conversation = %v, want ErrClaimReleased", err)
+			_, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, otherID, conv.ClaimID, testClaimLease, db.ClaimActivity{})
+			if !errors.Is(err, db.ErrClaimReleased) || errors.Is(err, db.ErrClaimLeaseExpired) {
+				t.Fatalf("renew naming another conversation = %v, want ErrClaimReleased and not the lapse", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
 			if !after.Equal(before) {
@@ -196,8 +200,9 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			if !ok {
 				t.Fatal("release cleared lease_expires_at; the row must keep recording when the lease would have lapsed")
 			}
-			if _, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); !errors.Is(err, db.ErrClaimReleased) {
-				t.Fatalf("renew of a released claim = %v, want ErrClaimReleased", err)
+			_, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{})
+			if !errors.Is(err, db.ErrClaimReleased) || errors.Is(err, db.ErrClaimLeaseExpired) {
+				t.Fatalf("renew of a released claim = %v, want ErrClaimReleased and not the lapse", err)
 			}
 			after, _, _ := f.Lease(t, conv.ClaimID)
 			if !after.Equal(before) {
@@ -257,8 +262,8 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}},
 		}
 		for _, w := range writes {
-			if err := w.call(); !errors.Is(err, db.ErrClaimReleased) {
-				t.Errorf("%s on an expired lease = %v, want ErrClaimReleased", w.name, err)
+			if err := w.call(); !errors.Is(err, db.ErrClaimLeaseExpired) || !errors.Is(err, db.ErrClaimReleased) {
+				t.Errorf("%s on an expired lease = %v, want ErrClaimLeaseExpired (which is ErrClaimReleased)", w.name, err)
 			}
 		}
 
@@ -402,6 +407,119 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
 			t.Errorf("OldestIdleClaimSystem after release = (%s, %v), want (0s, nil)", d, err)
 		}
+	})
+
+	t.Run("Fence_NamesALapseApartFromARelease", func(t *testing.T) {
+		// The lapse wraps the release, so every caller that treats the two
+		// alike keeps doing so.
+		if !errors.Is(db.ErrClaimLeaseExpired, db.ErrClaimReleased) {
+			t.Fatal("ErrClaimLeaseExpired does not wrap ErrClaimReleased")
+		}
+
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		conversations := f.Stores.Conversations
+		fenced := func() error {
+			_, err := conversations.SetSessionForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, "sess-classify")
+			return err
+		}
+
+		f.SetLease(t, conv.ClaimID, -time.Second)
+		if err := fenced(); !errors.Is(err, db.ErrClaimLeaseExpired) {
+			t.Errorf("fenced write on an unreleased lapsed claim = %v, want ErrClaimLeaseExpired", err)
+		}
+
+		// Released, the answer is the release whatever the lease says: a
+		// released claim may have a successor, and only the lapse of an
+		// unreleased one is ever recoverable.
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		for _, in := range []time.Duration{-time.Second, testClaimLease} {
+			f.SetLease(t, conv.ClaimID, in)
+			if err := fenced(); !errors.Is(err, db.ErrClaimReleased) || errors.Is(err, db.ErrClaimLeaseExpired) {
+				t.Errorf("fenced write on a released claim (lease %+v) = %v, want ErrClaimReleased and not the lapse", in, err)
+			}
+			_, err := f.Stores.ConversationQueue.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{})
+			if !errors.Is(err, db.ErrClaimReleased) || errors.Is(err, db.ErrClaimLeaseExpired) {
+				t.Errorf("renewal of a released claim (lease %+v) = %v, want ErrClaimReleased and not the lapse", in, err)
+			}
+		}
+	})
+
+	t.Run("Reacquire_RestoresAnExpiredUnreleasedClaim", func(t *testing.T) {
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+		f.SetLease(t, conv.ClaimID, -30*time.Second)
+		if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, conversationID, stopTestUser, "", ""); err != nil || !ok {
+			t.Fatalf("RequestStopSystem = (%v, %v), want (true, nil)", ok, err)
+		}
+
+		got, err := q.ReacquireClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, claimLeaseExecutor, claimLeaseBootEpoch, testClaimLease)
+		if err != nil {
+			t.Fatalf("ReacquireClaimLeaseSystem on an expired unreleased claim: %v", err)
+		}
+		expiry, now, ok := f.Lease(t, conv.ClaimID)
+		if !ok {
+			t.Fatal("re-acquire cleared the lease")
+		}
+		if drift := expiry.Sub(now.Add(testClaimLease)); drift > time.Second || drift < -time.Second {
+			t.Errorf("re-acquired lease_expires_at = %s, want within 1s of database now + %s (drift %s)", expiry, testClaimLease, drift)
+		}
+		if drift := got.ExpiresAt.Sub(expiry); drift > time.Second || drift < -time.Second {
+			t.Errorf("ReacquireClaimLeaseSystem returned %s but the row carries %s", got.ExpiresAt, expiry)
+		}
+		if !got.StopRequested || got.StopRequestedBy != stopTestUser {
+			t.Errorf("re-acquire read back stop = (%v, %q), want the pending stop by %s", got.StopRequested, got.StopRequestedBy, stopTestUser)
+		}
+
+		// The claim is live again: its holder's writes and renewals land, and
+		// no other dispatcher's takeover can release it.
+		if _, err := f.Stores.Conversations.SetSessionForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID, "sess-after-wake"); err != nil {
+			t.Errorf("fenced write after the re-acquire: %v", err)
+		}
+		if _, err := q.RenewClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, testClaimLease, db.ClaimActivity{}); err != nil {
+			t.Errorf("renewal after the re-acquire: %v", err)
+		}
+		refs, err := q.TakeOverExpiredClaimsSystem(ctx, "reacquire-other-exec", 1, 10)
+		if err != nil {
+			t.Fatalf("TakeOverExpiredClaimsSystem: %v", err)
+		}
+		if len(refs) != 0 {
+			t.Errorf("takeover after a re-acquire released %+v, want nothing", refs)
+		}
+		c, err := q.ClaimByIDSystem(ctx, conv.ClaimID)
+		if err != nil || c == nil || c.ReleasedAt != nil {
+			t.Errorf("claim after the takeover pass = (%+v, %v), want it still unreleased", c, err)
+		}
+	})
+
+	t.Run("Reacquire_RefusedUnlessUnreleasedAndThisBootsOwn", func(t *testing.T) {
+		f := mk(t)
+		conversationID, _ := f.StageStep(t)
+		conv := claim(t, f, conversationID)
+		q := f.Stores.ConversationQueue
+		f.SetLease(t, conv.ClaimID, -30*time.Second)
+		refused := func(t *testing.T, what, executorID string, bootEpoch int64) {
+			t.Helper()
+			before, _, _ := f.Lease(t, conv.ClaimID)
+			if _, err := q.ReacquireClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, executorID, bootEpoch, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+				t.Errorf("re-acquire of %s = %v, want ErrClaimReleased", what, err)
+			}
+			if after, _, _ := f.Lease(t, conv.ClaimID); !after.Equal(before) {
+				t.Errorf("a refused re-acquire of %s moved lease_expires_at: %s -> %s", what, before, after)
+			}
+		}
+
+		refused(t, "another executor's claim", "reacquire-other-exec", claimLeaseBootEpoch)
+		refused(t, "another boot's claim", claimLeaseExecutor, claimLeaseBootEpoch+1)
+		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		refused(t, "a released claim", claimLeaseExecutor, claimLeaseBootEpoch)
 	})
 
 	t.Run("Renew_StampsTheCheckpointAgeAndClearsItWithNone", func(t *testing.T) {

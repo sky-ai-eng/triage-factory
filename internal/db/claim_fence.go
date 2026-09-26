@@ -1,6 +1,9 @@
 package db
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 // ErrClaimReleased is the fence trip: an executor engagement tried to write
 // against a claim that is no longer live, so the write was refused.
@@ -47,3 +50,16 @@ import "errors"
 // the refusal it gets is the ordinary shape of every stop that catches a run
 // mid-setup.
 var ErrClaimReleased = errors.New("db: claim released — this engagement no longer owns the conversation")
+
+// ErrClaimLeaseExpired is the fence refusing a claim that is still
+// unreleased but whose lease has lapsed. It wraps ErrClaimReleased, so
+// every caller that treats the two alike keeps doing so; only the
+// suspend recovery asks which it is.
+//
+// The distinction is worth a second sentinel because only one of the two is
+// ever recoverable. A released claim may have a successor, and nothing its
+// old holder does can be allowed to land. An unreleased one cannot: a mint
+// requires the prior claim released, and every release is guarded on the
+// lease having lapsed or on the claim's boot being dead, so an unreleased
+// claim is proof nobody else holds the conversation.
+var ErrClaimLeaseExpired = fmt.Errorf("%w: lease expired", ErrClaimReleased)

@@ -267,8 +267,10 @@ type ConversationQueueStore interface {
 	// arrives late cannot resurrect authority that already lapsed. Refused
 	// with ErrClaimReleased when the claim is released, expired, or not the
 	// one holding conversationID — one answer for every way this caller is
-	// not the owner, exactly as the fence gives. Returns the new expiry on
-	// database time.
+	// not the owner, exactly as the fence gives, and like the fence it names
+	// the unreleased-but-lapsed case ErrClaimLeaseExpired, which wraps it.
+	// The classification is one follow-up read on the refusal path. Returns
+	// the new expiry on database time.
 	//
 	// One statement, and it must stay one: the guard and the write cannot be
 	// split without opening a window where an expired lease renews. Bookkeeping
@@ -282,6 +284,20 @@ type ConversationQueueStore interface {
 	// activity is the engagement's own report — see ClaimActivity — stamped
 	// in the same statement.
 	RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity ClaimActivity) (ClaimRenewal, error)
+
+	// ReacquireClaimLeaseSystem restores the lease on a claim this executor
+	// boot minted and nobody has released, whatever its expiry says, and
+	// returns the renewal as RenewClaimLeaseSystem does. It is the one write
+	// that may extend an expired lease, and it is safe only because an
+	// unreleased claim means no successor exists: every release is guarded on
+	// the lease having lapsed or on the claim's boot being dead, and a mint
+	// requires the prior claim released. The caller must have established
+	// that its engagement did nothing while the lease was lapsed.
+	//
+	// Refused with ErrClaimReleased when the claim is released, is not the
+	// one holding conversationID, or was minted by another executor or boot.
+	// The activity columns are not stamped; the caller's next renewal does.
+	ReacquireClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64, lease time.Duration) (ClaimRenewal, error)
 
 	// SettleUnclaimedStopsSystem is the dispatcher's settlement pass over
 	// conversations no live claim holds. It settles two shapes, in one
