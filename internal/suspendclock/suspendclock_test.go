@@ -6,16 +6,17 @@ import (
 	"time"
 )
 
-// TestSuspended_ReportsOnLinux reads the real clocks. CI cannot suspend the
-// machine, so this pins only that the reading is available and sane: a
-// cumulative suspended time is never negative.
-func TestSuspended_ReportsOnLinux(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("the reading this test pins is Linux's")
+// TestSuspended_Reports reads the real clocks on each platform that has a
+// pair to compare. CI cannot suspend the machine, so this pins only that the
+// reading is available and sane: a cumulative suspended time is never
+// negative.
+func TestSuspended_Reports(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("only Linux and darwin have a clock pair to read")
 	}
 	d, ok := Suspended()
 	if !ok {
-		t.Fatal("Suspended() is not ok on Linux; CLOCK_BOOTTIME and CLOCK_MONOTONIC are both always available")
+		t.Fatalf("Suspended() is not ok on %s; both clocks of its pair are always available", runtime.GOOS)
 	}
 	if d < 0 {
 		t.Errorf("Suspended() = %s, want a non-negative cumulative reading", d)

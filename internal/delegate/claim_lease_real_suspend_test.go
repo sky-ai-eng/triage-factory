@@ -45,8 +45,11 @@ const (
 // realSuspendMinSleep and wake it. It needs no credentials and no network.
 //
 // Beyond the recovery itself it checks the suspend clock against the wall
-// clock's jump across the sleep, which is the evidence that the clock pair the
-// platform's suspendclock file reads really measures time asleep.
+// clock's jump across the sleep. The lease is stamped on the wall clock, so
+// agreement shows the suspend clock counts the same gap that lapsed the lease.
+// It is not an independent measure of time asleep: the kernel adds one
+// measured interval to both clocks on resume, so an error in that measurement
+// would pass.
 func TestSuspendRecovery_RealSuspend(t *testing.T) {
 	if os.Getenv("TF_TEST_REAL_SUSPEND") != "1" {
 		t.Skip("set TF_TEST_REAL_SUSPEND=1 and suspend the machine when the test logs READY")
@@ -107,9 +110,11 @@ func TestSuspendRecovery_RealSuspend(t *testing.T) {
 	waitUntil(t, 15*time.Second, "the re-acquire after wake", func() bool {
 		return !f.queue.firstReacquire().IsZero()
 	})
-	// From the last movement of the suspend clock this test saw, so a dark
-	// wake inside the sleep can make it negative: the claim was taken back
-	// then, and held across the rest of the sleep.
+	// Measured from the poll at which this test last saw the suspend clock
+	// move, so it can be negative: by up to one of this test's polls when the
+	// loop noticed the wake first, and by much more when a dark wake inside
+	// the sleep let the loop take the claim back before the sleep's last
+	// stretch.
 	reacquiredAfter := f.queue.firstReacquire().Sub(woke)
 
 	if err := context.Cause(f.claimCtx); err != nil {

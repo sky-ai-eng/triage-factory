@@ -561,6 +561,40 @@ func TestSuspendRecovery_TwoRefusalsOneReacquire(t *testing.T) {
 	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
+// TestSuspendRecovery_SecondSuspendReacquiresAgain: an engagement that wakes,
+// takes its claim back, and sleeps again before anything else renews (a macOS
+// dark wake does this) recovers the second lapse too. The second refusal is
+// issued after the first re-acquire, so it must not be read as one that
+// re-acquire already answered.
+func TestSuspendRecovery_SecondSuspendReacquiresAgain(t *testing.T) {
+	f := newSuspendFixture(t)
+	f.register(t, time.Now().Add(-10*time.Second))
+	contents := []string{"after the first sleep", "after the second sleep"}
+	for i, content := range contents {
+		f.lapse(t)
+		f.sleep(120 * time.Second)
+		if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+			&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: content}); err != nil {
+			t.Fatalf("write after sleep %d: %v", i+1, err)
+		}
+	}
+	if _, _, reacquires := f.queue.counts(); reacquires != 2 {
+		t.Errorf("re-acquires = %d, want one per sleep", reacquires)
+	}
+	for _, content := range contents {
+		if n := f.transcript(t, content); n != 1 {
+			t.Errorf("transcript rows for %q = %d, want exactly 1", content, n)
+		}
+	}
+	if err := context.Cause(f.claimCtx); err != nil {
+		t.Errorf("claim context cancelled with %v; a recovered engagement carries on", err)
+	}
+	if !f.leaseLive(t) {
+		t.Error("the claim's lease is not live after the second re-acquire")
+	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 2})
+}
+
 // TestSuspendRecovery_PollRenewsOnWake: the suspend poll renews as soon as the
 // clock moves, taking the claim back well before the next cadence tick would
 // have asked.
