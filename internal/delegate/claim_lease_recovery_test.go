@@ -37,6 +37,8 @@ type recordingQueue struct {
 	before          func()
 	beforeReacquire func()
 	reacquireErr    error
+	// reacquiredAt is when the first re-acquire the store accepted returned.
+	reacquiredAt time.Time
 }
 
 func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
@@ -69,7 +71,21 @@ func (q *recordingQueue) ReacquireClaimLeaseSystem(ctx context.Context, orgID, c
 	if fail != nil {
 		return db.ClaimRenewal{}, fail
 	}
-	return q.ConversationQueueStore.ReacquireClaimLeaseSystem(ctx, orgID, conversationID, claimID, executorID, bootEpoch, lease)
+	r, err := q.ConversationQueueStore.ReacquireClaimLeaseSystem(ctx, orgID, conversationID, claimID, executorID, bootEpoch, lease)
+	if err == nil {
+		q.mu.Lock()
+		if q.reacquiredAt.IsZero() {
+			q.reacquiredAt = time.Now()
+		}
+		q.mu.Unlock()
+	}
+	return r, err
+}
+
+func (q *recordingQueue) firstReacquire() time.Time {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.reacquiredAt
 }
 
 func (q *recordingQueue) counts() (renewed, refused, reacquires int) {
@@ -163,6 +179,17 @@ func (f *suspendFixture) assertRecoveries(t *testing.T, want map[string]int64) {
 
 func newSuspendFixture(t *testing.T) *suspendFixture {
 	t.Helper()
+	f := newClaimLeaseFixture(t)
+	suspendclock.SetSourceForTest(t, func() (time.Duration, bool) {
+		return time.Duration(f.asleep.Load()), true
+	})
+	return f
+}
+
+// newClaimLeaseFixture is newSuspendFixture on the platform's real suspend
+// clock, for the test that waits for an actual sleep.
+func newClaimLeaseFixture(t *testing.T) *suspendFixture {
+	t.Helper()
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	const convID = "conv-suspend"
@@ -170,9 +197,6 @@ func newSuspendFixture(t *testing.T) *suspendFixture {
 	claimID := markEngaged(t, database, convID)
 
 	f := &suspendFixture{database: database, recoveries: suspendRecoveryCounter(t)}
-	suspendclock.SetSourceForTest(t, func() (time.Duration, bool) {
-		return time.Duration(f.asleep.Load()), true
-	})
 
 	stores := testSpawnerStores(database)
 	f.queue = &recordingQueue{ConversationQueueStore: stores.ConversationQueue}
