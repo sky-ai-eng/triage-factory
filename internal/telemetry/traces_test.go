@@ -67,7 +67,7 @@ func TestResolveTracesEndpoint(t *testing.T) {
 			tfRaw:          "http://tempo:4318",
 			otelTracesRaw:  "http://collector:4318/v1/traces",
 			otelGenericRaw: "http://collector:4318",
-			want:           "http://tempo:4318",
+			want:           "http://tempo:4318/v1/traces",
 		},
 		{name: "off disables", tfRaw: "off", want: ""},
 		{name: "false disables", tfRaw: "False", want: ""},
@@ -83,10 +83,14 @@ func TestResolveTracesEndpoint(t *testing.T) {
 			otelGenericRaw: "http://collector:4318",
 			want:           "",
 		},
-		{name: "scheme-less value is plaintext http", tfRaw: "tempo:4318", want: "http://tempo:4318"},
-		{name: "https preserved", tfRaw: "https://tempo.example.com:4318", want: "https://tempo.example.com:4318"},
-		{name: "explicit path preserved", tfRaw: "http://collector:4318/v1/traces", want: "http://collector:4318/v1/traces"},
-		{name: "whitespace trimmed", tfRaw: "  http://tempo:4318 ", want: "http://tempo:4318"},
+		{name: "scheme-less value is plaintext http", tfRaw: "tempo:4318", want: "http://tempo:4318/v1/traces"},
+		{name: "https preserved", tfRaw: "https://tempo.example.com:4318", want: "https://tempo.example.com:4318/v1/traces"},
+		{name: "bare base gets the otlp traces path", tfRaw: "http://tempo:4318", want: "http://tempo:4318/v1/traces"},
+		{name: "explicit path preserved", tfRaw: "http://collector:4318/otlp/v1/traces", want: "http://collector:4318/otlp/v1/traces"},
+		// "/" is a path the operator typed, not an absent one: it addresses
+		// the collector's root and must not be rewritten to /v1/traces.
+		{name: "explicit root path preserved", tfRaw: "http://collector:4318/", want: "http://collector:4318/"},
+		{name: "whitespace trimmed", tfRaw: "  http://tempo:4318 ", want: "http://tempo:4318/v1/traces"},
 		{name: "non-http scheme rejected", tfRaw: "grpc://tempo:4317", wantErr: true},
 		{name: "scheme without host rejected", tfRaw: "http://", wantErr: true},
 	}
