@@ -113,6 +113,17 @@ func (c *countingInserts) InsertMessageForClaimSystem(ctx context.Context, orgID
 	return c.ConversationStore.InsertMessageForClaimSystem(ctx, orgID, claimID, msg)
 }
 
+// The ages of the last accepted renewal the tests start from: one well inside
+// the self-fence deadline, so the engagement was renewing healthily when it
+// slept, and one past it, so it was not. suspendPastTheLease is a sleep long
+// enough to lapse the lease; the tests lapse it on database time themselves,
+// so its length only has to read as a suspend.
+const (
+	renewedRecently     = DefaultClaimSelfFenceDeadline / 4
+	renewedTooLongAgo   = DefaultClaimSelfFenceDeadline + 5*time.Second
+	suspendPastTheLease = 2 * DefaultClaimLease
+)
+
 // suspendFixture is one claimed conversation in a real SQLite store, driven by
 // a spawner whose suspend clock is faked. The claim is minted as the spawner's
 // own executor boot, which is what the re-acquire requires.
@@ -300,17 +311,17 @@ func waitUntil(t *testing.T, within time.Duration, what string, cond func() bool
 }
 
 // TestSuspendRecovery_RefusedRenewalReacquires: a renewal refused because a
-// two-minute suspend lapsed the lease, from an engagement that renewed ten
-// seconds before it slept, takes the claim back and carries on.
+// suspend lapsed the lease, from an engagement that renewed well inside its
+// self-fence deadline before it slept, takes the claim back and carries on.
 func TestSuspendRecovery_RefusedRenewalReacquires(t *testing.T) {
 	f := newSuspendFixture(t)
 	f.s.setClaimLease(20*time.Millisecond, 0, 0)
 	// The machine sleeps as the first renewal goes out.
 	f.queue.before = func() {
 		f.lapse(t)
-		f.sleep(120 * time.Second)
+		f.sleep(suspendPastTheLease)
 	}
-	f.runLoop(t, time.Now().Add(-10*time.Second))
+	f.runLoop(t, time.Now().Add(-renewedRecently))
 
 	waitUntil(t, 5*time.Second, "a renewal after the re-acquire", func() bool {
 		renewed, _, reacquires := f.queue.counts()
@@ -336,9 +347,9 @@ func TestSuspendRecovery_RefusedRenewalReacquires(t *testing.T) {
 // the claim back through the store wrapper, is retried once, and lands once.
 func TestSuspendRecovery_SinkWriteRetriedThroughTheWrapper(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 
 	sink := newConversationSink(f.s, f.conv.OrgID, f.conv.ID, f.conv.ClaimID, "event", "")
 	if err := sink.OnMessage(&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the wake"}); err != nil {
@@ -371,7 +382,7 @@ func TestSuspendRecovery_NoSuspendFencesAsToday(t *testing.T) {
 	f := newSuspendFixture(t)
 	f.s.setClaimLease(20*time.Millisecond, 0, 0)
 	f.queue.before = func() { f.lapse(t) }
-	f.runLoop(t, time.Now().Add(-10*time.Second))
+	f.runLoop(t, time.Now().Add(-renewedRecently))
 
 	waitUntil(t, 5*time.Second, "the fence", func() bool { return f.claimCtx.Err() != nil })
 	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errClaimLeaseLost) {
@@ -395,9 +406,9 @@ func TestSuspendRecovery_NoSuspendFencesAsToday(t *testing.T) {
 // it slept, and without the sleep its lease would have lapsed anyway.
 func TestSuspendRecovery_AlreadyFailingToRenewFences(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-50*time.Second))
+	f.register(t, time.Now().Add(-renewedTooLongAgo))
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 
 	sink := newConversationSink(f.s, f.conv.OrgID, f.conv.ID, f.conv.ClaimID, "event", "")
 	err := sink.OnMessage(&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "stale"})
@@ -424,9 +435,9 @@ func TestSuspendRecovery_AlreadyFailingToRenewFences(t *testing.T) {
 // refused, and the engagement fences with nothing written.
 func TestSuspendRecovery_ClaimTakenDuringTheSuspendFences(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 	f.queue.beforeReacquire = func() { f.release(t) }
 
 	sink := newConversationSink(f.s, f.conv.OrgID, f.conv.ID, f.conv.ClaimID, "event", "")
@@ -454,9 +465,9 @@ func TestSuspendRecovery_ClaimTakenDuringTheSuspendFences(t *testing.T) {
 // fences exactly as a refusal does, and the refused write is not retried.
 func TestSuspendRecovery_ReacquireErrorFences(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 	f.queue.reacquireErr = errors.New("database is locked")
 
 	_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
@@ -484,10 +495,10 @@ func TestSuspendRecovery_ReacquireErrorFences(t *testing.T) {
 // claim context already cancelled with a lease cause and leaves the lapse.
 func TestSuspendRecovery_SelfFencedEngagementDoesNotReacquire(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.fence(errClaimSelfFenced)
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 
 	_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
 		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "fenced"})
@@ -508,10 +519,10 @@ func TestSuspendRecovery_SelfFencedEngagementDoesNotReacquire(t *testing.T) {
 // to land after a suspend like any other write.
 func TestSuspendRecovery_StoppedEngagementStillReacquires(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.fence(errStopRequested)
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 
 	parked, err := f.s.conversations.ParkOpenForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ID, f.conv.ClaimID,
 		db.ParkStopped(domain.ParkReasonUserCancelled, "Stopped by user"))
@@ -530,9 +541,9 @@ func TestSuspendRecovery_StoppedEngagementStillReacquires(t *testing.T) {
 // meeting the same lapse spend one re-acquire, and both proceed on it.
 func TestSuspendRecovery_TwoRefusalsOneReacquire(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	f.lapse(t)
-	f.sleep(120 * time.Second)
+	f.sleep(suspendPastTheLease)
 
 	var wg sync.WaitGroup
 	errs := make([]error, 2)
@@ -568,11 +579,11 @@ func TestSuspendRecovery_TwoRefusalsOneReacquire(t *testing.T) {
 // re-acquire already answered.
 func TestSuspendRecovery_SecondSuspendReacquiresAgain(t *testing.T) {
 	f := newSuspendFixture(t)
-	f.register(t, time.Now().Add(-10*time.Second))
+	f.register(t, time.Now().Add(-renewedRecently))
 	contents := []string{"after the first sleep", "after the second sleep"}
 	for i, content := range contents {
 		f.lapse(t)
-		f.sleep(120 * time.Second)
+		f.sleep(suspendPastTheLease)
 		if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
 			&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: content}); err != nil {
 			t.Fatalf("write after sleep %d: %v", i+1, err)
@@ -595,28 +606,111 @@ func TestSuspendRecovery_SecondSuspendReacquiresAgain(t *testing.T) {
 	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 2})
 }
 
+// TestSuspendRecovery_StaleRenewalDoesNotRewindTheBase: a renewal issued
+// before the sleep that comes back accepted after a write's recovery took the
+// claim back is older news. Recording it would rewind the suspend base to
+// before the sleep, and a later lapse with no suspend behind it (a wall-clock
+// step on the database's clock) would count that sleep again.
+func TestSuspendRecovery_StaleRenewalDoesNotRewindTheBase(t *testing.T) {
+	f := newSuspendFixture(t)
+	st := f.register(t, time.Now().Add(-renewedRecently))
+	issuedBeforeTheSleep, baseBeforeTheSleep := time.Now(), time.Duration(f.asleep.Load())
+	f.lapse(t)
+	f.sleep(suspendPastTheLease)
+	if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the sleep"}); err != nil {
+		t.Fatalf("write after the sleep: %v", err)
+	}
+	// The renewal that was out across the sleep returns, accepted.
+	st.accepted(issuedBeforeTheSleep, baseBeforeTheSleep, true)
+
+	f.lapse(t)
+	_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the step"})
+	if !errors.Is(err, db.ErrClaimLeaseExpired) {
+		t.Fatalf("write after a lapse with no suspend = %v, want the lapse refused", err)
+	}
+	if _, _, reacquires := f.queue.counts(); reacquires != 1 {
+		t.Errorf("re-acquires = %d, want only the sleep's", reacquires)
+	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
+}
+
+// TestSuspendRecovery_AbandonedReacquireDoesNotFence: a write whose caller
+// gives up while its re-acquire is out learns nothing about the claim, so it
+// neither fences the engagement nor counts an attempt, and the next write
+// recovers.
+func TestSuspendRecovery_AbandonedReacquireDoesNotFence(t *testing.T) {
+	f := newSuspendFixture(t)
+	f.register(t, time.Now().Add(-renewedRecently))
+	f.lapse(t)
+	f.sleep(suspendPastTheLease)
+	ctx, abandon := context.WithCancel(context.Background())
+	f.queue.beforeReacquire = abandon
+
+	_, err := f.s.conversations.InsertMessageForClaimSystem(ctx, f.conv.OrgID, f.conv.ClaimID,
+		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "abandoned"})
+	if !errors.Is(err, db.ErrClaimLeaseExpired) {
+		t.Fatalf("abandoned write = %v, want the lapse it met", err)
+	}
+	if err := context.Cause(f.claimCtx); err != nil {
+		t.Errorf("claim context cancelled with %v; an abandoned re-acquire fences nothing", err)
+	}
+	f.assertRecoveries(t, nil)
+
+	f.queue.mu.Lock()
+	f.queue.beforeReacquire = nil
+	f.queue.mu.Unlock()
+	if _, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after"}); err != nil {
+		t.Fatalf("the next write after an abandoned re-acquire: %v", err)
+	}
+	if !f.leaseLive(t) {
+		t.Error("the claim's lease is not live after the second write's re-acquire")
+	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
+}
+
+// TestSuspendRecovery_NoSuspendClockFencesAsToday: on a platform that cannot
+// report suspended time, no lapse is recoverable, so a refused renewal fences
+// exactly as it did before the recovery existed.
+func TestSuspendRecovery_NoSuspendClockFencesAsToday(t *testing.T) {
+	f := newSuspendFixture(t)
+	suspendclock.SetSourceForTest(t, func() (time.Duration, bool) { return 0, false })
+	f.s.setClaimLease(20*time.Millisecond, 0, 0)
+	f.queue.before = func() { f.lapse(t) }
+	f.runLoop(t, time.Now().Add(-renewedRecently))
+
+	waitUntil(t, 5*time.Second, "the fence", func() bool { return f.claimCtx.Err() != nil })
+	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errClaimLeaseLost) {
+		t.Errorf("fence cause = %v, want errClaimLeaseLost", cause)
+	}
+	if _, _, reacquires := f.queue.counts(); reacquires != 0 {
+		t.Errorf("re-acquires = %d, want none without a suspend clock", reacquires)
+	}
+	f.assertRecoveries(t, nil)
+}
+
 // TestSuspendRecovery_PollRenewsOnWake: the suspend poll renews as soon as the
 // clock moves, taking the claim back well before the next cadence tick would
 // have asked.
 func TestSuspendRecovery_PollRenewsOnWake(t *testing.T) {
 	f := newSuspendFixture(t)
-	// The product's timings: the cadence tick is twenty seconds out, so a
-	// renewal inside the next few is the poll's.
+	// The product's timings, so the cadence tick is a full interval out.
 	f.runLoop(t, time.Now())
 	waitUntil(t, 5*time.Second, "the loop to register its lease", func() bool {
 		return f.s.claimLeaseFor(f.conv.ClaimID) != nil
 	})
 
 	f.lapse(t)
-	f.sleep(120 * time.Second)
-	woke := time.Now()
-	waitUntil(t, 3*suspendPollInterval, "the wake renewal", func() bool {
+	f.sleep(suspendPastTheLease)
+	// The cadence tick is a full interval out, so a re-acquire inside half of
+	// one is the poll's. The poll takes about a second; the margin is for a
+	// loaded runner.
+	waitUntil(t, DefaultClaimRenewInterval/2, "the wake renewal", func() bool {
 		_, _, reacquires := f.queue.counts()
 		return reacquires == 1
 	})
-	if took := time.Since(woke); took > 2*suspendPollInterval {
-		t.Errorf("re-acquired %s after the wake, want within about one poll", took)
-	}
 	if _, refused, _ := f.queue.counts(); refused != 1 {
 		t.Errorf("refused renewals = %d, want the one wake renewal", refused)
 	}

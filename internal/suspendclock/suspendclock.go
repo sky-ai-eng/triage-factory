@@ -9,8 +9,14 @@
 // This package is the one reading that tells the two apart.
 //
 // Readings are not smoothed. The two clocks are read in two calls, so two
-// readings taken close together can step backwards by a sub-microsecond
-// skew; callers clamp the difference at zero.
+// readings taken close together can step backwards by the difference in the
+// gap between the calls: under a microsecond normally, hundreds of
+// microseconds under preemption. On darwin the reading also drifts while
+// awake, by the frequency correction NTP applies to one clock of the pair and
+// not the other, so on a machine that has not slept it can sit slightly below
+// zero. Callers subtract readings at most a self-fence deadline of awake time
+// apart, where both effects are milliseconds against a one-second threshold,
+// and clamp the difference at zero.
 package suspendclock
 
 import (

@@ -503,10 +503,10 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		conv := claim(t, f, conversationID)
 		q := f.Stores.ConversationQueue
 		f.SetLease(t, conv.ClaimID, -30*time.Second)
-		refused := func(t *testing.T, what, executorID string, bootEpoch int64) {
+		refused := func(t *testing.T, what, onConversation, executorID string, bootEpoch int64) {
 			t.Helper()
 			before, _, _ := f.Lease(t, conv.ClaimID)
-			if _, err := q.ReacquireClaimLeaseSystem(ctx, f.OrgID, conversationID, conv.ClaimID, executorID, bootEpoch, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
+			if _, err := q.ReacquireClaimLeaseSystem(ctx, f.OrgID, onConversation, conv.ClaimID, executorID, bootEpoch, testClaimLease); !errors.Is(err, db.ErrClaimReleased) {
 				t.Errorf("re-acquire of %s = %v, want ErrClaimReleased", what, err)
 			}
 			if after, _, _ := f.Lease(t, conv.ClaimID); !after.Equal(before) {
@@ -514,12 +514,13 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}
 		}
 
-		refused(t, "another executor's claim", "reacquire-other-exec", claimLeaseBootEpoch)
-		refused(t, "another boot's claim", claimLeaseExecutor, claimLeaseBootEpoch+1)
+		refused(t, "the claim named under another conversation", "reacquire-other-conversation", claimLeaseExecutor, claimLeaseBootEpoch)
+		refused(t, "another executor's claim", conversationID, "reacquire-other-exec", claimLeaseBootEpoch)
+		refused(t, "another boot's claim", conversationID, claimLeaseExecutor, claimLeaseBootEpoch+1)
 		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
-		refused(t, "a released claim", claimLeaseExecutor, claimLeaseBootEpoch)
+		refused(t, "a released claim", conversationID, claimLeaseExecutor, claimLeaseBootEpoch)
 	})
 
 	t.Run("Renew_StampsTheCheckpointAgeAndClearsItWithNone", func(t *testing.T) {

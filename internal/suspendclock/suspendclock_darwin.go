@@ -9,7 +9,9 @@ import (
 // platformSuspended is CLOCK_MONOTONIC minus CLOCK_UPTIME_RAW. Per Apple's
 // clock_gettime(3), CLOCK_MONOTONIC keeps counting while the system sleeps
 // and CLOCK_UPTIME_RAW (mach_absolute_time) does not, so the difference
-// grows by exactly the time asleep.
+// grows by the time asleep. CLOCK_MONOTONIC is also subject to NTP's
+// frequency correction and CLOCK_UPTIME_RAW is not, so the difference also
+// drifts while awake, by parts per million.
 //
 // CLOCK_UPTIME_RAW is read first, for the reason the Linux reading orders
 // its calls: the gap between them can only bias the reading up.

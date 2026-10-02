@@ -103,6 +103,13 @@ func (st *claimLeaseState) accepted(issuedAt time.Time, suspended time.Duration,
 }
 
 func (st *claimLeaseState) acceptedLocked(issuedAt time.Time, suspended time.Duration, ok bool) {
+	// An acceptance issued before the one already recorded is older news: a
+	// renewal that was out across a sleep while a write's recovery took the
+	// claim back. Recording it would rewind the suspend base to before that
+	// sleep, and a later lapse would count the same sleep again.
+	if issuedAt.Before(*st.lastRenewal.Load()) {
+		return
+	}
 	// Published BEFORE the re-arm, so a callback dispatched in between reads
 	// this renewal and stands down rather than fencing on the deadline it
 	// was armed for.
@@ -183,7 +190,10 @@ func (s *Spawner) claimLeaseFor(claimID string) *claimLeaseState {
 // A re-acquire the database refuses means the claim was released during the
 // suspend, and one that fails for any other reason cannot show otherwise; both
 // fence the engagement here, since the refusal the caller holds is the end of
-// it either way.
+// it either way. A call the caller abandoned, by cancelling ctx, is neither:
+// it says nothing about the claim, so it fences nothing and is not counted,
+// the caller's refusal stands, and a later write or renewal can still
+// recover.
 func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, seen uint64) (db.ClaimRenewal, bool) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -211,16 +221,25 @@ func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, se
 	callCtx, cancel := context.WithTimeout(ctx, st.callTimeout)
 	renewal, err := s.conversationQueue.ReacquireClaimLeaseSystem(callCtx, conv.OrgID, conv.ID, conv.ClaimID, executorID, bootEpoch, st.lease)
 	cancel()
-	if err != nil {
-		if errors.Is(err, db.ErrClaimReleased) {
-			dispatchLog.Info("claim was taken during a system suspend; fencing this engagement",
-				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
-			recordSuspendRecovery(suspendRecoveryTaken)
-		} else {
-			dispatchLog.Warn("claim lease could not be re-acquired after a system suspend; fencing this engagement",
-				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept, "error", err)
-			recordSuspendRecovery(suspendRecoveryFailed)
-		}
+	switch {
+	case err == nil:
+	case errors.Is(err, db.ErrClaimReleased):
+		dispatchLog.Info("claim was taken during a system suspend; fencing this engagement",
+			"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
+		recordSuspendRecovery(suspendRecoveryTaken)
+		st.fenceWith(errClaimLeaseLost)
+		return db.ClaimRenewal{}, false
+	case st.fenced.Load():
+		// The watchdog fired while the call was out, and its fence may be
+		// what cancelled the call.
+		recordSuspendRecovery(suspendRecoveryFailed)
+		return db.ClaimRenewal{}, false
+	case ctx.Err() != nil:
+		return db.ClaimRenewal{}, false
+	default:
+		dispatchLog.Warn("claim lease could not be re-acquired after a system suspend; fencing this engagement",
+			"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept, "error", err)
+		recordSuspendRecovery(suspendRecoveryFailed)
 		st.fenceWith(errClaimLeaseLost)
 		return db.ClaimRenewal{}, false
 	}
@@ -240,8 +259,9 @@ func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, se
 }
 
 // The outcomes of one re-acquire attempt, which is what the suspend-recovery
-// counter counts. An engagement attempts at most once per suspend: a success
-// resets the base the next attempt measures from, and a failure fences it.
+// counter counts. An engagement counts at most one attempt per suspend: a
+// success resets the base the next attempt measures from, a failure fences
+// it, and a call its caller abandoned is not counted.
 //
 //   - reacquired: the claim was taken back and the engagement carried on.
 //   - taken: the claim was released while the machine slept, so a successor

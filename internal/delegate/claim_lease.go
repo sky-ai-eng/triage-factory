@@ -220,18 +220,22 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 		stopRenewing()
 	})
 	defer st.stopWatchdog()
-	s.registerClaimLease(st)
-	defer s.deregisterClaimLease(st)
 
-	// The suspend poll. A platform that cannot report suspended time gets no
+	// The suspend poll, from the reading the state was built on, so a sleep
+	// that starts any time after that counts as movement however late this
+	// goroutine gets here. Read before the state is registered, while nothing
+	// else can reach it. A platform that cannot report suspended time gets no
 	// poll at all, and the loop is exactly its cadence.
 	var suspendTick <-chan time.Time
-	lastSeen, canSee := suspendclock.Suspended()
+	lastSeen, canSee := st.suspendBase, st.suspendOK
 	if canSee {
 		t := time.NewTicker(suspendPollInterval)
 		defer t.Stop()
 		suspendTick = t.C
 	}
+
+	s.registerClaimLease(st)
+	defer s.deregisterClaimLease(st)
 
 	ticker := time.NewTicker(cadence)
 	defer ticker.Stop()
@@ -300,8 +304,9 @@ func (s *Spawner) renewClaimLease(ctx context.Context, conv *domain.Conversation
 				observeStop(taken)
 				continue
 			}
-			if st.fenced.Load() {
-				// The recovery tried, failed, and fenced; it said why.
+			if st.fenced.Load() || ctx.Err() != nil {
+				// The recovery tried, failed, and fenced, and said why; or
+				// the engagement returned while it was out.
 				return
 			}
 			dispatchLog.Info("claim lease lapsed; fencing this engagement",
