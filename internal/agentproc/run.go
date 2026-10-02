@@ -44,9 +44,11 @@ type RunOptions struct {
 	Model string
 
 	// PermissionMode is the Claude Code permission posture used when the query
-	// starts. Empty leaves the SDK default unchanged; "auto" lets Claude decide
-	// which tool calls can proceed without asking. This is an SDK-runtime option
-	// only — the native agent loop does not consume RunOptions.
+	// starts. Empty means "default" — the allowlist decides, and an
+	// off-allowlist call is prompted or denied (see BuildArgs for why it is
+	// always sent explicitly); "auto" lets Claude decide which tool calls can
+	// proceed without asking. This is an SDK-runtime option only — the
+	// native agent loop does not consume RunOptions.
 	PermissionMode string
 
 	// SessionID, when non-empty, switches the invocation to

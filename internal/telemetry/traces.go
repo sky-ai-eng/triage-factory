@@ -40,6 +40,10 @@ const (
 	// SDK reads its own environment.
 	envOTLPTracesEndpoint = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
 	envOTLPEndpoint       = "OTEL_EXPORTER_OTLP_ENDPOINT"
+
+	// otlpTracesPath is the OTLP/HTTP signal path for traces, applied when
+	// TF_TRACES_ENDPOINT names only a base URL.
+	otlpTracesPath = "/v1/traces"
 )
 
 // tracesMu guards tracerProvider — Init and ShutdownTraces run once each,
@@ -53,15 +57,15 @@ var (
 
 // tracesConfig is the resolved tracing configuration.
 type tracesConfig struct {
-	// endpoint is the OTLP/HTTP endpoint URL handed to the exporter; ""
-	// means tracing is disabled and no exporter is built.
+	// endpoint is the full OTLP/HTTP URL spans are POSTed to; "" means
+	// tracing is disabled and no exporter is built.
 	//
-	// Not necessarily the URL spans are POSTed to: a bare base URL
-	// ("http://tempo:4318") carries an empty path, and the exporter fills
-	// in the OTLP-standard /v1/traces for it. A path given here is used
-	// verbatim instead. Both spellings are normal — a collector's docs
-	// usually print the base — so this resolves the scheme and host, and
-	// leaves the signal path to the exporter's own defaulting.
+	// Always carries a path. A bare base URL ("http://tempo:4318") is
+	// resolved to the OTLP-standard /v1/traces, because the exporter's
+	// WithEndpointURL treats a path-less URL as the root path rather than
+	// filling in the signal path. A path given explicitly is used
+	// verbatim. Both spellings are normal — a collector's docs usually
+	// print the base.
 	endpoint string
 
 	// ignoredOTelEnv names the standard OTLP endpoint variables that carry
@@ -219,8 +223,9 @@ func ShutdownTraces(ctx context.Context) error {
 // A value with no scheme is read as plaintext ("tempo:4318" →
 // "http://tempo:4318"), since the in-cluster collector is the overwhelming
 // case; spell https:// explicitly for a TLS backend. A path is passed
-// through as given; this function never invents one, leaving the empty
-// case to the exporter, which fills in the OTLP-standard /v1/traces.
+// through as given, "/" included; an empty one becomes the OTLP-standard
+// /v1/traces (see tracesConfig.endpoint for why the exporter can't be
+// left to do it).
 func resolveTracesEndpoint(tfRaw, otelTracesRaw, otelGenericRaw string) (tracesConfig, error) {
 	raw := strings.TrimSpace(tfRaw)
 	switch strings.ToLower(raw) {
@@ -242,6 +247,9 @@ func resolveTracesEndpoint(tfRaw, otelTracesRaw, otelGenericRaw string) (tracesC
 	}
 	if u.Host == "" {
 		return tracesConfig{}, fmt.Errorf("endpoint %q: missing host", tfRaw)
+	}
+	if u.Path == "" {
+		u.Path = otlpTracesPath
 	}
 	return tracesConfig{endpoint: u.String()}, nil
 }

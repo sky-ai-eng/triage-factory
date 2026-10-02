@@ -17,6 +17,11 @@ import "strconv"
 // follow-up message, never a question tool.
 const disallowedTools = "AskUserQuestion"
 
+// defaultPermissionMode is the posture a run gets when RunOptions leaves
+// PermissionMode empty: an off-allowlist tool call goes to the canUseTool
+// handler when one is wired, and is denied when none is.
+const defaultPermissionMode = "default"
+
 // BuildArgs assembles the argv consumed by wrapper.mjs (which translates
 // it into Agent SDK Options). Pulled out of Run so the flag set is
 // unit-testable without spawning a subprocess.
@@ -54,9 +59,16 @@ func BuildArgs(opts RunOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
-	if opts.PermissionMode != "" {
-		args = append(args, "--permission-mode", opts.PermissionMode)
+	// Always sent. The SDK leaves an omitted mode to Claude Code, which
+	// applies the operator's own settings defaultMode and, with telemetry
+	// off or a third-party provider, starts in auto — where a classifier,
+	// not the allowlist, decides whether an unlisted tool runs. Every caller
+	// that leaves PermissionMode empty is relying on the allowlist.
+	permissionMode := opts.PermissionMode
+	if permissionMode == "" {
+		permissionMode = defaultPermissionMode
 	}
+	args = append(args, "--permission-mode", permissionMode)
 	args = append(args,
 		"--output-format", "stream-json",
 		"--verbose",
