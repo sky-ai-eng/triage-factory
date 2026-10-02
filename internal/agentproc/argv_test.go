@@ -16,6 +16,7 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 	want := []string{
 		"-p", "do the thing",
 		"--model", "sonnet-4-6",
+		"--permission-mode", "default",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowedTools", "Read,Write",
@@ -125,9 +126,21 @@ func TestBuildArgs_PermissionMode(t *testing.T) {
 		t.Errorf("--permission-mode value = %q, want auto", got[idx+1])
 	}
 
-	withoutMode := BuildArgs(RunOptions{Interactive: true})
-	if slices.Contains(withoutMode, "--permission-mode") {
-		t.Errorf("zero-value PermissionMode must omit the flag: %v", withoutMode)
+	// An omitted mode is Claude Code's to choose, and it can choose auto, so
+	// the zero value must still put "default" on the wire — for one-shot
+	// runs (the toolless system jobs) as much as interactive ones.
+	for name, opts := range map[string]RunOptions{
+		"interactive": {Interactive: true},
+		"one-shot":    {Message: "hi"},
+	} {
+		withoutMode := BuildArgs(opts)
+		idx := slices.Index(withoutMode, "--permission-mode")
+		if idx < 0 || idx+1 >= len(withoutMode) {
+			t.Fatalf("%s: zero-value PermissionMode must still send the flag: %v", name, withoutMode)
+		}
+		if withoutMode[idx+1] != "default" {
+			t.Errorf("%s: --permission-mode value = %q, want default", name, withoutMode[idx+1])
+		}
 	}
 }
 
