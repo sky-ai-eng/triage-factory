@@ -9,6 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -20,7 +24,9 @@ import (
 // verbs. before, when set, runs at the top of the first renewal: it is how a
 // test puts a suspend exactly between a renewal's issue and its statement,
 // rather than racing the loop's ticker to get there first. beforeReacquire
-// runs at the top of every re-acquire, for the same reason.
+// runs at the top of every re-acquire, for the same reason. reacquireErr,
+// when set, is what every re-acquire returns instead of reaching the store:
+// the database failing the call rather than refusing it.
 type recordingQueue struct {
 	db.ConversationQueueStore
 
@@ -30,6 +36,7 @@ type recordingQueue struct {
 	reacquires      int
 	before          func()
 	beforeReacquire func()
+	reacquireErr    error
 }
 
 func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID string, lease time.Duration, activity db.ClaimActivity) (db.ClaimRenewal, error) {
@@ -54,10 +61,13 @@ func (q *recordingQueue) RenewClaimLeaseSystem(ctx context.Context, orgID, conve
 func (q *recordingQueue) ReacquireClaimLeaseSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64, lease time.Duration) (db.ClaimRenewal, error) {
 	q.mu.Lock()
 	q.reacquires++
-	before := q.beforeReacquire
+	before, fail := q.beforeReacquire, q.reacquireErr
 	q.mu.Unlock()
 	if before != nil {
 		before()
+	}
+	if fail != nil {
+		return db.ClaimRenewal{}, fail
 	}
 	return q.ConversationQueueStore.ReacquireClaimLeaseSystem(ctx, orgID, conversationID, claimID, executorID, bootEpoch, lease)
 }
@@ -101,6 +111,54 @@ type suspendFixture struct {
 	fence    context.CancelCauseFunc
 
 	asleep atomic.Int64 // the fake suspend clock's reading, in nanoseconds
+
+	// recoveries reads the suspend-recovery counter for one outcome, from a
+	// manual reader the fixture swapped in for the test's duration.
+	recoveries func(outcome string) int64
+}
+
+// suspendRecoveryCounter swaps the suspend-recovery counter for one on a
+// manual reader and returns a reader of its value for an outcome.
+func suspendRecoveryCounter(t *testing.T) func(outcome string) int64 {
+	t.Helper()
+	reader := sdkmetric.NewManualReader()
+	prev := suspendRecoveries.Swap(newSuspendRecoveryStats(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	t.Cleanup(func() { suspendRecoveries.Store(prev) })
+	return func(outcome string) int64 {
+		t.Helper()
+		var rm metricdata.ResourceMetrics
+		if err := reader.Collect(context.Background(), &rm); err != nil {
+			t.Fatalf("collect metrics: %v", err)
+		}
+		for _, sm := range rm.ScopeMetrics {
+			for _, m := range sm.Metrics {
+				if m.Name != "claims.suspend_recoveries" {
+					continue
+				}
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("claims.suspend_recoveries is %T, want an int64 sum", m.Data)
+				}
+				for _, dp := range sum.DataPoints {
+					if v, ok := dp.Attributes.Value(attribute.Key("outcome")); ok && v.AsString() == outcome {
+						return dp.Value
+					}
+				}
+			}
+		}
+		return 0
+	}
+}
+
+// assertRecoveries checks the counter against want for every outcome, so an
+// outcome a test did not expect is caught as well as a missing one.
+func (f *suspendFixture) assertRecoveries(t *testing.T, want map[string]int64) {
+	t.Helper()
+	for _, outcome := range []string{suspendRecoveryReacquired, suspendRecoveryTaken, suspendRecoveryFailed} {
+		if got := f.recoveries(outcome); got != want[outcome] {
+			t.Errorf("claims.suspend_recoveries{outcome=%q} = %d, want %d", outcome, got, want[outcome])
+		}
+	}
 }
 
 func newSuspendFixture(t *testing.T) *suspendFixture {
@@ -111,7 +169,7 @@ func newSuspendFixture(t *testing.T) *suspendFixture {
 	seedConversation(t, database, convID, "sess-suspend", "/tmp/wt-suspend")
 	claimID := markEngaged(t, database, convID)
 
-	f := &suspendFixture{database: database}
+	f := &suspendFixture{database: database, recoveries: suspendRecoveryCounter(t)}
 	suspendclock.SetSourceForTest(t, func() (time.Duration, bool) {
 		return time.Duration(f.asleep.Load()), true
 	})
@@ -246,6 +304,7 @@ func TestSuspendRecovery_RefusedRenewalReacquires(t *testing.T) {
 	if !f.leaseLive(t) {
 		t.Error("the claim's lease is not live after the re-acquire")
 	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
 // TestSuspendRecovery_SinkWriteRetriedThroughTheWrapper: an SDK sink write
@@ -279,6 +338,7 @@ func TestSuspendRecovery_SinkWriteRetriedThroughTheWrapper(t *testing.T) {
 	if !f.leaseLive(t) {
 		t.Error("the claim's lease is not live after the re-acquire")
 	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
 // TestSuspendRecovery_NoSuspendFencesAsToday: the same lapse with no suspend
@@ -302,6 +362,7 @@ func TestSuspendRecovery_NoSuspendFencesAsToday(t *testing.T) {
 	if !hasActiveClaim(t, f.database, f.conv.ID) {
 		t.Error("the fence released the claim; releasing it is the executor's, after the engagement returns")
 	}
+	f.assertRecoveries(t, nil)
 }
 
 // TestSuspendRecovery_AlreadyFailingToRenewFences: a suspend on the clock does
@@ -331,6 +392,7 @@ func TestSuspendRecovery_AlreadyFailingToRenewFences(t *testing.T) {
 	if f.leaseLive(t) {
 		t.Error("the lease came back for an engagement that was already failing to renew")
 	}
+	f.assertRecoveries(t, nil)
 }
 
 // TestSuspendRecovery_ClaimTakenDuringTheSuspendFences: the takeover that
@@ -360,6 +422,37 @@ func TestSuspendRecovery_ClaimTakenDuringTheSuspendFences(t *testing.T) {
 	if hasActiveClaim(t, f.database, f.conv.ID) {
 		t.Error("the released claim is live again")
 	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryTaken: 1})
+}
+
+// TestSuspendRecovery_ReacquireErrorFences: a re-acquire the database fails
+// rather than refuses cannot show the claim is still this engagement's, so it
+// fences exactly as a refusal does, and the refused write is not retried.
+func TestSuspendRecovery_ReacquireErrorFences(t *testing.T) {
+	f := newSuspendFixture(t)
+	f.register(t, time.Now().Add(-10*time.Second))
+	f.lapse(t)
+	f.sleep(120 * time.Second)
+	f.queue.reacquireErr = errors.New("database is locked")
+
+	_, err := f.s.conversations.InsertMessageForClaimSystem(context.Background(), f.conv.OrgID, f.conv.ClaimID,
+		&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "unproven"})
+	if !errors.Is(err, db.ErrClaimLeaseExpired) {
+		t.Fatalf("InsertMessageForClaimSystem = %v, want the original lapse refusal", err)
+	}
+	if n := f.inserts.calls.Load(); n != 1 {
+		t.Errorf("inserts reaching the store = %d, want only the refused one", n)
+	}
+	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errClaimLeaseLost) {
+		t.Errorf("fence cause = %v, want errClaimLeaseLost", cause)
+	}
+	if f.leaseLive(t) {
+		t.Error("the lease came back although the re-acquire failed")
+	}
+	if !hasActiveClaim(t, f.database, f.conv.ID) {
+		t.Error("the claim was released; releasing it is the executor's, after the engagement returns")
+	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryFailed: 1})
 }
 
 // TestSuspendRecovery_SelfFencedEngagementDoesNotReacquire: a watchdog that
@@ -383,6 +476,7 @@ func TestSuspendRecovery_SelfFencedEngagementDoesNotReacquire(t *testing.T) {
 	if f.leaseLive(t) {
 		t.Error("the lease came back for a self-fenced engagement")
 	}
+	f.assertRecoveries(t, nil)
 }
 
 // TestSuspendRecovery_StoppedEngagementStillReacquires: a stop is not a lease
@@ -440,6 +534,7 @@ func TestSuspendRecovery_TwoRefusalsOneReacquire(t *testing.T) {
 			t.Errorf("transcript rows for %q = %d, want exactly 1", content, n)
 		}
 	}
+	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
 // TestSuspendRecovery_PollRenewsOnWake: the suspend poll renews as soon as the

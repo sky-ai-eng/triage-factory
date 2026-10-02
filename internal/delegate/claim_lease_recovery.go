@@ -7,6 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
@@ -211,9 +215,11 @@ func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, se
 		if errors.Is(err, db.ErrClaimReleased) {
 			dispatchLog.Info("claim was taken during a system suspend; fencing this engagement",
 				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
+			recordSuspendRecovery(suspendRecoveryTaken)
 		} else {
 			dispatchLog.Warn("claim lease could not be re-acquired after a system suspend; fencing this engagement",
 				"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept, "error", err)
+			recordSuspendRecovery(suspendRecoveryFailed)
 		}
 		st.fenceWith(errClaimLeaseLost)
 		return db.ClaimRenewal{}, false
@@ -222,13 +228,65 @@ func (s *Spawner) recoverClaimLease(ctx context.Context, st *claimLeaseState, se
 	// again, but the engagement is already tearing down and writes nothing;
 	// its own executor releases the claim once the lease lapses.
 	if st.fenced.Load() {
+		recordSuspendRecovery(suspendRecoveryFailed)
 		return db.ClaimRenewal{}, false
 	}
 	st.acceptedLocked(issuedAt, suspended, ok)
 	st.reacquired.Add(1)
 	dispatchLog.Info("claim lease re-acquired after a system suspend",
 		"conversation", conv.ID, "claim", conv.ClaimID, "suspended", slept)
+	recordSuspendRecovery(suspendRecoveryReacquired)
 	return renewal, true
+}
+
+// The outcomes of one re-acquire attempt, which is what the suspend-recovery
+// counter counts. An engagement attempts at most once per suspend: a success
+// resets the base the next attempt measures from, and a failure fences it.
+//
+//   - reacquired: the claim was taken back and the engagement carried on.
+//   - taken: the claim was released while the machine slept, so a successor
+//     may hold the conversation and the engagement fenced.
+//   - failed: the re-acquire errored, or the engagement's own watchdog fenced
+//     it while the call was out; either way it did not carry on.
+const (
+	suspendRecoveryReacquired = "reacquired"
+	suspendRecoveryTaken      = "taken"
+	suspendRecoveryFailed     = "failed"
+)
+
+// suspendRecoveries owns this package's suspend-recovery counter.
+// Package-level because a metric instrument is process-global by nature, and
+// swapped atomically so a test can back it with a manual reader while a
+// renewal loop may still be counting.
+var suspendRecoveries atomic.Pointer[suspendRecoveryStats]
+
+func init() {
+	suspendRecoveries.Store(newSuspendRecoveryStats(otel.GetMeterProvider()))
+}
+
+type suspendRecoveryStats struct {
+	attempts metric.Int64Counter
+}
+
+// newSuspendRecoveryStats builds the instrument against mp — production passes
+// the global provider, which telemetry.Init installs. An instrument-creation
+// error can only be a programmer error, and the API hands back a usable no-op
+// alongside it, so it is logged rather than propagated.
+func newSuspendRecoveryStats(mp metric.MeterProvider) *suspendRecoveryStats {
+	counter, err := mp.Meter("internal/delegate").Int64Counter("claims.suspend_recoveries",
+		metric.WithDescription("Claim re-acquires attempted after a system suspend lapsed an engagement's lease, by outcome."))
+	if err != nil {
+		dispatchLog.Warn("suspend recovery counter setup failed", "error", err)
+	}
+	return &suspendRecoveryStats{attempts: counter}
+}
+
+func recordSuspendRecovery(outcome string) {
+	stats := suspendRecoveries.Load()
+	if stats == nil || stats.attempts == nil {
+		return
+	}
+	stats.attempts.Add(context.Background(), 1, metric.WithAttributes(attribute.String("outcome", outcome)))
 }
 
 // leaseRecoveringConversations is the conversation store every engagement
