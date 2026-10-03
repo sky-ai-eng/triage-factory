@@ -7,6 +7,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -100,6 +101,11 @@ func (a *App) startBrain(term int64) {
 	// be what reports them.
 	a.claimGauges = workmetrics.NewClaimObserver(otel.GetMeterProvider(), a.stores.ConversationQueue)
 	go a.claimGauges.Run(brainCtx, workmetrics.DefaultDepthInterval)
+	// Source connection gauge (tf_upstream_up): each org's stored GitHub and
+	// Jira connection state, which the poll cycles write. Brain-gated so one
+	// process exports it, beside the poller that owns the state.
+	a.connectionGauge = poller.NewConnectionObserver(otel.GetMeterProvider(), a.stores.PollReadiness)
+	go a.connectionGauge.Run(brainCtx, poller.DefaultConnectionInterval)
 	// Durable event-queue drain worker: claims github:/jira: events the
 	// ingestor enqueued under the work-item contract's leases, routes them,
 	// and marks them done under the lease's fence. A failed attempt returns
@@ -267,6 +273,10 @@ func (a *App) stopBrain(reason string) {
 	if a.claimGauges != nil {
 		a.claimGauges.Close()
 		a.claimGauges = nil
+	}
+	if a.connectionGauge != nil {
+		a.connectionGauge.Close()
+		a.connectionGauge = nil
 	}
 	if a.pollerMgr != nil {
 		a.pollerMgr.StopAll()

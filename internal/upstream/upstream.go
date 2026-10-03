@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -119,6 +120,19 @@ func ClassOf(err error) (Class, bool) {
 		return Transient, true
 	}
 	return "", false
+}
+
+// LogLevel is the level a poll cycle logs err at. An upstream failure (one
+// ClassOf recognizes) logs at Debug, because the poller reports a source's
+// connection being lost and restored once each, from the cycle's own request
+// outcomes, rather than once per failed request per cycle. Anything else is a
+// fault of TF's own (a database read, a setting, a credential it could not
+// load) and keeps the caller's level.
+func LogLevel(err error, otherwise slog.Level) slog.Level {
+	if _, ok := ClassOf(err); ok {
+		return slog.LevelDebug
+	}
+	return otherwise
 }
 
 // Retryable reports whether a request that ended in class c may be sent

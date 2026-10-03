@@ -5022,12 +5022,23 @@ REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
 -- consumed atomically so racing pods can't double-fire the toast.
 -- Store methods take an explicit orgID and run on the admin pool; the handler
 -- has already resolved and authorized the org from session claims.
+--
+-- connection_state is whether the last poll cycle that made requests reached
+-- the upstream: 'unknown' until a cycle first records one, then 'up' or
+-- 'down'. connection_changed_at is when the current state began, NULL until
+-- the first state is recorded. connection_failure_class is the request outcome
+-- class that put the connection down ('transient' or 'auth'), NULL whenever
+-- the state is not 'down'. Only the background-brain holder polls, so each row
+-- has one writer.
 CREATE TABLE public.poll_readiness (
-    org_id            text NOT NULL,
-    source            text NOT NULL,
-    restarted_at      timestamp with time zone,
-    last_poll_at      timestamp with time zone,
-    announce_pending  boolean NOT NULL DEFAULT false
+    org_id                    text NOT NULL,
+    source                    text NOT NULL,
+    restarted_at              timestamp with time zone,
+    last_poll_at              timestamp with time zone,
+    announce_pending          boolean NOT NULL DEFAULT false,
+    connection_state          text NOT NULL DEFAULT 'unknown',
+    connection_changed_at     timestamp with time zone,
+    connection_failure_class  text
 );
 
 ALTER TABLE ONLY public.poll_readiness

@@ -5,7 +5,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestPollReadinessStore_SQLite_ReadyLifecycle mirrors the Postgres
@@ -115,4 +118,13 @@ func TestPollReadinessStore_SQLite_LastPollTimes(t *testing.T) {
 	if _, ok := times["jira"]; ok || len(times) != 1 {
 		t.Fatalf("after jira restart times = %v, want github only", times)
 	}
+}
+
+// TestPollReadinessStore_SQLite_ConnectionConformance runs the shared
+// connection-status contract against the SQLite impl. The org is the local
+// sentinel, whose orgs row BootstrapSchemaForTest seeds.
+func TestPollReadinessStore_SQLite_ConnectionConformance(t *testing.T) {
+	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string) {
+		return sqlitestore.New(newSQLiteForArtifactTest(t)).PollReadiness, runmode.LocalDefaultOrgID
+	})
 }

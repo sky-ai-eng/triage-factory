@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/tracker"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -93,10 +96,17 @@ type Manager struct {
 	// OnError fires when a poll cycle returns an error. Source is "github"
 	// or "jira"; orgID identifies the tenant whose cycle errored (empty
 	// when the failure is upstream of the per-org loop, e.g. listing
-	// active orgs itself). Wired from main to a toast helper so users
-	// see the failure without log-diving; nil-safe if caller doesn't
-	// set it.
+	// active orgs itself). nil-safe. Production leaves it unset: a
+	// connection failure reaches people as the connection state below, not
+	// as a notification per failed cycle. The poll-scale benchmark and the
+	// tests observe cycle failures through it.
 	OnError func(source, orgID string, err error)
+
+	// connections persists each (org, source)'s connection state at the end
+	// of every cycle (see recordConnection). nil disables the write and the
+	// lost/restored log lines that come from it (tests that construct a
+	// Manager directly).
+	connections db.PollReadinessStore
 
 	mu       sync.Mutex
 	ghStop   chan struct{}
@@ -140,15 +150,15 @@ type Manager struct {
 
 	// pollSuccessMu guards lastGithubSuccess/lastJiraSuccess — per-org
 	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
-	// call without error (TFAC-573). This is the /readyz soft signal: it
-	// proves an org's poll actually completed, where the heartbeat above
-	// only proves the loop woke.
+	// call without error and did not leave the org's connection down. This
+	// is the /readyz soft signal: it proves an org's poll actually completed,
+	// where the heartbeat above only proves the loop woke.
 	pollSuccessMu     sync.Mutex
 	lastGithubSuccess map[string]time.Time
 	lastJiraSuccess   map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver) *Manager {
 	return &Manager{
 		database:     database,
 		pub:          pub,
@@ -162,6 +172,7 @@ func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, ta
 		githubGroups: githubGroups,
 		secrets:      secrets,
 		apps:         apps,
+		connections:  connections,
 		resolver:     resolver,
 	}
 }
@@ -555,6 +566,17 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		trace.WithAttributes(telemetry.Source("github"), telemetry.OrgID(orgID)))
 	defer span.End()
 
+	// The cycle's own requests decide the org's GitHub connection state, and
+	// the state decides whether the cycle counts as a successful poll: a cycle
+	// whose every request failed is not one, whatever else it managed.
+	ctx, conn := newCycleConnection(ctx)
+	refreshed := false
+	defer func() {
+		if state := m.recordConnection(ctx, githubLog, "github", orgID, conn); refreshed && state != db.ConnectionDown {
+			m.stampGitHubSuccess(orgID)
+		}
+	}()
+
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org
 	// where "the App can reach repositories nobody asked for" is largest, so
@@ -565,7 +587,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// stale mirror is the worst outcome here.
 	if m.ReconcileGrant != nil {
 		if err := m.ReconcileGrant(ctx, orgID); err != nil {
-			githubLog.WarnContext(ctx, "installation mirror reconcile failed", "org", orgID, "error", err)
+			conn.note(err)
+			githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "installation mirror reconcile failed", "org", orgID, "error", err)
 		}
 	}
 
@@ -609,7 +632,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	appActive := m.orgHasRegisteredApp(ctx, orgID)
 	if !appActive {
 		// No App, or a staged App → the PAT is the live credential.
-		m.pollGitHubPAT(ctx, orgID, repos, isLocal)
+		refreshed = m.pollGitHubPAT(ctx, conn, orgID, repos, isLocal)
 		return
 	}
 
@@ -656,20 +679,32 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	unresolvedOwners := make(map[string]bool)
 	var rateLimitResumeFrom string
 	var rateLimitErr *ghclient.ErrRateLimited
+	// installErr is the failure that cost an installation its client this
+	// cycle, for the degraded report below. A local failure is kept over an
+	// upstream one, so the report logs at the level of the fault TF owns.
+	var installErr error
+	keepInstallErr := func(err error) {
+		if _, upstreamFailure := upstream.ClassOf(err); installErr == nil || !upstreamFailure {
+			installErr = err
+		}
+	}
 
 	covered := make(map[string]bool, len(repos))
 	anyFunctional := false
 	for _, inst := range installs {
 		client, cerr := m.resolver.ClientFor(ctx, orgID, inst.AccountLogin)
 		if cerr != nil {
-			githubLog.Error("resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
+			conn.note(cerr)
+			keepInstallErr(cerr)
+			githubLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve client for installation failed", "org", orgID, "installation", inst.InstallationID, "account", inst.AccountLogin, "error", cerr)
 			m.reportError("github", orgID, cerr)
 			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
 		}
 		grant, gerr := client.ListInstallationRepos(ctx)
 		if gerr != nil {
-			githubLog.Error("list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
+			keepInstallErr(gerr)
+			githubLog.Log(ctx, upstream.LogLevel(gerr, slog.LevelError), "list installation repos failed", "org", orgID, "account", inst.AccountLogin, "error", gerr)
 			m.reportError("github", orgID, gerr)
 			unresolvedOwners[strings.ToLower(inst.AccountLogin)] = true
 			continue
@@ -701,10 +736,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
 		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
 		if rerr != nil {
-			githubLog.Error("tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
+			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
 		} else {
-			m.stampGitHubSuccess(orgID)
+			refreshed = true
 		}
 		var rl *ghclient.ErrRateLimited
 		if errors.As(rerr, &rl) {
@@ -751,9 +786,12 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// worse, act as a leaked PAT if one ever crept back in. Surface degraded
 	// health and skip rather than masking it.
 	if !anyFunctional {
-		degraded := errors.New("github app is active but no installation produced a usable token")
+		// Wrapping the installation's own failure keeps its class: an
+		// unreachable host is reported by the connection state, and only a
+		// fault of TF's own logs at Error here.
+		degraded := fmt.Errorf("github app is active but no installation produced a usable token: %w", installErr)
 		span.SetStatus(codes.Error, "no usable installation token")
-		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
+		githubLog.Log(ctx, upstream.LogLevel(degraded, slog.LevelError), "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
 		return
 	}
@@ -799,13 +837,13 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 		client, err := m.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
 			if !errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-				githubGroupsLog.Warn("resolve client for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
+				githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "resolve client for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			}
 			continue
 		}
 		teams, err := client.ListOrgTeams(ctx, owner)
 		if err != nil {
-			githubGroupsLog.Warn("list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
+			githubGroupsLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "list teams for owner failed; skipping reconcile", "org", orgID, "owner", owner, "error", err)
 			continue
 		}
 		slugs := make([]string, 0, len(teams))
@@ -834,7 +872,9 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 // backfill and team-based review-request detection. Multi-mode PAT fallback
 // has no local sentinel user, so it passes no username (org-wide REST
 // discovery doesn't need one; dashboard history is local/PAT-only).
-func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []string, isLocal bool) {
+//
+// It reports whether the tracker's refresh completed without error.
+func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID string, repos []string, isLocal bool) bool {
 	// The PAT path is the whole body of one branch of runGitHubCycleForOrg,
 	// so it records onto that caller's poll.github.org span rather than
 	// opening a child that would only ever duplicate it. A no-op span when
@@ -851,12 +891,13 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			span.SetAttributes(telemetry.Outcome("unconfigured"))
-			return // not configured for GitHub — silent skip
+			return false // not configured for GitHub — silent skip
 		}
+		conn.note(err)
 		span.SetStatus(codes.Error, "resolve pat client")
-		githubLog.ErrorContext(ctx, "resolve pat client failed", "org", orgID, "error", err)
+		githubLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "resolve pat client failed", "org", orgID, "error", err)
 		m.reportError("github", orgID, err)
-		return
+		return false
 	}
 
 	var username string
@@ -870,16 +911,16 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 		if serr != nil {
 			span.SetStatus(codes.Error, "read org settings")
 			githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", serr)
-			return
+			return false
 		}
 		username, err = m.users.GetGitHubLoginSystem(ctx, runmode.LocalDefaultUserID, orgSet.GitHubBaseURL)
 		if err != nil {
 			span.SetStatus(codes.Error, "read github identity")
 			githubLog.ErrorContext(ctx, "read github identity failed", "org", orgID, "error", err)
-			return
+			return false
 		}
 		if teams, terr := client.ListMyTeams(ctx); terr != nil {
-			githubLog.Warn("list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
+			githubLog.Log(ctx, upstream.LogLevel(terr, slog.LevelWarn), "list teams failed; team-based review requests will be missed this cycle", "org", orgID, "error", terr)
 		} else {
 			userTeams = teams
 		}
@@ -889,14 +930,13 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, orgID string, repos []strin
 	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
-		githubLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", rerr)
+		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
 		m.reportError("github", orgID, rerr)
-	} else {
-		m.stampGitHubSuccess(orgID)
 	}
 	var rl *ghclient.ErrRateLimited
 	errors.As(rerr, &rl)
 	m.recordGitHubCursor(orgID, resumeFrom, rl)
+	return rerr == nil
 }
 
 // orgHasRegisteredApp reports whether the org's live GitHub credential is a
@@ -1256,6 +1296,17 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		trace.WithAttributes(telemetry.Source("jira"), telemetry.OrgID(orgID)))
 	defer span.End()
 
+	// Same contract as the GitHub cycle: the cycle's own requests decide the
+	// org's Jira connection state, and the state decides whether the cycle
+	// counts as a successful poll.
+	ctx, conn := newCycleConnection(ctx)
+	refreshed := false
+	defer func() {
+		if state := m.recordConnection(ctx, jiraLog, "jira", orgID, conn); refreshed && state != db.ConnectionDown {
+			m.stampJiraSuccess(orgID)
+		}
+	}()
+
 	orgSet, oerr := m.orgs.GetSettingsSystem(ctx, orgID)
 	if oerr != nil {
 		span.SetStatus(codes.Error, "load settings")
@@ -1326,17 +1377,17 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	client, cerr := sysResolver.ForSystem(ctx, orgID)
 	if cerr != nil {
 		span.SetStatus(codes.Error, "resolve system client")
-		jiraLog.ErrorContext(ctx, "resolve system client failed", "org", orgID, "error", cerr)
+		jiraLog.Log(ctx, upstream.LogLevel(cerr, slog.LevelError), "resolve system client failed", "org", orgID, "error", cerr)
 		m.reportError("jira", orgID, cerr)
 		return
 	}
 	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, client, baseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")
-		jiraLog.ErrorContext(ctx, "tracker error", "org", orgID, "error", err)
+		jiraLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "tracker error", "org", orgID, "error", err)
 		m.reportError("jira", orgID, err)
 		return
 	}
-	m.stampJiraSuccess(orgID)
+	refreshed = true
 }
 
 // toTrackerJiraRules collapses the org-wide rule union into the

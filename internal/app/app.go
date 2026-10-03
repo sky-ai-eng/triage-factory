@@ -252,6 +252,10 @@ type App struct {
 	// lifecycle and for the same reason as workDepth above. nil when the
 	// brain isn't running.
 	claimGauges *workmetrics.ClaimObserver
+	// connectionGauge is the brain's source-connection observer
+	// (tf_upstream_up), on the same lifecycle and for the same reason as
+	// workDepth above. nil when the brain isn't running.
+	connectionGauge *poller.ConnectionObserver
 
 	// shuttingDown latches once Run's blocking listener has unwound and the
 	// dispatch drain has begun (drainDispatches). The executor healthz reads

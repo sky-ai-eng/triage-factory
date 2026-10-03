@@ -21,54 +21,47 @@ import (
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
-// TestRunOrg_ProviderBackoff_SkipsToast pins the systemllm circuit
-// breaker's caller-side behavior (profiler.go's IsProviderBackoff check): a
-// batch failing with a breaker skip must not fire the user-facing
-// "Profiling failed" toast — it's an anticipated, self-healing deferral,
-// not a genuine failure the user needs to see. The doc-scan phase still
-// broadcasts repository_updated (doc flags) unconditionally before the
-// batch is even attempted, so the assertion here specifically checks for
-// the toast's absence, not "no message of any kind."
-func TestRunOrg_ProviderBackoff_SkipsToast(t *testing.T) {
-	readmeBody := `{"content":"` + base64.StdEncoding.EncodeToString([]byte("# readme")) + `","encoding":"base64"}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/contents/README.md"):
-			_, _ = w.Write([]byte(readmeBody))
-		case strings.Contains(r.URL.Path, "/contents/"):
-			w.WriteHeader(http.StatusNotFound)
-		default:
-			_, _ = w.Write([]byte(`{"default_branch":"main","clone_url":"https://x/own/withdocs.git"}`))
-		}
-	}))
-	defer srv.Close()
+// TestRunOrg_BatchFailure_NoToast pins that a failed profiling batch, whether
+// a genuine failure or a provider-backoff deferral, reaches nobody as a toast:
+// the failure is logged, the rows are saved without a profile, and the next
+// cycle retries them. The doc-scan phase still broadcasts repository_updated
+// (doc flags) before the batch is attempted, so the assertion is that the
+// one frame on the socket is that event and nothing follows it.
+func TestRunOrg_BatchFailure_NoToast(t *testing.T) {
+	for name, batchErr := range map[string]error{
+		"genuine failure":  stubErr("simulated batch failure"),
+		"provider backoff": &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := docScanServer(t)
 
-	hub := websocket.NewHub()
-	client := dialHubTestClient(t, hub)
-	waitForHubClient(t, hub)
+			hub := websocket.NewHub()
+			client := dialHubTestClient(t, hub)
+			waitForHubClient(t, hub)
 
-	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
-	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
-		return nil, &systemllm.ErrProviderBackoff{Provider: "anthropic-direct:default"}
-	}
+			repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
+			p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
+			p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
+				return nil, batchErr
+			}
 
-	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
-		t.Fatalf("RunOrg: %v", err)
-	}
+			if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+				t.Fatalf("RunOrg: %v", err)
+			}
 
-	msg := client.expectMessage(t, 2*time.Second)
-	var evt struct {
-		Type string `json:"type"`
+			msg := client.expectMessage(t, 2*time.Second)
+			var evt struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(msg, &evt); err != nil {
+				t.Fatalf("unmarshal event: %v", err)
+			}
+			if evt.Type != repoevent.EventType {
+				t.Fatalf("first event type = %q, want %q", evt.Type, repoevent.EventType)
+			}
+			client.expectNoMessage(t, 200*time.Millisecond)
+		})
 	}
-	if err := json.Unmarshal(msg, &evt); err != nil {
-		t.Fatalf("unmarshal event: %v", err)
-	}
-	if evt.Type != repoevent.EventType {
-		t.Fatalf("first event type = %q, want %q", evt.Type, repoevent.EventType)
-	}
-
-	client.expectNoMessage(t, 200*time.Millisecond)
 }
 
 // TestRunOrg_ChangedTracksUpsertSuccess pins that the cycle's changed flag

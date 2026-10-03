@@ -2777,7 +2777,7 @@
     },
     {
       "collapsed": false,
-      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended. Scraped from each pod's :9464 and summed across pods. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide rule alerts on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
+      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended, and the connection state each org's poll cycles record for GitHub and Jira. Scraped from each pod's :9464 and summed across pods; tf_upstream_up is exported by the pod holding the background brain only. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide and UpstreamDownFleetWide rules alert on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -3053,6 +3053,162 @@
       ],
       "title": "Orgs with failing requests",
       "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Per upstream, the number of orgs whose last GitHub or Jira poll cycle that made requests got no answer: every request failed in transit, or was refused for its credential (tf_upstream_up == 0). The numerator of the UpstreamDownFleetWide rule in docker/observability/rules/tf-connections.yml. A cycle that met only rate limits, or made no requests, leaves an org's state where it was. 0 means no org is down.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 121
+      },
+      "id": 40,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count by (upstream) (tf_upstream_up == 0) or vector(0)",
+          "legendFormat": "{{upstream}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Orgs down by upstream",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Every org whose stored GitHub or Jira connection state is down right now, and the upstream it is down against. The pod's log says when each went down and why: one WARN `<source> connection lost` with the org and the failure class (`transient` or `auth`), and one INFO `<source> connection restored` with `down_for` when it comes back.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 121
+      },
+      "id": 41,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "upstream"
+          }
+        ]
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "max by (upstream, org_id) (tf_upstream_up == 0)",
+          "format": "table",
+          "instant": true,
+          "legendFormat": "__auto",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "Value": true
+            },
+            "indexByName": {
+              "upstream": 0,
+              "org_id": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "title": "Orgs down",
+      "type": "table"
     }
   ],
   "refresh": "30s",

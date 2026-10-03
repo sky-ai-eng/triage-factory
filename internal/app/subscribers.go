@@ -154,12 +154,13 @@ func (a *App) broadcastEvent(evt domain.Event) {
 	}
 }
 
-// handlePollCompleted reacts to poll-complete sentinels: it records Jira
-// readiness (gating /api/jira/stock — TFAC-583's org-scoped
-// poll_readiness table, read by whichever control pod's API serves that
-// endpoint, not just the one that ran this poll) and surfaces a one-shot
-// "first poll complete after config change" toast so users see their
-// settings actually took effect.
+// handlePollCompleted reacts to poll-complete sentinels: it records the
+// source's completed poll (the org-scoped poll_readiness table, read by
+// whichever control pod's API serves the request, not just the one that ran
+// this poll) and surfaces a one-shot "first poll complete after config
+// change" toast so users see their settings actually took effect. The stamp
+// is Jira's readiness gate for /api/jira/stock and, for every source, the
+// last-poll time the team activity page shows.
 func (a *App) handlePollCompleted(evt domain.Event) {
 	if evt.EventType != domain.EventSystemPollCompleted {
 		return
@@ -174,7 +175,7 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 		return
 	}
 	ctx := context.Background()
-	if meta.Source == "jira" {
+	if meta.Source == "jira" || meta.Source == "github" {
 		// Pass the poll's started_at so MarkPollComplete can ignore stale
 		// sentinels from pre-restart poll goroutines that finish late. A
 		// missing field yields StartedAt=0 → a zero time.Time, which
@@ -183,8 +184,8 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 		if meta.StartedAt != 0 {
 			startedAt = time.Unix(0, meta.StartedAt)
 		}
-		if err := a.stores.PollReadiness.MarkPollComplete(ctx, evt.OrgID, "jira", startedAt); err != nil {
-			pollTrackerLog.Warn("mark jira poll complete failed", "org", evt.OrgID, "error", err)
+		if err := a.stores.PollReadiness.MarkPollComplete(ctx, evt.OrgID, meta.Source, startedAt); err != nil {
+			pollTrackerLog.Warn("mark poll complete failed", "org", evt.OrgID, "source", meta.Source, "error", err)
 		}
 	}
 	taken, err := a.stores.PollReadiness.TakeAnnouncePending(ctx, evt.OrgID, meta.Source)

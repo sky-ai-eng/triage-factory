@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
@@ -182,6 +183,30 @@ func TestClassOf(t *testing.T) {
 			got, ok := ClassOf(tc.err)
 			if got != tc.want || ok != tc.wantOK {
 				t.Errorf("ClassOf = (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestLogLevel: an upstream failure logs at Debug, because the poller reports
+// the connection's loss and restoration once each; a local failure keeps the
+// caller's level.
+func TestLogLevel(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want slog.Level
+	}{
+		{"classified", fmt.Errorf("tracker: %w", &classifiedErr{Transient}), slog.LevelDebug},
+		{"rate limited", &classifiedErr{RateLimited}, slog.LevelDebug},
+		{"transport", &net.OpError{Op: "dial", Err: errors.New("refused")}, slog.LevelDebug},
+		{"local failure", errors.New("load creds: keychain locked"), slog.LevelError},
+		{"cancellation", context.Canceled, slog.LevelError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := LogLevel(tc.err, slog.LevelError); got != tc.want {
+				t.Errorf("LogLevel = %v, want %v", got, tc.want)
 			}
 		})
 	}

@@ -1,6 +1,7 @@
-# Alerting rules for TF's requests to the systems it connects to (GitHub,
-# Jira, Slack's Web API), read from tf_upstream_requests_total. Loaded by the
-# bundled Prometheus through the rule_files glob in prometheus.yml.
+# Alerting rules for TF's connections to the systems it connects to (GitHub,
+# Jira, Slack's Web API), read from tf_upstream_requests_total and
+# tf_upstream_up. Loaded by the bundled Prometheus through the rule_files glob
+# in prometheus.yml.
 #
 # Every alert in this file is fleet-wide on purpose. Each org connects with
 # its own credentials, and often to its own host: a GitHub Enterprise Server
@@ -10,11 +11,11 @@
 # must never page one. What an operator can act on is many orgs failing
 # against the same upstream at once: an outage of a service they share
 # (github.com, Atlassian's cloud, Slack), or a fault in this deployment's
-# network or in TF. So the rule compares the number of failing orgs with the
-# number of orgs making requests, and never looks at one org: it needs at
-# least two orgs making requests to an upstream before it can fire, so a
-# single-org deployment gets no page from it and reads the dashboard's
-# "Orgs with failing requests" panel instead.
+# network or in TF. So each rule compares the number of failing orgs with the
+# number of orgs it has a value for, and never looks at one org: it needs at
+# least two orgs before it can fire, so a single-org deployment gets no page
+# from either and reads the dashboard's "Orgs with failing requests" and
+# "Orgs down" panels instead.
 #
 # Delivery is not configured in this repo. The bundled stack runs no
 # Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
@@ -66,3 +67,39 @@ groups:
             at {{ $labels.upstream }} itself or at this deployment's network,
             not at one org's configuration. Break it down with
             sum by (org_id, outcome) (rate(tf_upstream_requests_total{upstream="{{ $labels.upstream }}"}[5m])).
+
+      # More than half of the orgs with a recorded connection state for one
+      # upstream are down against it, sustained for 5 minutes. tf_upstream_up
+      # is the state each org's GitHub and Jira poll cycles store at their
+      # end: 0 when every request the cycle made failed in transit or was
+      # refused for its credential, 1 when the upstream answered at all. It
+      # is exported by the one pod holding the background brain, so the
+      # counts below are not multiplied by the number of pods.
+      #
+      # The same floor as UpstreamFailingFleetWide: at least two orgs with a
+      # recorded state, so one org down in a single-org deployment, which is
+      # 100% of it, does not page. With two orgs, one down is 50% and does
+      # not fire either.
+      - alert: UpstreamDownFleetWide
+        expr: |
+          (
+            count by (upstream) (tf_upstream_up == 0)
+            /
+            count by (upstream) (tf_upstream_up)
+          ) > 0.5
+          and on (upstream)
+          count by (upstream) (tf_upstream_up) >= 2
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Most orgs' connections to {{ $labels.upstream }} are down"
+          description: >-
+            {{ $value | humanizePercentage }} of the orgs with a recorded
+            connection state for {{ $labels.upstream }} have been down for 5
+            minutes: their last poll cycle got no answer from it. Many orgs
+            down at once points at {{ $labels.upstream }} itself or at this
+            deployment's network, not at one org's configuration. List them
+            with tf_upstream_up{upstream="{{ $labels.upstream }}"} == 0, and
+            read the pod's WARN "connection lost" lines for each org's
+            failure class.

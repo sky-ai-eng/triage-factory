@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -109,4 +110,103 @@ func (s *pollReadinessStore) LastPollTimes(ctx context.Context, orgID string) (m
 		out[source] = at.UTC()
 	}
 	return out, rows.Err()
+}
+
+// sqliteConnectionCols is the column list every connection read here
+// projects, shared by the point read and the write's RETURNING so the two
+// shapes cannot drift.
+const sqliteConnectionCols = `org_id, source, connection_state, connection_changed_at, connection_failure_class`
+
+func (s *pollReadinessStore) RecordConnection(ctx context.Context, orgID, source string, state db.ConnectionState, failureClass string) (stored, previous db.ConnectionStatus, err error) {
+	if err := state.Validate(); err != nil {
+		return db.ConnectionStatus{}, db.ConnectionStatus{}, err
+	}
+	// The class describes a connection that is down and nothing else, so it is
+	// derived from the state here rather than trusted from the caller.
+	var class any
+	if state == db.ConnectionDown && failureClass != "" {
+		class = failureClass
+	}
+	err = inTx(ctx, s.q, func(q queryer) error {
+		var rerr error
+		if previous, rerr = connectionStatus(ctx, q, orgID, source); rerr != nil {
+			return rerr
+		}
+		stored, rerr = scanConnectionStatus(q.QueryRowContext(ctx, `
+			INSERT INTO poll_readiness (org_id, source, connection_state, connection_changed_at, connection_failure_class)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (org_id, source) DO UPDATE SET
+				connection_changed_at = CASE
+					WHEN poll_readiness.connection_state = excluded.connection_state
+						THEN poll_readiness.connection_changed_at
+					ELSE excluded.connection_changed_at
+				END,
+				connection_state = excluded.connection_state,
+				connection_failure_class = excluded.connection_failure_class
+			RETURNING `+sqliteConnectionCols,
+			orgID, source, string(state), time.Now().UTC(), class))
+		return rerr
+	})
+	if err != nil {
+		return db.ConnectionStatus{}, db.ConnectionStatus{}, err
+	}
+	return stored, previous, nil
+}
+
+func (s *pollReadinessStore) Connection(ctx context.Context, orgID, source string) (db.ConnectionStatus, error) {
+	return connectionStatus(ctx, s.q, orgID, source)
+}
+
+func (s *pollReadinessStore) ListConnectionStatuses(ctx context.Context) ([]db.ConnectionStatus, error) {
+	rows, err := s.q.QueryContext(ctx, `
+		SELECT pr.org_id, pr.source, pr.connection_state, pr.connection_changed_at, pr.connection_failure_class
+		FROM poll_readiness pr
+		JOIN orgs o ON o.id = pr.org_id
+		WHERE pr.connection_state <> 'unknown'
+		ORDER BY pr.org_id, pr.source
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []db.ConnectionStatus{}
+	for rows.Next() {
+		st, err := scanConnectionStatus(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
+// connectionStatus is the point read behind Connection and RecordConnection's
+// read of the row it is about to replace. An absent row is the unknown state.
+func connectionStatus(ctx context.Context, q queryer, orgID, source string) (db.ConnectionStatus, error) {
+	st, err := scanConnectionStatus(q.QueryRowContext(ctx,
+		`SELECT `+sqliteConnectionCols+` FROM poll_readiness WHERE org_id = ? AND source = ?`,
+		orgID, source))
+	if errors.Is(err, sql.ErrNoRows) {
+		return db.ConnectionStatus{OrgID: orgID, Source: source, State: db.ConnectionUnknown}, nil
+	}
+	return st, err
+}
+
+func scanConnectionStatus(row interface{ Scan(...any) error }) (db.ConnectionStatus, error) {
+	var (
+		st        db.ConnectionStatus
+		state     string
+		changedAt sql.NullTime
+		class     sql.NullString
+	)
+	if err := row.Scan(&st.OrgID, &st.Source, &state, &changedAt, &class); err != nil {
+		return db.ConnectionStatus{}, err
+	}
+	st.State = db.ConnectionState(state)
+	if changedAt.Valid {
+		at := changedAt.Time.UTC()
+		st.ChangedAt = &at
+	}
+	st.FailureClass = class.String
+	return st, nil
 }

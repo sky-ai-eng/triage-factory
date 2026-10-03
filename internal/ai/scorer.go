@@ -83,7 +83,8 @@ type llmResolveFunc func(ctx context.Context, orgID, model string) (map[string]s
 // rather than inferred from the failed-batch count * batchSize so the final partial
 // batch doesn't inflate the count, and so the number stays correct if
 // batchSize changes. Failures are non-fatal: the method still returns whatever
-// scores succeeded, and the caller surfaces skippedTasks as a warning toast.
+// scores succeeded, and the caller resets the skipped tasks to pending so the
+// next cycle retries them.
 func (r *Runner) scoreTasks(ctx context.Context, tasks []domain.Task, model string) (scores []TaskScore, skippedTasks int, err error) {
 	if len(tasks) == 0 {
 		return nil, 0, nil

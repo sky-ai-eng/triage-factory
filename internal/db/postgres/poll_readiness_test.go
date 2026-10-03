@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
@@ -141,5 +143,47 @@ func TestPollReadinessStore_Postgres_LastPollTimes(t *testing.T) {
 	}
 	if _, ok := times["jira"]; ok || len(times) != 1 {
 		t.Fatalf("after jira restart times = %v, want github only", times)
+	}
+}
+
+// TestPollReadinessStore_Postgres_ConnectionConformance runs the shared
+// connection-status contract against the Postgres impl. The store is
+// admin-pool only, so there is no RLS path to wire it through.
+func TestPollReadinessStore_Postgres_ConnectionConformance(t *testing.T) {
+	dbtest.RunPollReadinessConnectionConformance(t, func(t *testing.T) (db.PollReadinessStore, string) {
+		h := pgtest.Shared(t)
+		h.Reset(t)
+		orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "connections")
+		return pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).PollReadiness, orgID
+	})
+}
+
+// TestPollReadinessStore_Postgres_ConnectionListSkipsDeletedOrgs pins the
+// scoping the SQLite suite structurally cannot: a soft-deleted org's last
+// recorded state stops being reported, so a tenant that is gone never counts
+// toward the deployment's connection gauge.
+func TestPollReadinessStore_Postgres_ConnectionListSkipsDeletedOrgs(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	live, _, _ := pgtest.SeedOrgWithUser(t, h, "live")
+	gone, _, _ := pgtest.SeedOrgWithUser(t, h, "gone")
+	store := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey).PollReadiness
+	ctx := context.Background()
+
+	for _, org := range []string{live, gone} {
+		if _, _, err := store.RecordConnection(ctx, org, "github", db.ConnectionDown, "transient"); err != nil {
+			t.Fatalf("RecordConnection %s: %v", org, err)
+		}
+	}
+	if _, err := h.AdminDB.ExecContext(ctx, `UPDATE orgs SET deleted_at = now() WHERE id = $1`, gone); err != nil {
+		t.Fatalf("soft-delete org: %v", err)
+	}
+
+	list, err := store.ListConnectionStatuses(ctx)
+	if err != nil {
+		t.Fatalf("ListConnectionStatuses: %v", err)
+	}
+	if len(list) != 1 || list[0].OrgID != live {
+		t.Errorf("ListConnectionStatuses = %+v, want only the live org's row", list)
 	}
 }
