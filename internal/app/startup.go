@@ -210,7 +210,7 @@ func (a *App) startWorkers(ctx context.Context) {
 
 	// Wake from a system suspend: drop the idle HTTP connections that may
 	// not have survived it. Every role, since every role calls out over
-	// HTTP. Rescheduling the polls on wake is the brain's half (startBrain).
+	// HTTP. Rescheduling the polls on wake is the brain's (startBrain).
 	go watchSuspendForConnections(ctx)
 }
 
