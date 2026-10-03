@@ -24,8 +24,8 @@ import { apiFetch, apiJSON, httpErrorMessage } from './apiClient'
 //
 // timeout_ms is the deadline REMAINING (relative), not the window the prompt
 // was granted, so a prompt reconstructed after a refresh gets the time it
-// actually has left. 0 / absent means the server stored no expiry and the
-// client falls back to its own default.
+// actually has left. 0 / absent means the server has no usable deadline to
+// report and the client falls back to its own default.
 //
 // title is the prompt copy the SDK already rendered, absent when it rendered
 // none — what the user approves is the real input, never a restatement of it
@@ -47,20 +47,22 @@ export interface PermissionDecisionInput {
 }
 
 // Fallback client-side TTL for a payload that carries no timeout_ms,
-// mirroring the backend's default permTimeout() (= 5m/2). The backend denies
-// an unanswered prompt at its bound but emits no "expired" event, so without
-// a timer a timed-out prompt would linger in the dock forever.
+// mirroring the backend's permission window (150s). The backend broadcasts
+// permission_resolved when it denies an unanswered prompt; the TTL is the
+// backstop for a client that missed that frame, so a timed-out prompt does
+// not linger in the dock.
 export const PERMISSION_TTL_FALLBACK_MS = 150_000
 
-// How long the prompt outlives the server deadline before the client drops
-// it. Deliberately AFTER the deadline, not racing it: the broker guarantees a
-// late answer 404s (never a dropped 200), and the resolver drops the prompt
-// on 404 — so a user clicking into the grace window gets a clean dismiss
-// instead of a prompt that vanished from under the cursor at t-0.
+// How long past the server deadline the client waits before re-checking the
+// prompt. Deliberately AFTER the deadline, not racing it: the broker
+// guarantees a late answer 404s (never a dropped 200), and the resolver drops
+// the prompt on 404 — so a user clicking into the grace window gets a clean
+// dismiss instead of a prompt that vanished from under the cursor at t-0.
 export const PERMISSION_TTL_GRACE_MS = 5_000
 
-// ttlForPrompt derives the client dismiss TTL for one prompt: its server-side
-// deadline (when present) plus the grace, else the fallback plus the grace.
+// ttlForPrompt derives when the client re-checks one prompt with the server
+// (see usePermissionQueues): its server-side deadline (when present) plus the
+// grace, else the fallback plus the grace.
 export function ttlForPrompt(prompt: PendingPermission): number {
   const base =
     typeof prompt.timeout_ms === 'number' && prompt.timeout_ms > 0

@@ -16,7 +16,7 @@ func TestPendingPermissionDTOs_InputIsAlwaysAnObject(t *testing.T) {
 	dtos := PendingPermissionDTOs([]ConversationPermission{
 		{ToolCallID: "toolu_known", ToolName: "Bash", Input: map[string]any{"command": "ls"}, RequestedAt: now},
 		{ToolCallID: "toolu_unknown", ToolName: "Bash", Input: nil, RequestedAt: now},
-	}, now)
+	}, now, nil)
 
 	raw, err := json.Marshal(dtos)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestPendingPermissionDTOs_TimeoutIsRemaining(t *testing.T) {
 		{ToolCallID: "toolu_live", ExpiresAt: &in90s},
 		{ToolCallID: "toolu_lapsed", ExpiresAt: &past},
 		{ToolCallID: "toolu_no_expiry"},
-	}, now)
+	}, now, nil)
 
 	if got := dtos[0].TimeoutMs; got < 89_000 || got > 90_000 {
 		t.Fatalf("timeout_ms = %d, want ~90000 (the remaining window)", got)
@@ -68,5 +68,37 @@ func TestPendingPermissionDTOs_TimeoutIsRemaining(t *testing.T) {
 	}
 	if got := dtos[2].TimeoutMs; got != 0 {
 		t.Fatalf("missing-expiry timeout_ms = %d, want 0", got)
+	}
+}
+
+// TestPendingPermissionDTOs_LiveWaitBeatsStoredExpiry is the state a system
+// suspend leaves behind: the stored expiry, projected on the wall clock, is
+// already past, while the process still waiting has most of its window left
+// because its clock stopped during the sleep. The wire must carry the wait's
+// remaining time. A prompt the reporting process doesn't hold falls back to
+// the stored expiry, and a live wait already at its end sends 0 rather than
+// a negative.
+func TestPendingPermissionDTOs_LiveWaitBeatsStoredExpiry(t *testing.T) {
+	now := time.Now().UTC()
+	beforeTheSleep := now.Add(-10 * time.Minute)
+	in30s := now.Add(30 * time.Second)
+
+	dtos := PendingPermissionDTOs([]ConversationPermission{
+		{ToolCallID: "toolu_slept", ExpiresAt: &beforeTheSleep},
+		{ToolCallID: "toolu_not_held", ExpiresAt: &in30s},
+		{ToolCallID: "toolu_ending", ExpiresAt: &in30s},
+	}, now, map[string]time.Duration{
+		"toolu_slept":  140 * time.Second,
+		"toolu_ending": -time.Millisecond,
+	})
+
+	if got := dtos[0].TimeoutMs; got != 140_000 {
+		t.Fatalf("slept timeout_ms = %d, want 140000 (the live wait, not the lapsed wall-clock expiry)", got)
+	}
+	if got := dtos[1].TimeoutMs; got < 29_000 || got > 30_000 {
+		t.Fatalf("not-held timeout_ms = %d, want ~30000 (the stored expiry)", got)
+	}
+	if got := dtos[2].TimeoutMs; got != 0 {
+		t.Fatalf("ending timeout_ms = %d, want 0", got)
 	}
 }

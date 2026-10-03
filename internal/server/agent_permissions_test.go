@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -117,6 +118,93 @@ func TestHandleAgentPermissions_ReconstructsAParkedPrompt(t *testing.T) {
 	}
 	if _, after := getPendingPermissions(t, s, conversationID); len(after) != 0 {
 		t.Fatalf("an answered prompt must be gone for every other surface too: %+v", after)
+	}
+}
+
+// TestHandleAgentPermissions_DeadlineSurvivesASuspend is the read after a
+// system suspend. The prompt's wait runs on the monotonic clock, which stops
+// while the machine sleeps; its stored expiry is a wall-clock projection,
+// which a sleep puts in the past. That disagreement is the whole of what a
+// suspend does to this path, so the test builds it directly: the row's
+// expiry is moved behind now while the wait is untouched. A refreshed dock
+// must get the wait's remaining time rather than 0, and the prompt must
+// still be answerable.
+func TestHandleAgentPermissions_DeadlineSurvivesASuspend(t *testing.T) {
+	s := newTestServer(t)
+	spawner := delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6")
+	s.SetSpawner(spawner)
+	conversationID := seedSteerConversation(t, s.db, "perms-suspend", "running")
+	claimID := dbtest.SeedActiveClaim(t, s.db, conversationID, "exec-1", 0)
+
+	got := make(chan agentproc.PermissionDecision, 1)
+	h := spawner.BrowserPermissionHandler(runmode.LocalDefaultOrgID, conversationID, claimID, delegate.AbsentAutoDeny{})
+	go func() { got <- h(agentproc.PermissionRequest{ToolCallID: "toolu_slept", ToolName: "Bash"}) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, pending := getPendingPermissions(t, s, conversationID); len(pending) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The laptop slept for ten minutes: the wall clock moved on, the wait
+	// did not.
+	if _, err := s.db.Exec(`UPDATE conversation_permissions SET expires_at = ? WHERE tool_call_id = ?`,
+		time.Now().UTC().Add(-10*time.Minute), "toolu_slept"); err != nil {
+		t.Fatalf("age the stored expiry: %v", err)
+	}
+
+	code, pending := getPendingPermissions(t, s, conversationID)
+	if code != http.StatusOK || len(pending) != 1 {
+		t.Fatalf("status = %d, pending = %+v; want the one prompt", code, pending)
+	}
+	live := spawner.PermissionRemaining(runmode.LocalDefaultOrgID, conversationID)["toolu_slept"]
+	if got := time.Duration(pending[0].TimeoutMs) * time.Millisecond; got <= 0 || got < live-5*time.Second || got > live+time.Second {
+		t.Fatalf("timeout_ms = %v, want the wait's remaining time (~%v), not the lapsed stored expiry", got, live)
+	}
+
+	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/permissions/toolu_slept",
+		map[string]string{"behavior": "allow"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d, want 200 — the server is still waiting on this prompt", rec.Code)
+	}
+	select {
+	case d := <-got:
+		if d.Behavior != "allow" {
+			t.Fatalf("handler decision = %q, want allow", d.Behavior)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler never received the decision")
+	}
+}
+
+// TestHandleAgentPermissions_StoredExpiryWhenNoWaitIsHeld: a pending row this
+// process holds no wait for — every row a multi-mode control pod reads, were
+// there any — is answered from its stored expiry, as before.
+func TestHandleAgentPermissions_StoredExpiryWhenNoWaitIsHeld(t *testing.T) {
+	s := newTestServer(t)
+	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
+	conversationID := seedSteerConversation(t, s.db, "perms-unheld", "running")
+	claimID := dbtest.SeedActiveClaim(t, s.db, conversationID, "exec-1", 0)
+
+	expires := time.Now().UTC().Add(time.Minute)
+	if _, err := sqlitestore.New(s.db).Permissions.Create(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationPermission{
+		ConversationID: conversationID,
+		ClaimID:        claimID,
+		ToolCallID:     "toolu_unheld",
+		ToolName:       "Bash",
+		ExpiresAt:      &expires,
+	}); err != nil {
+		t.Fatalf("seed pending row: %v", err)
+	}
+
+	code, pending := getPendingPermissions(t, s, conversationID)
+	if code != http.StatusOK || len(pending) != 1 {
+		t.Fatalf("status = %d, pending = %+v; want the one prompt", code, pending)
+	}
+	if got := pending[0].TimeoutMs; got < 55_000 || got > 60_000 {
+		t.Fatalf("timeout_ms = %d, want ~60000 from the stored expiry", got)
 	}
 }
 
