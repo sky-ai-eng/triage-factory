@@ -233,6 +233,10 @@ type GitProxyConfig struct {
 	// the old eager repo-less TokenSource probe (which no longer type-checks
 	// now that TokenSource is per-repo).
 	ProbeCredentials func(ctx context.Context) error
+
+	// ConversationID is the conversation the proxy serves, for log
+	// attribution only (gitproxy.Config.ConversationID).
+	ConversationID string
 }
 
 // GitProxyHandle is one live git credential proxy. It exposes only the
@@ -277,6 +281,7 @@ func StartGitProxy(ctx context.Context, bindIP string, allowNonLoopback bool, gi
 		RecordPush:       git.RecordPush,
 		Authorize:        git.Authorize,
 		RecordDenial:     git.RecordDenial,
+		ConversationID:   git.ConversationID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agentproc: construct git proxy: %w", err)

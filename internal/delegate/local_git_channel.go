@@ -184,6 +184,7 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	} else {
 		cfg.Upstream = base
 	}
+	cfg.ConversationID = info.ConversationID
 	cfg.TokenSource = func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {

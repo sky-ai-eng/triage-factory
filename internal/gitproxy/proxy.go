@@ -82,6 +82,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -197,9 +199,8 @@ type Config struct {
 	// in via this flag.
 	AllowNonLoopback bool
 
-	// ConversationID is the conversation this proxy serves. Carried for
-	// future per-conversation policy / observability; the proxy itself does
-	// not branch on it today.
+	// ConversationID is the conversation this proxy serves, for log
+	// attribution only. Empty is fine; it costs a log line its conversation.
 	ConversationID string
 
 	// IncomingToken, when non-empty, is the per-run secret every request
@@ -305,6 +306,9 @@ type Server struct {
 
 	requestCount atomic.Int64
 
+	// misses answers and logs the requests no credential could be found for.
+	misses *credmiss.Responder
+
 	// tokenMu serializes per-repo token cache access. Concurrent requests
 	// for the same repo during a refresh coalesce on the mutex rather than
 	// thundering-herd the minter. Cross-repo concurrency is serialized too
@@ -313,8 +317,8 @@ type Server struct {
 	cachedTokens map[string]Token // keyed lower("owner/repo")
 	// mintCount counts successful mint-and-cache cycles across all repos
 	// (TokenSource returned a valid token we cached). Failed TokenSource
-	// calls produce a 502 and do NOT increment this. Observable via
-	// MintCount() for tests.
+	// calls are answered as credential misses and do NOT increment this.
+	// Observable via MintCount() for tests.
 	mintCount atomic.Int64
 
 	// listener is owned once Start has been called. nil until then.
@@ -376,7 +380,11 @@ func New(cfg Config) (*Server, error) {
 		}
 	}
 
-	s := &Server{cfg: cfg, upstreamURL: u}
+	s := &Server{
+		cfg:         cfg,
+		upstreamURL: u,
+		misses:      credmiss.NewResponder("gitproxy", cfg.ConversationID, gitproxyLog),
+	}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
@@ -390,9 +398,9 @@ func New(cfg Config) (*Server, error) {
 // adding observability) outside the listener loop.
 //
 // The returned handler does the credential injection before delegating
-// to the underlying ReverseProxy: a failure to mint a token surfaces
-// as a 502 here rather than via the ReverseProxy's silent-pass-broken-
-// auth path.
+// to the underlying ReverseProxy: a failure to mint a token is answered
+// here (internal/credmiss: 403 when a retry cannot succeed, 502 when it
+// can) rather than via the ReverseProxy's silent-pass-broken-auth path.
 //
 // CONNECT requests are rejected explicitly with 501. Git clients
 // configured with http.proxy=<this> AND an https:// remote URL would
@@ -484,11 +492,9 @@ func (s *Server) Handler() http.Handler {
 
 		tok, err := s.installationToken(r.Context(), owner, repo)
 		if err != nil {
-			// 502 Bad Gateway maps cleanly: the proxy is alive but the
-			// upstream credential pipeline is broken. Avoid leaking the
-			// error detail to the agent — the underlying mint error
-			// may include the App ID or other identifying info.
-			http.Error(w, "gitproxy: failed to obtain installation token", http.StatusBadGateway)
+			// The answer names the reason and nothing else: the underlying
+			// mint error may include the App ID or other identifying info.
+			s.misses.Respond(w, err)
 			return
 		}
 		// Stash the token on the request context so Rewrite can pick
@@ -609,7 +615,7 @@ func (s *Server) installationToken(ctx context.Context, owner, repo string) (Tok
 	// already-expired (which would re-mint on every request — a refresh
 	// storm against the secret store for a credential that never rotates).
 	if !tok.ExpiresAt.IsZero() && !tok.ExpiresAt.After(now.Add(refreshThreshold)) {
-		return Token{}, fmt.Errorf("token source returned expired or near-expiry token (expires_at=%s)", tok.ExpiresAt.Format(time.RFC3339))
+		return Token{}, fmt.Errorf("%w: token source returned one expiring at %s", credbundle.ErrTokenExpiring, tok.ExpiresAt.Format(time.RFC3339))
 	}
 	if s.cachedTokens == nil {
 		s.cachedTokens = make(map[string]Token)
@@ -770,13 +776,14 @@ func (s *Server) RequestCount() int64 { return s.requestCount.Load() }
 // MintCount returns the number of successful TokenSource invocations
 // (i.e. mints whose returned token passed validation and was cached).
 // TokenSource calls that returned an error or a stale/invalid token
-// are NOT counted — those produce a 502 and the cache is unchanged.
+// are NOT counted — those are answered as credential misses and the
+// cache is unchanged.
 //
 // Exposed so tests can verify caching behavior (first request for a repo
 // mints; subsequent requests for the same repo reuse; a second repo mints
 // again). Tests asserting "mint was attempted at all" should pin upstream
 // hits or response status instead, since a failed attempt is still
-// observable via the 502 it produces.
+// observable via the status it produces.
 func (s *Server) MintCount() int64 { return s.mintCount.Load() }
 
 // timeNow returns the current time, honoring the testable now hook.
