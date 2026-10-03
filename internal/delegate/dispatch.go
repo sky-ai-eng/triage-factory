@@ -2247,7 +2247,7 @@ func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.Blueprint
 	dispatchLog.Warn("an upstream stayed unreachable through every retry the upstream budget allows; parking the conversation for a person",
 		"conversation", conv.ID, "upstream_hand_backs", prior, "error", cause)
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonUpstreamUnavailable,
-		fmt.Sprintf("Paused after repeated attempts: the workspace could not be set up because a service it needs was unreachable for about four hours. The last attempt failed with: %s. Send a message to try again.", cause),
+		fmt.Sprintf("Paused after repeated attempts: the workspace could not be set up because %s was unreachable for about four hours. Send a message to try again.", upstreamSetupSubject(cause)),
 		"")
 	return true
 }

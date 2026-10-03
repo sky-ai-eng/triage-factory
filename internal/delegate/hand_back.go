@@ -190,3 +190,15 @@ func upstreamSetupFailure(cause error) bool {
 	class, ok := upstream.ClassOf(cause)
 	return ok && (class == upstream.Transient || class == upstream.RateLimited)
 }
+
+// upstreamSetupSubject names what an upstreamSetupFailure could not reach, for
+// the stop note an exhausted upstream budget parks with. It is a label and
+// not the error: git's output names the per-run proxy's address and repeats
+// lines the remote sent, the note is a transcript row both the person and
+// the resumed model read, and the logs already carry the whole error.
+func upstreamSetupSubject(cause error) string {
+	if worktree.IsTransientGitError(cause) {
+		return "the repository's git host"
+	}
+	return "a service it needs"
+}

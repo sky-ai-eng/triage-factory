@@ -230,6 +230,21 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 	}
 }
 
+func TestUpstreamSetupSubject_NamesWhatWasUnreachable(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"git":          {gitFailure("fatal: unable to access 'http://127.0.0.1:41000/o/r/': The requested URL returned error: 502\n"), "the repository's git host"},
+		"github: 502":  {fmt.Errorf("failed to fetch PR: %w", ghclient.NewHTTPError(502, "<html>bad gateway</html>", "github: 502")), "a service it needs"},
+		"github: dial": {fmt.Errorf("failed to fetch PR: %w", &url.Error{Op: "Get", URL: "https://api.github.com/repos/o/r/pulls/7", Err: errors.New("connection refused")}), "a service it needs"},
+	} {
+		if got := upstreamSetupSubject(tc.err); got != tc.want {
+			t.Errorf("%s: upstreamSetupSubject = %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
 // TestUpstreamSetup_AnUnreachableHostHandsBackOnTheSchedule: a clone that
 // failed because GitHub could not be reached spends the upstream budget, on
 // its schedule, and leaves the setup budget alone.
@@ -305,7 +320,7 @@ func TestUpstreamSetup_ASpentBudgetParks(t *testing.T) {
 	spent.UpstreamHandBacks = maxUpstreamHandBacks - 1
 
 	survived := f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
-		gitFailure("fatal: unable to access 'https://github.com/o/r/': Failed to connect to github.com port 443 after 129 ms: Connection refused\n"))
+		gitFailure("remote: Internal Server Error\nfatal: unable to access 'http://127.0.0.1:41000/o/r/': Failed to connect to 127.0.0.1 port 41000 after 0 ms: Connection refused\n"))
 	if !survived {
 		t.Fatal("handlePreAgentFailure reported the step over")
 	}
@@ -330,9 +345,14 @@ func TestUpstreamSetup_ASpentBudgetParks(t *testing.T) {
 			note = m.Content
 		}
 	}
-	for _, want := range []string{"about four hours", "Connection refused", "Send a message to try again"} {
+	for _, want := range []string{"the repository's git host", "about four hours", "Send a message to try again"} {
 		if !strings.Contains(note, want) {
 			t.Errorf("stop note %q does not mention %q", note, want)
+		}
+	}
+	for _, leak := range []string{"127.0.0.1", "remote:", "fatal:", "exit status"} {
+		if strings.Contains(note, leak) {
+			t.Errorf("stop note %q quotes git's output (%q); it should name what was unreachable", note, leak)
 		}
 	}
 	if next := f.reclaim(t); next != nil {
