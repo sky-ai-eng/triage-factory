@@ -191,14 +191,16 @@ func upstreamSetupFailure(cause error) bool {
 	return ok && (class == upstream.Transient || class == upstream.RateLimited)
 }
 
-// upstreamSetupSubject names what an upstreamSetupFailure could not reach, for
-// the stop note an exhausted upstream budget parks with. It is a label and
-// not the error: git's output names the per-run proxy's address and repeats
-// lines the remote sent, the note is a transcript row both the person and
-// the resumed model read, and the logs already carry the whole error.
-func upstreamSetupSubject(cause error) string {
+// upstreamSetupReason is what a person is told when an upstreamSetupFailure
+// spends the upstream budget: the stop note, the toast, the blueprint's abort
+// reason. It names what could not be reached and does not quote the error:
+// git's output names the per-run proxy's address and repeats lines the remote
+// sent, the stop note is a transcript row the resumed model reads too, and
+// the logs already carry the whole error.
+func upstreamSetupReason(cause error) string {
+	subject := "a service it needs"
 	if worktree.IsTransientGitError(cause) {
-		return "the repository's git host"
+		subject = "the repository's git host"
 	}
-	return "a service it needs"
+	return "the workspace could not be set up because " + subject + " was unreachable for about four hours"
 }

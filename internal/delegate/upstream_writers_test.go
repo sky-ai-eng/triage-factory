@@ -230,7 +230,7 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 	}
 }
 
-func TestUpstreamSetupSubject_NamesWhatWasUnreachable(t *testing.T) {
+func TestUpstreamSetupReason_NamesWhatWasUnreachable(t *testing.T) {
 	for name, tc := range map[string]struct {
 		err  error
 		want string
@@ -239,8 +239,21 @@ func TestUpstreamSetupSubject_NamesWhatWasUnreachable(t *testing.T) {
 		"github: 502":  {fmt.Errorf("failed to fetch PR: %w", ghclient.NewHTTPError(502, "<html>bad gateway</html>", "github: 502")), "a service it needs"},
 		"github: dial": {fmt.Errorf("failed to fetch PR: %w", &url.Error{Op: "Get", URL: "https://api.github.com/repos/o/r/pulls/7", Err: errors.New("connection refused")}), "a service it needs"},
 	} {
-		if got := upstreamSetupSubject(tc.err); got != tc.want {
-			t.Errorf("%s: upstreamSetupSubject = %q, want %q", name, got, tc.want)
+		got := upstreamSetupReason(tc.err)
+		if !strings.Contains(got, tc.want) {
+			t.Errorf("%s: upstreamSetupReason = %q, want it to name %q", name, got, tc.want)
+		}
+		assertQuotesNoError(t, name, got)
+	}
+}
+
+// assertQuotesNoError fails when text a person reads carries the error an
+// upstream setup failure ended on, rather than naming what was unreachable.
+func assertQuotesNoError(t *testing.T, what, text string) {
+	t.Helper()
+	for _, leak := range []string{"127.0.0.1", "remote:", "fatal:", "exit status", "failed to fetch PR", "bad gateway", "api.github.com"} {
+		if strings.Contains(text, leak) {
+			t.Errorf("%s %q quotes the error (%q); it should name what was unreachable", what, text, leak)
 		}
 	}
 }
@@ -350,11 +363,7 @@ func TestUpstreamSetup_ASpentBudgetParks(t *testing.T) {
 			t.Errorf("stop note %q does not mention %q", note, want)
 		}
 	}
-	for _, leak := range []string{"127.0.0.1", "remote:", "fatal:", "exit status"} {
-		if strings.Contains(note, leak) {
-			t.Errorf("stop note %q quotes git's output (%q); it should name what was unreachable", note, leak)
-		}
-	}
+	assertQuotesNoError(t, "stop note", note)
 	if next := f.reclaim(t); next != nil {
 		t.Errorf("claimed %s after the park; want nothing until someone sends a message", next.ID)
 	}
@@ -370,12 +379,59 @@ func TestUpstreamSetup_ASpentBudgetOnAnSDKStepWithNoSession_FailsAsBefore(t *tes
 	spent.UpstreamHandBacks = maxUpstreamHandBacks - 1
 
 	if survived := f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
-		gitFailure("fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n")); survived {
+		gitFailure("fatal: unable to access 'http://127.0.0.1:41000/o/r/': Could not resolve host: github.com\n")); survived {
 		t.Fatal("the step survived; with no session to resume nothing could wake a park")
 	}
 	if st := f.blueprintStatus(t); st != string(domain.BlueprintRunStatusFailed) {
 		t.Errorf("blueprint_run status = %q, want failed", st)
 	}
+	var abortReason string
+	if err := f.database.QueryRow(`SELECT COALESCE(abort_reason, '') FROM blueprint_runs WHERE id = ?`, f.br.ID).Scan(&abortReason); err != nil {
+		t.Fatalf("read abort reason: %v", err)
+	}
+	if !strings.Contains(abortReason, "the repository's git host") {
+		t.Errorf("abort reason = %q, want it to name the repository's git host", abortReason)
+	}
+	assertQuotesNoError(t, "abort reason", abortReason)
+}
+
+// TestUpstreamSetup_ASpentBudgetOnAnSDKConversationWithWorkButNoSession_Parks:
+// the same SDK conversation with a transcript parks launch_failed, as the
+// setup budget's exhausted disposition does. Its note names what was
+// unreachable and offers no message, which the follow-up path would refuse
+// with no session to resume.
+func TestUpstreamSetup_ASpentBudgetOnAnSDKConversationWithWorkButNoSession_Parks(t *testing.T) {
+	f := newLaunchFixture(t, "setup-spent-sdk-work")
+	f.speak(t, "assistant", "on it")
+	spent := f.conv
+	spent.UpstreamHandBacks = maxUpstreamHandBacks - 1
+
+	if survived := f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, f.br, spent,
+		gitFailure("remote: Internal Server Error\nfatal: unable to access 'http://127.0.0.1:41000/o/r/': The requested URL returned error: 502\n")); !survived {
+		t.Fatal("handlePreAgentFailure reported the step over; a conversation with work parks")
+	}
+	var status, parkReason string
+	if err := f.database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, '') FROM conversations WHERE id = ?`, f.conv.ID,
+	).Scan(&status, &parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != domain.StatusOpen || parkReason != string(domain.ParkReasonLaunchFailed) {
+		t.Errorf("conversation = (%q, %q), want (open, launch_failed)", status, parkReason)
+	}
+	var note string
+	for _, m := range f.transcript(t) {
+		if m.Subtype == domain.MessageSubtypeStopNote {
+			note = m.Content
+		}
+	}
+	if !strings.Contains(note, "the repository's git host") || !strings.Contains(note, "about four hours") {
+		t.Errorf("stop note = %q, want it to name the repository's git host and the four hours", note)
+	}
+	if strings.Contains(note, "Send a message") {
+		t.Errorf("stop note %q offers a message the follow-up path refuses", note)
+	}
+	assertQuotesNoError(t, "stop note", note)
 }
 
 // TestDispatch_GitHubUnreachableDuringSetupRetriesLaterAndProceedsOnceItIsBack

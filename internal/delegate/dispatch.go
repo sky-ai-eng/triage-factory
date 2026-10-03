@@ -2225,7 +2225,8 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 // The exception is an SDK conversation with no session yet. A message cannot
 // wake it (the follow-up path refuses one with no session to resume), so a
 // park would leave it where nothing reaches it; it takes the setup budget's
-// exhausted disposition instead, which fails a step that never ran.
+// exhausted disposition instead (disposeOfUnreachableUpstream), which fails a
+// step that never ran.
 func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	prior := conv.UpstreamHandBacks
 	if prior+1 < s.budgetLimit(db.BudgetUpstream) {
@@ -2241,15 +2242,32 @@ func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.Blueprint
 		}
 		return true
 	}
-	if conv.Runtime != domain.ConversationRuntimeNative && conv.SessionID == "" {
-		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
-	}
-	dispatchLog.Warn("an upstream stayed unreachable through every retry the upstream budget allows; parking the conversation for a person",
+	dispatchLog.Warn("an upstream stayed unreachable through every retry the upstream budget allows",
 		"conversation", conv.ID, "upstream_hand_backs", prior, "error", cause)
+	if conv.Runtime != domain.ConversationRuntimeNative && conv.SessionID == "" {
+		return s.disposeOfUnreachableUpstream(orgID, br, conv, cause)
+	}
 	s.parkWithStopNote(orgID, conv, domain.ParkReasonUpstreamUnavailable,
-		fmt.Sprintf("Paused after repeated attempts: the workspace could not be set up because %s was unreachable for about four hours. Send a message to try again.", upstreamSetupSubject(cause)),
+		"Paused after repeated attempts: "+upstreamSetupReason(cause)+". Send a message to try again.",
 		"")
 	return true
+}
+
+// disposeOfUnreachableUpstream is disposeOfExhaustedConversation for an SDK
+// conversation with no session whose upstream budget ran out: the same split,
+// the same park reason and the same toast, worded with upstreamSetupReason
+// rather than the error. The park's note offers no message, because the
+// follow-up path refuses one to an SDK conversation with no session.
+func (s *Spawner) disposeOfUnreachableUpstream(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
+	reason := upstreamSetupReason(cause)
+	if br == nil || s.conversationHasWork(orgID, conv.ID) {
+		s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
+			"Paused after repeated attempts: "+reason+".",
+			fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), reason))
+		return true
+	}
+	s.failUnstartedStep(orgID, br, conv, reason)
+	return false
 }
 
 // disposeOfExhaustedConversation answers for a conversation that failed the
@@ -2280,11 +2298,18 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 		return true
 	}
 	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", conv.ID, "attempts", conv.SetupFailures+1, "error", cause)
-	s.failClaimedConversation(orgID, &conv, cause.Error())
+	s.failUnstartedStep(orgID, br, conv, cause.Error())
+	return false
+}
+
+// failUnstartedStep fails a blueprint step whose conversation never ran: the
+// conversation's terminal, then the blueprint's, with reason as its abort
+// reason.
+func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv domain.Conversation, reason string) {
+	s.failClaimedConversation(orgID, &conv, reason)
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
-		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
-	return false
+		domain.BlueprintRunStatusFailed, reason, conv.BlueprintStepIndex, false)
 }
 
 // conversationHasWork reports whether this conversation holds anything a
@@ -2356,10 +2381,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 	}
 	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
 		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
-	s.failClaimedConversation(orgID, &conv, cause.Error())
-	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
-		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
-		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
+	s.failUnstartedStep(orgID, br, conv, cause.Error())
 }
 
 // parkWithStopNote is the park every pre-agent stop lands on: a stop note on the
