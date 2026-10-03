@@ -63,7 +63,13 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
+
+// apiproxyLog is this package's component logger (see internal/logging).
+var apiproxyLog = logging.Component("apiproxy")
 
 // Provider distinguishes the credential-injection shape for the upstream
 // REST API.
@@ -84,8 +90,8 @@ const (
 // repo. owner/repo are parsed from the request path when it carries the
 // /repos/{owner}/{repo}/... shape; both are empty for paths that don't,
 // and the source decides what credential (if any) backs those. An error
-// (or an empty token) surfaces to the caller as a 502 — the proxy never
-// forwards a request it could not authenticate upstream.
+// (or an empty token) is answered as a credential miss (internal/credmiss)
+// — the proxy never forwards a request it could not authenticate upstream.
 //
 // Called once per request with no proxy-side caching, so implementations
 // own their own reuse/refresh policy. Must be safe for concurrent use.
@@ -97,7 +103,7 @@ type TokenSource func(ctx context.Context, owner, repo string) (string, error)
 // plus a mode enum) keeps the Cloud-vs-Data-Center split out of the
 // proxy; internal/jira already owns that mapping, and the JiraBasic /
 // JiraBearer constructors cover the static cases. An error (or an empty
-// value) surfaces as a 502.
+// value) is answered as a credential miss (internal/credmiss).
 //
 // Called once per request with no proxy-side caching. Must be safe for
 // concurrent use.
@@ -176,6 +182,10 @@ type Config struct {
 	// Empty disables the check (loopback/test usage, or single-tenant
 	// direct paths where the local hop is already trusted).
 	IncomingToken string
+
+	// ConversationID is the conversation this proxy serves, for log
+	// attribution only. Empty is fine; it costs a log line its conversation.
+	ConversationID string
 }
 
 // Server is a single per-run proxy instance. Not safe to share across
@@ -187,6 +197,9 @@ type Server struct {
 	proxy       *httputil.ReverseProxy
 
 	requestCount atomic.Int64
+
+	// misses answers and logs the requests no credential could be found for.
+	misses *credmiss.Responder
 
 	// listener is owned once Start has been called. nil until then.
 	listener net.Listener
@@ -228,7 +241,13 @@ func New(cfg Config) (*Server, error) {
 		return nil, err
 	}
 
-	s := &Server{cfg: cfg, upstreamURL: u}
+	s := &Server{
+		cfg:         cfg,
+		upstreamURL: u,
+		// The provider is in the name because a run holds one of each, and a
+		// missing bundle fails both; without it the two lines are identical.
+		misses: credmiss.NewResponder("apiproxy-"+string(cfg.Provider), cfg.ConversationID, apiproxyLog),
+	}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
@@ -280,8 +299,9 @@ type authCtxKey struct{}
 // Start path.
 //
 // The returned handler resolves the upstream credential before
-// delegating to the underlying ReverseProxy: a source failure surfaces
-// as a 502 here rather than via a silently-unauthenticated forward.
+// delegating to the underlying ReverseProxy: a source failure is
+// answered here (internal/credmiss: 403 when a retry cannot succeed, 502
+// when it can) rather than via a silently-unauthenticated forward.
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Per-run caller auth first, so an unauthorized caller costs no
@@ -297,11 +317,10 @@ func (s *Server) Handler() http.Handler {
 		}
 		value, err := s.authHeaderValue(r.Context(), r.URL.Path)
 		if err != nil {
-			// 502 Bad Gateway maps cleanly: the proxy is alive but the
-			// upstream credential pipeline is broken. Avoid leaking the
-			// error detail to the caller — the underlying source error may
-			// include identifying info about the credential setup.
-			http.Error(w, "apiproxy: failed to resolve upstream credential", http.StatusBadGateway)
+			// The answer names the reason and nothing else: the underlying
+			// source error may include identifying info about the
+			// credential setup.
+			s.misses.Respond(w, err)
 			return
 		}
 		// Stash the resolved value on the request context so Rewrite can

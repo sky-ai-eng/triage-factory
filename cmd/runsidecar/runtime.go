@@ -192,10 +192,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// shapes, so they are derived together, here, from the one value the brain
 	// sealed — nothing about the host travels in the frame.
 	gitUpstream, apiUpstream := githubUpstreams(bundle)
+	conversationID := runConversationID(req)
 
 	var git *agentproc.GitProxyConfig
 	if req.GitEnabled {
 		git = r.gitProxyConfig(gitUpstream)
+		git.ConversationID = conversationID
 		git.SharedOriginHost = sharedOriginHost
 		git.SharedOriginCAPath = agentproc.SandboxGHInjectorCertPath
 	}
@@ -231,7 +233,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// any failure here, tear down what already bound so a half-started run
 	// leaks no listener.
 	if req.GitHubAPIEnabled {
-		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, apiUpstream)
+		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, apiUpstream, conversationID)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
 			return nil, aerr
@@ -240,7 +242,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.GitHubAPIURL, result.GitHubAPIToken = url, token
 	}
 	if req.JiraAPIEnabled {
-		srv, url, token, deployment, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream)
+		srv, url, token, deployment, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream, conversationID)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -375,6 +377,16 @@ func ghChannelWanted(req sidecarproto.StartProxiesBody) bool {
 	return req.GHChannelEnabled && req.AgentHost != nil && req.AgentHost.ConversationID != ""
 }
 
+// runConversationID is the conversation the request names, for the proxies' log
+// attribution. Empty when the request carries no agenthost identity, which
+// costs those lines their conversation and nothing else.
+func runConversationID(req sidecarproto.StartProxiesBody) string {
+	if req.AgentHost == nil {
+		return ""
+	}
+	return req.AgentHost.ConversationID
+}
+
 // githubUpstreams derives this run's two GitHub hosts from the sealed bundle:
 // the web base the git proxy forwards to, and the REST mount the API proxy and
 // the gh injector prepend. A bundle with no GitHub half (a Jira-only org) — or
@@ -465,8 +477,11 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 		GitHandler: gitHandler,
 		TokenSource: func(context.Context) (string, error) {
 			bundle := r.currentBundle()
-			if bundle == nil || bundle.GitHub == nil || bundle.GitHub.CLIToken == nil || bundle.GitHub.CLIToken.Token == "" {
-				return "", fmt.Errorf("runsidecar: no gh-channel token in current bundle")
+			if bundle == nil {
+				return "", fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoBundle)
+			}
+			if bundle.GitHub == nil || bundle.GitHub.CLIToken == nil || bundle.GitHub.CLIToken.Token == "" {
+				return "", fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoCLIToken)
 			}
 			return bundle.GitHub.CLIToken.Token, nil
 		},
@@ -536,7 +551,7 @@ func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
 // Its per-repo TokenSource reads the held bundle, so the real installation
 // token never leaves the sidecar; the returned placeholder is what the
 // orchestrator's ghclient presents. upstream is the bundle-derived REST mount.
-func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, error) {
+func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream, conversationID string) (*apiproxy.Server, string, string, error) {
 	token, err := randomToken()
 	if err != nil {
 		return nil, "", "", err
@@ -546,17 +561,8 @@ func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiprox
 		Upstream:         upstream,
 		IncomingToken:    token,
 		AllowNonLoopback: true,
-		TokenSource: func(_ context.Context, owner, repo string) (string, error) {
-			bundle := r.currentBundle()
-			if bundle == nil {
-				return "", fmt.Errorf("runsidecar: no current bundle for github api proxy")
-			}
-			tok, _, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
-			if source == credbundle.RepoTokenNone {
-				return "", fmt.Errorf("runsidecar: no github token for %s/%s in bundle", owner, repo)
-			}
-			return tok, nil
-		},
+		ConversationID:   conversationID,
+		TokenSource:      r.githubAPIToken,
 	})
 	if err != nil {
 		return nil, "", "", fmt.Errorf("runsidecar: construct github api proxy: %w", err)
@@ -568,16 +574,31 @@ func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream string) (*apiprox
 	return srv, "http://" + addr, token, nil
 }
 
+// githubAPIToken is the GitHub REST proxy's TokenSource: the held bundle's
+// token for the repository the request targets, read live so a mid-run re-seal
+// is picked up.
+func (r *credRuntime) githubAPIToken(_ context.Context, owner, repo string) (string, error) {
+	bundle := r.currentBundle()
+	if bundle == nil {
+		return "", fmt.Errorf("runsidecar: github api proxy: %w", credbundle.ErrNoBundle)
+	}
+	tok, _, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
+	if source == credbundle.RepoTokenNone {
+		return "", fmt.Errorf("runsidecar: github api proxy, %s/%s: %w", owner, repo, credbundle.ErrNoRepoToken)
+	}
+	return tok, nil
+}
+
 // startJiraAPIProxy binds a Jira-REST credential proxy on the veth IP,
 // resolving the injected auth (Cloud Basic vs Data Center Bearer) from the
 // bundle's Jira credential. upstream defaults to the bundle's Jira URL. The
 // deployment is returned alongside so the orchestrator's proxy client can speak
 // the same REST version the credential's own backend expects — it is derived
 // here because the bundle that names it opens only in this process.
-func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.Server, string, string, jira.Deployment, error) {
+func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID string) (*apiproxy.Server, string, string, jira.Deployment, error) {
 	bundle := r.currentBundle()
 	if bundle == nil || bundle.Jira == nil {
-		return nil, "", "", "", fmt.Errorf("runsidecar: jira api proxy requested but bundle carries no Jira credential")
+		return nil, "", "", "", fmt.Errorf("runsidecar: jira api proxy requested: %w", credbundle.ErrNoJiraCredential)
 	}
 	if upstream == "" {
 		upstream = bundle.Jira.URL
@@ -599,6 +620,7 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream string) (*apiproxy.
 		Upstream:         upstream,
 		IncomingToken:    token,
 		AllowNonLoopback: true,
+		ConversationID:   conversationID,
 		AuthHeaderSource: auth,
 	})
 	if err != nil {
@@ -674,11 +696,11 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 		TokenSource: func(_ context.Context, owner, repo string) (gitproxy.Token, error) {
 			bundle := r.currentBundle()
 			if bundle == nil {
-				return gitproxy.Token{}, fmt.Errorf("%w: no current bundle", agentproc.ErrNoGitCredentials)
+				return gitproxy.Token{}, fmt.Errorf("%w: %w", agentproc.ErrNoGitCredentials, credbundle.ErrNoBundle)
 			}
 			token, expiresAt, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
 			if source == credbundle.RepoTokenNone {
-				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s", agentproc.ErrNoGitCredentials, owner, repo)
+				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s: %w", agentproc.ErrNoGitCredentials, owner, repo, credbundle.ErrNoRepoToken)
 			}
 			return gitproxy.Token{Value: token, ExpiresAt: expiresAt}, nil
 		},
