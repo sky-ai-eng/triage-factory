@@ -430,7 +430,7 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			escalatedMaxTokens = 0
 		}
 		callStarted := time.Now()
-		completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows, maxTokens))
+		completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, maxTokens))
 		if release != nil {
 			release()
 		}

@@ -2,7 +2,8 @@
 // clients (GitHub, Jira, Slack's Web API): one classification of what a
 // request's response or failure means, the retry primitives every client's
 // own retry loop is built from, bounded reads and short excerpts of error
-// bodies, and the request and retry counters.
+// bodies, and the request and retry counters. The LLM providers count into
+// the same counters, classified by internal/inference.
 //
 // Each client keeps its own retry loop and its own limits. What lives here is
 // only what they share, so a client whose upstream signals a rate limit or an
@@ -31,6 +32,12 @@ const (
 	GitHub Name = "github"
 	Jira   Name = "jira"
 	Slack  Name = "slack"
+
+	// The LLM providers internal/inference serves. Their requests are
+	// classified by inference.Classify rather than ClassifyResponse, because
+	// a provider failure reaches TF as a rendered error, not a response.
+	Anthropic Name = "anthropic"
+	Bedrock   Name = "bedrock"
 )
 
 // Class is the closed vocabulary of request outcomes; it is a metric label.

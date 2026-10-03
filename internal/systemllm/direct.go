@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // completeDirect calls the org's configured Anthropic/Bedrock provider
@@ -96,7 +97,7 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 		// of the same job.
 		NoConversationCacheBreakpoint: true,
 	})
-	r.breaker.recordResult(provider, isTransientFailure(ctx, callErr))
+	r.recordAttempt(ctx, opts.OrgID, pc.Provider, provider, callErr)
 
 	durationMs := int(time.Since(startedAt).Milliseconds())
 	r.recordDirectCall(ctx, opts, startedAt, durationMs, completion, callErr)
@@ -109,6 +110,25 @@ func (r *Recorder) completeDirect(ctx context.Context, opts CompleteOptions) (*C
 	}
 
 	return &CompleteResult{Text: completionText(completion)}, nil
+}
+
+// recordAttempt classifies one call that was actually attempted, counts it
+// against orgID, and feeds the class to the breaker. The breaker opens on the
+// classes that say the provider could not serve the call right now, a rate
+// limit or a transient failure, since an unreachable endpoint looks the same
+// as an overloaded one from here. Any other outcome closes it: any other 4xx
+// is a misconfiguration no cooldown fixes, a context overflow rejects this one
+// prompt and says nothing about the provider, and a cancelled call is not a
+// provider outcome at all. A cancellation is not counted either.
+func (r *Recorder) recordAttempt(ctx context.Context, orgID string, provider schemas.ModelProvider, breakerKey string, callErr error) {
+	class, counted := inference.Classify(ctx, callErr)
+	r.breaker.recordResult(breakerKey, counted && (class == upstream.Transient || class == upstream.RateLimited))
+	if !counted {
+		return
+	}
+	if name, ok := inference.UpstreamName(provider); ok {
+		upstream.Record(ctx, name, orgID, class)
+	}
 }
 
 // resolveDirectCreds resolves the org's LLM env map for the direct path:

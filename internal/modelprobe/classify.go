@@ -3,10 +3,12 @@ package modelprobe
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // Verdict is what one probe concluded. Two of the three are stored; the third
@@ -27,23 +29,6 @@ const (
 	// a save or hide a model that works.
 	VerdictInconclusive Verdict = "inconclusive"
 )
-
-// refusalStatuses are the HTTP statuses that mean "this credential may not
-// invoke this model": authentication rejected, entitlement denied, and the id
-// not existing for this account. A model-not-found is a refusal rather than a
-// gap because the question the probe asks is not "does this model exist
-// somewhere" but "can this credential invoke this exact string" — and the
-// answer to that is no, permanently, until something about the account changes.
-var refusalStatuses = map[int]bool{401: true, 403: true, 404: true}
-
-// inconclusiveStatuses are the statuses that say nothing about entitlement:
-// the provider is overloaded, throttling, or broken. They are listed rather
-// than derived as "everything else" because they must beat the refusal markers
-// below — a 503 whose body quotes an earlier AccessDeniedException is a bad
-// minute, not a grant being revoked.
-func inconclusiveStatus(status int) bool {
-	return status == 408 || status == 409 || status == 429 || status >= 500
-}
 
 // refusalMarkers are the provider spellings of a refusal that can arrive with
 // no HTTP status attached — a mid-stream error chunk, or a vendor SDK error
@@ -87,52 +72,56 @@ func truncate(msg string) string {
 // wrong red costs a real request to undo and, in the meantime, tells an admin
 // their credentials lack access they actually have.
 //
-// A rendered status settles the question when there is one, in both directions
-// (a 500 stays inconclusive however its body reads), and the markers are
-// consulted only for the failures that carry no status and for the 400 a
-// Bedrock id error arrives as. That mirrors how the system-job breaker reads
-// the same rendered text — same marker, same precedence — because the two are
-// classifying the same string for different questions and disagreeing about
-// what "the provider answered 503" means would be a bug in one of them.
+// The failure's class is the shared one (inference.Classify), so a failure
+// the probe calls a refusal is never one that reads elsewhere as the provider
+// being unavailable. Classify's ok is not needed: it is false only when
+// callCtx is done, which classifyFailure checks first.
 func classify(callCtx context.Context, err error) (Verdict, string) {
 	if err == nil {
 		return VerdictGreen, ""
 	}
-	status, ok := inference.RenderedStatus(err)
-	return classifyFailure(callCtx, status, ok, err.Error())
+	class, _ := inference.Classify(callCtx, err)
+	status, _ := inference.RenderedStatus(err)
+	return classifyFailure(callCtx, class, status, err.Error())
 }
 
-// classifyFailure sorts one attempt that did NOT succeed, given whatever the
-// transport managed to say about it: the provider's HTTP status when there is
-// one (hasStatus false means nobody reported a number, not status 0) and the
-// flattened message.
+// classifyFailure sorts one attempt that did NOT succeed, given its upstream
+// class ("" when nothing classified it), the HTTP status the provider
+// answered with (0 when none was reported), and the flattened message.
 //
-// Both probe paths land here, which is the point: the direct call reads a
-// status off the rendered provider error, the SDK subprocess reads it off the
-// terminal result event's api_error_status, and the two arrive at the same
-// verdict for the same number. A refusal is a refusal whichever transport
-// carried the answer, so the status sets and the marker list are not
-// duplicated per path.
+// Both probe paths land here, which is the point: the direct call classifies
+// the rendered provider error, the SDK subprocess classifies the terminal
+// result event's api_error_status, and the two arrive at the same verdict for
+// the same number.
 //
-// callCtx is the ctx the ATTEMPT ran under, not the caller's. It is derived
-// from the caller's, so a non-nil Err covers both endings that are TF's own
-// clock rather than the provider's answer: the caller navigating away
-// mid-sweep, and the per-probe timeout expiring. Checking the caller's ctx
-// instead would miss the second — the outer one is still healthy when a probe
-// times out. It is checked before the status because a transport can report
-// one on the way down from a cancellation, and TF's own clock ending the
-// attempt is not the provider answering.
-func classifyFailure(callCtx context.Context, status int, hasStatus bool, message string) (Verdict, string) {
+// The order is what makes a verdict an answer:
+//
+//   - callCtx done → inconclusive. callCtx is the ctx the ATTEMPT ran under,
+//     not the caller's. It is derived from the caller's, so a non-nil Err
+//     covers both endings that are TF's own clock rather than the provider's
+//     answer: the caller navigating away mid-sweep, and the per-probe timeout
+//     expiring. It is checked before the class because a transport can report
+//     a status on the way down from a cancellation.
+//   - a rate limit or a transient failure → inconclusive, whatever the
+//     message says: a 503 whose body quotes an earlier AccessDeniedException
+//     is a bad minute, not a grant being revoked.
+//   - Auth, or a 404 → red. A model-not-found is a refusal rather than a gap
+//     because the question the probe asks is not "does this model exist
+//     somewhere" but "can this credential invoke this exact string", and the
+//     answer to that is no until something about the account changes. That
+//     is why the 404 is read here rather than in the shared classification:
+//     to anyone else, a 404 is only a request that was wrong.
+//   - a refusal marker → red.
+//   - everything else → inconclusive.
+func classifyFailure(callCtx context.Context, class upstream.Class, status int, message string) (Verdict, string) {
 	if callCtx.Err() != nil {
 		return VerdictInconclusive, truncate(message)
 	}
-	if hasStatus {
-		switch {
-		case refusalStatuses[status]:
-			return VerdictRed, truncate(message)
-		case inconclusiveStatus(status):
-			return VerdictInconclusive, truncate(message)
-		}
+	switch {
+	case class == upstream.Transient, class == upstream.RateLimited:
+		return VerdictInconclusive, truncate(message)
+	case class == upstream.Auth, status == http.StatusNotFound:
+		return VerdictRed, truncate(message)
 	}
 	lower := strings.ToLower(message)
 	for _, marker := range refusalMarkers {
@@ -164,7 +153,7 @@ func classifyFailure(callCtx context.Context, status int, hasStatus bool, messag
 // and why sdkErrorDetail puts the number in front of the message.
 func classifySDK(callCtx context.Context, outcome *agentproc.Outcome, err error) (Verdict, string) {
 	if err != nil {
-		return classifyFailure(callCtx, 0, false, sdkFailureMessage(outcome, err))
+		return classifyFailure(callCtx, "", 0, sdkFailureMessage(outcome, err))
 	}
 	if outcome == nil || outcome.Result == nil {
 		return VerdictInconclusive, "the agent runtime exited without a terminal result event"
@@ -174,10 +163,14 @@ func classifySDK(callCtx context.Context, outcome *agentproc.Outcome, err error)
 		return VerdictGreen, ""
 	}
 	// An error with no status is an invocation that failed short of the
-	// provider answering — a turn limit, a runtime fault. hasStatus is false
-	// for it, so it falls to the markers and then to inconclusive, which is
-	// what "the question was not answered" is worth.
-	return classifyFailure(callCtx, res.APIErrorStatus, res.APIErrorStatus != 0, sdkErrorDetail(res))
+	// provider answering — a turn limit, a runtime fault. Nothing classifies
+	// it, so it falls to the markers and then to inconclusive, which is what
+	// "the question was not answered" is worth.
+	var class upstream.Class
+	if res.APIErrorStatus != 0 {
+		class = inference.ClassifyStatus(res.APIErrorStatus)
+	}
+	return classifyFailure(callCtx, class, res.APIErrorStatus, sdkErrorDetail(res))
 }
 
 // sdkErrorDetail is what an admin reads for a refusal the runtime carried.

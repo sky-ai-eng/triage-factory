@@ -1340,35 +1340,6 @@ func TestRun_ParkNoticeWrittenOncePerWindow(t *testing.T) {
 	}
 }
 
-// TestIsTransient_NumericCodesMatchAsTokens pins the retry classifier's
-// numeric matching: a status code is a standalone token, never a substring
-// of an identifier, so a trace id in a permanent error cannot buy a retry.
-func TestIsTransient_NumericCodesMatchAsTokens(t *testing.T) {
-	transient := []string{
-		"HTTP 500 from upstream",
-		"provider returned (502)",
-		"status code: 429",
-		"503: service unavailable",
-		"500",
-	}
-	for _, msg := range transient {
-		if !isTransient(errors.New(msg)) {
-			t.Errorf("isTransient(%q) = false, want true", msg)
-		}
-	}
-	permanent := []string{
-		"invalid api key (request id req_a5003b)",
-		"model not found; trace 4290ab11",
-		"deadline of 15000ms exceeded budget policy",
-		"quota id 90429x rejected",
-	}
-	for _, msg := range permanent {
-		if isTransient(errors.New(msg)) {
-			t.Errorf("isTransient(%q) = true, want false — an embedded id must not read as a status code", msg)
-		}
-	}
-}
-
 // TestRun_SystemAddendumReachesEveryProviderCall pins the threading: the
 // driver's per-conversation system block must arrive on the request beside the
 // shared prompt, on every call the engagement makes. A dropped addendum is
