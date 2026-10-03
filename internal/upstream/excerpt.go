@@ -17,7 +17,7 @@ const maxExcerpt = 200
 // else (a proxy's HTML page, an empty body) only its size.
 //
 // The message is the first non-empty of `message` (GitHub), `errorMessages[0]`
-// or the first value of `errors` (Jira), and `error` (Slack).
+// or the first value of `errors` (Jira), `error` (Slack), and `msg` (GoTrue).
 func Excerpt(body []byte) string {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return "empty body"
@@ -31,6 +31,7 @@ func Excerpt(body []byte) string {
 		firstArrayString(obj["errorMessages"]),
 		firstErrorsValue(obj["errors"]),
 		jsonString(obj["error"]),
+		jsonString(obj["msg"]),
 	} {
 		if msg = strings.Join(strings.Fields(msg), " "); msg != "" {
 			return truncate(msg, maxExcerpt)

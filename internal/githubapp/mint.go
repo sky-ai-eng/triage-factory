@@ -66,6 +66,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -301,8 +302,8 @@ type installationTokenResponse struct {
 // (or a permission subset) use MintScopedInstallationToken.
 //
 // Network failures, non-2xx responses, and malformed JSON all surface
-// as errors with the HTTP status and (truncated) body included for
-// debuggability. A successful return guarantees Value != "" and
+// as errors with the HTTP status and an excerpt of the body
+// (upstream.Excerpt) included for debuggability. A successful return guarantees Value != "" and
 // ExpiresAt is non-zero and in the future at receipt time.
 func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64) (Token, error) {
 	return m.mintInstallationToken(ctx, installationID, nil)
@@ -356,7 +357,7 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 	defer span.End()
 	// Named error return so the failure exits below don't each need a
 	// status line. Fixed message, not err.Error() — a failed mint's error
-	// text carries a truncated GitHub response body.
+	// text carries GitHub's error message.
 	defer func() {
 		if err != nil {
 			span.SetStatus(codes.Error, "mint failed")
@@ -404,8 +405,8 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode != http.StatusCreated {
-		return Token{}, fmt.Errorf("githubapp: mint installation token: status %d, body: %s",
-			resp.StatusCode, truncate(string(respBody), 512))
+		return Token{}, fmt.Errorf("githubapp: mint installation token: status %d: %s",
+			resp.StatusCode, upstream.Excerpt(respBody))
 	}
 
 	var parsed installationTokenResponse
@@ -483,7 +484,7 @@ func (it installationListItem) installation() Installation {
 //
 // This is the read side of the installation mirror: the backfill reconcile
 // upserts whatever this returns. A non-2xx response or malformed JSON
-// surfaces as an error with the HTTP status and a truncated body.
+// surfaces as an error with the HTTP status and an excerpt of the body.
 func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) {
 	appJWT, err := m.AppJWT()
 	if err != nil {
@@ -510,8 +511,8 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 		linkHeader := resp.Header.Get("Link")
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("githubapp: list installations: status %d, body: %s",
-				resp.StatusCode, truncate(string(body), 512))
+			return nil, fmt.Errorf("githubapp: list installations: status %d: %s",
+				resp.StatusCode, upstream.Excerpt(body))
 		}
 
 		var page []installationListItem
@@ -567,11 +568,7 @@ func (m *Minter) GetInstallation(ctx context.Context, installationID int64) (Ins
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return Installation{}, &APIStatusError{
-			Op:          "get installation",
-			StatusCode:  resp.StatusCode,
-			BodyExcerpt: truncate(string(body), errorBodyExcerpt),
-		}
+		return Installation{}, newAPIStatusError("get installation", resp, body)
 	}
 
 	var item installationListItem
@@ -580,12 +577,6 @@ func (m *Minter) GetInstallation(ctx context.Context, installationID int64) (Ins
 	}
 	return item.installation(), nil
 }
-
-// errorBodyExcerpt is how much of a failed response is kept for diagnostics.
-// The read above it is bounded at a megabyte to survive a proxy answering with
-// something enormous; what is worth keeping out of that is the first few lines,
-// which is where GitHub puts the message.
-const errorBodyExcerpt = 512
 
 // APIStatusError is a non-2xx answer from an App-JWT-authenticated endpoint —
 // GetApp, which is where a refused status has to be told apart from a transport
@@ -599,22 +590,33 @@ const errorBodyExcerpt = 512
 // configured API base and the message is read by operators, not resolved by
 // machines.
 //
-// BodyExcerpt is named for what it is. An error value outlives the request that
-// produced it and travels wherever the error travels — a log line, a wrapped
-// error held for the length of a retry loop — so it keeps a bounded excerpt
-// rather than the whole response, and says so in the field name: a field called
-// Body that is silently clipped is a trap for anyone who later inspects or
-// marshals one. Truncation happens once, at construction, so the megabyte the
-// reader was willing to accept does not stay reachable from the error.
+// BodyExcerpt is upstream.Excerpt of the response: GitHub's own error message,
+// or only the size of a body that is not a JSON object, such as a proxy's HTML
+// page. An error value outlives the request that produced it and travels
+// wherever the error travels — a log line, a wrapped error held for the length
+// of a retry loop — so it never holds the response itself.
 type APIStatusError struct {
 	Op          string
 	StatusCode  int
 	BodyExcerpt string
+	Class       upstream.Class
+}
+
+func newAPIStatusError(op string, resp *http.Response, body []byte) *APIStatusError {
+	return &APIStatusError{
+		Op:          op,
+		StatusCode:  resp.StatusCode,
+		BodyExcerpt: upstream.Excerpt(body),
+		Class:       upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
+	}
 }
 
 func (e *APIStatusError) Error() string {
-	return fmt.Sprintf("githubapp: %s: status %d, body: %s", e.Op, e.StatusCode, e.BodyExcerpt)
+	return fmt.Sprintf("githubapp: %s: status %d: %s", e.Op, e.StatusCode, e.BodyExcerpt)
 }
+
+// UpstreamClass implements upstream.Classified.
+func (e *APIStatusError) UpstreamClass() upstream.Class { return e.Class }
 
 // App is the App's own metadata, returned by GET /app authenticated with an
 // app-level JWT. A GitHub App authenticates itself: minting a JWT off the App's
@@ -656,7 +658,7 @@ type appResponse struct {
 // signing key — and (b) derive everything the manifest path would have
 // collected (slug, owner login + type, permissions, events, client_id). A
 // non-2xx (notably 401 on a bad ID/key pair) or malformed JSON surfaces as an
-// error with the HTTP status and a truncated body.
+// error with the HTTP status and an excerpt of the body.
 func (m *Minter) GetApp(ctx context.Context) (App, error) {
 	appJWT, err := m.AppJWT()
 	if err != nil {
@@ -681,11 +683,7 @@ func (m *Minter) GetApp(ctx context.Context) (App, error) {
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return App{}, &APIStatusError{
-			Op:          "get app",
-			StatusCode:  resp.StatusCode,
-			BodyExcerpt: truncate(string(body), errorBodyExcerpt),
-		}
+		return App{}, newAPIStatusError("get app", resp, body)
 	}
 
 	var parsed appResponse
@@ -776,14 +774,4 @@ func (m *Minter) timeNow() time.Time {
 		return m.now()
 	}
 	return time.Now()
-}
-
-// truncate returns at most n bytes of s, with an ellipsis if cut.
-// Local helper to keep error messages bounded when the GitHub error
-// response is large.
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

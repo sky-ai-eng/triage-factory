@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // The App's own webhook, read through the same app-level JWT the rest of this
@@ -239,8 +241,8 @@ func (m *Minter) RedeliverHookDelivery(ctx context.Context, deliveryID int64) er
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("githubapp: redeliver hook delivery %d: status %d, body: %s",
-			deliveryID, resp.StatusCode, truncate(string(body), 512))
+		return fmt.Errorf("githubapp: redeliver hook delivery %d: status %d: %s",
+			deliveryID, resp.StatusCode, upstream.Excerpt(body))
 	}
 	return nil
 }
@@ -269,8 +271,8 @@ func (m *Minter) appGet(ctx context.Context, endpoint string) (body []byte, link
 		return nil, "", ErrHookAPIUnavailable
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("githubapp: get %s: status %d, body: %s",
-			endpoint, resp.StatusCode, truncate(string(body), 512))
+		return nil, "", fmt.Errorf("githubapp: get %s: status %d: %s",
+			endpoint, resp.StatusCode, upstream.Excerpt(body))
 	}
 	return body, resp.Header.Get("Link"), nil
 }

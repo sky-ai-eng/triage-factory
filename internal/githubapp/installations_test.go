@@ -178,7 +178,7 @@ func TestListInstallations_RefusesOffOriginPagination(t *testing.T) {
 }
 
 // TestListInstallations_HTTPError pins that a non-200 surfaces an error
-// with the status + truncated body rather than a silent empty slice.
+// with the status and GitHub's message rather than a silent empty slice.
 func TestListInstallations_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -196,8 +196,12 @@ func TestListInstallations_HTTPError(t *testing.T) {
 		t.Fatalf("NewMinter: %v", err)
 	}
 
-	if _, err := m.ListInstallations(context.Background()); err == nil {
+	_, err = m.ListInstallations(context.Background())
+	if err == nil {
 		t.Fatal("ListInstallations on 403 = nil err; want error")
+	}
+	if want := "githubapp: list installations: status 403: Bad credentials"; err.Error() != want {
+		t.Errorf("Error() = %q, want %q", err.Error(), want)
 	}
 }
 

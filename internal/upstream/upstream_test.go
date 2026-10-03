@@ -311,6 +311,7 @@ func TestExcerpt(t *testing.T) {
 		{"errors array of strings", `{"errors":["first","second"]}`, "first"},
 		{"errors array of objects", `{"errors":[{"message":"thing failed"}]}`, "thing failed"},
 		{"Slack error", `{"ok":false,"error":"invalid_auth"}`, "invalid_auth"},
+		{"GoTrue msg", `{"code":400,"error_code":"validation_failed","msg":"metadata_url is invalid"}`, "metadata_url is invalid"},
 		{"whitespace is collapsed", `{"message":"line one\n\tline two"}`, "line one line two"},
 		{"oversized JSON message", `{"message":"` + long + `"}`, strings.Repeat("é", 200) + "…"},
 		{"empty message falls through", `{"message":"","error":"ratelimited"}`, "ratelimited"},

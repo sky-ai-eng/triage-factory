@@ -415,9 +415,9 @@ func TestMintScopedInstallationToken(t *testing.T) {
 }
 
 // TestMintInstallationToken_HTTPError pins that a non-201 response
-// surfaces as an error containing both the status and (truncated)
-// body, so debugging a misconfigured App / installation ID doesn't
-// require packet captures.
+// surfaces as an error containing both the status and GitHub's error
+// message, so debugging a misconfigured App / installation ID doesn't
+// require packet captures — and nothing else of the body.
 func TestMintInstallationToken_HTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -446,6 +446,9 @@ func TestMintInstallationToken_HTTPError(t *testing.T) {
 	}
 	if !strings.Contains(msg, "Bad credentials") {
 		t.Errorf("error missing body text: %q", msg)
+	}
+	if strings.Contains(msg, "documentation_url") {
+		t.Errorf("error carries the raw body: %q", msg)
 	}
 }
 
