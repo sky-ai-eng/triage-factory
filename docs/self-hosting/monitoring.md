@@ -65,6 +65,11 @@ dashboard signal, never as a 503). `/readyz` is unauthenticated by design, same 
 usernames, or other tenant data, so there is no `?verbose=` mode and none is
 needed.
 
+A poll counts as successful only when its refresh completed and the cycle did
+not leave the org's connection to that source down (see
+[Source connections](#source-connections)). `age_seconds` keeps growing during
+an outage, because a cycle that reached nothing does not refresh it.
+
 In an HA (multiple control pods) topology `/readyz` also carries a `lease` field
 and a standby hard-checks only DB + migrations — see
 [Scaling out](scaling.md#multiple-control-pods-ha).
@@ -462,6 +467,90 @@ request TF built wrong, which is not a connection failure. One org failing on
 its own is still visible, in the dashboard's Connections row and in the
 per-org query above; it just does not alert. The same holds for a deployment
 with a single org: the rule needs two orgs to compare before it can fire.
+
+#### Connection state per org
+
+At the end of every GitHub and Jira poll cycle, TF decides from that cycle's
+own requests whether the org's connection to the source is up, and stores the
+answer on the org's `poll_readiness` row:
+
+| The cycle's requests | Connection state |
+| --- | --- |
+| Any ended `ok` or `rejected` | **up**. The upstream answered. A 404 is an answer about the request, not about the connection. |
+| Otherwise, any ended `auth` | **down**, failure class `auth` |
+| Otherwise, any ended `transient` | **down**, failure class `transient` |
+| Only `rate_limited` | **unchanged**. A rate limit is handled, with its own resume point. |
+| None, because the cycle skipped the source on purpose: turned off, no credential or configuration, no repos tracked, no Jira project armed | **unknown**: the stored state is cleared. Nobody is checking the connection, so a state from before the skip would only be stale. |
+| None, for any other reason (the org's settings could not be read, the event-source policy could not be read, an active App installed on no accounts) | **unchanged**. These are faults of TF's own or of the org's setup, and say nothing about the connection. |
+
+For an org on a GitHub App, a failed installation-token mint counts as well,
+under the class of its error: the mint goes to the same host, and its request
+is not one `tf_upstream_requests_total` counts.
+
+A cycle that leaves the connection down is not a successful poll. It does not
+refresh the org's `last_success_unix` in `/readyz`, and it emits no poll
+completion, so scoring and repo profiling do not run off it and Jira's
+readiness gate stays as it was.
+
+The state is what the log reports, once per change instead of once per failed
+request:
+
+| Change | Level | Message and attributes |
+| --- | --- | --- |
+| to down | WARN | `github connection lost` or `jira connection lost`, with `org` and `class` |
+| still down, for a different reason | WARN | `<source> connection still down, failure changed`, with `org`, `class` and `previous_class` |
+| down to up | INFO | `<source> connection restored`, with `org` and `down_for` |
+| down to unknown | INFO | `<source> connection no longer checked`, with `org`, `reason` (`disabled`, `unconfigured`, `no_repos` or `no_armed_projects`) and `previous_state` |
+| up to unknown | DEBUG | the same line |
+| first recorded state is up | DEBUG | `<source> connection up`, with `org` |
+
+The `transient` and `auth` failures in between (a repository listing, a Jira
+query, a token mint) log at DEBUG, because the lines above report them; set
+`TF_LOG_LEVEL=debug` to see each one. A `rejected` request or a rate limit
+keeps its level: it leaves the connection up, so no connection line would
+report it. A repository GitHub answers 404 for still logs
+`discovery: repo unreachable — skipping` at WARN every cycle. A failure of
+TF's own, such as reading the database or the org's settings, or loading a
+credential from the secret store, keeps its level too, because it is not a
+connection state. Connection failures are not toasted.
+
+`tf_upstream_up` exports the stored state:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `tf_upstream_up` | `upstream`, `org_id` | 1 when the connection is up, 0 when it is down. No series while the state is unknown: before any cycle has recorded one, and after a cycle skipped the source on purpose. |
+
+`upstream` is `github` or `jira`. Only the pod holding the background brain
+exports it, from a read of the stored states every 15 seconds, so it is not
+summed across pods. A deleted org's series is dropped, and so is the series of
+an org whose source is turned off, loses its credential or stops tracking
+anything, on that org's next cycle.
+
+```
+tf_upstream_up == 0                         # not an alert: every org down right now, and against which upstream
+sum by (upstream) (1 - tf_upstream_up)      # not an alert: orgs down, per upstream; 0 when none is
+```
+
+The rules file loads a second alert, `UpstreamDownFleetWide`:
+
+```
+(
+  count by (upstream) (tf_upstream_up == 0)
+  /
+  count by (upstream) (tf_upstream_up)
+) > 0.5
+and on (upstream)
+count by (upstream) (tf_upstream_up) >= 2
+                                                            # for 5m, severity: critical
+```
+
+It fires when, for one upstream, more than half of the orgs with a recorded
+state are down and at least two orgs have one, and that condition has held for
+5 minutes; each org need not have been down that long. It
+is fleet-wide for the same reason as `UpstreamFailingFleetWide`: one org's
+unreachable host or revoked credential is that org's problem and never pages.
+There is no per-org rule. The dashboard's "Orgs down" table lists every org
+that is down, and the pod's WARN line for each says when it went down and why.
 
 The bundled stack runs **no Alertmanager**, and `prometheus.yml` has no
 `alerting:` block, so a firing alert is recorded and sent nowhere. Prometheus

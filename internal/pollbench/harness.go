@@ -211,7 +211,7 @@ func Run(cfg RunConfig) (*Result, error) {
 	}
 	mgr := poller.NewManager(database, pub,
 		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, stores.Orgs,
-		stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps,
+		stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
 		resolver)
 
 	// Poll-cycle errors surfaced via OnError are classified at capture: an

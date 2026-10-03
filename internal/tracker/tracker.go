@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -16,6 +17,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -314,10 +316,10 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, resumeFrom, err := t.discoverGitHub(ctx, client, username, repos)
+	discovered, quietRepos, resumeFrom, discoveryErr := t.discoverGitHub(ctx, client, username, repos)
 	var rateLimited *ghclient.ErrRateLimited
-	if err != nil {
-		if errors.As(err, &rateLimited) {
+	if discoveryErr != nil {
+		if errors.As(discoveryErr, &rateLimited) {
 			// The repo fan-out already stopped queuing new repos the moment
 			// this surfaced (see discoverGitHub). Deliberately do NOT return
 			// here, though: `discovered` still holds every repo that DID
@@ -333,7 +335,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 			// afterward. See the check below the entity-seeding loop.
 			trackerLog.Warn("github discovery: rate limit budget exhausted, stopping repo fan-out", "resume_at", rateLimited.ResumeAt)
 		} else {
-			trackerLog.Error("github discovery error", "error", err)
+			trackerLog.Log(ctx, upstream.LogLevel(discoveryErr, slog.LevelError), "github discovery error", "error", discoveryErr)
 		}
 	}
 
@@ -472,6 +474,14 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		// so downstream scoring/profiler triggers don't churn on
 		// a cold-start cycle that's still partway through the repo list.
 		return 0, resumeFrom, rateLimited
+	}
+	if discoveryErr != nil {
+		// Every listing failed and the connection is why: the cycle fetched
+		// nothing, so it must not go on to report a completed poll — Phase 2
+		// would fail against the same upstream, and with no active entities
+		// it would emit the completion sentinel without having reached
+		// GitHub at all.
+		return 0, "", discoveryErr
 	}
 
 	// Phase 2: Refresh active entities.
@@ -810,7 +820,7 @@ func (t *Tracker) resolveStubNodeID(ctx context.Context, client *ghclient.Client
 	}
 	pr, err := client.GetPRBasic(ctx, owner, repo, number)
 	if err != nil {
-		trackerLog.Warn("stub enrich: GetPRBasic failed", "source_id", e.SourceID, "error", err)
+		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "stub enrich: GetPRBasic failed", "source_id", e.SourceID, "error", err)
 		return "", false, false
 	}
 	if pr == nil || pr.NodeID == "" {
@@ -849,6 +859,15 @@ const maxSearchQueryLen = 256
 // refresh (never dispatched once the fan-out stopped queuing, or dispatched
 // but itself rate-limited) when ErrRateLimited cut the cycle short. It's only
 // ever non-empty alongside a non-nil error.
+//
+// Otherwise the error is non-nil only when every listing sent failed and at
+// least one failed because the connection did (see discoveryUnreached): a
+// cycle that reached no repo at all reports that rather than an empty
+// success. A repo GitHub answers 404 for is skipped and is never such a
+// failure. A repo it refuses with a JSON 403 is skipped too, but the refusal
+// is an Auth failure, so a cycle whose every repo was refused that way reports
+// it: the credential reaches none of what the org tracks (an organization's
+// SAML enforcement, say), which is the auth-down state the poller records.
 func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, string, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
@@ -938,23 +957,31 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 					// This repo's own fetch is what hit the rate limit — it
 					// was NOT refreshed, so TFAC-571's cursor must resume
 					// here (not at the next repo) next cycle.
-					results[i] = repoListResult{rateLimited: true}
+					results[i] = repoListResult{rateLimited: true, err: err}
 					// Not an error status: exhausting the budget is a
 					// handled outcome with a resume cursor behind it.
 					span.SetAttributes(telemetry.Outcome("rate_limited"))
 					return nil
 				}
-				// 403/404 means the token can't reach this configured repo (a
-				// PAT user without access, or an App not installed on it) —
-				// skip and log rather than failing the whole sweep.
+				results[i] = repoListResult{err: err}
+				// A 403/404 that GitHub itself answered (class Auth or
+				// Rejected) means the token can't reach this configured repo
+				// (a PAT user without access, or an App not installed on it)
+				// — skip and log rather than failing the whole sweep. The
+				// error stays on the result all the same, so a sweep in which
+				// every repo was refused counts as unreached (see the doc
+				// above). A 403 from something in front of GitHub (a VPN
+				// proxy's HTML page) is Transient: it says nothing about this
+				// repo, so it is a failed listing like any other.
 				var he *ghclient.HTTPError
-				if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) {
+				if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) &&
+					(he.Class == upstream.Auth || he.Class == upstream.Rejected) {
 					span.SetAttributes(telemetry.Outcome("unreachable"))
-					trackerLog.WarnContext(ctx, "discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
+					trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "discovery: repo unreachable — skipping", "repo", repoFull, "status", he.StatusCode)
 					return nil
 				}
 				span.SetStatus(codes.Error, "list open PRs")
-				trackerLog.ErrorContext(ctx, "discovery: list open PRs failed", "repo", repoFull, "error", err)
+				trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "discovery: list open PRs failed", "repo", repoFull, "error", err)
 				return nil
 			}
 
@@ -1008,6 +1035,14 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 				break
 			}
 		}
+	} else {
+		listings := make([]error, 0, dispatched)
+		for _, r := range results[:dispatched] {
+			if r.ok || r.err != nil {
+				listings = append(listings, r.err)
+			}
+		}
+		discoveryErr = discoveryUnreached("github", listings)
 	}
 
 	// Phase 1b: merged/closed dashboard backfill (local/PAT-only). Seeds
@@ -1016,13 +1051,13 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 	// instead backfills per bound user via Tracker.BackfillDashboardHistory.
 	// Query construction is shared with that path (dashboardBackfillQueries) so
 	// both search for exactly the same history. Also skipped once Phase 1a hit
-	// ErrRateLimited — it shares the same client budget, so it would just fail
-	// the same way for no benefit.
+	// ErrRateLimited, or reached no repo at all — it shares the same client and
+	// the same host, so it would just fail the same way for no benefit.
 	if username != "" && discoveryErr == nil {
 		for _, q := range dashboardBackfillQueries(username, repos) {
 			prs, err := client.DiscoverPRs(ctx, q, 50)
 			if err != nil {
-				trackerLog.Error("dashboard backfill query failed", "error", err, "query", q)
+				trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "dashboard backfill query failed", "error", err, "query", q)
 				continue
 			}
 			for _, pr := range prs {
@@ -1035,13 +1070,48 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 		}
 	}
 
-	if discoveryErr != nil {
-		// The only error this returns is ErrRateLimited, which is a
-		// handled outcome with a resume cursor behind it — an attribute,
-		// not an error status, same as the per-repo children above.
+	switch {
+	case rateLimitErr.Load() != nil:
+		// ErrRateLimited is a handled outcome with a resume cursor behind it
+		// — an attribute, not an error status, same as the per-repo children
+		// above.
 		span.SetAttributes(telemetry.Outcome("rate_limited"))
+	case discoveryErr != nil:
+		span.SetStatus(codes.Error, "every listing failed")
+		span.SetAttributes(telemetry.Outcome("failed"))
 	}
 	return all, quiet, resumeFrom, discoveryErr
+}
+
+// discoveryUnreached reports a discovery pass that reached nothing because of
+// the connection: errs holds one entry per discovery call sent, nil for a call
+// that succeeded. It returns an error when every call failed and at least one
+// failure is an upstream Transient or Auth (upstream.ClassOf), wrapping that
+// failure so a caller can still read its class; an Auth failure is preferred,
+// as the one a person has to fix. It returns nil when any call succeeded, when
+// none was sent, and when every failure was an answer about its own request (a
+// 404), which says nothing about the connection.
+func discoveryUnreached(source string, errs []error) error {
+	var cause error
+	for _, err := range errs {
+		if err == nil {
+			return nil
+		}
+		switch class, _ := upstream.ClassOf(err); class {
+		case upstream.Auth:
+			if c, _ := upstream.ClassOf(cause); c != upstream.Auth {
+				cause = err
+			}
+		case upstream.Transient:
+			if cause == nil {
+				cause = err
+			}
+		}
+	}
+	if cause == nil {
+		return nil
+	}
+	return fmt.Errorf("%s discovery: all %d calls failed: %w", source, len(errs), cause)
 }
 
 // repoListResult is one goroutine's outcome from Phase 1a's per-repo
@@ -1065,6 +1135,9 @@ type repoListResult struct {
 	prs         []ghclient.DiscoveredPR
 	notModified bool
 	rateLimited bool
+	// err is the listing's failure; nil for a listing that succeeded and for
+	// a repo that was never sent (a malformed slug).
+	err error
 }
 
 // recordPullsPoll persists the conditional-request state for a repo after a
@@ -1253,9 +1326,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
 	}
 	// Phase 1: Discovery
-	discovered, err := t.discoverJira(ctx, client, baseURL, projects)
-	if err != nil {
-		trackerLog.Error("jira discovery error", "error", err)
+	discovered, discoveryErr := t.discoverJira(ctx, client, baseURL, projects)
+	if discoveryErr != nil {
+		trackerLog.Log(ctx, upstream.LogLevel(discoveryErr, slog.LevelError), "jira discovery error", "error", discoveryErr)
 	}
 
 	for _, state := range discovered {
@@ -1328,6 +1401,14 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 				}
 			}
 		}
+	}
+
+	if discoveryErr != nil {
+		// Every discovery query failed and the connection is why: the cycle
+		// fetched nothing, so it must not go on to report a completed poll.
+		// With no active entities, Phase 2 would emit the completion sentinel,
+		// which marks Jira ready without Jira having answered once.
+		return 0, discoveryErr
 	}
 
 	// Phase 2: Refresh
@@ -1887,6 +1968,9 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	liveStatuses := map[string][]domain.JiraStatusRef{}
 
 	failed, salvaged := 0, 0
+	// One entry per query sent, nil for a query that returned: a pass whose
+	// every query failed because of the connection reports that.
+	outcomes := make([]error, 0, len(queries))
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
 		if err != nil && q.build != nil {
@@ -1899,12 +1983,13 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 				}
 			}
 		}
+		outcomes = append(outcomes, err)
 		if err != nil {
 			// One project's query failing must not sink the others, so
 			// this continues — which means the caller gets a short result
 			// with no indication why. The outcome below is that indication.
 			failed++
-			trackerLog.ErrorContext(ctx, "jira discovery query failed", "project", q.projectKey, "error", err)
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "jira discovery query failed", "project", q.projectKey, "error", err)
 			continue
 		}
 		for _, issue := range issues {
@@ -1924,6 +2009,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 		// Surfacing a condition nobody is watching needs the durable
 		// notification channel.
 		span.SetAttributes(telemetry.Outcome("partial"), telemetry.Attempt(failed+salvaged))
+	}
+	if err := discoveryUnreached("jira", outcomes); err != nil {
+		span.SetStatus(codes.Error, "every query failed")
+		span.SetAttributes(telemetry.Outcome("failed"))
+		return all, err
 	}
 
 	return all, nil
@@ -1967,7 +2057,7 @@ func (t *Tracker) salvageJiraQuery(
 	if !cached {
 		statuses, err := client.ProjectStatuses(ctx, projectKey)
 		if err != nil {
-			trackerLog.WarnContext(ctx, "jira workflow read failed; cannot tell whether the query names a dead status",
+			trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "jira workflow read failed; cannot tell whether the query names a dead status",
 				"project", projectKey, "error", err)
 			return "", nil
 		}

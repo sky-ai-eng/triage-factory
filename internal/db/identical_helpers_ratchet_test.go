@@ -94,6 +94,7 @@ var identicalHelperRatchet = []string{
 	"scanArtifactRows",
 	"scanAuthEvent",
 	"scanAuthEventRows",
+	"scanConnectionStatus",
 	"scanEntityRow",
 	"scanExternalAction",
 	"scanExternalActionRows",

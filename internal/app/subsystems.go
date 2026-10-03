@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sync"
-	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
@@ -26,7 +24,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/syslimit"
 	"github.com/sky-ai-eng/triage-factory/internal/systemllm"
-	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
@@ -70,36 +67,7 @@ func (a *App) buildAI() {
 	// substitute.
 	systemJobModel := systemllm.NewModelFunc(a.stores.Orgs)
 
-	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, ai.RunnerCallbacks{
-		OnScoringStarted: func(orgID string, taskIDs []string) {
-			a.wsHub.Broadcast(websocket.Event{
-				Type:  "scoring_started",
-				OrgID: orgID,
-				Data:  map[string]any{"task_ids": taskIDs},
-			})
-		},
-		OnScoringCompleted: func(ctx context.Context, orgID string, taskIDs []string) {
-			a.wsHub.Broadcast(websocket.Event{
-				Type:  "scoring_completed",
-				OrgID: orgID,
-				Data:  map[string]any{"task_ids": taskIDs},
-			})
-			// The score write admitted each task's re-evaluation row in its
-			// own transaction; wake the router's re-derive worker so they
-			// are claimed now rather than on its next scan tick. a.router is
-			// set in buildRouting (before Run), so it's non-nil by the time
-			// any scoring cycle completes.
-			if a.router != nil {
-				a.router.WakeReDerive()
-			}
-		},
-		OnTasksSkipped: func(orgID string, skipped, total int) {
-			toast.Warning(a.wsHub, orgID, fmt.Sprintf("AI scoring: %d of %d tasks skipped this cycle", skipped, total))
-		},
-		OnError: func(orgID string, err error) {
-			toast.Error(a.wsHub, orgID, fmt.Sprintf("AI scoring cycle aborted: %v", err))
-		},
-	})
+	a.scorer = ai.NewManager(a.stores.Scores, a.stores.Entities, a.runSecrets, llmcred.SystemEnvResolver(a.llmResolver, "tf-scorer"), a.llmRecorder, sysLimiter, systemJobModel, a.scorerCallbacks())
 	// SetScorerTrigger wires the brain-lease-aware relay wrapper
 	// (relay.go), not a.scorer.Trigger directly: the config-save handler
 	// that calls this may run on a standby control pod, where a.scorer
@@ -422,15 +390,6 @@ func (a *App) buildExecution() error {
 // events are durably enqueued so the router can't drop them under burst),
 // and the router drains the event_queue rather than the lossy in-memory bus.
 func (a *App) buildRouting() {
-	// Poll errors are toasted with per-source time-based throttling: the
-	// poller fires OnError on every failure, but a persistent failure
-	// (expired PAT, outage) would otherwise spam a sticky toast every cycle.
-	const errorToastMinInterval = 5 * time.Minute
-	var (
-		errorThrottleMu sync.Mutex
-		lastErrorToast  = map[string]time.Time{}
-	)
-
 	// eventWake is a best-effort, coalescing nudge to the router's drain
 	// worker; a dropped wake only delays a drain to the worker's floor scan,
 	// never loses an event.
@@ -444,50 +403,10 @@ func (a *App) buildRouting() {
 	a.ingestor = ingest.New(a.bus, a.stores.EventQueue, wake)
 	a.srv.SetIngestor(a.ingestor)
 
-	a.pollerMgr = poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.ghResolver)
+	a.pollerMgr = a.newPollerManager()
 	// TFAC-573: GET /readyz's poller-alive hard check + per-org poll-
 	// staleness soft signal read through this method.
 	a.srv.SetPollerManager(a.pollerMgr.Health)
-	// The App-installation grant mirror, refreshed by pull at the head of every
-	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
-	// profiler / reconciler: those all hang off a poll COMPLETION,
-	// and a cycle that finds no installations never emits one — so a subscriber
-	// would go silent for precisely the org whose mirror needs correcting. Its
-	// leader gating is the poller's own, which is the same brain lease every
-	// other timer-driven pass sits behind.
-	a.pollerMgr.ReconcileGrant = a.grantReconciler.RunOrg
-	// The managed installation set's pull-side convergence: one listing of the
-	// deployment App's installations per GitHub cycle, fanned out to the
-	// workspaces that bound each. A deployment singleton — it does not fit the
-	// per-org Manager.Trigger(orgID) shape the other passes take — hung off the
-	// same cycle and the same brain lease as the grant pass above. A no-op
-	// wherever no managed workspace has bound an installation; where one has and
-	// no deployment App is configured, an error the poller warns on every cycle.
-	a.pollerMgr.RefreshManagedInstallations = a.grantReconciler.RunDeployment
-	// Skip a cycle for a source an org admin turned off. This is what makes
-	// "a turned-off source makes zero API calls" true, which is a promise
-	// measurable from the other end; the router's drop beside it is what makes
-	// "no tasks" true for every producer at once.
-	a.pollerMgr.EventSources = a.stores.OrgEventSources
-	a.pollerMgr.OnError = func(source, orgID string, err error) {
-		// Throttle key includes orgID so a chronic failure on one tenant
-		// doesn't suppress a fresh failure on another. Process-level errors
-		// pass orgID="" and throttle together per source.
-		throttleKey := source + ":" + orgID
-		errorThrottleMu.Lock()
-		if last, ok := lastErrorToast[throttleKey]; ok && time.Since(last) < errorToastMinInterval {
-			errorThrottleMu.Unlock()
-			return
-		}
-		lastErrorToast[throttleKey] = time.Now()
-		errorThrottleMu.Unlock()
-
-		label := "Jira"
-		if source == "github" {
-			label = "GitHub"
-		}
-		toast.ErrorTitled(a.wsHub, orgID, label, fmt.Sprintf("Poll failed: %v", err))
-	}
 
 	// Multi-mode only: let the server seed a bound user's trailing-window PR
 	// history on identity bind / first dashboard load (TFAC-396). Local mode
@@ -521,4 +440,65 @@ func (a *App) buildRouting() {
 	// spawner's conversation-queue self-sweep already uses (registerInstance
 	// minted it at boot, above).
 	a.router.SetExecutorID(a.identity.ID, a.bootEpoch)
+}
+
+// scorerCallbacks is how the scorer reaches the UI: a broadcast when a cycle
+// starts and when its scores commit, and a wake for the re-derive worker. A
+// failed or partial cycle reaches no one but the log, so OnTasksSkipped and
+// OnError stay unset.
+func (a *App) scorerCallbacks() ai.RunnerCallbacks {
+	return ai.RunnerCallbacks{
+		OnScoringStarted: func(orgID string, taskIDs []string) {
+			a.wsHub.Broadcast(websocket.Event{
+				Type:  "scoring_started",
+				OrgID: orgID,
+				Data:  map[string]any{"task_ids": taskIDs},
+			})
+		},
+		OnScoringCompleted: func(ctx context.Context, orgID string, taskIDs []string) {
+			a.wsHub.Broadcast(websocket.Event{
+				Type:  "scoring_completed",
+				OrgID: orgID,
+				Data:  map[string]any{"task_ids": taskIDs},
+			})
+			// The score write admitted each task's re-evaluation row in its
+			// own transaction; wake the router's re-derive worker so they
+			// are claimed now rather than on its next scan tick. a.router is
+			// set in buildRouting (before Run), so it's non-nil by the time
+			// any scoring cycle completes.
+			if a.router != nil {
+				a.router.WakeReDerive()
+			}
+		},
+	}
+}
+
+// newPollerManager builds the poll scheduler and wires the passes it runs
+// beside each cycle. A failed cycle reaches people as the org's connection
+// state, which the poller persists and logs once per change, so OnError stays
+// unset: nothing toasts a poll failure.
+func (a *App) newPollerManager() *poller.Manager {
+	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver)
+	// The App-installation grant mirror, refreshed by pull at the head of every
+	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
+	// profiler / reconciler: those all hang off a poll COMPLETION,
+	// and a cycle that finds no installations never emits one — so a subscriber
+	// would go silent for precisely the org whose mirror needs correcting. Its
+	// leader gating is the poller's own, which is the same brain lease every
+	// other timer-driven pass sits behind.
+	m.ReconcileGrant = a.grantReconciler.RunOrg
+	// The managed installation set's pull-side convergence: one listing of the
+	// deployment App's installations per GitHub cycle, fanned out to the
+	// workspaces that bound each. A deployment singleton — it does not fit the
+	// per-org Manager.Trigger(orgID) shape the other passes take — hung off the
+	// same cycle and the same brain lease as the grant pass above. A no-op
+	// wherever no managed workspace has bound an installation; where one has and
+	// no deployment App is configured, an error the poller warns on every cycle.
+	m.RefreshManagedInstallations = a.grantReconciler.RunDeployment
+	// Skip a cycle for a source an org admin turned off. This is what makes
+	// "a turned-off source makes zero API calls" true, which is a promise
+	// measurable from the other end; the router's drop beside it is what makes
+	// "no tasks" true for every producer at once.
+	m.EventSources = a.stores.OrgEventSources
+	return m
 }

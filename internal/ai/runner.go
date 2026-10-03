@@ -39,16 +39,16 @@ type RunnerCallbacks struct {
 	OnScoringCompleted func(ctx context.Context, orgID string, taskIDs []string)
 	// OnTasksSkipped fires once per scoring cycle if one or more batches
 	// errored. skipped is the exact count of tasks that weren't scored;
-	// total is len(tasks) at cycle start. orgID is the scoring context
-	// so per-tenant subscribers (toasts in multi-mode) route to the
-	// right WS connection. Wired to a warning toast in main so the user
-	// knows tasks were skipped without log-diving. Fatal errors (DB
-	// failures) go through OnError.
+	// total is len(tasks) at cycle start. orgID is the scoring context.
+	// Each failed batch is also logged where it fails, and the skipped
+	// tasks are retried next cycle. Fatal errors (DB failures) go through
+	// OnError.
 	OnTasksSkipped func(orgID string, skipped, total int)
 	// OnError fires on fatal scoring errors (query, write, or scorer-
 	// returned errors that abort the cycle). orgID identifies the
-	// tenant whose cycle failed; toast wiring in main.go scopes the
-	// user-facing notification accordingly.
+	// tenant whose cycle failed. Every such error is also logged where it
+	// happens. Production leaves both unset, because TF does not toast a
+	// scoring failure; the tests observe errors through these hooks.
 	OnError func(orgID string, err error)
 }
 

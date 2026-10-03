@@ -5,22 +5,11 @@
 
 export type ToastLevel = 'info' | 'success' | 'warning' | 'error'
 
-// ToastAction is an optional CTA rendered inside the toast body. The
-// `to` field is a react-router path; ToastProvider uses useNavigate
-// to handle the click. Keeping action shape data-only (no callback)
-// means non-React callers can construct toasts without touching the
-// router; the component layer wires the navigation.
-export interface ToastAction {
-  label: string
-  to: string
-}
-
 export interface ToastItem {
   id: string
   level: ToastLevel
   title?: string
   body: string
-  action?: ToastAction
 }
 
 type Listener = (items: ToastItem[]) => void
@@ -80,17 +69,11 @@ export const toastStore = {
 
 // Convenience API — the 99% surface. Body first because most toasts are
 // body-only; optional title is the second arg for the rarer titled case.
-// `action` is the third arg for the still-rarer case where the toast
-// includes a CTA link (e.g. "Clone failed — Go to Repos").
 export const toast = {
-  info: (body: string, title?: string, action?: ToastAction) =>
-    push({ level: 'info', body, title, action }),
-  success: (body: string, title?: string, action?: ToastAction) =>
-    push({ level: 'success', body, title, action }),
-  warning: (body: string, title?: string, action?: ToastAction) =>
-    push({ level: 'warning', body, title, action }),
-  error: (body: string, title?: string, action?: ToastAction) =>
-    push({ level: 'error', body, title, action }),
+  info: (body: string, title?: string) => push({ level: 'info', body, title }),
+  success: (body: string, title?: string) => push({ level: 'success', body, title }),
+  warning: (body: string, title?: string) => push({ level: 'warning', body, title }),
+  error: (body: string, title?: string) => push({ level: 'error', body, title }),
   dismiss,
   push,
 }

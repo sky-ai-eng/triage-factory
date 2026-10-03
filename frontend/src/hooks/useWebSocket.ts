@@ -129,13 +129,6 @@ if (typeof window !== 'undefined' && typeof document !== 'undefined') {
   window.addEventListener('blur', onVisibilityChange)
 }
 
-// Track per-repo clone_status across WS events so we only fire the
-// "clone failed" toast on the *transition* into 'failed', not on every
-// repository_updated event carrying the same failed status. Module-level
-// (not React state) so the dedupe survives page navigations and the
-// short-lived useWebSocket subscriptions on individual pages.
-const cloneStatusByRepo = new Map<string, 'ok' | 'failed' | 'pending'>()
-
 function ensureConnected() {
   if (
     globalWs &&
@@ -169,36 +162,6 @@ function ensureConnected() {
           body: event.data.body,
         })
         return
-      }
-      // Cross-page clone failure surfacing: when a repo's clone_status
-      // transitions to 'failed' on the backend (bootstrap, lazy clone,
-      // or import path), fire a sticky error toast with a CTA to the
-      // Repos page. Doing it here (rather than in Repos.tsx) means the
-      // user sees it even when they're on Board / Settings / Tasks.
-      if (event.type === 'repository_updated' && event.data && typeof event.data === 'object') {
-        const data = event.data as {
-          id?: string
-          slug?: string
-          clone_status?: 'ok' | 'failed' | 'pending'
-          clone_error_kind?: 'ssh' | 'other'
-        }
-        // Keyed on the row id, worded with the slug — the two jobs the
-        // event's two identity fields exist to keep apart. Keying on the
-        // name would restart the dedupe on a rename and re-fire a toast
-        // for a failure the user already saw.
-        if (data.id && data.clone_status) {
-          const prev = cloneStatusByRepo.get(data.id)
-          cloneStatusByRepo.set(data.id, data.clone_status)
-          if (data.clone_status === 'failed' && prev !== 'failed') {
-            const kind = data.clone_error_kind === 'ssh' ? ' (SSH)' : ''
-            toastStore.push({
-              level: 'error',
-              title: 'Clone failed',
-              body: `Could not clone ${data.slug ?? 'a repository'}${kind}. Open the Repos page for details.`,
-              action: { label: 'Go to Repos', to: '/repos' },
-            })
-          }
-        }
       }
       // Event-source availability changed for the org this socket is scoped
       // to — an admin paused or resumed a source, or a credential moved. The
@@ -273,10 +236,6 @@ function subscribe(handler: Handler) {
  *     short-circuit the wait by calling ensureConnected() right after
  *     so the new socket comes up immediately rather than after the
  *     2s reconnect delay that's tuned for unexpected disconnects.
- *   - cloneStatusByRepo is intentionally NOT cleared: the per-repo
- *     state is keyed by `owner/repo` which is invariant across orgs
- *     in our deployment shape, and re-firing the "clone failed" toast
- *     on a switched org would be noisy.
  *   - No retry/error handling here: a fail-to-reconnect surfaces via
  *     the existing reconnect-on-close loop, same as any other dropped
  *     connection.
