@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/suspendclock"
 	"github.com/sky-ai-eng/triage-factory/internal/workmetrics"
 	"go.opentelemetry.io/otel"
 )
@@ -123,6 +125,15 @@ func (a *App) startBrain(term int64) {
 	// the poller process, so this acquisition also restarts at the head of
 	// each org's repo list rather than where its predecessor stopped.
 	a.reloader.initialPoll()
+	// Wake from a system suspend: every org due for a poll at once. The
+	// schedule runs on Go's monotonic clock, which a suspend stops, so without
+	// this every org's next poll would still lag by up to its full interval.
+	// Under brainCtx so it stops with the poller it reschedules, and only the
+	// process that polls reacts. The idle-connection half runs in every
+	// process (startWorkers).
+	go suspendclock.Watch(brainCtx, suspendCheckInterval, suspendThreshold, func(time.Duration) {
+		a.pollerMgr.PollAllSoon()
+	})
 	// Brain-bound sentinel relay LISTEN (tf_bus): "only the brain LISTENs
 	// on tf_bus" (spec §5.3) is enforced by SUBSCRIPTION scope — the
 	// listener holds with the lease, stopping via brainCtx on demotion —
