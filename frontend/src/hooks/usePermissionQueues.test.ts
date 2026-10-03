@@ -23,6 +23,33 @@ function prompt(toolCallID: string, extra: Record<string, unknown> = {}) {
 
 // stubPermissions routes the pending-set read to a queue of canned responses,
 // one per call, so a test can script "ok, then failure, then ok".
+// heldFetch parks every call until the test answers it, in whatever order the
+// test likes, so one read can stay in flight while others land around it.
+function heldFetch() {
+  const calls: Array<{
+    url: string
+    init?: RequestInit
+    answer: (r: { ok: boolean; body?: unknown }) => Promise<void>
+  }> = []
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(
+      (url: string, init?: RequestInit) =>
+        new Promise((resolve) => {
+          calls.push({
+            url,
+            init,
+            answer: (r) =>
+              act(async () => {
+                resolve({ ok: r.ok, status: r.ok ? 200 : 500, ...jsonBody(r.body) })
+              }),
+          })
+        }),
+    ),
+  )
+  return calls
+}
+
 function stubPermissions(responses: Array<{ ok?: boolean; body?: unknown; throws?: boolean }>) {
   let i = 0
   const fetchMock = vi.fn(() => {
@@ -169,6 +196,99 @@ describe('usePermissionQueues', () => {
 
       await expire()
       await waitFor(() => expect(result.current.queues[CONVERSATION]).toBeUndefined())
+    })
+
+    // The re-check is a read like any other, so a newer one can supersede it
+    // while it is in flight. The prompt must still be settled by an answer —
+    // not left in the queue with no timer, where nothing would ever expire it.
+    it('settles the prompt when a newer read that then fails superseded its re-check', async () => {
+      const calls = heldFetch()
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(calls).toHaveLength(1))
+      await calls[0].answer({ ok: true, body: [prompt('toolu_1', { timeout_ms: 1_000 })] })
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+
+      await expire()
+      await waitFor(() => expect(calls).toHaveLength(2)) // the re-check, held
+      act(() => result.current.refresh(CONVERSATION)) // a websocket trigger's read
+      await waitFor(() => expect(calls).toHaveLength(3))
+      await calls[2].answer({ ok: false })
+      await calls[1].answer({ ok: true, body: [prompt('toolu_1', { timeout_ms: 120_000 })] })
+
+      expect(result.current.queues[CONVERSATION]).toHaveLength(1)
+      // Re-armed from the re-check's answer: 120s on, it checks again.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(125_000)
+      })
+      await waitFor(() => expect(calls).toHaveLength(4))
+    })
+
+    it('settles the prompt when answering another prompt superseded its re-check', async () => {
+      // A local drop supersedes in-flight reads without reading anything
+      // itself, so no newer read will come along to settle the expired one.
+      const calls = heldFetch()
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(calls).toHaveLength(1))
+      await calls[0].answer({
+        ok: true,
+        body: [
+          prompt('toolu_1', { timeout_ms: 1_000 }),
+          prompt('toolu_2', { timeout_ms: 120_000 }),
+        ],
+      })
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(2))
+
+      await expire()
+      await waitFor(() => expect(calls).toHaveLength(2)) // toolu_1's re-check, held
+      act(() => {
+        void result.current.resolve(CONVERSATION, 'toolu_2', { behavior: 'allow' })
+      })
+      await waitFor(() => expect(calls).toHaveLength(3))
+      expect(calls[2].init?.method).toBe('POST')
+      await calls[2].answer({ ok: true, body: { status: 'resolved' } })
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+      await calls[1].answer({ ok: true, body: [prompt('toolu_1', { timeout_ms: 120_000 })] })
+
+      expect(result.current.queues[CONVERSATION]?.[0].tool_call_id).toBe('toolu_1')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(125_000)
+      })
+      await waitFor(() => expect(calls).toHaveLength(4))
+    })
+
+    it('settles two prompts that expire together in one read each', async () => {
+      // Each re-check supersedes the other's read. Settling from its own
+      // answer is what keeps that from turning into reads without end.
+      stubPermissions([
+        {
+          ok: true,
+          body: [
+            prompt('toolu_1', { timeout_ms: 1_000 }),
+            prompt('toolu_2', { timeout_ms: 1_000 }),
+          ],
+        },
+        {
+          ok: true,
+          body: [
+            prompt('toolu_1', { timeout_ms: 120_000 }),
+            prompt('toolu_2', { timeout_ms: 120_000 }),
+          ],
+        },
+      ])
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(2))
+
+      await expire()
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
+      await expire()
+      expect(fetch).toHaveBeenCalledTimes(3)
+      expect(result.current.queues[CONVERSATION]).toHaveLength(2)
     })
 
     it('drops the prompt when the re-check cannot be answered', async () => {
