@@ -126,6 +126,15 @@ func TestIsTransientGitError(t *testing.T) {
 		}
 	}
 
+	timedOut := fmt.Errorf("bare clone: %w", &GitError{
+		Args:   []string{"clone"},
+		Output: "error: RPC failed; curl 18 transfer closed with outstanding read data remaining\nfatal: early EOF\n",
+		Err:    context.DeadlineExceeded,
+	})
+	if IsTransientGitError(timedOut) {
+		t.Error("IsTransientGitError read a command its deadline stopped as a network failure")
+	}
+
 	if IsTransientGitError(errors.New("fatal: unable to access: Could not resolve host: github.com")) {
 		t.Error("IsTransientGitError matched text on an error that is not a GitError")
 	}

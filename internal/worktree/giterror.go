@@ -52,10 +52,12 @@ var transientGitMarkers = []string{
 }
 
 // IsTransientGitError reports whether err is a GitError whose output names a
-// network failure rather than a refusal.
+// network failure rather than a refusal. A command its deadline stopped is
+// never one, whatever it printed before it was stopped: it ran out of the
+// time it was given, which is not an answer from the remote.
 func IsTransientGitError(err error) bool {
 	var gitErr *GitError
-	if !errors.As(err, &gitErr) {
+	if !errors.As(err, &gitErr) || errors.Is(gitErr.Err, context.DeadlineExceeded) {
 		return false
 	}
 	out := strings.ToLower(gitErr.Output)

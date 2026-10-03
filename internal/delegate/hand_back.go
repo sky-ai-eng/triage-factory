@@ -174,11 +174,12 @@ func sdkUpstreamSummary(r *agentproc.Result) string {
 // setup (the pull-request fetch) that failed Transient or RateLimited, or a
 // git command whose output names a network failure.
 //
-// A git command is read by its output alone. Its GitError unwraps to the
-// context error when its deadline stopped it, and upstream.ClassOf reads
-// context.DeadlineExceeded as a transport timeout, so without this a clone
-// that outlasts its bound because the repository is large would spend the
-// upstream budget instead of the setup budget.
+// A git command is read by IsTransientGitError alone, which never reads one
+// its deadline stopped as transient. Its GitError unwraps to the context
+// error then, and upstream.ClassOf reads context.DeadlineExceeded as a
+// transport timeout, so without this a clone that outlasts its bound because
+// the repository is large would spend the upstream budget instead of the
+// setup budget.
 func upstreamSetupFailure(cause error) bool {
 	if worktree.IsTransientGitError(cause) {
 		return true

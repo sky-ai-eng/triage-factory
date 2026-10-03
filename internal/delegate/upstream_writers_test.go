@@ -204,6 +204,9 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 	deadline := fmt.Errorf("failed to create worktree: %w", &worktree.GitError{
 		Args: []string{"clone"}, Output: "Cloning into bare repository '/state/repos/o/r'...\n", Err: context.DeadlineExceeded,
 	})
+	deadlineAfterEOF := fmt.Errorf("failed to create worktree: %w", &worktree.GitError{
+		Args: []string{"clone"}, Output: "Cloning into bare repository '/state/repos/o/r'...\nfatal: early EOF\n", Err: context.DeadlineExceeded,
+	})
 	for name, tc := range map[string]struct {
 		err  error
 		want bool
@@ -214,6 +217,7 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 		"git: repository not found": {gitFailure("remote: Repository not found.\nfatal: repository 'https://github.com/o/r/' not found\n"), false},
 		"git: refused credential":   {gitFailure("fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 403\n"), false},
 		"git: its deadline":         {deadline, false},
+		"git: its deadline, late":   {deadlineAfterEOF, false},
 		"github: transport": {fmt.Errorf("failed to fetch PR: %w", &url.Error{
 			Op: "Get", URL: "https://api.github.com/repos/o/r/pulls/7", Err: errors.New("dial tcp: lookup api.github.com: no such host"),
 		}), true},
