@@ -49,6 +49,12 @@ import (
 //
 // Every way the row can fail to resolve — released, expired, wrong org, wrong
 // conversation, never existed — is one answer: this caller is not the owner.
+// The one refinement is that an unreleased claim whose lease lapsed says so,
+// as db.ErrClaimLeaseExpired, which is still db.ErrClaimReleased to every
+// caller that asks only that. The row is read whatever its state rather than
+// matched by the predicate, so it is locked whenever it exists, which adds no
+// window: a row the old predicate skipped was one no write could land on
+// anyway.
 //
 // statement_timestamp() rather than now(): the expiry has to be read against
 // fresh database time, not the instant the caller's transaction began, or a
@@ -67,15 +73,37 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 	if !isValidUUID(conversationID) {
 		return fmt.Errorf("%w: conversation %q is not a valid id", db.ErrClaimReleased, conversationID)
 	}
-	var one int
+	return claimRefusal(ctx, q, orgID, conversationID, claimID, "FOR SHARE")
+}
+
+// claimRefusal reads the named claim's state and answers whether a holder
+// write against it would be refused: nil while it is live, db.ErrClaimReleased
+// when there is no such claim on the conversation or it is released, and
+// db.ErrClaimLeaseExpired when it is unreleased with a lapsed lease. lock is
+// the locking clause to read under, "" for none.
+//
+// "live" is exactly the guard every holder write and the renewal test —
+// unreleased with a lease in the future — so the classification never passes
+// a claim the guard would refuse. A live claim with no lease is impossible
+// here (claims_live_has_lease), and would read as released, not expired.
+func claimRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID, lock string) error {
+	var state string
 	err := q.QueryRowContext(ctx, `
-		SELECT 1 FROM claims
+		SELECT CASE
+		         WHEN released_at IS NULL AND lease_expires_at > statement_timestamp() THEN 'live'
+		         WHEN released_at IS NULL AND lease_expires_at IS NOT NULL THEN 'expired'
+		         ELSE 'released'
+		       END
+		FROM claims
 		WHERE id = $1 AND org_id = $2 AND conversation_id = $3
-		  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
-		FOR SHARE
-	`, claimID, orgID, conversationID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
+		`+lock, claimID, orgID, conversationID).Scan(&state)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) || (err == nil && state == "released"):
 		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+	case err != nil:
+		return err
+	case state == "expired":
+		return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimLeaseExpired, claimID, conversationID)
 	}
-	return err
+	return nil
 }

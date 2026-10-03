@@ -330,7 +330,10 @@ func TestRenewClaimLease_CopiesTheTrackersActivity(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { defer close(done); s.renewClaimLease(ctx, conv, time.Now(), func(error) {}) }()
+	go func() {
+		defer close(done)
+		s.renewClaimLease(ctx, conv, time.Now(), context.Background(), func(error) {})
+	}()
 	deadline := time.After(5 * time.Second)
 	for len(fake.seen()) < 2 {
 		select {
