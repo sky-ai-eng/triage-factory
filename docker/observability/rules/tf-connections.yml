@@ -114,7 +114,7 @@ groups:
       # tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) rather
       # than failing; tf_conversations_deferred counts the conversations
       # waiting for their next attempt. Zero is the steady state. A brief
-      # nonzero is a provider blip the backoff rode out;
+      # nonzero is an upstream blip the backoff rode out;
       # a sustained one means an upstream the runs depend on has been
       # unavailable for half an hour, and after about four hours each waiting
       # run parks as upstream_unavailable until someone messages it.
