@@ -528,7 +528,9 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// time means "try now", so the wait is dropped in the same transaction:
 	// the message and the claimability it asks for commit together. It is
 	// cleared whatever the read above saw, because an engagement that was
-	// live then can have handed back with a wait since.
+	// live then can have handed back with a wait since. One still live when
+	// this commits either takes the message into the call it makes next, or
+	// hands back with the message undelivered, which sets no wait.
 	//
 	// Sending takes only visibility, and clearing is a write to the
 	// conversation, so a member who may read the conversation but not write

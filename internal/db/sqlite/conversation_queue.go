@@ -1387,8 +1387,10 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 	return count, nil
 }
 
-// HandBackClaimSystem releases the claim and then writes the conversation, in
-// that order, the order RequeueConversation takes. next_attempt_at is stamped
+// HandBackClaimSystem releases the claim and then writes the conversation.
+// The transaction holds the database's one write lock from BEGIN, so a
+// follow-up's message and its clear are either committed before the check for
+// it here or land after the wait it would clear. next_attempt_at is stamped
 // with sqliteNowPlusExpr, the spelling nextAttemptDueSQL compares against.
 func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID, conversationID, claimID, outcome string, delay time.Duration, lastErr string) error {
 	if _, ok := db.HandBackPolicyFor(outcome); !ok {
@@ -1412,12 +1414,13 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 			nextAttempt = sqliteLeaseModifier(delay)
 		}
 		_, err = q.ExecContext(ctx, `
-			UPDATE conversations
-			SET next_attempt_at = CASE WHEN ? IS NOT NULL THEN `+sqliteNowPlusExpr+` END,
-			    result_summary = COALESCE(NULLIF(?, ''), result_summary),
+			UPDATE conversations AS r
+			SET next_attempt_at = CASE WHEN ? IS NOT NULL AND NOT `+undeliveredInputExistsSQL+`
+			                           THEN `+sqliteNowPlusExpr+` END,
+			    result_summary = COALESCE(NULLIF(?, ''), r.result_summary),
 			    preferred_executor_id = NULL
-			WHERE id = ?
-		`, nextAttempt, nextAttempt, lastErr, conversationID)
+			WHERE r.org_id = ? AND r.id = ? AND r.status IS NULL
+		`, nextAttempt, nextAttempt, lastErr, orgID, conversationID)
 		return err
 	})
 }

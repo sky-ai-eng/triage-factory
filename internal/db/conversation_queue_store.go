@@ -543,12 +543,18 @@ type ConversationQueueStore interface {
 
 	// HandBackClaimSystem is an engagement handing its own claim back: the
 	// claim is released with outcome, the conversation stays mid-flight, and
-	// it becomes claimable after delay (at once when delay is 0), measured on
-	// database time and stamped as next_attempt_at. Fenced on claimID like
+	// it becomes claimable after delay, measured on database time and stamped
+	// as next_attempt_at. It is claimable at once when delay is 0, and when a
+	// person's message is waiting undelivered: one sent while the engagement
+	// was failing asks to try again now, which is what ClearNextAttempt
+	// answers for a message sent after the hand-back. Fenced on claimID like
 	// every holder write: ErrClaimReleased when the claim is no longer live. A
 	// non-empty lastErr is written to result_summary; preferred_executor_id is
-	// cleared, for the reason ReleaseOwnClaimsOnShutdownSystem clears it. An
-	// outcome outside HandBackPolicies is refused with
+	// cleared, for the reason ReleaseOwnClaimsOnShutdownSystem clears it. The
+	// conversation is written only while it is mid-flight (no stored status):
+	// one another writer parked or concluded while the claim was still live
+	// keeps its row as that writer left it, and only the claim is released.
+	// An outcome outside HandBackPolicies is refused with
 	// ErrInvalidRequeueOutcome and nothing is written.
 	HandBackClaimSystem(ctx context.Context, orgID, conversationID, claimID, outcome string, delay time.Duration, lastErr string) error
 

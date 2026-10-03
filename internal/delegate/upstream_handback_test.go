@@ -343,3 +343,52 @@ func TestUpstream_AMessageRetriesAtOnce(t *testing.T) {
 		t.Errorf("claim after the message = (%+v, %v), want conversation %s at once", next, err, f.conversationID)
 	}
 }
+
+// TestUpstream_AMessageSentDuringTheOutageRetriesAtOnce: a message that lands
+// while the engagement is still failing has no wait to clear yet. The
+// hand-back finds it undelivered and sets none, so it does not sit out the
+// schedule the hand-back would otherwise set.
+func TestUpstream_AMessageSentDuringTheOutageRetriesAtOnce(t *testing.T) {
+	f := newUpstreamFixture(t, "r-upstream-message-during")
+	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "is it back yet?"); err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if disp := f.record(t, 3); !disp.handedBack {
+		t.Fatalf("disposition = %+v, want handed back", disp)
+	}
+	if got := claimOutcome(t, f.stallFixture, f.claimID); got != db.HandBackUpstream {
+		t.Errorf("claim outcome = %q, want %s", got, db.HandBackUpstream)
+	}
+	if in, ok := f.nextAttemptIn(t); ok {
+		t.Errorf("next_attempt_at = now + %v, want none while a person's message is waiting", in)
+	}
+	next, err := f.s.conversationQueue.ClaimNextConversation(context.Background(), "exec-successor", 1, db.ClaimPlacement{}, time.Minute)
+	if err != nil || next == nil || next.ID != f.conversationID {
+		t.Fatalf("claim after the hand-back = (%+v, %v), want conversation %s at once", next, err, f.conversationID)
+	}
+	if next.UpstreamHandBacks != 1 {
+		t.Errorf("successor's upstream hand-backs = %d, want 1 — the hand-back still spends the budget", next.UpstreamHandBacks)
+	}
+}
+
+// TestUpstreamExhaustedNote_NamesTheWaitTheBudgetAllows: the note tells a
+// person how long the provider was retried, and that figure is the schedule's
+// waits summed over every hand-back the budget allows. A change to either
+// that moves the total off four hours fails here rather than leaving the note
+// wrong.
+func TestUpstreamExhaustedNote_NamesTheWaitTheBudgetAllows(t *testing.T) {
+	policy, ok := db.HandBackPolicyFor(db.HandBackUpstream)
+	if !ok {
+		t.Fatal("no requeued_upstream policy")
+	}
+	var total time.Duration
+	for n := 0; n+1 < maxUpstreamHandBacks; n++ {
+		total += policy.Delay(n)
+	}
+	if got := total.Round(time.Hour); got != 4*time.Hour {
+		t.Errorf("the upstream budget waits %v in all, about %v; the note says four hours", total, got)
+	}
+	if !strings.Contains(upstreamExhaustedNote, "about four hours") {
+		t.Errorf("upstreamExhaustedNote = %q, want it to name the four hours this test checks", upstreamExhaustedNote)
+	}
+}

@@ -285,8 +285,9 @@ some wait before the next claim:
 | `requeued_upstream` | A native run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own 5 attempts. | Upstream: 27 in a row. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
 
 A run that spends its upstream budget parks `open` with park reason
-`upstream_unavailable`, and a message resumes it. A message to a run that is
-waiting to retry tries it at once. A run waiting to retry displays as `queued`
+`upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
+and a message resumes it. A message to a run that is waiting to retry, or one
+sent while its engagement is failing, tries it at once. A run waiting to retry displays as `queued`
 but is not counted in the queue's depth, age or positions, which measure
 waiting for capacity. The wait is measured on database time, so a machine that
 sleeps through it retries when it wakes.

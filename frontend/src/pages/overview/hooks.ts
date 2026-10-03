@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { HttpError, apiJSON, apiList } from '../../lib/apiClient'
-import { ACTIVE_STATUSES } from '../../lib/conversationStatus'
+import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
 import { TASK_LIST_PATH, TASK_PAGE_SIZE } from '../../lib/taskList'
 import { useWebSocket } from '../../hooks/useWebSocket'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
@@ -344,4 +344,31 @@ export function useClock(): { clock: string; date: string } {
       .join(' ')
       .toUpperCase(),
   }
+}
+
+/**
+ * The `now` the RUNNING rows' retry labels are computed against. A run
+ * waiting out its model provider says when it tries again, and has to stop
+ * saying so when that time passes, which no hint announces: until an
+ * executor claims it, nothing about the row changes on the server. A
+ * per-second tick would re-render the page for a label that moves once, so
+ * one timer is armed for the earliest retry time among the rows, and the
+ * `now` it advances arms the next.
+ */
+export function useRetryClock(rows: readonly Conversation[] | undefined): number {
+  const [now, setNow] = useState(() => Date.now())
+  const next = useMemo(() => {
+    let earliest: number | null = null
+    for (const c of rows ?? []) {
+      const at = retryingAt(c, now)?.getTime()
+      if (at != null && (earliest == null || at < earliest)) earliest = at
+    }
+    return earliest
+  }, [rows, now])
+  useEffect(() => {
+    if (next == null) return
+    const t = setTimeout(() => setNow(Date.now()), Math.max(0, next - Date.now()))
+    return () => clearTimeout(t)
+  }, [next, now])
+  return now
 }

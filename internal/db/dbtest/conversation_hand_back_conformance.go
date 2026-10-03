@@ -161,6 +161,56 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		mustClaim(t, f, c.ID)
 	})
 
+	t.Run("HandBack_SetsNoWaitWhileAPersonsMessageIsUndelivered", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f)
+		// A system-authored row waiting undelivered is not somebody asking
+		// to try again: the wait stands.
+		pending := false
+		if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+			ConversationID: c.ID, Role: "user", Subtype: domain.MessageSubtypeStopNote, Content: "a note",
+			Delivered: &pending, WindowState: domain.MessageWindowActive,
+		}); err != nil {
+			t.Fatalf("InsertMessage(stop note): %v", err)
+		}
+		handBack(t, f, c, db.HandBackUpstream, handBackWait)
+		waitIs(t, f, c.ID, handBackWait)
+
+		f.SetNextAttempt(t, c.ID, -time.Second)
+		c = mustClaim(t, f, c.ID)
+		if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+			ConversationID: c.ID, Role: "user", Content: "is it back yet?",
+			Delivered: &pending, WindowState: domain.MessageWindowActive,
+		}); err != nil {
+			t.Fatalf("InsertMessage(follow-up): %v", err)
+		}
+		handBack(t, f, c, db.HandBackUpstream, handBackWait)
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != db.HandBackUpstream {
+			t.Errorf("handed-back claim = (released %v, %q), want (true, %s)", released, outcome, db.HandBackUpstream)
+		}
+		noWait(t, f, c.ID)
+		mustClaim(t, f, c.ID)
+	})
+
+	t.Run("HandBack_LeavesAConversationAnotherWriterParkedAsItIs", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f)
+		f.SetStoredStatus(t, c.ID, domain.StatusOpen)
+		before := get(t, f, c.ID)
+
+		if err := f.Stores.ConversationQueue.HandBackClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.HandBackUpstream, handBackWait, "provider returned 503"); err != nil {
+			t.Fatalf("HandBackClaimSystem: %v", err)
+		}
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != db.HandBackUpstream {
+			t.Errorf("handed-back claim = (released %v, %q), want (true, %s) — the engagement is leaving either way", released, outcome, db.HandBackUpstream)
+		}
+		noWait(t, f, c.ID)
+		if after := get(t, f, c.ID); after.Status != domain.StatusOpen || after.ResultSummary != before.ResultSummary {
+			t.Errorf("parked conversation after the hand-back = (%q, summary %q), want (open, %q) as the park left it",
+				after.Status, after.ResultSummary, before.ResultSummary)
+		}
+	})
+
 	t.Run("Claim_SkipsADeferredConversationUntilItsTimeAndClearsTheWait", func(t *testing.T) {
 		f := mk(t)
 		c := stageClaimed(t, f)

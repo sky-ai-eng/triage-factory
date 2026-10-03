@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
-import { useConversationSets, useTasksIndex, useTranscriptTick } from './hooks'
-import { ACTIVE_STATUSES } from '../../lib/conversationStatus'
-import type { Message, Task, WSEvent } from '../../types'
+import { useConversationSets, useRetryClock, useTasksIndex, useTranscriptTick } from './hooks'
+import { ACTIVE_STATUSES, retryingAt } from '../../lib/conversationStatus'
+import type { Conversation, Message, Task, WSEvent } from '../../types'
 import { jsonBody, listBody } from '../../test/apiResponse'
 
 // The ticks arrive through the singleton websocket, and the REAL useWebSocket
@@ -204,5 +204,42 @@ describe('useTasksIndex', () => {
     expect(tasksRead.statuses).toEqual(['queued', 'in_progress', 'done'])
     expect(result.current?.get('t-a')?.title).toBe('a')
     expect(result.current?.get('t-b')?.title).toBe('b')
+  })
+})
+
+describe('useRetryClock', () => {
+  const deferred = (id: string, at: string) =>
+    ({ ID: id, Status: 'queued', next_attempt_at: at }) as Conversation
+
+  it('advances at each retry time, so a row stops saying when it retries once that passes', () => {
+    vi.setSystemTime(new Date('2026-10-03T12:00:00Z'))
+    const rows = [
+      deferred('c-later', '2026-10-03T12:05:00Z'),
+      deferred('c-sooner', '2026-10-03T12:00:30Z'),
+    ]
+    const { result } = renderHook(() => useRetryClock(rows))
+    const retrying = () => rows.filter((c) => retryingAt(c, result.current)).map((c) => c.ID)
+    expect(retrying()).toEqual(['c-later', 'c-sooner'])
+
+    act(() => {
+      vi.advanceTimersByTime(29_000)
+    })
+    expect(retrying()).toEqual(['c-later', 'c-sooner'])
+
+    act(() => {
+      vi.advanceTimersByTime(1_000)
+    })
+    expect(retrying()).toEqual(['c-later'])
+
+    act(() => {
+      vi.advanceTimersByTime(270_000)
+    })
+    expect(retrying()).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('arms nothing when no row is waiting to retry', () => {
+    renderHook(() => useRetryClock([{ ID: 'c-1', Status: 'running' } as Conversation]))
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

@@ -1372,6 +1372,102 @@ func TestBootReset_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
 	}
 }
 
+// TestHandBack_Postgres_NoDeadlockAgainstARunsTerminal pins the lock order the
+// hand-back shares with a run's terminal, which parks its children and then
+// releases their claims. The terminal parks the conversation, the hand-back is
+// let run into it, and only then does the terminal take the claim. A hand-back
+// that released the claim before waiting on the conversation would close the
+// cycle, and Postgres would abort one side with 40P01. Taking the conversation
+// first, it waits holding nothing, and finds its claim released once the
+// terminal commits.
+func TestHandBack_Postgres_NoDeadlockAgainstARunsTerminal(t *testing.T) {
+	h := pgtest.Shared(t)
+	f := pgClaimLeaseFixture(t, h)
+	ctx := context.Background()
+	id, _ := f.StageStep(t)
+	claimed, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, "hand-back-order", 1, db.ClaimPlacement{}, db.DefaultClaimLease)
+	if err != nil || claimed == nil || claimed.ID != id {
+		t.Fatalf("claim = (%+v, %v), want conversation %s", claimed, err, id)
+	}
+
+	// The terminal's first write.
+	terminal, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer func() { _ = terminal.Rollback() }()
+	if _, err := terminal.ExecContext(ctx, `
+		UPDATE conversations SET status = 'open', parked_at = now(), park_reason = 'blueprint_terminal'
+		WHERE id = $1 AND status IS NULL
+	`, id); err != nil {
+		t.Fatalf("park the conversation: %v", err)
+	}
+
+	handBackDone := make(chan error, 1)
+	go func() {
+		handBackDone <- f.Stores.ConversationQueue.HandBackClaimSystem(ctx, f.OrgID, id, claimed.ClaimID, db.HandBackUpstream, time.Hour, "provider returned 503")
+	}()
+
+	// Let the hand-back run until it has either finished or is waiting on a
+	// lock. It is the only other session on this database.
+	var handBackErr error
+	finished := false
+	deadline := time.Now().Add(10 * time.Second)
+	for !finished && time.Now().Before(deadline) {
+		select {
+		case handBackErr = <-handBackDone:
+			finished = true
+		case <-time.After(20 * time.Millisecond):
+			var waiting int
+			if err := h.AdminDB.QueryRowContext(ctx, `
+				SELECT count(*) FROM pg_stat_activity
+				WHERE wait_event_type = 'Lock' AND datname = current_database()
+			`).Scan(&waiting); err != nil {
+				t.Fatalf("read pg_stat_activity: %v", err)
+			}
+			if waiting > 0 {
+				deadline = time.Now()
+			}
+		}
+	}
+
+	// The terminal's second write.
+	_, claimErr := terminal.ExecContext(ctx, `
+		UPDATE claims SET released_at = now(), outcome = 'cancelled'
+		WHERE conversation_id = $1 AND released_at IS NULL
+	`, id)
+	commitErr := terminal.Commit()
+	if !finished {
+		handBackErr = <-handBackDone
+	}
+
+	for name, err := range map[string]error{"the terminal's claim release": claimErr, "the terminal's commit": commitErr} {
+		if err == nil {
+			continue
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "40P01" {
+			t.Fatalf("%s deadlocked against the hand-back: %v", name, err)
+		}
+		t.Fatalf("%s: %v", name, err)
+	}
+	if !errors.Is(handBackErr, db.ErrClaimReleased) {
+		t.Fatalf("HandBackClaimSystem = %v, want ErrClaimReleased — the terminal released the claim first", handBackErr)
+	}
+	var status, outcome string
+	var waits bool
+	if err := h.AdminDB.QueryRowContext(ctx, `
+		SELECT COALESCE(r.status, ''), r.next_attempt_at IS NOT NULL, COALESCE(c.outcome, '')
+		FROM conversations r JOIN claims c ON c.id = $2
+		WHERE r.id = $1
+	`, id, claimed.ClaimID).Scan(&status, &waits, &outcome); err != nil {
+		t.Fatalf("read the result: %v", err)
+	}
+	if status != domain.StatusOpen || waits || outcome != "cancelled" {
+		t.Errorf("after both writes = (status %q, wait %v, claim outcome %q), want (open, false, cancelled) — the terminal's write alone", status, waits, outcome)
+	}
+}
+
 // TestSettleUnclaimedStops_Postgres_NoDeadlockAgainstARunsTerminal pins the
 // lock order the settlement shares with a run's terminal write. The terminal
 // (markBlueprintRunStatus) locks the run and then parks its children; a

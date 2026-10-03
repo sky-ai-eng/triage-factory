@@ -1069,11 +1069,16 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 	return len(released), nil
 }
 
-// HandBackClaimSystem releases the claim and then writes the conversation, in
-// that order, the order RequeueConversation takes. The conversation write is
-// not SKIP LOCKED the way clearPreferredExecutor is: next_attempt_at is what
-// keeps the row out of the scan, so it cannot be dropped when somebody else
-// holds the row.
+// HandBackClaimSystem locks the conversation, releases the claim, and then
+// writes the conversation, in that order. A run's terminal parks its children
+// and releases their claims conversation first, so taking the claim first could
+// leave each holding the row the other waits on. The lock is also why the
+// conversation write is a statement of its own: one that waited out a
+// follow-up's transaction reads that follow-up's message, where a lone UPDATE
+// that waited on the row would still check for it against the snapshot it
+// started with. The lock is not SKIP LOCKED the way clearPreferredExecutor's
+// is: next_attempt_at is what keeps the row out of the scan, so its write
+// cannot be dropped when somebody else holds the row.
 func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID, conversationID, claimID, outcome string, delay time.Duration, lastErr string) error {
 	if _, ok := db.HandBackPolicyFor(outcome); !ok {
 		return fmt.Errorf("%w: %q", db.ErrInvalidRequeueOutcome, outcome)
@@ -1082,6 +1087,11 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		return fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
 	}
 	err := inTx(ctx, s.conn, func(q queryer) error {
+		if _, err := q.ExecContext(ctx, `
+			SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+		`, orgID, conversationID); err != nil {
+			return err
+		}
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = $4
 			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
@@ -1095,12 +1105,12 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 		}
 		_, err = q.ExecContext(ctx, `
-			UPDATE conversations
-			SET next_attempt_at = CASE WHEN $1::float8 > 0
+			UPDATE conversations r
+			SET next_attempt_at = CASE WHEN $1::float8 > 0 AND NOT `+undeliveredInputExistsSQL+`
 			                           THEN statement_timestamp() + make_interval(secs => $1::float8) END,
-			    result_summary = COALESCE(NULLIF($2, ''), result_summary),
+			    result_summary = COALESCE(NULLIF($2, ''), r.result_summary),
 			    preferred_executor_id = NULL
-			WHERE org_id = $3 AND id = $4
+			WHERE r.org_id = $3 AND r.id = $4 AND r.status IS NULL
 		`, delay.Seconds(), lastErr, orgID, conversationID)
 		return err
 	})
