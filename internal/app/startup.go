@@ -78,10 +78,11 @@ func (a *App) runStartupTasks(ctx context.Context) {
 //     RunDispatcher itself is not joined — it is a select loop that returns at
 //     its next tick and writes nothing on the way out.
 //   - Everything else here is deliberately NOT joined: the reapers, evictors,
-//     heartbeat, stat sampler, signal loops and backplane listeners are all
-//     periodic and idempotent, every write they make rides the cancellable app
-//     context, and a tick lost to shutdown is simply taken by the next boot.
-//     Waiting on them would add shutdown latency to buy nothing.
+//     heartbeat, stat sampler, signal loops, backplane listeners and suspend
+//     watcher are all periodic and idempotent, every write they make rides
+//     the cancellable app context, and a tick lost to shutdown is simply
+//     taken by the next boot. Waiting on them would add shutdown latency to
+//     buy nothing.
 func (a *App) startWorkers(ctx context.Context) {
 	// Dispatcher workers (executor/all): the conversation-queue dispatcher
 	// (claims + executes queued conversations, reconciling crash-stranded
@@ -206,6 +207,11 @@ func (a *App) startWorkers(ctx context.Context) {
 	// silent eviction of the user's own repos). Multi gets a real per-pod
 	// disk budget + cold-bare TTL, bounding at-rest storage across tenants.
 	worktree.StartReaper(ctx, worktree.DefaultPolicy(), 0)
+
+	// Wake from a system suspend: drop the idle HTTP connections that may
+	// not have survived it. Every role, since every role calls out over
+	// HTTP. Rescheduling the polls on wake is the brain's half (startBrain).
+	go watchSuspendForConnections(ctx)
 }
 
 // cleanupWorktrees removes orphaned worktrees from crashed conversations.

@@ -240,6 +240,37 @@ func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
 	}
 }
 
+// TestManager_PollAllSoon_DuesEveryOrgForEverySource pins the wake path: with
+// every org of both sources scheduled in the future, PollAllSoon leaves no
+// slot behind, so the next wake of each loop polls every org.
+func TestManager_PollAllSoon_DuesEveryOrgForEverySource(t *testing.T) {
+	m := &Manager{}
+	now := time.Now()
+	sources := []string{"github", "jira"}
+	orgIDs := []string{"org-a", "org-b"}
+	for _, source := range sources {
+		for _, orgID := range orgIDs {
+			m.schedulePoll(source, orgID, now.Add(time.Hour))
+			if m.pollDue(source, orgID, now) {
+				t.Fatalf("%s/%s is due with its slot an hour out", source, orgID)
+			}
+		}
+	}
+
+	m.PollAllSoon()
+
+	if len(m.nextPoll) != 0 {
+		t.Errorf("nextPoll has %d slots after PollAllSoon, want none: %v", len(m.nextPoll), m.nextPoll)
+	}
+	for _, source := range sources {
+		for _, orgID := range orgIDs {
+			if !m.pollDue(source, orgID, now) {
+				t.Errorf("%s/%s is not due after PollAllSoon", source, orgID)
+			}
+		}
+	}
+}
+
 // TestManager_StartGitHub_DoesNotRepollScheduledOrg pins that a restart is
 // schedule-neutral: an org already on its cadence is not re-polled just because
 // the loop bounced. (resetSchedule used to clear all slots on start, which —
