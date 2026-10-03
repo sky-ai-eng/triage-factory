@@ -93,10 +93,16 @@ func TestCredentialMiss(t *testing.T) {
 				src.set(tc.sentinel)
 				proxyURL := startProxy(t, cfg(upstream.URL, src))
 
+				// A run holds one proxy per provider, and a missing bundle fails
+				// both, so the name has to say which one answered.
+				name := "apiproxy-" + string(provider)
 				for range 3 {
 					status, msg, raw := doMiss(t, proxyURL)
 					if status != tc.status {
 						t.Errorf("status = %d, want %d", status, tc.status)
+					}
+					if !strings.HasPrefix(msg, name+": ") {
+						t.Errorf("message %q does not name the proxy %q", msg, name)
 					}
 					if !strings.Contains(msg, "("+tc.reason+")") {
 						t.Errorf("message %q does not name reason %q", msg, tc.reason)
@@ -121,7 +127,7 @@ func TestCredentialMiss(t *testing.T) {
 				if n := strings.Count(logged, "credential lookup failed"); n != 2 {
 					t.Fatalf("a second reason took the count to %d, want 2:\n%s", n, logged)
 				}
-				for _, want := range []string{"WARN", "apiproxy", "conv-miss", tc.reason} {
+				for _, want := range []string{"WARN", name, "conv-miss", tc.reason} {
 					if !strings.Contains(logged, want) {
 						t.Errorf("log missing %q:\n%s", want, logged)
 					}

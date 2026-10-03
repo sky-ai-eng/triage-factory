@@ -244,7 +244,9 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:         cfg,
 		upstreamURL: u,
-		misses:      credmiss.NewResponder("apiproxy", cfg.ConversationID, apiproxyLog),
+		// The provider is in the name because a run holds one of each, and a
+		// missing bundle fails both; without it the two lines are identical.
+		misses: credmiss.NewResponder("apiproxy-"+string(cfg.Provider), cfg.ConversationID, apiproxyLog),
 	}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
