@@ -173,6 +173,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
@@ -196,9 +197,10 @@ const (
 const maxBufferedBody = 1 << 20
 
 // injectorLog carries what this package says out loud, which is only its
-// refusals. Everything it merely observes travels as a relayed audit row and is
-// silent here; a refusal is a decision this process made, and the line is
-// written locally so it owes nothing to the relay hop that records it.
+// refusals and the requests it found no credential for. Everything it merely
+// observes travels as a relayed audit row and is silent here; a refusal is a
+// decision this process made, and the line is written locally so it owes
+// nothing to the relay hop that records it.
 var injectorLog = logging.Component("ghinjector")
 
 // maxRequestBody caps how much of a GraphQL request body the injector will
@@ -215,8 +217,8 @@ const maxRequestBody = 1 << 20
 // TokenSource supplies the single real GitHub credential to inject on every
 // request — the team-set-scoped installation token (App orgs) or the org PAT.
 // Read once per request with no proxy-side caching so a mid-run brain re-seal is
-// picked up; an error (or empty token) surfaces to the agent as a 502, never a
-// silently-unauthenticated forward.
+// picked up; an error (or empty token) is answered as a credential miss
+// (internal/credmiss), never a silently-unauthenticated forward.
 type TokenSource func(ctx context.Context) (string, error)
 
 // ObservedWrite is one mutating REST request the injector forwarded, with the
@@ -292,6 +294,9 @@ type Server struct {
 
 	requestCount atomic.Int64
 
+	// misses answers and logs the requests no credential could be found for.
+	misses *credmiss.Responder
+
 	listener net.Listener
 	httpSrv  *http.Server
 	serveErr chan error
@@ -311,7 +316,12 @@ func New(cfg Config) (*Server, error) {
 		return nil, fmt.Errorf("ghinjector: derive graphql upstream: %w", err)
 	}
 
-	s := &Server{cfg: cfg, restURL: rest, graphqlURL: gql}
+	s := &Server{
+		cfg:        cfg,
+		restURL:    rest,
+		graphqlURL: gql,
+		misses:     credmiss.NewResponder("ghinjector", cfg.ConversationID, injectorLog),
+	}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
@@ -396,10 +406,13 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		tok, err := s.cfg.TokenSource(r.Context())
-		if err != nil || tok == "" {
-			// 502: the proxy is alive but the credential pipeline is broken.
-			// Never leak the source error (may carry credential-setup detail).
-			http.Error(w, "ghinjector: failed to resolve upstream credential", http.StatusBadGateway)
+		if err == nil && tok == "" {
+			err = errors.New("ghinjector: token source returned an empty token")
+		}
+		if err != nil {
+			// The answer names the reason and nothing else: the source error
+			// may carry credential-setup detail.
+			s.misses.Respond(w, err)
 			return
 		}
 		ctx := context.WithValue(r.Context(), authCtxKey{}, tok)
