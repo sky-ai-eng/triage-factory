@@ -188,79 +188,22 @@ func TestSearchIssues_RetriesTransient5xx(t *testing.T) {
 	}
 }
 
-func TestParseRetryAfter(t *testing.T) {
-	cases := []struct {
-		name   string
-		value  string
-		wantOK bool
-		approx time.Duration
-	}{
-		{"absent", "", false, 0},
-		{"seconds", "5", true, 5 * time.Second},
-		{"zero", "0", false, 0},
-		{"negative", "-3", false, 0},
-		{"http-date-future", time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), true, 10 * time.Second},
-		{"http-date-past", time.Now().Add(-10 * time.Second).UTC().Format(http.TimeFormat), false, 0},
-		{"garbage", "soon", false, 0},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := http.Header{}
-			if tc.value != "" {
-				h.Set("Retry-After", tc.value)
-			}
-			d, ok := parseRetryAfter(h)
-			if ok != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
-			}
-			if tc.wantOK {
-				// Allow a couple seconds of slack for HTTP-date rounding.
-				if d < tc.approx-2*time.Second || d > tc.approx+time.Second {
-					t.Errorf("duration = %v, want ~%v", d, tc.approx)
-				}
-			}
-		})
-	}
-}
-
-func TestRetryableStatus(t *testing.T) {
-	cases := []struct {
-		status     int
-		idempotent bool
-		want       bool
-	}{
-		{http.StatusTooManyRequests, false, true},
-		{http.StatusTooManyRequests, true, true},
-		{http.StatusInternalServerError, true, true},
-		{http.StatusServiceUnavailable, true, true},
-		{http.StatusInternalServerError, false, false},
-		{http.StatusBadRequest, true, false},
-		{http.StatusOK, true, false},
-		{http.StatusNotFound, false, false},
-	}
-	for _, tc := range cases {
-		if got := retryableStatus(tc.status, tc.idempotent); got != tc.want {
-			t.Errorf("retryableStatus(%d, idempotent=%v) = %v, want %v", tc.status, tc.idempotent, got, tc.want)
-		}
-	}
-}
-
-func TestBackoffDuration(t *testing.T) {
+func TestBackoff(t *testing.T) {
 	prev := rateLimitBackoffBase
 	rateLimitBackoffBase = 500 * time.Millisecond
 	t.Cleanup(func() { rateLimitBackoffBase = prev })
 
-	if got := backoffDuration(1); got != 500*time.Millisecond {
+	if got := backoff(1); got != 500*time.Millisecond {
 		t.Errorf("attempt 1 = %v, want 500ms", got)
 	}
-	if got := backoffDuration(2); got != time.Second {
+	if got := backoff(2); got != time.Second {
 		t.Errorf("attempt 2 = %v, want 1s", got)
 	}
-	if got := backoffDuration(3); got != 2*time.Second {
+	if got := backoff(3); got != 2*time.Second {
 		t.Errorf("attempt 3 = %v, want 2s", got)
 	}
 	// Large attempt saturates at the cap, never overflows negative.
-	if got := backoffDuration(40); got != maxRateLimitWait {
+	if got := backoff(40); got != maxRateLimitWait {
 		t.Errorf("attempt 40 = %v, want cap %v", got, maxRateLimitWait)
 	}
 }

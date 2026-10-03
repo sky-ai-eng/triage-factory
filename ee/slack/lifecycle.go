@@ -249,7 +249,7 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 	if !ok {
 		return
 	}
-	if err := slackReactionsAdd(ctx, a.client, token, meta.Channel, meta.TS, slackLifecycleAckReaction); err != nil {
+	if err := slackReactionsAdd(ctx, a.client, orgID, token, meta.Channel, meta.TS, slackLifecycleAckReaction); err != nil {
 		slackLog.Warn("slack lifecycle: reactions.add failed", "error", err)
 	}
 }
@@ -274,7 +274,7 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
-	if _, err := slackChatPostMessage(ctx, a.client, token, slackMessageParams{
+	if _, err := slackChatPostMessage(ctx, a.client, orgID, token, slackMessageParams{
 		Channel: meta.Channel, ThreadTS: threadTS, Text: slackLifecycleNoMatchCopy,
 	}); err != nil {
 		slackLog.Warn("slack lifecycle: not-configured reply failed", "error", err)
@@ -700,7 +700,7 @@ func postSlackFailureReply(ctx context.Context, client *http.Client, publicURL f
 	if u := publicURL(); u != "" {
 		text += fmt.Sprintf(" Details: %s/orgs/%s/runs/%s", u, orgID, conversationID)
 	}
-	if _, err := slackChatPostMessage(ctx, client, botToken, slackMessageParams{
+	if _, err := slackChatPostMessage(ctx, client, orgID, botToken, slackMessageParams{
 		Channel: channel, ThreadTS: threadTS, Text: text,
 	}); err != nil {
 		slackLog.Warn("slack lifecycle: failure reply post failed", "conversation", conversationID, "error", err)
@@ -934,7 +934,7 @@ func (w *conversationStatusWorker) setStatus(text indicatorText) {
 	if text.loading != "" {
 		loading = []string{text.loading}
 	}
-	if err := slackAssistantSetStatus(w.ctx, w.client, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
+	if err := slackAssistantSetStatus(w.ctx, w.client, w.orgID, w.botToken, w.channel, w.threadTS, text.status, loading); err != nil {
 		slackLog.Warn("slack lifecycle: setStatus failed", "conversation", w.conversationID, "error", err)
 	}
 }

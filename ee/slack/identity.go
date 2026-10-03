@@ -108,7 +108,7 @@ func (r *IdentityResolver) resolveSender(ctx context.Context, ws slackstore.Work
 		return
 	}
 
-	info, err := slackUsersInfo(ctx, r.client, botToken, slackUserID)
+	info, err := slackUsersInfo(ctx, r.client, ws.OrgID, botToken, slackUserID)
 	if err != nil {
 		// Transient: no write, so the next mention retries.
 		slackLog.Warn("identity: users.info failed", "workspace", ws.WorkspaceID, "slack_user", slackUserID, "error", err)

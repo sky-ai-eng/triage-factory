@@ -458,13 +458,13 @@ func (h *channelsHandler) liveSlackCandidates(ctx context.Context, orgID string,
 			anyFailed = true
 			continue
 		}
-		pub, pubTruncated, err := slackConversationsList(ctx, h.client, botToken)
+		pub, pubTruncated, err := slackConversationsList(ctx, h.client, orgID, botToken)
 		if err != nil {
 			slackLog.Warn("channels: conversations.list failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
 			continue
 		}
-		mine, mineTruncated, err := slackUsersConversations(ctx, h.client, botToken)
+		mine, mineTruncated, err := slackUsersConversations(ctx, h.client, orgID, botToken)
 		if err != nil {
 			slackLog.Warn("channels: users.conversations failed", "workspace", ws.WorkspaceID, "error", err)
 			anyFailed = true
@@ -556,7 +556,7 @@ func (h *channelsHandler) ensureAndAutoJoin(ctx context.Context, orgID, userID s
 			warnings = append(warnings, channelsWarning{ChannelID: channelID, Reason: "join_failed"})
 			continue
 		}
-		err := slackConversationsJoin(ctx, h.client, botToken, channelID)
+		err := slackConversationsJoin(ctx, h.client, orgID, botToken, channelID)
 		if err == nil {
 			continue
 		}

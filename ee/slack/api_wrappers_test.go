@@ -29,7 +29,7 @@ func TestSlackChatPostMessage_PlainText(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": "1700000000.000001"})
 	})
 
-	ts, err := slackChatPostMessage(context.Background(), srv.Client(), "xoxb-test",
+	ts, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test",
 		slackMessageParams{Channel: "C1", Text: "hello"})
 	if err != nil {
 		t.Fatalf("slackChatPostMessage: %v", err)
@@ -57,7 +57,7 @@ func TestSlackChatPostMessage_MarkdownBody_SendsBlocksAndTextFallback(t *testing
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "ts": "1700000000.000002"})
 	})
 
-	_, err := slackChatPostMessage(context.Background(), srv.Client(), "xoxb-test", slackMessageParams{
+	_, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{
 		Channel: "C1", ThreadTS: "1699999999.000001", Text: "fallback", MarkdownBody: "**bold**",
 	})
 	if err != nil {
@@ -90,7 +90,7 @@ func TestSlackChatPostMessage_MarkdownTooLong_ReturnsTypedError_NoRequestSent(t 
 	})
 
 	over := strings.Repeat("a", slackMarkdownBodyMaxRunes+1)
-	_, err := slackChatPostMessage(context.Background(), srv.Client(), "xoxb-test",
+	_, err := slackChatPostMessage(context.Background(), srv.Client(), "org-1", "xoxb-test",
 		slackMessageParams{Channel: "C1", Text: "t", MarkdownBody: over})
 	if err == nil {
 		t.Fatal("slackChatPostMessage with an over-cap markdown body should error")
@@ -116,7 +116,7 @@ func TestSlackChatUpdate_SendsTSNotThreadTS_AndPairsBlocksWithText(t *testing.T)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
 
-	err := slackChatUpdate(context.Background(), srv.Client(), "xoxb-test", slackMessageParams{
+	err := slackChatUpdate(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{
 		Channel: "C1", ThreadTS: "1700000000.000003", Text: "edited", MarkdownBody: "*edited*",
 	})
 	if err != nil {
@@ -142,7 +142,7 @@ func TestSlackChatUpdate_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "message_not_found"})
 	})
-	err := slackChatUpdate(context.Background(), srv.Client(), "xoxb-test", slackMessageParams{Channel: "C1", ThreadTS: "1.0", Text: "x"})
+	err := slackChatUpdate(context.Background(), srv.Client(), "org-1", "xoxb-test", slackMessageParams{Channel: "C1", ThreadTS: "1.0", Text: "x"})
 	if err == nil {
 		t.Fatal("slackChatUpdate with {ok:false} should return an error")
 	}
@@ -157,7 +157,7 @@ func TestSlackReactionsAdd_AlreadyReacted_TreatedAsSuccess(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "already_reacted"})
 	})
-	if err := slackReactionsAdd(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0", "eyes"); err != nil {
+	if err := slackReactionsAdd(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "eyes"); err != nil {
 		t.Errorf("slackReactionsAdd(already_reacted) = %v; want nil", err)
 	}
 }
@@ -174,7 +174,7 @@ func TestSlackReactionsAdd_OtherError_Surfaces(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_name"})
 	})
-	if err := slackReactionsAdd(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0", "eyes"); err == nil {
+	if err := slackReactionsAdd(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "eyes"); err == nil {
 		t.Fatal("slackReactionsAdd(invalid_name) should return an error")
 	}
 }
@@ -226,7 +226,7 @@ func withLoweredRepliesCap(t *testing.T, n int) {
 // truncated.
 func TestSlackConversationsReplies_PaginatesAcrossPages(t *testing.T) {
 	srv := fakePaginatedReplies(t, 25, 10)
-	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "xoxb-test", "C1", "1600000000.000000", 0)
+	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1600000000.000000", 0)
 	if err != nil {
 		t.Fatalf("slackConversationsReplies: %v", err)
 	}
@@ -243,7 +243,7 @@ func TestSlackConversationsReplies_PaginatesAcrossPages(t *testing.T) {
 func TestSlackConversationsReplies_CapTruncates(t *testing.T) {
 	withLoweredRepliesCap(t, 15)
 	srv := fakePaginatedReplies(t, 40, 10)
-	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "xoxb-test", "C1", "1600000000.000000", 0)
+	got, truncated, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1600000000.000000", 0)
 	if err != nil {
 		t.Fatalf("slackConversationsReplies: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestSlackConversationsReplies_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "thread_not_found"})
 	})
-	_, _, err := slackConversationsReplies(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0", 0)
+	_, _, err := slackConversationsReplies(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", 0)
 	if err == nil {
 		t.Fatal("slackConversationsReplies with {ok:false} should return an error")
 	}
@@ -291,7 +291,7 @@ func TestSlackConversationsHistory_ParamsAndBounds(t *testing.T) {
 		})
 	})
 
-	got, err := slackConversationsHistory(context.Background(), srv.Client(), "xoxb-test", slackConversationsHistoryParams{
+	got, err := slackConversationsHistory(context.Background(), srv.Client(), "org-1", "xoxb-test", slackConversationsHistoryParams{
 		Channel: "C1", Latest: "1700000000.000000", Limit: 5,
 	})
 	if err != nil {
@@ -315,7 +315,7 @@ func TestSlackConversationsHistory_OldestInclusive(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "messages": []map[string]any{}})
 	})
-	if _, err := slackConversationsHistory(context.Background(), srv.Client(), "xoxb-test", slackConversationsHistoryParams{
+	if _, err := slackConversationsHistory(context.Background(), srv.Client(), "org-1", "xoxb-test", slackConversationsHistoryParams{
 		Channel: "C1", Oldest: "1700000000.000000", Inclusive: true,
 	}); err != nil {
 		t.Fatalf("slackConversationsHistory: %v", err)
@@ -333,7 +333,7 @@ func TestSlackChatGetPermalink_GoldenDecode(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "permalink": "https://acme.slack.com/archives/C1/p1700000000000000"})
 	})
-	got, err := slackChatGetPermalink(context.Background(), srv.Client(), "xoxb-test", "C1", "1700000000.000000")
+	got, err := slackChatGetPermalink(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1700000000.000000")
 	if err != nil {
 		t.Fatalf("slackChatGetPermalink: %v", err)
 	}
@@ -347,7 +347,7 @@ func TestSlackChatGetPermalink_NotOk(t *testing.T) {
 	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "message_not_found"})
 	})
-	_, err := slackChatGetPermalink(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0")
+	_, err := slackChatGetPermalink(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0")
 	if err == nil {
 		t.Fatal("slackChatGetPermalink with {ok:false} should return an error")
 	}
@@ -382,7 +382,7 @@ func TestSlackAssistantSetStatus_GoldenParams(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
-	err := slackAssistantSetStatus(context.Background(), srv.Client(), "xoxb-test", "C1", "1700000000.000000",
+	err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1700000000.000000",
 		"is thinking...", []string{"step one, with a comma", "step two"})
 	if err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
@@ -410,7 +410,7 @@ func TestSlackAssistantSetStatus_EmptyStatusClears(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 	})
-	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0", "", nil); err != nil {
+	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "", nil); err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
 	}
 }
@@ -434,7 +434,7 @@ func TestSlackAssistantSetStatus_TruncatesLoadingMessagesOver10(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("step %d", i)
 	}
-	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "xoxb-test", "C1", "1.0", "working", many); err != nil {
+	if err := slackAssistantSetStatus(context.Background(), srv.Client(), "org-1", "xoxb-test", "C1", "1.0", "working", many); err != nil {
 		t.Fatalf("slackAssistantSetStatus: %v", err)
 	}
 }
@@ -454,7 +454,7 @@ func TestSlackFilesInfo_GoldenDecode(t *testing.T) {
 			},
 		})
 	})
-	got, err := slackFilesInfo(context.Background(), srv.Client(), "xoxb-test", "F1")
+	got, err := slackFilesInfo(context.Background(), srv.Client(), "org-1", "xoxb-test", "F1")
 	if err != nil {
 		t.Fatalf("slackFilesInfo: %v", err)
 	}
@@ -485,10 +485,13 @@ func TestSlackFileDownload_StreamsBodyWithBearerAuth(t *testing.T) {
 }
 
 // TestSlackFileDownload_HTTPError surfaces a non-2xx response as an error
-// without writing partial garbage to w.
+// without writing partial garbage to w, and the error carries an excerpt of
+// the response body rather than the body itself.
 func TestSlackFileDownload_HTTPError(t *testing.T) {
+	const page = "<html><body>Forbidden</body></html>"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(page))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -496,6 +499,31 @@ func TestSlackFileDownload_HTTPError(t *testing.T) {
 	err := slackFileDownload(context.Background(), srv.Client(), "xoxb-test", srv.URL+"/x.txt", &buf)
 	if err == nil {
 		t.Fatal("slackFileDownload with HTTP 403 should return an error")
+	}
+	if want := fmt.Sprintf("slack file download: http 403: non-JSON body, %d bytes", len(page)); err.Error() != want {
+		t.Errorf("err = %q; want %q", err.Error(), want)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("wrote %d bytes to w on an error response; want none", buf.Len())
+	}
+}
+
+// TestSlackUploadFileBytes_HTTPError surfaces a non-2xx upload response as
+// an error carrying an excerpt of the body: a JSON error body contributes
+// its error message, never the raw JSON.
+func TestSlackUploadFileBytes_HTTPError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"ok":false,"error":"upload_failed"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	err := slackUploadFileBytes(context.Background(), srv.Client(), srv.URL+"/upload/v1/XYZ", strings.NewReader("x"))
+	if err == nil {
+		t.Fatal("slackUploadFileBytes with HTTP 500 should return an error")
+	}
+	if want := "slack file upload: http 500: upload_failed"; err.Error() != want {
+		t.Errorf("err = %q; want %q", err.Error(), want)
 	}
 }
 
@@ -541,7 +569,7 @@ func TestSlackFilesUpload_FullFlow(t *testing.T) {
 	slackAPIBase = srv.URL
 	t.Cleanup(func() { slackAPIBase = orig })
 
-	fileID, err := slackFilesUpload(context.Background(), srv.Client(), "xoxb-test", slackFileUploadParams{
+	fileID, err := slackFilesUpload(context.Background(), srv.Client(), "org-1", "xoxb-test", slackFileUploadParams{
 		Filename: "report.txt", Length: 11, Title: "Report", Channel: "C1", ThreadTS: "1700000000.000000",
 		Body: strings.NewReader("hello world"),
 	})
@@ -575,7 +603,7 @@ func TestSlackFilesUpload_GetUploadURLFails(t *testing.T) {
 		hits++
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "invalid_length"})
 	})
-	_, err := slackFilesUpload(context.Background(), srv.Client(), "xoxb-test", slackFileUploadParams{
+	_, err := slackFilesUpload(context.Background(), srv.Client(), "org-1", "xoxb-test", slackFileUploadParams{
 		Filename: "x.txt", Length: 1, Channel: "C1", Body: strings.NewReader("x"),
 	})
 	if err == nil {

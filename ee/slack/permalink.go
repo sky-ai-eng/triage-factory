@@ -106,7 +106,7 @@ func (r *PermalinkResolver) resolvePermalink(ctx context.Context, ws slackstore.
 		return
 	}
 
-	permalink, err := slackChatGetPermalink(ctx, r.client, botToken, channel, rootTS)
+	permalink, err := slackChatGetPermalink(ctx, r.client, ws.OrgID, botToken, channel, rootTS)
 	if err != nil {
 		slackLog.Warn("permalink: chat.getPermalink failed", "workspace", ws.WorkspaceID, "entity", entityID, "error", err)
 		return

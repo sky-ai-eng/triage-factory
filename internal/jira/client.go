@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -338,8 +339,13 @@ func (cfg Config) NewAPIRequest(ctx context.Context, method, path string, body i
 // Client wraps the Jira REST API. The API version and auth scheme are
 // carried by cfg — see Config and the named constructors.
 type Client struct {
-	cfg     Config
-	http    *http.Client
+	cfg  Config
+	http *http.Client
+	// orgID is the org this client makes its calls for, the org_id every
+	// request is counted under (upstream.Record). The resolver sets it; a
+	// client built directly with NewClient, outside an org context, leaves it
+	// empty.
+	orgID   string
 	selfMu  sync.RWMutex
 	selfVal *currentUserResponse
 }
@@ -354,6 +360,14 @@ func NewClient(cfg Config) *Client {
 		cfg:  cfg,
 		http: telemetry.TracedHTTPClient(15*time.Second, "jira"),
 	}
+}
+
+// newOrgClient is NewClient for a client that makes its calls for orgID, so
+// its requests are counted under that org.
+func newOrgClient(orgID string, cfg Config) *Client {
+	c := NewClient(cfg)
+	c.orgID = orgID
+	return c
 }
 
 // apiURL builds a versioned REST URL for this client's backend, e.g.
@@ -1061,7 +1075,7 @@ func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary
 
 	// If parent field failed on Server/DC, retry with Epic Link
 	if err != nil && parentKey != "" {
-		if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
+		if parentRejected(err) {
 			delete(fields, "parent")
 			epicField, epicErr := c.epicLinkField(ctx)
 			if epicErr == nil && epicField != "" {
@@ -1173,7 +1187,7 @@ func (c *Client) SetParent(ctx context.Context, issueKey, parentKey string) erro
 	}
 
 	// Fall back to Epic Link if the parent field failed
-	if strings.Contains(err.Error(), "gh.epic.error") || strings.Contains(err.Error(), "parent") {
+	if parentRejected(err) {
 		epicField, epicErr := c.epicLinkField(ctx)
 		if epicErr == nil && epicField != "" {
 			return c.put(ctx, url, map[string]any{"fields": map[string]any{
@@ -1183,6 +1197,17 @@ func (c *Client) SetParent(ctx context.Context, issueKey, parentKey string) erro
 	}
 
 	return err
+}
+
+// parentRejected reports whether err is Jira refusing the parent field — the
+// Server/DC answer for an Epic parent, which takes the Epic Link custom field
+// instead. Jira names the field in the response body, not the status.
+func parentRejected(err error) bool {
+	var se *StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	return strings.Contains(se.Body, "gh.epic.error") || strings.Contains(se.Body, "parent")
 }
 
 // epicLinkField discovers the custom field ID for Epic Link on Server/DC.
@@ -1305,25 +1330,23 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 }
 
 // doRequest issues method+url (with an optional JSON body) and returns the
-// final response's status and fully-read body after any rate-limit-aware
-// retries. It is the shared core behind get/put/postJSON/post.
+// final response's status and body after any retries. It is the shared core
+// behind get/put/postJSON/post, each of which turns a failure status into a
+// *StatusError. A success body is read whole; an error body is read capped at
+// upstream.MaxErrorBody. A failure with no response — request build,
+// authorize, transport (after retries), body read, or a ctx cancellation
+// during backoff — is returned as-is and picks up that one helper's wrapping
+// prefix (request %s / PUT %s / POST %s).
 //
-// Each of those keeps its own status-to-error mapping, so the "returned <code>:
-// <body>" strings a caller matches on (e.g. CreateIssue's parent/epic-link
-// fallback) are unchanged. A failure with no response — request build,
-// authorize, transport (after retries), body read, or a ctx cancellation during
-// backoff — is returned as-is and picks up that one helper's wrapping prefix
-// (request %s / PUT %s / POST %s), rather than the assorted per-call-site
-// wording the inlined versions used (raw errors, "read response", ...); no
-// caller inspects those.
-//
-// idempotent selects the retry policy (see retryableStatus): a GET retries a
-// 429 or a 5xx; a mutation (PUT/POST) retries only a 429 — a throttled request
-// was rejected, not processed, so replaying it can't double a side effect,
-// whereas a 5xx mutation might have partially applied and is surfaced instead.
-// The body is buffered as bytes so each attempt gets a fresh reader (an
-// http.Request body isn't reusable across attempts). Every wait is ctx-aware,
-// so the caller's deadline bounds total blocking regardless of the retry cap.
+// Every attempt is classified and counted (upstream.Record) against the
+// client's org. idempotent selects the retry policy (upstream.Retryable): a
+// rate limit is retried for any request — a throttled request was rejected,
+// not processed, so replaying it can't double a side effect — while a
+// transient failure (a 5xx, a dropped connection) is retried only for an
+// idempotent request, since a mutation might have partially applied. The body
+// is buffered as bytes so each attempt gets a fresh reader (an http.Request
+// body isn't reusable across attempts). Every wait is ctx-aware, so the
+// caller's deadline bounds total blocking regardless of the retry cap.
 func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
 	for attempt := 1; ; attempt++ {
 		var reader io.Reader
@@ -1341,23 +1364,38 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 
 		resp, err := c.http.Do(req)
 		if err != nil {
-			// A transport error (reset, timeout) is retryable for an idempotent
-			// request; a mutation might have reached Jira, so it is returned as-is.
-			if idempotent && attempt <= maxRateLimitRetries && ctx.Err() == nil {
-				if serr := awaitRetry(ctx, attempt, backoffDuration(attempt), "transport_error"); serr != nil {
-					return 0, nil, serr
-				}
-				continue
+			class, counted := upstream.ClassifyTransport(ctx, err)
+			if !counted {
+				return 0, nil, err
 			}
-			return 0, nil, err
+			upstream.Record(ctx, upstream.Jira, c.orgID, class)
+			if !upstream.Retryable(class, idempotent) || attempt > maxRateLimitRetries {
+				return 0, nil, err
+			}
+			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
+				return 0, nil, serr
+			}
+			continue
 		}
 
-		data, rerr := readAllClose(resp)
+		var data []byte
+		var rerr error
+		if resp.StatusCode >= 300 {
+			data, rerr = upstream.ReadErrorBody(resp.Body)
+		} else {
+			data, rerr = io.ReadAll(resp.Body)
+		}
+		_ = resp.Body.Close()
 		if rerr != nil {
+			if class, counted := upstream.ClassifyTransport(ctx, rerr); counted {
+				upstream.Record(ctx, upstream.Jira, c.orgID, class)
+			}
 			return 0, nil, rerr
 		}
 
-		if !retryableStatus(resp.StatusCode, idempotent) || attempt > maxRateLimitRetries {
+		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
+		upstream.Record(ctx, upstream.Jira, c.orgID, class)
+		if !upstream.Retryable(class, idempotent) || attempt > maxRateLimitRetries {
 			return resp.StatusCode, data, nil
 		}
 
@@ -1369,10 +1407,16 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			// slot) waiting it out.
 			return resp.StatusCode, data, nil
 		}
-		if serr := awaitRetry(ctx, attempt, wait, "throttled"); serr != nil {
+		if serr := c.retryAfter(ctx, attempt, class, wait, "throttled"); serr != nil {
 			return 0, nil, serr
 		}
 	}
+}
+
+// retryAfter counts the decision to retry and then waits it out.
+func (c *Client) retryAfter(ctx context.Context, attempt int, class upstream.Class, wait time.Duration, reason string) error {
+	upstream.RecordRetry(ctx, upstream.Jira, c.orgID, class)
+	return awaitRetry(ctx, attempt, wait, reason)
 }
 
 // awaitRetry blocks out one backoff between attempts under its own span,
@@ -1384,7 +1428,7 @@ func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason str
 		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(reason)))
 	defer span.End()
 
-	if err := sleepCtx(ctx, wait); err != nil {
+	if err := upstream.Sleep(ctx, wait); err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
@@ -1394,8 +1438,10 @@ func awaitRetry(ctx context.Context, attempt int, wait time.Duration, reason str
 
 // StatusError is a non-2xx Jira response, carrying the status alongside the
 // message so callers can branch on *which* failure they got rather than
-// pattern-matching a string. Its Error() text is the same line these paths
-// have always produced.
+// pattern-matching a string. Body is the response body, capped at
+// upstream.MaxErrorBody, for callers that parse Jira's error detail; the
+// message carries only an excerpt of it (upstream.Excerpt), because it is
+// logged.
 //
 // The distinction that motivates it: a 404 from the issue endpoint is Jira
 // stating that an issue does not exist, which is a far stronger claim than an
@@ -1407,11 +1453,25 @@ type StatusError struct {
 	URL    string
 	Status int
 	Body   string
+	Class  upstream.Class
+}
+
+func newStatusError(method, url string, status int, body []byte) *StatusError {
+	return &StatusError{
+		Method: method,
+		URL:    url,
+		Status: status,
+		Body:   string(body),
+		Class:  upstream.ClassifyResponse(status, nil, body),
+	}
 }
 
 func (e *StatusError) Error() string {
-	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.URL, e.Status, e.Body)
+	return fmt.Sprintf("%s %s returned %d: %s", e.Method, e.URL, e.Status, upstream.Excerpt([]byte(e.Body)))
 }
+
+// UpstreamClass implements upstream.Classified.
+func (e *StatusError) UpstreamClass() upstream.Class { return e.Class }
 
 // IsNotFound reports whether err is a Jira 404. Jira also answers 404 for an
 // issue the credential may not see, which it does deliberately so existence
@@ -1429,7 +1489,7 @@ func (c *Client) get(ctx context.Context, url string) ([]byte, error) {
 		return nil, fmt.Errorf("request %s: %w", url, err)
 	}
 	if status != http.StatusOK {
-		return nil, &StatusError{Method: "GET", URL: url, Status: status, Body: string(body)}
+		return nil, newStatusError("GET", url, status, body)
 	}
 	return body, nil
 }
@@ -1444,7 +1504,7 @@ func (c *Client) put(ctx context.Context, url string, payload any) error {
 		return fmt.Errorf("PUT %s: %w", url, err)
 	}
 	if status >= 300 {
-		return fmt.Errorf("PUT %s returned %d: %s", url, status, string(body))
+		return newStatusError("PUT", url, status, body)
 	}
 	return nil
 }
@@ -1464,7 +1524,7 @@ func (c *Client) postJSON(ctx context.Context, url string, payload any, idempote
 		return nil, fmt.Errorf("POST %s: %w", url, err)
 	}
 	if status >= 300 {
-		return nil, fmt.Errorf("POST %s returned %d: %s", url, status, string(body))
+		return nil, newStatusError("POST", url, status, body)
 	}
 	return body, nil
 }
@@ -1479,7 +1539,7 @@ func (c *Client) post(ctx context.Context, url string, payload any) error {
 		return fmt.Errorf("POST %s: %w", url, err)
 	}
 	if status >= 300 {
-		return fmt.Errorf("POST %s returned %d: %s", url, status, string(body))
+		return newStatusError("POST", url, status, body)
 	}
 	return nil
 }

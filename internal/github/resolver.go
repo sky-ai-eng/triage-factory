@@ -344,9 +344,11 @@ func (r *resolver) RateLimitFor(orgID string) (RateLimitState, bool) {
 // resolver entry point (ClientFor, ClientForRepoWithIdentity,
 // ClientForRepoScoped, tier3PATClient) uses, so every credential tier —
 // App installation token or PAT — feeds the same per-org rate-limit
-// registry without each call site remembering to wire it.
+// registry, and counts its requests under the org, without each call site
+// remembering to wire it.
 func (r *resolver) newObservedClient(orgID, base, token string) *Client {
 	c := NewClient(base, token)
+	c.orgID = orgID
 	c.SetRateLimitObserver(func(s RateLimitState) {
 		r.rateLimits.record(orgID, s)
 	})

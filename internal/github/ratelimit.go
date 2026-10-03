@@ -10,13 +10,16 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/trace"
 )
 
 const (
 	// maxRateLimitRetries bounds how many additional attempts an idempotent
-	// request (GET, or the GraphQL query POST) gets after hitting a 429 or a
-	// secondary-limit 403, on top of the initial attempt.
+	// request (GET, or the GraphQL query POST) gets after a rate limit or a
+	// transient failure, on top of the initial attempt. Both causes draw on
+	// the same budget, so one call never makes more than
+	// 1+maxRateLimitRetries attempts.
 	maxRateLimitRetries = 3
 
 	// maxRateLimitWait caps how long a single call will sleep for a rate-limit
@@ -30,7 +33,18 @@ const (
 	// when a 429/secondary-403 carries no Retry-After header. It doubles per
 	// retry and is capped at maxRateLimitWait.
 	rateLimitBackoffBase = 1 * time.Second
+
+	// transientBackoffMax caps the backoff before retrying a transient
+	// failure. A transient failure carries no reset time to wait for, so the
+	// cap is the poll-cycle scale, not the rate-limit one.
+	transientBackoffMax = 30 * time.Second
 )
+
+// transientBackoffBase is the first sleep before retrying a 5xx, a 408, a
+// non-JSON 403 or a dropped connection: 1s, 2s, 4s. It is a var, not a
+// const, only so tests can shrink it to keep the suite fast; production
+// never reassigns it.
+var transientBackoffBase = 1 * time.Second
 
 // ErrRateLimited is returned when a GitHub rate-limit budget is exhausted:
 // retries for a transient 429/secondary-403 ran out, or a known
@@ -45,6 +59,9 @@ type ErrRateLimited struct {
 func (e *ErrRateLimited) Error() string {
 	return fmt.Sprintf("github: rate limit budget exhausted, resume at %s", e.ResumeAt.Format(time.RFC3339))
 }
+
+// UpstreamClass implements upstream.Classified.
+func (e *ErrRateLimited) UpstreamClass() upstream.Class { return upstream.RateLimited }
 
 // RateLimit returns the primary rate-limit budget from the most recent
 // response that carried x-ratelimit-* headers. ok is false until the first
@@ -131,7 +148,7 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 		span.SetAttributes(telemetry.Outcome("refused"))
 		return &ErrRateLimited{ResumeAt: reset}
 	}
-	if err := sleepCtx(ctx, wait); err != nil {
+	if err := upstream.Sleep(ctx, wait); err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
@@ -144,15 +161,16 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 // These sleeps are why a GitHub call can take five minutes with no slow
 // request in it: untraced, the caller's span just takes minutes while
 // every transport span inside it is fast. The attempt number separates
-// "one long wait" from "five short ones". Neither outcome is an error
-// status — waiting out a rate limit is the client working, and a
+// "one long wait" from "five short ones", and the disposition separates a
+// rate limit from a transient failure. Neither outcome is an error
+// status — waiting out a rate limit or a 503 is the client working, and a
 // cancelled wait is the caller leaving.
-func awaitRetry(ctx context.Context, attempt int, wait time.Duration) error {
+func awaitRetry(ctx context.Context, attempt int, class upstream.Class, wait time.Duration) error {
 	ctx, span := tracer.Start(ctx, "github.ratelimit.backoff",
-		trace.WithAttributes(telemetry.Attempt(attempt)))
+		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(string(class))))
 	defer span.End()
 
-	if err := sleepCtx(ctx, wait); err != nil {
+	if err := upstream.Sleep(ctx, wait); err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
@@ -167,9 +185,9 @@ func awaitRetry(ctx context.Context, attempt int, wait time.Duration) error {
 type reqBuilder func() (*http.Request, error)
 
 // doIdempotent sends the request(s) built by build over c.http, retrying a
-// 429 or a rate-limited 403 (primary budget exhausted, or secondary/abuse)
-// per Retry-After or the primary reset (or exponential backoff when neither
-// is present) up to maxRateLimitRetries extra attempts. See doWithRetry.
+// rate limit (a 429, or a 403 that signals an exhausted primary budget or a
+// secondary/abuse limit) or a transient failure up to maxRateLimitRetries extra
+// attempts. See doWithRetry.
 func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Response, error) {
 	return c.doWithRetry(ctx, c.http, true, build)
 }
@@ -178,30 +196,37 @@ func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Resp
 // (POST/PUT/PATCH/DELETE that changes state) must never be silently
 // replayed — a retried mutation could double the side effect — so a
 // rate-limited 429/403 response short-circuits straight into ErrRateLimited
-// instead of being retried. See doWithRetry.
+// and a transient failure is returned as-is. See doWithRetry.
 func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Response, error) {
 	return c.doWithRetry(ctx, c.http, false, build)
 }
 
-// doWithRetry is the shared rate-limit-aware request loop behind every
-// request-core method (request, GetConditional, PostGraphQL, DownloadArtifact
-// — the last supplies its own hc with an extended timeout, everything else
-// passes c.http). For idempotent calls it pre-flights a known exhausted
-// budget (awaitBudget) and retries a 429 or rate-limited 403 (primary budget
-// exhausted via x-ratelimit-remaining: 0, or secondary/abuse) up to
-// maxRateLimitRetries extra attempts — honoring Retry-After when present,
-// else the primary reset time when that's what triggered it, else
-// exponential backoff; every sleep is ctx-aware. Mutations get exactly one
-// attempt: a rate-limited 429/403 returns ErrRateLimited immediately rather
-// than retrying.
+// doWithRetry is the shared request loop behind every request-core method
+// (request, GetConditional, PostGraphQL, DownloadArtifact — the last supplies
+// its own hc with an extended timeout, everything else passes c.http). Every
+// attempt is classified and counted (upstream.Record) against the client's
+// org.
 //
-// A non-rate-limit response (any 2xx, or a 403/429 that doesn't look like
-// rate limiting) is returned to the caller with its body untouched and still
-// open, so callers that stream (DownloadArtifact) or need the raw status
-// (GetConditional's 304) keep their existing post-processing unchanged. Only
-// the rate-limit-candidate branch reads the (small, JSON) error body itself;
-// when that turns out to be a genuine 403 rather than rate limiting, the
-// already-drained body is replayed onto the response before returning it.
+// For idempotent calls it pre-flights a known exhausted budget (awaitBudget)
+// and retries up to maxRateLimitRetries extra attempts:
+//   - a rate limit — a 429, or a 403 carrying Retry-After,
+//     x-ratelimit-remaining: 0, or a secondary-limit body — honoring
+//     Retry-After when present, else the primary reset time when that's what
+//     triggered it, else exponential backoff;
+//   - a transient failure — a dropped connection, a 5xx, a 408, or a 403
+//     whose body is not JSON (a proxy in front of GHES, not GitHub) — after
+//     transient backoff.
+//
+// Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
+// returns ErrRateLimited immediately, and a transient failure is returned to
+// the caller unchanged.
+//
+// Any response that isn't retried is returned to the caller. A success keeps
+// its body untouched and still open, so callers that stream
+// (DownloadArtifact) or need the raw status (GetConditional's 304) keep their
+// own post-processing. An error response's body has already been read,
+// capped at upstream.MaxErrorBody, to classify it, and is replayed onto the
+// response for the caller.
 func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bool, build reqBuilder) (*http.Response, error) {
 	if idempotent {
 		if err := c.awaitBudget(ctx); err != nil {
@@ -221,57 +246,86 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		}
 		resp, err := hc.Do(req)
 		if err != nil {
-			return nil, err
+			class, counted := upstream.ClassifyTransport(ctx, err)
+			if !counted {
+				return nil, err
+			}
+			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+			if !upstream.Retryable(class, idempotent) || attempt >= maxAttempts {
+				return nil, err
+			}
+			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		c.recordRateLimit(resp.Header)
 
-		if !rateLimitCandidate(resp.StatusCode) {
+		if resp.StatusCode < 400 {
+			upstream.Record(ctx, upstream.GitHub, c.orgID, upstream.OK)
 			return resp, nil
 		}
 
-		retryAfter, hasRetryAfter := parseRetryAfter(resp.Header)
-		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
-		data, readErr := readAllClose(resp)
+		data, readErr := upstream.ReadErrorBody(resp.Body)
+		resp.Body.Close()
 		if readErr != nil {
+			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
+				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+			}
 			return nil, readErr
 		}
+		resp.Body = newBodyReader(data)
 
-		if resp.StatusCode == http.StatusForbidden && !hasRetryAfter && !primaryExhausted && !isSecondaryRateLimitBody(data) {
-			// A genuine 403 (auth/permissions), not rate limiting — replay the
-			// already-drained body so the caller's normal handling sees it.
-			resp.Body = newBodyReader(data)
-			return resp, nil
+		retryAfter, hasRetryAfter := upstream.RetryAfter(resp.Header)
+		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
+		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
+		if resp.StatusCode == http.StatusForbidden && (hasRetryAfter || primaryExhausted || isSecondaryRateLimitBody(data)) {
+			class = upstream.RateLimited
 		}
+		upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 
-		wait := retryAfter
-		switch {
-		case hasRetryAfter:
-			// wait already set.
-		case primaryExhausted && !primaryReset.IsZero() && time.Until(primaryReset) > 0:
-			// GitHub told us exactly when the primary budget resets — use it
-			// instead of a blind guess.
-			wait = time.Until(primaryReset)
+		switch class {
+		case upstream.RateLimited:
+			wait := retryAfter
+			switch {
+			case hasRetryAfter:
+				// wait already set.
+			case primaryExhausted && !primaryReset.IsZero() && time.Until(primaryReset) > 0:
+				// GitHub told us exactly when the primary budget resets — use it
+				// instead of a blind guess.
+				wait = time.Until(primaryReset)
+			default:
+				wait = upstream.Backoff(attempt, rateLimitBackoffBase, maxRateLimitWait)
+			}
+
+			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts {
+				return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
+			}
+			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
+				return nil, err
+			}
+		case upstream.Transient:
+			if !idempotent || attempt >= maxAttempts {
+				return resp, nil
+			}
+			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
+				return nil, err
+			}
 		default:
-			wait = backoffDuration(attempt)
-		}
-
-		if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts {
-			return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
-		}
-		if err := awaitRetry(ctx, attempt, wait); err != nil {
-			return nil, err
+			return resp, nil
 		}
 	}
 }
 
-// rateLimitCandidate reports whether status is one GitHub might use to
-// signal rate limiting — 429 always, 403 sometimes (both the classic primary
-// budget exhaustion and secondary/abuse limits). A 403 candidate is only
-// actually treated as rate limiting once its Retry-After header, its
-// x-ratelimit-remaining: 0 header, or its body text confirms it (see
-// doWithRetry).
-func rateLimitCandidate(status int) bool {
-	return status == http.StatusTooManyRequests || status == http.StatusForbidden
+// retryAfter counts the decision to retry and then waits it out.
+func (c *Client) retryAfter(ctx context.Context, attempt int, class upstream.Class, wait time.Duration) error {
+	upstream.RecordRetry(ctx, upstream.GitHub, c.orgID, class)
+	return awaitRetry(ctx, attempt, class, wait)
+}
+
+// transientBackoff is the wait before retrying a transient failure.
+func transientBackoff(attempt int) time.Duration {
+	return upstream.Backoff(attempt, transientBackoffBase, transientBackoffMax)
 }
 
 // primaryBudgetExhausted reports whether resp signals the primary rate-limit
@@ -298,68 +352,6 @@ func primaryBudgetExhausted(h http.Header) (reset time.Time, exhausted bool) {
 func isSecondaryRateLimitBody(body []byte) bool {
 	b := bytes.ToLower(body)
 	return bytes.Contains(b, []byte("secondary rate limit")) || bytes.Contains(b, []byte("abuse detection mechanism"))
-}
-
-// parseRetryAfter reads the Retry-After header, which GitHub sends as either
-// delay-seconds or an HTTP-date (RFC 7231 §7.1.3). A value that resolves to
-// zero or negative — a non-positive delay-seconds count, or an HTTP-date
-// that's already past (a stale/expired header, or clock skew between us and
-// GitHub) — is reported as absent (ok=false) rather than honored as "wait
-// zero", so the caller falls back to backoffDuration's sane minimum instead
-// of retrying with no pause at all.
-func parseRetryAfter(h http.Header) (time.Duration, bool) {
-	v := h.Get("Retry-After")
-	if v == "" {
-		return 0, false
-	}
-	if secs, err := strconv.Atoi(v); err == nil {
-		if secs <= 0 {
-			return 0, false
-		}
-		return time.Duration(secs) * time.Second, true
-	}
-	if t, err := http.ParseTime(v); err == nil {
-		if wait := time.Until(t); wait > 0 {
-			return wait, true
-		}
-		return 0, false
-	}
-	return 0, false
-}
-
-// backoffDuration is the exponential backoff used when a rate-limited
-// response carries no Retry-After: 1s, 2s, 4s, ... capped at maxRateLimitWait.
-func backoffDuration(attempt int) time.Duration {
-	d := rateLimitBackoffBase * time.Duration(1<<uint(attempt-1))
-	if d > maxRateLimitWait || d <= 0 {
-		return maxRateLimitWait
-	}
-	return d
-}
-
-// sleepCtx sleeps for d or returns ctx.Err() if ctx is done first, so every
-// rate-limit wait aborts immediately on cancellation instead of blocking to
-// the end of the sleep.
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
-}
-
-// readAllClose reads resp.Body to completion and closes it, for the small
-// JSON error bodies a rate-limit-candidate response carries.
-func readAllClose(resp *http.Response) ([]byte, error) {
-	data, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return data, err
 }
 
 // newBodyReader wraps already-read bytes as a Response.Body replacement, so

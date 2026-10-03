@@ -204,7 +204,7 @@ func (c *appConnection) serveOnce(ctx context.Context, stores db.Stores, pipelin
 		return time.Time{}, errors.New("app token not configured")
 	}
 
-	url, err := slackConnectionsOpen(ctx, client, appToken)
+	url, err := slackConnectionsOpen(ctx, client, c.orgID, appToken)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("apps.connections.open: %w", err)
 	}

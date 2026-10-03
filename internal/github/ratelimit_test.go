@@ -380,8 +380,8 @@ func TestGet_ContextCancelledDuringBackoffSleep(t *testing.T) {
 // initial + maxRateLimitRetries retries) and returns *ErrRateLimited rather
 // than retrying forever. A small constant Retry-After keeps the wait bounded
 // and the test fast — the bound under test is the attempt count, not backoff
-// timing (a non-positive Retry-After is deliberately NOT used here: it's no
-// longer honored as "wait zero", see TestParseRetryAfter_NonPositiveNotHonored).
+// timing (a non-positive Retry-After is deliberately NOT used here: it's not
+// honored as "wait zero", see internal/upstream's TestRetryAfter).
 func TestGet_ExhaustsRetriesThenErrRateLimited(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -527,33 +527,6 @@ func TestPostGraphQL_RetriesOn429(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Errorf("upstream requests = %d, want exactly 2", got)
-	}
-}
-
-// TestParseRetryAfter_NonPositiveNotHonored pins the fix for a hot-loop risk:
-// a non-positive delay-seconds value, or an HTTP-date that's already in the
-// past (a stale header, or clock skew between us and GitHub), must not be
-// honored as "wait zero" — that would make doWithRetry spin immediately
-// against the API on every bounded retry instead of backing off. Both forms
-// report ok=false so the caller falls back to backoffDuration's sane minimum.
-func TestParseRetryAfter_NonPositiveNotHonored(t *testing.T) {
-	cases := []struct {
-		name string
-		v    string
-	}{
-		{"zero seconds", "0"},
-		{"negative seconds", "-5"},
-		{"http-date in the past", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			h := http.Header{}
-			h.Set("Retry-After", tc.v)
-			wait, ok := parseRetryAfter(h)
-			if ok {
-				t.Errorf("parseRetryAfter(%q) = (%v, true), want ok=false so the caller falls back to backoff", tc.v, wait)
-			}
-		})
 	}
 }
 

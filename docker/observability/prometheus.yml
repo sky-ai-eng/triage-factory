@@ -13,6 +13,16 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alerting rules, from docker/observability/rules/ mounted read-only. A glob,
+# so a new rules file in that directory is loaded without editing this one.
+# There is no `alerting:` block: delivery is per deployment, so a firing alert
+# shows on the /alerts page and as an ALERTS series and goes nowhere else
+# until you add one that points at your Alertmanager. Prometheus reads rule
+# files at start and on reload, not on change, so an edit takes effect after
+# `docker compose restart prometheus`.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   # TF pods. DNS service discovery rather than static targets, because
   # `docker compose up -d --scale executor=3` gives the `executor` service

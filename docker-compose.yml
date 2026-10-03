@@ -746,11 +746,11 @@ services:
   # TF_TRACES_ENDPOINT on both TF services points at the Tempo below.
   #
   # Editing this out is expected and supported:
-  #   - Own Prometheus? Delete `prometheus`, scrape each pod's :9464, and
-  #     update the Prometheus URL in
-  #     docker/observability/grafana-datasources.yaml. Tempo's span-metrics
-  #     remote_write (docker/observability/tempo.yaml) needs a
-  #     --web.enable-remote-write-receiver target; repoint or drop it.
+  #   - Own Prometheus? Delete `prometheus`, scrape each pod's :9464, load
+  #     the alerting rules in docker/observability/rules/, and update the
+  #     Prometheus URL in docker/observability/grafana-datasources.yaml.
+  #     Tempo's span-metrics remote_write (docker/observability/tempo.yaml)
+  #     needs a --web.enable-remote-write-receiver target; repoint or drop it.
   #   - Own Grafana? Delete `grafana` and copy the two data sources + three
   #     correlations out of that same file, plus the dashboards under
   #     docker/observability/dashboards/ (they reference data sources by the
@@ -802,6 +802,10 @@ services:
       - --enable-feature=exemplar-storage
     volumes:
       - ./docker/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alerting rules, loaded through the rule_files glob in prometheus.yml.
+      # The directory rather than one file, so a new rules file needs no
+      # change here.
+      - ./docker/observability/rules:/etc/prometheus/rules:ro
       - prometheus-data:/prometheus
 
   grafana:

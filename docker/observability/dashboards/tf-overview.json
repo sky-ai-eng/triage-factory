@@ -2774,6 +2774,285 @@
       ],
       "title": "Drops by op",
       "type": "table"
+    },
+    {
+      "collapsed": false,
+      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended. Scraped from each pod's :9464 and summed across pods. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide rule alerts on. `org_id` is the org a request was made for, and is empty for a request made outside an org context (setup and admin handlers).",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "id": 36,
+      "panels": [],
+      "title": "Connections \u2014 upstream systems",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "One count per HTTP attempt, so a call retried twice adds three. `rate_limited`: the upstream asked TF to wait (a 429, or one of GitHub's rate-limit 403s). `transient`: a 5xx, a 408, a transport failure, or a 403 whose body is not a JSON object, which comes from a proxy in front of the upstream rather than the upstream itself. `auth`: a 401, or a JSON 403 that is not a rate limit. `rejected`: any other 4xx, meaning the request itself was wrong.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 113
+      },
+      "id": 37,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (upstream, outcome) (rate(tf_upstream_requests_total[$__rate_interval]))",
+          "legendFormat": "{{upstream}} {{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Requests by outcome",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Decisions to retry, by the outcome of the attempt that caused the retry. GitHub retries a GET or a GraphQL query after a rate limit or a transient failure, and never a mutation; Jira retries a 429 on any call, and a transient failure on an idempotent one; Slack retries one 429 whose Retry-After is 30s or less. A mutation that fails transiently is not retried, so it shows in Requests by outcome and not here. A retry that then succeeds counts here once, and its successful attempt counts as `ok` in Requests by outcome.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 113
+      },
+      "id": 38,
+      "options": {
+        "legend": {
+          "calcs": [
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (upstream, outcome) (rate(tf_upstream_retries_total[$__rate_interval]))",
+          "legendFormat": "{{upstream}} {{outcome}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Retries",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "tf-prometheus"
+      },
+      "description": "Per upstream, the number of orgs with at least one `transient` or `auth` attempt in the last 5 minutes: the numerator of the UpstreamFailingFleetWide rule in docker/observability/rules/tf-connections.yml, over the same window. Requests made outside an org context are not counted. No data means no org is failing.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisPlacement": "auto",
+            "drawStyle": "line",
+            "fillOpacity": 6,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "decimals": 0,
+          "mappings": [],
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 113
+      },
+      "id": 39,
+      "options": {
+        "legend": {
+          "calcs": [
+            "last",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Max",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "tf-prometheus"
+          },
+          "editorMode": "code",
+          "expr": "count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=\"\",outcome=~\"transient|auth\"}[5m])) > 0)",
+          "legendFormat": "{{upstream}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Orgs with failing requests",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",

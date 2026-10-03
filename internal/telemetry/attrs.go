@@ -38,6 +38,7 @@ const (
 	keyJob            = attribute.Key("job")
 	keyQueueWaitMS    = attribute.Key("queue.wait_ms")
 	keyProvider       = attribute.Key("provider")
+	keyUpstream       = attribute.Key("upstream")
 	keyTransport      = attribute.Key("transport")
 	keyOp             = attribute.Key("op")
 	keyReason         = attribute.Key("reason")
@@ -89,6 +90,8 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //     which credential shape resolved; never a hostname or a model id.
 //   - Transport — how a call reached its upstream where a subsystem has
 //     more than one route (the system-LLM path's "subprocess" vs "direct").
+//   - Upstream — which external API system a request went to, i.e.
+//     upstream.Name ("github", "jira", "slack"). Never a host.
 //   - Op — which operation a multiplexed channel carried, where one span
 //     name covers a switch: a capbroker IPC method, a relay
 //     "<namespace>.<op>" pair. Every value is a Go constant in the
@@ -101,6 +104,7 @@ func Disposition(value string) attribute.KeyValue { return keyDisposition.String
 func Runtime(value string) attribute.KeyValue     { return keyRuntime.String(value) }
 func Job(name string) attribute.KeyValue          { return keyJob.String(name) }
 func Provider(name string) attribute.KeyValue     { return keyProvider.String(name) }
+func Upstream(name string) attribute.KeyValue     { return keyUpstream.String(name) }
 func Transport(name string) attribute.KeyValue    { return keyTransport.String(name) }
 func Op(name string) attribute.KeyValue           { return keyOp.String(name) }
 func Workspace(value string) attribute.KeyValue   { return keyWorkspace.String(value) }
