@@ -7,8 +7,8 @@ import (
 	"strings"
 )
 
-// GitError is a git command that failed. Error() renders exactly the text
-// gitRunCtxAuth produced before, so existing text checks keep working.
+// GitError is a failed git command with its arguments, combined output, and
+// underlying process or context error.
 type GitError struct {
 	Args   []string
 	Output string // combined stdout/stderr
