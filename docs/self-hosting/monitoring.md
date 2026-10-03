@@ -271,6 +271,10 @@ operation past its own deadline.
 
 A stalled engagement is parked `open` with park reason `stalled`, and nothing
 retries it: it stays parked until someone sends it a message, which resumes it.
+The exception is a native engagement whose `provider` operation stalled: a
+model provider that sends nothing is an outage rather than a stuck run, so the
+engagement is handed back `requeued_upstream` (below) instead of parked. The
+SDK runtime reports no provider operation, so its stalls all park.
 
 An engagement can also **hand its claim back**: release it with the
 conversation still mid-flight, so the next claim continues the conversation
@@ -282,7 +286,7 @@ some wait before the next claim:
 | `requeued` | The engagement failed before its agent ran: a workspace that would not build, a runtime that would not start. | Setup: 5 in a row. | At once. |
 | `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
 | `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
-| `requeued_upstream` | A native run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own 5 attempts. | Upstream: 27 in a row. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status. Also a native engagement whose provider sent nothing for 150 seconds, and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
 
 A run that spends its upstream budget parks `open` with park reason
 `upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
@@ -302,7 +306,7 @@ what produces these rows, so it must not be what reports them.
 | `tf_claims_oldest_expired_age_seconds` | Seconds past expiry of the oldest such claim. |
 | `tf_claims_oldest_idle_seconds` | The longest any live claim with an unexpired lease has gone without activity, as its last renewal stamped it. A claim that has not renewed yet is not counted. A tool call counts as activity only when it starts and when it returns, so one long tool call can hold this past 600 without being a stall. |
 | `tf_claims_oldest_checkpoint_age_seconds` | The longest any live claim with an unexpired lease has gone since its engagement's workspace was last covered by a stored checkpoint, as its last renewal stamped it: the workspace a hard kill of its executor would lose right now. Covered means a checkpoint written, or one that found the tree unchanged since the last; before the first, the age runs from when the agent loop started. Only native engagements with checkpoints enabled stamp it (see [Workspace checkpoints](scaling.md#workspace-checkpoints)); the others are not counted. |
-| `tf_conversations_deferred{org_id}` | Conversations a `requeued_upstream` hand-back is holding out of the queue until their next attempt: their model provider was unavailable, and they retry on the backoff above. **Zero is the steady state.** An org with none reports no series. |
+| `tf_conversations_deferred{org_id}` | Conversations a `requeued_upstream` hand-back is holding out of the queue until their next attempt: their model provider, or GitHub during workspace setup, was unavailable, and they retry on the backoff above. **Zero is the steady state.** An org with none reports no series. |
 
 Four counters come from the executors rather than the brain, incremented by
 the executor that ran the engagement. They are per process, so `sum` across
@@ -316,17 +320,19 @@ executor pods:
 | `tf_conversations_handed_back_total{outcome, org_id}` | Claims handed back with the conversation still mid-flight, by the hand-back outcome in the table above: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`. A lease takeover (`reaped`) is not counted here. |
 
 The expired-claim alert is on the age rather than the count, because the count
-is expected to flicker and the age is not. Every stall is a conversation that
-stopped and waits for a person, so the stall alert fires on the first one:
+is expected to flicker and the age is not. Every stall but a provider's is a
+conversation that stopped and waits for a person, so the stall alert fires on
+the first one. A provider stall is handed back to retry, and an outage that
+lasts shows in the deferred-conversation rule instead:
 
 ```
 tf_claims_oldest_expired_age_seconds > 120                                      # for 5m: a dead engagement nobody has released
-sum(rate(tf_engagements_stalled_total[15m])) > 0                                # any stall: a conversation parked until someone sends it a message
+sum(rate(tf_engagements_stalled_total{op!="provider"}[15m])) > 0                # any stall: a conversation parked until someone sends it a message
 sum by (op) (rate(tf_engagements_stalled_total[1h]))                            # not an alert: the stall rate by operation
 tf_claims_oldest_checkpoint_age_seconds > 3 * 300                               # for 15m: an engagement whose workspace is not being checkpointed (use your TF_SNAPSHOT_INTERVAL_SEC)
 sum(rate(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0             # checkpoints failing: read the workspace.snapshot spans with reason=checkpoint
 sum by (outcome) (increase(tf_claims_suspend_recoveries_total[1d]))             # not an alert: how often a sleep would have cost a run, and how often it still did
-sum(max_over_time(tf_conversations_deferred[15m])) > 0                          # for 30m, warning: runs have waited half an hour on an unavailable model provider
+sum(max_over_time(tf_conversations_deferred[15m])) > 0                          # for 30m, warning: runs have waited half an hour on an unavailable upstream
 sum by (outcome) (increase(tf_conversations_handed_back_total[1h]))             # not an alert: hand-backs by outcome
 ```
 

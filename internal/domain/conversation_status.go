@@ -189,9 +189,10 @@ const (
 	// its limit with nothing in flight, or an operation outlived its own
 	// deadline. Nothing retries it; a message resumes it.
 	ParkReasonStalled ParkReason = "stalled"
-	// ParkReasonUpstreamUnavailable — the model provider stayed unavailable
-	// through every retry its hand-back budget allows (about four hours of
-	// them). Nothing retries it further; a message resumes it.
+	// ParkReasonUpstreamUnavailable — the model provider, or GitHub while the
+	// engagement set up its workspace, stayed unavailable through every retry
+	// the upstream hand-back budget allows (about four hours of them). Nothing
+	// retries it further; a message resumes it.
 	ParkReasonUpstreamUnavailable ParkReason = "upstream_unavailable"
 )
 

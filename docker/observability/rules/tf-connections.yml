@@ -108,12 +108,13 @@ groups:
             read the pod's WARN "connection lost" lines for each org's
             failure class.
 
-      # Delegated runs have been waiting out an unavailable model provider for
-      # half an hour. A native run whose provider call fails through its own
-      # retries hands its claim back and is tried again on a backoff (30s, 1m,
-      # 2m, 5m, then every 10m) rather than failing; tf_conversations_deferred
-      # counts the conversations waiting for their next attempt. Zero is the
-      # steady state. A brief nonzero is a provider blip the backoff rode out;
+      # Delegated runs have been waiting out an unavailable upstream for half
+      # an hour. A run whose provider call fails through its own retries, or
+      # whose workspace setup cannot reach GitHub, hands its claim back and is
+      # tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) rather
+      # than failing; tf_conversations_deferred counts the conversations
+      # waiting for their next attempt. Zero is the steady state. A brief
+      # nonzero is a provider blip the backoff rode out;
       # a sustained one means an upstream the runs depend on has been
       # unavailable for half an hour, and after about four hours each waiting
       # run parks as upstream_unavailable until someone messages it.

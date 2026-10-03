@@ -480,12 +480,13 @@ func (s *Spawner) handBackOnShutdown(ctx context.Context, park liveParkContext, 
 // 'requeued_upstream' and the conversation waits delay before its next claim.
 // The cause is still there, so a successor claimed at once would only meet it
 // again. lastErr is the provider's last failure, kept on the row so a person
-// looking at a run that is waiting can see what it is waiting out.
+// looking at a run that is waiting can see what it is waiting out. sessionID
+// is the SDK session the snapshot carries, "" for a native engagement.
 //
 // Nothing is written to the transcript: the next engagement continues it from
 // the call that failed, and for the model nothing has happened yet.
-func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, delay time.Duration, lastErr string) (fenced bool) {
-	return s.leaveConversation(ctx, park, "", snapshotReasonUpstream, func(ctx context.Context, park liveParkContext) bool {
+func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, sessionID string, delay time.Duration, lastErr string) (fenced bool) {
+	return s.leaveConversation(ctx, park, sessionID, snapshotReasonUpstream, func(ctx context.Context, park liveParkContext) bool {
 		return s.handBackClaim(ctx, park, db.HandBackUpstream, delay, lastErr)
 	})
 }

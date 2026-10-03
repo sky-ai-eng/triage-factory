@@ -305,6 +305,16 @@ const SessionContinuationNote = "<system-note kind=\"continuation\">\n" +
 	"restart the task.\n" +
 	"</system-note>"
 
+// UpstreamContinuationNote is SessionContinuationNote's twin for a session
+// whose engagement handed the conversation back because the model provider
+// stayed unavailable: the process did not end unexpectedly, the provider
+// went away and came back, and the session holds everything up to the call
+// that failed. Same envelope, same reason to be literal.
+const UpstreamContinuationNote = "<system-note kind=\"continuation\">\n" +
+	"The model provider was unavailable, so this session was paused and has " +
+	"now resumed. Continue the task from where you left off.\n" +
+	"</system-note>"
+
 // Conversation is the durable agent-context row: one row per transcript,
 // regardless of surface (a delegated task conversation, a future interactive
 // session or subagent). Per-engagement execution state lives on Claim. The
@@ -551,13 +561,21 @@ type Conversation struct {
 	// is why those hand-backs count toward neither.
 	//
 	// UpstreamHandBacks counts the same episode's 'requeued_upstream'
-	// hand-backs — engagements that gave the conversation back because the
-	// model provider stayed unavailable through their own retries. It picks
-	// the next wait off the upstream schedule and bounds how many times the
-	// conversation is retried before it parks for a person.
+	// hand-backs — engagements that gave the conversation back because an
+	// upstream (the model provider, or GitHub during workspace setup) stayed
+	// unavailable through their own retries. It picks the next wait off the
+	// upstream schedule and bounds how many times the conversation is retried
+	// before it parks for a person.
 	SetupFailures     int `json:"-"`
 	LostEngagements   int `json:"-"`
 	UpstreamHandBacks int `json:"-"`
+
+	// LastHandBackOutcome is the outcome of the conversation's most recent
+	// released claim, "" when it has none. Filled only by
+	// ConversationQueueStore.ClaimNextConversation, beside the budgets above.
+	// A resuming SDK launch reads it to pick the note that tells the model
+	// why its session paused.
+	LastHandBackOutcome string `json:"-"`
 
 	// OrgID is the conversation's owning tenant. Populated only by
 	// ConversationQueueStore.ClaimNextConversation (a cross-org system claim that returns the row

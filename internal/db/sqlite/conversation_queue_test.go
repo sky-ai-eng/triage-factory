@@ -129,7 +129,7 @@ func TestConversationQueueStore_SQLite_RequeueAndReset(t *testing.T) {
 	}
 
 	// RequeueConversation puts it back to queued (attempts retained), re-claimable.
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, 0, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	reclaimed, err := stores.ConversationQueue.ClaimNextConversation(ctx, sqliteRQExecutorID, sqliteRQBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -183,7 +183,7 @@ func TestConversationQueueStore_SQLite_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, 0, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, org, convID)
@@ -438,7 +438,7 @@ func TestConversationQueueStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", db.RequeueSetupFailure, "x"); err == nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, bogusOrg, "r", db.RequeueSetupFailure, 0, "x"); err == nil {
 		t.Errorf("RequeueConversation with non-local orgID should error")
 	}
 }
@@ -481,7 +481,7 @@ func TestConversationQueueStore_SQLite_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, org, convID, db.RequeueSetupFailure, 0, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.Get(ctx, org, convID)

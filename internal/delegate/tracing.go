@@ -190,7 +190,7 @@ func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 	// The resume path's parent is the claim context, which a renewal cancels
 	// to deliver a stop and the stall watchdog cancels to stop a stall.
 	// Neither is the dispatcher standing down.
-	case parent.Err() != nil && !errors.Is(context.Cause(parent), errStopRequested) && !errors.Is(context.Cause(parent), errStalled):
+	case parent.Err() != nil && !errors.Is(context.Cause(parent), errStopRequested) && !watchdogStopped(parent):
 		return engagementShutdown, true
 	case step.Err() != nil:
 		return cancelOutcome(step), true
@@ -201,10 +201,17 @@ func stopOutcome(parent, step context.Context) (outcome string, ok bool) {
 // cancelOutcome names a stop that ended an engagement before the agent came
 // up: the watchdog's, or anyone else's.
 func cancelOutcome(step context.Context) string {
-	if errors.Is(context.Cause(step), errStalled) {
+	if watchdogStopped(step) {
 		return engagementStalled
 	}
 	return engagementCancelled
+}
+
+// watchdogStopped reports whether the stall watchdog cancelled ctx, with
+// either of its two causes.
+func watchdogStopped(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return errors.Is(cause, errStalled) || errors.Is(cause, errUpstreamStalled)
 }
 
 // endEngagementIfStopped closes conversationID's root when a cancellation is what

@@ -188,7 +188,7 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 	// before it died.
 	opening := agentproc.RunOptions{}
 	if err := s.composeLaunchTurn(ctx, &opening, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 	if _, err := s.conversations.InsertMessageForClaimSystem(ctx, runmode.LocalDefaultOrgID, claimID, &domain.Message{
@@ -208,7 +208,7 @@ func TestComposeLaunchTurn_ResumedSessionSendsTheNoteAndNoOpening(t *testing.T) 
 		OpeningBlocks: opening.OpeningBlocks,
 	}
 	if err := s.composeLaunchTurn(ctx, &resumed, sink, runmode.LocalDefaultOrgID, "r-sdk-reclaim",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the resuming launch: %v", err)
 	}
 
@@ -250,7 +250,7 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 
 	first := agentproc.RunOptions{}
 	if err := s.composeLaunchTurn(ctx, &first, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the opening launch: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestComposeLaunchTurn_ReclaimWithNoSessionResendsTheOpening(t *testing.T) {
 	// the arm that sends the opening owns this field too.
 	second := agentproc.RunOptions{Message: domain.SessionContinuationNote}
 	if err := s.composeLaunchTurn(ctx, &second, sink, runmode.LocalDefaultOrgID, "r-sdk-fresh",
-		runmode.LocalDefaultUserID, openingTestMemories(), openingTestTaskContext); err != nil {
+		runmode.LocalDefaultUserID, "", openingTestMemories(), openingTestTaskContext); err != nil {
 		t.Fatalf("the re-claiming launch: %v", err)
 	}
 

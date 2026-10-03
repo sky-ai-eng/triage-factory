@@ -414,6 +414,10 @@ func EpisodeUpstreamHandBacksSQL(convAlias string) string {
 // episodeHandBacksSQL). The claim id is returned because the executor needs
 // to name this engagement later — at teardown, once it has been released and
 // can no longer be found by looking for the conversation's active claim.
+//
+// last_hand_back_outcome is the outcome of the most recent released claim.
+// The claim minted in this statement is not among them: it is unreleased, and
+// the subquery reads the statement's snapshot, which does not hold it.
 var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::text, candidate.type, candidate.task_id, candidate.prompt_id,
 	candidate.model, candidate.runtime, candidate.worktree_path, candidate.sdk_session_id,
 	candidate.trigger_type, candidate.trigger_id, candidate.creator_user_id,
@@ -423,7 +427,11 @@ var conversationQueueClaimReturning = `candidate.id::text, candidate.org_id::tex
 	1 + ` + episodeHandBacksSQL("candidate", handedBackOutcomesSQL) + ` AS attempts,
 	` + EpisodeSetupFailuresSQL("candidate") + ` AS setup_failures,
 	` + EpisodeLostEngagementsSQL("candidate") + ` AS lost_engagements,
-	` + EpisodeUpstreamHandBacksSQL("candidate") + ` AS upstream_hand_backs`
+	` + EpisodeUpstreamHandBacksSQL("candidate") + ` AS upstream_hand_backs,
+	COALESCE((SELECT prior.outcome FROM claims prior
+	          WHERE prior.conversation_id = candidate.id AND prior.released_at IS NOT NULL
+	          ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.id DESC
+	          LIMIT 1), '') AS last_hand_back_outcome`
 
 func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, executorID string, bootEpoch int64, placement db.ClaimPlacement, lease time.Duration) (*domain.Conversation, error) {
 	// One scan, every surface: the needs-driving predicate is type-agnostic
@@ -1218,7 +1226,7 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 // IS NULL), so RowsAffected there tells the whole guard's outcome; the
 // conversations flip that follows needs no guard of its own; nothing else in
 // this transaction could have changed the row in between.
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, lastErr string) (*domain.Conversation, error) {
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
 	if !outcome.Valid() {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidRequeueOutcome, outcome)
 	}
@@ -1242,10 +1250,12 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		// delay, the correct placement-is-advisory answer on a recovery path
 		// (affinity is re-earned on the next enqueue, never carried stale).
 		r, err := writeConversationReturning(ctx, q, `
-			UPDATE conversations SET result_summary = $1, preferred_executor_id = NULL
+			UPDATE conversations SET result_summary = $1, preferred_executor_id = NULL,
+			    next_attempt_at = CASE WHEN $4::float8 > 0
+			                           THEN statement_timestamp() + make_interval(secs => $4::float8) END
 			WHERE org_id = $2 AND id = $3
 			RETURNING *
-		`, lastErr, orgID, conversationID)
+		`, lastErr, orgID, conversationID, delay.Seconds())
 		if err != nil {
 			return err
 		}
@@ -1901,7 +1911,8 @@ func scanPgClaimedConversation(row *sql.Row) (*domain.Conversation, error) {
 	err := row.Scan(&r.ID, &r.OrgID, &r.Type, &r.TaskID, &r.PromptID, &r.Model, &r.Runtime,
 		&r.WorktreePath, &r.SessionID, &r.TriggerType, &r.TriggerID,
 		&r.CreatorUserID, &r.TeamID, &r.BlueprintRunID, &stepIdx,
-		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks)
+		&r.ClaimID, &claimedAt, &r.Attempts, &r.SetupFailures, &r.LostEngagements, &r.UpstreamHandBacks,
+		&r.LastHandBackOutcome)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

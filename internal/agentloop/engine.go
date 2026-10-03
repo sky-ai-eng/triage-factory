@@ -288,6 +288,11 @@ type ActivityBounds struct {
 	Tool time.Duration
 }
 
+// ProviderActivityOp is the operation name a provider attempt is reported to
+// Activity under. Exported because what a stall means depends on it: a
+// provider that sends nothing is an upstream outage, not a stuck engagement.
+const ProviderActivityOp = "provider"
+
 // beginActivity reports an operation to Activity, or does nothing.
 func (e *Engine) beginActivity(name string, bound time.Duration) (end func()) {
 	if e.Activity == nil {

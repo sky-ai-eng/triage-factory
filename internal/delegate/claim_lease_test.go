@@ -501,6 +501,7 @@ func TestStopOutcome_NamesEachCancellation(t *testing.T) {
 	shutdown := cancelledWith(live, context.Canceled)
 	fenced := cancelledWith(live, errClaimSelfFenced)
 	renewalStop := cancelledWith(live, errStopRequested)
+	silentProvider := cancelledWith(live, errUpstreamStalled)
 
 	for name, tc := range map[string]struct {
 		parent, step context.Context
@@ -511,6 +512,7 @@ func TestStopOutcome_NamesEachCancellation(t *testing.T) {
 		"lease fence":                {fenced, cancelledWith(fenced, context.Canceled), engagementFenced},
 		"stop delivered by renewal":  {renewalStop, cancelledWith(renewalStop, context.Canceled), engagementCancelled},
 		"lease fence on step itself": {live, cancelledWith(live, errClaimLeaseLost), engagementFenced},
+		"silent provider":            {silentProvider, cancelledWith(silentProvider, context.Canceled), engagementStalled},
 	} {
 		got, ok := stopOutcome(tc.parent, tc.step)
 		if !ok || got != tc.want {

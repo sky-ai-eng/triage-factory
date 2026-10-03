@@ -3215,7 +3215,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Per org, the conversations a hand-back is holding out of the queue until a time: the model provider was unavailable through an engagement's own retries, so the engagement handed its claim back to be tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) instead of failing the run (tf_conversations_deferred). They display as queued but count toward no queue depth, age or position. A person's message retries one at once. After about four hours of attempts a conversation parks as upstream_unavailable and leaves this count. The ConversationsDeferred rule in docker/observability/rules/tf-connections.yml warns when the total stays above zero for 30 minutes. No data means no org has a deferred conversation.",
+      "description": "Per org, the conversations a hand-back is holding out of the queue until a time: the model provider was unavailable through an engagement's own retries, or GitHub could not be reached while it set up its workspace, so the engagement handed its claim back to be tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) instead of failing the run (tf_conversations_deferred). They display as queued but count toward no queue depth, age or position. A person's message retries one at once. After about four hours of attempts a conversation parks as upstream_unavailable and leaves this count. The ConversationsDeferred rule in docker/observability/rules/tf-connections.yml warns when the total stays above zero for 30 minutes. No data means no org has a deferred conversation.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3304,7 +3304,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Claims given back with the conversation still mid-flight, so the next claim continues it, by why (tf_conversations_handed_back_total, summed across executors). requeued: the engagement failed before its agent ran, and counts toward the setup budget. requeued_credentials: the credential bundle never arrived. requeued_shutdown: the executor stopped or drained. requeued_upstream: the model provider stayed unavailable through the engagement's retries, and the conversation waits on a backoff before its next claim. A lease takeover (reaped) is not counted here; see tf_claims_expired.",
+      "description": "Claims given back with the conversation still mid-flight, so the next claim continues it, by why (tf_conversations_handed_back_total, summed across executors). requeued: the engagement failed before its agent ran, and counts toward the setup budget. requeued_credentials: the credential bundle never arrived. requeued_shutdown: the executor stopped or drained. requeued_upstream: the model provider stayed unavailable through the engagement's retries or went silent, or GitHub could not be reached during workspace setup, and the conversation waits on a backoff before its next claim. A lease takeover (reaped) is not counted here; see tf_claims_expired.",
       "fieldConfig": {
         "defaults": {
           "color": {
