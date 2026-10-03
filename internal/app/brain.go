@@ -123,6 +123,10 @@ func (a *App) startBrain(term int64) {
 	// the poller process, so this acquisition also restarts at the head of
 	// each org's repo list rather than where its predecessor stopped.
 	a.reloader.initialPoll()
+	// Wake from a system suspend: every org due for a poll at once. Under
+	// brainCtx so it stops with the poller it reschedules, and only the
+	// process that polls reacts.
+	go a.watchSuspendForPolls(brainCtx)
 	// Brain-bound sentinel relay LISTEN (tf_bus): "only the brain LISTENs
 	// on tf_bus" (spec §5.3) is enforced by SUBSCRIPTION scope — the
 	// listener holds with the lease, stopping via brainCtx on demotion —

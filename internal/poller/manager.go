@@ -387,6 +387,24 @@ func (m *Manager) PollSoon(source, orgID string) {
 	delete(m.nextPoll, pollKey(source, orgID))
 }
 
+// PollAllSoon makes every org immediately eligible for its next poll of every
+// source, by dropping every scheduler slot. It is for the wake from a system
+// suspend only, never for a config change: a config change concerns one org,
+// and PollSoon is the call for it.
+//
+// PollSoon's warning against clearing every slot is about pulling the whole
+// fleet's polls forward at once. After a suspend they are behind, not ahead:
+// each slot was set on Go's monotonic clock, which stopped while the machine
+// slept, so every slot now lags the wall clock by the time asleep. An org
+// whose interval the sleep reached is already overdue, so polling it now
+// restores its schedule rather than compressing it. An org whose interval is
+// longer than the sleep is pulled forward by at most the difference, once.
+func (m *Manager) PollAllSoon() {
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	clear(m.nextPoll)
+}
+
 // PollGitHubOnce runs one synchronous GitHub poll cycle for a single org,
 // bypassing the scheduler entirely — no due gate, no slot reservation, no
 // ticker. It is the driver entrypoint for the poll-scale benchmark harness
