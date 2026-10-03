@@ -122,23 +122,27 @@ func (s *pollReadinessStore) LastPollTimes(ctx context.Context, orgID string) (m
 const pgConnectionCols = `org_id, source, connection_state, connection_changed_at, connection_failure_class`
 
 func (s *pollReadinessStore) RecordConnection(ctx context.Context, orgID, source string, state db.ConnectionState, failureClass string) (stored, previous db.ConnectionStatus, err error) {
-	if err := state.Validate(); err != nil {
+	if err := db.ValidateConnection(state, failureClass); err != nil {
 		return db.ConnectionStatus{}, db.ConnectionStatus{}, err
 	}
 	// The class describes a connection that is down and nothing else, so it is
 	// derived from the state here rather than trusted from the caller.
 	var class any
-	if state == db.ConnectionDown && failureClass != "" {
+	if state == db.ConnectionDown {
 		class = failureClass
 	}
 	err = inTx(ctx, s.admin, func(q queryer) error {
+		// FOR UPDATE holds an existing row until commit, so two overlapping
+		// writers (a demoted holder's last cycle beside its successor's first)
+		// read the previous state one after the other and report a change once.
 		var rerr error
-		if previous, rerr = connectionStatus(ctx, q, orgID, source); rerr != nil {
+		if previous, rerr = connectionStatus(ctx, q, orgID, source, true); rerr != nil {
 			return rerr
 		}
+		// An unknown state carries no start time: it is the absence of one.
 		stored, rerr = scanConnectionStatus(q.QueryRowContext(ctx, `
 			INSERT INTO poll_readiness (org_id, source, connection_state, connection_changed_at, connection_failure_class)
-			VALUES ($1, $2, $3, now(), $4)
+			VALUES ($1, $2, $3, CASE WHEN $3::text = 'unknown' THEN NULL ELSE now() END, $4)
 			ON CONFLICT (org_id, source) DO UPDATE SET
 				connection_changed_at = CASE
 					WHEN poll_readiness.connection_state = EXCLUDED.connection_state
@@ -158,7 +162,7 @@ func (s *pollReadinessStore) RecordConnection(ctx context.Context, orgID, source
 }
 
 func (s *pollReadinessStore) Connection(ctx context.Context, orgID, source string) (db.ConnectionStatus, error) {
-	return connectionStatus(ctx, s.admin, orgID, source)
+	return connectionStatus(ctx, s.admin, orgID, source, false)
 }
 
 func (s *pollReadinessStore) ListConnectionStatuses(ctx context.Context) ([]db.ConnectionStatus, error) {
@@ -186,11 +190,14 @@ func (s *pollReadinessStore) ListConnectionStatuses(ctx context.Context) ([]db.C
 }
 
 // connectionStatus is the point read behind Connection and RecordConnection's
-// read of the row it is about to replace. An absent row is the unknown state.
-func connectionStatus(ctx context.Context, q queryer, orgID, source string) (db.ConnectionStatus, error) {
-	st, err := scanConnectionStatus(q.QueryRowContext(ctx,
-		`SELECT `+pgConnectionCols+` FROM poll_readiness WHERE org_id = $1 AND source = $2`,
-		orgID, source))
+// read of the row it is about to replace, which locks it. An absent row is the
+// unknown state.
+func connectionStatus(ctx context.Context, q queryer, orgID, source string, forUpdate bool) (db.ConnectionStatus, error) {
+	query := `SELECT ` + pgConnectionCols + ` FROM poll_readiness WHERE org_id = $1 AND source = $2`
+	if forUpdate {
+		query += ` FOR UPDATE`
+	}
+	st, err := scanConnectionStatus(q.QueryRowContext(ctx, query, orgID, source))
 	if errors.Is(err, sql.ErrNoRows) {
 		return db.ConnectionStatus{OrgID: orgID, Source: source, State: db.ConnectionUnknown}, nil
 	}

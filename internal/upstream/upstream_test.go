@@ -188,18 +188,21 @@ func TestClassOf(t *testing.T) {
 	}
 }
 
-// TestLogLevel: an upstream failure logs at Debug, because the poller reports
-// the connection's loss and restoration once each; a local failure keeps the
-// caller's level.
+// TestLogLevel: a transient or auth failure logs at Debug, because the poller
+// reports the connection's loss and restoration once each. A rejected request
+// and a rate limit leave the connection up, so nothing else would report them
+// and they keep the caller's level, as does a local failure.
 func TestLogLevel(t *testing.T) {
 	cases := []struct {
 		name string
 		err  error
 		want slog.Level
 	}{
-		{"classified", fmt.Errorf("tracker: %w", &classifiedErr{Transient}), slog.LevelDebug},
-		{"rate limited", &classifiedErr{RateLimited}, slog.LevelDebug},
+		{"transient", fmt.Errorf("tracker: %w", &classifiedErr{Transient}), slog.LevelDebug},
+		{"auth", &classifiedErr{Auth}, slog.LevelDebug},
 		{"transport", &net.OpError{Op: "dial", Err: errors.New("refused")}, slog.LevelDebug},
+		{"rejected", fmt.Errorf("list open PRs: %w", &classifiedErr{Rejected}), slog.LevelError},
+		{"rate limited", &classifiedErr{RateLimited}, slog.LevelError},
 		{"local failure", errors.New("load creds: keychain locked"), slog.LevelError},
 		{"cancellation", context.Canceled, slog.LevelError},
 	}

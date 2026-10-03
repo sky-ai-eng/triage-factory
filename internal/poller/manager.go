@@ -602,6 +602,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// Anticipated: an org that tracks nothing. Same posture as the
 		// Jira twin's unconfigured skip — an outcome, never an error.
 		span.SetAttributes(telemetry.Outcome("no_repos"))
+		conn.skip("no_repos")
 		m.setGitHubCursor(orgID, "") // tracked set emptied — drop any stale cursor
 		return
 	}
@@ -778,7 +779,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 			}
 		}
 	}
-	m.recordGitHubCursor(orgID, resumeFrom, rateLimitErr)
+	m.advanceGitHubCursor(conn, orgID, resumeFrom, rateLimitErr)
 
 	// No installation produced a usable installation token (every mint/list
 	// failed). Under XOR there is no PAT behind these failures to fall back to
@@ -789,7 +790,10 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// Wrapping the installation's own failure keeps its class: an
 		// unreachable host is reported by the connection state, and only a
 		// fault of TF's own logs at Error here.
-		degraded := fmt.Errorf("github app is active but no installation produced a usable token: %w", installErr)
+		degraded := errors.New("github app is active but no installation produced a usable token")
+		if installErr != nil {
+			degraded = fmt.Errorf("%w: %w", degraded, installErr)
+		}
 		span.SetStatus(codes.Error, "no usable installation token")
 		githubLog.Log(ctx, upstream.LogLevel(degraded, slog.LevelError), "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)
@@ -891,6 +895,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	if err != nil {
 		if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
 			span.SetAttributes(telemetry.Outcome("unconfigured"))
+			conn.skip("unconfigured")
 			return false // not configured for GitHub — silent skip
 		}
 		conn.note(err)
@@ -935,7 +940,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 	var rl *ghclient.ErrRateLimited
 	errors.As(rerr, &rl)
-	m.recordGitHubCursor(orgID, resumeFrom, rl)
+	m.advanceGitHubCursor(conn, orgID, resumeFrom, rl)
 	return rerr == nil
 }
 
@@ -1167,6 +1172,19 @@ func (m *Manager) recordGitHubCursor(orgID, resumeFrom string, rl *ghclient.ErrR
 	m.schedulePoll("github", orgID, rl.ResumeAt)
 }
 
+// advanceGitHubCursor applies a cycle's resume point through recordGitHubCursor,
+// except after a cycle that left the connection down: such a cycle refreshed
+// no repo, so the place the previous cycle stopped is still where the next one
+// should start, and taking its "" as a full wrap would send the next cycle back
+// to the head of the list. A rate-limited cycle always applies, because its
+// resume point and resume time are what it learned.
+func (m *Manager) advanceGitHubCursor(conn *cycleConnection, orgID, resumeFrom string, rl *ghclient.ErrRateLimited) {
+	if state, _, _ := conn.outcome(); rl == nil && state == db.ConnectionDown {
+		return
+	}
+	m.recordGitHubCursor(orgID, resumeFrom, rl)
+}
+
 // rotateFromCursor returns repos rotated so iteration starts at cursor's
 // position and wraps around — TFAC-571's round-robin fairness mechanism, so
 // a large tracked set doesn't starve the repos at the tail of the list when
@@ -1330,6 +1348,11 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// anticipated outcome, never an error.
 	if skip, outcome := m.sourceDisabled(ctx, "jira", orgID); skip {
 		span.SetAttributes(telemetry.Outcome(outcome))
+		// Only a deliberate pause clears the connection state. An unreadable
+		// policy is a fault of TF's own, which says nothing about Jira.
+		if outcome == "disabled" {
+			conn.skip(outcome)
+		}
 		return
 	}
 	creds, lerr := integrations.LoadSystem(ctx, m.secrets, orgID)
@@ -1352,6 +1375,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		// is the common case, so it gets an outcome rather than an error
 		// status.
 		span.SetAttributes(telemetry.Outcome("unconfigured"))
+		conn.skip("unconfigured")
 		return
 	}
 	// Only ARMED projects can be polled: the discovery JQL is built from
@@ -1363,6 +1387,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	projects := toTrackerJiraRules(rules)
 	if len(projects) == 0 {
 		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+		conn.skip("no_armed_projects")
 		return
 	}
 	baseURL := orgSet.JiraBaseURL

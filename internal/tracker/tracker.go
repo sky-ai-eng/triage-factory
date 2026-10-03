@@ -863,7 +863,11 @@ const maxSearchQueryLen = 256
 // Otherwise the error is non-nil only when every listing sent failed and at
 // least one failed because the connection did (see discoveryUnreached): a
 // cycle that reached no repo at all reports that rather than an empty
-// success. A repo the token cannot see is skipped and is not such a failure.
+// success. A repo GitHub answers 404 for is skipped and is never such a
+// failure. A repo it refuses with a JSON 403 is skipped too, but the refusal
+// is an Auth failure, so a cycle whose every repo was refused that way reports
+// it: the credential reaches none of what the org tracks (an organization's
+// SAML enforcement, say), which is the auth-down state the poller records.
 func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, string, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
@@ -963,10 +967,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 				// A 403/404 that GitHub itself answered (class Auth or
 				// Rejected) means the token can't reach this configured repo
 				// (a PAT user without access, or an App not installed on it)
-				// — skip and log rather than failing the whole sweep. A 403
-				// from something in front of GitHub (a VPN proxy's HTML page)
-				// is Transient: it says nothing about this repo, so it is a
-				// failed listing like any other.
+				// — skip and log rather than failing the whole sweep. The
+				// error stays on the result all the same, so a sweep in which
+				// every repo was refused counts as unreached (see the doc
+				// above). A 403 from something in front of GitHub (a VPN
+				// proxy's HTML page) is Transient: it says nothing about this
+				// repo, so it is a failed listing like any other.
 				var he *ghclient.HTTPError
 				if errors.As(err, &he) && (he.StatusCode == 403 || he.StatusCode == 404) &&
 					(he.Class == upstream.Auth || he.Class == upstream.Rejected) {

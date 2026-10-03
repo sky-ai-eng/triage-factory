@@ -73,11 +73,17 @@ type PollReadinessStore interface {
 	// (orgID, source) and returns the row as stored together with the row it
 	// replaced (an absent row reads as ConnectionUnknown with no ChangedAt).
 	// ChangedAt moves only when the state changes; FailureClass is stored
-	// only while the state is ConnectionDown and cleared otherwise. The
-	// previous row is read and the new one written in one transaction, and
-	// the stored row comes from the write's RETURNING. Upserts.
+	// only while the state is ConnectionDown and cleared otherwise.
+	// Recording ConnectionUnknown clears the state: ChangedAt goes back to
+	// nil, for a source the poller has stopped checking. The pair is
+	// validated by ValidateConnection. The previous row is read and the new
+	// one written in one transaction, with the read holding the row against a
+	// concurrent writer, and the stored row comes from the write's RETURNING.
+	// Upserts.
 	//
-	// Only the background-brain holder polls, so each row has one writer.
+	// Only the background-brain holder polls, so each row has one writer
+	// outside a lease handover, when a demoted holder's in-flight cycle can
+	// still finish beside its successor's first one.
 	RecordConnection(ctx context.Context, orgID, source string, state ConnectionState, failureClass string) (stored ConnectionStatus, previous ConnectionStatus, err error)
 
 	// Connection returns the connection status of (orgID, source). A pair no
@@ -107,14 +113,31 @@ const (
 	ConnectionDown ConnectionState = "down"
 )
 
-// Validate reports whether s is in the vocabulary. The column is
-// app-validated rather than CHECK-constrained, so this is the only gate.
-func (s ConnectionState) Validate() error {
-	switch s {
-	case ConnectionUnknown, ConnectionUp, ConnectionDown:
+// The failure classes a down connection records: the upstream request outcome
+// classes (internal/upstream) that put a connection down.
+const (
+	ConnectionFailureTransient = "transient"
+	ConnectionFailureAuth      = "auth"
+)
+
+// ValidateConnection reports whether (state, failureClass) may be recorded:
+// a state in the vocabulary and, for ConnectionDown, one of the failure
+// classes. A class beside any other state is ignored, because it is cleared.
+// The columns are app-validated rather than CHECK-constrained, like the other
+// vocabulary text columns in both dialects, so this is the only gate.
+func ValidateConnection(state ConnectionState, failureClass string) error {
+	switch state {
+	case ConnectionUnknown, ConnectionUp:
 		return nil
+	case ConnectionDown:
+		switch failureClass {
+		case ConnectionFailureTransient, ConnectionFailureAuth:
+			return nil
+		}
+		return fmt.Errorf("poll readiness: a down connection needs a failure class of %q or %q, got %q",
+			ConnectionFailureTransient, ConnectionFailureAuth, failureClass)
 	}
-	return fmt.Errorf("poll readiness: unknown connection state %q", s)
+	return fmt.Errorf("poll readiness: unknown connection state %q", state)
 }
 
 // ConnectionStatus is one (org, source)'s connection state as stored.
@@ -122,10 +145,10 @@ type ConnectionStatus struct {
 	OrgID  string
 	Source string
 	State  ConnectionState
-	// ChangedAt is when State began; nil until a state is first recorded.
+	// ChangedAt is when State began; nil while State is ConnectionUnknown.
 	ChangedAt *time.Time
 	// FailureClass is the upstream request outcome class that put the
-	// connection down ("transient" or "auth"); empty unless State is
-	// ConnectionDown.
+	// connection down (ConnectionFailureTransient or ConnectionFailureAuth);
+	// empty unless State is ConnectionDown.
 	FailureClass string
 }

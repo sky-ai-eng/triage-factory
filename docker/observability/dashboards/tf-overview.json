@@ -3059,7 +3059,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Per upstream, the number of orgs whose last GitHub or Jira poll cycle that made requests got no answer: every request failed in transit, or was refused for its credential (tf_upstream_up == 0). The numerator of the UpstreamDownFleetWide rule in docker/observability/rules/tf-connections.yml. A cycle that met only rate limits, or made no requests, leaves an org's state where it was. 0 means no org is down.",
+      "description": "Per upstream, the number of orgs whose last GitHub or Jira poll cycle that made requests got no answer: every request failed in transit, or was refused for its credential (tf_upstream_up 0). The numerator of the UpstreamDownFleetWide rule in docker/observability/rules/tf-connections.yml. A cycle that met only rate limits leaves an org's state where it was; one that skipped the source on purpose (turned off, no credential, nothing tracked) clears it, and the org drops out. 0 means no org is down; no data means no org has a recorded state.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3134,7 +3134,7 @@
             "uid": "tf-prometheus"
           },
           "editorMode": "code",
-          "expr": "count by (upstream) (tf_upstream_up == 0) or vector(0)",
+          "expr": "sum by (upstream) (1 - tf_upstream_up)",
           "legendFormat": "{{upstream}}",
           "range": true,
           "refId": "A"
@@ -3148,7 +3148,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Every org whose stored GitHub or Jira connection state is down right now, and the upstream it is down against. The pod's log says when each went down and why: one WARN `<source> connection lost` with the org and the failure class (`transient` or `auth`), and one INFO `<source> connection restored` with `down_for` when it comes back.",
+      "description": "Every org whose stored GitHub or Jira connection state is down right now, and the upstream it is down against. The pod's log says when each went down and why: one WARN `<source> connection lost` with the org and the failure class (`transient` or `auth`), then one INFO `<source> connection restored` with `down_for` when it comes back, or one INFO `<source> connection no longer checked` when the poller stops checking it.",
       "fieldConfig": {
         "defaults": {
           "custom": {

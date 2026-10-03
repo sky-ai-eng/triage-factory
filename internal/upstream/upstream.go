@@ -129,14 +129,20 @@ func ClassOf(err error) (Class, bool) {
 	return "", false
 }
 
-// LogLevel is the level a poll cycle logs err at. An upstream failure (one
-// ClassOf recognizes) logs at Debug, because the poller reports a source's
-// connection being lost and restored once each, from the cycle's own request
-// outcomes, rather than once per failed request per cycle. Anything else is a
-// fault of TF's own (a database read, a setting, a credential it could not
-// load) and keeps the caller's level.
+// LogLevel is the level a poll cycle logs err at. A Transient or Auth failure
+// logs at Debug, because those are the outcomes the poller turns into a
+// source's connection state, and it reports that state being lost and
+// restored once each rather than once per failed request per cycle.
+//
+// Every other error keeps the caller's level. A Rejected request is an answer
+// about the request (a repository that does not exist, a query the upstream
+// refuses), which leaves the connection up, so no connection line would ever
+// report it. A rate limit is a handled outcome that keeps the level it has
+// always had. Anything ClassOf does not recognize is a fault of TF's own (a
+// database read, a setting, a credential it could not load).
 func LogLevel(err error, otherwise slog.Level) slog.Level {
-	if _, ok := ClassOf(err); ok {
+	switch class, _ := ClassOf(err); class {
+	case Transient, Auth:
 		return slog.LevelDebug
 	}
 	return otherwise

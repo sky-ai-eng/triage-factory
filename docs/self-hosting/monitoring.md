@@ -67,8 +67,8 @@ needed.
 
 A poll counts as successful only when its refresh completed and the cycle did
 not leave the org's connection to that source down (see
-[Source connections](#source-connections)). During an outage `age_seconds`
-therefore grows, rather than a cycle that reached nothing refreshing it.
+[Source connections](#source-connections)). `age_seconds` keeps growing during
+an outage, because a cycle that reached nothing does not refresh it.
 
 In an HA (multiple control pods) topology `/readyz` also carries a `lease` field
 and a standby hard-checks only DB + migrations — see
@@ -479,7 +479,9 @@ answer on the org's `poll_readiness` row:
 | Any ended `ok` or `rejected` | **up**. The upstream answered. A 404 is an answer about the request, not about the connection. |
 | Otherwise, any ended `auth` | **down**, failure class `auth` |
 | Otherwise, any ended `transient` | **down**, failure class `transient` |
-| Only `rate_limited`, or no requests at all | **unchanged**. A rate limit is handled, with its own resume point. A cycle that made no requests (no repos tracked, no credential, the source turned off) says nothing about the connection. |
+| Only `rate_limited` | **unchanged**. A rate limit is handled, with its own resume point. |
+| None, because the cycle skipped the source on purpose: turned off, no credential or configuration, no repos tracked, no Jira project armed | **unknown**: the stored state is cleared. Nobody is checking the connection, so a state from before the skip would only be stale. |
+| None, for any other reason (the org's settings could not be read, the event-source policy could not be read, an active App installed on no accounts) | **unchanged**. These are faults of TF's own or of the org's setup, and say nothing about the connection. |
 
 For an org on a GitHub App, a failed installation-token mint counts as well,
 under the class of its error: the mint goes to the same host, and its request
@@ -498,30 +500,35 @@ request:
 | to down | WARN | `github connection lost` or `jira connection lost`, with `org` and `class` |
 | still down, for a different reason | WARN | `<source> connection still down, failure changed`, with `org`, `class` and `previous_class` |
 | down to up | INFO | `<source> connection restored`, with `org` and `down_for` |
+| down to unknown | INFO | `<source> connection no longer checked`, with `org`, `reason` (`disabled`, `unconfigured`, `no_repos` or `no_armed_projects`) and `previous_state` |
+| up to unknown | DEBUG | the same line |
 | first recorded state is up | DEBUG | `<source> connection up`, with `org` |
 
-The upstream failures in between (a repository listing, a Jira query, a token
-mint) log at DEBUG; set `TF_LOG_LEVEL=debug` to see each one. A failure of
+The `transient` and `auth` failures in between (a repository listing, a Jira
+query, a token mint) log at DEBUG, because the lines above report them; set
+`TF_LOG_LEVEL=debug` to see each one. A `rejected` request or a rate limit
+keeps its level: it leaves the connection up, so no connection line would
+report it. A repository GitHub answers 404 for still logs
+`discovery: repo unreachable — skipping` at WARN every cycle. A failure of
 TF's own, such as reading the database or the org's settings, or loading a
-credential from the secret store, keeps its level, because it is not a
+credential from the secret store, keeps its level too, because it is not a
 connection state. Connection failures are not toasted.
 
 `tf_upstream_up` exports the stored state:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_upstream_up` | `upstream`, `org_id` | 1 when the connection is up, 0 when it is down. No series while the state is unknown, before any cycle has recorded one. |
+| `tf_upstream_up` | `upstream`, `org_id` | 1 when the connection is up, 0 when it is down. No series while the state is unknown: before any cycle has recorded one, and after a cycle skipped the source on purpose. |
 
 `upstream` is `github` or `jira`. Only the pod holding the background brain
 exports it, from a read of the stored states every 15 seconds, so it is not
-summed across pods. A deleted org's series is dropped. A state is left as it was
-by a cycle that makes no requests, so an org whose source is turned off or
-loses its credential while down keeps reporting 0 until a cycle reaches the
-upstream again.
+summed across pods. A deleted org's series is dropped, and so is the series of
+an org whose source is turned off, loses its credential or stops tracking
+anything, on that org's next cycle.
 
 ```
-tf_upstream_up == 0                                         # not an alert: every org down right now, and against which upstream
-count by (upstream) (tf_upstream_up == 0) or vector(0)      # not an alert: orgs down, per upstream
+tf_upstream_up == 0                         # not an alert: every org down right now, and against which upstream
+sum by (upstream) (1 - tf_upstream_up)      # not an alert: orgs down, per upstream; 0 when none is
 ```
 
 The rules file loads a second alert, `UpstreamDownFleetWide`:
@@ -538,7 +545,8 @@ count by (upstream) (tf_upstream_up) >= 2
 ```
 
 It fires when, for one upstream, more than half of the orgs with a recorded
-state are down, at least two orgs have one, and that has held for 5 minutes. It
+state are down and at least two orgs have one, and that condition has held for
+5 minutes; each org need not have been down that long. It
 is fleet-wide for the same reason as `UpstreamFailingFleetWide`: one org's
 unreachable host or revoked credential is that org's problem and never pages.
 There is no per-org rule. The dashboard's "Orgs down" table lists every org

@@ -17,8 +17,9 @@ type PollReadinessStoreFactory func(t *testing.T) (store db.PollReadinessStore, 
 // every backend impl must hold: an unrecorded pair reads as unknown; the write
 // returns both the row it stored and the row it replaced; the time a state
 // began moves only when the state changes; the failure class exists only while
-// the connection is down; the list reports recorded states only; and the
-// readiness columns sharing the row are independent of all of it.
+// the connection is down, and a down state must carry one; recording unknown
+// clears the state; the list reports recorded states only; and the readiness
+// columns sharing the row are independent of all of it.
 func RunPollReadinessConnectionConformance(t *testing.T, mk PollReadinessStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -133,6 +134,67 @@ func RunPollReadinessConnectionConformance(t *testing.T, mk PollReadinessStoreFa
 		store, orgID := mk(t)
 		if _, _, err := store.RecordConnection(ctx, orgID, "github", db.ConnectionState("sideways"), ""); err == nil {
 			t.Error("RecordConnection accepted a state outside the vocabulary")
+		}
+	})
+
+	t.Run("a_down_connection_needs_a_failure_class", func(t *testing.T) {
+		// The class is the half of a down state that says what to fix, and the
+		// column is app-validated, so the store is the only thing that can
+		// refuse a down row without one or with a class that cannot put a
+		// connection down.
+		store, orgID := mk(t)
+		for _, class := range []string{"", "rejected", "rate_limited"} {
+			if _, _, err := store.RecordConnection(ctx, orgID, "github", db.ConnectionDown, class); err == nil {
+				t.Errorf("RecordConnection accepted down with failure class %q", class)
+			}
+		}
+		st, err := store.Connection(ctx, orgID, "github")
+		if err != nil {
+			t.Fatalf("Connection: %v", err)
+		}
+		if st.State != db.ConnectionUnknown {
+			t.Errorf("a refused write left %+v, want nothing recorded", st)
+		}
+	})
+
+	t.Run("recording_unknown_clears_the_state", func(t *testing.T) {
+		// Unknown is the absence of a state, for a source the poller stopped
+		// checking: no start time, no class, and no longer listed.
+		store, orgID := mk(t)
+		read := func() (*db.ConnectionStatus, error) {
+			st, err := store.Connection(ctx, orgID, "jira")
+			return &st, err
+		}
+
+		fresh, _, err := store.RecordConnection(ctx, orgID, "github", db.ConnectionUnknown, "")
+		if err != nil {
+			t.Fatalf("RecordConnection (unknown on a fresh row): %v", err)
+		}
+		if fresh.State != db.ConnectionUnknown || fresh.ChangedAt != nil {
+			t.Errorf("unknown on a fresh row stored %+v, want unknown with no ChangedAt", fresh)
+		}
+
+		down, _, err := store.RecordConnection(ctx, orgID, "jira", db.ConnectionDown, "auth")
+		if err != nil {
+			t.Fatalf("RecordConnection (down): %v", err)
+		}
+		cleared, prev, err := store.RecordConnection(ctx, orgID, "jira", db.ConnectionUnknown, "")
+		if err != nil {
+			t.Fatalf("RecordConnection (clear): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordConnection (clear)", cleared, read)
+		if cleared.State != db.ConnectionUnknown || cleared.ChangedAt != nil || cleared.FailureClass != "" {
+			t.Errorf("clearing stored %+v, want unknown with no ChangedAt and no class", cleared)
+		}
+		if prev.State != db.ConnectionDown || prev.ChangedAt == nil || !prev.ChangedAt.Equal(*down.ChangedAt) {
+			t.Errorf("previous on clearing = %+v, want the down row it replaced", prev)
+		}
+		list, err := store.ListConnectionStatuses(ctx)
+		if err != nil {
+			t.Fatalf("ListConnectionStatuses: %v", err)
+		}
+		if len(list) != 0 {
+			t.Errorf("ListConnectionStatuses after clearing = %+v, want empty", list)
 		}
 	})
 

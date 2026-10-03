@@ -75,9 +75,10 @@ func NewProfiler(resolver github.Resolver, secrets agentproc.SecretsReader, llmR
 }
 
 // SetRecipients switches the profiler's repository_updated broadcasts
-// from the org-scoped local shape to the multi-mode per-user fan-out: repositories is org-wide but its REST
-// read is visibility-scoped, and the websocket hub has no team axis, so
-// the audience must be resolved per emission (see internal/repoevent).
+// from the org-scoped local shape to the multi-mode per-user fan-out:
+// repositories is org-wide but its REST read is visibility-scoped, and the
+// websocket hub has no team axis, so the audience must be resolved per
+// emission (see internal/repoevent).
 // Multi-mode wiring only, called once at boot before any Trigger —
 // local mode never calls it, keeping the single org-wide broadcast N=1
 // has always had.

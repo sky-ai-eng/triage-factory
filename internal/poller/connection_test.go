@@ -27,6 +27,7 @@ const (
 	list503       = "503"        // 503 with a JSON body: transient, retried
 	listHTML403   = "html403"    // 403 with a proxy's HTML page: transient, not retried
 	listJSON404   = "json404"    // 404 with GitHub's JSON body: rejected
+	listJSON403   = "json403"    // 403 with GitHub's JSON body: auth
 	listRateLimit = "rate_limit" // primary budget exhausted until well past the client's wait cap
 )
 
@@ -95,6 +96,10 @@ func (s *githubConnServer) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"message":"Not Found","documentation_url":"https://docs.github.com/rest"}`))
+	case listJSON403:
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Resource protected by organization SAML enforcement."}`))
 	case listRateLimit:
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Hour).Unix()))
@@ -395,11 +400,13 @@ func TestGitHubCycle_HTMLForbiddenIsAnOutageNotAMissingRepo(t *testing.T) {
 
 // TestGitHubCycle_JSON404RepoIsSkippedAndTheConnectionIsUp: GitHub itself
 // answering 404 for one repo is an answer about that repo. It is skipped as
-// unreachable, the other repo is polled, and the connection is up.
+// unreachable, the other repo is polled, and the connection is up. Because the
+// connection is up, no connection line will ever mention the missing repo, so
+// its own line stays at WARN, visible at the default level.
 func TestGitHubCycle_JSON404RepoIsSkippedAndTheConnectionIsUp(t *testing.T) {
 	srv := newGitHubConnServer(t, map[string]string{"a": listJSON404, "b": listOK})
 	f := newConnectionFixture(t, srv, "octo/a", "octo/b")
-	logs := captureLogs(t, slog.LevelDebug)
+	logs := captureLogs(t, slog.LevelInfo)
 	ctx := context.Background()
 
 	f.m.runGitHubCycleForOrg(ctx, f.org)
@@ -407,8 +414,8 @@ func TestGitHubCycle_JSON404RepoIsSkippedAndTheConnectionIsUp(t *testing.T) {
 	if st := f.connection(t); st.State != dbpkg.ConnectionUp {
 		t.Errorf("state = %+v, want up", st)
 	}
-	if n := logs.count(slog.LevelDebug, "discovery: repo unreachable"); n != 1 {
-		t.Errorf("logged %d repo-unreachable lines, want 1 for the 404 repo\n%s", n, logs)
+	if n := logs.count(slog.LevelWarn, "discovery: repo unreachable"); n != 1 {
+		t.Errorf("logged %d repo-unreachable WARNs, want 1 for the 404 repo\n%s", n, logs)
 	}
 	ents, err := f.stores.Entities.ListActiveSystem(ctx, f.org, "github")
 	if err != nil {
@@ -433,6 +440,181 @@ func TestGitHubCycle_EveryRepoMissingIsNotAnOutage(t *testing.T) {
 	}
 	if f.lastSuccess().IsZero() {
 		t.Error("a cycle GitHub answered was not stamped as a successful poll")
+	}
+}
+
+// TestGitHubCycle_EveryRepoRefusedIsAnAuthOutage: GitHub refuses every
+// tracked repo with a JSON 403, as an organization's SAML enforcement does to a
+// token nobody authorized. Each repo is skipped as unreachable, and because the
+// credential reaches none of them the connection is down with class auth and
+// the cycle is not a successful poll.
+func TestGitHubCycle_EveryRepoRefusedIsAnAuthOutage(t *testing.T) {
+	srv := newGitHubConnServer(t, map[string]string{"a": listJSON403, "b": listJSON403})
+	f := newConnectionFixture(t, srv, "octo/a", "octo/b")
+	logs := captureLogs(t, slog.LevelDebug)
+
+	f.m.runGitHubCycleForOrg(context.Background(), f.org)
+
+	if st := f.connection(t); st.State != dbpkg.ConnectionDown || st.FailureClass != string(upstream.Auth) {
+		t.Errorf("state = %+v, want down/auth", st)
+	}
+	if n := logs.count(slog.LevelDebug, "discovery: repo unreachable"); n != 2 {
+		t.Errorf("logged %d repo-unreachable DEBUG lines, want one per repo\n%s", n, logs)
+	}
+	if n := logs.count(slog.LevelWarn, "github connection lost"); n != 1 {
+		t.Errorf("logged %d connection-lost WARNs, want 1\n%s", n, logs)
+	}
+	if !f.lastSuccess().IsZero() {
+		t.Error("a cycle whose every repo was refused was stamped as a successful poll")
+	}
+	if n := f.pub.pollCompletions(); n != 0 {
+		t.Errorf("published %d poll completions, want 0", n)
+	}
+}
+
+// TestGitHubCycle_OutageKeepsTheRepoCursor: a cycle that reached no repo made
+// no progress through the list, so the round-robin cursor stays where the
+// previous cycle left it instead of being read as a full wrap. The next cycle
+// that does reach GitHub moves it as usual.
+func TestGitHubCycle_OutageKeepsTheRepoCursor(t *testing.T) {
+	srv := newGitHubConnServer(t, map[string]string{"a": list503, "b": list503, "c": list503})
+	f := newConnectionFixture(t, srv, "octo/a", "octo/b", "octo/c")
+	ctx := context.Background()
+	f.m.setGitHubCursor(f.org, "octo/b")
+
+	f.m.runGitHubCycleForOrg(ctx, f.org)
+	if got := f.m.githubCursor(f.org); got != "octo/b" {
+		t.Errorf("cursor after an outage = %q, want octo/b kept", got)
+	}
+
+	srv.setAll(listOK)
+	f.m.runGitHubCycleForOrg(ctx, f.org)
+	if got := f.m.githubCursor(f.org); got != "" {
+		t.Errorf("cursor after a cycle that covered every repo = %q, want the full wrap's empty cursor", got)
+	}
+}
+
+// TestGitHubCycle_DeliberateSkipClearsTheState: a cycle that polls nothing on
+// purpose (the org tracks no repos, or has no credential) clears the stored
+// state instead of keeping one nobody is checking. A down state that would
+// otherwise stay down in the gauge and the fleet alert is closed with one INFO
+// line, and a second skipped cycle says nothing more.
+func TestGitHubCycle_DeliberateSkipClearsTheState(t *testing.T) {
+	for _, tc := range []struct {
+		reason   string
+		repos    []string
+		resolver *fakeResolver
+	}{
+		{reason: "no_repos"},
+		{reason: "unconfigured", repos: []string{"octo/a"}, resolver: &fakeResolver{err: ghclient.ErrNoGitHubCredentials}},
+	} {
+		t.Run(tc.reason, func(t *testing.T) {
+			srv := newGitHubConnServer(t, map[string]string{"a": listOK})
+			f := newConnectionFixture(t, srv, tc.repos...)
+			if tc.resolver != nil {
+				f.m.resolver = tc.resolver
+			}
+			logs := captureLogs(t, slog.LevelInfo)
+			ctx := context.Background()
+			if _, _, err := f.stores.PollReadiness.RecordConnection(ctx, f.org, "github", dbpkg.ConnectionDown, string(upstream.Transient)); err != nil {
+				t.Fatalf("seed down: %v", err)
+			}
+
+			f.m.runGitHubCycleForOrg(ctx, f.org)
+
+			if st := f.connection(t); st.State != dbpkg.ConnectionUnknown || st.ChangedAt != nil {
+				t.Errorf("state after a deliberate skip = %+v, want cleared", st)
+			}
+			if n := logs.count(slog.LevelInfo, "github connection no longer checked"); n != 1 {
+				t.Errorf("logged %d no-longer-checked INFOs, want 1\n%s", n, logs)
+			}
+			if !strings.Contains(logs.String(), tc.reason) {
+				t.Errorf("the line does not name the reason %q:\n%s", tc.reason, logs)
+			}
+			logs.reset()
+
+			f.m.runGitHubCycleForOrg(ctx, f.org)
+			if out := logs.String(); strings.Contains(out, "connection") {
+				t.Errorf("a second skipped cycle logged about the connection:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestJiraCycle_OnlyAPauseClearsTheState: an admin turning Jira off is a
+// deliberate skip and clears the state; a policy the cycle could not read is a
+// fault of TF's own, which says nothing about Jira, and keeps it.
+func TestJiraCycle_OnlyAPauseClearsTheState(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		turnedOff bool
+		want      dbpkg.ConnectionState
+	}{
+		{name: "turned off", turnedOff: true, want: dbpkg.ConnectionUnknown},
+		{name: "policy unreadable", want: dbpkg.ConnectionDown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			database := newMigratedSQLiteForPoller(t)
+			stores := sqlitestore.New(database)
+			org := runmode.LocalDefaultOrgID
+			var sources dbpkg.OrgEventSourceStore = erroringSourceStore{}
+			if tc.turnedOff {
+				turnOffSource(t, database, "jira")
+				sources = stores.OrgEventSources
+			}
+			if _, _, err := stores.PollReadiness.RecordConnection(ctx, org, "jira", dbpkg.ConnectionDown, string(upstream.Transient)); err != nil {
+				t.Fatalf("seed down: %v", err)
+			}
+			m := &Manager{
+				database: database, pub: &eventRecorder{},
+				tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+				orgs: stores.Orgs, users: stores.Users, secrets: stores.Secrets,
+				jiraRules: stores.JiraStatusRules, connections: stores.PollReadiness,
+				EventSources: sources,
+			}
+
+			// The nil resolver is the assertion's teeth: both cases must skip
+			// before any client is built.
+			m.runJiraCycleForOrg(ctx, nil, org, time.Now())
+
+			st, err := stores.PollReadiness.Connection(ctx, org, "jira")
+			if err != nil {
+				t.Fatalf("Connection: %v", err)
+			}
+			if st.State != tc.want {
+				t.Errorf("state = %+v, want %s", st, tc.want)
+			}
+		})
+	}
+}
+
+// TestRecordConnection_CancelledCycleWritesNothing: a cycle its caller cut
+// short saw only part of what it meant to send, and its ctx cannot carry the
+// write anyway. It records nothing and logs no failure.
+func TestRecordConnection_CancelledCycleWritesNothing(t *testing.T) {
+	database := newMigratedSQLiteForPoller(t)
+	stores := sqlitestore.New(database)
+	m := &Manager{connections: stores.PollReadiness}
+	logs := captureLogs(t, slog.LevelInfo)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	ctx, conn := newCycleConnection(ctx)
+	upstream.Record(ctx, upstream.GitHub, runmode.LocalDefaultOrgID, upstream.Transient)
+	cancel()
+
+	if got := m.recordConnection(ctx, githubLog, "github", runmode.LocalDefaultOrgID, conn); got != dbpkg.ConnectionDown {
+		t.Errorf("recordConnection returned %q, want the observed down for the caller's stamp decision", got)
+	}
+	st, err := stores.PollReadiness.Connection(context.Background(), runmode.LocalDefaultOrgID, "github")
+	if err != nil {
+		t.Fatalf("Connection: %v", err)
+	}
+	if st.State != dbpkg.ConnectionUnknown {
+		t.Errorf("a cancelled cycle recorded %+v", st)
+	}
+	if out := logs.String(); out != "" {
+		t.Errorf("a cancelled cycle logged:\n%s", out)
 	}
 }
 

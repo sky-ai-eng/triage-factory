@@ -118,15 +118,21 @@ func (s *pollReadinessStore) LastPollTimes(ctx context.Context, orgID string) (m
 const sqliteConnectionCols = `org_id, source, connection_state, connection_changed_at, connection_failure_class`
 
 func (s *pollReadinessStore) RecordConnection(ctx context.Context, orgID, source string, state db.ConnectionState, failureClass string) (stored, previous db.ConnectionStatus, err error) {
-	if err := state.Validate(); err != nil {
+	if err := db.ValidateConnection(state, failureClass); err != nil {
 		return db.ConnectionStatus{}, db.ConnectionStatus{}, err
 	}
 	// The class describes a connection that is down and nothing else, so it is
-	// derived from the state here rather than trusted from the caller.
-	var class any
-	if state == db.ConnectionDown && failureClass != "" {
+	// derived from the state here rather than trusted from the caller. An
+	// unknown state carries no start time: it is the absence of one.
+	var class, changedAt any
+	if state == db.ConnectionDown {
 		class = failureClass
 	}
+	if state != db.ConnectionUnknown {
+		changedAt = time.Now().UTC()
+	}
+	// The IMMEDIATE transaction takes the write lock at BEGIN, so the read
+	// below already excludes a concurrent writer.
 	err = inTx(ctx, s.q, func(q queryer) error {
 		var rerr error
 		if previous, rerr = connectionStatus(ctx, q, orgID, source); rerr != nil {
@@ -144,7 +150,7 @@ func (s *pollReadinessStore) RecordConnection(ctx context.Context, orgID, source
 				connection_state = excluded.connection_state,
 				connection_failure_class = excluded.connection_failure_class
 			RETURNING `+sqliteConnectionCols,
-			orgID, source, string(state), time.Now().UTC(), class))
+			orgID, source, string(state), changedAt, class))
 		return rerr
 	})
 	if err != nil {

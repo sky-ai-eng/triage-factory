@@ -5025,11 +5025,14 @@ REVOKE ALL ON public.leases FROM anon, authenticated, service_role;
 --
 -- connection_state is whether the last poll cycle that made requests reached
 -- the upstream: 'unknown' until a cycle first records one, then 'up' or
--- 'down'. connection_changed_at is when the current state began, NULL until
--- the first state is recorded. connection_failure_class is the request outcome
--- class that put the connection down ('transient' or 'auth'), NULL whenever
--- the state is not 'down'. Only the background-brain holder polls, so each row
--- has one writer.
+-- 'down', and 'unknown' again once the poller stops checking the source
+-- (turned off, no credential, nothing tracked). connection_changed_at is when
+-- the current state began, NULL while it is 'unknown'.
+-- connection_failure_class is the request outcome class that put the
+-- connection down ('transient' or 'auth'), NULL whenever the state is not
+-- 'down'. All three are app-validated (db.ValidateConnection), like the other
+-- vocabulary text columns. Only the background-brain holder polls, so each row
+-- has one writer outside a lease handover.
 CREATE TABLE public.poll_readiness (
     org_id                    text NOT NULL,
     source                    text NOT NULL,
