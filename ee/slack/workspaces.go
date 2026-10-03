@@ -203,7 +203,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	// The bot token is the ONLY way the handler learns the workspace id —
 	// the admin never types it. Always re-validated: there's no "keep the
 	// current bot token" path.
-	result, err := slackAuthTest(r.Context(), h.client, botToken)
+	result, err := slackAuthTest(r.Context(), h.client, orgID, botToken)
 	if err != nil {
 		httpx.BadRequest(w, "could not validate the bot token with Slack: "+err.Error())
 		return
@@ -213,7 +213,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	// same bot token via auth.test's bot_id -> bots.info's app_id. It's key
 	// material (the app-single-org invariant), so a failure here is fatal:
 	// no fallback, connect refused.
-	botsInfo, err := slackBotsInfo(r.Context(), h.client, botToken, result.BotID)
+	botsInfo, err := slackBotsInfo(r.Context(), h.client, orgID, botToken, result.BotID)
 	if err != nil {
 		httpx.BadRequest(w, "could not resolve the app id for this bot token: "+err.Error())
 		return
@@ -240,7 +240,7 @@ func (h *workspacesHandler) handleConnect(w http.ResponseWriter, r *http.Request
 	// re-validating stored credentials on every unrelated edit isn't this
 	// leaf's job.
 	if transport == transportSocket && appToken != "" {
-		if err := slackOpenConnection(r.Context(), h.client, appToken); err != nil {
+		if err := slackOpenConnection(r.Context(), h.client, orgID, appToken); err != nil {
 			httpx.BadRequest(w, "could not validate the app-level token with Slack: "+err.Error())
 			return
 		}

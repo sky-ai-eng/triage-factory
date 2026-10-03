@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 
@@ -558,8 +559,9 @@ func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number in
 
 	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", owner, repo, number), payload)
 	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "422") && event == "REQUEST_CHANGES" {
+		var he *HTTPError
+		isHTTP := errors.As(err, &he)
+		if isHTTP && he.StatusCode == http.StatusUnprocessableEntity && event == "REQUEST_CHANGES" {
 			return 0, event, fmt.Errorf("cannot request changes on your own pull request — change the review type to Comment")
 		}
 		// Backstop: pre-submit validation in cmd/exec/gh should prevent
@@ -568,7 +570,7 @@ func (c *Client) SubmitReview(ctx context.Context, owner, repo string, number in
 		// here. The fix is the same in both cases — edit/delete the
 		// offending comment, or restart the review against the current
 		// diff.
-		if strings.Contains(errStr, "must be part of the same hunk") {
+		if isHTTP && strings.Contains(he.Body, "must be part of the same hunk") {
 			return 0, event, fmt.Errorf(
 				"a pending review comment has a multi-line range that crosses a diff hunk boundary — " +
 					"GitHub requires start_line and line to be in the same hunk. " +
@@ -704,9 +706,8 @@ func (c *Client) DeleteBranchRef(ctx context.Context, owner, repo, branch string
 }
 
 // liftValidationErr extracts a useful message from a GitHub error
-// returned by client.do. The original error string has the shape
-// "POST /path returned NNN: {raw JSON body}"; for 422s the body
-// follows GitHub's validation envelope:
+// returned by client.do. For a *HTTPError whose body follows GitHub's
+// error envelope — for 422s, the validation envelope:
 //
 //	{
 //	  "message": "Validation Failed",
@@ -717,19 +718,15 @@ func (c *Client) DeleteBranchRef(ctx context.Context, owner, repo, branch string
 //	  ]
 //	}
 //
-// Falls back to the original error verbatim when the body isn't
-// parseable as JSON or doesn't match the envelope (other 4xx/5xx
-// shapes go straight through unchanged).
+// the message and every entry's detail are joined into one line. Any other
+// error, or a body that isn't parseable as JSON or doesn't match the
+// envelope, is returned unchanged.
 func liftValidationErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	s := err.Error()
-	idx := strings.Index(s, ": ")
-	if idx == -1 {
+	var he *HTTPError
+	if !errors.As(err, &he) {
 		return err
 	}
-	body := s[idx+2:]
+	body := he.Body
 	var parsed struct {
 		Message string `json:"message"`
 		Errors  []struct {
@@ -769,7 +766,8 @@ func (c *Client) DismissReview(ctx context.Context, owner, repo string, number, 
 	_, err := c.Put(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews/%d/dismissals", owner, repo, number, reviewID), map[string]any{
 		"message": message,
 	})
-	if err != nil && strings.Contains(err.Error(), "422") {
+	var he *HTTPError
+	if errors.As(err, &he) && he.StatusCode == http.StatusUnprocessableEntity {
 		return fmt.Errorf("cannot dismiss this review — only APPROVED or CHANGES_REQUESTED reviews can be dismissed (COMMENTED reviews are permanent)")
 	}
 	return err

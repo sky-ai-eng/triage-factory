@@ -330,7 +330,7 @@ func TestPostGraphQL_TotalError_Errors(t *testing.T) {
 
 // TestRequestCore_Table exercises the unified ctx-aware request core (TFAC-475):
 // a 2xx returns the body; any non-2xx returns a *HTTPError carrying the exact
-// status, body, and rendered message; and the Accept header defaults to the v3
+// status and body, and a message carrying only an excerpt of the body; and the Accept header defaults to the v3
 // JSON media type but is overridable via GetRaw. Empty-token (no Authorization)
 // is pinned separately by TestClient_EmptyToken_UnauthenticatedAcrossMethods.
 func TestRequestCore_Table(t *testing.T) {
@@ -341,10 +341,11 @@ func TestRequestCore_Table(t *testing.T) {
 		accept     string // "" → Get (default Accept); else GetRaw with this Accept
 		wantErr    bool
 		wantStatus int
+		wantMsg    string // the body's part of the rendered message
 	}{
 		{name: "2xx returns body", status: 200, body: `{"ok":true}`},
-		{name: "404 returns typed error", status: 404, body: `{"message":"nope"}`, wantErr: true, wantStatus: 404},
-		{name: "500 returns typed error", status: 500, body: "boom", wantErr: true, wantStatus: 500},
+		{name: "404 returns typed error", status: 404, body: `{"message":"nope"}`, wantErr: true, wantStatus: 404, wantMsg: "nope"},
+		{name: "500 returns typed error", status: 500, body: "boom", wantErr: true, wantStatus: 500, wantMsg: "non-JSON body, 4 bytes"},
 		{name: "GetRaw honors custom Accept", status: 200, body: "diff", accept: "application/vnd.github.v3.diff"},
 	}
 	for _, tt := range tests {
@@ -384,7 +385,7 @@ func TestRequestCore_Table(t *testing.T) {
 				if he.Body != tt.body {
 					t.Errorf("Body = %q, want %q", he.Body, tt.body)
 				}
-				if want := fmt.Sprintf("GET /x returned %d: %s", tt.status, tt.body); he.Error() != want {
+				if want := fmt.Sprintf("GET /x returned %d: %s", tt.status, tt.wantMsg); he.Error() != want {
 					t.Errorf("Error() = %q, want %q", he.Error(), want)
 				}
 				return
@@ -452,10 +453,9 @@ func TestRequestCore_ContextCancellation(t *testing.T) {
 }
 
 // TestDo_PostSurfacesHTTPError pins the error-typing half of the unification: a
-// do-family call (Post) now returns a status-discriminable *HTTPError, where it
-// used to return a plain fmt.Errorf. The rendered message is byte-identical to
-// the old "%s %s returned %d: %s", so string-matching callers are unaffected
-// and errors.As callers only gain accuracy.
+// do-family call (Post) returns a status-discriminable *HTTPError whose
+// message is "%s %s returned %d: %s" with GitHub's own error message as the
+// last part, and whose Body keeps the response body for callers that parse it.
 func TestDo_PostSurfacesHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
@@ -472,8 +472,11 @@ func TestDo_PostSurfacesHTTPError(t *testing.T) {
 	if he.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("StatusCode = %d, want 422", he.StatusCode)
 	}
-	if want := `POST /repos/o/r/pulls returned 422: {"message":"validation failed"}`; he.Error() != want {
+	if want := `POST /repos/o/r/pulls returned 422: validation failed`; he.Error() != want {
 		t.Errorf("Error() = %q, want %q", he.Error(), want)
+	}
+	if want := `{"message":"validation failed"}`; he.Body != want {
+		t.Errorf("Body = %q, want %q", he.Body, want)
 	}
 }
 

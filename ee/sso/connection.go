@@ -30,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // envServiceRoleToken names the env var holding the pre-minted RS256
@@ -620,7 +621,7 @@ func createSAMLProvider(ctx context.Context, client *http.Client, baseURL, token
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("create sso provider: http %d: %s", resp.StatusCode, bytes.TrimSpace(respBody))
+		return "", fmt.Errorf("create sso provider: http %d: %s", resp.StatusCode, upstream.Excerpt(respBody))
 	}
 	var out gotrueSSOProvider
 	if err := json.Unmarshal(respBody, &out); err != nil {

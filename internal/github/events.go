@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -346,7 +347,8 @@ type fileContent struct {
 func (c *Client) GetFileContent(ctx context.Context, owner, repo, path string) (string, error) {
 	data, err := c.Get(ctx, fmt.Sprintf("/repos/%s/%s/contents/%s", owner, repo, path))
 	if err != nil {
-		if strings.Contains(err.Error(), "returned 404") {
+		var he *HTTPError
+		if errors.As(err, &he) && he.StatusCode == http.StatusNotFound {
 			return "", nil
 		}
 		return "", fmt.Errorf("get %s from %s/%s: %w", path, owner, repo, err)

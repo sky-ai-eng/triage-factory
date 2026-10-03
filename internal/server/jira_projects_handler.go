@@ -113,7 +113,7 @@ func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	upstream, err := jira.NewClient(cfg).ListProjects(r.Context(), q, startAt, page.Limit)
+	upstream, err := jira.NewClient(cfg).WithOrg(orgID).ListProjects(r.Context(), q, startAt, page.Limit)
 	if err != nil {
 		serverLog.Warn("list jira projects failed", "org", orgID, "error", err)
 		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{

@@ -105,7 +105,7 @@ func (r *ChannelResolver) resolveChannelName(ctx context.Context, ws slackstore.
 		return
 	}
 
-	info, err := slackConversationsInfo(ctx, r.client, botToken, channelID)
+	info, err := slackConversationsInfo(ctx, r.client, ws.OrgID, botToken, channelID)
 	if err != nil {
 		slackLog.Warn("channel name: conversations.info failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
 		return

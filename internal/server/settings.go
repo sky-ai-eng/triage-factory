@@ -629,7 +629,7 @@ func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	client := jira.NewClient(cfg)
+	client := jira.NewClient(cfg).WithOrg(orgID)
 
 	// Intersect statuses across all projects — only return statuses that
 	// exist in every project. A union would let users pick a status that

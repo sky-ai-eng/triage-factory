@@ -845,7 +845,7 @@ func (s *Server) appInstallationReposUnion(ctx context.Context, orgID, base stri
 			githubAppLog.Warn("cutover-preflight: mint token failed, skipping", "org", orgID, "account", inst.AccountLogin, "error", terr)
 			continue
 		}
-		repos, lerr := ghclient.NewClient(base, tok.Value).ListInstallationRepos(ctx)
+		repos, lerr := ghclient.NewClient(base, tok.Value).WithOrg(orgID).ListInstallationRepos(ctx)
 		if lerr != nil {
 			githubAppLog.Warn("cutover-preflight: list repos failed, skipping", "org", orgID, "account", inst.AccountLogin, "error", lerr)
 			continue
@@ -908,7 +908,7 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	repos, err := ghclient.NewClient(base, pat).ListUserRepos(ctx)
+	repos, err := ghclient.NewClient(base, pat).WithOrg(orgID).ListUserRepos(ctx)
 	if err != nil {
 		// The detail (ListUserRepos folds GitHub's response body into the
 		// error) goes to the log, not the response body.

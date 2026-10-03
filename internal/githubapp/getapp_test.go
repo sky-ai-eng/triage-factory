@@ -11,6 +11,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestGetApp_HappyPath pins the App-JWT auth, the GET /app request shape, and
@@ -126,8 +127,8 @@ func TestGetApp_AuthFailure(t *testing.T) {
 // TestGetApp_StatusErrorKeepsOnlyAnExcerpt: the response read is bounded at a
 // megabyte so a proxy answering with something enormous cannot exhaust memory,
 // but an ERROR outlives its request — it is logged, wrapped, held across a
-// retry — so what it keeps is an excerpt, clipped once at construction rather
-// than only when rendered.
+// retry — so it keeps only an excerpt, taken once at construction. A body that
+// is not a JSON object contributes its size and nothing else.
 func TestGetApp_StatusErrorKeepsOnlyAnExcerpt(t *testing.T) {
 	huge := strings.Repeat("A", 100_000)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -155,21 +156,18 @@ func TestGetApp_StatusErrorKeepsOnlyAnExcerpt(t *testing.T) {
 	if status.StatusCode != http.StatusInternalServerError {
 		t.Errorf("StatusCode = %d, want 500", status.StatusCode)
 	}
-	// 512 bytes of body plus the ellipsis truncate appends.
-	if maxLen := 512 + len("…"); len(status.BodyExcerpt) > maxLen {
-		t.Errorf("BodyExcerpt is %d bytes, want at most %d — the whole response is still reachable from the error",
-			len(status.BodyExcerpt), maxLen)
+	if want := "non-JSON body, 100000 bytes"; status.BodyExcerpt != want {
+		t.Errorf("BodyExcerpt = %q, want %q", status.BodyExcerpt, want)
 	}
-	if len(err.Error()) > 1024 {
-		t.Errorf("rendered error is %d bytes; it should be bounded by the excerpt", len(err.Error()))
+	if status.Class != upstream.Transient {
+		t.Errorf("Class = %q, want transient", status.Class)
 	}
 }
 
-// TestGetApp_StatusErrorRendersShortBodiesWhole: the excerpt only clips what
-// exceeds it, so an ordinary GitHub error — which is a short JSON object —
-// reaches the operator intact.
-func TestGetApp_StatusErrorRendersShortBodiesWhole(t *testing.T) {
-	const body = `{"message":"A JSON web token could not be decoded"}`
+// TestGetApp_StatusErrorRendersGitHubsMessage: an ordinary GitHub error is a
+// short JSON object, and its message reaches the operator.
+func TestGetApp_StatusErrorRendersGitHubsMessage(t *testing.T) {
+	const body = `{"message":"A JSON web token could not be decoded","documentation_url":"https://docs.github.com/rest"}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(body))
@@ -190,7 +188,10 @@ func TestGetApp_StatusErrorRendersShortBodiesWhole(t *testing.T) {
 	if err == nil {
 		t.Fatal("GetApp: want an error on 401")
 	}
-	if want := "githubapp: get app: status 401, body: " + body; err.Error() != want {
+	if want := "githubapp: get app: status 401: A JSON web token could not be decoded"; err.Error() != want {
 		t.Errorf("Error() = %q, want %q", err.Error(), want)
+	}
+	if c, ok := upstream.ClassOf(err); !ok || c != upstream.Auth {
+		t.Errorf("ClassOf = (%q, %v), want (auth, true)", c, ok)
 	}
 }

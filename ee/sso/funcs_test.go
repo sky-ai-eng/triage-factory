@@ -178,3 +178,34 @@ func TestIdPFromMetadataURL(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateSAMLProvider_ErrorCarriesExcerptOnly: a GoTrue refusal reaches the
+// log as GoTrue's own message, and a non-JSON answer (a proxy's error page)
+// as its size — never as the body itself.
+func TestCreateSAMLProvider_ErrorCarriesExcerptOnly(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"GoTrue JSON", http.StatusBadRequest, `{"code":400,"error_code":"validation_failed","msg":"metadata_url could not be fetched"}`,
+			"create sso provider: http 400: metadata_url could not be fetched"},
+		{"proxy page", http.StatusBadGateway, "<html><body>502 Bad Gateway</body></html>",
+			"create sso provider: http 502: non-JSON body, 41 bytes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			_, err := createSAMLProvider(t.Context(), srv.Client(), srv.URL, "tok", "https://login.example/metadata", nil)
+			if err == nil || err.Error() != tc.want {
+				t.Errorf("err = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

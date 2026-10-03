@@ -16,17 +16,25 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // HTTPError is returned for any transport-level non-2xx GitHub response.
-// Callers can use errors.As to inspect the status code.
+// Callers can use errors.As to inspect the status code, and parse Body (the
+// response body, capped at upstream.MaxErrorBody) for GitHub's error detail.
+// The message carries only an excerpt of the body (upstream.Excerpt), because
+// it is logged.
 type HTTPError struct {
 	StatusCode int
 	Body       string
+	Class      upstream.Class
 	msg        string
 }
 
 func (e *HTTPError) Error() string { return e.msg }
+
+// UpstreamClass implements upstream.Classified.
+func (e *HTTPError) UpstreamClass() upstream.Class { return e.Class }
 
 // NewHTTPError reconstructs an *HTTPError from its wire-transmitted parts.
 // The agenthost IPC path serializes a GitHub API failure's status code,
@@ -35,7 +43,12 @@ func (e *HTTPError) Error() string { return e.msg }
 // status (IsHTTP406, the download-logs 404 fallback) keep working over the
 // RPC exactly as they do against an in-process *Client.
 func NewHTTPError(statusCode int, body, msg string) *HTTPError {
-	return &HTTPError{StatusCode: statusCode, Body: body, msg: msg}
+	return &HTTPError{
+		StatusCode: statusCode,
+		Body:       body,
+		Class:      upstream.ClassifyResponse(statusCode, nil, []byte(body)),
+		msg:        msg,
+	}
 }
 
 // IsHTTP406 reports whether err is an HTTP 406 Not Acceptable response.
@@ -44,16 +57,20 @@ func IsHTTP406(err error) bool {
 	return errors.As(err, &he) && he.StatusCode == 406
 }
 
-// newStatusError builds the *HTTPError for a transport-level non-2xx. The
-// "%s %s returned %d: %s" message format lives here, in one place, so the REST
-// builders (request, GetConditional, DownloadArtifact) can't drift on it — the
-// GET-only methods pass method "GET". (PostGraphQL keeps its own distinct
-// "GraphQL returned %d: %s" shape — it has no REST path to report.)
-func newStatusError(method, path string, statusCode int, body string) *HTTPError {
+// newStatusError builds the *HTTPError for a transport-level non-2xx, so
+// every builder (request, GetConditional, DownloadArtifact, PostGraphQL)
+// gets the same "<what> returned %d: <excerpt>" message and a class. what
+// names the request: "GET /repos/o/r/pulls" for a REST call, "GraphQL" for
+// PostGraphQL, which has no REST path to report.
+//
+// A rate-limited response never gets here — doWithRetry turns it into
+// ErrRateLimited — so the default classification is the whole answer.
+func newStatusError(what string, resp *http.Response, body []byte) *HTTPError {
 	return &HTTPError{
-		StatusCode: statusCode,
-		Body:       body,
-		msg:        fmt.Sprintf("%s %s returned %d: %s", method, path, statusCode, body),
+		StatusCode: resp.StatusCode,
+		Body:       string(body),
+		Class:      upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
+		msg:        fmt.Sprintf("%s returned %d: %s", what, resp.StatusCode, upstream.Excerpt(body)),
 	}
 }
 
@@ -73,6 +90,11 @@ type Client struct {
 	baseURL string // API base: "https://api.github.com" or "{ghe}/api/v3"
 	pat     string
 	http    *http.Client
+
+	// orgID is the org this client makes its calls for, the org_id every
+	// request is counted under (upstream.Record). Set by WithOrg; empty for a
+	// client that makes its calls for no org.
+	orgID string
 
 	// viaProxy marks a client whose baseURL is a per-run credential proxy
 	// (NewProxyClient), not a real GitHub API base. The REST path
@@ -110,6 +132,13 @@ func NewClient(baseURL, pat string) *Client {
 		// can reach the network any other way.
 		http: telemetry.TracedHTTPClient(30*time.Second, "github"),
 	}
+}
+
+// WithOrg sets the org c makes its calls for, so its requests are counted
+// under that org, and returns c. Call it before c's first request.
+func (c *Client) WithOrg(orgID string) *Client {
+	c.orgID = orgID
+	return c
 }
 
 // NewProxyClient builds a client that talks to a per-run credential proxy
@@ -191,9 +220,7 @@ func (c *Client) newRequest(ctx context.Context, method, fullURL string, body an
 // ctx for cancellation (request-scoped cancellation, handler deadlines,
 // poller/shutdown abort — additive to the 30s client timeout), reads the full
 // body, and returns a typed *HTTPError on any non-2xx so every caller can
-// status-discriminate via errors.As. The error string is the verbatim
-// "%s %s returned %d: %s" the pre-unification do() formatted, so string-matching
-// callers are unaffected and errors.As callers only gain accuracy.
+// status-discriminate via errors.As and read the body from HTTPError.Body.
 //
 // GET requests go through doIdempotent (rate-limit pre-flight + retry);
 // every other method is a mutation and goes through doMutation (single
@@ -221,7 +248,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 		return nil, fmt.Errorf("read response body for %s: %w", path, err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, newStatusError(method, path, resp.StatusCode, string(data))
+		return nil, newStatusError(method+" "+path, resp, data)
 	}
 	return data, nil
 }
@@ -311,7 +338,7 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 		return nil, "", false, fmt.Errorf("read response body for %s: %w", path, readErr)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, "", false, newStatusError("GET", path, resp.StatusCode, string(data))
+		return nil, "", false, newStatusError("GET "+path, resp, data)
 	}
 	return data, resp.Header.Get("ETag"), false, nil
 }
@@ -380,14 +407,13 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		// Drain a modest amount of the error body for context — these are
-		// usually small JSON messages.
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		// doWithRetry already read the error body, capped, and replayed it.
+		body, _ := io.ReadAll(resp.Body)
 		// Wrap in *HTTPError so callers can errors.As to discriminate
 		// status codes (e.g., the download-logs fallback path needs to
 		// detect 404 specifically — GitHub returns it for runs that
 		// haven't finished yet — without resorting to string matching).
-		return 0, newStatusError("GET", path, resp.StatusCode, string(body))
+		return 0, newStatusError("GET "+path, resp, body)
 	}
 
 	// Pre-flight size cap. GitHub's signed-URL redirect returns an honest
@@ -467,9 +493,9 @@ func (e gqlErrors) first(context string) error {
 // an absent/null `data` is a genuine failure.
 //
 // Every caller in this codebase uses PostGraphQL for reads (queries), never
-// mutations, so it goes through doIdempotent — a 429/secondary-403 retries
-// like a GET rather than surfacing immediately as it would for a real
-// mutation.
+// mutations, so it goes through doIdempotent — a rate limit or a transient
+// failure retries like a GET rather than surfacing immediately as it would
+// for a real mutation.
 func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 	if c.viaProxy {
 		// A credential-proxy client's baseURL is the REST proxy, which does not
@@ -499,11 +525,7 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 		return nil, fmt.Errorf("read graphql response body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       string(data),
-			msg:        fmt.Sprintf("GraphQL returned %d: %s", resp.StatusCode, string(data)),
-		}
+		return nil, newStatusError("GraphQL", resp, data)
 	}
 
 	// GraphQL can return a 200 carrying BOTH a usable `data` block and an

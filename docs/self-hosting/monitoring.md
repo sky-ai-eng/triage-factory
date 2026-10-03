@@ -91,7 +91,8 @@ route `9464` externally**; scrape it from inside the compose network / cluster.
 
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
-terminal-state invariant, the work queues, and Slack message-event volume.
+terminal-state invariant, the work queues, claims, Slack message-event volume,
+and the outcome of every request TF makes to GitHub, Jira, and Slack.
 
 ### Dropped audit records
 
@@ -335,6 +336,132 @@ pods in an HA topology):
 sum(increase(tf_slack_retry_deliveries_total[15m])) > 0
 ```
 
+### Source connections
+
+Every HTTP request TF makes to GitHub, Jira, or Slack's Web API is classified
+by how it ended and counted against the org it was made for. Two counters,
+both per process, so `sum` across pods:
+
+| Metric | Labels | What it counts |
+| --- | --- | --- |
+| `tf_upstream_requests_total` | `upstream`, `outcome`, `org_id` | HTTP attempts. A retried call counts once per attempt, so a call that succeeds on its third attempt adds two failed attempts and one `ok`. |
+| `tf_upstream_retries_total` | `upstream`, `outcome`, `org_id` | Decisions to retry. `outcome` is the class of the attempt that caused the retry. |
+
+`upstream` is `github`, `jira`, or `slack`. `outcome` is one of:
+
+| `outcome` | Meaning |
+| --- | --- |
+| `ok` | A response with a status below 400. |
+| `rate_limited` | The upstream asked TF to wait: a 429, or one of GitHub's rate-limit 403s. |
+| `transient` | A 5xx, a 408, a transport failure, or a 403 whose body is not a JSON object. A 403 like that comes from something in front of the upstream rather than the upstream itself (a VPN-dependent proxy in front of a GitHub Enterprise Server, for example), so it says nothing about the credential and is expected to clear. |
+| `auth` | A 401, or a 403 whose body is a JSON object and that is not a rate limit: the upstream refused the credential, or the credential may not do this. |
+| `rejected` | Any other 4xx. The request itself is wrong, and sending it again will not help. |
+
+A request abandoned because its caller gave up (a shutdown, a deadline) is not
+an outcome and is not counted.
+
+`org_id` is the org the request was made for, and is empty for a request made
+for no org. Those requests count in any total, and the queries and the alert
+below that count orgs exclude them. `org_id` makes the series count grow with
+the number of orgs: each pod exports at most 15 series per counter for each
+org (3 upstreams × 5 outcomes), and only the combinations that org has
+produced.
+
+In multi mode, the requests a delegated run makes from inside its sandbox (its
+exec verbs, and `gh`) reach the upstream through the run's credential sidecar,
+and are not counted: the sidecar exports no metrics.
+
+Each client has its own retry policy:
+
+| `upstream` | What is retried |
+| --- | --- |
+| `github` | A GET or a GraphQL query, after a rate limit or a transient failure, up to 3 retries. A `Retry-After` on a 5xx is waited out up to 30s; a longer one returns the response. A mutation gets one attempt. |
+| `jira` | A 429 on any call, and a transient failure on an idempotent call, up to 3 retries. A `Retry-After` longer than 30s is not waited out; the throttled response goes back to the caller. |
+| `slack` | One retry of a 429 whose `Retry-After` is 30s or less. A longer wait returns a rate-limit error at once. A 5xx or a transport failure is not retried, and neither is a file download or upload. |
+
+No client retries a mutation after a transient failure, because the upstream
+may have applied it before the failure. GitHub and Jira also return three
+transient failures without retrying, even for a GET, because another attempt
+would only repeat them: a 403 whose body is not JSON (a proxy that wants a
+VPN, or Jira Data Center's login lockout), a TLS failure (a certificate the
+client does not trust or that names another host, or a server that does not
+speak TLS), and a timeout, which has already spent the client's whole time
+budget. A rate-limited request was refused
+before it was processed, which is why Jira can safely send even a mutation
+again after a 429.
+
+The error a client returns for a failed request carries the status and either
+the upstream's own error message from a JSON body, cut to at most 200
+characters, or, for any other body, only its size. The raw body is never
+copied into an error, so a proxy's HTML error page does not end up in a log
+line.
+
+As with every metric on this page, local mode collects these only when
+`TF_METRICS_ADDR` is set.
+
+```
+sum by (upstream, outcome) (rate(tf_upstream_requests_total[5m]))              # not an alert: attempts by outcome
+sum by (upstream, outcome) (rate(tf_upstream_retries_total[5m]))               # not an alert: retries, by the outcome that caused them
+sum by (org_id, outcome) (rate(tf_upstream_requests_total{upstream="jira",org_id!="",outcome=~"transient|auth"}[15m]))   # not an alert: which orgs are failing against Jira, and how
+```
+
+The bundled Prometheus loads one alerting rule for these counters,
+`UpstreamFailingFleetWide`, from
+[`docker/observability/rules/tf-connections.yml`](../../docker/observability/rules/tf-connections.yml):
+
+```
+(
+  count by (upstream) (
+    (
+      sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m]))
+      /
+      sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m]))
+    ) > 0.5
+  )
+  /
+  count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0)
+) > 0.5
+and on (upstream)
+count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0) >= 2
+                                                                                # for 10m, severity: critical
+```
+
+It fires when, for one upstream, more than half of the orgs sending it
+requests are failing, at least two orgs are sending it requests, and that has
+held for 10 minutes. An org is failing when more than half of its attempts in
+the last 5 minutes ended `transient` or `auth`, so an occasional 5xx among an
+org's healthy requests does not count it. It is fleet-wide on purpose. Each org connects
+with its own credentials, and often to its own host: a GitHub Enterprise
+Server or Jira Data Center that may be reachable only through that org's VPN.
+When one of those hosts is down, or an org's credential has been revoked, the
+problem belongs to that org and nothing an operator does will fix it, so it
+must never page one. Many orgs failing against the same upstream at once is
+what an operator can act on: an outage of a service they share (github.com,
+Atlassian's cloud, Slack), or a fault in this deployment's network or in TF.
+`rate_limited` and `rejected` are left out of the numerator: the first is the
+upstream asking TF to wait, which the clients handle, and the second is a
+request TF built wrong, which is not a connection failure. One org failing on
+its own is still visible, in the dashboard's Connections row and in the
+per-org query above; it just does not alert. The same holds for a deployment
+with a single org: the rule needs two orgs to compare before it can fire.
+
+The bundled stack runs **no Alertmanager**, and `prometheus.yml` has no
+`alerting:` block, so a firing alert is recorded and sent nowhere. Prometheus
+publishes no port, so read the alert as the
+`ALERTS{alertname="UpstreamFailingFleetWide"}` series in Grafana's Explore, or
+through the container:
+
+```sh
+docker compose exec prometheus wget -qO- http://localhost:9090/api/v1/alerts
+```
+
+Delivery is a per-deployment choice: add an `alerting:` block to
+`docker/observability/prometheus.yml` that points at your Alertmanager, or load
+the rules file into the Prometheus you already run. Every `*.yml` in
+`docker/observability/rules/` is loaded, so another rules file is a new file
+there. Prometheus reads rule files at start and on a reload, not when they
+change, so an edit takes effect after `docker compose restart prometheus`.
+
 ## Traces — `TF_TRACES_ENDPOINT`
 
 Tracing is **off in every mode until you set `TF_TRACES_ENDPOINT`**, and that
@@ -530,7 +657,7 @@ dashboard, which needs no queries typed to be useful.
 | Service | Role | Published |
 | --- | --- | --- |
 | `tempo` | trace backend — OTLP/HTTP on `:4318`, query API on `:3200` | nothing |
-| `prometheus` | scrapes every pod's `:9464`; receives Tempo's generated span metrics | nothing |
+| `prometheus` | scrapes every pod's `:9464`; receives Tempo's generated span metrics; evaluates the alerting rules in `docker/observability/rules/` | nothing |
 | `grafana` | the UI that joins them; data sources and correlations provisioned from disk | `127.0.0.1:3030` |
 
 Grafana is the only one reachable from the host, and only on loopback — reach
@@ -543,7 +670,8 @@ pointing TF at a Tempo off the compose network — spans are unauthenticated on
 the wire unless you configure TLS.
 
 Config lives in [`docker/observability/`](../../docker/observability/) — Tempo's
-config, Prometheus's scrape config, and Grafana's data sources and dashboards.
+config, Prometheus's scrape config and alerting rules, and Grafana's data
+sources and dashboards.
 One detail worth knowing: Prometheus finds TF's `:9464` by DNS service discovery
 rather than static targets, so `--scale executor=3` is scraped as three targets
 instead of whichever replica DNS happened to answer with.
@@ -552,9 +680,10 @@ instead of whichever replica DNS happened to answer with.
 
 Grafana's home page is the **Triage Factory — Overview** dashboard, provisioned
 from [`docker/observability/dashboards/`](../../docker/observability/dashboards/)
-the same way the data sources are. Seven rows — three answering "is TF healthy,
+the same way the data sources are. Eight rows — three answering "is TF healthy,
 and what is slow", then one each for the three pipelines whose spans need
-reading rather than aggregating, and one that should stay empty:
+reading rather than aggregating, one that should stay empty, and one for TF's
+requests to GitHub, Jira, and Slack:
 
 - **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
   job cycles (scorer / profiler / classifier), API requests slower than 500 ms,
@@ -616,6 +745,14 @@ reading rather than aggregating, and one that should stay empty:
   [dropped audit records](#dropped-audit-records) for what each stage means,
   which of them local mode can reach, and the one loss the counters
   deliberately cannot see.
+- **Connections.** `tf_upstream_requests_total` and
+  `tf_upstream_retries_total`, each by `upstream` and `outcome`, and the number
+  of orgs per upstream with a `transient` or `auth` attempt in the last 5
+  minutes. That last panel is the numerator of the `UpstreamFailingFleetWide`
+  rule, over the same window. One org there is usually that org's own GitHub
+  Enterprise Server, Jira Data Center, or credential; the rule is what tells
+  you when it is most of them. See [source connections](#source-connections)
+  for what each outcome means and what each client retries.
 
 Everything the dashboard displays is span names, opaque IDs, and closed enums —
 never a repo name, username, or PR title — the same rule the spans and metrics
@@ -641,7 +778,8 @@ The compose file is yours to edit, and these three services are the parts most
 likely to duplicate something you already run:
 
 - **Already have Prometheus?** Delete the `prometheus` service, scrape each
-  pod's `:9464` with yours, and update the Prometheus URL in
+  pod's `:9464` with yours, load the alerting rules in
+  `docker/observability/rules/` into it, and update the Prometheus URL in
   `docker/observability/grafana-datasources.yaml`. Tempo's span-metrics
   `remote_write` needs a `--web.enable-remote-write-receiver` target — repoint
   it or drop that block from `docker/observability/tempo.yaml`.

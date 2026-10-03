@@ -751,7 +751,7 @@ func settingsRedirectPath(orgID string) string {
 // blocks registration.
 func (s *Server) fetchBotUserID(ctx context.Context, ghBase, slug, orgID string) int64 {
 	botLogin := slug + "[bot]"
-	id, err := ghclient.NewClient(ghBase, "").UserID(ctx, botLogin)
+	id, err := ghclient.NewClient(ghBase, "").WithOrg(orgID).UserID(ctx, botLogin)
 	if err != nil {
 		githubAppLog.Warn("resolve bot user id failed; storing NULL (plain noreply commit email until re-register)",
 			"org", orgID, "bot_login", botLogin, "error", err)
