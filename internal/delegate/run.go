@@ -605,7 +605,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// recorded through the sink's own insert door. Last before the launch, so
 	// the rows a crashed bring-up leaves behind are the rows of a conversation
 	// that really was about to speak.
-	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, taskMemories, taskContext); err != nil {
+	if err := s.composeLaunchTurn(ctx, &baseOpts, sink, orgID, conversationID, creatorUserID, cfg.lastHandBackOutcome, taskMemories, taskContext); err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			// Fenced out before the first turn: a successor owns the
 			// conversation, and every row this engagement still wrote would
@@ -706,6 +706,22 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return engagementDisposition{}
 	}
 
+	// The provider was unavailable through the SDK's own retries: handed back
+	// rather than recorded. parked, so the session file stays on disk as the
+	// resume's warm cache.
+	if disp, ok := s.leaveSDKOnUpstream(ctx, liveParkContext{
+		orgID:          orgID,
+		conversationID: conversationID,
+		namespace:      namespace,
+		claudeCwd:      claudeCwd,
+		claimID:        cfg.claimID,
+		runtime:        domain.ConversationRuntimeSDK,
+		mirror:         mirror,
+	}, out.result, out.sessionID, cfg.upstreamHandBacks, creatorUserID); ok {
+		parked = true
+		return disp
+	}
+
 	if out.result != nil {
 		var fenced bool
 		parked, fenced = s.processCompletion(ctx, orgID, conversationID, cfg.blueprintRunID, cfg.claimID, task, out.result, claudeCwd, mirror, out.sessionID, triggerType, creatorUserID)
@@ -737,22 +753,24 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 // session holds the opening and every turn taken on it, and re-sending the
 // opening over the top of that would read as a second briefing and restart the
 // mission — so it gets the continuation note instead, which says the one thing
-// the session cannot: the process it is talking to is a new one. A launch with
-// no session to resume has a model that knows nothing, and gets the opening.
+// the session cannot: why it paused. lastHandBackOutcome picks the note (see
+// continuationNote). A launch with no session to resume has a model that knows
+// nothing, and gets the opening.
 func (s *Spawner) composeLaunchTurn(
 	ctx context.Context,
 	opts *agentproc.RunOptions,
 	sink *conversationSink,
-	orgID, conversationID, creatorUserID string,
+	orgID, conversationID, creatorUserID, lastHandBackOutcome string,
 	memories []domain.TaskMemory,
 	taskContext string,
 ) error {
 	if opts.SessionID != "" {
-		if err := s.recordContinuationNote(sink, conversationID, creatorUserID); err != nil {
+		note := continuationNote(lastHandBackOutcome)
+		if err := s.recordContinuationNote(sink, conversationID, creatorUserID, note); err != nil {
 			return err
 		}
 		opts.OpeningBlocks = nil
-		opts.Message = domain.SessionContinuationNote
+		opts.Message = note
 		return nil
 	}
 	blocks, err := s.openingTurnBlocks(ctx, sink, orgID, conversationID, creatorUserID, memories, taskContext)
@@ -764,6 +782,20 @@ func (s *Spawner) composeLaunchTurn(
 	return nil
 }
 
+// continuationNote is the note a launch resuming a session sends, by how the
+// conversation's previous claim was released. One released 'requeued_upstream'
+// did not lose its process to anything unexpected, and telling the model it
+// did would be wrong; every other way a session comes to be resumed is a
+// process that ended. The outcome is the most recent claim's, so a session
+// whose provider failed it and whose next engagement then could not reach
+// GitHub during setup still gets the upstream note.
+func continuationNote(lastHandBackOutcome string) string {
+	if lastHandBackOutcome == db.HandBackUpstream {
+		return domain.UpstreamContinuationNote
+	}
+	return domain.SessionContinuationNote
+}
+
 // recordContinuationNote writes the note a resuming launch sends, through the
 // same door the rest of the engagement's rows go through.
 //
@@ -771,14 +803,14 @@ func (s *Spawner) composeLaunchTurn(
 // so a note left there would come back at the next claim as a follow-up
 // nobody typed. The row exists so the transcript shows what was actually sent
 // — the session file is the model's copy, and nothing else here reads it.
-func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID, creatorUserID string) error {
+func (s *Spawner) recordContinuationNote(sink *conversationSink, conversationID, creatorUserID, note string) error {
 	delivered := true
 	return sink.OnMessage(&domain.Message{
 		ConversationID: conversationID,
 		UserID:         creatorUserID,
 		Role:           "user",
 		Subtype:        domain.MessageSubtypeInjectionNudge,
-		Content:        domain.SessionContinuationNote,
+		Content:        note,
 		Delivered:      &delivered,
 	})
 }
@@ -868,7 +900,9 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 //     already closed — the live driver included, which is what lets the flip
 //     land after the process is gone rather than under it.
 //   - invalid attempt / IsError → record failed (a knowable error) with the
-//     totals already folded onto the result.
+//     totals already folded onto the result. runAgent hands an IsError result
+//     whose provider was unavailable (sdkProviderUnavailable) back to the
+//     queue before calling this; the resume path does not, and fails it here.
 //
 // Keeping the disposition here — rather than in the live driver — is what makes
 // the non-live backends honest: a one-shot/resume turn that ends open or with a

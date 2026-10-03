@@ -319,7 +319,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		// The other budgets' hand-backs are not upstream ones.
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueSetupFailure, ""); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueSetupFailure, 0, ""); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		c = mustClaim(t, f, c.ID)
@@ -338,6 +338,84 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		c = mustClaim(t, f, c.ID)
 		if c.UpstreamHandBacks != 0 || c.SetupFailures != 0 {
 			t.Errorf("claim after a concluded engagement = (upstream %d, setup %d), want (0, 0)", c.UpstreamHandBacks, c.SetupFailures)
+		}
+	})
+
+	t.Run("Requeue_UpstreamSpendsTheUpstreamBudgetOnItsWait", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f)
+		q := f.Stores.ConversationQueue
+
+		// A person's message waiting undelivered does not lift a setup
+		// requeue's wait: the input that woke the conversation is still
+		// undelivered when its setup fails.
+		pending := false
+		if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+			ConversationID: c.ID, Role: "user", Content: "the follow-up that woke it",
+			Delivered: &pending, WindowState: domain.MessageWindowActive,
+		}); err != nil {
+			t.Fatalf("InsertMessage(follow-up): %v", err)
+		}
+		got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueUpstreamUnavailable, handBackWait, "Could not resolve host: github.com")
+		if err != nil || got == nil {
+			t.Fatalf("RequeueConversation(requeued_upstream) = (%+v, %v), want the requeued row", got, err)
+		}
+		if got.NextAttemptAt == nil {
+			t.Error("the requeued row carries no next_attempt_at")
+		}
+		AssertWriteReturnedStoredRow(t, "RequeueConversation", *got, func() (*domain.Conversation, error) {
+			return f.Stores.Conversations.GetSystem(ctx, f.OrgID, c.ID)
+		})
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != db.HandBackUpstream {
+			t.Errorf("requeued claim = (released %v, %q), want (true, %s)", released, outcome, db.HandBackUpstream)
+		}
+		waitIs(t, f, c.ID, handBackWait)
+		if next := claim(t, f); next != nil {
+			t.Fatalf("claimed %s during the wait, want nothing claimable", next.ID)
+		}
+
+		f.SetNextAttempt(t, c.ID, -time.Second)
+		c = mustClaim(t, f, c.ID)
+		if c.UpstreamHandBacks != 1 || c.SetupFailures != 0 || c.LostEngagements != 0 {
+			t.Errorf("claim after an upstream requeue = (upstream %d, setup %d, lost %d), want (1, 0, 0)", c.UpstreamHandBacks, c.SetupFailures, c.LostEngagements)
+		}
+
+		// The setup budget's requeue sets no wait.
+		if got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueSetupFailure, 0, "runsc: exit status 128"); err != nil || got == nil {
+			t.Fatalf("RequeueConversation(requeued) = (%+v, %v)", got, err)
+		}
+		noWait(t, f, c.ID)
+		c = mustClaim(t, f, c.ID)
+		if c.UpstreamHandBacks != 1 || c.SetupFailures != 1 {
+			t.Errorf("claim after a setup requeue = (upstream %d, setup %d), want (1, 1)", c.UpstreamHandBacks, c.SetupFailures)
+		}
+	})
+
+	t.Run("Claim_CarriesTheLastReleasedClaimsOutcome", func(t *testing.T) {
+		f := mk(t)
+		c := stageClaimed(t, f)
+		if c.LastHandBackOutcome != "" {
+			t.Errorf("first claim LastHandBackOutcome = %q, want none", c.LastHandBackOutcome)
+		}
+		handBack(t, f, c, db.HandBackUpstream, 0)
+		c = mustClaim(t, f, c.ID)
+		if c.LastHandBackOutcome != db.HandBackUpstream {
+			t.Errorf("claim after an upstream hand-back: LastHandBackOutcome = %q, want %s", c.LastHandBackOutcome, db.HandBackUpstream)
+		}
+		handBack(t, f, c, db.HandBackShutdown, 0)
+		c = mustClaim(t, f, c.ID)
+		if c.LastHandBackOutcome != db.HandBackShutdown {
+			t.Errorf("claim after a shutdown hand-back: LastHandBackOutcome = %q, want %s", c.LastHandBackOutcome, db.HandBackShutdown)
+		}
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkIdle()); err != nil || !ok {
+			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
+		}
+		if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, c.ID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume = (%v, %v)", ok, err)
+		}
+		c = mustClaim(t, f, c.ID)
+		if c.LastHandBackOutcome != "parked" {
+			t.Errorf("claim after a park: LastHandBackOutcome = %q, want parked", c.LastHandBackOutcome)
 		}
 	})
 

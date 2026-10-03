@@ -12,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -344,7 +345,23 @@ func (s *Spawner) activityFor(conversationID string) *activityTracker {
 // goes first, so an executor that dies mid-stop still leaves a record the
 // settlement parks as stalled; the cancel runs whatever the write did, since
 // the holder parks with stopParkReason on the cause alone.
+//
+// A silent provider is the exception. The provider went away, not the
+// engagement, so nothing here asks for a person: no intent is written, since
+// one would take the conversation out of the queue, and the holder reads
+// errUpstreamStalled and hands the conversation back on the upstream
+// schedule. An executor that dies before that hand-back leaves a claim whose
+// lease lapses, and the takeover requeues it. The SDK reports no provider
+// operation (a wait on its provider surfaces as the idle arm), so this only
+// ever applies to a native engagement.
 func (s *Spawner) stallEngagement(conv *domain.Conversation, fence context.CancelCauseFunc, cause stallCause) {
+	if cause.op == agentloop.ProviderActivityOp {
+		fence(errUpstreamStalled)
+		dispatchLog.Warn("engagement stalled: the model provider sent nothing within its deadline; handing the conversation back to retry later",
+			"conversation", conv.ID, "claim", conv.ClaimID, "op", cause.op, "in_flight", cause.elapsed)
+		recordEngagementStall(cause.op)
+		return
+	}
 	if s.conversations != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), stallIntentTimeout)
 		if _, err := s.conversations.RequestStopSystem(ctx, conv.OrgID, conv.ID, "", "", domain.ParkReasonStalled); err != nil {

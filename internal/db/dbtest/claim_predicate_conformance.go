@@ -137,9 +137,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		var err error
 		switch outcome {
 		case "requeued":
-			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueSetupFailure, "")
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueSetupFailure, 0, "")
 		case "requeued_credentials":
-			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueAwaitingCredentials, "")
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueAwaitingCredentials, 0, "")
 		case "requeued_shutdown":
 			_, err = h.Stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, predicateExecutorID, predicateBootEpoch, []string{convID})
 		case "reaped":

@@ -940,6 +940,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	cfg.teamID = conv.TeamID
 	cfg.claimID = conv.ClaimID
 	cfg.upstreamHandBacks = conv.UpstreamHandBacks
+	cfg.lastHandBackOutcome = conv.LastHandBackOutcome
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
@@ -2178,30 +2179,95 @@ type engagementDisposition struct {
 // control-plane outage. It shows on the phase ladder as awaiting_credentials
 // while it waits, which is where that outage is watched.
 //
+// An upstream that could not be reached (upstreamSetupFailure) spends the
+// upstream budget instead, on its schedule: the cause is outside the
+// conversation and outlives the engagement, so the 2-second retry the setup
+// budget buys would spend it in seconds on an outage. See
+// handBackUnreachableUpstream.
+//
 // Returns whether the conversation survived. A requeue and an exhausted park
 // both leave the step live, so whatever this claim staged for it on disk is
 // the next claim's to re-mount; false is the poison pill, and the step is over.
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if errors.Is(cause, errAwaitingCredentialsTimeout) {
 		dispatchLog.Warn("credential bundle never arrived; handing the conversation back without spending its setup budget", "conversation", conv.ID, "error", cause)
-		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, cause.Error()); err != nil {
+		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, 0, cause.Error()); err != nil {
 			dispatchLog.Warn("requeue conversation after a credentials timeout failed", "conversation", conv.ID, "error", err)
 		} else if requeued != nil {
 			recordHandBack(orgID, string(db.RequeueAwaitingCredentials), 1)
 		}
 		return true
 	}
+	if upstreamSetupFailure(cause) {
+		return s.handBackUnreachableUpstream(orgID, br, conv, cause)
+	}
 	attempt := conv.SetupFailures + 1
 	if attempt >= s.budgetLimit(db.BudgetSetup) {
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", attempt, "error", cause)
-	if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, cause.Error()); err != nil {
+	if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, 0, cause.Error()); err != nil {
 		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
 	} else if requeued != nil {
 		recordHandBack(orgID, string(db.RequeueSetupFailure), 1)
 	}
 	return true
+}
+
+// handBackUnreachableUpstream is handlePreAgentFailure's arm for an upstream
+// that could not be reached while the engagement set up its workspace. While
+// the upstream budget lasts the claim goes back 'requeued_upstream' with the
+// schedule's wait, and the setup budget is untouched. Once it is spent the
+// conversation parks upstream_unavailable through the write an exhausted
+// setup budget parks launch_failed with, a first engagement included: the
+// cause is outside the run, and a message retries it.
+//
+// The exception is an SDK conversation with no session yet. A message cannot
+// wake it (the follow-up path refuses one with no session to resume), so a
+// park would leave it where nothing reaches it; it takes the setup budget's
+// exhausted disposition instead (disposeOfUnreachableUpstream), which fails a
+// step that never ran.
+func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
+	prior := conv.UpstreamHandBacks
+	if prior+1 < s.budgetLimit(db.BudgetUpstream) {
+		policy, _ := db.HandBackPolicyFor(db.HandBackUpstream)
+		delay := policy.Delay(prior)
+		dispatchLog.Info("an upstream was unreachable while the engagement set up; handing the conversation back to retry later",
+			"conversation", conv.ID, "upstream_hand_backs", prior, "delay", delay, "error", cause)
+		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueUpstreamUnavailable, delay, cause.Error()); err != nil {
+			dispatchLog.Warn("requeue conversation after an unreachable upstream failed", "conversation", conv.ID, "error", err)
+		} else if requeued != nil {
+			recordHandBack(orgID, db.HandBackUpstream, 1)
+			s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+		}
+		return true
+	}
+	dispatchLog.Warn("an upstream stayed unreachable through every retry the upstream budget allows",
+		"conversation", conv.ID, "upstream_hand_backs", prior, "error", cause)
+	if conv.Runtime != domain.ConversationRuntimeNative && conv.SessionID == "" {
+		return s.disposeOfUnreachableUpstream(orgID, br, conv, cause)
+	}
+	s.parkWithStopNote(orgID, conv, domain.ParkReasonUpstreamUnavailable,
+		"Paused after repeated attempts: "+upstreamSetupReason(cause)+". Send a message to try again.",
+		"")
+	return true
+}
+
+// disposeOfUnreachableUpstream is disposeOfExhaustedConversation for an SDK
+// conversation with no session whose upstream budget ran out: the same split,
+// the same park reason and the same toast, worded with upstreamSetupReason
+// rather than the error. The park's note offers no message, because the
+// follow-up path refuses one to an SDK conversation with no session.
+func (s *Spawner) disposeOfUnreachableUpstream(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
+	reason := upstreamSetupReason(cause)
+	if br == nil || s.conversationHasWork(orgID, conv.ID) {
+		s.parkWithStopNote(orgID, conv, domain.ParkReasonLaunchFailed,
+			"Paused after repeated attempts: "+reason+".",
+			fmt.Sprintf("Run %s could not start: %s", shortConversationID(conv.ID), reason))
+		return true
+	}
+	s.failUnstartedStep(orgID, br, conv, reason)
+	return false
 }
 
 // disposeOfExhaustedConversation answers for a conversation that failed the
@@ -2232,11 +2298,18 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 		return true
 	}
 	dispatchLog.Error("workspace setup failed after attempts; failing blueprint", "conversation", conv.ID, "attempts", conv.SetupFailures+1, "error", cause)
-	s.failClaimedConversation(orgID, &conv, cause.Error())
+	s.failUnstartedStep(orgID, br, conv, cause.Error())
+	return false
+}
+
+// failUnstartedStep fails a blueprint step whose conversation never ran: the
+// conversation's terminal, then the blueprint's, with reason as its abort
+// reason.
+func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv domain.Conversation, reason string) {
+	s.failClaimedConversation(orgID, &conv, reason)
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
 		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
-		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
-	return false
+		domain.BlueprintRunStatusFailed, reason, conv.BlueprintStepIndex, false)
 }
 
 // conversationHasWork reports whether this conversation holds anything a
@@ -2308,10 +2381,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 	}
 	dispatchLog.Error("blueprint step refused: the model it would run on is not enabled for its team",
 		"conversation", conv.ID, "blueprint_run", br.ID, "team", conv.TeamID, "error", cause)
-	s.failClaimedConversation(orgID, &conv, cause.Error())
-	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
-		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
-		domain.BlueprintRunStatusFailed, cause.Error(), conv.BlueprintStepIndex, false)
+	s.failUnstartedStep(orgID, br, conv, cause.Error())
 }
 
 // parkWithStopNote is the park every pre-agent stop lands on: a stop note on the
@@ -2321,7 +2391,8 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 //
 // The note and the reason are the caller's because they are the only parts that
 // differ, and they are what a person is actually told — a park that describes
-// the wrong cause sends them to fix the wrong thing.
+// the wrong cause sends them to fix the wrong thing. An empty toastMsg fires no
+// toast: an upstream outage is not raised as one.
 func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
 	bgCtx := context.Background()
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
@@ -2353,7 +2424,9 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 		return
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, "open")
-	toast.Error(s.wsHub, orgID, toastMsg)
+	if toastMsg != "" {
+		toast.Error(s.wsHub, orgID, toastMsg)
+	}
 }
 
 // failClaimedConversation writes the terminal and the boundary for a claimed

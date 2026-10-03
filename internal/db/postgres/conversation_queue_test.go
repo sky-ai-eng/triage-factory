@@ -70,7 +70,7 @@ func TestConversationQueueStore_Postgres_ClaimCycle(t *testing.T) {
 	}
 
 	// Requeue → re-claimable, attempts retained.
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	got2, err := stores.ConversationQueue.ClaimNextConversation(ctx, pgConversationQueueExecutorID, pgConversationQueueBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
@@ -748,7 +748,7 @@ func TestConversationQueueStore_Postgres_QueuedAtStamps(t *testing.T) {
 		t.Fatalf("ClaimedAt %v precedes QueuedAt %v", claimed.ClaimedAt, firstQueuedAt)
 	}
 
-	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "transient setup error"); err != nil {
+	if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "transient setup error"); err != nil {
 		t.Fatalf("RequeueConversation: %v", err)
 	}
 	requeued, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
@@ -798,7 +798,7 @@ func TestConversationQueueStore_Postgres_RequeueFromSetupPhase(t *testing.T) {
 				t.Fatalf("SetActiveClaimPhaseSystem(%s): %v", phase, err)
 			}
 
-			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, "workspace setup: boom"); err != nil {
+			if _, err := stores.ConversationQueue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "workspace setup: boom"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			after, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)

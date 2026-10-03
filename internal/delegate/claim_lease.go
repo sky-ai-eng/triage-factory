@@ -49,6 +49,13 @@ const (
 // its fenced park, which is why leaseFenced does not match it. It differs
 // from a requested stop only in the reason the park records (stopParkReason).
 //
+// errUpstreamStalled is the watchdog's cause for a stall whose operation was a
+// provider attempt: the model provider sent nothing within its bound. That is
+// an upstream outage rather than a stuck engagement, so the holder hands the
+// conversation back to retry on the upstream schedule (leaveOnUpstream)
+// instead of parking it, and no stop intent is written: an intent takes the
+// row out of the queue. leaseFenced does not match it either.
+//
 // errDispatcherShutdown is the last: the dispatcher this engagement runs
 // under is stopping with the process. Nobody asked for the conversation to
 // stop, so it is handed back to the queue rather than parked — see
@@ -59,6 +66,7 @@ var (
 	errClaimSelfFenced    = errors.New("delegate: claim self-fenced after renewal failures")
 	errStopRequested      = errors.New("delegate: stop requested")
 	errStalled            = errors.New("delegate: engagement stalled")
+	errUpstreamStalled    = errors.New("delegate: model provider sent nothing within its deadline")
 	errDispatcherShutdown = errors.New("delegate: dispatcher shutting down")
 )
 
@@ -73,6 +81,12 @@ var (
 func leaseFenced(ctx context.Context) bool {
 	cause := context.Cause(ctx)
 	return errors.Is(cause, errClaimLeaseLost) || errors.Is(cause, errClaimSelfFenced)
+}
+
+// upstreamStalled reports whether ctx was cancelled because the watchdog found
+// the model provider silent past its bound.
+func upstreamStalled(ctx context.Context) bool {
+	return errors.Is(context.Cause(ctx), errUpstreamStalled)
 }
 
 // shutdownCancelled reports whether ctx was cancelled because the dispatcher

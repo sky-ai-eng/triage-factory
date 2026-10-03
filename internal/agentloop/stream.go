@@ -74,7 +74,7 @@ func (e *Engine) streamWithRetry(ctx context.Context, orgID string, client Provi
 	delay := p.BaseDelay
 	var lastErr error
 	for attempt := 1; attempt <= p.MaxAttempts; attempt++ {
-		end := e.beginActivity("provider", e.ActivityBounds.Provider)
+		end := e.beginActivity(ProviderActivityOp, e.ActivityBounds.Provider)
 		completion, err := client.Stream(ctx, req)
 		end()
 		class, counted := inference.Classify(ctx, err)

@@ -725,6 +725,9 @@ func gitRunCtx(ctx context.Context, dir string, args ...string) error {
 // GIT_TERMINAL_PROMPT=0 reaches the subprocess (and the lazy promisor fetch it
 // spawns) whether or not auth is active; an inert auth uses that base alone,
 // behaving identically to before aside from the now-explicit prompt disable.
+//
+// A failure is a *GitError, so a caller that wraps it with %w leaves git's
+// output readable to IsTransientGitError.
 func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...string) error {
 	for attempt := 1; ; attempt++ {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -742,9 +745,9 @@ func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...stri
 			return nil
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("cancelled")
+			return &GitError{Args: args, Output: string(out), Err: ctx.Err()}
 		}
-		runErr := fmt.Errorf("%s: %s", err, string(out))
+		runErr := &GitError{Args: args, Output: string(out), Err: err}
 		if attempt >= worktreeAddLockRaceMaxAttempts || !isWorktreeAddLockRace(args, out) {
 			return runErr
 		}
@@ -763,7 +766,7 @@ func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...stri
 		// caller blocked for the full backoff instead of returning promptly.
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("cancelled")
+			return &GitError{Args: args, Output: string(out), Err: ctx.Err()}
 		case <-time.After(worktreeAddLockRaceBackoff):
 		}
 	}

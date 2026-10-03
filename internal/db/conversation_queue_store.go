@@ -94,9 +94,10 @@ type ClaimRef struct {
 }
 
 // RequeueOutcome is the claim outcome RequeueConversation releases with. It
-// is typed because the two values spend different budgets: a setup failure
-// counts toward the dispatcher's setup budget, and a credentials wait that
-// timed out counts toward nothing (see domain.Conversation.SetupFailures).
+// is typed because the values spend different budgets: a setup failure counts
+// toward the dispatcher's setup budget, an upstream that was unreachable
+// during setup toward the upstream budget, and a credentials wait that timed
+// out toward nothing (see domain.Conversation.SetupFailures).
 type RequeueOutcome string
 
 const (
@@ -108,6 +109,12 @@ const (
 	// bundle never arrived. Nothing about the conversation failed — the
 	// brain's provisioner did not answer — so it counts toward no budget.
 	RequeueAwaitingCredentials RequeueOutcome = "requeued_credentials"
+	// RequeueUpstreamUnavailable hands back an engagement whose setup failed
+	// because an upstream it fetches from (GitHub, for the clone or the pull
+	// request) could not be reached. It is the HandBackUpstream outcome an
+	// engagement writes for an unavailable model provider, so it spends the
+	// same upstream budget and waits on the same schedule.
+	RequeueUpstreamUnavailable RequeueOutcome = HandBackUpstream
 )
 
 // ErrInvalidRequeueOutcome refuses a RequeueConversation call naming an
@@ -118,7 +125,7 @@ var ErrInvalidRequeueOutcome = errors.New("db: invalid requeue outcome")
 
 // Valid reports whether o is one of the RequeueOutcome values.
 func (o RequeueOutcome) Valid() bool {
-	return o == RequeueSetupFailure || o == RequeueAwaitingCredentials
+	return o == RequeueSetupFailure || o == RequeueAwaitingCredentials || o == RequeueUpstreamUnavailable
 }
 
 // The hand-back outcomes no RequeueOutcome names: each is written by its own
@@ -172,7 +179,8 @@ type HandBackPolicy struct {
 //   - requeued_shutdown: the executor stopped or drained cleanly. A deliberate
 //     stop is not a loss.
 //   - requeued_upstream: an upstream stayed unavailable through the
-//     engagement's own retries. The cause outlives the engagement, so the next
+//     engagement's own retries, or could not be reached while the engagement
+//     set up its workspace. The cause outlives the engagement, so the next
 //     claim waits on the schedule rather than failing the same way at once.
 //
 // The upstream budget counts attempts, not time: next_attempt_at is database
@@ -377,7 +385,8 @@ type ConversationQueueStore interface {
 	// UpstreamHandBacks are scoped to the conversation's current queue episode
 	// rather than its lifetime — see the dialects' episodeHandBacksSQL for the
 	// model, which the SQL is the definition of. The last three are the
-	// budgets HandBackPolicies names.
+	// budgets HandBackPolicies names. LastHandBackOutcome is the outcome of
+	// the conversation's most recent released claim, read in the same claim.
 	//
 	// A hand-back that has to wait (HandBackClaimSystem with a delay) keeps
 	// the conversation out of the scan until its next_attempt_at, and the
@@ -576,16 +585,25 @@ type ConversationQueueStore interface {
 
 	// RequeueConversation hands a claimed conversation back after a transient
 	// dispatcher failure — a workspace setup hiccup, a runtime that failed to
-	// launch, a credentials wait that timed out — recording lastErr for
-	// visibility. Releasing the claim IS the requeue: the conversation is
-	// mid-flight, so the moment it has no claim it matches the needs-driving
-	// predicate again. The claim releases with outcome, which keeps the
-	// current queue episode open either way; RequeueSetupFailure is what the
-	// next claim's SetupFailures counts, so the dispatcher can stop retrying
-	// a conversation that fails the same way every time. An outcome outside
-	// the vocabulary is refused with ErrInvalidRequeueOutcome and nothing is
-	// written. Guarded on a mid-flight conversation with a live claim, so a
-	// stale call can't act on a terminal or parked row.
+	// launch, a credentials wait that timed out, an upstream that could not be
+	// reached — recording lastErr for visibility. Releasing the claim IS the
+	// requeue: the conversation is mid-flight, so the moment it has no claim
+	// it matches the needs-driving predicate again. The claim releases with
+	// outcome, which keeps the current queue episode open either way;
+	// RequeueSetupFailure is what the next claim's SetupFailures counts, so
+	// the dispatcher can stop retrying a conversation that fails the same way
+	// every time. An outcome outside the vocabulary is refused with
+	// ErrInvalidRequeueOutcome and nothing is written. Guarded on a mid-flight
+	// conversation with a live claim, so a stale call can't act on a terminal
+	// or parked row.
+	//
+	// A positive delay stamps next_attempt_at at database now plus delay, the
+	// wait HandBackClaimSystem stamps; 0 leaves the conversation claimable at
+	// once. Unlike HandBackClaimSystem the wait is stamped whatever input is
+	// pending: an engagement that failed before its agent ran delivered
+	// nothing, so the input that woke the conversation is still undelivered
+	// and says nothing about whether to try again sooner. A message sent
+	// after the requeue clears the wait the way it clears any other.
 	//
 	// Returns the requeued row (ConversationStore.Get/GetSystem's
 	// projection), or nil when the guard declined — nothing mid-flight with a
@@ -593,7 +611,7 @@ type ConversationQueueStore interface {
 	// EntityStore.Close shape: a second requeue of an already-requeued
 	// conversation is not an error, and the caller that wants to know whether
 	// this call was the one that requeued it now can.
-	RequeueConversation(ctx context.Context, orgID, conversationID string, outcome RequeueOutcome, lastErr string) (*domain.Conversation, error)
+	RequeueConversation(ctx context.Context, orgID, conversationID string, outcome RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error)
 
 	// ResetProcessingConversations is the boot reset: every claim this
 	// executor minted in a strictly earlier boot (executor_id = executorID AND

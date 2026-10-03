@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -490,10 +491,13 @@ func (f stallFixture) runNative(t *testing.T, provider agentloop.Provider, tools
 	})
 }
 
-// TestNativeStall_ProviderWithNoFirstByteParksStalled: a provider attempt
-// that never produces a byte is stopped at the provider bound, and the
-// conversation parks open as stalled rather than failing or retrying.
-func TestNativeStall_ProviderWithNoFirstByteParksStalled(t *testing.T) {
+// TestNativeStall_ProviderWithNoFirstByteHandsBackUpstream: a provider attempt
+// that never produces a byte is stopped at the provider bound, and since a
+// silent provider is an upstream outage rather than a stuck engagement, the
+// conversation is handed back 'requeued_upstream' on the schedule. No stop
+// intent is written, which would take the row out of the queue, and nothing
+// parks it as stalled. The stall still counts.
+func TestNativeStall_ProviderWithNoFirstByteHandsBackUpstream(t *testing.T) {
 	stalls := stallCounter(t)
 	f := newStallFixture(t, "r-stall-provider", activityTimings{idle: time.Hour, providerByte: 100 * time.Millisecond})
 
@@ -502,21 +506,85 @@ func TestNativeStall_ProviderWithNoFirstByteParksStalled(t *testing.T) {
 	if result.Kind != agentloop.ResultCancelled {
 		t.Fatalf("result = %v (err %v), want cancelled", result.Kind, result.Err)
 	}
-	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errStalled) {
-		t.Fatalf("claim context cause = %v, want errStalled", cause)
+	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errUpstreamStalled) || errors.Is(cause, errStalled) {
+		t.Fatalf("claim context cause = %v, want errUpstreamStalled", cause)
+	}
+	if leaseFenced(f.claimCtx) {
+		t.Fatal("leaseFenced matches errUpstreamStalled; the holder still owns its claim and hands it back")
 	}
 	if n := provider.calls.Load(); n != 1 {
 		t.Errorf("provider attempts = %d, want 1 — a stall stops the engagement, it does not retry", n)
 	}
 
-	if disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
+	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
 		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID},
-		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil); disp.fenced || disp.handedBack {
-		t.Fatalf("the stalled engagement reported %+v; it still holds its claim and parks", disp)
+		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+	if !disp.handedBack || disp.fenced {
+		t.Fatalf("disposition = %+v, want handed back and unfenced", disp)
 	}
-	f.assertParkedStalled(t)
+	var status, parkReason, summary string
+	var intent, waiting bool
+	if err := f.database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, ''), COALESCE(result_summary, ''),
+		        stop_requested_at IS NOT NULL, next_attempt_at IS NOT NULL
+		 FROM conversations WHERE id = ?`, f.conversationID,
+	).Scan(&status, &parkReason, &summary, &intent, &waiting); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "" || parkReason != "" {
+		t.Errorf("conversation = (%q, %q), want mid-flight with no park", status, parkReason)
+	}
+	if intent {
+		t.Error("the provider stall wrote a stop intent; the row would leave the queue")
+	}
+	if !waiting {
+		t.Error("the hand-back set no next_attempt_at; the successor would meet the silent provider at once")
+	}
+	if !strings.Contains(summary, "model provider") {
+		t.Errorf("result_summary = %q, want it to say the provider went silent", summary)
+	}
+	if got := claimOutcome(t, f, f.claimID); got != db.HandBackUpstream {
+		t.Errorf("claim outcome = %q, want %s", got, db.HandBackUpstream)
+	}
 	if got := stalls("provider"); got != 1 {
 		t.Errorf("engagements.stalled{op=provider} = %d, want 1", got)
+	}
+}
+
+// TestNativeStall_ProviderStallAtTheEndOfTheBudgetParksUpstream: the upstream
+// budget bounds a silent provider the way it bounds a failing one. The stall
+// that would be its last hand-back parks the conversation upstream_unavailable
+// with the note, never stalled.
+func TestNativeStall_ProviderStallAtTheEndOfTheBudgetParksUpstream(t *testing.T) {
+	f := newStallFixture(t, "r-stall-provider-spent", activityTimings{idle: time.Hour, providerByte: 100 * time.Millisecond})
+	result := f.runNative(t, &silentProvider{}, &recordingToolHost{})
+	if !errors.Is(context.Cause(f.claimCtx), errUpstreamStalled) {
+		t.Fatalf("claim context cause = %v, want errUpstreamStalled", context.Cause(f.claimCtx))
+	}
+
+	disp := f.s.recordNativeResult(f.claimCtx, runmode.LocalDefaultOrgID, f.conversationID, f.task,
+		runConfig{orgID: runmode.LocalDefaultOrgID, claimID: f.claimID, upstreamHandBacks: maxUpstreamHandBacks - 1},
+		"", "", "manual", runmode.LocalDefaultUserID, time.Now(), result, nil)
+	if disp.handedBack || disp.fenced {
+		t.Fatalf("disposition = %+v, want a park", disp)
+	}
+	var status, parkReason string
+	if err := f.database.QueryRow(
+		`SELECT COALESCE(status, ''), COALESCE(park_reason, '') FROM conversations WHERE id = ?`, f.conversationID,
+	).Scan(&status, &parkReason); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != domain.StatusOpen || parkReason != string(domain.ParkReasonUpstreamUnavailable) {
+		t.Errorf("conversation = (%q, %q), want (open, upstream_unavailable)", status, parkReason)
+	}
+	var notes int
+	for _, m := range allRows(t, f.s, f.conversationID) {
+		if m.Subtype == domain.MessageSubtypeStopNote && m.Content == upstreamExhaustedNote {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Errorf("stop notes saying why = %d, want 1", notes)
 	}
 }
 

@@ -334,14 +334,20 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			return err
 		}
 		claimed.ClaimID = claimID
+		// The last column is the outcome of the most recent released claim;
+		// the one just minted is unreleased, so it is not a candidate.
 		var handBacks int
 		if err := q.QueryRowContext(ctx, `
 			SELECT `+episodeHandBacksSQL("r", handedBackOutcomesSQL)+`,
 			       `+EpisodeSetupFailuresSQL("r")+`,
 			       `+EpisodeLostEngagementsSQL("r")+`,
-			       `+EpisodeUpstreamHandBacksSQL("r")+`
+			       `+EpisodeUpstreamHandBacksSQL("r")+`,
+			       COALESCE((SELECT prior.outcome FROM claims prior
+			                 WHERE prior.conversation_id = r.id AND prior.released_at IS NOT NULL
+			                 ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.rowid DESC
+			                 LIMIT 1), '')
 			FROM conversations r WHERE r.id = ?
-		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks); err != nil {
+		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks, &claimed.LastHandBackOutcome); err != nil {
 			return err
 		}
 		claimed.ExecutorID = executorID
@@ -366,7 +372,7 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 // itself (matched only when the owning conversation's status IS NULL), so
 // checking RowsAffected there tells the whole guard's outcome without a
 // separate probe.
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, lastErr string) (*domain.Conversation, error) {
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -387,10 +393,15 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		if err != nil || n == 0 {
 			return err
 		}
+		var nextAttempt any
+		if delay > 0 {
+			nextAttempt = sqliteLeaseModifier(delay)
+		}
 		row := q.QueryRowContext(ctx, `
-			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL
+			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL,
+			    next_attempt_at = CASE WHEN ? IS NOT NULL THEN `+sqliteNowPlusExpr+` END
 			WHERE id = ?
-			RETURNING `+sqliteConversationReturningColumns, lastErr, conversationID)
+			RETURNING `+sqliteConversationReturningColumns, lastErr, nextAttempt, nextAttempt, conversationID)
 		r, err := scanConversationReturning(row)
 		if err != nil {
 			return err

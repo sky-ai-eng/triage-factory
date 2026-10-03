@@ -699,43 +699,6 @@ func nativeBashMemBudgetMB(ceilingMB int) int {
 	return budget
 }
 
-// upstreamExhaustedNote is the transcript's account of a conversation parked
-// because its model provider stayed unavailable through every hand-back the
-// upstream budget allows. The model reads it on the next claim and a person
-// reads it in place.
-const upstreamExhaustedNote = "Paused after repeated attempts: the model provider was unavailable for about four hours. Send a message to try again."
-
-// insertUpstreamStopNote writes upstreamExhaustedNote as a stop note, through
-// the claim fence like every other write of this engagement. fenced is true
-// when the fence refused it: a successor owns the conversation, and neither
-// the note nor the park that follows is this engagement's to write. Any other
-// failure is logged and the park still lands.
-func (s *Spawner) insertUpstreamStopNote(ctx context.Context, orgID, conversationID, claimID, creatorUserID string) (fenced bool) {
-	if s.conversations == nil {
-		return false // test fixture with no DB wired
-	}
-	msg := &domain.Message{
-		ConversationID: conversationID,
-		UserID:         creatorUserID,
-		Role:           "user",
-		Subtype:        domain.MessageSubtypeStopNote,
-		Content:        upstreamExhaustedNote,
-	}
-	id, err := s.conversations.InsertMessageForClaimSystem(context.WithoutCancel(ctx), orgID, claimID, msg)
-	if errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused the stop note — a successor owns this conversation; recording nothing",
-			"conversation", conversationID, "claim_id", claimID, "org_id", orgID)
-		return true
-	}
-	if err != nil {
-		delegateLog.Warn("record stop note failed; the park still lands", "conversation", conversationID, "error", err)
-		return false
-	}
-	msg.ID = int(id)
-	s.broadcastMessage(orgID, conversationID, msg)
-	return false
-}
-
 // recordNativeResult maps an engagement's terminal disposition onto the
 // existing bookkeeping. Every graceful release — a conclusion, a guard park,
 // a flow-control terminal — snapshots the workspace first, exactly as the
@@ -804,6 +767,12 @@ func (s *Spawner) recordNativeResult(
 		if shutdownCancelled(ctx) {
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
 		}
+		// Nor is a provider that went silent. The watchdog stopped the call,
+		// not the work, so the conversation is handed back on the upstream
+		// schedule exactly as a provider that kept failing is.
+		if upstreamStalled(ctx) {
+			return s.leaveOnUpstream(ctx, park, "", cfg.upstreamHandBacks, "the model provider sent nothing within its deadline", creatorUserID)
+		}
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
 
 	case agentloop.ResultFailed:
@@ -834,34 +803,19 @@ func (s *Spawner) recordNativeResult(
 		if leaseFenced(ctx) {
 			return engagementDisposition{fenced: true}
 		}
-		park := liveParkContext{
+		lastErr := "model provider unavailable"
+		if result.Err != nil {
+			lastErr = result.Err.Error()
+		}
+		return s.leaveOnUpstream(ctx, liveParkContext{
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      namespace,
 			claudeCwd:      claudeCwd,
 			claimID:        cfg.claimID,
-			reason:         db.ParkStopped(domain.ParkReasonUpstreamUnavailable, ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
-		}
-		lastErr := "model provider unavailable"
-		if result.Err != nil {
-			lastErr = result.Err.Error()
-		}
-		n := cfg.upstreamHandBacks
-		if n+1 < s.budgetLimit(db.BudgetUpstream) {
-			policy, _ := db.HandBackPolicyFor(db.HandBackUpstream)
-			delay := policy.Delay(n)
-			delegateLog.Info("model provider unavailable through the engagement's retries; handing the conversation back to retry later",
-				"conversation", conversationID, "claim", cfg.claimID, "upstream_hand_backs", n, "delay", delay, "error", lastErr)
-			return engagementDisposition{fenced: s.handBackOnUpstream(ctx, park, delay, lastErr), handedBack: true}
-		}
-		delegateLog.Warn("model provider unavailable through every retry the upstream budget allows; parking the conversation for a person",
-			"conversation", conversationID, "claim", cfg.claimID, "upstream_hand_backs", n, "error", lastErr)
-		if s.insertUpstreamStopNote(ctx, orgID, conversationID, cfg.claimID, creatorUserID) {
-			return engagementDisposition{fenced: true}
-		}
-		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, "")}
+		}, "", cfg.upstreamHandBacks, lastErr, creatorUserID)
 
 	case agentloop.ResultParked:
 		// The engagement stopped without concluding — a guard before a call,
