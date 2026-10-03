@@ -86,6 +86,7 @@ func TestIsTransientGitError(t *testing.T) {
 		"early eof":                             "fetch-pack: unexpected disconnect while reading sideband packet\nfatal: early EOF",
 		"rpc failed":                            "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)",
 		"the requested url returned error: 5":   "fatal: unable to access 'http://127.0.0.1:41000/o/r/': The requested URL returned error: 502",
+		"the requested url returned error: 408": "fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 408",
 		"the requested url returned error: 429": "fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 429",
 		"gnutls_handshake":                      "fatal: unable to access 'https://github.com/o/r/': gnutls_handshake() failed: The TLS connection was non-properly terminated.",
 		"ssl_error":                             "fatal: unable to access 'https://github.com/o/r/': OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443",

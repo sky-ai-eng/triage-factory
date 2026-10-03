@@ -210,6 +210,7 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 	}{
 		"git: unresolvable host":    {gitFailure("fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com\n"), true},
 		"git: proxy 502":            {gitFailure("fatal: unable to access 'http://127.0.0.1:41000/o/r/': The requested URL returned error: 502\n"), true},
+		"git: request timeout":      {gitFailure("fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 408\n"), true},
 		"git: repository not found": {gitFailure("remote: Repository not found.\nfatal: repository 'https://github.com/o/r/' not found\n"), false},
 		"git: refused credential":   {gitFailure("fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 403\n"), false},
 		"git: its deadline":         {deadline, false},

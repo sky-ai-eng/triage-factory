@@ -31,9 +31,10 @@ func (e *GitError) Unwrap() error { return e.Err }
 // the network or of the server, never an answer about the request, so the
 // list leaves out authentication and not-found errors on purpose: "repository
 // not found", "authentication failed" and a 403 all say the same thing on
-// the next attempt. A 5xx and a 429 are matched by their prefix in git's
-// "The requested URL returned error: <status>" line, which is also how a
-// per-run git proxy's 502 for an unreachable upstream reaches git.
+// the next attempt. The statuses are the ones upstream.ClassifyResponse reads
+// as Transient or RateLimited (a 5xx, a 408, a 429), matched in git's "The
+// requested URL returned error: <status>" line, which is also how a per-run
+// git proxy's 502 for an unreachable upstream reaches git.
 var transientGitMarkers = []string{
 	"could not resolve host",
 	"connection timed out",
@@ -44,6 +45,7 @@ var transientGitMarkers = []string{
 	"early eof",
 	"rpc failed",
 	"the requested url returned error: 5",
+	"the requested url returned error: 408",
 	"the requested url returned error: 429",
 	"gnutls_handshake",
 	"ssl_error",
