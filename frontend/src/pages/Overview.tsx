@@ -22,6 +22,7 @@ import {
   useConversationSets,
   useOpenPRCount,
   useOverviewTick,
+  useRetryClock,
   useSpendToday,
   useTasksIndex,
   useTranscriptTick,
@@ -130,6 +131,7 @@ export default function Overview() {
       .map((c) => needsRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge))
   }, [needs, tasks, runHref, renderAge])
 
+  const retryNow = useRetryClock(running?.rows)
   const runningItems = useMemo<RunRowItem[]>(() => {
     const rows = running?.rows ?? []
     const live = rows
@@ -140,8 +142,8 @@ export default function Overview() {
       .sort((a, b) => (a.queue_position ?? 1e9) - (b.queue_position ?? 1e9))
     return [...live, ...queued]
       .slice(0, RUNNING_SHOWN)
-      .map((c) => runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge))
-  }, [running, tasks, runHref, renderAge])
+      .map((c) => runningRow(c, tasks?.get(c.TaskID), runHref(c.ID), renderAge, retryNow))
+  }, [running, tasks, runHref, renderAge, retryNow])
 
   const needsHidden = needsTotal != null ? Math.max(0, needsTotal - needsItems.length) : 0
   const runningHidden = running != null ? Math.max(0, running.total - runningItems.length) : 0

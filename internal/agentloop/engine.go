@@ -214,6 +214,15 @@ const (
 	// that came back "context canceled" is a cancellation, not a failure
 	// that happens to mention one.
 	ResultCancelled
+	// ResultUpstreamUnavailable — a provider call could not be served
+	// through every in-turn retry, and inference.Classify reads the last
+	// failure as the provider being unavailable (transient or rate-limited)
+	// rather than refusing the request. That holds for every call the
+	// engagement makes, the working call and each compaction call alike.
+	// Nothing about the conversation failed: the transcript is whole up to
+	// the call, and the caller hands the claim back to be retried later. Err
+	// carries the last failure.
+	ResultUpstreamUnavailable
 )
 
 // Result is the engagement's terminal report, returned to the in-process
@@ -231,7 +240,8 @@ type Result struct {
 	DurationMs    int
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
-	// Err carries the underlying cause on ResultFailed.
+	// Err carries the underlying cause on ResultFailed and
+	// ResultUpstreamUnavailable.
 	Err error
 }
 
@@ -322,6 +332,9 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 		if ctx.Err() != nil {
 			return e.cancelled(ctx, started, 0)
 		}
+		if upstreamUnavailable(err) {
+			return e.unavailable(started, 0, err)
+		}
 		e.insertNotice(ctx, params, "Compacting this conversation on resume failed: "+err.Error())
 		return e.failed(ctx, started, 0, fmt.Errorf("compact on resume: %w", err))
 	}
@@ -378,6 +391,9 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			if err := e.compactWarm(ctx, params); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
+				}
+				if upstreamUnavailable(err) {
+					return e.unavailable(started, turn, err)
 				}
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact conversation: %w", err))
@@ -455,8 +471,14 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 			// A crash or an exhausted retry between stream start and persist
 			// loses this message entirely, which is safe: its tool calls
-			// never ran. Record the error as a row so the failure has a
-			// visible cause in the transcript, then fail.
+			// never ran. A provider unavailable through every retry hands the
+			// engagement back.
+			if upstreamUnavailable(err) {
+				return e.unavailable(started, turn, err)
+			}
+			// Anything else will not succeed on a retry. Record the error as a
+			// row so the failure has a visible cause in the transcript, then
+			// fail.
 			e.insertNotice(ctx, params, "The model call failed and could not be retried: "+err.Error())
 			return e.failed(ctx, started, turn, err)
 		}
@@ -577,6 +599,9 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			if err := e.compactWindowFull(ctx, params); err != nil {
 				if ctx.Err() != nil {
 					return e.cancelled(ctx, started, turn)
+				}
+				if upstreamUnavailable(err) {
+					return e.unavailable(started, turn, err)
 				}
 				e.insertNotice(ctx, params, "Compacting this conversation failed: "+err.Error())
 				return e.failed(ctx, started, turn, fmt.Errorf("compact after context window wall: %w", err))
@@ -908,6 +933,19 @@ func (e *Engine) failed(ctx context.Context, started time.Time, turn int, err er
 		NumTurns:    turn,
 		DurationMs:  msSince(started),
 		Err:         err,
+	}
+}
+
+// unavailable ends the engagement on a provider that was unavailable through
+// every retry, which is not the conversation failing. It writes no notice
+// row: the notice is a transcript row the model reads on the next claim, and
+// from the model's side nothing has happened yet.
+func (e *Engine) unavailable(started time.Time, turn int, err error) Result {
+	return Result{
+		Kind:       ResultUpstreamUnavailable,
+		NumTurns:   turn,
+		DurationMs: msSince(started),
+		Err:        err,
 	}
 }
 

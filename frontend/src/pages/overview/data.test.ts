@@ -160,6 +160,22 @@ describe('rows', () => {
     expect(r.age).toBe('1m')
     expect(r.lifecycle).toBe('queued')
   })
+  it('says when a queued row waiting out an unavailable provider tries again', () => {
+    const r = runningRow(
+      conv({
+        Status: 'queued',
+        QueuedAt: '2026-08-29T11:59:00Z',
+        next_attempt_at: '2026-08-29T12:10:00Z',
+      }),
+      task({}),
+      '/runs/c1',
+      frozenAge,
+      NOW,
+    )
+    expect(r.activity).toMatch(/^Retrying at /)
+    // It holds no place in line, so it wears no queue mark.
+    expect(r.queue).toBeNull()
+  })
   it('builds a needs row that always asks and ages from settled time', () => {
     const r = needsRow(
       conv({ Status: 'completed', CompletedAt: '2026-08-29T10:00:00Z', unresolved_pr_count: 1 }),

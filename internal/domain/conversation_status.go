@@ -189,10 +189,10 @@ const (
 	// its limit with nothing in flight, or an operation outlived its own
 	// deadline. Nothing retries it; a message resumes it.
 	ParkReasonStalled ParkReason = "stalled"
-	// ParkReasonDrained — the executor holding this conversation is draining
-	// (scale-down). A forward seam: no writer yet, and the one that lands is
-	// the drain trigger internal/delegate/workspace_snapshot.go documents.
-	ParkReasonDrained ParkReason = "drained"
+	// ParkReasonUpstreamUnavailable — the model provider stayed unavailable
+	// through every retry its hand-back budget allows (about four hours of
+	// them). Nothing retries it further; a message resumes it.
+	ParkReasonUpstreamUnavailable ParkReason = "upstream_unavailable"
 )
 
 // AllParkReasons returns the park_reason vocabulary. Same discipline as
@@ -213,7 +213,7 @@ func AllParkReasons() []ParkReason {
 		ParkReasonLaunchFailed,
 		ParkReasonModelNotEnabled,
 		ParkReasonStalled,
-		ParkReasonDrained,
+		ParkReasonUpstreamUnavailable,
 	}
 }
 
@@ -226,7 +226,7 @@ func IsParkReason(reason string) bool {
 	case ParkReasonIdle, ParkReasonUserCancelled, ParkReasonSystemCancelled,
 		ParkReasonBlueprintCancelled, ParkReasonBlueprintTerminal,
 		ParkReasonLaunchFailed, ParkReasonModelNotEnabled, ParkReasonStalled,
-		ParkReasonDrained:
+		ParkReasonUpstreamUnavailable:
 		return true
 	}
 	return false

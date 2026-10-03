@@ -2,6 +2,7 @@ package agentloop
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
@@ -11,9 +12,9 @@ import (
 // RetryPolicy bounds the same-provider-same-model retry. There is no
 // fallback of any kind — not a different model, not a different provider,
 // not a degraded request. A run that cannot reach the model it was given
-// fails; silently substituting a different model would make the transcript a
-// lie about what produced it, and the cost ledger a lie about what was
-// bought.
+// ends its engagement without an answer; silently substituting a different
+// model would make the transcript a lie about what produced it, and the cost
+// ledger a lie about what was bought.
 type RetryPolicy struct {
 	// MaxAttempts counts the first try. Zero uses defaultMaxAttempts.
 	MaxAttempts int
@@ -36,7 +37,9 @@ const (
 // streamWithRetry makes one provider call, retrying only the classes that say
 // the provider could not serve it right now (inference.Classify: a rate
 // limit, a 5xx, a transport failure) with bounded exponential backoff.
-// Exhaustion returns the last error; the caller fails the conversation.
+// Exhaustion returns the last error wrapped as an upstreamUnavailableError, so
+// the engagement can tell an outage from a failure wherever the call was made;
+// any other failure returns as it came.
 //
 // Every attempt is counted against orgID, and every retry decision beside
 // it, so a provider outage shows in the upstream counters rather than only in
@@ -85,8 +88,11 @@ func (e *Engine) streamWithRetry(ctx context.Context, orgID string, client Provi
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		if (class != upstream.Transient && class != upstream.RateLimited) || attempt == p.MaxAttempts {
+		if class != upstream.Transient && class != upstream.RateLimited {
 			break
+		}
+		if attempt == p.MaxAttempts {
+			return nil, &upstreamUnavailableError{err: err}
 		}
 		if named {
 			upstream.RecordRetry(ctx, name, orgID, class)
@@ -101,4 +107,20 @@ func (e *Engine) streamWithRetry(ctx context.Context, orgID string, client Provi
 		}
 	}
 	return nil, lastErr
+}
+
+// upstreamUnavailableError is a provider call that still read as unavailable
+// (Transient or RateLimited) when its retries ran out. Only streamWithRetry
+// makes one, so it marks the provider's failure and never a store write's
+// beside it. It wraps the last failure, and its text is that failure's.
+type upstreamUnavailableError struct{ err error }
+
+func (e *upstreamUnavailableError) Error() string { return e.err.Error() }
+func (e *upstreamUnavailableError) Unwrap() error { return e.err }
+
+// upstreamUnavailable reports whether err, however a caller wrapped it,
+// carries a provider call that was unavailable through every retry.
+func upstreamUnavailable(err error) bool {
+	var u *upstreamUnavailableError
+	return errors.As(err, &u)
 }

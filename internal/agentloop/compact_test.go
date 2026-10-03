@@ -2,6 +2,7 @@ package agentloop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -713,5 +714,89 @@ func TestCompactionPrompts_AskTheSummaryToCarryTheRequest(t *testing.T) {
 		if strings.Contains(prompt, "Do not restate the original request") {
 			t.Errorf("%s prompt still tells the model the request is preserved separately", name)
 		}
+	}
+}
+
+// TestCompaction_AnUnavailableProviderEndsTheEngagementWithoutANotice: every
+// compaction call goes through streamWithRetry, and a provider unavailable
+// through its retries there is the same outage as on the working call. At
+// each of the three moments compaction runs — on resume, at the proactive
+// trip, and at the context-window wall — the engagement ends
+// ResultUpstreamUnavailable and writes no failure notice.
+func TestCompaction_AnUnavailableProviderEndsTheEngagementWithoutANotice(t *testing.T) {
+	old := time.Now().UTC().Add(-time.Hour)
+	unavailable := scriptedTurn{err: errors.New("503 service unavailable")}
+	for _, tc := range []struct {
+		name  string
+		rows  []domain.Message
+		first []scriptedTurn
+	}{
+		{
+			name: "on resume",
+			rows: []domain.Message{
+				{Role: "user", Content: "the mission", CreatedAt: old},
+				usedAssistant("prior work", overThreshold, old),
+				pendingUser("go on"),
+			},
+		},
+		{
+			name: "at the proactive trip",
+			rows: []domain.Message{
+				{Role: "user", Content: "the mission"},
+				usedAssistant("worked a lot", overThreshold, time.Now().UTC()),
+				pendingUser("go on"),
+			},
+		},
+		{
+			name: "at the context-window wall",
+			rows: []domain.Message{
+				{Role: "user", Content: "the mission"},
+				pendingUser("review it"),
+			},
+			first: []scriptedTurn{{text: "I read the diff and the first problem is", finish: wallStop}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := newMemTranscript(tc.rows...)
+			p := &scriptedProvider{turns: tc.first, repeat: &unavailable}
+			e := newTestEngine(tr, p, newScriptedToolHost())
+			e.Retry = RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }}
+
+			got := e.Run(context.Background(), testParams())
+			if got.Kind != ResultUpstreamUnavailable {
+				t.Fatalf("disposition = %v (err %v), want ResultUpstreamUnavailable", got.Kind, got.Err)
+			}
+			if got.Err == nil || !strings.Contains(got.Err.Error(), "503") {
+				t.Errorf("Err = %v, want the provider's last failure", got.Err)
+			}
+			if n := tr.find(func(m domain.Message) bool {
+				return strings.Contains(m.Content, "Compacting this conversation") || strings.Contains(m.Content, "could not be retried")
+			}); n != nil {
+				t.Errorf("an unavailable provider wrote the failure notice %q", n.Content)
+			}
+		})
+	}
+}
+
+// TestCompaction_ARefusedCallStillFails: only an outage hands back. A
+// compaction call the provider refuses fails the engagement with its cause on
+// the transcript, as it always has.
+func TestCompaction_ARefusedCallStillFails(t *testing.T) {
+	old := time.Now().UTC().Add(-time.Hour)
+	tr := newMemTranscript(
+		domain.Message{Role: "user", Content: "the mission", CreatedAt: old},
+		usedAssistant("prior work", overThreshold, old),
+		pendingUser("go on"),
+	)
+	p := &scriptedProvider{turns: []scriptedTurn{{err: errors.New("401 invalid api key")}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultFailed {
+		t.Fatalf("disposition = %v, want ResultFailed", got.Kind)
+	}
+	if n := tr.find(func(m domain.Message) bool {
+		return strings.Contains(m.Content, "Compacting this conversation on resume failed")
+	}); n == nil {
+		t.Error("the refused compaction's cause must be visible in the transcript")
 	}
 }

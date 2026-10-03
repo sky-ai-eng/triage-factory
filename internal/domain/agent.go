@@ -354,6 +354,13 @@ type Conversation struct {
 	ClaimedAt   *time.Time
 	CompletedAt *time.Time
 
+	// NextAttemptAt is the earliest time the dispatcher may claim this
+	// conversation again, set when an engagement handed it back to wait out
+	// an unavailable upstream. While it is in the future the conversation
+	// displays `queued` but holds no place in line. nil when nothing is
+	// deferring it.
+	NextAttemptAt *time.Time `json:"next_attempt_at,omitempty"`
+
 	// QueuePosition is this conversation's place in its OWN ORG's line:
 	// 1-based, ordered by (started_at, id) over the org's display-`queued`
 	// conversations. nil in every other state, and nil on reads that don't
@@ -542,8 +549,15 @@ type Conversation struct {
 	// about whether a conversation kills its executor, and neither a
 	// credentials wait nor a clean shutdown says anything about either, which
 	// is why those hand-backs count toward neither.
-	SetupFailures   int `json:"-"`
-	LostEngagements int `json:"-"`
+	//
+	// UpstreamHandBacks counts the same episode's 'requeued_upstream'
+	// hand-backs — engagements that gave the conversation back because the
+	// model provider stayed unavailable through their own retries. It picks
+	// the next wait off the upstream schedule and bounds how many times the
+	// conversation is retried before it parks for a person.
+	SetupFailures     int `json:"-"`
+	LostEngagements   int `json:"-"`
+	UpstreamHandBacks int `json:"-"`
 
 	// OrgID is the conversation's owning tenant. Populated only by
 	// ConversationQueueStore.ClaimNextConversation (a cross-org system claim that returns the row

@@ -161,3 +161,33 @@ describe('RunStation dock approval affordance', () => {
     expect(onOpenArtifact).toHaveBeenCalledWith('pr', 'pr1')
   })
 })
+
+describe('RunStation retry readout', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => Promise.reject(new Error('no network in this suite'))),
+    )
+  })
+
+  it('says when a queued run waiting out an unavailable provider tries again', () => {
+    // `now` is 00:01; the hand-back set the next attempt four minutes later.
+    station({ Status: 'queued', next_attempt_at: '2026-07-30T00:05:00Z' })
+    const at = new Date('2026-07-30T00:05:00Z').toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    })
+    expect(screen.getByText(`Retrying at ${at}`)).toBeInTheDocument()
+  })
+
+  it('reads as an ordinary queued run once the time has passed', () => {
+    station({ Status: 'queued', next_attempt_at: '2026-07-30T00:00:30Z' })
+    expect(screen.queryByText(/Retrying at/)).not.toBeInTheDocument()
+  })
+
+  it('ignores the stamp on a run that is no longer queued', () => {
+    station({ Status: 'running', next_attempt_at: '2026-07-30T00:05:00Z' })
+    expect(screen.queryByText(/Retrying at/)).not.toBeInTheDocument()
+  })
+})

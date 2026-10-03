@@ -280,6 +280,17 @@ type ConversationStore interface {
 	// cannot see), so it lives in the caller.
 	MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error)
 
+	// ClearNextAttempt drops the wait a hand-back set on the conversation
+	// (ConversationQueueStore.HandBackClaimSystem), so it is claimable as soon
+	// as it otherwise matches. A person's message is the caller: it means "try
+	// now", and it rides the same transaction as the message it clears the
+	// way for. Returns the row when it dropped a wait, and nil with no error
+	// when there was none to drop: no wait set, no such conversation, or one
+	// the caller may read but not write. A miss is an answer here rather than
+	// ErrNoSuchConversation, because the caller asks it only to learn whether
+	// the conversation's read changed.
+	ClearNextAttempt(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error)
+
 	// SetSession stores the Claude Code session id captured from
 	// the agent's init event into conversations.sdk_session_id.
 	// Persisted mid-flight, before any terminal state, so the

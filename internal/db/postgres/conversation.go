@@ -396,6 +396,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 		UPDATE conversations SET status = NULL,
 		                parked_at = NULL, park_reason = NULL,
 		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+		                next_attempt_at = NULL,
 		                queued_at = now(),
 		                preferred_executor_id = (
 		                    SELECT c.executor_id FROM claims c
@@ -681,6 +682,21 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *conversationStore) ClearNextAttempt(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
+	if !isValidUUID(conversationID) {
+		return nil, nil
+	}
+	r, err := writeConversationReturning(ctx, s.q, `
+		UPDATE conversations SET next_attempt_at = NULL
+		WHERE org_id = $1 AND id = $2 AND next_attempt_at IS NOT NULL
+		RETURNING *
+	`, orgID, conversationID)
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
 }
 
 func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {
@@ -1122,7 +1138,8 @@ const pgConversationColumns = `
 	COALESCE(a.display_name, '') AS actor_agent_name,
 	r.ended_at, COALESCE(r.ended_reason, ''),
 	r.stop_requested_at, COALESCE(r.stop_requested_by, ''), COALESCE(r.stop_requested_reason, ''),
-	cl.last_activity_at, COALESCE(cl.current_op, '')
+	cl.last_activity_at, COALESCE(cl.current_op, ''),
+	r.next_attempt_at
 `
 
 // pgDisplayStatusSQL is the wire status: a four-rung ladder over state that
@@ -1165,6 +1182,10 @@ const pgDisplayStatusSQL = `COALESCE(
 // row carries SQL NULL. It binds $1 as the org id, which is what
 // pgConversationListWhere always puts first.
 //
+// A deferred conversation displays `queued` and has no position: it waits for
+// a time, not for the rows ahead of it, so ranking it would put a number on a
+// wait the line does not decide (nextAttemptDueSQL, conversation_queue.go).
+//
 // The rank is a window over one pass, not a per-row correlated count:
 // pgDisplayStatusSQL is itself three correlated subqueries, and counting the
 // rows ahead of each row would evaluate the whole ladder once per pair.
@@ -1189,6 +1210,7 @@ const pgQueuePositionCTE = `
 		       (ROW_NUMBER() OVER (ORDER BY r.started_at, r.id))::int AS position
 		FROM conversations r
 		WHERE r.org_id = $1 AND (` + pgDisplayStatusSQL + `) = 'queued'
+		  AND ` + nextAttemptDueSQL + `
 	)
 `
 
@@ -2492,7 +2514,7 @@ type conversationScanner interface {
 // destinations for whatever a caller appended to that list — the list read's
 // queue position, today — in the order it appended them.
 func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...any) error {
-	var queuedAt, claimedAt, completedAt, endedAt, stopRequestedAt, lastActivityAt sql.NullTime
+	var queuedAt, claimedAt, completedAt, endedAt, stopRequestedAt, lastActivityAt, nextAttemptAt sql.NullTime
 	var costUSD sql.NullFloat64
 	var durationMs, numTurns, blueprintStep sql.NullInt64
 	var blueprintRunID sql.NullString
@@ -2506,9 +2528,13 @@ func scanConversation(sc conversationScanner, r *domain.Conversation, extra ...a
 		&r.MemoryMissing, &r.ActorAgentName, &endedAt, &endedReason,
 		&stopRequestedAt, &r.StopRequestedBy, &r.StopRequestedReason,
 		&lastActivityAt, &r.ClaimCurrentOp,
+		&nextAttemptAt,
 	}
 	if err := sc.Scan(append(dest, extra...)...); err != nil {
 		return err
+	}
+	if nextAttemptAt.Valid {
+		r.NextAttemptAt = &nextAttemptAt.Time
 	}
 	if stopRequestedAt.Valid {
 		r.StopRequestedAt = &stopRequestedAt.Time

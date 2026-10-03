@@ -242,20 +242,34 @@ func (s *Spawner) ReleaseOwnClaimsOnShutdown() {
 		dispatchLog.Warn("shutdown claim release: list this executor's claims failed; they will be taken over after their leases", "error", err)
 		return
 	}
-	var idle []string
+	// Grouped by org, one release per org, so each hand-back is counted
+	// against the org it belongs to.
+	idle := map[string][]string{}
+	var orgs []string
+	idleCount := 0
 	for _, c := range live {
-		if s.engagementFor(c.ConversationID) == nil {
-			idle = append(idle, c.ConversationID)
+		if s.engagementFor(c.ConversationID) != nil {
+			continue
 		}
+		if _, seen := idle[c.OrgID]; !seen {
+			orgs = append(orgs, c.OrgID)
+		}
+		idle[c.OrgID] = append(idle[c.OrgID], c.ConversationID)
+		idleCount++
 	}
-	if len(idle) == 0 {
+	if idleCount == 0 {
 		return
 	}
-	n, err := s.conversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, executorID, bootEpoch, idle)
-	if err != nil {
-		dispatchLog.Warn("shutdown claim release failed; the claims will be taken over after their leases", "error", err)
-		return
+	released := 0
+	for _, orgID := range orgs {
+		n, err := s.conversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, executorID, bootEpoch, idle[orgID])
+		if err != nil {
+			dispatchLog.Warn("shutdown claim release failed; the claims will be taken over after their leases", "org_id", orgID, "error", err)
+			continue
+		}
+		recordHandBack(orgID, db.HandBackShutdown, n)
+		released += n
 	}
 	dispatchLog.Info("released this executor's claims on shutdown; their conversations are claimable now",
-		"released", n, "still_engaged", len(live)-len(idle))
+		"released", released, "still_engaged", len(live)-idleCount)
 }

@@ -523,14 +523,30 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// id of 0, and the client dedups and orders by id, so two follow-ups would
 	// collapse into one and a later refetch would double them against their
 	// real ids.
+	//
+	// A person writing to a conversation that a hand-back is holding until a
+	// time means "try now", so the wait is dropped in the same transaction:
+	// the message and the claimability it asks for commit together. It is
+	// cleared whatever the read above saw, because an engagement that was
+	// live then can have handed back with a wait since. One still live when
+	// this commits either takes the message into the call it makes next, or
+	// hands back with the message undelivered, which sets no wait.
+	//
+	// Sending takes only visibility, and clearing is a write to the
+	// conversation, so a member who may read the conversation but not write
+	// it finds no row to clear. Their message still lands, and the
+	// conversation is claimed when its wait is over, as it was going to be.
 	msg := pendingUserInput(conv.ID, userID, text)
+	var cleared *domain.Conversation
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
 			return iErr
 		}
 		msg.ID = int(id)
-		return nil
+		var cErr error
+		cleared, cErr = ts.Conversations.ClearNextAttempt(ctx, orgID, conv.ID)
+		return cErr
 	}); err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
@@ -539,6 +555,13 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// path's recordSteeredMessage only runs when a process took the text
 	// directly instead of through this queue.
 	s.broadcastMessage(orgID, conv.ID, msg)
+
+	// A dropped wait changed the conversation's own read, which the message
+	// frame says nothing about: the views showing "Retrying at" refetch on
+	// the status push, the one a hand-back sends when it sets the wait.
+	if cleared != nil {
+		s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+	}
 
 	if !wake {
 		// A driver already exists (or is about to claim) and drains before its

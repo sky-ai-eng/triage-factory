@@ -9,6 +9,7 @@ import {
   QUEUE_DWELL_VISIBLE_MS,
   queueDwellMs,
   parkReasonLabel,
+  retryingAt,
   workStartedAt,
 } from '../../lib/conversationStatus'
 import { artifactSetKey } from '../../lib/approval'
@@ -66,6 +67,7 @@ export function TelemetryRail({
         ? formatElapsed(workStart, now)
         : null
   const dwellMs = queueDwellMs(conversation, now)
+  const retryAt = retryingAt(conversation, now)
   // Shown for a live engagement, setting up or running: a clone or a
   // credentials wait is an operation the watchdog bounds as much as a tool
   // call is.
@@ -123,10 +125,19 @@ export function TelemetryRail({
             k="queued"
             v={formatDurationMs(dwellMs)}
             title={
-              isQueued
-                ? 'Waiting for a free run slot'
-                : 'Time spent waiting in the queue before this run started'
+              retryAt
+                ? 'Waiting to retry: the model provider was unavailable'
+                : isQueued
+                  ? 'Waiting for a free run slot'
+                  : 'Time spent waiting in the queue before this run started'
             }
+          />
+        )}
+        {retryAt && (
+          <Readout
+            k="retry"
+            v={clockStamp(retryAt)}
+            title="The model provider was unavailable, so the run tries again at this time. A message tries it now."
           />
         )}
         {started && (

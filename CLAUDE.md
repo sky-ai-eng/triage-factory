@@ -88,7 +88,10 @@ side-tables), `window_state`/`seq` are the native
 loop's assembly columns, and `user_id`/`claim_id` attribute each row to the
 requesting user and producing engagement. Queue-is-truth generalizes: "needs
 driving" = a queued conversation or one with undelivered input and no active
-claim.
+claim, and no hand-back wait (`conversations.next_attempt_at`) still ahead of
+it. Every hand-back outcome — a claim released with the conversation left
+mid-flight — declares the budget it spends and its backoff in one table,
+`db.HandBackPolicies`, which both dialects render their SQL from.
 
 Key invariants:
 

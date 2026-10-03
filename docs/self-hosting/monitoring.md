@@ -272,7 +272,27 @@ operation past its own deadline.
 A stalled engagement is parked `open` with park reason `stalled`, and nothing
 retries it: it stays parked until someone sends it a message, which resumes it.
 
-The four gauges below are read from the database by the control pod's
+An engagement can also **hand its claim back**: release it with the
+conversation still mid-flight, so the next claim continues the conversation
+where it stopped. Each hand-back outcome spends its own budget, if any, and
+some wait before the next claim:
+
+| Outcome | When | Budget | Next claim |
+| -- | -- | -- | -- |
+| `requeued` | The engagement failed before its agent ran: a workspace that would not build, a runtime that would not start. | Setup: 5 in a row. | At once. |
+| `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
+| `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
+| `requeued_upstream` | A native run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own 5 attempts. | Upstream: 27 in a row. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+
+A run that spends its upstream budget parks `open` with park reason
+`upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
+and a message resumes it. A message to a run that is waiting to retry, or one
+sent while its engagement is failing, tries it at once. A run waiting to retry displays as `queued`
+but is not counted in the queue's depth, age or positions, which measure
+waiting for capacity. The wait is measured on database time, so a machine that
+sleeps through it retries when it wakes.
+
+The five gauges below are read from the database by the control pod's
 background brain, deliberately not by any dispatcher: a stuck dispatcher is
 what produces these rows, so it must not be what reports them.
 
@@ -282,8 +302,9 @@ what produces these rows, so it must not be what reports them.
 | `tf_claims_oldest_expired_age_seconds` | Seconds past expiry of the oldest such claim. |
 | `tf_claims_oldest_idle_seconds` | The longest any live claim with an unexpired lease has gone without activity, as its last renewal stamped it. A claim that has not renewed yet is not counted. A tool call counts as activity only when it starts and when it returns, so one long tool call can hold this past 600 without being a stall. |
 | `tf_claims_oldest_checkpoint_age_seconds` | The longest any live claim with an unexpired lease has gone since its engagement's workspace was last covered by a stored checkpoint, as its last renewal stamped it: the workspace a hard kill of its executor would lose right now. Covered means a checkpoint written, or one that found the tree unchanged since the last; before the first, the age runs from when the agent loop started. Only native engagements with checkpoints enabled stamp it (see [Workspace checkpoints](scaling.md#workspace-checkpoints)); the others are not counted. |
+| `tf_conversations_deferred{org_id}` | Conversations a `requeued_upstream` hand-back is holding out of the queue until their next attempt: their model provider was unavailable, and they retry on the backoff above. **Zero is the steady state.** An org with none reports no series. |
 
-Three counters come from the executors rather than the brain, incremented by
+Four counters come from the executors rather than the brain, incremented by
 the executor that ran the engagement. They are per process, so `sum` across
 executor pods:
 
@@ -292,6 +313,7 @@ executor pods:
 | `tf_engagements_stalled_total{op}` | Engagements the stall watchdog stopped. `op` is the operation in flight cut at its first colon (`provider`, `tool`, `clone`, `rehydrate`, `permission`, `sidecar_network`, `sidecar_launch`, `sidecar_bringup`, `awaiting_credentials`, `fetch_pr`, `snapshot_wait`, `checkpoint`), or `idle` when nothing was in flight. |
 | `tf_claims_suspend_recoveries_total{outcome}` | Claims an engagement tried to take back after a system suspend (laptop sleep, `systemctl suspend`, hibernate) let its lease lapse. `reacquired`: the claim was taken back and the run carried on. `taken`: the claim was released while the machine slept, so the engagement stopped and the conversation went to whoever took it over. `failed`: the re-acquire errored, or the engagement's own watchdog stopped it while the call was out; the run stopped as it would without the recovery. An engagement tries at most once per suspend. A suspend shorter than the lease's remaining time lapses nothing and is not counted. |
 | `tf_workspace_checkpoints_total{outcome}` | Workspace checkpoints that came due in a live engagement. `written`: stored. `skipped_unchanged`: the tree matched the last one stored, so nothing was uploaded. `skipped_busy`: the engagement's previous checkpoint was still uploading, or the executor already had two checkpoints capturing; the next tool-batch boundary tries again. `failed`: the capture or the upload failed, and the last checkpoint written still stands. |
+| `tf_conversations_handed_back_total{outcome, org_id}` | Claims handed back with the conversation still mid-flight, by the hand-back outcome in the table above: `requeued`, `requeued_credentials`, `requeued_shutdown`, `requeued_upstream`. A lease takeover (`reaped`) is not counted here. |
 
 The expired-claim alert is on the age rather than the count, because the count
 is expected to flicker and the age is not. Every stall is a conversation that
@@ -304,7 +326,19 @@ sum by (op) (rate(tf_engagements_stalled_total[1h]))                            
 tf_claims_oldest_checkpoint_age_seconds > 3 * 300                               # for 15m: an engagement whose workspace is not being checkpointed (use your TF_SNAPSHOT_INTERVAL_SEC)
 sum(rate(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0             # checkpoints failing: read the workspace.snapshot spans with reason=checkpoint
 sum by (outcome) (increase(tf_claims_suspend_recoveries_total[1d]))             # not an alert: how often a sleep would have cost a run, and how often it still did
+sum(max_over_time(tf_conversations_deferred[15m])) > 0                          # for 30m, warning: runs have waited half an hour on an unavailable model provider
+sum by (outcome) (increase(tf_conversations_handed_back_total[1h]))             # not an alert: hand-backs by outcome
 ```
+
+The bundled Prometheus loads the deferred-conversation rule as
+`ConversationsDeferred` from `docker/observability/rules/tf-connections.yml`,
+at severity `warning`. It fires for a single org, because one org's provider
+account can be the whole of the outage, and nothing is lost while the runs
+wait. It reads each org's maximum over 15 minutes rather than the gauge
+itself: a run that is still retrying drops out of the count while it is due
+or claimed between two waits, and a sample taken then would restart the
+30-minute timer. The dashboard's Connections row graphs it as "Conversations waiting to
+retry", beside "Hand-backs by outcome".
 
 The checkpoint age is not an alarm on its own: a single tool call can run for
 up to 30 minutes, and no checkpoint is taken while one runs, so a long test
@@ -717,7 +751,8 @@ the session-transcript read, with `snapshot.bundle_bytes` /
 `workspace.snapshot.archive` (the tar walk plus compression, with
 `snapshot.raw_bytes` in against `size_bytes` out — the compression ratio),
 and `workspace.snapshot.put` (the blob write). Its `reason` says what took it:
-`park`, `conclusion`, `shutdown` (a hand-back), or `checkpoint` (a live
+`park`, `conclusion`, `shutdown` (a hand-back on shutdown), `upstream` (a
+hand-back while the model provider is unavailable), or `checkpoint` (a live
 engagement at a tool-batch boundary). A checkpoint's span also carries
 `outcome`, the counter's label above; its `capture` and `archive` are what the
 agent's next tool call waits for, and its `put` runs while the agent works, so

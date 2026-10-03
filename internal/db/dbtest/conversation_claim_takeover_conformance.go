@@ -218,8 +218,8 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		bystander := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
 		q := f.Stores.ConversationQueue
 
-		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, c.ClaimID); err != nil {
-			t.Fatalf("ReleaseClaimOnShutdownSystem: %v", err)
+		if err := q.HandBackClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.HandBackShutdown, 0, ""); err != nil {
+			t.Fatalf("HandBackClaimSystem(requeued_shutdown): %v", err)
 		}
 		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != "requeued_shutdown" {
 			t.Errorf("handed-back claim = (released %v, %q), want (true, requeued_shutdown)", released, outcome)
@@ -229,14 +229,16 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		if got := get(t, f, c.ID); got.Status != domain.StatusQueued {
 			t.Errorf("status after the hand-back = %q, want %q — the conversation is mid-flight, not parked", got.Status, domain.StatusQueued)
+		} else if got.NextAttemptAt != nil {
+			t.Errorf("a shutdown hand-back set next_attempt_at %v, want none — it is claimable at once", got.NextAttemptAt)
 		}
 
 		// The fence: a second hand-back, or one naming a claim that is not
 		// this conversation's, writes nothing and says why.
-		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, c.ClaimID); !errors.Is(err, db.ErrClaimReleased) {
+		if err := q.HandBackClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.HandBackShutdown, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Errorf("repeat hand-back = %v, want ErrClaimReleased", err)
 		}
-		if err := q.ReleaseClaimOnShutdownSystem(ctx, f.OrgID, c.ID, bystander.ClaimID); !errors.Is(err, db.ErrClaimReleased) {
+		if err := q.HandBackClaimSystem(ctx, f.OrgID, c.ID, bystander.ClaimID, db.HandBackShutdown, 0, ""); !errors.Is(err, db.ErrClaimReleased) {
 			t.Errorf("hand-back naming another conversation's claim = %v, want ErrClaimReleased", err)
 		}
 		if released, _ := claimState(t, f, bystander.ClaimID); released {

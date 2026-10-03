@@ -19,6 +19,10 @@ type fakeExpiredClaims struct {
 	idleErr error
 	ckpt    time.Duration
 	ckptErr error
+	// deferred is the per-org deferred count, and deferredErr its read's
+	// failure.
+	deferred    map[string]int
+	deferredErr error
 }
 
 func (f *fakeExpiredClaims) ExpiredClaimsSystem(context.Context) (int, time.Duration, error) {
@@ -32,6 +36,53 @@ func (f *fakeExpiredClaims) OldestIdleClaimSystem(context.Context) (time.Duratio
 
 func (f *fakeExpiredClaims) OldestCheckpointAgeSystem(context.Context) (time.Duration, error) {
 	return f.ckpt, f.ckptErr
+}
+
+func (f *fakeExpiredClaims) CountDeferredSystem(context.Context) (map[string]int, error) {
+	return f.deferred, f.deferredErr
+}
+
+// TestClaimObserver_ReportsDeferredConversationsPerOrg: the deferred gauge
+// reports nothing before its first read, then one series per org the store
+// counted, keeps them across a failed read, and drops an org the next read no
+// longer counts rather than freezing it at its last value.
+func TestClaimObserver_ReportsDeferredConversationsPerOrg(t *testing.T) {
+	src := &fakeExpiredClaims{}
+	reader := sdkmetric.NewManualReader()
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	c := NewClaimObserver(provider, src)
+	defer c.Close()
+	ctx := context.Background()
+
+	if _, ok := gaugeWith(t, collect(t, reader), "conversations.deferred", orgAttr("org-a")); ok {
+		t.Error("conversations.deferred reported before any measure")
+	}
+
+	src.deferred = map[string]int{"org-a": 2, "org-b": 1}
+	c.Tick(ctx)
+	ms := collect(t, reader)
+	if got, ok := gaugeWith(t, ms, "conversations.deferred", orgAttr("org-a")); !ok || got != 2 {
+		t.Errorf("conversations.deferred{org-a} = %d (present=%v), want 2", got, ok)
+	}
+	if got, ok := gaugeWith(t, ms, "conversations.deferred", orgAttr("org-b")); !ok || got != 1 {
+		t.Errorf("conversations.deferred{org-b} = %d (present=%v), want 1", got, ok)
+	}
+
+	src.deferred, src.deferredErr = nil, errors.New("database unreachable")
+	c.Tick(ctx)
+	if got, ok := gaugeWith(t, collect(t, reader), "conversations.deferred", orgAttr("org-a")); !ok || got != 2 {
+		t.Errorf("conversations.deferred{org-a} = %d (present=%v) after a failed read, want the previous 2 kept", got, ok)
+	}
+
+	src.deferred, src.deferredErr = map[string]int{"org-b": 3}, nil
+	c.Tick(ctx)
+	ms = collect(t, reader)
+	if _, ok := gaugeWith(t, ms, "conversations.deferred", orgAttr("org-a")); ok {
+		t.Error("conversations.deferred{org-a} still reported after the store stopped counting it")
+	}
+	if got, ok := gaugeWith(t, ms, "conversations.deferred", orgAttr("org-b")); !ok || got != 3 {
+		t.Errorf("conversations.deferred{org-b} = %d (present=%v), want 3", got, ok)
+	}
 }
 
 // TestClaimObserver_ReportsTheOldestCheckpointAge: the checkpoint-age gauge

@@ -6,14 +6,17 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
+
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 )
 
 // ExpiredClaimSource is what the claim observer needs: the store read that
 // counts live claims past their expiry deployment-wide and says how far past
 // expiry the oldest is, the one that says how long the idlest live engagement
-// has gone without activity, and the one that says how long the longest-
-// uncheckpointed one has gone without its workspace being stored.
-// db.ConversationQueueStore satisfies it.
+// has gone without activity, the one that says how long the longest-
+// uncheckpointed one has gone without its workspace being stored, and the one
+// that counts, per org, the conversations a hand-back is holding out of the
+// queue until a time. db.ConversationQueueStore satisfies it.
 //
 // The narrow interface is what keeps this package off the store bundle, the
 // same reason DepthSource is narrow.
@@ -21,6 +24,7 @@ type ExpiredClaimSource interface {
 	ExpiredClaimsSystem(ctx context.Context) (count int, oldestPastExpiry time.Duration, err error)
 	OldestIdleClaimSystem(ctx context.Context) (time.Duration, error)
 	OldestCheckpointAgeSystem(ctx context.Context) (time.Duration, error)
+	CountDeferredSystem(ctx context.Context) (map[string]int, error)
 }
 
 // ClaimObserver measures expired claims on a ticker and reports the result
@@ -45,6 +49,11 @@ type ClaimObserver struct {
 	idleSampled          bool
 	checkpointAge        time.Duration
 	checkpointAgeSampled bool
+	// deferred is the latest per-org count of deferred conversations. An org
+	// with none is absent, so its series stops rather than freezing at its
+	// last value, the way the depth gauges drop a removed org.
+	deferred        map[string]int
+	deferredSampled bool
 }
 
 // NewClaimObserver creates the gauges against a provider and registers the
@@ -82,6 +91,13 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		return c
 	}
 
+	deferred, err := m.Int64ObservableGauge("conversations.deferred",
+		metric.WithDescription("Conversations a hand-back is holding out of the queue until a time still ahead: an upstream they depend on was unavailable, and they retry on a backoff."))
+	if err != nil {
+		log.Error("claim gauge setup failed", "instrument", "conversations.deferred", "error", err)
+		return c
+	}
+
 	reg, err := m.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
@@ -99,8 +115,13 @@ func NewClaimObserver(provider metric.MeterProvider, src ExpiredClaimSource) *Cl
 		if c.checkpointAgeSampled {
 			o.ObserveInt64(checkpointAge, int64(c.checkpointAge.Seconds()))
 		}
+		if c.deferredSampled {
+			for org, n := range c.deferred {
+				o.ObserveInt64(deferred, int64(n), metric.WithAttributes(telemetry.OrgID(org)))
+			}
+		}
 		return nil
-	}, expired, oldest, idle, checkpointAge)
+	}, expired, oldest, idle, checkpointAge, deferred)
 	if err != nil {
 		log.Error("claim gauge callback registration failed", "error", err)
 		return c
@@ -151,6 +172,13 @@ func (c *ClaimObserver) Tick(ctx context.Context) {
 	} else {
 		c.mu.Lock()
 		c.checkpointAge, c.checkpointAgeSampled = age, true
+		c.mu.Unlock()
+	}
+	if byOrg, err := c.src.CountDeferredSystem(ctx); err != nil {
+		log.Error("deferred-conversation measure failed; keeping the previous values", "error", err)
+	} else {
+		c.mu.Lock()
+		c.deferred, c.deferredSampled = byOrg, true
 		c.mu.Unlock()
 	}
 }

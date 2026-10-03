@@ -105,11 +105,27 @@ const undeliveredInputExistsSQL = `EXISTS (
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
 // parked and woken by new input. A terminal conversation is never eligible,
-// and neither is one with a pending stop — the settlement parks it instead.
-const needsDrivingSQL = `r.archived_at IS NULL
+// and neither is one with a pending stop — the settlement parks it instead,
+// nor one a hand-back is holding until a time still ahead. The Postgres twin
+// carries the model for the time gate and the two predicates split around it.
+const needsDrivingSQL = awaitingDrivingSQL + `
+	  AND ` + nextAttemptDueSQL
+
+// awaitingDrivingSQL is needsDrivingSQL without the time gate.
+const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND r.stop_requested_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
 	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
+
+// nextAttemptDueSQL is the time gate, compared as text in the claims lease
+// layout: HandBackClaimSystem stamps next_attempt_at with sqliteNowPlusExpr,
+// so both sides of the comparison are the one spelling.
+const nextAttemptDueSQL = `(r.next_attempt_at IS NULL OR r.next_attempt_at <= ` + sqliteNowExpr + `)`
+
+// deferredSQL is a conversation waiting to be driven that a hand-back is
+// holding out of the queue until a time still ahead.
+const deferredSQL = awaitingDrivingSQL + `
+	  AND r.next_attempt_at > ` + sqliteNowExpr
 
 // eligibleForDrivingSQL is the surface-agnostic "waiting to be driven" —
 // what the queue-depth counters and the display projection's derived
@@ -145,9 +161,10 @@ func taskLiveConversationSQL(orgExpr, taskExpr string) string {
 }
 
 // handedBackOutcomesSQL is every claim outcome that records nothing about the
-// conversation, so none of them ends a queue episode. The Postgres twin
-// carries what each one means and which budget it spends.
-const handedBackOutcomesSQL = `'requeued','requeued_credentials','reaped','requeued_shutdown'`
+// conversation, so none of them ends a queue episode, rendered from
+// db.HandBackPolicies, which says what each one means and which budget it
+// spends.
+var handedBackOutcomesSQL = db.HandBackOutcomesSQL()
 
 // episodeHandBacksSQL counts the current queue episode's hand-backs whose
 // outcome is in outcomesSQL, against the conversation alias convAlias. The one
@@ -166,15 +183,22 @@ func episodeHandBacksSQL(convAlias, outcomesSQL string) string {
 }
 
 // EpisodeSetupFailuresSQL is the setup budget's unit: the current episode's
-// 'requeued' hand-backs, against the conversation alias convAlias.
+// db.BudgetSetup hand-backs, against the conversation alias convAlias.
 func EpisodeSetupFailuresSQL(convAlias string) string {
-	return episodeHandBacksSQL(convAlias, `'requeued'`)
+	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetSetup))
 }
 
 // EpisodeLostEngagementsSQL is the loss budget's unit: the current episode's
-// 'reaped' hand-backs, against the conversation alias convAlias.
+// db.BudgetLoss hand-backs, against the conversation alias convAlias.
 func EpisodeLostEngagementsSQL(convAlias string) string {
-	return episodeHandBacksSQL(convAlias, `'reaped'`)
+	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetLoss))
+}
+
+// EpisodeUpstreamHandBacksSQL is the upstream budget's unit: the current
+// episode's db.BudgetUpstream hand-backs, against the conversation alias
+// convAlias.
+func EpisodeUpstreamHandBacksSQL(convAlias string) string {
+	return episodeHandBacksSQL(convAlias, db.HandBackBudgetOutcomesSQL(db.BudgetUpstream))
 }
 
 // conversationQueueClaimCols is the column list ClaimNextConversation returns, shared with the
@@ -284,10 +308,14 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		// answer. Left behind, it rides through this engagement onto whatever
 		// terminal follows — and the RunStation prints it beside a failed
 		// conversation as "stopped by user" on a conversation nobody stopped.
+		//
+		// A deferred row is mid-flight, so next_attempt_at is the only column
+		// it carries here: the wait it named is over once it is claimed.
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
-			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
-			WHERE id = ? AND status IS NOT NULL
+			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                         next_attempt_at = NULL
+			WHERE id = ? AND (status IS NOT NULL OR next_attempt_at IS NOT NULL)
 		`, claimed.ID); err != nil {
 			return err
 		}
@@ -310,9 +338,10 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if err := q.QueryRowContext(ctx, `
 			SELECT `+episodeHandBacksSQL("r", handedBackOutcomesSQL)+`,
 			       `+EpisodeSetupFailuresSQL("r")+`,
-			       `+EpisodeLostEngagementsSQL("r")+`
+			       `+EpisodeLostEngagementsSQL("r")+`,
+			       `+EpisodeUpstreamHandBacksSQL("r")+`
 			FROM conversations r WHERE r.id = ?
-		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements); err != nil {
+		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks); err != nil {
 			return err
 		}
 		claimed.ExecutorID = executorID
@@ -1086,7 +1115,9 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			}
 			if terminal {
 				if _, err := q.ExecContext(ctx, `
-					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL WHERE id = ?
+					UPDATE conversations SET stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+					                         next_attempt_at = NULL
+					WHERE id = ?
 				`, v.id); err != nil {
 					return err
 				}
@@ -1097,7 +1128,8 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				    park_reason = ?,
 				    stop_requested_at = NULL,
 				    stop_requested_by = NULL,
-				    stop_requested_reason = NULL
+				    stop_requested_reason = NULL,
+				    next_attempt_at = NULL
 				WHERE id = ?
 			`, now, parkReason, v.id); err != nil {
 				return err
@@ -1355,12 +1387,20 @@ func (s *conversationQueueStore) ReleaseOwnClaimsOnShutdownSystem(ctx context.Co
 	return count, nil
 }
 
-func (s *conversationQueueStore) ReleaseClaimOnShutdownSystem(ctx context.Context, orgID, conversationID, claimID string) error {
+// HandBackClaimSystem releases the claim and then writes the conversation.
+// The transaction holds the database's one write lock from BEGIN, so a
+// follow-up's message and its clear are either committed before the check for
+// it here or land after the wait it would clear. next_attempt_at is stamped
+// with sqliteNowPlusExpr, the spelling nextAttemptDueSQL compares against.
+func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID, conversationID, claimID, outcome string, delay time.Duration, lastErr string) error {
+	if _, ok := db.HandBackPolicyFor(outcome); !ok {
+		return fmt.Errorf("%w: %q", db.ErrInvalidRequeueOutcome, outcome)
+	}
 	return inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
-			UPDATE claims SET released_at = ?, outcome = 'requeued_shutdown'
+			UPDATE claims SET released_at = ?, outcome = ?
 			WHERE id = ? AND org_id = ? AND conversation_id = ? AND released_at IS NULL
-		`, time.Now().UTC(), claimID, orgID, conversationID)
+		`, time.Now().UTC(), outcome, claimID, orgID, conversationID)
 		if err != nil {
 			return err
 		}
@@ -1369,11 +1409,42 @@ func (s *conversationQueueStore) ReleaseClaimOnShutdownSystem(ctx context.Contex
 		} else if n == 0 {
 			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 		}
+		var nextAttempt any
+		if delay > 0 {
+			nextAttempt = sqliteLeaseModifier(delay)
+		}
 		_, err = q.ExecContext(ctx, `
-			UPDATE conversations SET preferred_executor_id = NULL WHERE id = ?
-		`, conversationID)
+			UPDATE conversations AS r
+			SET next_attempt_at = CASE WHEN ? IS NOT NULL AND NOT `+undeliveredInputExistsSQL+`
+			                           THEN `+sqliteNowPlusExpr+` END,
+			    result_summary = COALESCE(NULLIF(?, ''), r.result_summary),
+			    preferred_executor_id = NULL
+			WHERE r.org_id = ? AND r.id = ? AND r.status IS NULL
+		`, nextAttempt, nextAttempt, lastErr, orgID, conversationID)
 		return err
 	})
+}
+
+// CountDeferredSystem reads deferredSQL per org.
+func (s *conversationQueueStore) CountDeferredSystem(ctx context.Context) (map[string]int, error) {
+	rows, err := s.conn.QueryContext(ctx, `
+		SELECT r.org_id, COUNT(*) FROM conversations r
+		WHERE `+deferredSQL+`
+		GROUP BY r.org_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int{}
+	for rows.Next() {
+		var orgID string
+		var n int
+		if err := rows.Scan(&orgID, &n); err != nil {
+			return nil, err
+		}
+		out[orgID] = n
+	}
+	return out, rows.Err()
 }
 
 // StrandedBlueprintRunsSystem measures the grace on this process's clock,
