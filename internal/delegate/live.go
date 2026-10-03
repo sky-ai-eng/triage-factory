@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -473,6 +474,22 @@ func (s *Spawner) handBackOnShutdown(ctx context.Context, park liveParkContext, 
 	return s.leaveConversation(ctx, park, sessionID, snapshotReasonShutdown, s.releaseClaimOnShutdown)
 }
 
+// handBackOnUpstream is the shutdown hand-back for an engagement whose model
+// provider stayed unavailable through its own retries: the same ordered
+// ending, a snapshot of the tree included, except that the claim is released
+// 'requeued_upstream' and the conversation waits delay before its next claim.
+// The cause is still there, so a successor claimed at once would only meet it
+// again. lastErr is the provider's last failure, kept on the row so a person
+// looking at a run that is waiting can see what it is waiting out.
+//
+// Nothing is written to the transcript: the next engagement continues it from
+// the call that failed, and for the model nothing has happened yet.
+func (s *Spawner) handBackOnUpstream(ctx context.Context, park liveParkContext, delay time.Duration, lastErr string) (fenced bool) {
+	return s.leaveConversation(ctx, park, "", snapshotReasonUpstream, func(ctx context.Context, park liveParkContext) bool {
+		return s.handBackClaim(ctx, park, db.HandBackUpstream, delay, lastErr)
+	})
+}
+
 // leaveConversation is the ordered ending both of the above share, and
 // release is the one step where they differ: the write that lets go of the
 // claim. It returns release's answer — fenced when the engagement no longer
@@ -542,33 +559,45 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 }
 
 // releaseClaimOnShutdown hands the engagement's claim back as a clean
-// shutdown and leaves the conversation mid-flight. The write is fenced like a
-// park's, and for the same reason: a successor that already holds the
-// conversation owns it, and this engagement records nothing.
+// shutdown, claimable at once.
 func (s *Spawner) releaseClaimOnShutdown(ctx context.Context, park liveParkContext) (fenced bool) {
+	return s.handBackClaim(ctx, park, db.HandBackShutdown, 0, "")
+}
+
+// handBackClaim releases the engagement's claim with a hand-back outcome and
+// leaves the conversation mid-flight, claimable after delay (at once for 0).
+// The write is fenced like a park's, and for the same reason: a successor that
+// already holds the conversation owns it, and this engagement records nothing.
+func (s *Spawner) handBackClaim(ctx context.Context, park liveParkContext, outcome string, delay time.Duration, lastErr string) (fenced bool) {
 	if s.conversationQueue == nil {
 		return false // test fixture with no DB wired
 	}
 	if park.claimID == "" {
-		delegateLog.Error("shutdown hand-back without a claim id — every release is the holder's fenced write; recording nothing",
-			"conversation", park.conversationID, "org_id", park.orgID)
+		delegateLog.Error("hand-back without a claim id — every release is the holder's fenced write; recording nothing",
+			"conversation", park.conversationID, "org_id", park.orgID, "outcome", outcome)
 		return true
 	}
-	err := s.conversationQueue.ReleaseClaimOnShutdownSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID)
+	err := s.conversationQueue.HandBackClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, outcome, delay, lastErr)
 	if errors.Is(err, db.ErrClaimReleased) {
-		delegateLog.Error("claim fence refused the shutdown hand-back — this engagement no longer holds the conversation; recording nothing",
-			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "error", err)
+		delegateLog.Error("claim fence refused the hand-back — this engagement no longer holds the conversation; recording nothing",
+			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "outcome", outcome, "error", err)
 		return true
 	}
 	if err != nil {
 		// The claim is still live, so the conversation is not lost: it is
 		// taken over once the lease lapses, counted as a lost engagement.
-		delegateLog.Warn("shutdown hand-back failed; the conversation is taken over after its claim lease",
-			"conversation", park.conversationID, "claim_id", park.claimID, "error", err)
+		delegateLog.Warn("hand-back failed; the conversation is taken over after its claim lease",
+			"conversation", park.conversationID, "claim_id", park.claimID, "outcome", outcome, "error", err)
 		return false
 	}
-	delegateLog.Info("handed the conversation back on shutdown; the next claim continues it",
-		"conversation", park.conversationID, "claim_id", park.claimID)
+	recordHandBack(park.orgID, outcome, 1)
+	if delay > 0 {
+		delegateLog.Info("handed the conversation back; the next claim continues it once the wait is over",
+			"conversation", park.conversationID, "claim_id", park.claimID, "outcome", outcome, "delay", delay)
+	} else {
+		delegateLog.Info("handed the conversation back; the next claim continues it",
+			"conversation", park.conversationID, "claim_id", park.claimID, "outcome", outcome)
+	}
 	s.broadcastConversationUpdate(park.orgID, park.conversationID, domain.StatusQueued)
 	return false
 }

@@ -523,6 +523,17 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// id of 0, and the client dedups and orders by id, so two follow-ups would
 	// collapse into one and a later refetch would double them against their
 	// real ids.
+	//
+	// A person writing to a conversation that a hand-back is holding until a
+	// time means "try now", so the wait is dropped in the same transaction:
+	// the message and the claimability it asks for commit together. It is
+	// cleared whatever the read above saw, because an engagement that was
+	// live then can have handed back with a wait since.
+	//
+	// Sending takes only visibility, and clearing is a write to the
+	// conversation, so a member who may read the conversation but not write
+	// it finds no row to clear. Their message still lands, and the
+	// conversation is claimed when its wait is over, as it was going to be.
 	msg := pendingUserInput(conv.ID, userID, text)
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
@@ -530,6 +541,9 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 			return iErr
 		}
 		msg.ID = int(id)
+		if _, cErr := ts.Conversations.ClearNextAttempt(ctx, orgID, conv.ID); cErr != nil && !errors.Is(cErr, db.ErrNoSuchConversation) {
+			return cErr
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)

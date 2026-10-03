@@ -16,6 +16,8 @@ import {
   isResumableConversation,
   canResumeConversation,
   resumeBlockedCopy,
+  retryingAt,
+  retryingAtLabel,
   workStartedAt,
 } from '../../lib/conversationStatus'
 import {
@@ -129,8 +131,12 @@ export default function RunStation({
   // Queued dwell and working time are separate clocks: a QUEUED station ticks
   // the live wait, everything else ticks/settles on working time from the
   // claim stamp (queue dwell never inflates it).
-  const elapsed =
-    conversation.Status === 'queued'
+  // A queued run that is waiting out an unavailable model provider says when
+  // it tries again instead: its wait is set by that time, not by the queue.
+  const retryAt = retryingAt(conversation, now)
+  const elapsed = retryAt
+    ? retryingAtLabel(retryAt)
+    : conversation.Status === 'queued'
       ? formatElapsed(conversation.QueuedAt ?? conversation.StartedAt, now)
       : !active && conversation.DurationMs != null
         ? formatDurationMs(conversation.DurationMs)

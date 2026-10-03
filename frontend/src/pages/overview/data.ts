@@ -4,6 +4,8 @@ import {
   ACTIVE_STATUSES,
   activeProse,
   isFailedStatus,
+  retryingAt,
+  retryingAtLabel,
   workStartedAt,
 } from '../../lib/conversationStatus'
 import type { ActivityDay } from '../../hooks/useTeamActivity'
@@ -117,13 +119,17 @@ export function runningRow(
   task: Task | undefined,
   href: string,
   renderAge: (iso: string) => ReactNode,
+  now: number = Date.now(),
 ): RunRowItem {
   const queued = conv.Status === 'queued'
+  // A run waiting out an unavailable model provider has no place in line, so
+  // its one sentence says when it tries again rather than naming its work.
+  const retryAt = retryingAt(conv, now)
   return {
     id: conv.ID,
     source: sourceOf(conv, task),
     lifecycle: lifecycleOf(conv),
-    activity: workingProse(conv, task),
+    activity: retryAt ? retryingAtLabel(retryAt) : workingProse(conv, task),
     ref: refOf(task),
     age: renderAge(queued ? (conv.QueuedAt ?? conv.StartedAt) : workStartedAt(conv)),
     // queue_position is the 1-based place in line; the mark wears the places

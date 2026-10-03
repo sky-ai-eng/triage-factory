@@ -245,6 +245,12 @@ export interface Conversation {
   // settled (the park clears it) or when nobody asked. The run page keeps its
   // stop controls disabled while it is set on a non-terminal conversation.
   stop_requested_at?: string
+  // next_attempt_at is the earliest time the dispatcher claims this
+  // conversation again, set when its model provider was unavailable and the
+  // engagement handed it back to retry later. The status still reads queued,
+  // with no queue_position, while it is in the future. Absent when nothing is
+  // holding the conversation back.
+  next_attempt_at?: string
   // claim_last_activity_at is when the live claim's engagement last did
   // anything its stall watchdog counts as activity, as the claim's last lease
   // renewal stamped it. Absent with no live claim, or before its first

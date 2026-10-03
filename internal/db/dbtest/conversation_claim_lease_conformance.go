@@ -57,6 +57,17 @@ type ClaimLeaseFixture struct {
 	// clock and in the layout each dialect stamps them with. It stages a
 	// conclusion old enough to be outside a grace no test can wait out.
 	BackdateConclusion func(t *testing.T, conversationID string, ago time.Duration)
+
+	// SetNextAttempt rewrites a conversation's next_attempt_at to database now
+	// plus `in`, which may be negative, on the clock and in the layout the
+	// hand-back stamps it with. It is how a test moves a deferred
+	// conversation past its wait without waiting it out.
+	SetNextAttempt func(t *testing.T, conversationID string, in time.Duration)
+
+	// NextAttempt reads a conversation's next_attempt_at back on the
+	// BACKEND's own clock, alongside database now, for the reason Lease does.
+	// ok is false for SQL NULL.
+	NextAttempt func(t *testing.T, conversationID string) (at time.Time, now time.Time, ok bool)
 }
 
 // ClaimLeaseFactory builds a fresh fixture per subtest.

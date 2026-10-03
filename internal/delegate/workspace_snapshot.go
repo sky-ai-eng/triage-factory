@@ -192,6 +192,7 @@ const (
 	snapshotReasonPark       = "park"
 	snapshotReasonConclusion = "conclusion"
 	snapshotReasonShutdown   = "shutdown"
+	snapshotReasonUpstream   = "upstream"
 	snapshotReasonCheckpoint = "checkpoint"
 )
 

@@ -101,6 +101,13 @@ func TestShutdown_NativeEngagementIsHandedBackAndTheNextClaimContinuesIt(t *test
 	if got := claimOutcome(t, f, f.claimID); got != "requeued_shutdown" {
 		t.Errorf("claim outcome = %q, want requeued_shutdown", got)
 	}
+	var waits bool
+	if err := f.database.QueryRow(`SELECT next_attempt_at IS NOT NULL FROM conversations WHERE id = ?`, f.conversationID).Scan(&waits); err != nil {
+		t.Fatalf("read next_attempt_at: %v", err)
+	}
+	if waits {
+		t.Error("a shutdown hand-back set next_attempt_at; the conversation is claimable at once")
+	}
 
 	next, err := f.s.conversationQueue.ClaimNextConversation(context.Background(), "exec-successor", 1, db.ClaimPlacement{}, time.Minute)
 	if err != nil || next == nil || next.ID != f.conversationID {

@@ -19,6 +19,7 @@ import {
   isTerminalStatus,
   queueDwellMs,
   resumeBlockedCopy,
+  retryingAt,
   workStartedAt,
 } from './conversationStatus'
 
@@ -396,5 +397,24 @@ describe('claimCheckpointReadout', () => {
 
   it('clamps clock skew to zero rather than going negative', () => {
     expect(claimCheckpointReadout('2026-07-16T10:05:05Z', now)).toBe('0s')
+  })
+})
+
+describe('retryingAt', () => {
+  const now = T('2026-07-16T10:00:00Z')
+
+  it('is the stamp on a queued conversation while it is still ahead', () => {
+    const at = retryingAt(base({ Status: 'queued', next_attempt_at: '2026-07-16T10:05:00Z' }), now)
+    expect(at?.getTime()).toBe(T('2026-07-16T10:05:00Z'))
+  })
+
+  it('is null once the stamp has passed, without one, or off the queue', () => {
+    expect(
+      retryingAt(base({ Status: 'queued', next_attempt_at: '2026-07-16T09:59:00Z' }), now),
+    ).toBeNull()
+    expect(retryingAt(base({ Status: 'queued' }), now)).toBeNull()
+    expect(
+      retryingAt(base({ Status: 'running', next_attempt_at: '2026-07-16T10:05:00Z' }), now),
+    ).toBeNull()
   })
 })

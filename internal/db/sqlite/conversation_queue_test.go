@@ -826,6 +826,12 @@ func TestStopIntent_SQLite(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, sqliteClaimLeaseFixture)
 }
 
+// TestHandBack_SQLite runs the shared hand-back conformance on the same
+// fixture the claim-lease suite uses.
+func TestHandBack_SQLite(t *testing.T) {
+	dbtest.RunHandBackConformance(t, sqliteClaimLeaseFixture)
+}
+
 // TestClaimTakeover_SQLite runs the shared recovery-pass conformance on the
 // same fixture the claim-lease suite uses.
 func TestClaimTakeover_SQLite(t *testing.T) {
@@ -922,6 +928,39 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 			if _, err := conn.Exec(`UPDATE claims SET released_at = ? WHERE conversation_id = ? AND released_at IS NOT NULL`, at, conversationID); err != nil {
 				t.Fatalf("backdate claim releases on %s: %v", conversationID, err)
 			}
+		},
+		SetNextAttempt: func(t *testing.T, conversationID string, in time.Duration) {
+			t.Helper()
+			// strftime, in the layout the hand-back stamps and the claim
+			// scan compares as text.
+			if _, err := conn.Exec(
+				`UPDATE conversations SET next_attempt_at = strftime('%Y-%m-%d %H:%M:%f','now',?) WHERE id = ?`,
+				fmt.Sprintf("%+.3f seconds", in.Seconds()), conversationID,
+			); err != nil {
+				t.Fatalf("stage next_attempt_at on %s: %v", conversationID, err)
+			}
+		},
+		NextAttempt: func(t *testing.T, conversationID string) (time.Time, time.Time, bool) {
+			t.Helper()
+			var at sql.NullString
+			var now string
+			if err := conn.QueryRow(
+				`SELECT CAST(next_attempt_at AS TEXT), strftime('%Y-%m-%d %H:%M:%f','now') FROM conversations WHERE id = ?`, conversationID,
+			).Scan(&at, &now); err != nil {
+				t.Fatalf("read next_attempt_at of %s: %v", conversationID, err)
+			}
+			const layout = "2006-01-02 15:04:05.000"
+			parse := func(v string) time.Time {
+				parsed, err := time.Parse(layout, v)
+				if err != nil {
+					t.Fatalf("conversation %s carries %q, not the layout the claim scan compares against: %v", conversationID, v, err)
+				}
+				return parsed
+			}
+			if !at.Valid {
+				return time.Time{}, parse(now), false
+			}
+			return parse(at.String), parse(now), true
 		},
 	}
 }

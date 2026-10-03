@@ -1313,3 +1313,97 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 		return stores.Conversations, orgID, seeder, extra
 	})
 }
+
+// TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims puts
+// ClearNextAttempt under the pool and principal the follow-up runs it as: the
+// sender's synthetic claims on the app pool, beside the message insert.
+//
+// The two principals answer differently, and both answers are wanted. A team
+// member may update the conversation, so the wait clears and the returned row
+// is the row a point read under the same claims finds. A viewer may read the
+// conversation, and so may send it a message, but may not update it: the
+// clear finds no row (ErrNoSuchConversation, which the follow-up tolerates),
+// and the wait stays where it was.
+func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	ctx := context.Background()
+
+	orgID, creator, teamID := pgtest.SeedOrgWithUser(t, h, "creator")
+	teammate := seedPgMember(t, h, orgID, "teammate", "member")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'member')`, teammate, teamID)
+	viewer := seedPgMember(t, h, orgID, "viewer", "member")
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO memberships (user_id, team_id, role) VALUES ($1, $2, 'viewer')`, viewer, teamID)
+	seedPgConversationPromptIn(t, h, "p_next_attempt_rls", orgID, creator)
+
+	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Next attempt RLS', '', '{}'::jsonb, now())
+	`, entityID, orgID, "next-attempt-"+orgID[:8])
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
+		VALUES ($1, $2, $3, 'github:pr:ci_check_failed', '', '{}'::jsonb, now())
+	`, eventID, orgID, entityID)
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO tasks (id, org_id, creator_user_id, team_id, visibility, entity_id, event_type, dedup_key,
+		                   primary_event_id, status, scoring_status, priority_score)
+		VALUES ($1, $2, $3, $4, 'team', $5, 'github:pr:ci_check_failed', '', $6, 'queued', 'pending', 0.5)
+	`, taskID, orgID, creator, teamID, entityID, eventID)
+	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
+	stepIdx := 0
+	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
+		TaskID: taskID, PromptID: "p_next_attempt_rls", Model: "m",
+		TriggerType: "manual", CreatorUserID: creator,
+		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
+	})
+	pgtest.MustExec(t, h.AdminDB,
+		`UPDATE conversations SET next_attempt_at = statement_timestamp() + interval '1 hour' WHERE id = $1`, convID)
+	waitSet := func() bool {
+		t.Helper()
+		var set bool
+		if err := h.AdminDB.QueryRow(`SELECT next_attempt_at IS NOT NULL FROM conversations WHERE id = $1`, convID).Scan(&set); err != nil {
+			t.Fatalf("read next_attempt_at: %v", err)
+		}
+		return set
+	}
+
+	// The viewer: the conversation is visible, the clear finds nothing to
+	// write.
+	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, viewer, func(tx db.TxStores) error {
+		if got, gErr := tx.Conversations.Get(ctx, orgID, convID); gErr != nil || got == nil {
+			t.Fatalf("the viewer cannot read the conversation (%+v, %v); this test needs a principal who may send but not write", got, gErr)
+		}
+		_, cErr := tx.Conversations.ClearNextAttempt(ctx, orgID, convID)
+		return cErr
+	})
+	if !errors.Is(err, db.ErrNoSuchConversation) {
+		t.Errorf("ClearNextAttempt as a viewer = %v, want ErrNoSuchConversation", err)
+	}
+	if !waitSet() {
+		t.Error("a viewer's clear dropped the wait")
+	}
+
+	// The team member: cleared, and the returned row is the stored row.
+	if err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, teammate, func(tx db.TxStores) error {
+		cleared, cErr := tx.Conversations.ClearNextAttempt(ctx, orgID, convID)
+		if cErr != nil {
+			return cErr
+		}
+		if cleared.NextAttemptAt != nil {
+			t.Errorf("ClearNextAttempt returned next_attempt_at %v, want none", cleared.NextAttemptAt)
+		}
+		dbtest.AssertWriteReturnedStoredRow(t, "ClearNextAttempt under claims", *cleared, func() (*domain.Conversation, error) {
+			return tx.Conversations.Get(ctx, orgID, convID)
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("ClearNextAttempt as a team member: %v", err)
+	}
+	if waitSet() {
+		t.Error("a team member's clear left the wait in place")
+	}
+}

@@ -48,6 +48,32 @@ import (
 // outlasts it is not one more retry away.
 const maxClaimAttempts = 5
 
+// maxUpstreamHandBacks is the upstream budget: how many engagements of one
+// queue episode may end with the model provider unavailable (Conversation.
+// UpstreamHandBacks, plus the one ending now) before the conversation parks
+// for a person instead of being handed back again. Over the
+// db.HandBackUpstream schedule that is about four hours of retrying while the
+// machine is awake. It counts attempts rather than time because the waits are
+// database time, which a suspended machine advances while nobody retries.
+const maxUpstreamHandBacks = 27
+
+// budgetLimit is how many hand-backs of budget b one queue episode may hold
+// before the dispatcher stops handing the conversation back, and 0 for a
+// budget with no limit. It is the one place each db.HandBackBudget's limit is
+// read from.
+func (s *Spawner) budgetLimit(b db.HandBackBudget) int {
+	switch b {
+	case db.BudgetSetup:
+		return maxClaimAttempts
+	case db.BudgetLoss:
+		return s.maxClaimLossesOrDefault()
+	case db.BudgetUpstream:
+		return maxUpstreamHandBacks
+	default:
+		return 0
+	}
+}
+
 // ledgerWriteTimeout bounds the conversation_worktrees write a claim makes on
 // its way to starting the agent. Long enough that only a genuinely stuck store
 // hits it, short enough that one does not hold the step behind it.
@@ -538,7 +564,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// down the next one. The count is this claim's, read in the claim
 	// statement, so it names exactly the losses since the last engagement
 	// that got anywhere.
-	if conv.LostEngagements >= s.maxClaimLossesOrDefault() {
+	if conv.LostEngagements >= s.budgetLimit(db.BudgetLoss) {
 		s.disposeOfLostConversation(ctx, conv)
 		return
 	}
@@ -913,6 +939,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	cfg.orgID = orgID
 	cfg.teamID = conv.TeamID
 	cfg.claimID = conv.ClaimID
+	cfg.upstreamHandBacks = conv.UpstreamHandBacks
 	cfg.isBlueprintStep = true
 	cfg.blueprintRunID = br.ID
 	cfg.blueprintStep = stepIdx
@@ -2111,12 +2138,13 @@ type engagementDisposition struct {
 	// successor owns the conversation. Nothing was written and nothing may be
 	// reacted to — the row now describes somebody else's work.
 	fenced bool
-	// handedBack means the dispatcher shut down under this engagement, and
-	// the engagement let go of the conversation without recording anything
-	// about it: its claim is released 'requeued_shutdown' (or left for the
-	// shutdown release to), the conversation stays mid-flight, and the next
-	// claim continues it. Like fenced, nothing may be reacted to — there is
-	// no terminal, and the row is about to be somebody else's.
+	// handedBack means the engagement let go of the conversation without
+	// recording anything about it: the dispatcher shut down under it (its
+	// claim released 'requeued_shutdown', or left for the shutdown release
+	// to), or its model provider stayed unavailable ('requeued_upstream', with
+	// a wait). The conversation stays mid-flight and the next claim continues
+	// it. Like fenced, nothing may be reacted to — there is no terminal, and
+	// the row is about to be somebody else's.
 	handedBack bool
 	// launchErr means the engagement never reached the agent's first turn:
 	// workspace setup, the jail, the tool host, the opening turn. Nothing was
@@ -2156,18 +2184,22 @@ type engagementDisposition struct {
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if errors.Is(cause, errAwaitingCredentialsTimeout) {
 		dispatchLog.Warn("credential bundle never arrived; handing the conversation back without spending its setup budget", "conversation", conv.ID, "error", cause)
-		if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, cause.Error()); err != nil {
+		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, cause.Error()); err != nil {
 			dispatchLog.Warn("requeue conversation after a credentials timeout failed", "conversation", conv.ID, "error", err)
+		} else if requeued != nil {
+			recordHandBack(orgID, string(db.RequeueAwaitingCredentials), 1)
 		}
 		return true
 	}
 	attempt := conv.SetupFailures + 1
-	if attempt >= maxClaimAttempts {
+	if attempt >= s.budgetLimit(db.BudgetSetup) {
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", attempt, "error", cause)
-	if _, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, cause.Error()); err != nil {
+	if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, cause.Error()); err != nil {
 		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
+	} else if requeued != nil {
+		recordHandBack(orgID, string(db.RequeueSetupFailure), 1)
 	}
 	return true
 }

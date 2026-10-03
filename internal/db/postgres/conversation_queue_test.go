@@ -1132,6 +1132,14 @@ func TestStopIntent_Postgres(t *testing.T) {
 	dbtest.RunStopIntentConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
 }
 
+// TestHandBack_Postgres runs the shared hand-back conformance — the fenced
+// hand-back, the wait it sets, and every read the wait keeps a conversation
+// out of — on the claim-lease fixture.
+func TestHandBack_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunHandBackConformance(t, func(t *testing.T) dbtest.ClaimLeaseFixture { return pgClaimLeaseFixture(t, h) })
+}
+
 // TestClaimTakeover_Postgres runs the shared recovery-pass conformance — the
 // takeover, the shutdown release, the boot reset, the widened settlement and
 // the stranded-run read — on the claim-lease fixture.
@@ -1209,6 +1217,23 @@ func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixtu
 			pgtest.MustExec(t, h.AdminDB,
 				`UPDATE claims SET released_at = now() - make_interval(secs => $1) WHERE conversation_id = $2 AND released_at IS NOT NULL`,
 				ago.Seconds(), conversationID)
+		},
+		SetNextAttempt: func(t *testing.T, conversationID string, in time.Duration) {
+			t.Helper()
+			pgtest.MustExec(t, h.AdminDB,
+				`UPDATE conversations SET next_attempt_at = statement_timestamp() + make_interval(secs => $1) WHERE id = $2`,
+				in.Seconds(), conversationID)
+		},
+		NextAttempt: func(t *testing.T, conversationID string) (time.Time, time.Time, bool) {
+			t.Helper()
+			var at sql.NullTime
+			var now time.Time
+			if err := h.AdminDB.QueryRow(
+				`SELECT next_attempt_at, statement_timestamp() FROM conversations WHERE id = $1`, conversationID,
+			).Scan(&at, &now); err != nil {
+				t.Fatalf("read next_attempt_at of %s: %v", conversationID, err)
+			}
+			return at.Time, now, at.Valid
 		},
 	}
 }

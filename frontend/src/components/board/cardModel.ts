@@ -7,6 +7,8 @@ import {
   formatElapsed,
   isActiveStatus,
   isFailedStatus,
+  retryingAt,
+  retryingAtLabel,
   workStartedAt,
 } from '../../lib/conversationStatus'
 
@@ -93,9 +95,14 @@ export function deriveCard(
   // surface narrates a live conversation with — the setup phase, then the
   // agent's own action, with the bare state word standing in until it has
   // one — so a card and an Overview row never tell two stories about one run.
+  //
+  // A queued run waiting out an unavailable model provider is not waiting on
+  // a slot, and has no place in line: the line says when it tries again.
   let command: string | undefined
   if (working && conversation) {
-    if (conversation.Status === 'queued') {
+    const retryAt = retryingAt(conversation, now)
+    if (retryAt) command = retryingAtLabel(retryAt)
+    else if (conversation.Status === 'queued') {
       const ahead = (conversation.queue_position ?? 1) - 1
       command = ahead > 0 ? `Waiting for a run slot · ${ahead} ahead` : 'Waiting for a run slot'
     } else command = activeProse(conversation)

@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/pressly/goose/v3"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -21,10 +20,20 @@ import (
 // reason goes.
 //
 // The exclusion list in the SQL is spelled out as literals because SQL cannot
-// import a Go const. The final assertion is what keeps the two in step: it
-// walks domain.AllParkReasons() and fails if the migration cleared one, so a
-// reason added in Go and forgotten in the migration is caught here rather than
-// by a user whose park reason silently vanished on upgrade.
+// import a Go const. The final assertion walks splitStopReasonParkReasons and
+// fails if the migration cleared one.
+// splitStopReasonParkReasons is the park_reason vocabulary as it stood when
+// 202608160005 shipped: the rows that migration can meet on upgrade. It is
+// pinned rather than read from domain.AllParkReasons(), because the migration
+// is shipped and never edited while the vocabulary keeps moving, and a reason
+// added later is never on a row this migration runs over.
+var splitStopReasonParkReasons = []string{
+	"idle", "user_cancelled", "system_cancelled",
+	"blueprint_cancelled", "blueprint_terminal",
+	"launch_failed", "model_not_enabled", "stalled",
+	"drained",
+}
+
 func TestMigrate_SplitsStopReasonIntoParkReasonAndPerTurnStopReason(t *testing.T) {
 	database := openMigrationsTestDB(t)
 
@@ -78,8 +87,8 @@ func TestMigrate_SplitsStopReasonIntoParkReasonAndPerTurnStopReason(t *testing.T
 		}
 	}
 	// Every park reason a shipped build could have written.
-	for _, r := range domain.AllParkReasons() {
-		seed("park-"+string(r), string(r))
+	for _, r := range splitStopReasonParkReasons {
+		seed("park-"+r, r)
 	}
 	// The model's stop reasons, written by the terminal write on the same
 	// column. These are the values a rename alone would relabel.
@@ -123,12 +132,11 @@ func TestMigrate_SplitsStopReasonIntoParkReasonAndPerTurnStopReason(t *testing.T
 		t.Errorf("never-parked row park_reason = %q, want empty", got)
 	}
 	// The half that matters most: no real park reason is collateral damage of
-	// the clean-up. Derived from the vocabulary, so the SQL's literal list
-	// cannot fall behind it.
-	for _, r := range domain.AllParkReasons() {
-		if got := parkReasonOf("park-" + string(r)); got != string(r) {
-			t.Errorf("park reason %q survived as %q — the migration's exclusion list has fallen behind "+
-				"domain.AllParkReasons()", r, got)
+	// the clean-up.
+	for _, r := range splitStopReasonParkReasons {
+		if got := parkReasonOf("park-" + r); got != r {
+			t.Errorf("park reason %q survived as %q — the migration's exclusion list does not "+
+				"cover a reason that existed when it shipped", r, got)
 		}
 	}
 

@@ -188,3 +188,33 @@ func TestDepthObserver_CloseWhileRunningStopsReporting(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestDeferredGauge_ExportedName_RealScrape pins the name the monitoring doc,
+// the ConversationsDeferred rule and the "Conversations waiting to retry"
+// panel all read, through the exporter configured as production's is.
+func TestDeferredGauge_ExportedName_RealScrape(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	exporter, err := otelprom.New(
+		otelprom.WithRegisterer(registry),
+		otelprom.WithNamespace("tf"),
+		otelprom.WithoutScopeInfo(),
+		otelprom.WithTranslationStrategy(otlptranslator.UnderscoreEscapingWithSuffixes),
+	)
+	if err != nil {
+		t.Fatalf("exporter: %v", err)
+	}
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
+	c := NewClaimObserver(provider, &fakeExpiredClaims{deferred: map[string]int{"org-1": 2}})
+	defer c.Close()
+	c.Tick(context.Background())
+
+	rec := httptest.NewRecorder()
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	const want = `tf_conversations_deferred{org_id="org-1"} 2`
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if line == want {
+			return
+		}
+	}
+	t.Errorf("scrape lacks %q:\n%s", want, rec.Body.String())
+}

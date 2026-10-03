@@ -224,7 +224,7 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   launch_failed: 'the runtime could not start',
   model_not_enabled: 'its model is no longer one this team can pick',
   stalled: 'stalled',
-  drained: 'the executor was drained',
+  upstream_unavailable: 'Paused: provider unavailable',
 }
 
 // parkReasonLabel is the gloss for one park reason. An unrecognized code
@@ -335,6 +335,28 @@ export function queueDwellMs(conversation: Conversation, now: number = Date.now(
   if (conversation.Status === 'queued') return Math.max(0, now - new Date(queuedAt).getTime())
   if (!conversation.ClaimedAt) return null
   return Math.max(0, new Date(conversation.ClaimedAt).getTime() - new Date(queuedAt).getTime())
+}
+
+// retryingAt is when a deferred conversation is tried again: a queued
+// conversation whose model provider was unavailable, handed back to wait until
+// next_attempt_at. It reads `queued` and has no place in line, because it waits
+// for that time rather than for the runs ahead of it. Null for every other
+// conversation, and once the time has passed — from then on it is an ordinary
+// queued run waiting for a slot.
+export function retryingAt(
+  conversation: Pick<Conversation, 'Status' | 'next_attempt_at'>,
+  now: number = Date.now(),
+): Date | null {
+  if (conversation.Status !== 'queued' || !conversation.next_attempt_at) return null
+  const at = new Date(conversation.next_attempt_at)
+  if (Number.isNaN(at.getTime()) || at.getTime() <= now) return null
+  return at
+}
+
+// retryingAtLabel renders retryingAt's time for a person, in their local time
+// and the 24-hour clock the run views stamp times with.
+export function retryingAtLabel(at: Date): string {
+  return `Retrying at ${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`
 }
 
 export function formatDurationMs(ms: number): string {

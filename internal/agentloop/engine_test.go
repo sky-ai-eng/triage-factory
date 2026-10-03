@@ -1038,7 +1038,12 @@ func TestRun_RetryIsSameProviderSameModelAndExhaustionFails(t *testing.T) {
 	}
 }
 
-func TestRun_RetryExhaustionFailsAndRecordsTheError(t *testing.T) {
+// TestRun_RetryExhaustionOnAnUnavailableProviderEndsWithoutANotice: a
+// provider that answers 503 to every attempt has not failed the conversation.
+// The engagement ends ResultUpstreamUnavailable carrying the last error, and
+// writes nothing to the transcript, which the model reads on the next claim
+// and in which nothing has happened yet.
+func TestRun_RetryExhaustionOnAnUnavailableProviderEndsWithoutANotice(t *testing.T) {
 	tr := newMemTranscript(pendingUser("go"))
 	p := &scriptedProvider{turns: []scriptedTurn{
 		{err: errors.New("503 service unavailable")},
@@ -1047,10 +1052,54 @@ func TestRun_RetryExhaustionFailsAndRecordsTheError(t *testing.T) {
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
 	e.Retry = RetryPolicy{MaxAttempts: 3, Sleep: func(context.Context, time.Duration) error { return nil }}
+	before := len(tr.snapshot())
+
+	got := e.Run(context.Background(), testParams())
+	if got.Kind != ResultUpstreamUnavailable {
+		t.Fatalf("disposition = %v, want ResultUpstreamUnavailable", got.Kind)
+	}
+	if got.Err == nil || !strings.Contains(got.Err.Error(), "503") {
+		t.Errorf("Err = %v, want the last attempt's failure", got.Err)
+	}
+	if len(p.requests) != 3 {
+		t.Errorf("attempts = %d, want the whole in-turn budget spent first", len(p.requests))
+	}
+	if n := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "could not be retried") }); n != nil {
+		t.Errorf("an unavailable provider wrote the failure notice %q", n.Content)
+	}
+	if after := len(tr.snapshot()); after != before {
+		t.Errorf("transcript grew from %d to %d rows; an unavailable provider writes nothing", before, after)
+	}
+}
+
+// TestRun_RateLimitExhaustionEndsAsUnavailableToo: a rate limit is the
+// provider asking to wait, the other class the hand-back exists for.
+func TestRun_RateLimitExhaustionEndsAsUnavailableToo(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{err: errors.New("429 rate limit exceeded")},
+		{err: errors.New("429 rate limit exceeded")},
+	}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
+	e.Retry = RetryPolicy{MaxAttempts: 2, Sleep: func(context.Context, time.Duration) error { return nil }}
+
+	if got := e.Run(context.Background(), testParams()); got.Kind != ResultUpstreamUnavailable {
+		t.Fatalf("disposition = %v, want ResultUpstreamUnavailable", got.Kind)
+	}
+}
+
+// TestRun_RejectedProviderErrorFailsAndRecordsTheError: a failure the
+// provider will answer the same way however long anyone waits — here a
+// refused key — still fails the conversation with its cause on the
+// transcript.
+func TestRun_RejectedProviderErrorFailsAndRecordsTheError(t *testing.T) {
+	tr := newMemTranscript(pendingUser("go"))
+	p := &scriptedProvider{turns: []scriptedTurn{{err: errors.New("401 invalid api key")}}}
+	e := newTestEngine(tr, p, newScriptedToolHost())
 
 	got := e.Run(context.Background(), testParams())
 	if got.Kind != ResultFailed {
-		t.Fatalf("exhaustion must fail the conversation: %v", got.Kind)
+		t.Fatalf("disposition = %v, want ResultFailed", got.Kind)
 	}
 	if n := tr.find(func(m domain.Message) bool { return strings.Contains(m.Content, "could not be retried") }); n == nil {
 		t.Error("the failure's cause must be visible in the transcript")

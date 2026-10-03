@@ -1089,6 +1089,11 @@ CREATE TABLE public.conversations (
     completed_at timestamp with time zone,
     -- Stamped on park, cleared on resume; the snapshot-retention sweep keys off it.
     parked_at timestamp with time zone,
+    -- The earliest database time the conversation may next be claimed, set by a
+    -- hand-back that has to wait (db.HandBackPolicies names which outcomes do).
+    -- NULL = claimable whenever it otherwise matches. Cleared by the next claim,
+    -- by a person's message, by the stop settlement and by a resume.
+    next_attempt_at timestamp with time zone,
     -- NULL = live. An archived conversation is never claimed again.
     archived_at timestamp with time zone,
     actor_agent_id uuid,

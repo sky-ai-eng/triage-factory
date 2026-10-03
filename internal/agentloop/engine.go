@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // Transcript is the loop's view of the messages table. The three methods are
@@ -214,6 +215,13 @@ const (
 	// that came back "context canceled" is a cancellation, not a failure
 	// that happens to mention one.
 	ResultCancelled
+	// ResultUpstreamUnavailable — the provider could not serve the call
+	// through every in-turn retry, and inference.Classify reads the last
+	// failure as the provider being unavailable (transient or rate-limited)
+	// rather than refusing the request. Nothing about the conversation
+	// failed: the transcript is whole up to the call, and the caller hands
+	// the claim back to be retried later. Err carries the last failure.
+	ResultUpstreamUnavailable
 )
 
 // Result is the engagement's terminal report, returned to the in-process
@@ -231,7 +239,8 @@ type Result struct {
 	DurationMs    int
 	// ParkNotice is the user-visible reason a guard parked the engagement.
 	ParkNotice string
-	// Err carries the underlying cause on ResultFailed.
+	// Err carries the underlying cause on ResultFailed and
+	// ResultUpstreamUnavailable.
 	Err error
 }
 
@@ -455,8 +464,23 @@ func (e *Engine) Run(ctx context.Context, params Params) Result {
 			}
 			// A crash or an exhausted retry between stream start and persist
 			// loses this message entirely, which is safe: its tool calls
-			// never ran. Record the error as a row so the failure has a
-			// visible cause in the transcript, then fail.
+			// never ran.
+			//
+			// A provider that was unavailable through every retry is not the
+			// conversation failing. It ends the engagement with no notice row:
+			// the notice is a transcript row the model reads on the next
+			// claim, and from the model's side nothing has happened yet.
+			if class, ok := inference.Classify(ctx, err); ok && (class == upstream.Transient || class == upstream.RateLimited) {
+				return Result{
+					Kind:       ResultUpstreamUnavailable,
+					NumTurns:   turn,
+					DurationMs: msSince(started),
+					Err:        err,
+				}
+			}
+			// Anything else will not succeed on a retry. Record the error as a
+			// row so the failure has a visible cause in the transcript, then
+			// fail.
 			e.insertNotice(ctx, params, "The model call failed and could not be retried: "+err.Error())
 			return e.failed(ctx, started, turn, err)
 		}

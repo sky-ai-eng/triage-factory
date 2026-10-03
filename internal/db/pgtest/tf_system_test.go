@@ -330,8 +330,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		}
 		// A released claim is the fence's answer, not a grant failure: the
 		// statement ran under tf_system and found nothing live to release.
-		if err := stores.ConversationQueue.ReleaseClaimOnShutdownSystem(ctx, orgID, conversationID, uuid.NewString()); err != nil && !errors.Is(err, db.ErrClaimReleased) {
-			t.Errorf("ConversationQueue.ReleaseClaimOnShutdownSystem: %v", err)
+		if err := stores.ConversationQueue.HandBackClaimSystem(ctx, orgID, conversationID, uuid.NewString(), db.HandBackUpstream, 30*time.Second, "provider unavailable"); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+			t.Errorf("ConversationQueue.HandBackClaimSystem: %v", err)
 		}
 	})
 

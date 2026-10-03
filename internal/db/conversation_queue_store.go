@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -118,6 +119,128 @@ var ErrInvalidRequeueOutcome = errors.New("db: invalid requeue outcome")
 // Valid reports whether o is one of the RequeueOutcome values.
 func (o RequeueOutcome) Valid() bool {
 	return o == RequeueSetupFailure || o == RequeueAwaitingCredentials
+}
+
+// The hand-back outcomes no RequeueOutcome names: each is written by its own
+// verb rather than by RequeueConversation.
+const (
+	// HandBackReaped is a claim whose lease lapsed with nobody driving it,
+	// released by a takeover, by its own executor, or by a boot reset.
+	HandBackReaped = "reaped"
+	// HandBackShutdown is a claim its executor handed back on a clean
+	// shutdown or drain.
+	HandBackShutdown = "requeued_shutdown"
+	// HandBackUpstream is a claim handed back because an upstream the
+	// engagement depends on stayed unavailable through its own retries.
+	HandBackUpstream = "requeued_upstream"
+)
+
+// HandBackBudget names the budget a hand-back outcome spends.
+type HandBackBudget string
+
+const (
+	BudgetNone     HandBackBudget = "none"
+	BudgetSetup    HandBackBudget = "setup"
+	BudgetLoss     HandBackBudget = "loss"
+	BudgetUpstream HandBackBudget = "upstream"
+)
+
+// HandBackPolicy is one hand-back outcome: a claim released with an outcome
+// that records nothing about the conversation, so the conversation stays
+// mid-flight and the queue episode stays open.
+type HandBackPolicy struct {
+	Outcome string
+	Budget  HandBackBudget
+	// Schedule is the delay before the next claim, indexed by how many
+	// hand-backs of this budget the episode already holds; the last entry
+	// repeats. Nil means claimable at once.
+	Schedule []time.Duration
+}
+
+// HandBackPolicies is every hand-back outcome, and the one place each declares
+// the budget it spends and how long the conversation waits before its next
+// claim. Both dialects render their hand-back SQL from it (HandBackOutcomesSQL,
+// HandBackBudgetOutcomesSQL), so a new reason to hand a conversation back is a
+// row here plus the writer that releases with it.
+//
+//   - requeued: the engagement failed before its agent ran (a workspace that
+//     would not build, a runtime that would not launch), or a resume re-queued
+//     a claim someone else still held.
+//   - requeued_credentials: the credentials wait timed out. The brain's
+//     provisioner did not answer, which says nothing about the conversation.
+//   - reaped: the engagement's lease lapsed with nobody driving it.
+//   - requeued_shutdown: the executor stopped or drained cleanly. A deliberate
+//     stop is not a loss.
+//   - requeued_upstream: an upstream stayed unavailable through the
+//     engagement's own retries. The cause outlives the engagement, so the next
+//     claim waits on the schedule rather than failing the same way at once.
+//
+// The upstream budget counts attempts, not time: next_attempt_at is database
+// time, and a machine that sleeps advances it while nobody retries, so a time
+// budget would run out on wake.
+var HandBackPolicies = []HandBackPolicy{
+	{Outcome: string(RequeueSetupFailure), Budget: BudgetSetup},
+	{Outcome: string(RequeueAwaitingCredentials), Budget: BudgetNone},
+	{Outcome: HandBackReaped, Budget: BudgetLoss},
+	{Outcome: HandBackShutdown, Budget: BudgetNone},
+	{Outcome: HandBackUpstream, Budget: BudgetUpstream,
+		Schedule: []time.Duration{30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute}},
+}
+
+// HandBackPolicyFor returns outcome's policy, and false for an outcome that is
+// not a hand-back.
+func HandBackPolicyFor(outcome string) (HandBackPolicy, bool) {
+	for _, p := range HandBackPolicies {
+		if p.Outcome == outcome {
+			return p, true
+		}
+	}
+	return HandBackPolicy{}, false
+}
+
+// Delay is how long a conversation handed back with this policy waits before
+// its next claim, given how many hand-backs of the policy's budget its episode
+// already holds. Zero for a policy with no schedule.
+func (p HandBackPolicy) Delay(prior int) time.Duration {
+	if len(p.Schedule) == 0 {
+		return 0
+	}
+	return p.Schedule[min(max(prior, 0), len(p.Schedule)-1)]
+}
+
+// HandBackOutcomesSQL renders every hand-back outcome as a SQL IN-list body,
+// in table order: the claim outcomes that do not end a queue episode.
+func HandBackOutcomesSQL() string {
+	return renderOutcomesSQL(func(HandBackPolicy) bool { return true })
+}
+
+// HandBackBudgetOutcomesSQL renders the hand-back outcomes that spend budget b
+// as a SQL IN-list body, in table order. A budget nothing spends renders as
+// NULL, which keeps `outcome IN (NULL)` well-formed and matching nothing.
+func HandBackBudgetOutcomesSQL(b HandBackBudget) string {
+	return renderOutcomesSQL(func(p HandBackPolicy) bool { return p.Budget == b })
+}
+
+func renderOutcomesSQL(keep func(HandBackPolicy) bool) string {
+	var parts []string
+	for _, p := range HandBackPolicies {
+		if !keep(p) {
+			continue
+		}
+		// The outcomes are package constants, so this never trips; it keeps
+		// the rendering from ever quoting a value that could close the
+		// literal.
+		for _, r := range p.Outcome {
+			if (r < 'a' || r > 'z') && r != '_' {
+				panic(fmt.Sprintf("db: hand-back outcome %q is not a lowercase identifier", p.Outcome))
+			}
+		}
+		parts = append(parts, "'"+p.Outcome+"'")
+	}
+	if len(parts) == 0 {
+		return "NULL"
+	}
+	return strings.Join(parts, ",")
 }
 
 // StrandedRun names a running blueprint run whose current step concluded
@@ -250,11 +373,16 @@ type ConversationQueueStore interface {
 	// deliberately never claimed — the sequence-level cancel is honored here
 	// (decision: a queued-not-started step cancels with zero work).
 	//
-	// The returned Attempts, SetupFailures and LostEngagements are scoped to
-	// the conversation's current queue episode rather than its lifetime — see
-	// the dialects' EpisodeSetupFailuresSQL / EpisodeLostEngagementsSQL for
-	// the model, which the SQL is the definition of. The last two are the
-	// dispatcher's two budgets.
+	// The returned Attempts, SetupFailures, LostEngagements and
+	// UpstreamHandBacks are scoped to the conversation's current queue episode
+	// rather than its lifetime — see the dialects' episodeHandBacksSQL for the
+	// model, which the SQL is the definition of. The last three are the
+	// budgets HandBackPolicies names.
+	//
+	// A hand-back that has to wait (HandBackClaimSystem with a delay) keeps
+	// the conversation out of the scan until its next_attempt_at, and the
+	// claim clears the column, so the stamp never outlives the wait it
+	// described.
 	//
 	// lease is how long the minted claim's authority lasts before the holder
 	// must have renewed it: lease_expires_at = database now + lease, stamped
@@ -413,14 +541,22 @@ type ConversationQueueStore interface {
 	// stamp names an executor that is leaving. Returns the count released.
 	ReleaseOwnClaimsOnShutdownSystem(ctx context.Context, executorID string, bootEpoch int64, conversationIDs []string) (int, error)
 
-	// ReleaseClaimOnShutdownSystem is one engagement handing its own claim
-	// back because its executor is shutting down: the claim is released as
-	// 'requeued_shutdown' and the conversation is left mid-flight, so it is
-	// claimable at once and the next claim continues it. Fenced on claimID
-	// like every holder write: ErrClaimReleased when the claim is no longer
-	// live. preferred_executor_id is cleared in the same transaction, for the
-	// reason ReleaseOwnClaimsOnShutdownSystem clears it.
-	ReleaseClaimOnShutdownSystem(ctx context.Context, orgID, conversationID, claimID string) error
+	// HandBackClaimSystem is an engagement handing its own claim back: the
+	// claim is released with outcome, the conversation stays mid-flight, and
+	// it becomes claimable after delay (at once when delay is 0), measured on
+	// database time and stamped as next_attempt_at. Fenced on claimID like
+	// every holder write: ErrClaimReleased when the claim is no longer live. A
+	// non-empty lastErr is written to result_summary; preferred_executor_id is
+	// cleared, for the reason ReleaseOwnClaimsOnShutdownSystem clears it. An
+	// outcome outside HandBackPolicies is refused with
+	// ErrInvalidRequeueOutcome and nothing is written.
+	HandBackClaimSystem(ctx context.Context, orgID, conversationID, claimID, outcome string, delay time.Duration, lastErr string) error
+
+	// CountDeferredSystem counts, per org, the conversations a hand-back is
+	// holding out of the queue until a time: unclaimed, otherwise waiting to
+	// be driven, and with next_attempt_at still in the future. An org with
+	// none is absent. Cross-org system read for the deferred gauge.
+	CountDeferredSystem(ctx context.Context) (map[string]int, error)
 
 	// StrandedBlueprintRunsSystem returns running blueprint runs whose current
 	// step's conversation reached completed or failed more than grace ago and

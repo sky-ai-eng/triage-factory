@@ -548,6 +548,14 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 	if conv.StopRequestedAt != nil {
 		out["stop_requested_at"] = *conv.StopRequestedAt
 	}
+	// The wait a hand-back set: the earliest the conversation is claimed
+	// again, after its model provider was unavailable. It still reads
+	// `queued`, with no queue_position, because it waits for a time rather
+	// than for the conversations ahead of it. Absent when nothing is holding
+	// it, read off presence like the keys above.
+	if conv.NextAttemptAt != nil {
+		out["next_attempt_at"] = *conv.NextAttemptAt
+	}
 	// The live claim's activity as its last renewal stamped it: when the
 	// engagement last did anything its stall watchdog counts, and what it had
 	// in flight. Absent with no live claim or before the first renewal, read
