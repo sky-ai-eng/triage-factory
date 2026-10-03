@@ -58,8 +58,9 @@ var ErrClaimReleased = errors.New("db: claim released — this engagement no lon
 //
 // The distinction is worth a second sentinel because only one of the two is
 // ever recoverable. A released claim may have a successor, and nothing its
-// old holder does can be allowed to land. An unreleased one cannot: a mint
-// requires the prior claim released, and every release is guarded on the
-// lease having lapsed or on the claim's boot being dead, so an unreleased
+// old holder does can be allowed to land. An unreleased one cannot: a
+// release is final (released_at is set once and never cleared), and the
+// one-active index admits one unreleased claim per conversation, so a
+// successor can be minted only after this claim is released. An unreleased
 // claim is proof nobody else holds the conversation.
 var ErrClaimLeaseExpired = fmt.Errorf("%w: lease expired", ErrClaimReleased)

@@ -508,9 +508,10 @@ renewal refused on the lapsed lease re-acquires the claim when `internal/suspend
 suspend since the last accepted renewal, that renewal is younger than the self-fence deadline on
 the monotonic clock, and the holder has not fenced itself. The re-acquire is a compare-and-set on
 the claim being unreleased and minted by the holder's own executor boot, which is proof no
-successor exists: every release is guarded on expiry or a dead boot, and a mint requires the prior
-claim released. A claim taken over during the suspend refuses the re-acquire and the holder fences
-as above. A stopped process (SIGSTOP) is not a suspend: its monotonic clock kept running, so it
+successor exists. A release is final, since `released_at` is set once and never cleared, and
+`idx_claims_one_active` admits one unreleased claim per conversation, so a successor can be minted
+only after this claim is released. Any release during the suspend, by a takeover or by any other
+path, therefore refuses the re-acquire, and the holder fences as above. A stopped process (SIGSTOP) is not a suspend: its monotonic clock kept running, so it
 fails the deadline condition and is refused like any other paused holder.
 
 #### Run health

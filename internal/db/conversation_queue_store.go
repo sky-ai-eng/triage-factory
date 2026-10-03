@@ -289,10 +289,12 @@ type ConversationQueueStore interface {
 	// boot minted and nobody has released, whatever its expiry says, and
 	// returns the renewal as RenewClaimLeaseSystem does. It is the one write
 	// that may extend an expired lease, and it is safe only because an
-	// unreleased claim means no successor exists: every release is guarded on
-	// the lease having lapsed or on the claim's boot being dead, and a mint
-	// requires the prior claim released. The caller must have established
-	// that its engagement did nothing while the lease was lapsed.
+	// unreleased claim means no successor exists: a release is final
+	// (released_at is set once and never cleared), and the one-active index
+	// admits one unreleased claim per conversation, so a successor can be
+	// minted only after this claim is released. Any release, by whatever
+	// path, therefore refuses the re-acquire. The caller must have
+	// established that its engagement did nothing while the lease was lapsed.
 	//
 	// Refused with ErrClaimReleased when the claim is released, is not the
 	// one holding conversationID, or was minted by another executor or boot.
