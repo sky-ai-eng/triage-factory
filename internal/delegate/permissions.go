@@ -41,6 +41,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -157,9 +158,16 @@ func (s *Spawner) resolveSDKPermissionMode(ctx context.Context, teamID string) s
 // channel the handler goroutine is parked on, plus the owning org so a resolve
 // from another tenant can't satisfy it. The owning run is encoded in the broker
 // key (see permKey), not stored here.
+//
+// deadline is the end of the prompt's full window, and it carries Go's
+// monotonic reading: the wait's timer is armed from it, and
+// PermissionRemaining reports from it, so the two cannot disagree. That clock
+// stops while the system is suspended, which is what lets a prompt keep the
+// awake time it had left across a sleep.
 type pendingPermission struct {
-	ch    chan agentproc.PermissionDecision
-	orgID string
+	ch       chan agentproc.PermissionDecision
+	orgID    string
+	deadline time.Time
 }
 
 // permKey is the broker key for a pending prompt. The identifier is the SDK's
@@ -295,22 +303,23 @@ func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string
 			span.End()
 		}()
 
+		// full is the prompt's server-side deadline. It stays the FULL window
+		// even when absent-deny may fire sooner: the card's client TTL is a
+		// backstop, and an absent-deny eagerly broadcasts permission_resolved
+		// to drop the card the moment it fires.
+		full := s.permTimeout()
+		deadline := time.Now().Add(full)
+
 		key := permKey(conversationID, req.ToolCallID)
 		ch := make(chan agentproc.PermissionDecision, 1)
 		s.mu.Lock()
-		s.permPending[key] = &pendingPermission{ch: ch, orgID: orgID}
+		s.permPending[key] = &pendingPermission{ch: ch, orgID: orgID, deadline: deadline}
 		s.mu.Unlock()
 		defer func() {
 			s.mu.Lock()
 			delete(s.permPending, key)
 			s.mu.Unlock()
 		}()
-
-		// full is the prompt's server-side deadline. It stays the FULL window
-		// even when absent-deny may fire sooner: the card's client TTL is a
-		// backstop, and an absent-deny eagerly broadcasts permission_resolved
-		// to drop the card the moment it fires.
-		full := s.permTimeout()
 
 		// Record BEFORE broadcasting, so the frame is a hint pointing at
 		// something that already exists: a client that refetches the instant it
@@ -332,7 +341,7 @@ func (s *Spawner) BrowserPermissionHandler(orgID, conversationID, claimID string
 			Data:           map[string]any{"tool_call_id": req.ToolCallID},
 		})
 
-		decision, got, reason, why := s.awaitPermission(ch, orgID, conversationID, full, absent)
+		decision, got, reason, why := s.awaitPermission(ch, orgID, conversationID, full, deadline, absent)
 		if got {
 			// A person answered. "allow" / "deny" come from the decision's own
 			// behavior field, which is a closed vocabulary the wrapper sets.
@@ -403,6 +412,39 @@ func (s *Spawner) recordPermissionRequest(orgID, conversationID, claimID string,
 	}
 }
 
+// PermissionRemaining reports, per tool call id, how long this process's
+// broker will still wait on each of a conversation's open prompts in orgID.
+// The pending-set read prefers it to the row's stored expiry: that expiry is
+// a wall-clock projection taken when the prompt was raised, and after a
+// system suspend the wall clock has jumped while the wait, which runs on the
+// monotonic clock, has not moved. Only the process holding the wait can say
+// what is left of it.
+//
+// It answers how long, never whether. Which prompts are pending is derived
+// from the row and the conversation's active claim, because a broker entry
+// can outlive its claim (the handler waits on its channel and timers, not on
+// the engagement's context).
+//
+// Durations rather than deadlines, so the caller never subtracts a monotonic
+// time from a wall-only one: time.Now().UTC() drops the monotonic reading,
+// and the subtraction would quietly fall back to the wall clock.
+//
+// A process that holds none of the conversation's prompts returns an empty
+// map. That is every multi-mode control pod, and multi raises no prompts.
+func (s *Spawner) PermissionRemaining(orgID, conversationID string) map[string]time.Duration {
+	prefix := permKey(conversationID, "")
+	out := map[string]time.Duration{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, p := range s.permPending {
+		if p.orgID != orgID || !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		out[strings.TrimPrefix(key, prefix)] = time.Until(p.deadline)
+	}
+	return out
+}
+
 // resolvePermissionRow stamps a prompt's terminal on its durable row and
 // returns what the store settled: the row when this call's decision landed,
 // nil when the store has nothing wired, the write failed (logged here — same
@@ -455,6 +497,10 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 // separate: the prose is written for an agent and free to be reworded, the
 // reason is a stored enum nothing should have to parse English to recover.
 //
+// full is the window, for the deny prose; deadline is where it ends, and is
+// what the full-window timer is armed from — the same value the broker entry
+// carries, so the time PermissionRemaining reports is the time this wait has.
+//
 // With absent.enabled false this is the exact legacy select: ch vs the full
 // window. With it enabled the wait polls presence on a short ticker and tracks
 // two deadlines: the full window (always), and the grace clock (only while no
@@ -463,12 +509,15 @@ func (s *Spawner) ExpirePermissionsForClaim(orgID, claimID string) {
 // to the full window (disarming graceTimer), and flipping back restarts the
 // grace clock. The grace deadline never exceeds the full window (clampGrace), so the
 // total wait is bounded by permTimeout() in every branch.
-func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, conversationID string, full time.Duration, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
+func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, conversationID string, full time.Duration, deadline time.Time, absent AbsentAutoDeny) (agentproc.PermissionDecision, bool, string, string) {
+	fullTimer := time.NewTimer(time.Until(deadline))
+	defer fullTimer.Stop()
+
 	if !absent.enabled {
 		select {
 		case d := <-ch:
 			return d, true, "", ""
-		case <-time.After(full):
+		case <-fullTimer.C:
 			return agentproc.PermissionDecision{}, false, permDenyTimedOut(full), domain.PermissionReasonTimeout
 		}
 	}
@@ -482,8 +531,6 @@ func (s *Spawner) awaitPermission(ch chan agentproc.PermissionDecision, orgID, c
 	//     ticker's sole job is to re-read presence and arm/disarm + reset this
 	//     timer on the present↔absent edges, so a present→absent flip restarts
 	//     the grace clock from that moment.
-	fullTimer := time.NewTimer(full)
-	defer fullTimer.Stop()
 	ticker := time.NewTicker(s.presencePollInterval())
 	defer ticker.Stop()
 

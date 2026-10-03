@@ -296,6 +296,54 @@ func TestBrowserPermissionHandler_ConcurrentRunsSameToolCallID(t *testing.T) {
 	}
 }
 
+// TestPermissionRemaining_ReportsTheLiveWait pins what the pending-set read
+// gets from the broker: each of the conversation's open prompts with the time
+// its wait still has, nothing from another conversation or another org, and
+// nothing once the prompt is answered.
+func TestPermissionRemaining_ReportsTheLiveWait(t *testing.T) {
+	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s.setActivityTimings(activityTimings{permission: 30 * time.Second})
+	const otherOrg = "00000000-0000-0000-0000-00000000beef"
+
+	type raised struct {
+		org, conversation, toolCallID string
+		got                           chan agentproc.PermissionDecision
+	}
+	prompts := []raised{
+		{runmode.LocalDefaultOrgID, "run-A", "toolu_mine", make(chan agentproc.PermissionDecision, 1)},
+		{runmode.LocalDefaultOrgID, "run-B", "toolu_other_run", make(chan agentproc.PermissionDecision, 1)},
+		{otherOrg, "run-A", "toolu_other_org", make(chan agentproc.PermissionDecision, 1)},
+	}
+	for _, p := range prompts {
+		h := s.BrowserPermissionHandler(p.org, p.conversation, "", AbsentAutoDeny{})
+		go func() { p.got <- h(agentproc.PermissionRequest{ToolCallID: p.toolCallID, ToolName: "Bash"}) }()
+		waitForPending(t, s, p.conversation, p.toolCallID)
+	}
+	t.Cleanup(func() {
+		for _, p := range prompts {
+			_, _ = s.ResolvePermission(p.org, p.conversation, p.toolCallID, "", agentproc.PermissionDecision{Behavior: "deny"})
+			<-p.got
+		}
+	})
+
+	got := s.PermissionRemaining(runmode.LocalDefaultOrgID, "run-A")
+	if len(got) != 1 {
+		t.Fatalf("PermissionRemaining = %v, want only run-A's prompt in this org", got)
+	}
+	if r, ok := got["toolu_mine"]; !ok || r <= 25*time.Second || r > 30*time.Second {
+		t.Fatalf("remaining = %v (present %v), want just under the 30s window", r, ok)
+	}
+
+	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-A", "toolu_mine", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
+		t.Fatalf("ResolvePermission: %v", err)
+	}
+	<-prompts[0].got
+	prompts = prompts[1:]
+	if got := s.PermissionRemaining(runmode.LocalDefaultOrgID, "run-A"); len(got) != 0 {
+		t.Fatalf("PermissionRemaining after the answer = %v, want empty", got)
+	}
+}
+
 // dialHubClient stands up an httptest server that registers the dialing
 // connection with the hub (unscoped, so it receives every event) and returns the
 // live client conn. Used by the broadcast tests below to read frames off the

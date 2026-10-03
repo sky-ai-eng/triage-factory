@@ -56,10 +56,16 @@ type ConversationPermission struct {
 	State  string `json:"state"`
 	Reason string `json:"reason,omitempty"`
 
-	RequestedAt time.Time  `json:"requested_at"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	DecidedBy   string     `json:"decided_by,omitempty"`
-	DecidedAt   *time.Time `json:"decided_at,omitempty"`
+	RequestedAt time.Time `json:"requested_at"`
+	// ExpiresAt is the end of the prompt's window as projected on the wall
+	// clock when it was raised. The wait itself runs on the asking process's
+	// monotonic clock, which stops during a system suspend while the wall
+	// clock does not, so after a sleep the real deadline is later than this.
+	// While that process still holds the prompt, its own deadline is the
+	// answer (see PendingPermissionDTOs); this is the fallback and the record.
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	DecidedBy string     `json:"decided_by,omitempty"`
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
 
 	// WaitedMs is how long the prompt stood open — milliseconds from
 	// RequestedAt to DecidedAt, stamped once at resolution and nil while
@@ -157,20 +163,21 @@ type PendingPermissionDTO struct {
 	Input map[string]any `json:"input"`
 	Title string         `json:"title,omitempty"`
 	// TimeoutMs is the deadline REMAINING, not the window the prompt was
-	// granted. Sent relative for the reason the websocket frame sent it
-	// relative — the client derives its dismiss TTL from the payload rather
-	// than mirroring a server constant, and clock skew between the two never
-	// enters into it. A prompt reconstructed after a refresh gets the time it
-	// actually has left, not a fresh full window it doesn't.
+	// granted. Sent relative so the client derives its TTL from the payload
+	// rather than mirroring a server constant, and clock skew between
+	// the two never enters into it. A prompt reconstructed after a refresh
+	// gets the time it actually has left, not a fresh full window it doesn't.
 	TimeoutMs   int64     `json:"timeout_ms"`
 	RequestedAt time.Time `json:"requested_at"`
 }
 
-// PendingPermissionDTOs projects open prompts onto the wire shape, measuring
-// each remaining deadline against now. A row with no stored expiry sends 0, so
-// the client falls back to its own default rather than treating the prompt as
-// already dead.
-func PendingPermissionDTOs(ps []ConversationPermission, now time.Time) []PendingPermissionDTO {
+// PendingPermissionDTOs projects open prompts onto the wire shape. A prompt's
+// remaining deadline comes from live, keyed by tool call id, when the process
+// waiting on it reported one; otherwise it is the stored expiry measured
+// against now. Either way a remaining time that isn't positive, or a row with
+// no stored expiry, sends 0, so the client falls back to its own default
+// rather than treating the prompt as already dead.
+func PendingPermissionDTOs(ps []ConversationPermission, now time.Time, live map[string]time.Duration) []PendingPermissionDTO {
 	out := make([]PendingPermissionDTO, 0, len(ps))
 	for _, p := range ps {
 		input := p.Input
@@ -186,10 +193,14 @@ func PendingPermissionDTOs(ps []ConversationPermission, now time.Time) []Pending
 			Title:       p.Title,
 			RequestedAt: p.RequestedAt,
 		}
-		if p.ExpiresAt != nil {
-			if remaining := p.ExpiresAt.Sub(now).Milliseconds(); remaining > 0 {
-				dto.TimeoutMs = remaining
-			}
+		var remaining time.Duration
+		if r, ok := live[p.ToolCallID]; ok {
+			remaining = r
+		} else if p.ExpiresAt != nil {
+			remaining = p.ExpiresAt.Sub(now)
+		}
+		if ms := remaining.Milliseconds(); ms > 0 {
+			dto.TimeoutMs = ms
 		}
 		out = append(out, dto)
 	}

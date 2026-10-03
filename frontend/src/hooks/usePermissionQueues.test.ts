@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { usePermissionQueues } from './usePermissionQueues'
 import { jsonBody } from '../test/apiResponse'
@@ -115,6 +115,77 @@ describe('usePermissionQueues', () => {
     act(() => result.current.refresh(CONVERSATION))
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
     expect(result.current.queues[CONVERSATION]).toBeUndefined()
+  })
+
+  // A prompt's TTL is the client's clock, and the client's clock is not the
+  // server's: across a system suspend the two can disagree by minutes. So an
+  // expired TTL asks the server instead of dropping the prompt on its own say.
+  describe('when a prompt’s TTL expires', () => {
+    beforeEach(() => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+    })
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    // expire runs a prompt's 1s deadline plus the client's 5s grace out.
+    async function expire() {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_000)
+      })
+    }
+
+    it('keeps a prompt the server still lists and re-arms it from the new deadline', async () => {
+      stubPermissions([
+        { ok: true, body: [prompt('toolu_1', { timeout_ms: 1_000 })] },
+        // The server is still waiting — it slept through part of the window
+        // the client counted — and reports how long it has left.
+        { ok: true, body: [prompt('toolu_1', { timeout_ms: 120_000 })] },
+      ])
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+
+      await expire()
+      await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+      expect(result.current.queues[CONVERSATION]).toHaveLength(1)
+
+      // Re-armed from the 120s the server reported, not the 1s it first said.
+      await expire()
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(result.current.queues[CONVERSATION]).toHaveLength(1)
+    })
+
+    it('drops a prompt the server no longer lists', async () => {
+      stubPermissions([
+        { ok: true, body: [prompt('toolu_1', { timeout_ms: 1_000 })] },
+        { ok: true, body: [] },
+      ])
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+
+      await expire()
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toBeUndefined())
+    })
+
+    it('drops the prompt when the re-check cannot be answered', async () => {
+      // Its deadline has passed and nothing can say otherwise, so it goes,
+      // rather than lingering in the dock with no timer left to clear it.
+      stubPermissions([
+        { ok: true, body: [prompt('toolu_1', { timeout_ms: 1_000 })] },
+        { ok: false },
+      ])
+      const { result } = renderHook(() => usePermissionQueues())
+
+      act(() => result.current.refresh(CONVERSATION))
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toHaveLength(1))
+
+      await expire()
+      await waitFor(() => expect(result.current.queues[CONVERSATION]).toBeUndefined())
+    })
   })
 
   it('drops a conversation’s queue on dropConversation', async () => {

@@ -1065,7 +1065,15 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 		notFound(w, "conversation")
 		return
 	}
-	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC()))
+	// The rows decide which prompts are pending; the broker, when this
+	// process holds the wait, decides how long each has left. A nil spawner
+	// has no waits to report, which is a fallback to the rows rather than a
+	// reason to fail a read that never needed it.
+	var live map[string]time.Duration
+	if spawner := ag.spawner(); spawner != nil {
+		live = spawner.PermissionRemaining(orgID, conversationID)
+	}
+	writeJSON(w, http.StatusOK, domain.PendingPermissionDTOs(pending, time.Now().UTC(), live))
 }
 
 // enrichConversations projects conversations onto the wire shape, augmenting each with a batched

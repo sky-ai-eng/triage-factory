@@ -39,7 +39,7 @@ function timerKey(conversationID: string, toolCallID: string): string {
 
 // usePermissionQueues manages permission prompts for many conversations at once: a
 // conversationID→queue map sourced from the server, plus per-(conversationID,toolCallID) TTL
-// timers (arm-once, clear-on-resolve/drop/unmount). It's the single
+// timers (arm-once, re-check on expiry, clear-on-resolve/drop/unmount). It's the single
 // implementation behind both the board (all visible conversations) and
 // useConversationDetail (filtered to one conversation), so neither the fetch nor
 // the TTL behavior can diverge between the two surfaces.
@@ -56,6 +56,11 @@ export function usePermissionQueues(): PermissionQueues {
   // the unmount cleanup below captures it once; entries are cleared on resolve,
   // drop, and unmount so a fired timer never touches a stale queue.
   const timers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // Set on unmount. An expired timer starts a read that can land after it, and
+  // a read that lands arms timers — which the unmount cleanup has already run
+  // past, so they would re-check forever.
+  const unmounted = useRef(false)
 
   // Per-conversation refresh generation. Every local drop and every new fetch bumps it,
   // and only the newest fetch is allowed to write — so an in-flight refetch
@@ -122,18 +127,31 @@ export function usePermissionQueues(): PermissionQueues {
     [bumpRefreshSeq],
   )
 
-  const refresh = useCallback(
-    (conversationID: string) => {
-      if (!conversationID) return
+  // reconcile re-reads a conversation's pending set and makes the queue and its
+  // timers match it. It resolves false only when the read failed, and true
+  // when it landed or a newer read or local drop superseded it — in that case
+  // the newer one owns the answer.
+  //
+  // A prompt's TTL timer runs this rather than dropping the prompt. The
+  // client's clock is not the server's: across a system suspend, or with the
+  // browser on a machine the server isn't, the two can disagree by minutes,
+  // and a prompt dropped on the client's clock alone is one the agent may
+  // still be parked on. So expiry asks, and the server's answer decides:
+  // a prompt it no longer lists drops, one it still lists stays and is
+  // re-armed from the remaining time it reports. Only an expiry the server
+  // could not answer falls back to dropping, so a prompt never outlives its
+  // deadline forever on a dead read.
+  const reconcile = useCallback(
+    function reconcileQueue(conversationID: string): Promise<boolean> {
       const seq = bumpRefreshSeq(conversationID)
-      void fetchPendingPermissions(conversationID).then((pending) => {
-        if (refreshSeq.current.get(conversationID) !== seq) return
+      return fetchPendingPermissions(conversationID).then((pending) => {
+        if (unmounted.current || refreshSeq.current.get(conversationID) !== seq) return true
         // null = the read failed, which says nothing about what is pending.
         // Leave the queue and its timers exactly as they are: the existing
         // prompts plus their client TTL are a correct-enough view until the
         // next trigger, whereas clearing here would hide a live prompt on a
         // transient error.
-        if (pending === null) return
+        if (pending === null) return false
         setQueues((prev) => {
           const before = prev[conversationID] ?? []
           // Skip the state write when nothing moved, so an unchanged refetch
@@ -150,7 +168,7 @@ export function usePermissionQueues(): PermissionQueues {
           return out
         })
         // Cancel timers for prompts the server no longer lists, and arm one
-        // per newly-seen prompt. The TTL is a backstop for a missed trigger,
+        // per prompt that has none. The TTL is a backstop for a missed trigger,
         // so it is derived from the deadline the server says is REMAINING —
         // which is what makes a prompt reconstructed mid-window expire on
         // time rather than getting a fresh full one.
@@ -167,12 +185,26 @@ export function usePermissionQueues(): PermissionQueues {
           if (timers.current.has(key)) continue
           timers.current.set(
             key,
-            setTimeout(() => dropPermission(conversationID, p.tool_call_id), ttlForPrompt(p)),
+            setTimeout(() => {
+              timers.current.delete(key)
+              void reconcileQueue(conversationID).then((read) => {
+                if (!read) dropPermission(conversationID, p.tool_call_id)
+              })
+            }, ttlForPrompt(p)),
           )
         }
+        return true
       })
     },
     [dropPermission, bumpRefreshSeq],
+  )
+
+  const refresh = useCallback(
+    (conversationID: string) => {
+      if (!conversationID) return
+      void reconcile(conversationID)
+    },
+    [reconcile],
   )
 
   const resolve = useCallback(
@@ -191,7 +223,9 @@ export function usePermissionQueues(): PermissionQueues {
   // component. The ref object is stable, so capturing it here is safe.
   useEffect(() => {
     const t = timers.current
+    unmounted.current = false
     return () => {
+      unmounted.current = true
       for (const timer of t.values()) clearTimeout(timer)
       t.clear()
     }

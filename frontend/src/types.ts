@@ -1164,10 +1164,7 @@ export type WSEvent =
       // (canUseTool), answered via
       // POST /api/agent/conversations/{conversationID}/permissions/{toolCallID}.
       // tool_call_id is the tool_use id of the gated call — the same id the
-      // assistant row's tool_calls and the tool result carry. timeout_ms is the
-      // prompt's server-side deadline (relative); the dock derives its dismiss
-      // TTL from it. title/display_name/description are the SDK's own prompt
-      // copy, present only when it rendered any.
+      // assistant row's tool_calls and the tool result carry.
       type: 'permission_request'
       conversation_id: string
       // Just the id: the prompt itself is read from
