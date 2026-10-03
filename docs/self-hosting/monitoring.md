@@ -326,7 +326,7 @@ sum by (op) (rate(tf_engagements_stalled_total[1h]))                            
 tf_claims_oldest_checkpoint_age_seconds > 3 * 300                               # for 15m: an engagement whose workspace is not being checkpointed (use your TF_SNAPSHOT_INTERVAL_SEC)
 sum(rate(tf_workspace_checkpoints_total{outcome="failed"}[1h])) > 0             # checkpoints failing: read the workspace.snapshot spans with reason=checkpoint
 sum by (outcome) (increase(tf_claims_suspend_recoveries_total[1d]))             # not an alert: how often a sleep would have cost a run, and how often it still did
-sum(tf_conversations_deferred) > 0                                              # for 30m, warning: runs have waited half an hour on an unavailable model provider
+sum(max_over_time(tf_conversations_deferred[15m])) > 0                          # for 30m, warning: runs have waited half an hour on an unavailable model provider
 sum by (outcome) (increase(tf_conversations_handed_back_total[1h]))             # not an alert: hand-backs by outcome
 ```
 
@@ -334,7 +334,10 @@ The bundled Prometheus loads the deferred-conversation rule as
 `ConversationsDeferred` from `docker/observability/rules/tf-connections.yml`,
 at severity `warning`. It fires for a single org, because one org's provider
 account can be the whole of the outage, and nothing is lost while the runs
-wait. The dashboard's Connections row graphs it as "Conversations waiting to
+wait. It reads each org's maximum over 15 minutes rather than the gauge
+itself: a run that is still retrying drops out of the count while it is due
+or claimed between two waits, and a sample taken then would restart the
+30-minute timer. The dashboard's Connections row graphs it as "Conversations waiting to
 retry", beside "Hand-backs by outcome".
 
 The checkpoint age is not an alarm on its own: a single tool call can run for

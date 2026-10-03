@@ -537,16 +537,16 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// it finds no row to clear. Their message still lands, and the
 	// conversation is claimed when its wait is over, as it was going to be.
 	msg := pendingUserInput(conv.ID, userID, text)
+	var cleared *domain.Conversation
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
 			return iErr
 		}
 		msg.ID = int(id)
-		if _, cErr := ts.Conversations.ClearNextAttempt(ctx, orgID, conv.ID); cErr != nil && !errors.Is(cErr, db.ErrNoSuchConversation) {
-			return cErr
-		}
-		return nil
+		var cErr error
+		cleared, cErr = ts.Conversations.ClearNextAttempt(ctx, orgID, conv.ID)
+		return cErr
 	}); err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
@@ -555,6 +555,13 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// path's recordSteeredMessage only runs when a process took the text
 	// directly instead of through this queue.
 	s.broadcastMessage(orgID, conv.ID, msg)
+
+	// A dropped wait changed the conversation's own read, which the message
+	// frame says nothing about: the views showing "Retrying at" refetch on
+	// the status push, the one a hand-back sends when it sets the wait.
+	if cleared != nil {
+		s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+	}
 
 	if !wake {
 		// A driver already exists (or is about to claim) and drains before its

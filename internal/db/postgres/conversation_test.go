@@ -1322,8 +1322,8 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 // member may update the conversation, so the wait clears and the returned row
 // is the row a point read under the same claims finds. A viewer may read the
 // conversation, and so may send it a message, but may not update it: the
-// clear finds no row (ErrNoSuchConversation, which the follow-up tolerates),
-// and the wait stays where it was.
+// clear finds no row to write, answers nil with no error so the message still
+// commits, and the wait stays where it was.
 func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
@@ -1373,15 +1373,17 @@ func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *tes
 
 	// The viewer: the conversation is visible, the clear finds nothing to
 	// write.
+	var viewerCleared *domain.Conversation
 	err := stores.Tx.SyntheticClaimsWithTx(ctx, orgID, viewer, func(tx db.TxStores) error {
 		if got, gErr := tx.Conversations.Get(ctx, orgID, convID); gErr != nil || got == nil {
 			t.Fatalf("the viewer cannot read the conversation (%+v, %v); this test needs a principal who may send but not write", got, gErr)
 		}
-		_, cErr := tx.Conversations.ClearNextAttempt(ctx, orgID, convID)
+		var cErr error
+		viewerCleared, cErr = tx.Conversations.ClearNextAttempt(ctx, orgID, convID)
 		return cErr
 	})
-	if !errors.Is(err, db.ErrNoSuchConversation) {
-		t.Errorf("ClearNextAttempt as a viewer = %v, want ErrNoSuchConversation", err)
+	if err != nil || viewerCleared != nil {
+		t.Errorf("ClearNextAttempt as a viewer = (%+v, %v), want (nil, nil)", viewerCleared, err)
 	}
 	if !waitSet() {
 		t.Error("a viewer's clear dropped the wait")
@@ -1392,6 +1394,9 @@ func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *tes
 		cleared, cErr := tx.Conversations.ClearNextAttempt(ctx, orgID, convID)
 		if cErr != nil {
 			return cErr
+		}
+		if cleared == nil {
+			t.Fatal("ClearNextAttempt as a team member returned no row; it dropped a wait")
 		}
 		if cleared.NextAttemptAt != nil {
 			t.Errorf("ClearNextAttempt returned next_attempt_at %v, want none", cleared.NextAttemptAt)

@@ -123,18 +123,28 @@ groups:
       # nothing is lost while it waits. The gauge is exported by the one pod
       # holding the background brain, so the sum is not multiplied by the
       # number of pods.
+      #
+      # The rule reads each org's maximum over the last 15 minutes, not the
+      # gauge as sampled. A run still retrying leaves the count between two
+      # waits, while it is due and while an engagement makes its own five
+      # attempts, and an org with only that run has no series then. Sampled
+      # in that gap, the plain gauge would restart the 30-minute timer, so
+      # one run could spend its whole four-hour budget without the rule
+      # firing. 15 minutes spans that gap and is shorter than the 30, so a
+      # single blip the backoff rode out still cannot fire it alone.
       - alert: ConversationsDeferred
-        expr: sum(tf_conversations_deferred) > 0
+        expr: sum(max_over_time(tf_conversations_deferred[15m])) > 0
         for: 30m
         labels:
           severity: warning
         annotations:
           summary: "Delegated runs have been waiting on an unavailable model provider for 30 minutes"
           description: >-
-            {{ $value }} conversations are waiting to retry because their model
-            provider was unavailable, and the count has stayed above zero for
-            30 minutes, though not necessarily the same conversations. Break it
-            down with sum by (org_id)
+            Conversations have been waiting to retry because their model
+            provider was unavailable, with no 15-minute stretch free of them
+            for 30 minutes, though not necessarily the same conversations; up
+            to {{ $value }} in the last 15 minutes, summing each org's peak.
+            Break it down with sum by (org_id)
             (tf_conversations_deferred), and read
             sum by (upstream, org_id, outcome) (rate(tf_upstream_requests_total{upstream=~"anthropic|bedrock"}[5m]))
             for what the provider is answering.

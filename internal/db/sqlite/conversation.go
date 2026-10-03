@@ -378,9 +378,14 @@ func (s *conversationStore) ClearNextAttempt(ctx context.Context, orgID, convers
 		return nil, err
 	}
 	row := s.q.QueryRowContext(ctx, `
-		UPDATE conversations SET next_attempt_at = NULL WHERE id = ?
+		UPDATE conversations SET next_attempt_at = NULL
+		WHERE id = ? AND next_attempt_at IS NOT NULL
 		RETURNING `+sqliteConversationReturningColumns, conversationID)
-	return scanConversationReturning(row)
+	r, err := scanConversationReturning(row)
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
 }
 
 func (s *conversationStore) SetSession(ctx context.Context, orgID, conversationID, sessionID string) (*domain.Conversation, error) {

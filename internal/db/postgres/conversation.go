@@ -686,12 +686,17 @@ func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID,
 
 func (s *conversationStore) ClearNextAttempt(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error) {
 	if !isValidUUID(conversationID) {
-		return nil, db.ErrNoSuchConversation
+		return nil, nil
 	}
-	return writeConversationReturning(ctx, s.q, `
-		UPDATE conversations SET next_attempt_at = NULL WHERE org_id = $1 AND id = $2
+	r, err := writeConversationReturning(ctx, s.q, `
+		UPDATE conversations SET next_attempt_at = NULL
+		WHERE org_id = $1 AND id = $2 AND next_attempt_at IS NOT NULL
 		RETURNING *
 	`, orgID, conversationID)
+	if errors.Is(err, db.ErrNoSuchConversation) {
+		return nil, nil
+	}
+	return r, err
 }
 
 func setConversationSession(ctx context.Context, q queryer, orgID, conversationID, sessionID string) (*domain.Conversation, error) {

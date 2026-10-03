@@ -284,8 +284,11 @@ type ConversationStore interface {
 	// (ConversationQueueStore.HandBackClaimSystem), so it is claimable as soon
 	// as it otherwise matches. A person's message is the caller: it means "try
 	// now", and it rides the same transaction as the message it clears the
-	// way for. A conversation with no wait set is written unchanged. Returns
-	// the row; ErrNoSuchConversation when no conversation matches.
+	// way for. Returns the row when it dropped a wait, and nil with no error
+	// when there was none to drop: no wait set, no such conversation, or one
+	// the caller may read but not write. A miss is an answer here rather than
+	// ErrNoSuchConversation, because the caller asks it only to learn whether
+	// the conversation's read changed.
 	ClearNextAttempt(ctx context.Context, orgID, conversationID string) (*domain.Conversation, error)
 
 	// SetSession stores the Claude Code session id captured from

@@ -318,7 +318,8 @@ func TestUpstream_ASpentBudgetParksForAPerson(t *testing.T) {
 
 // TestUpstream_AMessageRetriesAtOnce: a person writing to a conversation that
 // is waiting out its provider means "try now". The follow-up clears the wait
-// in the transaction that records the message.
+// in the transaction that records the message, and pushes the status update
+// the views showing "Retrying at" refetch on.
 func TestUpstream_AMessageRetriesAtOnce(t *testing.T) {
 	f := newUpstreamFixture(t, "r-upstream-message")
 	if disp := f.record(t, 0); !disp.handedBack {
@@ -328,12 +329,17 @@ func TestUpstream_AMessageRetriesAtOnce(t *testing.T) {
 	if err != nil || conv == nil || conv.Status != domain.StatusQueued || conv.NextAttemptAt == nil {
 		t.Fatalf("conversation before the message = (%+v, %v), want queued with a wait", conv, err)
 	}
+	hub, captured := capturingHub(t)
+	f.s.wsHub = hub
 
 	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "the provider is back, try again"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
 	}
 	if _, ok := f.nextAttemptIn(t); ok {
 		t.Error("the message left the wait in place")
+	}
+	if frames := captured.conversationUpdates(f.conversationID); len(frames) != 1 || frames[0]["status"] != domain.StatusQueued {
+		t.Errorf("conversation_update frames = %+v, want one saying queued — the read changed and the message frame does not say so", frames)
 	}
 	if got := pendingRows(t, f.s, f.conversationID); len(got) != 1 || got[0].Content != "the provider is back, try again" {
 		t.Errorf("pending input = %+v, want the message queued for the next claim", got)
@@ -350,8 +356,13 @@ func TestUpstream_AMessageRetriesAtOnce(t *testing.T) {
 // schedule the hand-back would otherwise set.
 func TestUpstream_AMessageSentDuringTheOutageRetriesAtOnce(t *testing.T) {
 	f := newUpstreamFixture(t, "r-upstream-message-during")
+	hub, captured := capturingHub(t)
+	f.s.wsHub = hub
 	if err := f.s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, f.conversationID, runmode.LocalDefaultUserID, "is it back yet?"); err != nil {
 		t.Fatalf("SendMessage: %v", err)
+	}
+	if frames := captured.conversationUpdates(f.conversationID); len(frames) != 0 {
+		t.Errorf("conversation_update frames = %+v, want none: there was no wait to drop", frames)
 	}
 	if disp := f.record(t, 3); !disp.handedBack {
 		t.Fatalf("disposition = %+v, want handed back", disp)

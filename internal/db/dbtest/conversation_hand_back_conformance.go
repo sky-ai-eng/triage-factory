@@ -359,13 +359,13 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		})
 		mustClaim(t, f, c.ID)
 
-		// A conversation with no wait is written unchanged, and one that
-		// does not exist is a miss.
-		if _, err := f.Stores.Conversations.ClearNextAttempt(ctx, f.OrgID, c.ID); err != nil {
-			t.Errorf("ClearNextAttempt with no wait set = %v, want nil", err)
+		// No wait to drop is an answer, not an error: the row is nil, so the
+		// caller knows the read did not change.
+		if got, err := f.Stores.Conversations.ClearNextAttempt(ctx, f.OrgID, c.ID); got != nil || err != nil {
+			t.Errorf("ClearNextAttempt with no wait set = (%+v, %v), want (nil, nil)", got, err)
 		}
-		if _, err := f.Stores.Conversations.ClearNextAttempt(ctx, f.OrgID, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, db.ErrNoSuchConversation) {
-			t.Errorf("ClearNextAttempt on no conversation = %v, want ErrNoSuchConversation", err)
+		if got, err := f.Stores.Conversations.ClearNextAttempt(ctx, f.OrgID, "00000000-0000-0000-0000-000000000000"); got != nil || err != nil {
+			t.Errorf("ClearNextAttempt on no conversation = (%+v, %v), want (nil, nil)", got, err)
 		}
 	})
 
