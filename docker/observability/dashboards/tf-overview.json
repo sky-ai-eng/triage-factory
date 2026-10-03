@@ -2777,7 +2777,7 @@
     },
     {
       "collapsed": false,
-      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended, and the connection state each org's poll cycles record for GitHub and Jira. Scraped from each pod's :9464 and summed across pods; tf_upstream_up is exported by the pod holding the background brain only. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide and UpstreamDownFleetWide rules alert on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
+      "description": "Requests TF makes to GitHub, Jira, Slack's Web API, and the LLM providers, by how each one ended, and the connection state each org's poll cycles record for GitHub and Jira. Scraped from each pod's :9464 and summed across pods; tf_upstream_up is exported by the pod holding the background brain only. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide and UpstreamDownFleetWide rules alert on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
       "gridPos": {
         "h": 1,
         "w": 24,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestClient_ThroughRunProxy drives the hop a sandboxed run actually makes:
@@ -176,8 +177,8 @@ func TestClient_ThroughRunProxy_WrongToken(t *testing.T) {
 
 // TestClient_UnreachableEndpoint is the shape of a run whose credential proxy
 // never came up: the dial fails, and the error has to carry both which host
-// was unreachable and enough of the cause for the retry classifier to see a
-// network failure rather than a permanent one.
+// was unreachable and enough of the cause for Classify to read a network
+// failure rather than a permanent one.
 func TestClient_UnreachableEndpoint(t *testing.T) {
 	// Bind and immediately release, so the address is well-formed and dead.
 	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -215,6 +216,9 @@ func TestClient_UnreachableEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(err.Error()), "refused") {
 		t.Errorf("the error must carry the dial cause: %v", err)
+	}
+	if got, _ := Classify(ctx, err); got != upstream.Transient {
+		t.Errorf("a dead endpoint classifies %q, want %q: %v", got, upstream.Transient, err)
 	}
 }
 

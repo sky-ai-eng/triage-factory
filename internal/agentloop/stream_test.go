@@ -1,58 +1,179 @@
 package agentloop
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/maximhq/bifrost/core/schemas"
+
+	"github.com/sky-ai-eng/triage-factory/internal/inference"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
-func TestIsTransient(t *testing.T) {
-	transient := []string{
-		"inference: provider error: 429 rate limit",
-		"inference: provider error: 503 service unavailable",
-		"dial tcp: i/o timeout",
-		"connection reset by peer",
-		"overloaded_error",
-		"unexpected EOF",
-		"EOF",
+// upstreamCounts reads the request and retry counters into
+// "<instrument> <upstream>/<org>/<outcome>" → value.
+func upstreamCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("collect: %v", err)
 	}
-	for _, msg := range transient {
-		if !isTransient(errors.New(msg)) {
-			t.Errorf("%q must be retried", msg)
+	attr := func(set attribute.Set, kv attribute.KeyValue) string {
+		v, _ := set.Value(kv.Key)
+		return v.AsString()
+	}
+	out := map[string]int64{}
+	for _, scope := range rm.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				continue
+			}
+			for _, dp := range sum.DataPoints {
+				key := m.Name + " " + attr(dp.Attributes, telemetry.Upstream("")) + "/" +
+					attr(dp.Attributes, telemetry.OrgID("")) + "/" + attr(dp.Attributes, telemetry.Outcome(""))
+				out[key] += dp.Value
+			}
 		}
 	}
-	permanent := []string{
-		"inference: provider error: 401 invalid api key",
-		"inference: provider error: model not found",
-		"inference: request has no model",
-		// eofPattern must not match "eof" embedded in a longer token: a
-		// field name or a base64 fragment that happens to contain it is not
-		// evidence of a truncated stream.
-		"invalid geofence parameter",
-		"inference: provider error: bad request field 'eof_marker'",
+	return out
+}
+
+func meterForTest(t *testing.T) *sdkmetric.ManualReader {
+	reader := sdkmetric.NewManualReader()
+	upstream.SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	return reader
+}
+
+func assertCounts(t *testing.T, got, want map[string]int64) {
+	t.Helper()
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %d, want %d", k, got[k], v)
+		}
 	}
-	for _, msg := range permanent {
-		if isTransient(errors.New(msg)) {
-			t.Errorf("%q must NOT burn the retry budget", msg)
+	for k, v := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("unexpected %s = %d", k, v)
 		}
 	}
 }
 
-// TestIsTransient_BifrostTransportFailure pins the coupling between this
-// classifier and how internal/inference renders a provider error. Every
-// transport failure in every bifrost provider carries the same fixed message,
-// which matches no marker here — so a network blip reads as permanent and
-// ends the engagement on the first attempt unless the wrapped cause and the
-// status code travel with it. That rendering is the contract; this is the
-// half of it that has to hold for a retryable failure to be retried.
-func TestIsTransient_BifrostTransportFailure(t *testing.T) {
-	rendered := "inference: provider error: failed to execute HTTP request to provider API: " +
-		"dial tcp 10.42.7.1:41231: connect: connection refused (HTTP 502) " +
-		"[provider_connection_failed] [endpoint: http://10.42.7.1:41231]"
-	if !isTransient(errors.New(rendered)) {
-		t.Fatalf("a dial failure must be retried: %q", rendered)
+// TestStreamWithRetry_RecordsEachAttemptAndEachRetry: every attempt counts
+// once under its own outcome, and every retry the loop decides on counts once
+// under the outcome that caused it.
+func TestStreamWithRetry_RecordsEachAttemptAndEachRetry(t *testing.T) {
+	reader := meterForTest(t)
+	p := &scriptedProvider{turns: []scriptedTurn{
+		{err: errors.New("inference: provider error: Overloaded [overloaded_error]")},
+		{err: errors.New("inference: provider error: rate limited (HTTP 429)")},
+		{text: "done"},
+	}}
+	e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
+
+	req := inference.Request{Provider: inference.ProviderAnthropic, Model: "claude-sonnet-4-5"}
+	if _, err := e.streamWithRetry(context.Background(), "org-1", p, req); err != nil {
+		t.Fatalf("streamWithRetry: %v", err)
 	}
-	bare := "inference: provider error: failed to execute HTTP request to provider API"
-	if isTransient(errors.New(bare)) {
-		t.Fatal("this test's premise is gone: the bare message now matches a marker")
+	assertCounts(t, upstreamCounts(t, reader), map[string]int64{
+		"upstream.requests anthropic/org-1/transient":    1,
+		"upstream.requests anthropic/org-1/rate_limited": 1,
+		"upstream.requests anthropic/org-1/ok":           1,
+		"upstream.retries anthropic/org-1/transient":     1,
+		"upstream.retries anthropic/org-1/rate_limited":  1,
+	})
+}
+
+// TestStreamWithRetry_ExhaustionCountsNoRetryForTheLastAttempt: the attempt
+// that exhausts the budget is a request, not a retry.
+func TestStreamWithRetry_ExhaustionCountsNoRetryForTheLastAttempt(t *testing.T) {
+	reader := meterForTest(t)
+	failure := scriptedTurn{err: errors.New("inference: provider error: Service Unavailable (HTTP 503)")}
+	p := &scriptedProvider{turns: []scriptedTurn{failure, failure, failure}}
+	e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
+	e.Retry.MaxAttempts = 3
+
+	req := inference.Request{Provider: inference.ProviderBedrock, Model: "m"}
+	if _, err := e.streamWithRetry(context.Background(), "org-1", p, req); err == nil {
+		t.Fatal("expected the last error once the attempts ran out")
 	}
+	assertCounts(t, upstreamCounts(t, reader), map[string]int64{
+		"upstream.requests bedrock/org-1/transient": 3,
+		"upstream.retries bedrock/org-1/transient":  2,
+	})
+}
+
+// TestStreamWithRetry_RejectedIsCountedAndNotRetried covers the classes the
+// loop does not retry: one attempt, one request, no retry.
+func TestStreamWithRetry_RejectedIsCountedAndNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		err     string
+		outcome string
+	}{
+		{"inference: provider error: invalid x-api-key (HTTP 401)", "auth"},
+		{"inference: provider error: max_tokens: field required (HTTP 400)", "rejected"},
+		{"inference: request has no model", "rejected"},
+	} {
+		t.Run(tc.outcome+" "+tc.err, func(t *testing.T) {
+			reader := meterForTest(t)
+			p := &scriptedProvider{turns: []scriptedTurn{{err: errors.New(tc.err)}}}
+			e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
+
+			req := inference.Request{Provider: inference.ProviderAnthropic, Model: "m"}
+			if _, err := e.streamWithRetry(context.Background(), "org-1", p, req); err == nil {
+				t.Fatal("expected the error back")
+			}
+			if p.calls != 1 {
+				t.Errorf("attempts = %d, want 1", p.calls)
+			}
+			assertCounts(t, upstreamCounts(t, reader), map[string]int64{
+				"upstream.requests anthropic/org-1/" + tc.outcome: 1,
+			})
+		})
+	}
+}
+
+// TestStreamWithRetry_NothingCountedWithoutAnOutcome: a provider outside the
+// closed label vocabulary records nothing, and neither does an attempt the
+// caller's own cancellation ended.
+func TestStreamWithRetry_NothingCountedWithoutAnOutcome(t *testing.T) {
+	t.Run("unlabeled provider", func(t *testing.T) {
+		reader := meterForTest(t)
+		p := &scriptedProvider{turns: []scriptedTurn{
+			{err: errors.New("inference: provider error: Overloaded [overloaded_error]")},
+			{text: "done"},
+		}}
+		e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
+
+		req := inference.Request{Provider: schemas.OpenAI, Model: "m"}
+		if _, err := e.streamWithRetry(context.Background(), "org-1", p, req); err != nil {
+			t.Fatalf("streamWithRetry: %v", err)
+		}
+		if p.calls != 2 {
+			t.Errorf("attempts = %d, want 2: an unlabeled provider is still retried", p.calls)
+		}
+		assertCounts(t, upstreamCounts(t, reader), map[string]int64{})
+	})
+
+	t.Run("cancelled mid-attempt", func(t *testing.T) {
+		reader := meterForTest(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		p := &scriptedProvider{turns: []scriptedTurn{{
+			err:    errors.New("inference: provider error: context canceled"),
+			onCall: cancel,
+		}}}
+		e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
+
+		req := inference.Request{Provider: inference.ProviderAnthropic, Model: "m"}
+		if _, err := e.streamWithRetry(ctx, "org-1", p, req); !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+		assertCounts(t, upstreamCounts(t, reader), map[string]int64{})
+	})
 }

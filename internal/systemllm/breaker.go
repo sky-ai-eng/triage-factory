@@ -1,14 +1,10 @@
 package systemllm
 
 import (
-	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
-
-	"github.com/sky-ai-eng/triage-factory/internal/inference"
 )
 
 // providerBreakerBaseDelay is the first cooldown a transient failure opens
@@ -139,68 +135,4 @@ func (b *providerBreaker) recordResult(provider string, transientFailure bool) {
 		delay = providerBreakerMaxDelay
 	}
 	c.until = time.Now().Add(delay)
-}
-
-// isTransientFailure reports whether err reflects an upstream condition
-// worth backing off on: an overloaded/rate-limited/5xx API response, or a
-// network-level failure that never got a response at all — an unreachable
-// endpoint looks identical to an overloaded one from the caller's side.
-//
-// Everything else does NOT trip the breaker: a caller-cancelled or
-// deadline-exceeded ctx is not a provider signal; a 4xx client error (bad
-// request, auth, not found) is a permanent misconfiguration no cooldown
-// will fix; a context overflow is a deterministic rejection of this exact
-// prompt and says nothing about provider health; and an unrecognized error
-// is equally not something a cooldown fixes — bucketing every unclassified
-// error as transient would silently downgrade a genuine, recurring bug to a
-// quiet "retrying next cycle" log line instead of surfacing it.
-//
-// Classification is on the error text because that is the shape the neutral
-// layer produces: internal/inference flattens a provider failure into a
-// message, deliberately rendering the status code as "(HTTP %d)" and the
-// wrapped cause alongside it, precisely so a caller can sort transient from
-// permanent. Nothing structured survives to match on — the transport error
-// underneath is rendered, not wrapped — which is also why the whole cooldown
-// matters more than it used to: bifrost's default retry count is zero, so
-// the first failure here is the first failure, not the tail of a retry
-// budget already spent inside a client.
-func isTransientFailure(ctx context.Context, err error) bool {
-	if err == nil || ctx.Err() != nil {
-		return false
-	}
-	if errors.Is(err, inference.ErrContextOverflow) {
-		return false
-	}
-	// A rendered status is the authoritative signal and settles the question
-	// either way: an error carrying one is classified on it alone, so a 400
-	// whose body happens to quote "connection reset" stays permanent.
-	if status, ok := inference.RenderedStatus(err); ok {
-		return status == 408 || status == 409 || status == 429 || status >= 500
-	}
-	msg := strings.ToLower(err.Error())
-	for _, m := range transportFailureMarkers {
-		if strings.Contains(msg, m) {
-			return true
-		}
-	}
-	return false
-}
-
-// transportFailureMarkers classify a failure that never reached the provider
-// (dial, DNS, TLS, timeout, a reset mid-stream) and so carries no status to
-// render. Deliberately narrower than the retry classifier in
-// internal/agentloop: that one decides whether to try again immediately, this
-// one opens a cooldown that gates every other org sharing the endpoint, so an
-// ambiguous match costs more here than a missed one.
-var transportFailureMarkers = []string{
-	"connection refused",
-	"connection reset",
-	"no such host",
-	"i/o timeout",
-	"tls handshake timeout",
-	"timeout awaiting response",
-	"context deadline exceeded",
-	"network is unreachable",
-	"no route to host",
-	"broken pipe",
 }

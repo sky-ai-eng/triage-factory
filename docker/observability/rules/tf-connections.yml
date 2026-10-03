@@ -1,7 +1,7 @@
 # Alerting rules for TF's connections to the systems it connects to (GitHub,
-# Jira, Slack's Web API), read from tf_upstream_requests_total and
-# tf_upstream_up. Loaded by the bundled Prometheus through the rule_files glob
-# in prometheus.yml.
+# Jira, Slack's Web API, and the LLM providers), read from
+# tf_upstream_requests_total and tf_upstream_up. Loaded by the bundled
+# Prometheus through the rule_files glob in prometheus.yml.
 #
 # Every alert in this file is fleet-wide on purpose. Each org connects with
 # its own credentials, and often to its own host: a GitHub Enterprise Server
@@ -10,12 +10,12 @@
 # problem belongs to that org and nothing an operator does will fix it, so it
 # must never page one. What an operator can act on is many orgs failing
 # against the same upstream at once: an outage of a service they share
-# (github.com, Atlassian's cloud, Slack), or a fault in this deployment's
-# network or in TF. So each rule compares the number of failing orgs with the
-# number of orgs it has a value for, and never looks at one org: it needs at
-# least two orgs before it can fire, so a single-org deployment gets no page
-# from either and reads the dashboard's "Orgs with failing requests" and
-# "Orgs down" panels instead.
+# (github.com, Atlassian's cloud, Slack, an LLM provider), or a fault in this
+# deployment's network or in TF. So each rule compares the number of failing
+# orgs with the number of orgs it has a value for, and never looks at one org:
+# it needs at least two orgs before it can fire, so a single-org deployment
+# gets no page from either and reads the dashboard's "Orgs with failing
+# requests" and "Orgs down" panels instead.
 #
 # Delivery is not configured in this repo. The bundled stack runs no
 # Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
