@@ -11,7 +11,10 @@
 # against the same upstream at once: an outage of a service they share
 # (github.com, Atlassian's cloud, Slack), or a fault in this deployment's
 # network or in TF. So the rule compares the number of failing orgs with the
-# number of orgs making requests, and never looks at one org.
+# number of orgs making requests, and never looks at one org: it needs at
+# least two orgs making requests to an upstream before it can fire, so a
+# single-org deployment gets no page from it and reads the dashboard's
+# "Orgs with failing requests" panel instead.
 #
 # Delivery is not configured in this repo. The bundled stack runs no
 # Alertmanager and prometheus.yml has no `alerting:` block, so a firing alert
@@ -23,24 +26,34 @@
 groups:
   - name: tf-connections
     rules:
-      # More than half of the orgs sending requests to one upstream saw a
-      # transient or auth outcome in the last 5 minutes, for 10 minutes.
+      # More than half of the orgs sending requests to one upstream are
+      # failing against it, sustained for 10 minutes, with at least two orgs
+      # sending requests. An org is failing when more than half of its
+      # attempts in the last 5 minutes ended transient or auth, so the
+      # occasional 5xx among an org's healthy requests does not count it.
       #
       # transient|auth are the outcomes that mean the upstream could not be
       # reached or would not accept the credential. rate_limited is the
       # upstream asking TF to wait, which the clients handle; rejected is a
       # request TF built wrong, which no org's connection explains.
       #
-      # org_id!="" on both sides: setup and admin handlers build clients
-      # outside an org context and record an empty org_id, which is not an org
-      # and must not be counted as one.
+      # org_id!="" throughout: a request made for no org records an empty
+      # org_id, which is not an org and must not be counted as one.
       - alert: UpstreamFailingFleetWide
         expr: |
           (
-            count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m])) > 0)
+            count by (upstream) (
+              (
+                sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m]))
+                /
+                sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m]))
+              ) > 0.5
+            )
             /
             count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0)
           ) > 0.5
+          and on (upstream)
+          count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0) >= 2
         for: 10m
         labels:
           severity: critical
@@ -48,8 +61,8 @@ groups:
           summary: "Most orgs' requests to {{ $labels.upstream }} are failing"
           description: >-
             {{ $value | humanizePercentage }} of the orgs sending requests to
-            {{ $labels.upstream }} saw transient or auth outcomes in the last 5
-            minutes, sustained for 10 minutes. Many orgs failing at once points
+            {{ $labels.upstream }} had more than half of their attempts end
+            transient or auth in the last 5 minutes, sustained for 10 minutes. Many orgs failing at once points
             at {{ $labels.upstream }} itself or at this deployment's network,
             not at one org's configuration. Break it down with
             sum by (org_id, outcome) (rate(tf_upstream_requests_total{upstream="{{ $labels.upstream }}"}[5m])).

@@ -527,6 +527,40 @@ func TestDoSlackJSON_TransportFailure_CountedOnceNotRetried(t *testing.T) {
 	}
 }
 
+// TestDoSlackJSON_LargePageDecodes: a page far larger than an error body is
+// read whole. A page of 200 conversations easily passes 64 KiB.
+func TestDoSlackJSON_LargePageDecodes(t *testing.T) {
+	topic := strings.Repeat("t", 1000)
+	var page strings.Builder
+	page.WriteString(`{"ok":true,"channels":[`)
+	for i := 0; i < 200; i++ {
+		if i > 0 {
+			page.WriteString(",")
+		}
+		fmt.Fprintf(&page, `{"id":"C%d","topic":{"value":%q}}`, i, topic)
+	}
+	page.WriteString(`]}`)
+	if page.Len() <= upstream.MaxErrorBody {
+		t.Fatalf("page is %d bytes, want one larger than an error body", page.Len())
+	}
+	srv := withFakeSlackAPI(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(page.String()))
+	})
+
+	var out struct {
+		OK       bool `json:"ok"`
+		Channels []struct {
+			ID string `json:"id"`
+		} `json:"channels"`
+	}
+	if err := doSlackJSON(context.Background(), srv.Client(), "org-1", newSlackTestRequest(t, context.Background()), &out); err != nil {
+		t.Fatalf("doSlackJSON: %v", err)
+	}
+	if len(out.Channels) != 200 {
+		t.Errorf("decoded %d channels, want 200", len(out.Channels))
+	}
+}
+
 // TestDoSlackJSON_CanceledContext_NotCounted pins that a request abandoned
 // because its caller's ctx ended is not recorded as an upstream outcome.
 func TestDoSlackJSON_CanceledContext_NotCounted(t *testing.T) {

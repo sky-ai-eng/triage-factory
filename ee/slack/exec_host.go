@@ -706,7 +706,7 @@ func (h *slackExecHandler) download(ctx context.Context, rt agenthost.ExtensionR
 		return slackDownloadResult{}, fmt.Errorf("slack: file is %d bytes, exceeds the %d-byte download cap", fi.Size, slackExecMaxFileBytes)
 	}
 	var buf bytes.Buffer
-	if err := slackFileDownload(ctx, h.client, token, fi.URLPrivate, &buf); err != nil {
+	if err := slackFileDownload(ctx, h.client, rt.Info().OrgID, token, fi.URLPrivate, &buf); err != nil {
 		return slackDownloadResult{}, fmt.Errorf("slack: download file: %w", err)
 	}
 	return slackDownloadResult{Name: fi.Name, Base64: base64.StdEncoding.EncodeToString(buf.Bytes())}, nil

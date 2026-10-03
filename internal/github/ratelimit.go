@@ -34,16 +34,18 @@ const (
 	// retry and is capped at maxRateLimitWait.
 	rateLimitBackoffBase = 1 * time.Second
 
-	// transientBackoffMax caps the backoff before retrying a transient
-	// failure. A transient failure carries no reset time to wait for, so the
-	// cap is the poll-cycle scale, not the rate-limit one.
+	// transientBackoffMax caps the wait before retrying a transient failure,
+	// and is the longest Retry-After on a 5xx that is waited out; a longer
+	// one returns the response instead of retrying before the server asked.
+	// A transient failure carries no reset time to wait for, so the cap is
+	// the poll-cycle scale, not the rate-limit one.
 	transientBackoffMax = 30 * time.Second
 )
 
-// transientBackoffBase is the first sleep before retrying a 5xx, a 408, a
-// non-JSON 403 or a dropped connection: 1s, 2s, 4s. It is a var, not a
-// const, only so tests can shrink it to keep the suite fast; production
-// never reassigns it.
+// transientBackoffBase is the first sleep before retrying a dropped
+// connection, or a 5xx or a 408 that carries no Retry-After: 1s, 2s, 4s. It
+// is a var, not a const, only so tests can shrink it to keep the suite fast;
+// production never reassigns it.
 var transientBackoffBase = 1 * time.Second
 
 // ErrRateLimited is returned when a GitHub rate-limit budget is exhausted:
@@ -213,9 +215,12 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 //     x-ratelimit-remaining: 0, or a secondary-limit body — honoring
 //     Retry-After when present, else the primary reset time when that's what
 //     triggered it, else exponential backoff;
-//   - a transient failure — a dropped connection, a 5xx, a 408, or a 403
-//     whose body is not JSON (a proxy in front of GHES, not GitHub) — after
-//     transient backoff.
+//   - a transient failure — a dropped connection, a 5xx or a 408 — after the
+//     response's Retry-After when it has one, else transient backoff. A
+//     transient failure that another attempt would only repeat is returned
+//     at once: a 403 whose body is not JSON (a proxy in front of GHES), a
+//     TLS failure, or a timeout (upstream.RetryableResponse,
+//     upstream.RetryableTransport).
 //
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
@@ -251,7 +256,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				return nil, err
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-			if !upstream.Retryable(class, idempotent) || attempt >= maxAttempts {
+			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts {
 				return nil, err
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
@@ -305,10 +310,17 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				return nil, err
 			}
 		case upstream.Transient:
-			if !idempotent || attempt >= maxAttempts {
+			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts {
 				return resp, nil
 			}
-			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
+			wait := transientBackoff(attempt)
+			if hasRetryAfter {
+				if retryAfter > transientBackoffMax {
+					return resp, nil
+				}
+				wait = retryAfter
+			}
+			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, err
 			}
 		default:

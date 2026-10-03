@@ -360,21 +360,33 @@ both per process, so `sum` across pods:
 A request abandoned because its caller gave up (a shutdown, a deadline) is not
 an outcome and is not counted.
 
-`org_id` is the org the request was made for. A client built outside an org
-context, which is what the setup and admin handlers use, records an empty
-`org_id`. Those requests count in any total, and the queries and the alert
-below that count orgs exclude them.
+`org_id` is the org the request was made for, and is empty for a request made
+for no org. Those requests count in any total, and the queries and the alert
+below that count orgs exclude them. `org_id` makes the series count grow with
+the number of orgs: each pod exports at most 15 series per counter for each
+org (3 upstreams × 5 outcomes), and only the combinations that org has
+produced.
+
+In multi mode, the requests a delegated run makes from inside its sandbox (its
+exec verbs, and `gh`) reach the upstream through the run's credential sidecar,
+and are not counted: the sidecar exports no metrics.
 
 Each client has its own retry policy:
 
 | `upstream` | What is retried |
 | --- | --- |
-| `github` | A GET or a GraphQL query, after a rate limit or a transient failure, up to 3 retries. A mutation gets one attempt. |
+| `github` | A GET or a GraphQL query, after a rate limit or a transient failure, up to 3 retries. A `Retry-After` on a 5xx is waited out up to 30s; a longer one returns the response. A mutation gets one attempt. |
 | `jira` | A 429 on any call, and a transient failure on an idempotent call, up to 3 retries. A `Retry-After` longer than 30s is not waited out; the throttled response goes back to the caller. |
-| `slack` | One retry of a 429 whose `Retry-After` is 30s or less. A longer wait returns a rate-limit error at once. A 5xx or a transport failure is not retried. |
+| `slack` | One retry of a 429 whose `Retry-After` is 30s or less. A longer wait returns a rate-limit error at once. A 5xx or a transport failure is not retried, and neither is a file download or upload. |
 
 No client retries a mutation after a transient failure, because the upstream
-may have applied it before the failure. A rate-limited request was refused
+may have applied it before the failure. GitHub and Jira also return three
+transient failures without retrying, even for a GET, because another attempt
+would only repeat them: a 403 whose body is not JSON (a proxy that wants a
+VPN, or Jira Data Center's login lockout), a TLS failure (a certificate the
+client does not trust or that names another host, or a server that does not
+speak TLS), and a timeout, which has already spent the client's whole time
+budget. A rate-limited request was refused
 before it was processed, which is why Jira can safely send even a mutation
 again after a 429.
 
@@ -399,15 +411,26 @@ The bundled Prometheus loads one alerting rule for these counters,
 
 ```
 (
-  count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m])) > 0)
+  count by (upstream) (
+    (
+      sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!="",outcome=~"transient|auth"}[5m]))
+      /
+      sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m]))
+    ) > 0.5
+  )
   /
   count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0)
-) > 0.5                                                                         # for 10m, severity: critical
+) > 0.5
+and on (upstream)
+count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=""}[5m])) > 0) >= 2
+                                                                                # for 10m, severity: critical
 ```
 
 It fires when, for one upstream, more than half of the orgs sending it
-requests have had a `transient` or `auth` attempt in the last 5 minutes, and
-that has held for 10 minutes. It is fleet-wide on purpose. Each org connects
+requests are failing, at least two orgs are sending it requests, and that has
+held for 10 minutes. An org is failing when more than half of its attempts in
+the last 5 minutes ended `transient` or `auth`, so an occasional 5xx among an
+org's healthy requests does not count it. It is fleet-wide on purpose. Each org connects
 with its own credentials, and often to its own host: a GitHub Enterprise
 Server or Jira Data Center that may be reachable only through that org's VPN.
 When one of those hosts is down, or an org's credential has been revoked, the
@@ -419,7 +442,8 @@ Atlassian's cloud, Slack), or a fault in this deployment's network or in TF.
 upstream asking TF to wait, which the clients handle, and the second is a
 request TF built wrong, which is not a connection failure. One org failing on
 its own is still visible, in the dashboard's Connections row and in the
-per-org query above; it just does not alert.
+per-org query above; it just does not alert. The same holds for a deployment
+with a single org: the rule needs two orgs to compare before it can fire.
 
 The bundled stack runs **no Alertmanager**, and `prometheus.yml` has no
 `alerting:` block, so a firing alert is recorded and sent nowhere. Prometheus

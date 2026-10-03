@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -91,12 +92,32 @@ func transportErrors(t *testing.T) map[string]error {
 		Op: "dial", Net: "tcp", Err: &net.DNSError{Err: "no such host", Name: "jira.corp.example", IsNotFound: true},
 	}}
 
-	for name, e := range map[string]error{"refused": refused, "timeout": timeout} {
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(tlsSrv.Close)
+	_, untrusted := (&http.Client{Transport: noProxy}).Get(tlsSrv.URL)
+	trusting := tlsSrv.Client()
+	trusting.Transport.(*http.Transport).Proxy = nil
+	_, wrongHost := trusting.Get(strings.Replace(tlsSrv.URL, "127.0.0.1", "localhost", 1))
+
+	plain := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(plain.Close)
+	_, notTLS := (&http.Client{Transport: noProxy}).Get(strings.Replace(plain.URL, "http://", "https://", 1))
+
+	errs := map[string]error{
+		"refused":               refused,
+		"timeout":               timeout,
+		"reset":                 reset,
+		"dns":                   dns,
+		"untrusted cert":        untrusted,
+		"cert for another host": wrongHost,
+		"server without TLS":    notTLS,
+	}
+	for name, e := range errs {
 		if e == nil {
 			t.Fatalf("%s: request unexpectedly succeeded", name)
 		}
 	}
-	return map[string]error{"refused": refused, "timeout": timeout, "reset": reset, "dns": dns}
+	return errs
 }
 
 func TestClassifyTransport(t *testing.T) {
@@ -187,6 +208,57 @@ func TestRetryable(t *testing.T) {
 	}
 }
 
+func TestRetryableResponse(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		c          Class
+		idempotent bool
+		want       bool
+	}{
+		{"503 on a GET", 503, Transient, true, true},
+		{"503 on a mutation", 503, Transient, false, false},
+		{"408 on a GET", 408, Transient, true, true},
+		{"non-JSON 403 on a GET", 403, Transient, true, false},
+		{"rate-limit 403", 403, RateLimited, false, true},
+		{"429", 429, RateLimited, false, true},
+		{"JSON 403", 403, Auth, true, false},
+		{"404", 404, Rejected, true, false},
+	}
+	for _, tc := range cases {
+		if got := RetryableResponse(tc.status, tc.c, tc.idempotent); got != tc.want {
+			t.Errorf("%s: RetryableResponse = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestRetryableTransport: a connection that was refused, reset or not
+// resolved is worth another attempt; a TLS failure recurs on every attempt
+// and a timeout has already spent the client's budget, so neither is.
+func TestRetryableTransport(t *testing.T) {
+	want := map[string]bool{
+		"refused":               true,
+		"reset":                 true,
+		"dns":                   true,
+		"timeout":               false,
+		"untrusted cert":        false,
+		"cert for another host": false,
+		"server without TLS":    false,
+	}
+	errs := transportErrors(t)
+	if len(errs) != len(want) {
+		t.Fatalf("transportErrors has %d cases, the table %d", len(errs), len(want))
+	}
+	for name, err := range errs {
+		if got := RetryableTransport(err, true); got != want[name] {
+			t.Errorf("%s: RetryableTransport(%v) = %v, want %v", name, err, got, want[name])
+		}
+		if RetryableTransport(err, false) {
+			t.Errorf("%s: a non-idempotent request must never be retried after a transport failure", name)
+		}
+	}
+}
+
 // TestRetryAfter covers both header forms, and pins that a non-positive or
 // past value is reported absent: honoring it as "wait zero" would have a
 // client spin against the upstream on every bounded retry.
@@ -204,6 +276,9 @@ func TestRetryAfter(t *testing.T) {
 		{"http-date-future", time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat), true, 10 * time.Second},
 		{"http-date-past", time.Now().Add(-10 * time.Second).UTC().Format(http.TimeFormat), false, 0},
 		{"junk", "soon", false, 0},
+		{"a week is reported as the bound", "604800", true, maxRetryAfter},
+		{"too large to convert is reported as the bound", "9999999999", true, maxRetryAfter},
+		{"http-date past the bound", time.Now().Add(400 * 24 * time.Hour).UTC().Format(http.TimeFormat), true, maxRetryAfter},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,7 +306,11 @@ func TestBackoff(t *testing.T) {
 		3:   4 * time.Second,
 		5:   16 * time.Second,
 		6:   30 * time.Second,
+		34:  30 * time.Second,
+		35:  30 * time.Second,
 		40:  30 * time.Second,
+		62:  30 * time.Second,
+		63:  30 * time.Second,
 		100: 30 * time.Second,
 	} {
 		if got := Backoff(attempt, base, max); got != want {
@@ -240,6 +319,14 @@ func TestBackoff(t *testing.T) {
 	}
 	if got := Backoff(1, time.Minute, time.Second); got != time.Second {
 		t.Errorf("a base over the cap = %v, want the cap", got)
+	}
+	// With the largest cap, every attempt is either an exact power of two
+	// times base or the cap: a shift that overflowed would land below it.
+	for attempt := 1; attempt <= 100; attempt++ {
+		got := Backoff(attempt, time.Second, math.MaxInt64)
+		if got <= 0 || (got != math.MaxInt64 && got != time.Second<<uint(attempt-1)) {
+			t.Fatalf("Backoff(%d, 1s, max) = %v, an overflowed value", attempt, got)
+		}
 	}
 }
 
@@ -305,14 +392,21 @@ func TestExcerpt(t *testing.T) {
 		want string
 	}{
 		{"GitHub message", `{"message":"Bad credentials","documentation_url":"https://docs.github.com/rest"}`, "Bad credentials"},
-		{"GitHub validation keeps message", `{"message":"Validation Failed","errors":[{"code":"custom","message":"No commits"}]}`, "Validation Failed"},
+		{"GitHub validation with an error message", `{"message":"Validation Failed","errors":[{"code":"custom","message":"No commits"}]}`, "Validation Failed: No commits"},
+		{"GitHub validation with a field error", `{"message":"Validation Failed","errors":[{"resource":"Issue","field":"title","code":"missing_field"}],"documentation_url":"https://docs.github.com"}`, "Validation Failed: missing_field field 'title'"},
+		{"GitHub validation with a code only", `{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"already_exists"}]}`, "Validation Failed: already_exists"},
+		{"detail already in the message", `{"message":"No commits between main and x","errors":[{"message":"No commits between main and x"}]}`, "No commits between main and x"},
+		{"Jira errorMessages with field errors", `{"errorMessages":["Issue could not be updated."],"errors":{"priority":"bad priority"}}`, "Issue could not be updated.: bad priority"},
 		{"Jira errorMessages", `{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}`, "Issue does not exist or you do not have permission to see it."},
 		{"Jira errors map, first in document order", `{"errorMessages":[],"errors":{"summary":"You must specify a summary.","priority":"bad priority"}}`, "You must specify a summary."},
 		{"errors array of strings", `{"errors":["first","second"]}`, "first"},
 		{"errors array of objects", `{"errors":[{"message":"thing failed"}]}`, "thing failed"},
 		{"Slack error", `{"ok":false,"error":"invalid_auth"}`, "invalid_auth"},
+		{"OAuth error with description", `{"error":"invalid_grant","error_description":"Invalid login credentials"}`, "Invalid login credentials"},
+		{"OAuth error without description", `{"error":"invalid_grant"}`, "invalid_grant"},
 		{"GoTrue msg", `{"code":400,"error_code":"validation_failed","msg":"metadata_url is invalid"}`, "metadata_url is invalid"},
 		{"whitespace is collapsed", `{"message":"line one\n\tline two"}`, "line one line two"},
+		{"control characters are dropped", `{"message":"\u001b[31mred\u001b[0m alert\u0007 \u009b2Jdone"}`, "[31mred[0m alert 2Jdone"},
 		{"oversized JSON message", `{"message":"` + long + `"}`, strings.Repeat("é", 200) + "…"},
 		{"empty message falls through", `{"message":"","error":"ratelimited"}`, "ratelimited"},
 		{"no known key", `{"detail":"something"}`, "JSON body with no error message, 22 bytes"},

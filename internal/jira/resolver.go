@@ -258,7 +258,7 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 		if email == "" || token == "" {
 			return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 		}
-		return newOrgClient(orgID, CloudAPIToken(host, email, token)), nil
+		return NewClient(CloudAPIToken(host, email, token)).WithOrg(orgID), nil
 	}
 
 	pat, err := r.secrets.GetSystem(ctx, orgID, keyJiraPAT)
@@ -268,7 +268,7 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 	if pat == "" {
 		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
 	}
-	return newOrgClient(orgID, DataCenterPAT(host, pat)), nil
+	return NewClient(DataCenterPAT(host, pat)).WithOrg(orgID), nil
 }
 
 // SystemCredential is the org's Jira service credential in raw, serializable
@@ -403,9 +403,9 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 			return nil, fmt.Errorf("%w: org=%s user=%s host=%s (credential not usable for %s deployment)", ErrNoJiraUserCredential, orgID, userID, host, deployment)
 		}
 		if cred.Method == AuthMethodCloudAPIToken {
-			return newOrgClient(orgID, CloudAPIToken(host, cred.Email, cred.Token)), nil
+			return NewClient(CloudAPIToken(host, cred.Email, cred.Token)).WithOrg(orgID), nil
 		}
-		return newOrgClient(orgID, DataCenterPAT(host, cred.Token)), nil
+		return NewClient(DataCenterPAT(host, cred.Token)).WithOrg(orgID), nil
 	case AuthMethodCloudOAuth:
 		// Same usability gate as the static schemes: a Cloud OAuth credential
 		// left over after a Cloud→DC cutover (or one missing its cloud_id /
@@ -424,7 +424,7 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		if err != nil {
 			return nil, fmt.Errorf("mint jira oauth access token for org %s user %s: %w", orgID, userID, err)
 		}
-		return newOrgClient(orgID, CloudOAuth(cloudID, accessToken)), nil
+		return NewClient(CloudOAuth(cloudID, accessToken)).WithOrg(orgID), nil
 	default:
 		// An unknown/empty method is corruption or a forward-version credential
 		// (e.g. a future OAuth method this build predates). Surface it rather than

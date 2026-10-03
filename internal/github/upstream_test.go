@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
@@ -129,8 +130,9 @@ func TestMutation_TransientIsNotRetried(t *testing.T) {
 
 // TestHTML403_IsTransientAndRendersSizeOnly is the GHES-behind-a-proxy case:
 // a 403 whose body is an HTML page came from the proxy, not GitHub. It is
-// classified Transient (and retried, being a GET), and the message carries
-// the page's size, never its markup.
+// classified Transient but not retried, since a proxy that wants a VPN does
+// not change its mind within a backoff, and the message carries the page's
+// size, never its markup.
 func TestHTML403_IsTransientAndRendersSizeOnly(t *testing.T) {
 	page := "<!DOCTYPE html><html><body><h1>Access denied</h1><p>Connect to the corporate VPN.</p></body></html>"
 	var calls int32
@@ -163,8 +165,61 @@ func TestHTML403_IsTransientAndRendersSizeOnly(t *testing.T) {
 	if he.Body != page {
 		t.Errorf("Body = %q, want the page kept for callers that parse it", he.Body)
 	}
-	if got, want := atomic.LoadInt32(&calls), int32(1+maxRateLimitRetries); got != want {
-		t.Errorf("upstream requests = %d, want %d", got, want)
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream requests = %d, want 1", got)
+	}
+}
+
+// TestGet_5xxRetryAfterBeyondCapIsNotRetried: a 503 that asks for a longer
+// wait than a transient retry waits out is returned, rather than retried
+// before the server asked.
+func TestGet_5xxRetryAfterBeyondCapIsNotRetried(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := clientAgainst(srv.URL).Get(context.Background(), "/x")
+	var he *HTTPError
+	if !errors.As(err, &he) || he.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("err = %v, want a 503 *HTTPError", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream requests = %d, want 1", got)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("the call waited instead of returning")
+	}
+}
+
+// TestGet_TimeoutIsNotRetried: an attempt that ran out the client's timeout
+// already spent the whole budget; another attempt would only multiply it.
+func TestGet_TimeoutIsNotRetried(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer srv.Close()
+
+	c := clientAgainst(srv.URL)
+	c.http = &http.Client{Timeout: 20 * time.Millisecond}
+	ctx, tally := upstream.WithTally(context.Background())
+	if _, err := c.Get(ctx, "/x"); err == nil {
+		t.Fatal("Get succeeded, want the timeout")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("upstream requests = %d, want 1", got)
+	}
+	if tally.Count(upstream.Transient) != 1 {
+		t.Errorf("tally: %d transient, want the timeout counted once", tally.Count(upstream.Transient))
 	}
 }
 

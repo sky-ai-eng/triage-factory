@@ -57,20 +57,20 @@ func IsHTTP406(err error) bool {
 	return errors.As(err, &he) && he.StatusCode == 406
 }
 
-// newStatusError builds the *HTTPError for a transport-level non-2xx. The
-// "%s %s returned %d: %s" message format lives here, in one place, so the REST
-// builders (request, GetConditional, DownloadArtifact) can't drift on it — the
-// GET-only methods pass method "GET". (PostGraphQL keeps its own distinct
-// "GraphQL returned %d: %s" shape — it has no REST path to report.)
+// newStatusError builds the *HTTPError for a transport-level non-2xx, so
+// every builder (request, GetConditional, DownloadArtifact, PostGraphQL)
+// gets the same "<what> returned %d: <excerpt>" message and a class. what
+// names the request: "GET /repos/o/r/pulls" for a REST call, "GraphQL" for
+// PostGraphQL, which has no REST path to report.
 //
 // A rate-limited response never gets here — doWithRetry turns it into
 // ErrRateLimited — so the default classification is the whole answer.
-func newStatusError(method, path string, resp *http.Response, body []byte) *HTTPError {
+func newStatusError(what string, resp *http.Response, body []byte) *HTTPError {
 	return &HTTPError{
 		StatusCode: resp.StatusCode,
 		Body:       string(body),
 		Class:      upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
-		msg:        fmt.Sprintf("%s %s returned %d: %s", method, path, resp.StatusCode, upstream.Excerpt(body)),
+		msg:        fmt.Sprintf("%s returned %d: %s", what, resp.StatusCode, upstream.Excerpt(body)),
 	}
 }
 
@@ -92,9 +92,8 @@ type Client struct {
 	http    *http.Client
 
 	// orgID is the org this client makes its calls for, the org_id every
-	// request is counted under (upstream.Record). The resolver sets it; a
-	// client built directly with NewClient, outside an org context, leaves it
-	// empty.
+	// request is counted under (upstream.Record). Set by WithOrg; empty for a
+	// client that makes its calls for no org.
 	orgID string
 
 	// viaProxy marks a client whose baseURL is a per-run credential proxy
@@ -133,6 +132,13 @@ func NewClient(baseURL, pat string) *Client {
 		// can reach the network any other way.
 		http: telemetry.TracedHTTPClient(30*time.Second, "github"),
 	}
+}
+
+// WithOrg sets the org c makes its calls for, so its requests are counted
+// under that org, and returns c. Call it before c's first request.
+func (c *Client) WithOrg(orgID string) *Client {
+	c.orgID = orgID
+	return c
 }
 
 // NewProxyClient builds a client that talks to a per-run credential proxy
@@ -242,7 +248,7 @@ func (c *Client) request(ctx context.Context, method, path string, body any, acc
 		return nil, fmt.Errorf("read response body for %s: %w", path, err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, newStatusError(method, path, resp, data)
+		return nil, newStatusError(method+" "+path, resp, data)
 	}
 	return data, nil
 }
@@ -332,7 +338,7 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 		return nil, "", false, fmt.Errorf("read response body for %s: %w", path, readErr)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, "", false, newStatusError("GET", path, resp, data)
+		return nil, "", false, newStatusError("GET "+path, resp, data)
 	}
 	return data, resp.Header.Get("ETag"), false, nil
 }
@@ -407,7 +413,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 		// status codes (e.g., the download-logs fallback path needs to
 		// detect 404 specifically — GitHub returns it for runs that
 		// haven't finished yet — without resorting to string matching).
-		return 0, newStatusError("GET", path, resp, body)
+		return 0, newStatusError("GET "+path, resp, body)
 	}
 
 	// Pre-flight size cap. GitHub's signed-URL redirect returns an honest
@@ -519,12 +525,7 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 		return nil, fmt.Errorf("read graphql response body: %w", err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, &HTTPError{
-			StatusCode: resp.StatusCode,
-			Body:       string(data),
-			Class:      upstream.ClassifyResponse(resp.StatusCode, resp.Header, data),
-			msg:        fmt.Sprintf("GraphQL returned %d: %s", resp.StatusCode, upstream.Excerpt(data)),
-		}
+		return nil, newStatusError("GraphQL", resp, data)
 	}
 
 	// GraphQL can return a 200 carrying BOTH a usable `data` block and an

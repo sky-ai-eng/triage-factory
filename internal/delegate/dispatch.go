@@ -1881,7 +1881,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
-		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(gh, sidecar), owner, repo, prNumber)
+		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
 		// The rehydrate's git runs through this claim's own sidecar proxy — the
 		// sandbox is already up (dispatchClaimedConversation brings it up before calling
 		// here), so the proxy is live by the time the rebuild fetches.

@@ -2777,7 +2777,7 @@
     },
     {
       "collapsed": false,
-      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended. Scraped from each pod's :9464 and summed across pods. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide rule alerts on. `org_id` is the org a request was made for, and is empty for a request made outside an org context (setup and admin handlers).",
+      "description": "Requests TF makes to GitHub, Jira, and Slack's Web API, by how each one ended. Scraped from each pod's :9464 and summed across pods. Every org brings its own upstream, so one org failing is usually that org's own GitHub Enterprise Server, Jira Data Center, or credential; many orgs failing against the same upstream at once is the fleet-wide case the UpstreamFailingFleetWide rule alerts on. `org_id` is the org a request was made for, and is empty for a request made for no org.",
       "gridPos": {
         "h": 1,
         "w": 24,
@@ -2882,7 +2882,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Decisions to retry, by the outcome of the attempt that caused the retry. GitHub retries a GET or a GraphQL query after a rate limit or a transient failure, and never a mutation; Jira retries a 429 on any call, and a transient failure on an idempotent one; Slack retries one 429 whose Retry-After is 30s or less. A mutation that fails transiently is not retried, so it shows in Requests by outcome and not here. A retry that then succeeds counts here once, and its successful attempt counts as `ok` in Requests by outcome.",
+      "description": "Decisions to retry, by the outcome of the attempt that caused the retry. GitHub retries a GET or a GraphQL query after a rate limit or a transient failure, and never a mutation; Jira retries a 429 on any call, and a transient failure on an idempotent one; neither retries a non-JSON 403, a TLS failure, or a timeout, which another attempt would only repeat; Slack retries one 429 whose Retry-After is 30s or less. A mutation that fails transiently is not retried, so it shows in Requests by outcome and not here. A retry that then succeeds counts here once, and its successful attempt counts as `ok` in Requests by outcome.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2970,7 +2970,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Per upstream, the number of orgs with at least one `transient` or `auth` attempt in the last 5 minutes: the numerator of the UpstreamFailingFleetWide rule in docker/observability/rules/tf-connections.yml, over the same window. Requests made outside an org context are not counted. No data means no org is failing.",
+      "description": "Per upstream, the number of orgs for which more than half of the attempts in the last 5 minutes ended `transient` or `auth`: the numerator of the UpstreamFailingFleetWide rule in docker/observability/rules/tf-connections.yml, over the same window. Requests made for no org are not counted. No data means no org is failing.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -3045,7 +3045,7 @@
             "uid": "tf-prometheus"
           },
           "editorMode": "code",
-          "expr": "count by (upstream) (sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=\"\",outcome=~\"transient|auth\"}[5m])) > 0)",
+          "expr": "count by (upstream) ((sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=\"\",outcome=~\"transient|auth\"}[5m])) / sum by (upstream, org_id) (rate(tf_upstream_requests_total{org_id!=\"\"}[5m]))) > 0.5)",
           "legendFormat": "{{upstream}}",
           "range": true,
           "refId": "A"

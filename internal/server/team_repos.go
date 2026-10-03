@@ -450,7 +450,7 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 			baseURL = creds.GitHubURL
 		}
 		if baseURL != "" {
-			clients = append(clients, ghclient.NewClient(baseURL, creds.GitHubPAT))
+			clients = append(clients, ghclient.NewClient(baseURL, creds.GitHubPAT).WithOrg(orgID))
 		}
 	}
 

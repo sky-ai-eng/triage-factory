@@ -18,8 +18,10 @@ var log = logging.Component("upstream")
 // under.
 const meterName = "internal/upstream"
 
-// instruments is the counter pair, created once per provider. Every label
-// value is a closed vocabulary: Name, Class, and org ids.
+// instruments is the counter pair, created once per provider. upstream and
+// outcome are closed vocabularies (Name, Class); org_id is not, so the series
+// count grows with the number of orgs, by at most 15 per counter for each
+// (3 names × 5 classes). That per-org breakdown is what the metrics are for.
 type instruments struct {
 	requests metric.Int64Counter
 	retries  metric.Int64Counter
@@ -67,8 +69,8 @@ func attrs(name Name, orgID string, c Class) metric.AddOption {
 }
 
 // Record counts one HTTP attempt against name, made for orgID, that ended in
-// c. orgID is empty for a client built outside an org context. If ctx carries
-// a Tally, the attempt is added to it as well.
+// c. orgID is empty for a request made for no org. If ctx carries a Tally,
+// the attempt is added to it as well.
 func Record(ctx context.Context, name Name, orgID string, c Class) {
 	current().requests.Add(context.Background(), 1, attrs(name, orgID, c))
 	if t := tallyFrom(ctx); t != nil {

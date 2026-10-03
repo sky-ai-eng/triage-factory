@@ -652,7 +652,7 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, c
 // orchestrator holds no GitHub credential for either. Local reads the PR through
 // the resolver-built client and routes the clone through its loopback proxy.
 func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
-	ghClient = prReadClient(ghClient, sidecar)
+	ghClient = prReadClient(orgID, ghClient, sidecar)
 	if ghClient == nil {
 		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
 	}
@@ -811,9 +811,9 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 // executor path every GitHub read routes through the run's credential
 // sidecar (the REST proxy), so the orchestrator holds no token; elsewhere
 // the resolver-built client is already the right one.
-func prReadClient(ghClient *ghclient.Client, sidecar *runSidecar) *ghclient.Client {
+func prReadClient(orgID string, ghClient *ghclient.Client, sidecar *runSidecar) *ghclient.Client {
 	if sidecar != nil {
-		return ghclient.NewProxyClient(sidecar.res.GitHubAPIURL, sidecar.res.GitHubAPIToken)
+		return ghclient.NewProxyClient(sidecar.res.GitHubAPIURL, sidecar.res.GitHubAPIToken).WithOrg(orgID)
 	}
 	return ghClient
 }

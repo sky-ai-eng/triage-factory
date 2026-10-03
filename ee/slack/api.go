@@ -381,23 +381,48 @@ func doSlackJSON(ctx context.Context, client *http.Client, orgID string, req *ht
 	return nil
 }
 
-// doSlackRequest makes one attempt: it executes req, reads its body (capped
-// at 64 KiB), and records the attempt's class against orgID. A transport
-// failure is recorded unless ctx ended first, since an abandoned request is
-// not an upstream outcome. Shared by doSlackJSON's initial attempt and its
-// single 429 retry.
+// slackMaxResponseBody bounds how much of a successful Web API response
+// doSlackRequest reads. A page of 200 conversations, or of messages carrying
+// blocks, runs to hundreds of KiB, so the bound sits far above any real page;
+// it exists so a misbehaving endpoint cannot hold unbounded memory.
+const slackMaxResponseBody = 16 << 20
+
+// doSlackRequest makes one attempt: it executes req, reads its body (an
+// error body capped at upstream.MaxErrorBody, a success body at
+// slackMaxResponseBody), and records the attempt's class against orgID. A
+// transport failure, including one while reading the body, is recorded
+// unless ctx ended first, since an abandoned request is not an upstream
+// outcome. Shared by doSlackJSON's initial attempt and its single 429 retry.
 func doSlackRequest(ctx context.Context, client *http.Client, orgID string, req *http.Request) (*http.Response, []byte, error) {
 	resp, err := client.Do(req)
 	if err != nil {
-		if class, ok := upstream.ClassifyTransport(ctx, err); ok {
-			upstream.Record(ctx, upstream.Slack, orgID, class)
-		}
+		recordSlackTransport(ctx, orgID, err)
 		return nil, nil, fmt.Errorf("slack api request: %w", err)
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var body []byte
+	if resp.StatusCode >= 400 {
+		body, err = upstream.ReadErrorBody(resp.Body)
+	} else {
+		body, err = io.ReadAll(io.LimitReader(resp.Body, slackMaxResponseBody+1))
+	}
+	if err != nil {
+		recordSlackTransport(ctx, orgID, err)
+		return nil, nil, fmt.Errorf("slack api: read response: %w", err)
+	}
 	upstream.Record(ctx, upstream.Slack, orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
+	if len(body) > slackMaxResponseBody {
+		return nil, nil, fmt.Errorf("slack api: response exceeds %d bytes", slackMaxResponseBody)
+	}
 	return resp, body, nil
+}
+
+// recordSlackTransport counts a transport failure against orgID, unless ctx
+// ended first.
+func recordSlackTransport(ctx context.Context, orgID string, err error) {
+	if class, ok := upstream.ClassifyTransport(ctx, err); ok {
+		upstream.Record(ctx, upstream.Slack, orgID, class)
+	}
 }
 
 // slackRetryAfter is the wait a 429 asks for: its Retry-After header, or
@@ -1118,7 +1143,7 @@ func unionSlackFileChannels(channels, groups []string, shareMaps ...map[string]j
 // NOT flow through doSlackJSON (this isn't a slack.com/api {ok,...}
 // endpoint, and the response body is opaque file bytes, not JSON) — no 429
 // retry here, matching the rest of this function's plain-HTTP posture.
-func slackFileDownload(ctx context.Context, client *http.Client, botToken, urlPrivate string, w io.Writer) error {
+func slackFileDownload(ctx context.Context, client *http.Client, orgID, botToken, urlPrivate string, w io.Writer) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlPrivate, nil)
 	if err != nil {
 		return err
@@ -1127,13 +1152,18 @@ func slackFileDownload(ctx context.Context, client *http.Client, botToken, urlPr
 
 	resp, err := client.Do(req)
 	if err != nil {
+		recordSlackTransport(ctx, orgID, err)
 		return fmt.Errorf("slack file download request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := upstream.ReadErrorBody(resp.Body)
+		upstream.Record(ctx, upstream.Slack, orgID, upstream.ClassifyResponse(resp.StatusCode, resp.Header, body))
 		return fmt.Errorf("slack file download: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
+	// The attempt is counted by its response; a failure while streaming the
+	// file after a 200 is returned but not counted a second time.
+	upstream.Record(ctx, upstream.Slack, orgID, upstream.OK)
 	if _, err := io.Copy(w, resp.Body); err != nil {
 		return fmt.Errorf("slack file download: copy response body: %w", err)
 	}
@@ -1185,20 +1215,18 @@ func slackGetUploadURLExternal(ctx context.Context, client *http.Client, orgID, 
 // doSlackJSON envelope decode (Slack's response here isn't the {ok,...}
 // shape). Streams from r rather than buffering, mirroring
 // slackFileDownload's rationale in the opposite direction.
-func slackUploadFileBytes(ctx context.Context, client *http.Client, uploadURL string, r io.Reader) error {
+func slackUploadFileBytes(ctx context.Context, client *http.Client, orgID, uploadURL string, r io.Reader) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uploadURL, r)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	resp, err := client.Do(req)
+	resp, body, err := doSlackRequest(ctx, client, orgID, req)
 	if err != nil {
-		return fmt.Errorf("slack file upload request: %w", err)
+		return fmt.Errorf("slack file upload: %w", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := upstream.ReadErrorBody(resp.Body)
 		return fmt.Errorf("slack file upload: http %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	return nil
@@ -1250,7 +1278,7 @@ func slackFilesUpload(ctx context.Context, client *http.Client, orgID, botToken 
 	if err != nil {
 		return "", err
 	}
-	if err := slackUploadFileBytes(ctx, client, uploadURL, params.Body); err != nil {
+	if err := slackUploadFileBytes(ctx, client, orgID, uploadURL, params.Body); err != nil {
 		return "", err
 	}
 	if err := slackCompleteUploadExternal(ctx, client, orgID, botToken, params.Channel, params.ThreadTS,

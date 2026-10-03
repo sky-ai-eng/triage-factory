@@ -342,9 +342,8 @@ type Client struct {
 	cfg  Config
 	http *http.Client
 	// orgID is the org this client makes its calls for, the org_id every
-	// request is counted under (upstream.Record). The resolver sets it; a
-	// client built directly with NewClient, outside an org context, leaves it
-	// empty.
+	// request is counted under (upstream.Record). Set by WithOrg; empty for a
+	// client that makes its calls for no org.
 	orgID   string
 	selfMu  sync.RWMutex
 	selfVal *currentUserResponse
@@ -362,10 +361,9 @@ func NewClient(cfg Config) *Client {
 	}
 }
 
-// newOrgClient is NewClient for a client that makes its calls for orgID, so
-// its requests are counted under that org.
-func newOrgClient(orgID string, cfg Config) *Client {
-	c := NewClient(cfg)
+// WithOrg sets the org c makes its calls for, so its requests are counted
+// under that org, and returns c. Call it before c's first request.
+func (c *Client) WithOrg(orgID string) *Client {
 	c.orgID = orgID
 	return c
 }
@@ -1342,8 +1340,12 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 // client's org. idempotent selects the retry policy (upstream.Retryable): a
 // rate limit is retried for any request — a throttled request was rejected,
 // not processed, so replaying it can't double a side effect — while a
-// transient failure (a 5xx, a dropped connection) is retried only for an
-// idempotent request, since a mutation might have partially applied. The body
+// transient failure (a 5xx, a 408, a dropped connection) is retried only for
+// an idempotent request, since a mutation might have partially applied. A
+// transient failure that another attempt would only repeat is returned at
+// once: a 403 whose body is not JSON (a proxy, or Jira Data Center's login
+// lockout), a TLS failure, or a timeout (upstream.RetryableResponse,
+// upstream.RetryableTransport). The body
 // is buffered as bytes so each attempt gets a fresh reader (an http.Request
 // body isn't reusable across attempts). Every wait is ctx-aware, so the
 // caller's deadline bounds total blocking regardless of the retry cap.
@@ -1369,7 +1371,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 				return 0, nil, err
 			}
 			upstream.Record(ctx, upstream.Jira, c.orgID, class)
-			if !upstream.Retryable(class, idempotent) || attempt > maxRateLimitRetries {
+			if !upstream.RetryableTransport(err, idempotent) || attempt > maxRateLimitRetries {
 				return 0, nil, err
 			}
 			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
@@ -1395,7 +1397,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 
 		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
 		upstream.Record(ctx, upstream.Jira, c.orgID, class)
-		if !upstream.Retryable(class, idempotent) || attempt > maxRateLimitRetries {
+		if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt > maxRateLimitRetries {
 			return resp.StatusCode, data, nil
 		}
 

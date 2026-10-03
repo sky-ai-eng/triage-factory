@@ -12,6 +12,8 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -90,6 +92,13 @@ func ClassifyTransport(ctx context.Context, err error) (Class, bool) {
 // error's own class, or Transient for a transport failure. ok is false for
 // anything else, which is a local failure (a request that could not be
 // built, a response that could not be parsed) or a cancellation.
+//
+// context.DeadlineExceeded is a transport failure here, not a cancellation:
+// an http.Client timeout matches it, and that is the upstream not answering
+// in time. A caller's own deadline matches it too, and the error alone
+// cannot tell the two apart. The clients can, because they hold the ctx:
+// ClassifyTransport is what keeps a caller's expired deadline out of the
+// counters.
 func ClassOf(err error) (Class, bool) {
 	if err == nil {
 		return "", false
@@ -128,27 +137,80 @@ func Retryable(c Class, idempotent bool) bool {
 	}
 }
 
+// RetryableResponse is Retryable for a response with the given status. A
+// Transient 403 is the exception: it came from something in front of the
+// upstream (a proxy that wants a VPN, a login lockout), which does not clear
+// within a client's backoff, so another attempt only delays the error. It
+// stays Transient for counting, since it says nothing about the credential.
+func RetryableResponse(status int, c Class, idempotent bool) bool {
+	if status == http.StatusForbidden && c == Transient {
+		return false
+	}
+	return Retryable(c, idempotent)
+}
+
+// RetryableTransport is Retryable for an error from http.Client.Do, which is
+// always Transient. Two transport failures are not retried, because another
+// attempt only delays the same error: a TLS failure (a certificate the
+// client does not trust or that names another host, or a server that does
+// not speak TLS), which every attempt meets again, and a timeout, which has
+// already spent the client's whole time budget on one attempt.
+func RetryableTransport(err error, idempotent bool) bool {
+	if !Retryable(Transient, idempotent) {
+		return false
+	}
+	var (
+		verifyErr    *tls.CertificateVerificationError
+		authorityErr x509.UnknownAuthorityError
+		hostnameErr  x509.HostnameError
+		invalidErr   x509.CertificateInvalidError
+		recordErr    tls.RecordHeaderError
+	)
+	switch {
+	case errors.As(err, &verifyErr), errors.As(err, &authorityErr),
+		errors.As(err, &hostnameErr), errors.As(err, &invalidErr),
+		errors.As(err, &recordErr), errors.Is(err, http.ErrSchemeMismatch):
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return false
+	}
+	return true
+}
+
+// maxRetryAfter is the longest wait RetryAfter reports. It is far above any
+// client's own cap, which is what decides whether a wait is honored; the
+// bound exists so a huge delay-seconds value cannot overflow a Duration.
+const maxRetryAfter = 24 * time.Hour
+
 // RetryAfter reads the Retry-After header, which is either delay-seconds or
 // an HTTP-date (RFC 7231 §7.1.3). A value that resolves to zero or negative —
 // a non-positive delay-seconds count, or an HTTP-date already past (a stale
 // header, or clock skew) — is reported as absent, so the caller falls back to
-// its backoff rather than retrying with no pause at all.
+// its backoff rather than retrying with no pause at all. A value above
+// maxRetryAfter is reported as maxRetryAfter; the caller compares the result
+// with its own cap.
 func RetryAfter(h http.Header) (time.Duration, bool) {
 	v := h.Get("Retry-After")
 	if v == "" {
 		return 0, false
 	}
-	if secs, err := strconv.Atoi(v); err == nil {
+	if secs, err := strconv.ParseInt(v, 10, 64); err == nil {
 		if secs <= 0 {
 			return 0, false
+		}
+		if secs > int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter, true
 		}
 		return time.Duration(secs) * time.Second, true
 	}
 	if t, err := http.ParseTime(v); err == nil {
-		if wait := time.Until(t); wait > 0 {
-			return wait, true
+		wait := time.Until(t)
+		if wait <= 0 {
+			return 0, false
 		}
-		return 0, false
+		return min(wait, maxRetryAfter), true
 	}
 	return 0, false
 }
@@ -159,14 +221,13 @@ func Backoff(attempt int, base, max time.Duration) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	if attempt > 62 {
+	shift := uint(attempt - 1)
+	// Compared before shifting, so a large attempt cannot overflow into a
+	// small wait.
+	if base <= 0 || shift >= 63 || base > max>>shift {
 		return max
 	}
-	d := base * time.Duration(int64(1)<<uint(attempt-1))
-	if d > max || d <= 0 {
-		return max
-	}
-	return d
+	return base << shift
 }
 
 // Sleep waits d, or returns ctx.Err() as soon as ctx is done, so the caller's
@@ -193,6 +254,11 @@ const MaxErrorBody = 64 << 10
 // connection when the caller closes the body, which is cheaper than draining
 // an arbitrarily large proxy page to keep one connection warm. Success bodies
 // are not read through this.
+//
+// A JSON body longer than the cap is cut mid-document and no longer parses,
+// so ClassifyResponse and Excerpt treat it as a non-JSON body: a 403 that
+// large classifies Transient rather than Auth. No upstream TF talks to sends
+// an error body anywhere near that size.
 func ReadErrorBody(r io.Reader) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(r, MaxErrorBody))
 }

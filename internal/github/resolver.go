@@ -347,8 +347,7 @@ func (r *resolver) RateLimitFor(orgID string) (RateLimitState, bool) {
 // registry, and counts its requests under the org, without each call site
 // remembering to wire it.
 func (r *resolver) newObservedClient(orgID, base, token string) *Client {
-	c := NewClient(base, token)
-	c.orgID = orgID
+	c := NewClient(base, token).WithOrg(orgID)
 	c.SetRateLimitObserver(func(s RateLimitState) {
 		r.rateLimits.record(orgID, s)
 	})

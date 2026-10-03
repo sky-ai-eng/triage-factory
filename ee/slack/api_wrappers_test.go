@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // --- chat.postMessage / chat.update ---
@@ -476,11 +478,15 @@ func TestSlackFileDownload_StreamsBodyWithBearerAuth(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var buf bytes.Buffer
-	if err := slackFileDownload(context.Background(), srv.Client(), "xoxb-test", srv.URL+"/files-pri/T1-F1/x.txt", &buf); err != nil {
+	ctx, tally := upstream.WithTally(context.Background())
+	if err := slackFileDownload(ctx, srv.Client(), "org-1", "xoxb-test", srv.URL+"/files-pri/T1-F1/x.txt", &buf); err != nil {
 		t.Fatalf("slackFileDownload: %v", err)
 	}
 	if buf.String() != payload {
 		t.Errorf("downloaded body = %q; want %q", buf.String(), payload)
+	}
+	if tally.Attempts() != 1 || tally.Count(upstream.OK) != 1 {
+		t.Errorf("tally: attempts=%d ok=%d; want 1/1", tally.Attempts(), tally.Count(upstream.OK))
 	}
 }
 
@@ -496,9 +502,13 @@ func TestSlackFileDownload_HTTPError(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	var buf bytes.Buffer
-	err := slackFileDownload(context.Background(), srv.Client(), "xoxb-test", srv.URL+"/x.txt", &buf)
+	ctx, tally := upstream.WithTally(context.Background())
+	err := slackFileDownload(ctx, srv.Client(), "org-1", "xoxb-test", srv.URL+"/x.txt", &buf)
 	if err == nil {
 		t.Fatal("slackFileDownload with HTTP 403 should return an error")
+	}
+	if tally.Attempts() != 1 || tally.Count(upstream.Transient) != 1 {
+		t.Errorf("tally: attempts=%d transient=%d; want the HTML 403 counted transient", tally.Attempts(), tally.Count(upstream.Transient))
 	}
 	if want := fmt.Sprintf("slack file download: http 403: non-JSON body, %d bytes", len(page)); err.Error() != want {
 		t.Errorf("err = %q; want %q", err.Error(), want)
@@ -518,9 +528,13 @@ func TestSlackUploadFileBytes_HTTPError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	err := slackUploadFileBytes(context.Background(), srv.Client(), srv.URL+"/upload/v1/XYZ", strings.NewReader("x"))
+	ctx, tally := upstream.WithTally(context.Background())
+	err := slackUploadFileBytes(ctx, srv.Client(), "org-1", srv.URL+"/upload/v1/XYZ", strings.NewReader("x"))
 	if err == nil {
 		t.Fatal("slackUploadFileBytes with HTTP 500 should return an error")
+	}
+	if tally.Attempts() != 1 || tally.Count(upstream.Transient) != 1 {
+		t.Errorf("tally: attempts=%d transient=%d; want 1/1", tally.Attempts(), tally.Count(upstream.Transient))
 	}
 	if want := "slack file upload: http 500: upload_failed"; err.Error() != want {
 		t.Errorf("err = %q; want %q", err.Error(), want)

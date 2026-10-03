@@ -319,7 +319,7 @@ func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID, u
 		writeNotConfigured(w, "Jira is not connected for this workspace, so a project or a status mapping cannot be added")
 		return nil, false
 	}
-	return jira.NewClient(cfg), true
+	return jira.NewClient(cfg).WithOrg(orgID), true
 }
 
 // writeJiraGateStopped ends the gate when Jira stops answering partway through

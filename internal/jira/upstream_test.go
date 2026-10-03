@@ -191,7 +191,7 @@ func TestErrorMessages_CarryAtMost200CharsOfBody(t *testing.T) {
 func TestDoRequest_RecordsEveryAttempt(t *testing.T) {
 	shortBackoff(t)
 	srv, _ := retryServer(t, nil, http.StatusServiceUnavailable)
-	c := newOrgClient("org-1", DataCenterPAT(srv.URL, "tok"))
+	c := NewClient(DataCenterPAT(srv.URL, "tok")).WithOrg("org-1")
 
 	ctx, tally := upstream.WithTally(context.Background())
 	if _, err := c.get(ctx, srv.URL); err != nil {
@@ -200,5 +200,33 @@ func TestDoRequest_RecordsEveryAttempt(t *testing.T) {
 	if tally.Attempts() != 2 || tally.Count(upstream.Transient) != 1 || tally.Count(upstream.OK) != 1 {
 		t.Errorf("tally = %d attempts, %d transient, %d ok; want 2, 1, 1",
 			tally.Attempts(), tally.Count(upstream.Transient), tally.Count(upstream.OK))
+	}
+}
+
+// TestDoRequest_HTML403IsNotRetried: a 403 that is not Jira's own JSON (a
+// proxy's page, or Data Center's login lockout) is Transient for counting,
+// but it does not clear within a backoff, so even a GET returns it at once.
+func TestDoRequest_HTML403IsNotRetried(t *testing.T) {
+	shortBackoff(t)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("<html><body>CAPTCHA required</body></html>"))
+	}))
+	defer srv.Close()
+
+	ctx, tally := upstream.WithTally(context.Background())
+	_, err := testClient(srv.URL).get(ctx, srv.URL)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusForbidden || se.Class != upstream.Transient {
+		t.Fatalf("err = %v, want a transient 403 *StatusError", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("attempts = %d, want 1", got)
+	}
+	if tally.Count(upstream.Transient) != 1 {
+		t.Errorf("tally: %d transient, want 1", tally.Count(upstream.Transient))
 	}
 }
