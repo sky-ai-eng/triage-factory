@@ -572,16 +572,6 @@ func TestIsHumanInput_CompactionRowsAreNotHuman(t *testing.T) {
 	}
 }
 
-// TestIsTransient_OverflowIsNeverRetried: the guard matters — an overflow
-// message quotes token counts, and "429 tokens" would otherwise satisfy the
-// numeric-token matcher and buy a retry on a permanently doomed request.
-func TestIsTransient_OverflowIsNeverRetried(t *testing.T) {
-	err := fmt.Errorf("%w: prompt is too long: 429 tokens > 200 maximum (HTTP 400)", inference.ErrContextOverflow)
-	if isTransient(err) {
-		t.Fatal("a context overflow classified as transient")
-	}
-}
-
 // TestCompaction_SanitizesModelTextForStore: a summary that quotes binary
 // command output carries NUL bytes Postgres cannot store, and both
 // compaction rows are built from raw model text (the warm summary is

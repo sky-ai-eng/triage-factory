@@ -47,21 +47,42 @@ func TestClassify_ExpiredRequestCtxIsInconclusive(t *testing.T) {
 	}
 }
 
-// With the request ctx still live, an unrecognized failure is inconclusive by
-// the default arm. Pinned so the outcome of a timeout is right for two
-// independent reasons, and neither is load-bearing alone.
-func TestClassify_UnrecognizedFailureIsInconclusive(t *testing.T) {
-	if verdict, _ := classify(context.Background(), errFlattenedTimeout); verdict != VerdictInconclusive {
-		t.Errorf("verdict = %q, want %q", verdict, VerdictInconclusive)
+// With the request ctx still live, a flattened deadline is inconclusive because
+// it reads as a transient failure, so the outcome of a timeout is right for two
+// independent reasons and neither is load-bearing alone. A failure nothing
+// recognizes is inconclusive by the default arm, and a transient one stays
+// inconclusive even when its text also quotes a refusal.
+func TestClassify_UnansweredFailureIsInconclusive(t *testing.T) {
+	for name, err := range map[string]error{
+		"a flattened deadline":                 errFlattenedTimeout,
+		"an unrecognized failure":              errors.New("inference: request has no model"),
+		"a dropped stream quoting a refusal":   errors.New("inference: provider error: AccessDeniedException: connection reset by peer"),
+		"a 503 whose body quotes a refusal":    errors.New("inference: provider error: AccessDeniedException (HTTP 503)"),
+		"a 400 that is not a model id problem": errors.New("inference: provider error: max_tokens: field required (HTTP 400)"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if verdict, _ := classify(context.Background(), err); verdict != VerdictInconclusive {
+				t.Errorf("verdict = %q, want %q", verdict, VerdictInconclusive)
+			}
+		})
 	}
 }
 
 // A live ctx does not soften a real refusal — the ctx check is a short-circuit
-// for our own clock, not a blanket amnesty.
+// for our own clock, not a blanket amnesty. A 404 is a refusal to the probe
+// alone, so it is read here rather than in the shared classification.
 func TestClassify_LiveCtxStillReadsARefusal(t *testing.T) {
-	err := errors.New("inference: provider error: permission denied (HTTP 403)")
-	if verdict, detail := classify(context.Background(), err); verdict != VerdictRed || detail == "" {
-		t.Errorf("classify = (%q, %q), want red with a detail", verdict, detail)
+	for name, err := range map[string]error{
+		"403":                      errors.New("inference: provider error: permission denied (HTTP 403)"),
+		"401":                      errors.New("inference: provider error: invalid x-api-key (HTTP 401)"),
+		"404":                      errors.New("inference: provider error: model: claude-nope (HTTP 404) [not_found_error]"),
+		"Bedrock invalid model id": errors.New("inference: provider error: The provided model identifier is invalid. (HTTP 400) [ValidationException]"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if verdict, detail := classify(context.Background(), err); verdict != VerdictRed || detail == "" {
+				t.Errorf("classify = (%q, %q), want red with a detail", verdict, detail)
+			}
+		})
 	}
 }
 

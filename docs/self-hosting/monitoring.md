@@ -92,7 +92,8 @@ route `9464` externally**; scrape it from inside the compose network / cluster.
 Beyond the standard Go runtime and process collectors (`go_*`, `process_*`),
 the TF-specific set today covers dropped audit records, the entity
 terminal-state invariant, the work queues, claims, Slack message-event volume,
-and the outcome of every request TF makes to GitHub, Jira, and Slack.
+and the outcome of every request TF makes to GitHub, Jira, Slack, and the LLM
+providers.
 
 ### Dropped audit records
 
@@ -338,16 +339,18 @@ sum(increase(tf_slack_retry_deliveries_total[15m])) > 0
 
 ### Source connections
 
-Every HTTP request TF makes to GitHub, Jira, or Slack's Web API is classified
-by how it ended and counted against the org it was made for. Two counters,
-both per process, so `sum` across pods:
+Every HTTP request TF makes to GitHub, Jira, or Slack's Web API, and every
+model call TF makes to an LLM provider, is classified by how it ended and
+counted against the org it was made for. Two counters, both per process, so
+`sum` across pods:
 
 | Metric | Labels | What it counts |
 | --- | --- | --- |
 | `tf_upstream_requests_total` | `upstream`, `outcome`, `org_id` | HTTP attempts. A retried call counts once per attempt, so a call that succeeds on its third attempt adds two failed attempts and one `ok`. |
 | `tf_upstream_retries_total` | `upstream`, `outcome`, `org_id` | Decisions to retry. `outcome` is the class of the attempt that caused the retry. |
 
-`upstream` is `github`, `jira`, or `slack`. `outcome` is one of:
+`upstream` is `github`, `jira`, `slack`, `anthropic`, or `bedrock`. `outcome` is
+one of:
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -360,16 +363,30 @@ both per process, so `sum` across pods:
 A request abandoned because its caller gave up (a shutdown, a deadline) is not
 an outcome and is not counted.
 
+A model call fails with a rendered error rather than a response, so
+`anthropic` and `bedrock` are classified from that error. Two statuses read
+differently from the table above: a 409 is `transient`, and a 403 is always
+`auth`, because the body that would tell a proxy's page from the provider's own
+refusal is no longer there to read. A failure that carries no status (a
+dropped connection, a timeout, or an error the provider sent partway through
+its response) is `transient` when it names a transport failure or an overload,
+and `rejected` otherwise. A request that overflows the model's context window
+is `rejected`.
+
 `org_id` is the org the request was made for, and is empty for a request made
 for no org. Those requests count in any total, and the queries and the alert
 below that count orgs exclude them. `org_id` makes the series count grow with
-the number of orgs: each pod exports at most 15 series per counter for each
-org (3 upstreams × 5 outcomes), and only the combinations that org has
+the number of orgs: each pod exports at most 25 series per counter for each
+org (5 upstreams × 5 outcomes), and only the combinations that org has
 produced.
 
 In multi mode, the requests a delegated run makes from inside its sandbox (its
 exec verbs, and `gh`) reach the upstream through the run's credential sidecar,
-and are not counted: the sidecar exports no metrics.
+and are not counted: the sidecar exports no metrics. The run's model calls are
+counted, by the executor that drives it, and so are the system jobs' calls
+(scoring, repo profiling, memory generation), by the control pod that makes
+them. A model availability test is not counted. In local mode, model calls go
+through the Agent SDK subprocess and none are counted.
 
 Each client has its own retry policy:
 
@@ -378,6 +395,7 @@ Each client has its own retry policy:
 | `github` | A GET or a GraphQL query, after a rate limit or a transient failure, up to 3 retries. A `Retry-After` on a 5xx is waited out up to 30s; a longer one returns the response. A mutation gets one attempt. |
 | `jira` | A 429 on any call, and a transient failure on an idempotent call, up to 3 retries. A `Retry-After` longer than 30s is not waited out; the throttled response goes back to the caller. |
 | `slack` | One retry of a 429 whose `Retry-After` is 30s or less. A longer wait returns a rate-limit error at once. A 5xx or a transport failure is not retried, and neither is a file download or upload. |
+| `anthropic`, `bedrock` | A delegated run's model call, after a rate limit or a transient failure, up to 4 retries with backoff from 1s doubling to 30s, against the same provider and model. A system job's call is not retried: a rate limit or a transient failure starts a cooldown for that provider (2s, doubling to 30s) in which further calls are skipped, and the job tries again later. |
 
 No client retries a mutation after a transient failure, because the upstream
 may have applied it before the failure. GitHub and Jira also return three
@@ -683,7 +701,7 @@ from [`docker/observability/dashboards/`](../../docker/observability/dashboards/
 the same way the data sources are. Eight rows — three answering "is TF healthy,
 and what is slow", then one each for the three pipelines whose spans need
 reading rather than aggregating, one that should stay empty, and one for TF's
-requests to GitHub, Jira, and Slack:
+requests to GitHub, Jira, Slack, and the LLM providers:
 
 - **Traces.** Five fixed TraceQL searches — GitHub and Jira poll cycles, system
   job cycles (scorer / profiler / classifier), API requests slower than 500 ms,

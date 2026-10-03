@@ -393,9 +393,8 @@ func drain(ch chan *schemas.BifrostStreamChunk) {
 // transport failure in every provider reports "failed to execute HTTP request
 // to provider API" — while the cause underneath it holds the dial error, the
 // TLS failure, or the reset that actually happened. Dropping it costs twice:
-// the operator gets an error with no lead to follow, and the caller's
-// transient-vs-permanent classification (agentloop's isTransient) sees no
-// "connection refused" or "502" to match on, so a retryable network blip is
+// the operator gets an error with no lead to follow, and Classify sees no
+// "connection refused" or "(HTTP 502)" to read, so a retryable network blip is
 // treated as a permanent failure and ends the engagement on the first attempt.
 func bifrostError(e *schemas.BifrostError) error {
 	if e == nil {
@@ -425,9 +424,9 @@ func bifrostError(e *schemas.BifrostError) error {
 
 // ErrContextOverflow classifies a provider rejection for context length: the
 // assembled prompt (plus max_tokens) does not fit the model's window. It is a
-// distinct class because the two callers must treat it opposite ways — the
-// retry classifier must NOT retry it (the same request can never succeed),
-// and the agent loop's compaction arm treats it as a trigger, not a failure.
+// distinct class because it must be treated two opposite ways — Classify
+// reads it as Rejected (the same request can never succeed), and the agent
+// loop's compaction arm treats it as a trigger, not a failure.
 var ErrContextOverflow = errors.New("inference: context window exceeded")
 
 // contextOverflowMarkers are the provider spellings of the overflow class.
@@ -472,11 +471,9 @@ var renderedStatusPattern = regexp.MustCompile(`\(HTTP (\d{3})\)`)
 //
 // It lives beside the renderer as its matched pair. Nothing structured survives
 // the flattening (the transport error underneath is rendered, not wrapped), so
-// every caller that has to sort provider failures by class reads the text back
-// — and two of them do, for opposite purposes: the system-job breaker asks
-// whether to back off, and the availability probe asks whether the provider
-// REFUSED. One spelling of the marker, written once and parsed once, is what
-// keeps those two from drifting apart on what a status even is.
+// sorting provider failures by class means reading the text back. One spelling
+// of the marker, written once and parsed once, is what keeps every reader of
+// it (Classify first) agreeing on what a status even is.
 func RenderedStatus(err error) (int, bool) {
 	if err == nil {
 		return 0, false

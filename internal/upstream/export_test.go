@@ -31,10 +31,7 @@ func TestExportedNames_RealScrape(t *testing.T) {
 	}
 	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
 
-	current()
-	prev := global.Load()
-	global.Store(newInstruments(provider))
-	t.Cleanup(func() { global.Store(prev) })
+	SetMeterProviderForTest(t, provider)
 
 	ctx := context.Background()
 	Record(ctx, GitHub, "org-1", Transient)

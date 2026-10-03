@@ -199,7 +199,7 @@ func (e *Engine) compactWarm(ctx context.Context, params Params) error {
 	// same tool_choice (absent), same model, same effort — over the same
 	// transcript plus the one request row. The only cache invalidation in
 	// the whole compaction process is the commit below.
-	completion, err := e.streamWithRetry(ctx, client, e.buildRequest(params, provider, rows, callMaxTokens(params, provider)))
+	completion, err := e.streamWithRetry(ctx, params.OrgID, client, e.buildRequest(params, provider, rows, callMaxTokens(params, provider)))
 	if release != nil {
 		release()
 	}
@@ -264,7 +264,7 @@ func (e *Engine) compactCold(ctx context.Context, params Params) error {
 	// Rows assemble with undelivered rows excluded (the default), so queued
 	// input is never summarized: it survives the commit as live input ordered
 	// after the result row.
-	completion, err := e.streamWithRetry(ctx, client, inference.Request{
+	completion, err := e.streamWithRetry(ctx, params.OrgID, client, inference.Request{
 		Provider:     provider,
 		Model:        model,
 		SystemPrompt: coldCompactionSystemPrompt,

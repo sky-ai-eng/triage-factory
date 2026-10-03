@@ -3,7 +3,6 @@ package systemllm
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/inference"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // TestProviderKey pins which calls share a breaker entry. The env maps go
@@ -102,86 +102,23 @@ func TestProviderKey(t *testing.T) {
 	})
 }
 
-// providerErr builds an error in the shape internal/inference renders a
-// provider failure into — bifrost's own message, the wrapped cause, and the
-// status marker the classifier keys on. Written out rather than referencing
-// the renderer so a change to that rendering fails here loudly instead of
-// silently reclassifying every failure.
-func providerErr(status int, detail string) error {
-	return fmt.Errorf("inference: provider error: %s (HTTP %d) [provider_error] [endpoint: https://api.anthropic.com]", detail, status)
-}
-
-// TestIsTransientFailure pins the classification that decides what trips
-// the breaker: overloaded/rate-limited/5xx and transport failures do; a
-// caller-cancelled ctx, permanent 4xx client errors, and a context overflow
-// don't.
-func TestIsTransientFailure(t *testing.T) {
-	bg := context.Background()
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	cases := []struct {
-		name string
-		ctx  context.Context
-		err  error
-		want bool
+// TestClassify_ReadsARealProviderRendering pins the coupling between the
+// breaker's classification and how a real provider failure is rendered: the
+// status marker is the whole contract, and a change to it would otherwise
+// turn every overload into a Rejected failure that never opens the breaker,
+// with no test failing.
+func TestClassify_ReadsARealProviderRendering(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		want   upstream.Class
 	}{
-		{"nil error", bg, nil, false},
-		{"cancelled ctx never trips the breaker, even for an overload", cancelled, providerErr(529, "overloaded"), false},
-		{"529 overloaded", bg, providerErr(529, "overloaded_error"), true},
-		{"500 internal error", bg, providerErr(500, "internal server error"), true},
-		{"503 service unavailable", bg, providerErr(503, "service unavailable"), true},
-		{"429 rate limited", bg, providerErr(429, "rate_limit_error"), true},
-		{"408 request timeout", bg, providerErr(408, "request timeout"), true},
-		{"409 conflict", bg, providerErr(409, "conflict"), true},
-		{"400 bad request is permanent, not transient", bg, providerErr(400, "invalid_request_error"), false},
-		{"401 unauthorized is permanent, not transient", bg, providerErr(401, "authentication_error"), false},
-		{"404 not found is permanent, not transient", bg, providerErr(404, "model not found"), false},
-		{
-			name: "a transport failure that never got a response is transient",
-			ctx:  bg,
-			err:  errors.New("inference: provider error: failed to execute HTTP request to provider API: dial tcp 10.42.7.1:443: connect: connection refused"),
-			want: true,
-		},
-		{
-			name: "a rendered status settles it: a 400 quoting a transport phrase stays permanent",
-			ctx:  bg,
-			err:  providerErr(400, "invalid_request_error: your prompt mentioned a connection reset"),
-			want: false,
-		},
-		{
-			name: "a context overflow is a deterministic rejection, not provider health",
-			ctx:  bg,
-			err:  fmt.Errorf("%w: prompt is too long: 429000 tokens > 200000 maximum (HTTP 400)", inference.ErrContextOverflow),
-			want: false,
-		},
-		{
-			name: "an unclassified error is NOT transient",
-			ctx:  bg,
-			err:  errors.New("unexpected end of JSON input"),
-			want: false,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isTransientFailure(tc.ctx, tc.err); got != tc.want {
-				t.Errorf("isTransientFailure(...) = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestIsTransientFailure_MatchesInferenceRendering pins the coupling between
-// this classifier and how internal/inference actually renders a status: the
-// marker is the whole contract, and a change to it would otherwise turn every
-// overload into an unclassified (permanent) failure with no test failing.
-func TestIsTransientFailure_MatchesInferenceRendering(t *testing.T) {
-	rendered := renderedStatusFixture(t, 529)
-	if !isTransientFailure(context.Background(), errors.New(rendered)) {
-		t.Fatalf("inference now renders a 529 as %q, which this classifier no longer recognizes", rendered)
-	}
-	if isTransientFailure(context.Background(), errors.New(renderedStatusFixture(t, 401))) {
-		t.Fatal("a 401 rendered the same way must stay permanent")
+		{529, upstream.Transient},
+		{401, upstream.Auth},
+	} {
+		rendered := renderedStatusFixture(t, tc.status)
+		if got, _ := inference.Classify(context.Background(), errors.New(rendered)); got != tc.want {
+			t.Errorf("a real %d renders as %q, which classifies %q, want %q", tc.status, rendered, got, tc.want)
+		}
 	}
 }
 
@@ -320,6 +257,43 @@ func TestComplete_Direct_ProviderBreakerShortCircuitsRepeatedOverload(t *testing
 	}
 	if h.Requests() != afterFirst {
 		t.Errorf("requests = %d after the second Complete, want unchanged at %d — the breaker should short-circuit without a network call", h.Requests(), afterFirst)
+	}
+}
+
+// TestComplete_Direct_CountsEachAttemptedCall: a call that reached the
+// provider counts once under its outcome and the org it was made for; a call
+// the breaker short-circuited made no request and counts nothing.
+func TestComplete_Direct_CountsEachAttemptedCall(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	overloaded := &capturingHandler{t: t, status: 529, errBody: `{"type":"error","error":{"type":"overloaded_error","message":"overloaded"}}`}
+	overloadedSrv := httptest.NewServer(overloaded)
+	defer overloadedSrv.Close()
+	healthySrv := httptest.NewServer(&capturingHandler{t: t, text: "ok"})
+	defer healthySrv.Close()
+
+	r := NewRecorder(nil)
+	ctx, tally := upstream.WithTally(context.Background())
+	failing := stubSecrets{"org-1/anthropic_api_key": "sk-ant-1", "org-1/anthropic_base_url": overloadedSrv.URL}
+	healthy := stubSecrets{"org-2/anthropic_api_key": "sk-ant-2", "org-2/anthropic_base_url": healthySrv.URL}
+
+	if _, err := r.Complete(ctx, completeOpts("org-1", failing)); err == nil {
+		t.Fatal("expected an error for a 529 response")
+	}
+	if _, err := r.Complete(ctx, completeOpts("org-1", failing)); !IsProviderBackoff(err) {
+		t.Fatalf("second call err = %v, want the breaker's short-circuit", err)
+	}
+	if _, err := r.Complete(ctx, completeOpts("org-2", healthy)); err != nil {
+		t.Fatalf("healthy call: %v", err)
+	}
+
+	if got := tally.Attempts(); got != 2 {
+		t.Errorf("attempts = %d, want 2: the short-circuited call made no request", got)
+	}
+	if got := tally.Count(upstream.Transient); got != 1 {
+		t.Errorf("transient = %d, want 1", got)
+	}
+	if got := tally.Count(upstream.OK); got != 1 {
+		t.Errorf("ok = %d, want 1", got)
 	}
 }
 
