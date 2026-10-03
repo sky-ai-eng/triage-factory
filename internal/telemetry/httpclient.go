@@ -9,7 +9,8 @@ import (
 
 // TracedTransport wraps an outbound RoundTripper so every request through
 // it produces a client span. A nil base means http.DefaultTransport, the
-// same convention http.Client uses.
+// same convention http.Client uses, behind a check that drops its idle
+// connections on the first request after a system suspend (sharedTransport).
 //
 // upstream ("github", "jira", "slack", "llm") becomes the span name as
 // "<upstream>.http" — one name per client, since otelhttp's default of
@@ -23,6 +24,9 @@ import (
 // that skip a client's usual request helper.
 func TracedTransport(base http.RoundTripper, upstream string) http.RoundTripper {
 	name := upstream + ".http"
+	if base == nil {
+		base = sharedTransport
+	}
 	return otelhttp.NewTransport(base,
 		otelhttp.WithTracerProvider(ScrubbedTracerProvider()),
 		otelhttp.WithSpanNameFormatter(func(string, *http.Request) string { return name }),

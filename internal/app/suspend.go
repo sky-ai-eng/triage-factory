@@ -34,26 +34,21 @@ func watchSuspendForConnections(ctx context.Context) {
 // clock, which a suspend stops, so without this every org's next poll would
 // still lag by up to its full interval.
 //
-// It drops the idle connections itself before clearing a single slot, rather
-// than relying on watchSuspendForConnections: the two watchers tick
-// independently, so the polls this makes due could otherwise go out on a
-// connection that did not survive the suspend, and wait out the client
-// timeout the drop exists to avoid. In the brain process the drop therefore
-// runs twice per wake, which costs nothing.
+// The polls this makes due need no ordering against the connection watcher
+// above: the GitHub and Jira clients send through telemetry.TracedTransport,
+// which drops the idle pool itself on the first request after a suspend.
 func (a *App) watchSuspendForPolls(ctx context.Context) {
 	suspendclock.Watch(ctx, suspendCheckInterval, suspendThreshold, func(time.Duration) {
-		dropIdleConnections()
 		a.pollerMgr.PollAllSoon()
 	})
 }
 
-// dropIdleConnections closes http.DefaultTransport's idle connections. A
-// keep-alive connection opened before a suspend may be dead after it, because
-// the NAT or VPN state behind it is gone, and the first request to reuse one
-// waits out its client's timeout before failing. Every client built on
-// telemetry.TracedHTTPClient sends through http.DefaultTransport, so one call
-// covers GitHub, Jira, the Jira OAuth and GitHub App flows, and Slack. A
-// connection in use at the wake is left to its request.
+// dropIdleConnections closes http.DefaultTransport's idle connections, which
+// may be dead after a suspend because the NAT or VPN state behind them is
+// gone. The clients built on telemetry.TracedHTTPClient (GitHub, Jira, the
+// Jira OAuth and GitHub App flows, Slack) already make this check before
+// every request, so for them this only frees the dead sockets sooner; it is
+// what covers a caller that uses http.DefaultTransport directly.
 func dropIdleConnections() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		t.CloseIdleConnections()
