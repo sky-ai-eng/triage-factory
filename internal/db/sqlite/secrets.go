@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"crypto/subtle"
+	"sync"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -102,6 +104,8 @@ func (*secretStore) PutUser(_ context.Context, orgID, userID, key, value, _ stri
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	userSecretsMu.Lock()
+	defer userSecretsMu.Unlock()
 	return auth.PutSecret(userKeychainKey(userID, key), value)
 }
 
@@ -113,6 +117,8 @@ func (*secretStore) PutUserSystem(_ context.Context, orgID, userID, key, value, 
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	userSecretsMu.Lock()
+	defer userSecretsMu.Unlock()
 	return auth.PutSecret(userKeychainKey(userID, key), value)
 }
 
@@ -145,7 +151,38 @@ func (*secretStore) DeleteUser(_ context.Context, orgID, userID, key string) (bo
 	// vars). Per-user keys aren't in the well-known envKeys set today,
 	// but routing through the same probe keeps the contract identical.
 	uk := userKeychainKey(userID, key)
+	userSecretsMu.Lock()
+	defer userSecretsMu.Unlock()
 	if !auth.HasStoredSecret(uk) {
+		return false, nil
+	}
+	if err := auth.DeleteSecret(uk); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// userSecretsMu makes DeleteUserSystemIfValue's read and delete one step
+// against every other per-user write. The keychain has no compare-and-delete,
+// and local mode is one process per state root, so a lock held by every
+// per-user writer in it is enough.
+var userSecretsMu sync.Mutex
+
+func (*secretStore) DeleteUserSystemIfValue(_ context.Context, orgID, userID, key, value string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	uk := userKeychainKey(userID, key)
+	userSecretsMu.Lock()
+	defer userSecretsMu.Unlock()
+	if !auth.HasStoredSecret(uk) {
+		return false, nil
+	}
+	cur, err := auth.GetSecret(uk)
+	if err != nil {
+		return false, err
+	}
+	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
 		return false, nil
 	}
 	if err := auth.DeleteSecret(uk); err != nil {

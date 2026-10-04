@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -308,4 +309,49 @@ func (s *secretStore) DeleteUser(ctx context.Context, orgID, userID, key string)
 		`DELETE FROM public.org_secrets
 		   WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text`,
 		orgID, userID, key)
+}
+
+// DeleteUserSystemIfValue compares in Go because the value is only readable
+// decrypted, so the row is locked FOR UPDATE between the read and the delete:
+// an upsert from another pod waits for this transaction, and either finds the
+// row gone and inserts its value, or is the value this read sees.
+func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
+	aad, err := secretAAD(orgID, userID, key)
+	if err != nil {
+		return false, err
+	}
+	deleted := false
+	err = inTx(ctx, s.admin, func(q queryer) error {
+		var ct, nonce []byte
+		err := q.QueryRowContext(ctx, `
+			SELECT ciphertext, nonce FROM public.org_secrets
+			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
+			FOR UPDATE
+		`, orgID, userID, key).Scan(&ct, &nonce)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		plain, err := s.key.Decrypt(ct, nonce, aad)
+		if err != nil {
+			return err
+		}
+		if subtle.ConstantTimeCompare(plain, []byte(value)) != 1 {
+			return nil
+		}
+		if _, err := q.ExecContext(ctx, `
+			DELETE FROM public.org_secrets
+			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
+		`, orgID, userID, key); err != nil {
+			return err
+		}
+		deleted = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return deleted, nil
 }

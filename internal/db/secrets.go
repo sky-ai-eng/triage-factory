@@ -176,4 +176,15 @@ type SecretStore interface {
 	// clear the identity row AND delete the PAT it captured; this exists now
 	// so that handler is a pure addition, not a store change.
 	DeleteUser(ctx context.Context, orgID, userID, key string) (ok bool, err error)
+
+	// DeleteUserSystemIfValue removes a per-user secret WITHOUT a request JWT,
+	// and only while its stored value is still value, reporting whether it
+	// did. For system code that has learned the credential it read is dead:
+	// Atlassian refusing a Cloud OAuth refresh token, say. A value replaced
+	// since it was read is not the dead one (another process's rotation, or
+	// the user connecting again), so it is left alone and deleted=false.
+	//
+	// The comparison and the delete are one step against every other writer
+	// of the row. Same pool and discipline as PutUserSystem.
+	DeleteUserSystemIfValue(ctx context.Context, orgID, userID, key, value string) (deleted bool, err error)
 }

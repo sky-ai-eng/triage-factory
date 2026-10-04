@@ -916,3 +916,41 @@ func seedPgSecondUserInOrg(t *testing.T, h *pgtest.Harness, orgID string) (userI
 	}
 	return userID
 }
+
+// TestSecretStore_Postgres_DeleteUserSystemIfValue pins the compare-and-delete:
+// it removes the row only while it still holds the value the caller read, and
+// touches no other key.
+func TestSecretStore_Postgres_DeleteUserSystemIfValue(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	const key, other = "jira_token/acme.atlassian.net", "jira_token/other.atlassian.net"
+	for _, k := range []string{key, other} {
+		if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, k, "envelope_v1", ""); err != nil {
+			t.Fatalf("PutUserSystem %s: %v", k, err)
+		}
+	}
+
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, "envelope_v0"); err != nil || deleted {
+		t.Fatalf("delete naming a value the row no longer holds = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "envelope_v1" {
+		t.Fatalf("value after the refused delete = (%q, %v), want envelope_v1", got, err)
+	}
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, "envelope_v1"); err != nil || !deleted {
+		t.Fatalf("delete naming the held value = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "" {
+		t.Fatalf("value after the delete = (%q, %v), want none", got, err)
+	}
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, "envelope_v1"); err != nil || deleted {
+		t.Fatalf("delete of a missing row = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, other); err != nil || got != "envelope_v1" {
+		t.Fatalf("another key after the delete = (%q, %v), want it untouched", got, err)
+	}
+}

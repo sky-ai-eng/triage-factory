@@ -2,6 +2,7 @@ package jiraoauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -129,32 +130,77 @@ func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host
 	return ct.cloudID, ct.accessToken, nil
 }
 
-// refresh reads the stored envelope, mints a fresh access token off its refresh
-// token, persists the rotated refresh token back, and caches the result.
+// refresh mints a fresh access token off the stored refresh token (refreshOnce)
+// and answers a refresh token Atlassian refused with invalid_grant.
+//
+// A refused token is dead for good, so the credential holding it is removed
+// and the refusal returned as jira.ErrJiraUserCredentialRefused: the user's
+// connection then reads as not connected, which is what has to happen for
+// them to connect again. It is removed only while it still holds the refused
+// token. The singleflight covers one process, and another one refreshing the
+// same user rotates the token under this one, which Atlassian then refuses
+// here; the credential it stored is live, so the refresh is tried once more
+// with it instead.
 func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key string) (cachedToken, error) {
+	for attempt := 0; ; attempt++ {
+		ct, raw, err := c.refreshOnce(ctx, orgID, userID, host, key)
+		if err == nil || !refusedGrant(err) {
+			return ct, err
+		}
+		deleted, derr := c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, jira.UserTokenKey(host), raw)
+		switch {
+		case derr != nil:
+			// Still dead, and connecting again replaces it, so the user
+			// gets the same answer; only the connection status is behind.
+			cacheLog.Warn("jira refused a stored refresh token and removing it failed",
+				"org", orgID, "user", userID, "host", host, "error", derr)
+			return cachedToken{}, fmt.Errorf("%w: %w", jira.ErrJiraUserCredentialRefused, err)
+		case deleted:
+			cacheLog.Warn("jira refused a stored refresh token; removed the credential, so the user has to connect again",
+				"org", orgID, "user", userID, "host", host)
+			return cachedToken{}, fmt.Errorf("%w: %w", jira.ErrJiraUserCredentialRefused, err)
+		case attempt > 0:
+			return cachedToken{}, err
+		}
+	}
+}
+
+// refusedGrant reports whether err is the token endpoint refusing the refresh
+// token itself (invalid_grant), as opposed to the request or the org's OAuth
+// app, which an admin fixes and the user's credential has nothing to do with.
+func refusedGrant(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Op == opToken && se.Code == "invalid_grant"
+}
+
+// refreshOnce reads the stored envelope, mints a fresh access token off its
+// refresh token, persists the rotated refresh token back, and caches the
+// result. raw is the envelope it read, for refresh to remove when the token in
+// it was refused.
+func (c *TokenCache) refreshOnce(ctx context.Context, orgID, userID, host, key string) (_ cachedToken, raw string, _ error) {
 	raw, err := c.secrets.GetUserSystem(ctx, orgID, userID, jira.UserTokenKey(host))
 	if err != nil {
-		return cachedToken{}, fmt.Errorf("jiraoauth: read stored credential: %w", err)
+		return cachedToken{}, "", fmt.Errorf("jiraoauth: read stored credential: %w", err)
 	}
 	if raw == "" {
-		return cachedToken{}, fmt.Errorf("jiraoauth: no stored credential for org=%s user=%s host=%s", orgID, userID, host)
+		return cachedToken{}, raw, fmt.Errorf("%w: org=%s user=%s host=%s", jira.ErrNoJiraUserCredential, orgID, userID, host)
 	}
 	cred, err := jira.ParseUserCredential(raw)
 	if err != nil {
-		return cachedToken{}, fmt.Errorf("jiraoauth: parse stored credential: %w", err)
+		return cachedToken{}, raw, fmt.Errorf("jiraoauth: parse stored credential: %w", err)
 	}
 	if cred.Method != jira.AuthMethodCloudOAuth || cred.RefreshToken == "" || cred.CloudID == "" {
-		return cachedToken{}, fmt.Errorf("jiraoauth: stored credential is not a usable cloud oauth credential (method=%q)", cred.Method)
+		return cachedToken{}, raw, fmt.Errorf("jiraoauth: stored credential is not a usable cloud oauth credential (method=%q)", cred.Method)
 	}
 
 	app, _, err := c.apps.Resolve(ctx, orgID)
 	if err != nil {
-		return cachedToken{}, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
+		return cachedToken{}, raw, fmt.Errorf("jiraoauth: resolve oauth app: %w", err)
 	}
 
 	tok, err := c.minter.Refresh(ctx, app, cred.RefreshToken)
 	if err != nil {
-		return cachedToken{}, err
+		return cachedToken{}, raw, err
 	}
 
 	// Rotation write-back — the load-bearing step. Persist the NEW refresh
@@ -166,17 +212,17 @@ func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key strin
 	rotated.RefreshToken = tok.RefreshToken
 	env, err := jira.MarshalUserCredential(rotated)
 	if err != nil {
-		return cachedToken{}, fmt.Errorf("jiraoauth: marshal rotated credential: %w", err)
+		return cachedToken{}, raw, fmt.Errorf("jiraoauth: marshal rotated credential: %w", err)
 	}
 	if err := c.secrets.PutUserSystem(ctx, orgID, userID, jira.UserTokenKey(host), env, "Jira user access token"); err != nil {
-		return cachedToken{}, fmt.Errorf("jiraoauth: persist rotated refresh token: %w", err)
+		return cachedToken{}, raw, fmt.Errorf("jiraoauth: persist rotated refresh token: %w", err)
 	}
 
 	ct := cachedToken{cloudID: cred.CloudID, accessToken: tok.AccessToken, expiresAt: tok.ExpiresAt}
 	c.mu.Lock()
 	c.cache[key] = ct
 	c.mu.Unlock()
-	return ct, nil
+	return ct, raw, nil
 }
 
 // Invalidate drops any cached access token for the user — call after a

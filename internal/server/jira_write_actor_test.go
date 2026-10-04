@@ -3,8 +3,12 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -13,7 +17,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/zalando/go-keyring"
 )
 
@@ -235,11 +242,31 @@ func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	keyring.MockInit() // in-memory keychain — the sandbox has no dbus backend
 	s := newTestServer(t)
+	seedStockGate(t, s)
+
+	// userErr makes the point sharp: even if the gate regressed and resolved
+	// up front, queue ignores jiraUserClient — so the 200 below wouldn't move.
+	// The forUserCalls assertion is the load-bearing guard.
+	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
+	s.jiraResolver = res
+
+	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{
+		"issue_keys": []string{"SKY-1"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if calls, _, _ := res.snapshot(); calls != 0 {
+		t.Errorf("ForUser called %d times for a stock queue; want 0 (queue does no Jira write)", calls)
+	}
+}
+
+// seedStockGate passes the stock POST gate: org Jira creds, a team status
+// rule, and the user's stored Jira identity.
+func seedStockGate(t *testing.T, s *Server) {
+	t.Helper()
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
-
-	// Pass the stock POST gate: org Jira creds + a team status rule + the
-	// user's stored Jira identity.
 	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
 		JiraURL: "https://jira.example.com",
 		JiraPAT: "tok",
@@ -259,20 +286,85 @@ func TestStockQueue_SkipsJiraResolver(t *testing.T) {
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
 		t.Fatalf("set jira identity: %v", err)
 	}
+}
 
-	// userErr makes the point sharp: even if the gate regressed and resolved
-	// up front, queue ignores jiraUserClient — so the 200 below wouldn't move.
-	// The forUserCalls assertion is the load-bearing guard.
-	res := &recordingJiraResolver{userErr: jira.ErrNoJiraUserCredential}
-	s.jiraResolver = res
+// jiraUserClientFailures are the ways resolving the acting user's Jira client
+// fails, and the answer each gets: the user reconnects, the request is retried,
+// an admin fixes the org's OAuth app, or the server is at fault.
+var jiraUserClientFailures = []struct {
+	name       string
+	err        error
+	status     int
+	reason     string
+	bodySubstr string
+}{
+	{"refused_grant", fmt.Errorf("mint: %w", jira.ErrJiraUserCredentialRefused), http.StatusConflict, httpx.ReasonNotConfigured, "Connect your Jira again"},
+	{"no_credential", jira.ErrNoJiraUserCredential, http.StatusConflict, httpx.ReasonNotConfigured, "connect your Jira"},
+	{"mint_unreachable", fmt.Errorf("mint: %w", &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},
+	{"mint_unavailable", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 503, Class: upstream.Transient}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},
+	{"mint_rate_limited", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 429, Class: upstream.RateLimited}), http.StatusBadGateway, httpx.ReasonRateLimited, "rate limiting"},
+	{"oauth_app_refused", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 401, Code: "invalid_client", Class: upstream.Auth}), http.StatusBadGateway, httpx.ReasonUpstreamRejected, "org admin"},
+	{"secret_store_network", fmt.Errorf("read credential: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}), http.StatusInternalServerError, httpx.ReasonInternal, ""},
+}
 
-	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{
-		"issue_keys": []string{"SKY-1"},
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+func assertJiraUserClientFailure(t *testing.T, rec *httptest.ResponseRecorder, status int, reason, bodySubstr string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, status, rec.Body.String())
 	}
-	if calls, _, _ := res.snapshot(); calls != 0 {
-		t.Errorf("ForUser called %d times for a stock queue; want 0 (queue does no Jira write)", calls)
+	var body struct {
+		Errors []httpx.ErrorItem `json:"errors"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || len(body.Errors) != 1 {
+		t.Fatalf("body = %s, want one error item (%v)", rec.Body.String(), err)
+	}
+	if body.Errors[0].Reason != reason {
+		t.Errorf("reason = %q, want %q", body.Errors[0].Reason, reason)
+	}
+	if !strings.Contains(body.Errors[0].Message, bodySubstr) {
+		t.Errorf("message = %q, want it to mention %q", body.Errors[0].Message, bodySubstr)
+	}
+}
+
+// TestTaskClaim_JiraTask_UserClientFailureAnsweredByWhoCanFixIt: a claim whose
+// acting user's Jira client cannot be resolved is refused before anything is
+// written, with the status and reason of whoever can fix the cause.
+func TestTaskClaim_JiraTask_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
+	for i, tc := range jiraUserClientFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			s.jiraResolver = &recordingJiraResolver{userErr: tc.err}
+			taskID := fmt.Sprintf("00000000-0000-4000-8000-0000000001%02d", i)
+			seedQueuedJiraTask(t, s.db, "e_jira_fail_"+tc.name, "SKY-"+tc.name, taskID)
+
+			rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
+			assertJiraUserClientFailure(t, rec, tc.status, tc.reason, tc.bodySubstr)
+
+			var claim sql.NullString
+			if err := s.db.QueryRow(`SELECT claimed_by_user_id FROM tasks WHERE id = ?`, taskID).Scan(&claim); err != nil {
+				t.Fatalf("scan task: %v", err)
+			}
+			if claim.Valid && claim.String != "" {
+				t.Errorf("claimed_by_user_id = %q; want unclaimed", claim.String)
+			}
+		})
+	}
+}
+
+// TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt: the stock deck's
+// claim answers the same failures the same way, through the same helper.
+func TestStockClaim_UserClientFailureAnsweredByWhoCanFixIt(t *testing.T) {
+	keyring.MockInit()
+	for _, tc := range jiraUserClientFailures {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestServer(t)
+			seedStockGate(t, s)
+			s.jiraResolver = &recordingJiraResolver{userErr: tc.err}
+
+			rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/claim", map[string]any{
+				"issue_keys": []string{"SKY-1"},
+			})
+			assertJiraUserClientFailure(t, rec, tc.status, tc.reason, tc.bodySubstr)
+		})
 	}
 }

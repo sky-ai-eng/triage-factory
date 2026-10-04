@@ -2,13 +2,18 @@ package jiraoauth
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // fakeRefresher records the refresh tokens it's handed and rotates: each call
@@ -82,6 +87,17 @@ func (f *fakeSecrets) PutUserSystem(_ context.Context, orgID, userID, key, value
 	f.bag[f.key(orgID, userID, key)] = value
 	f.puts++
 	return nil
+}
+
+func (f *fakeSecrets) DeleteUserSystemIfValue(_ context.Context, orgID, userID, key, value string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := f.key(orgID, userID, key)
+	if cur, ok := f.bag[k]; !ok || cur != value {
+		return false, nil
+	}
+	delete(f.bag, k)
+	return true, nil
 }
 
 const (
@@ -239,5 +255,145 @@ func TestTokenCache_WrongMethod(t *testing.T) {
 	cache := newTokenCache(&fakeRefresher{}, fakeAppResolver{}, secrets)
 	if _, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost); err == nil {
 		t.Fatal("want error for non-oauth credential, got nil")
+	}
+}
+
+// fakeTokenEndpoint is a fake Atlassian token endpoint behind a real Minter, so the
+// refusals the cache reacts to are classified exactly as production classifies
+// them. answer decides each request by the refresh token it carries; nil
+// answers a fresh rotation.
+type fakeTokenEndpoint struct {
+	mu     sync.Mutex
+	seen   []string
+	n      int
+	answer func(refreshToken string) (status int, body string)
+}
+
+func (e *fakeTokenEndpoint) minter(t *testing.T) *Minter {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("parse form: %v", err)
+		}
+		token := r.PostForm.Get("refresh_token")
+		e.mu.Lock()
+		e.seen = append(e.seen, token)
+		e.n++
+		n := e.n
+		answer := e.answer
+		e.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if answer != nil {
+			if status, body := answer(token); status != 0 {
+				w.WriteHeader(status)
+				_, _ = io.WriteString(w, body)
+				return
+			}
+		}
+		fmt.Fprintf(w, `{"access_token":"acc-%d","refresh_token":"ref-%d","expires_in":3600}`, n, n)
+	}))
+	t.Cleanup(srv.Close)
+	return &Minter{httpClient: srv.Client(), tokenURL: srv.URL}
+}
+
+func (e *fakeTokenEndpoint) tokens() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.seen...)
+}
+
+func storedEnvelope(secrets *fakeSecrets) string {
+	raw, _ := secrets.GetUserSystem(context.Background(), cOrg, cUser, jira.UserTokenKey(cHost))
+	return raw
+}
+
+// TestTokenCache_RefusedGrantRemovesTheCredential: a refresh token Atlassian
+// refuses with invalid_grant is dead, so the credential holding it is removed
+// and the refusal reads as a credential the user has to connect again.
+func TestTokenCache_RefusedGrantRemovesTheCredential(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+	endpoint := &fakeTokenEndpoint{answer: func(string) (int, string) {
+		return http.StatusBadRequest, `{"error":"invalid_grant","error_description":"Unknown or invalid refresh token."}`
+	}}
+	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+
+	_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) || !errors.Is(err, jira.ErrNoJiraUserCredential) {
+		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused, which is ErrNoJiraUserCredential", err)
+	}
+	if raw := storedEnvelope(secrets); raw != "" {
+		t.Errorf("stored credential = %q, want it removed", raw)
+	}
+	if got := endpoint.tokens(); len(got) != 1 {
+		t.Errorf("token requests = %v, want one: nothing replaced the refused token, so nothing is retried", got)
+	}
+}
+
+// TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries: the token
+// was rotated by another process between this one's read and its refresh, so
+// Atlassian refuses the old one here. The credential now stored is live: it is
+// kept, and the refresh is tried again with it.
+func TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+	endpoint := &fakeTokenEndpoint{}
+	endpoint.answer = func(token string) (int, string) {
+		if token != "ref-0" {
+			return 0, ""
+		}
+		// The other process's rotation write-back lands first.
+		seedOAuthEnvelope(t, secrets, "ref-other")
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	}
+	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+
+	_, access, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if err != nil {
+		t.Fatalf("AccessTokenForUser = %v, want the retry with the rotated token to succeed", err)
+	}
+	if access != "acc-2" {
+		t.Errorf("access token = %q, want the retry's acc-2", access)
+	}
+	if got := endpoint.tokens(); len(got) != 2 || got[1] != "ref-other" {
+		t.Errorf("token requests = %v, want ref-0 then the rotated ref-other", got)
+	}
+	if got := storedRefresh(t, secrets); got != "ref-2" {
+		t.Errorf("stored refresh token = %q, want the retry's rotation ref-2", got)
+	}
+}
+
+// TestTokenCache_OtherFailuresKeepTheCredential: a refusal of the org's OAuth
+// app, a rate limit and an outage say nothing about the user's grant, so the
+// credential stays and the error carries its class.
+func TestTokenCache_OtherFailuresKeepTheCredential(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"invalid_client", http.StatusUnauthorized, `{"error":"invalid_client"}`},
+		{"rate_limited", http.StatusTooManyRequests, `{"error":"rate_limited"}`},
+		{"unavailable", http.StatusServiceUnavailable, `<html>down</html>`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			secrets := newFakeSecrets()
+			seedOAuthEnvelope(t, secrets, "ref-0")
+			before := storedEnvelope(secrets)
+			endpoint := &fakeTokenEndpoint{answer: func(string) (int, string) { return tc.status, tc.body }}
+			cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+
+			_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+			if err == nil || errors.Is(err, jira.ErrNoJiraUserCredential) {
+				t.Fatalf("err = %v, want a failure that is not a missing credential", err)
+			}
+			if _, ok := upstream.ClassOf(err); !ok {
+				t.Errorf("err = %v, want it to carry an upstream class", err)
+			}
+			if got := storedEnvelope(secrets); got != before {
+				t.Errorf("stored credential changed to %q, want it kept", got)
+			}
+		})
 	}
 }

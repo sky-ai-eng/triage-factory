@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -501,15 +500,8 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	var jiraUserClient *jira.Client
 	if action == stockActionClaim || action == stockActionDone {
 		c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
-		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-				Reason:  httpx.ReasonNotConfigured,
-				Message: "connect your Jira to act on tickets",
-			})
-			return
-		}
 		if jerr != nil {
-			internalError(w, "stock", jerr)
+			writeJiraUserClientError(w, "stock", jerr)
 			return
 		}
 		jiraUserClient = c

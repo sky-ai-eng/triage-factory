@@ -26,6 +26,14 @@ var (
 	// assign the ticket to the service account, not the claimer. Handlers
 	// surface it as a "connect your Jira" 409/422 rather than acting as the bot.
 	ErrNoJiraUserCredential = errors.New("jira: no user credential for org/user")
+
+	// ErrJiraUserCredentialRefused is ErrNoJiraUserCredential for a stored
+	// credential Jira refused outright: Atlassian answered a Cloud OAuth
+	// refresh with invalid_grant, so the user revoked the grant or it
+	// expired, and the stored credential was removed. A caller that asks only
+	// whether a usable credential exists gets the answer it already handles;
+	// one that can say why the user has to connect again tells them so.
+	ErrJiraUserCredentialRefused = fmt.Errorf("%w: jira refused the stored credential", ErrNoJiraUserCredential)
 )
 
 // The well-known org-level Jira secret keys. They mirror integrations.KeyJira*
