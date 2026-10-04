@@ -41,6 +41,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -184,7 +185,7 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, er
 	//
 	// Named error return so the failure exits below don't each need a
 	// status line. Fixed message, not err.Error() — a failed token
-	// request's error text embeds a truncated response body.
+	// request's error text carries the endpoint's own error message.
 	ctx, span := tracer.Start(ctx, "jiraoauth.token_request",
 		trace.WithAttributes(telemetry.Disposition(form.Get("grant_type"))))
 	defer span.End()
@@ -209,11 +210,11 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, er
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	var parsed tokenResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		// A non-JSON body (e.g. a proxy/load-balancer "502 Bad Gateway") would
-		// otherwise drop its content behind the unmarshal error — surface a
-		// truncated copy so the failure is diagnosable.
-		return Token{}, fmt.Errorf("jiraoauth: parse token response (status %d): %w: body: %s", resp.StatusCode, err, truncate(string(body), 200))
+	if json.Unmarshal(body, &parsed) != nil {
+		// A body that is not a token response (a proxy's "502 Bad Gateway"
+		// page) is described by its size, never quoted: upstream bodies do
+		// not reach a log line.
+		return Token{}, fmt.Errorf("jiraoauth: parse token response (status %d): %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	if resp.StatusCode != http.StatusOK || parsed.Error != "" {
 		detail := parsed.Error
@@ -221,7 +222,7 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, er
 			detail = parsed.Error + ": " + parsed.ErrorDescription
 		}
 		if detail == "" {
-			detail = fmt.Sprintf("status %d", resp.StatusCode)
+			detail = fmt.Sprintf("status %d: %s", resp.StatusCode, upstream.Excerpt(body))
 		}
 		return Token{}, fmt.Errorf("%w: %s", ErrTokenEndpoint, detail)
 	}
@@ -258,20 +259,14 @@ func (m *Minter) AccessibleResources(ctx context.Context, accessToken string) ([
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jiraoauth: accessible-resources status %d: %s", resp.StatusCode, truncate(string(body), 256))
+		body, _ := upstream.ReadErrorBody(resp.Body)
+		return nil, fmt.Errorf("jiraoauth: accessible-resources status %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	var resources []Resource
 	if err := json.Unmarshal(body, &resources); err != nil {
 		return nil, fmt.Errorf("jiraoauth: parse accessible-resources: %w", err)
 	}
 	return resources, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

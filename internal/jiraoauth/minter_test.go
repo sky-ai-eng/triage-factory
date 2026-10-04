@@ -110,6 +110,58 @@ func TestRequestToken_MissingRefreshToken(t *testing.T) {
 	}
 }
 
+// TestMinter_ErrorsCarryOnlyAnExcerpt: a failed token or accessible-resources
+// request reaches a log line, so its error carries the status and the
+// upstream's own message from a JSON body, and only the size of anything
+// else, such as a proxy's HTML page.
+func TestMinter_ErrorsCarryOnlyAnExcerpt(t *testing.T) {
+	page := "<html><body><h1>502 Bad Gateway</h1>" + strings.Repeat("<p>cloudfront</p>", 50) + "</body></html>"
+	calls := []struct {
+		name string
+		call func(*Minter) error
+	}{
+		{name: "token", call: func(m *Minter) error {
+			_, err := m.Refresh(context.Background(), testApp(), "ref")
+			return err
+		}},
+		{name: "accessible resources", call: func(m *Minter) error {
+			_, err := m.AccessibleResources(context.Background(), "acc")
+			return err
+		}},
+	}
+	for _, c := range calls {
+		for _, tc := range []struct {
+			name    string
+			body    string
+			want    string
+			notWant string
+		}{
+			{name: "proxy page", body: page, want: "502", notWant: "<"},
+			{name: "json", body: `{"code":502,"message":"Bad gateway, try again","trace":"abc123"}`, want: "Bad gateway, try again", notWant: "abc123"},
+		} {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
+
+				err := c.call(&Minter{httpClient: srv.Client(), tokenURL: srv.URL, resourcesURL: srv.URL})
+				if err == nil {
+					t.Fatal("a 502 returned no error")
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, tc.want) {
+					t.Errorf("error %q does not carry %q", msg, tc.want)
+				}
+				if strings.Contains(msg, tc.notWant) || strings.Contains(msg, "cloudfront") {
+					t.Errorf("error carries the response body: %q", msg)
+				}
+			})
+		}
+	}
+}
+
 // TestAccessibleResources_ParsesSites pins the bearer-auth GET + parse.
 func TestAccessibleResources_ParsesSites(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

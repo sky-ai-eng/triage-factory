@@ -31,8 +31,14 @@ type cycleConnection struct {
 // newCycleConnection starts the count for one org's cycle. Every request made
 // under the returned ctx is counted, including inside the tracker's
 // discovery fan-out.
+//
+// The ctx is also a fail-fast scope: once one request has spent its retries
+// against a host that is not answering, the cycle has learned the connection
+// is down, and the rest of its requests to that host are sent once each
+// instead of each waiting out the same retry ladder. The next cycle retries
+// in full.
 func newCycleConnection(ctx context.Context) (context.Context, *cycleConnection) {
-	ctx, tally := upstream.WithTally(ctx)
+	ctx, tally := upstream.WithTally(upstream.WithFailFast(ctx))
 	return ctx, &cycleConnection{tally: tally, noted: map[upstream.Class]int{}}
 }
 

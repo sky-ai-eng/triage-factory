@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
-	"io"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -25,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // Sentinel errors returned by buildManifestAndState so callers can map
@@ -785,8 +785,11 @@ func exchangeManifestCode(ctx context.Context, conversionURL string) (*manifestC
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("github returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		// An upstream body never reaches a log line: the error carries
+		// GitHub's own message from a JSON body and only the size of
+		// anything else, such as a proxy's HTML page.
+		body, _ := upstream.ReadErrorBody(resp.Body)
+		return nil, fmt.Errorf("github returned %d: %s", resp.StatusCode, upstream.Excerpt(body))
 	}
 	var out manifestConversionResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -118,5 +119,89 @@ func TestRefreshJira_EveryQueryFailingIsAnError(t *testing.T) {
 	}
 	if n := completions(pub); n != 1 {
 		t.Errorf("a cycle Jira answered published %d poll completions, want 1", n)
+	}
+}
+
+// TestRefreshJira_EveryQueryRateLimitedIsAnError: when Jira answers every
+// discovery query with a 429 whose Retry-After is longer than the client
+// waits, the cycle fetched nothing. That is not a completed poll: RefreshJira
+// returns the rate limit, keeping its class, and publishes no completion. A
+// rate-limited query is not one Jira rejected, so no workflow is read to
+// salvage it.
+func TestRefreshJira_EveryQueryRateLimitedIsAnError(t *testing.T) {
+	jiraclient.SetRetryBackoffForTest(t, time.Millisecond)
+	var calls, workflowReads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if strings.HasSuffix(r.URL.Path, "/statuses") {
+			workflowReads.Add(1)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "120")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"errorMessages":["Rate limit exceeded."]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
+	rules := JiraRules{
+		{Key: "PROJ", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
+		{Key: "OPS", PickupMembers: jiraRefs("To Do"), DoneMembers: jiraRefs("Done")},
+	}
+	pub := &recordingPublisher{}
+
+	_, err := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID).
+		RefreshJira(context.Background(), client, srv.URL, rules)
+	if err == nil {
+		t.Fatal("RefreshJira returned nil with every discovery query rate-limited")
+	}
+	if class, ok := upstream.ClassOf(err); !ok || class != upstream.RateLimited {
+		t.Errorf("class of %v = %q (ok=%v), want rate_limited", err, class, ok)
+	}
+	pub.mu.Lock()
+	defer pub.mu.Unlock()
+	for _, e := range pub.events {
+		if e.EventType == domain.EventSystemPollCompleted {
+			t.Error("a cycle that fetched nothing published a poll completion")
+		}
+	}
+	if calls.Load() == 0 {
+		t.Error("no discovery query reached the server")
+	}
+	if n := workflowReads.Load(); n != 0 {
+		t.Errorf("read a workflow %d times to salvage a rate-limited query", n)
+	}
+}
+
+// TestDiscoveryRateLimited pins when a discovery pass that the connection did
+// not fail still fetched nothing: no call succeeded and at least one was
+// rate-limited.
+func TestDiscoveryRateLimited(t *testing.T) {
+	limited := &jiraclient.StatusError{Status: http.StatusTooManyRequests, Class: upstream.RateLimited}
+	rejected := &jiraclient.StatusError{Status: http.StatusBadRequest, Class: upstream.Rejected}
+	for _, tc := range []struct {
+		name string
+		errs []error
+		want bool
+	}{
+		{name: "nothing sent"},
+		{name: "one call succeeded", errs: []error{limited, nil}},
+		{name: "every call rejected", errs: []error{rejected, rejected}},
+		{name: "every call rate-limited", errs: []error{limited, limited}, want: true},
+		{name: "rate-limited beside a rejection", errs: []error{rejected, limited}, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := discoveryRateLimited("jira", tc.errs)
+			if (err != nil) != tc.want {
+				t.Fatalf("discoveryRateLimited = %v, want error: %v", err, tc.want)
+			}
+			if err != nil {
+				if class, _ := upstream.ClassOf(err); class != upstream.RateLimited {
+					t.Errorf("class of %v = %q, want rate_limited", err, class)
+				}
+			}
+		})
 	}
 }

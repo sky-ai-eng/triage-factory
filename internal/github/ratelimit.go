@@ -204,7 +204,7 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 }
 
 // doWithRetry is the shared request loop behind every request-core method
-// (request, GetConditional, PostGraphQL, DownloadArtifact — the last supplies
+// (request, GetConditional, postGraphQL, DownloadArtifact — the last supplies
 // its own hc with an extended timeout, everything else passes c.http). Every
 // attempt is classified and counted (upstream.Record) against the client's
 // org.
@@ -225,6 +225,10 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
 // the caller unchanged.
+//
+// Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
+// transient failure marks its host unreachable, and every later request to
+// that host gets one attempt the same way a mutation does.
 //
 // Any response that isn't retried is returned to the caller. A success keeps
 // its body untouched and still open, so callers that stream
@@ -249,6 +253,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		if err != nil {
 			return nil, err
 		}
+		host := req.URL.Host
 		resp, err := hc.Do(req)
 		if err != nil {
 			class, counted := upstream.ClassifyTransport(ctx, err)
@@ -256,7 +261,8 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				return nil, err
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts {
+			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, host)
 				return nil, err
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
@@ -276,6 +282,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		if readErr != nil {
 			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
 				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+				upstream.MarkUnreachable(ctx, host)
 			}
 			return nil, readErr
 		}
@@ -303,22 +310,21 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				wait = upstream.Backoff(attempt, rateLimitBackoffBase, maxRateLimitWait)
 			}
 
-			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts {
+			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
 				return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, err
 			}
 		case upstream.Transient:
-			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts {
-				return resp, nil
-			}
 			wait := transientBackoff(attempt)
 			if hasRetryAfter {
-				if retryAfter > transientBackoffMax {
-					return resp, nil
-				}
 				wait = retryAfter
+			}
+			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts ||
+				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, host)
+				return resp, nil
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, err

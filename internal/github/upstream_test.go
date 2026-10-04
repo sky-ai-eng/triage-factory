@@ -248,7 +248,7 @@ func TestJSON403_IsAuthAndNotRetried(t *testing.T) {
 }
 
 // TestLiftValidationErr_ReadsTypedBody: the 422 envelope is lifted from
-// HTTPError.Body, since the message no longer carries the body.
+// HTTPError.Body, because the message carries only an excerpt of it.
 func TestLiftValidationErr_ReadsTypedBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnprocessableEntity)

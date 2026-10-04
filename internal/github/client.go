@@ -492,11 +492,22 @@ func (e gqlErrors) first(context string) error {
 // preserved exactly — a usable `data` block degrades to the partial result,
 // an absent/null `data` is a genuine failure.
 //
-// Every caller in this codebase uses PostGraphQL for reads (queries), never
-// mutations, so it goes through doIdempotent — a rate limit or a transient
-// failure retries like a GET rather than surfacing immediately as it would
-// for a real mutation.
+// A query is a read, so it goes through doIdempotent: a rate limit or a
+// transient failure retries like a GET. A mutation goes through
+// PostGraphQLMutation instead.
 func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
+	return c.postGraphQL(ctx, body, true)
+}
+
+// PostGraphQLMutation is PostGraphQL for a GraphQL mutation. It goes through
+// doMutation, a single attempt like every REST write: a mutation that met a
+// 5xx or a dropped connection may already have been applied, so replaying it
+// could apply it twice. A rate limit returns ErrRateLimited at once.
+func (c *Client) PostGraphQLMutation(ctx context.Context, body any) ([]byte, error) {
+	return c.postGraphQL(ctx, body, false)
+}
+
+func (c *Client) postGraphQL(ctx context.Context, body any, idempotent bool) ([]byte, error) {
 	if c.viaProxy {
 		// A credential-proxy client's baseURL is the REST proxy, which does not
 		// front the sibling GraphQL endpoint; deriving graphqlURL from it would
@@ -510,7 +521,13 @@ func (c *Client) PostGraphQL(ctx context.Context, body any) ([]byte, error) {
 		return c.newRequest(ctx, "POST", graphqlURL(c.baseURL), body, "")
 	}
 
-	resp, err := c.doIdempotent(ctx, build)
+	var resp *http.Response
+	var err error
+	if idempotent {
+		resp, err = c.doIdempotent(ctx, build)
+	} else {
+		resp, err = c.doMutation(ctx, build)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("graphql request: %w", err)
 	}
