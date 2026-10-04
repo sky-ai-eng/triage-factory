@@ -1114,6 +1114,28 @@ func discoveryUnreached(source string, errs []error) error {
 	return fmt.Errorf("%s discovery: all %d calls failed: %w", source, len(errs), cause)
 }
 
+// discoveryRateLimited reports a discovery pass that fetched nothing because
+// the upstream asked it to wait: no call succeeded and at least one was
+// rate-limited. It is checked after discoveryUnreached, which owns the passes
+// the connection failed. The returned error wraps the rate limit, so a caller
+// reads its class and does not count the pass as a completed poll; the
+// connection state is untouched, since a rate limit says nothing about it.
+func discoveryRateLimited(source string, errs []error) error {
+	var cause error
+	for _, err := range errs {
+		if err == nil {
+			return nil
+		}
+		if class, _ := upstream.ClassOf(err); class == upstream.RateLimited && cause == nil {
+			cause = err
+		}
+	}
+	if cause == nil {
+		return nil
+	}
+	return fmt.Errorf("%s discovery: all %d calls failed: %w", source, len(errs), cause)
+}
+
 // repoListResult is one goroutine's outcome from Phase 1a's per-repo
 // open-PR listing — everything needed to merge into the shared seen/all/quiet
 // result, deferred to the sequential merge so that merge can run in original
@@ -1973,7 +1995,11 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	outcomes := make([]error, 0, len(queries))
 	for _, q := range queries {
 		issues, err := client.SearchIssues(ctx, q.jql, fields, 100)
-		if err != nil && q.build != nil {
+		// Only a query Jira rejected can be one naming a dead status. One it
+		// rate-limited or failed to answer would meet the same failure on the
+		// workflow read, which only adds a request to a host already refusing
+		// them.
+		if class, _ := upstream.ClassOf(err); err != nil && q.build != nil && class == upstream.Rejected {
 			if jql, dropped := t.salvageJiraQuery(ctx, client, q.projectKey, q.members, q.build, liveStatuses); jql != "" {
 				trackerLog.WarnContext(ctx, "jira discovery query rebuilt without statuses the workflow no longer has",
 					"project", q.projectKey, "dropped", domain.JiraStatusNames(dropped), "error", err)
@@ -2013,6 +2039,12 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 	if err := discoveryUnreached("jira", outcomes); err != nil {
 		span.SetStatus(codes.Error, "every query failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
+		return all, err
+	}
+	if err := discoveryRateLimited("jira", outcomes); err != nil {
+		// Not an error status, for the reason the GitHub fan-out gives: a
+		// rate limit is the upstream answering, and a handled outcome.
+		span.SetAttributes(telemetry.Outcome("rate_limited"))
 		return all, err
 	}
 
