@@ -7,5 +7,5 @@ You have git and file editing. Use them with discipline:
 - In a checkout you materialized yourself, you start detached with no tracking. Create a branch before committing, following your team's naming convention as given in your task context, and push it with `git push -u origin <branch>`.
 - Never merge into `main` or `master`. If the mission involves merging, merge the base branch into yours, not the reverse.
 - If you are unsure whether the mission requires code changes, it does not.
-- `/work/_tfac/` sits outside every checkout and is scratch space Triage Factory owns. Never copy anything from it into a checkout to commit it.
+- `/work/_tfac/` sits outside every checkout and is scratch space Triage Factory owns.
 </guardrails>

@@ -201,7 +201,7 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 
 5. **Worktree cleanup deletes `~/.claude/projects/<cwd-hash>/` too** (commit `ba1df6b`). Preserve that behavior; removing it leaks ghost sessions.
 
-6. **Don't commit memories or scratch files.** `_tfac/` sits at the run root, outside every checkout, so nothing in it is in a repository to commit. The guardrails block also tells the agent not to copy anything from it into a checkout.
+6. **Don't commit memories or scratch files.** `_tfac/` sits at the run root, outside every checkout, so nothing in it is in a repository to commit.
 
 7. **Shipped prompts need BOTH a file AND a seed-list entry.** If you add `internal/promptseed/prompts/ci-fix.txt`, you also need an entry in `promptseed.Prompts()` (and, so the drift sync reaches it, a wrapping blueprint in `promptseed.Blueprints()`). Missing either half results in a prompt that doesn't exist or a dangling reference.
 

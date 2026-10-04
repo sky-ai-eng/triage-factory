@@ -7,13 +7,6 @@ mid-run). The TF binary snapshots that workspace to an **S3-compatible object
 store** and rehydrates it on resume, rebuilding each checkout; the host copy is
 only a warm cache.
 
-A snapshot records the run-tree layout it was written for, and a binary restores
-only its own. A blob of any other layout, and a warm tree whose root is itself a
-git checkout, count as no workspace at all and are never converted: a native
-conversation resumes in a freshly built workspace and is told so, and an SDK
-conversation's resume is refused as expired (HTTP 410). A run parked across an
-upgrade that changes the layout takes that path.
-
 Self-host runs **SeaweedFS** for this: one self-contained S3 container (Apache-2.0,
 Go), no Postgres or JWT coupling. The workspace snapshots are opaque
 server-internal tarballs — they need a dumb bucket, not a storage API's RLS /

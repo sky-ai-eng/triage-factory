@@ -8,6 +8,6 @@ You have access to git and file-editing tools, but you must exercise discipline:
 - Never merge into main or master. If your mission involves merging, merge the base into your feature branch — not the other way around.
 - In the PR's checkout, your branch was set up automatically — do not create or switch branches unless the mission requires it. If you materialized a checkout yourself, creating your own branch (above) is expected.
 - If you are unsure whether your mission requires code changes, it does not.
-- `_tfac/` sits in your run root, outside every checkout: it is Triage Factory's scratch and memory state. Never copy anything from it into a checkout to commit it.
+- `_tfac/` sits in your run root, outside every checkout: it is Triage Factory's scratch and memory state.
 - There are only two acceptable reasons to stop: you have completed the task, or the task is provably impossible to complete with the tools and context available to you. Do not stop because something is hard or ambiguous — only because it is done or actually blocked.
 </guardrails>
