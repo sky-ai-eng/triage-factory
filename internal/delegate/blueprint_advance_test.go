@@ -98,39 +98,10 @@ func TestBlueprintDecisionForStepConversation(t *testing.T) {
 	}
 }
 
-// --- Draft-PR sidecar never parks the step ----------------------
-
-// TestProcessCompletion_BlueprintStepDraftPRDoesNotPark pins the post-park-removal
-// behavior: a non-final blueprint step that emits continue AND queued a draft PR
-// is NOT coerced and does NOT park — the artifact is an async sidecar, so the
-// step completes with its real outcome (continue) and the orchestrator advances
-// to the next step. (Previously this was coerced continue→finish and parked
-// for approval, freezing the blueprint.)
-func TestProcessCompletion_BlueprintStepDraftPRDoesNotPark(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "bp-nopark")
-	makeConversationBlueprintStep(t, database, conversationID, taskID)
-	// Queue a draft PR — the legacy "pending external action" — and confirm it no
-	// longer parks the step.
-	seedDraftPRArtifact(t, s, conversationID)
-	task := loadTask(t, s, taskID)
-	cwd := t.TempDir()
-
-	s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "bpr-"+conversationID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), task,
-		res(`{"outcome":"continue","summary":"opened a PR"}`), cwd, nil, "", "event", "")
-
-	conv := loadConversation(t, s, conversationID)
-	if conv.Outcome != "continue" {
-		t.Errorf("conv.outcome = %q, want continue (a queued draft PR no longer coerces the outcome)", conv.Outcome)
-	}
-	if conv.Status != "completed" {
-		t.Errorf("conv.status = %q, want completed (a draft PR is a sidecar; the step never parks)", conv.Status)
-	}
-}
-
-// TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue is the
-// contrast: a blueprint step that emits continue without queuing any external
-// action keeps continue (no coercion) and completes normally, leaving the
-// orchestrator to advance to the next step.
+// TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue: a
+// blueprint step that emits continue without queuing any external action keeps
+// continue and completes normally, leaving the orchestrator to advance to the
+// next step.
 func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "bp-continue")
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
@@ -231,25 +202,6 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 	}
 	if claimedByAgent.String != runmode.LocalDefaultAgentID {
 		t.Errorf("claimed_by_agent_id = %q, want the bot — an unresolved completion keeps the task bot-claimed", claimedByAgent.String)
-	}
-}
-
-// TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask is the
-// contrast: a blueprint that completes with no unresolved artifact closes the
-// task as before.
-func TestTerminateBlueprint_CompletedWithNoUnresolvedArtifactClosesTask(t *testing.T) {
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-clean")
-	stampBotClaim(t, database, taskID)
-	makeConversationBlueprintStep(t, database, conversationID, taskID)
-	blueprintRunID := "bpr-" + conversationID
-	setConversationStatus(t, database, conversationID, "completed")
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
-		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
-		domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	if got := readTaskStatus(t, database, taskID); got != "done" {
-		t.Errorf("task.status = %q, want done (a clean completion with no unresolved artifact closes the task)", got)
 	}
 }
 

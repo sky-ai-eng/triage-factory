@@ -381,12 +381,11 @@ func runDir(rootKey string) string {
 	return filepath.Join(os.TempDir(), runsDir, rootKey)
 }
 
-// RunRoot returns the run-root path for a given rootKey, without
-// creating it. The Jira lazy-worktree CLI calls this from a delegated
-// agent process to derive the parent directory under which `workspace
-// add` materializes per-repo worktrees as `{runRoot}/{owner}/{repo}/`.
-// Callers who need the directory to exist on disk should use MakeRunRoot
-// instead.
+// RunRoot returns the run-root path for a given rootKey, without creating it.
+// Every delegated run works in one: a plain folder that holds TF's state
+// (_tfac, the memory link, team knowledge, .claude/skills) and, beneath it, the
+// customer's checkouts at <root>/<owner>/<repo>/<slug>. The agent host derives
+// the same path when a run's recorded worktree_path is missing.
 //
 // rootKey is a key, not a conversation id, and this family takes no view on
 // which id a caller keys its tree by — it only requires that the caller uses
@@ -400,24 +399,19 @@ func RunRoot(rootKey string) string {
 	return runDir(rootKey)
 }
 
-// MakeRunRoot creates the run-root directory and returns its absolute
-// path. Used by the spawner's setupJira path: the agent's initial cwd
-// is the run-root (a throwaway dir holding only the _tfac/ scratch
-// subdirs until the agent calls `workspace add` to materialize
-// worktrees as subdirs).
+// MakeRunRoot creates the run-root directory and returns its absolute path. It
+// is where every run starts: the agent's working directory, and in multi its
+// home folder. Checkouts land beneath it, never at it.
 //
-// Single-purpose vs. CreateForBranch: CreateForBranch creates a worktree
-// AT runDir(rootKey); MakeRunRoot creates only the directory itself, with
-// no git contents. The Jira lazy path uses MakeRunRoot so the agent has
-// somewhere to land before it has chosen which repo(s) to materialize.
+// The skills symlink is planted here because the root is the one directory TF
+// owns outright. In multi the root is the jail's HOME, so ~/.claude/skills
+// resolves through it; locally the step skill is written into the same path,
+// which is the SDK's working directory.
 func MakeRunRoot(rootKey string) (string, error) {
 	dir := runDir(rootKey)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("mkdir run root: %w", err)
 	}
-	// The run root is the agent's cwd AND its in-jail HOME, so a blueprint step
-	// running on a Jira task discovers its skill through the same symlink a
-	// GitHub PR run's worktree carries.
 	plantSandboxSkillsLink(dir)
 	return dir, nil
 }
@@ -578,16 +572,6 @@ func repairOriginURL(ctx context.Context, bareDir, wantURL string) error {
 	return gitRunCtx(ctx, bareDir, "remote", "set-url", "origin", wantURL)
 }
 
-// makeWorktreeDir creates the run directory for a worktree. rootKey keys
-// the tree under the same contract as RunRoot / MakeRunRoot — see RunRoot.
-func makeWorktreeDir(rootKey string) (string, error) {
-	wtDir := runDir(rootKey)
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0755); err != nil {
-		return "", fmt.Errorf("mkdir runs: %w", err)
-	}
-	return wtDir, nil
-}
-
 // gitBaseEnv is the parent environment every git subprocess in this package
 // runs with: the process environment with GIT_TERMINAL_PROMPT forced to 0.
 // Disabling the prompt is essential on a headless server — git can never
@@ -624,68 +608,6 @@ func gitBaseEnv() []string {
 		out = append(out, kv)
 	}
 	return append(out, "GIT_TERMINAL_PROMPT=0")
-}
-
-// TrackedUnder returns the slash-separated repo-relative paths git tracks under
-// prefix in the working tree at dir. Empty for a prefix the repo knows nothing
-// about, and for a dir that is no working tree at all (a Jira run-root) — a
-// caller uses this to tell the repo's files from ours, and "not a repo" means
-// every path under the prefix can only be ours.
-//
-// This is what makes .git/info/exclude's blind spot safe to work around: an
-// exclude pattern does nothing for an already-tracked path, so a repo that
-// happens to track something under the directory TF claims would have that
-// content mutated by an infrastructure write and the change swept into the
-// agent's next commit. Ask git, don't infer from the exclude list.
-//
-// Errors are folded into "nothing tracked" deliberately: the answer's only use
-// is to hold TF back from touching a path, and a git that won't answer is not a
-// reason to fail a run.
-// AdoptLegacyScratchDir renames a run tree's pre-rename scratch dir to the
-// current name, so a run reusing a tree an older binary built still finds the
-// files an earlier step of the same workflow dropped there — a review pass's
-// findings, a downloaded CI log — where this binary's prompts say they are.
-// Without it that step reads an empty directory and, per its own instructions,
-// proceeds as though there was nothing to read.
-//
-// Refuses to move anything the repo tracks (the dir would be the repo's, not
-// ours) and never overwrites an existing current-name dir. Best-effort
-// otherwise: on failure the tree keeps both names and the run proceeds.
-func AdoptLegacyScratchDir(ctx context.Context, dir string) {
-	if dir == "" {
-		return
-	}
-	legacy := filepath.Join(dir, legacyScratchDir)
-	if info, err := os.Stat(legacy); err != nil || !info.IsDir() {
-		return
-	}
-	if _, err := os.Stat(filepath.Join(dir, ScratchDir)); err == nil {
-		return
-	}
-	if len(TrackedUnder(ctx, dir, legacyScratchDir)) > 0 {
-		worktreeLog.Warn("repo tracks files under the legacy scratch dir; leaving it in place", "dir", legacy)
-		return
-	}
-	if err := os.Rename(legacy, filepath.Join(dir, ScratchDir)); err != nil {
-		worktreeLog.Warn("adopt legacy scratch dir failed", "dir", legacy, "error", err)
-	}
-}
-
-func TrackedUnder(ctx context.Context, dir, prefix string) map[string]bool {
-	if dir == "" || prefix == "" {
-		return nil
-	}
-	out, err := gitOutputCtx(ctx, dir, "ls-files", "-z", "--", prefix)
-	if err != nil {
-		return nil
-	}
-	tracked := map[string]bool{}
-	for _, p := range strings.Split(out, "\x00") {
-		if p != "" {
-			tracked[p] = true
-		}
-	}
-	return tracked
 }
 
 func gitOutputCtx(ctx context.Context, dir string, args ...string) (string, error) {

@@ -2,7 +2,9 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,26 +210,82 @@ func pruneAll(baseDir string) {
 	}
 }
 
-// removeWorktreeRegFor deletes the single bare admin registration that
-// belongs to wtDir, if present. A cancelled/killed `git worktree add`
-// leaves <bare>/worktrees/<name> behind, locked with git's transient
-// "initializing" marker; plain `git worktree prune` skips locked entries
-// so the branch stays pinned. git names that admin dir after the
-// basename of the worktree path, and our worktree paths are
-// runDir(rootKey) (basename == rootKey, globally unique), so the entry is
-// deterministically worktrees/<basename(wtDir)>.
+// worktreeAdminEntries lists the bare's worktree admin entries by name. A
+// caller takes it under the per-repo lock right before a `git worktree add`, so
+// that if the add fails, removeWorktreeRegFor can tell the entry that add made
+// from every entry that was already there. Nil when the listing fails, which
+// leaves only the recorded path to go by.
+func worktreeAdminEntries(bareDir string) map[string]bool {
+	entries, err := os.ReadDir(filepath.Join(bareDir, "worktrees"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	return names
+}
+
+// removeWorktreeRegFor deletes the bare admin registration that belongs to
+// wtDir, if present. A cancelled/killed `git worktree add` leaves
+// <bare>/worktrees/<name> behind, locked with git's transient "initializing"
+// marker; plain `git worktree prune` skips locked entries, so the entry
+// outlives the add.
 //
-// Targeting by path — rather than sweeping every locked=initializing
-// entry in the bare — is what makes this safe to call without the
-// per-repo lock: it can only ever touch this run's own dead add, never a
-// concurrent add against the same bare. os.RemoveAll is a no-op when the
-// entry was never created (add failed before mkdir).
-func removeWorktreeRegFor(bareDir, wtDir string) {
-	adminDir := filepath.Join(bareDir, "worktrees", filepath.Base(wtDir))
-	if err := os.RemoveAll(adminDir); err != nil {
-		worktreeLog.Warn("clear half-built worktree failed", "dir", adminDir, "error", err)
+// The entry's name cannot identify it. git derives it from the checkout's
+// basename — for a checkout under a run root, its slug, which every run that
+// materialized that slug shares — sanitizes it, and adds a numeric suffix when
+// the name is taken. So the entry is found by the checkout path git recorded in
+// it, and an entry an add left before it recorded any path is found by being
+// absent from before: worktreeAdminEntries, listed under the per-repo lock just
+// before the add. before is nil for a checkout whose add completed, which always
+// recorded its path.
+//
+// Every other entry is left alone, a concurrent add against the same bare
+// included. The one such add this cannot tell from its own is one in another
+// process, caught in the instant between git creating its entry and recording
+// its path; that add then fails as a whole rather than leaving anything behind.
+func removeWorktreeRegFor(bareDir, wtDir string, before map[string]bool) {
+	worktreesDir := filepath.Join(bareDir, "worktrees")
+	entries, err := os.ReadDir(worktreesDir)
+	if err != nil {
 		return
 	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		adminDir := filepath.Join(worktreesDir, e.Name())
+		recorded := recordedWorktreePath(adminDir)
+		if !samePath(recorded, wtDir) && (recorded != "" || before == nil || before[e.Name()]) {
+			continue
+		}
+		if err := os.RemoveAll(adminDir); err != nil {
+			worktreeLog.Warn("clear half-built worktree failed", "dir", adminDir, "error", err)
+		}
+	}
+}
+
+// samePath reports whether a and b name one directory. git records a
+// worktree's path resolved, so a path built under a symlinked $TMPDIR spells it
+// differently; resolving the parent covers a checkout that is already gone.
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return resolvedPath(a) == resolvedPath(b)
+}
+
+func resolvedPath(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return p
 }
 
 // recordedWorktreePath returns the working-tree directory a bare admin
@@ -249,12 +307,29 @@ func recordedWorktreePath(adminDir string) string {
 }
 
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
-// worktrees — i.e. a child of the triagefactory-runs temp namespace
-// (runDir = <tmp>/triagefactory-runs/<rootKey>). Matched on the runsDir
-// path segment rather than the full os.TempDir() prefix because $TMPDIR
-// can differ between the run that created the worktree and the process
-// asking; the namespace itself is constant.
+// worktrees — a path inside the triagefactory-runs temp namespace, whether a
+// run root (runDir = <tmp>/triagefactory-runs/<rootKey>) or a checkout beneath
+// one (<root>/<owner>/<repo>/<slug>). Matched on the runsDir path segment
+// rather than the full os.TempDir() prefix because $TMPDIR can differ between
+// the run that created the worktree and the process asking; the namespace
+// itself is constant.
 func isTFRunWorktreePath(p string) bool {
+	if p == "" {
+		return false
+	}
+	for dir := filepath.Dir(filepath.Clean(p)); ; dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == runsDir {
+			return true
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return false
+		}
+	}
+}
+
+// isTFRunRoot reports whether p is a run root itself: a direct child of the
+// triagefactory-runs namespace.
+func isTFRunRoot(p string) bool {
 	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
 }
 
@@ -276,7 +351,7 @@ func isTFRunWorktreePath(p string) bool {
 // pinning this process's os.TempDir() would reject a tree that really is the
 // key's.
 func IsRunTreeFor(p, rootKey string) bool {
-	return rootKey != "" && isTFRunWorktreePath(p) && filepath.Base(p) == rootKey
+	return rootKey != "" && isTFRunRoot(p) && filepath.Base(p) == rootKey
 }
 
 // clearStaleLockedWorktrees force-removes admin registrations under

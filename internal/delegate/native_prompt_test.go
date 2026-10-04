@@ -137,7 +137,7 @@ func TestComposeConversationSystemBlock_OmitsWhatIsAbsent(t *testing.T) {
 // instructions reads as instruction.
 func TestNativeLaunchText_KeepsExternalTextOutOfTheInstructionChannel(t *testing.T) {
 	task, metadataJSON, skeleton, mission := hostileRun()
-	block2 := composeConversationSystemBlock(mission, runContext("", "", "tfac/SKY-9", "", ""), "verbs here", "")
+	block2 := composeConversationSystemBlock(mission, runContext("", "", "", "tfac/SKY-9", "", ""), "verbs here", "")
 	opening := BuildTaskContext(task, metadataJSON, skeleton, nil)
 
 	for _, sys := range []string{nativeSystemPrompt(), block2} {

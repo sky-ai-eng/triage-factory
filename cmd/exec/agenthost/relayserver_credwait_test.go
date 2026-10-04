@@ -56,6 +56,14 @@ func (s *stubWorktrees) DeleteByPathSystem(context.Context, string, string, stri
 	panic("unexpected DeleteByPathSystem")
 }
 
+func (s *stubWorktrees) ListForTaskSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
+	panic("unexpected ListForTaskSystem")
+}
+
+func (s *stubWorktrees) RecordForClaimSystem(context.Context, string, string, domain.ConversationWorktree) (domain.ConversationWorktree, error) {
+	panic("unexpected RecordForClaimSystem")
+}
+
 // credWaitServer builds a RelayServer whose reservation ledger holds rows and
 // whose sealed bundle reports sealedAt (zero ⇒ no bundle provisioned yet).
 func credWaitServer(t *testing.T, rows []domain.ConversationWorktree, sealedAt func() time.Time) (*RelayServer, *int32) {

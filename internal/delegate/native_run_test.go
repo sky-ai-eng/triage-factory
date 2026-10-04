@@ -147,7 +147,7 @@ func TestPrepareInheritedMemory_TrustsAClaimThatAlreadyRan(t *testing.T) {
 			}
 			// handedOff=true: the warm-step shape, where the orchestrator can
 			// read the file but not delete it.
-			got := prepareInheritedMemory(cwd, nil, true, replay.opened)
+			got := prepareInheritedMemory(cwd, true, replay.opened)
 			if (got != nil) != tc.wantDigest {
 				t.Fatalf("fingerprint present = %v, want %v", got != nil, tc.wantDigest)
 			}

@@ -49,7 +49,8 @@ const DefaultWorkspaceEvictAfterMulti = 6 * time.Hour
 const DefaultWorkspaceEvictInterval = time.Hour
 
 // removeWorkspaceTree is the privileged removal seam, as a package var so a
-// test can assert an eviction goes through it. It must stay worktree.RemoveAt:
+// test can assert an eviction or a setup's removal goes through it, and see
+// what each does when it fails. It must stay worktree.RemoveAt:
 // in multi mode the tree is owned by the sandbox identity that ran in it, and
 // only the cap-broker can unlink those modes — a plain os.RemoveAll here would
 // work on a developer's laptop and fail on every executor.

@@ -52,7 +52,7 @@ const toolHostDialTimeout = 60 * time.Second
 func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, task domain.Task, mission string, cfg runConfig, startTime time.Time, model, triggerType, creatorUserID string) engagementDisposition {
 	orgID := cfg.orgID
 	namespace := workspaceKey(task.ID)
-	claudeCwd := cfg.wtPath
+	claudeCwd := cfg.runRoot
 
 	// The mirror this engagement files its memory file through, built below
 	// once the inherited fingerprint it judges the file against exists. The
@@ -101,11 +101,8 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// step and an SDK step of the same blueprint share one run tree, so the two
 	// paths must agree on who may write in it.
 	handedOff := sandbox.RunTreeHandedOff(claudeCwd)
-	var owned repoFiles
 	if !handedOff {
-		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
-		owned = scanRepoFiles(ctx, claudeCwd)
-		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
+		if err := worktree.EnsureSandboxMemoryLink(claudeCwd); err != nil {
 			delegateLog.Warn("plant sandbox memory symlink failed; this conversation reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
 		}
 	}
@@ -113,12 +110,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// The SDK path's twin (runAgent) — same staging, same span, so the two
 	// runtimes' setup is comparable in the backend rather than only in prose.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
-	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
+	memoryDir := entityMemoryTarget(&cfg, conversationID, claudeCwd)
 	// The this-task share comes back from the materializer rather than from a
 	// read of its own: the opening rows and the this-task/ folder are two
 	// renderings of one answer, and two reads could disagree about what the
 	// folder holds and what the turn carries.
-	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
+	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID)
 
 	// The SDK path's twin again: the task team's knowledge base plus every
 	// other team's published root, copied in before the jail starts so it is
@@ -135,11 +132,11 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	if handedOff {
 		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
 	} else {
-		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
+		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd)
 	}
 
 	replay := s.nativeClaimReplay(stagingCtx, orgID, conversationID)
-	priorMemory := prepareInheritedMemory(claudeCwd, owned, handedOff, replay.opened)
+	priorMemory := prepareInheritedMemory(claudeCwd, handedOff, replay.opened)
 	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
 	stagingSpan.End()
 
@@ -156,7 +153,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// memory tree rather than beside it: that is the one per-launch location
 	// still writable on a warm step, where the run tree itself belongs to the
 	// sandbox identity.
-	writeTaskContextFile(memoryDir, launchText.taskContext, memoryOwned)
+	writeTaskContextFile(memoryDir, launchText.taskContext)
 
 	// The stop is read before the phase write, so a run stopped during
 	// bring-up parks here without ever asking the fence — the refusal below is
@@ -399,12 +396,12 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		}
 
 		// The native blocks name the in-jail paths and the `tfac` applet
-		// outright, so the run context carries only the branch convention and
-		// this run's staged knowledge — the two facts that differ per team and
-		// per run, and the ones those blocks cannot state for themselves.
+		// outright, so the run context carries only what differs per run and
+		// those blocks cannot state for themselves: the PR checkout's path, the
+		// branch convention, and this run's staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
-			runContext("", "", s.resolveBranchTemplate(ctx, task), "", knowledge),
+			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", knowledge),
 			cfg.toolsRef,
 			nonTerminal,
 		)
@@ -510,12 +507,12 @@ func nativeSpec() agentprompt.Spec {
 // steer, whose own memory file is at that path. opened is nativeClaimReplay's
 // answer, which is the same conversationOpened reading mintOpeningRows makes a
 // few calls later.
-func prepareInheritedMemory(cwd string, owned repoFiles, handedOff, opened bool) *memoryFingerprint {
+func prepareInheritedMemory(cwd string, handedOff, opened bool) *memoryFingerprint {
 	if opened {
 		return nil
 	}
 	if !handedOff {
-		clearAgentMemoryFile(cwd, owned)
+		clearAgentMemoryFile(cwd)
 	}
 	return fingerprintAgentMemoryFile(cwd)
 }

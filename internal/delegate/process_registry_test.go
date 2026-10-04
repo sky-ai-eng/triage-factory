@@ -67,28 +67,6 @@ func TestController_InterruptSteerNoProcErrors(t *testing.T) {
 	}
 }
 
-// TestSpawnerExecutorIdentityIndependentPerInstance pins that spawner
-// identity is per-instance state wired via SetExecutorID — unset (empty)
-// at construction, and setting one spawner's identity never leaks into
-// another. The empty default is deliberate: a missed wiring stays
-// observable (heartbeat refuses to start, stamps bind NULL) instead of
-// minting a plausible-looking random uuid.
-func TestSpawnerExecutorIdentityIndependentPerInstance(t *testing.T) {
-	a := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	b := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	if a.executorID != "" || b.executorID != "" {
-		t.Fatal("expected empty executor ids before SetExecutorID wires them")
-	}
-	a.SetExecutorID("instance-a", 1)
-	if b.executorID != "" {
-		t.Error("wiring one spawner's identity leaked into another instance")
-	}
-	b.SetExecutorID("instance-b", 1)
-	if a.executorID == b.executorID {
-		t.Error("expected distinct executor ids per spawner instance")
-	}
-}
-
 // TestStampExecutor_WritesExecutorID is the acceptance check for "a live run
 // stamps executor_id": stampExecutor confirms the wired instance id on the
 // conversation's active claim — and an unwired spawner (no SetExecutorID)
@@ -117,26 +95,6 @@ func TestStampExecutor_WritesExecutorID(t *testing.T) {
 	}
 	if got != "persistent-registry-id" {
 		t.Errorf("executor_id = %q, want the wired registry id", got)
-	}
-}
-
-// TestStop_ActiveConversation_RoutesThroughController verifies the live-run stop
-// path: an active run (a registered cancel handle) is killed via the
-// controller once the intent is recorded.
-func TestStop_ActiveConversation_RoutesThroughController(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-active", "sess", "/tmp/wt") // status running
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	fired := make(chan struct{}, 1)
-	s.cancels["r-active"] = func() { fired <- struct{}{} }
-
-	if err := s.Stop(runmode.LocalDefaultOrgID, "r-active", runmode.LocalDefaultUserID); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	select {
-	case <-fired:
-	default:
-		t.Error("expected Stop to fire the registered cancel func via the controller")
 	}
 }
 

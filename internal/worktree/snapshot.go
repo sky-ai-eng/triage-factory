@@ -1,9 +1,9 @@
 // Snapshot/rehydrate git primitives for the durable blueprint workspace.
-// CaptureWorkspaceGit distills a parked worktree down to its non-recoverable
-// git state (the agent's local-only commits + the uncommitted working tree);
-// RestoreWorkspaceGit rebuilds a worktree from the persistent bare clone and
-// layers that delta back on. The split keeps git knowledge in this package
-// while the storage/tar orchestration lives in internal/delegate.
+// CaptureWorkspaceGit distills one checkout down to its non-recoverable git
+// state (the agent's local-only commits + the uncommitted working tree);
+// RestoreCheckout (restore.go) rebuilds a checkout from the persistent bare
+// clone and layers that delta back on. The split keeps git knowledge in this
+// package while the storage/tar orchestration lives in internal/delegate.
 
 package worktree
 
@@ -22,12 +22,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// GitDelta is the non-recoverable git state of a delegated worktree at a
-// dormancy point. Everything recoverable — the bare clone, anything already
-// pushed to a remote — is deliberately absent; RestoreWorkspaceGit
-// reconstructs those from the bare and layers this delta on top. A nil
-// *GitDelta means the path was not a git worktree (e.g. a Jira lazy run-root),
-// so there is no git state to carry.
+// GitDelta is the non-recoverable git state of one checkout at a dormancy
+// point. Everything recoverable — the bare clone, anything already pushed to a
+// remote — is deliberately absent; RestoreCheckout reconstructs those from the
+// bare and layers this delta on top. A nil *GitDelta means the path was not a
+// git worktree (a run root, which never is), so there is no git state to carry.
 //
 // SECURITY INVARIANT — the agent's .git/config is NEVER part of this delta,
 // and must never be added. Restore rebuilds the worktree from the host-owned
@@ -56,8 +55,8 @@ type GitDelta struct {
 	// reachable there.
 	Bundle []byte
 	// Patch is a single binary diff capturing every uncommitted change
-	// (tracked modifications and untracked additions alike), with the managed
-	// _tfac tree excluded. nil when the working tree is clean.
+	// (tracked modifications and untracked additions alike). nil when the
+	// working tree is clean.
 	Patch []byte
 }
 
@@ -176,8 +175,9 @@ func SandboxClaudeSessionPath(runRoot, sessionID string) string {
 
 // IsGitWorktree reports whether wtPath is the root of a git working tree (a
 // `.git` file for a linked worktree, or a `.git` directory for a plain
-// checkout). False for an empty path or a Jira lazy run-root that holds only
-// _tfac.
+// checkout). False for an empty path and for a run root, which is a plain
+// folder — and a run root for which it is true was laid out by an older
+// binary, with the PR checkout at the root itself.
 func IsGitWorktree(wtPath string) bool {
 	if wtPath == "" {
 		return false
@@ -186,11 +186,10 @@ func IsGitWorktree(wtPath string) bool {
 	return err == nil
 }
 
-// CaptureWorkspaceGit captures the non-recoverable git delta of wtPath: the
-// current branch, a bounded bundle of the agent's local-only commits, and a
-// single patch covering every uncommitted change. Returns (nil, nil) when
-// wtPath is not a git worktree, so callers uniformly handle the
-// non-git run-root by skipping the git portion of the snapshot.
+// CaptureWorkspaceGit captures the non-recoverable git delta of the checkout at
+// wtPath: the current branch, a bounded bundle of the agent's local-only
+// commits, and a single patch covering every uncommitted change. Returns (nil,
+// nil) when wtPath is not a git worktree.
 func CaptureWorkspaceGit(ctx context.Context, wtPath string) (*GitDelta, error) {
 	if !IsGitWorktree(wtPath) {
 		return nil, nil
@@ -322,11 +321,6 @@ func BundleHeader(r io.Reader) ([]byte, error) {
 	}
 }
 
-// skillsExcludePath is the capture's git-pathspec spelling of the skills path
-// — forward slashes always, unlike skillsLinkRel's OS-path form, because it
-// is handed to git as a pathspec rather than resolved on the filesystem.
-const skillsExcludePath = ".claude/skills"
-
 // changeScopedPathspecLimit caps how many changed paths the scoped stage in
 // captureUncommitted will name before falling back to the full `add -A`.
 // Pathspec matching is a per-index-entry scan over the pathspec set, so a
@@ -360,7 +354,7 @@ var changeScopedPathspecLimit = 1000
 // opportunistically refreshing the real index, so the agent's staging (which
 // a warm resume reads back) is untouched even at the stat-cache level. An
 // explicit --untracked-files=normal overrides any status.showUntrackedFiles
-// config in the run root — the repo's (or agent's) display preference must
+// config in the checkout — the repo's (or agent's) display preference must
 // not hide untracked files from the capture.
 func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok bool) {
 	out, err := gitCapture(ctx, wtPath, nil, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=normal")
@@ -409,21 +403,7 @@ func changedPathsVsHEAD(ctx context.Context, wtPath string) (paths []string, ok 
 // patterns: a name containing a glob metacharacter must match itself, and
 // must not be re-interpreted into a wildcard that could explicitly name an
 // ignored file (which `git add` refuses outright, where recursing past one is
-// silent). Per-entry magic rather than the --literal-pathspecs global flag
-// because the same set carries the capture's exclusions as `:(exclude)`
-// specs, and the global flag would strip that magic too.
-//
-// Carrying the exclusions here — instead of add-then-`reset` the way the full
-// stage does — is load-bearing for performance, not tidiness. `git reset`
-// ends by refreshing the index it touched, and refreshing this HEAD-seeded
-// temp index (whose entries carry no stat information) re-hashes every file
-// in the tree: the exact O(tree) cost the scoped stage exists to avoid, paid
-// right back by the cleanup. Never staging the excluded paths reaches the
-// same index state — the read-tree seed already holds HEAD's entries for
-// them — with no reset to trigger the refresh. It also handles the collapsed
-// untracked-dir case (`?? .claude/` when nothing under it is tracked): the
-// exclusion applies inside the recursive add, so a skills tree under an
-// otherwise-captured directory still stays out.
+// silent).
 func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths []string) error {
 	f, err := os.CreateTemp("", "tf-pathspec-*")
 	if err != nil {
@@ -437,12 +417,6 @@ func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths [
 			return fmt.Errorf("write pathspec: %w", err)
 		}
 	}
-	for _, excl := range []string{ScratchDir, skillsExcludePath} {
-		if _, err := f.WriteString(":(exclude)" + excl + "\x00"); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("write exclude pathspec: %w", err)
-		}
-	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("flush pathspec: %w", err)
 	}
@@ -452,8 +426,8 @@ func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths [
 
 // captureUncommitted produces one binary patch of every uncommitted change in
 // wtPath via a throwaway index seeded from HEAD: stage everything (add -A
-// records modifications, deletions, and untracked additions alike), drop the
-// managed _tfac tree, then diff that index against HEAD. Using
+// records modifications, deletions, and untracked additions alike), then diff
+// that index against HEAD. Using
 // GIT_INDEX_FILE keeps the worktree's real index untouched so a warm-path
 // resume still sees the agent's staging exactly as it left it. Returns
 // (nil, nil) for a clean tree.
@@ -465,16 +439,10 @@ func stageChangedPaths(ctx context.Context, wtPath string, env []string, paths [
 // survives as the fallback and the semantics of record — the scoped stage
 // must produce a byte-identical patch or not run at all.
 //
-// _tfac is removed from the staged set explicitly rather than left to the
-// worktree's excludes: snapshot owns the _tfac capture separately (skipping
-// the subtrees that re-materialize on the next run), and a linked worktree's
-// managed excludes live in the per-worktree gitdir while `add` consults the
-// common dir — so relying on them here would leak _tfac into the patch.
-//
 // Every diff below passes --no-ext-diff --no-textconv. `git diff` is porcelain,
 // so by default it execs whatever external diff program (`diff.external`, or a
 // `.gitattributes`-mapped `diff.<driver>.command`) and whatever
-// `diff.<driver>.textconv` the repo names — and in a run root the config and the
+// `diff.<driver>.textconv` the repo names — and in a checkout the config and the
 // attributes are both the agent's to write. The flags are the guarantee, because
 // they outrank config; no value of `diff.external` is one, git having none that
 // means "disabled". They are equally a correctness requirement: textconv output
@@ -533,50 +501,6 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 		if _, err := gitCapture(ctx, wtPath, env, "add", "-A"); err != nil {
 			return false, fmt.Errorf("stage worktree: %w", err)
 		}
-		// The full stage's exclusions are add-then-reset; the scoped stage
-		// carries them as `:(exclude)` pathspecs instead and MUST NOT run
-		// these resets — `git reset` ends by refreshing the index, and
-		// refreshing the temp index's zero-stat entries re-hashes the whole
-		// tree, the exact cost the scoped stage exists to avoid. After the
-		// full `add -A` the refresh is cheap (add just wrote fresh stat
-		// information for everything it touched), so the resets stay here.
-		//
-		// `reset` rather than `rm --cached`, for the reason spelled out at the
-		// `.claude/skills` drop below: reset restores HEAD's entry for the path,
-		// so a repo that legitimately TRACKS files under our directory doesn't
-		// come back from the snapshot with them recorded as deletions. For the
-		// ordinary untracked case it drops the entry outright, which is what we
-		// want — the working-tree files stay on disk either way, only the temp
-		// index changes.
-		if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", ScratchDir); err != nil {
-			return false, fmt.Errorf("drop %s from temp index: %w", ScratchDir, err)
-		}
-		// Keep `.claude/skills` out of the delta for the same reason: it is TF
-		// mechanism, not the agent's work. In a sandboxed tree the path is our
-		// symlink to the read-only skills mount, and in local mode it's the
-		// materialized SKILL.md — carrying either would persist TF plumbing into
-		// a snapshot that a future restore re-establishes for itself.
-		//
-		// `reset` rather than `rm --cached`: reset restores HEAD's entry for the
-		// path, so a repo that legitimately TRACKS `.claude/skills` doesn't come
-		// back from the snapshot with those files recorded as deletions (which is
-		// exactly what dropping them from the staged set would produce, since
-		// HEAD still has them).
-		//
-		// Guarded on the path actually appearing in the diff so the reset only
-		// ever runs with a matching pathspec. Most captures — every
-		// non-blueprint run, and any repo without a `.claude` — have nothing
-		// there at all, and `git reset`'s treatment of a pathspec that matches
-		// neither the index nor HEAD is not a contract worth betting EVERY
-		// snapshot capture on. When the diff is empty the reset would be a
-		// no-op anyway, so the guard costs nothing but the read.
-		if staged, err := gitCapture(ctx, wtPath, env, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", skillsExcludePath); err != nil {
-			return false, fmt.Errorf("check %s in temp index: %w", skillsExcludePath, err)
-		} else if len(bytes.TrimSpace(staged)) > 0 {
-			if _, err := gitCapture(ctx, wtPath, env, "reset", "-q", "--", skillsExcludePath); err != nil {
-				return false, fmt.Errorf("drop %s from temp index: %w", skillsExcludePath, err)
-			}
-		}
 	}
 	cw := &captureCountingWriter{w: w}
 	if err := gitCaptureTo(ctx, wtPath, env, cw, "diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD"); err != nil {
@@ -585,189 +509,13 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 	return cw.n > 0, nil
 }
 
-// RestoreWorkspaceGit rebuilds a worktree at wtDir from the durable bare clone
-// plus the captured delta: ensure the bare exists, fold the bundled local-only
-// commits into its branch ref, check out a fresh worktree at that branch,
-// re-establish the managed _tfac excludes, and replay the uncommitted
-// patch. It deliberately rebuilds rather than untarring a worktree so a
-// snapshot taken on one host rehydrates cleanly on another — the worktree's
-// `.git` pointer is host-specific and never travels.
-//
-// owner/repo locate the bare; cloneURL seeds it only when the bare is missing
-// on this host (a fresh executor). In the local reboot / `/tmp`-wipe case the
-// bare survives under the persistent state-root, so cloneURL goes unused.
-//
-// auth is the host-side HTTPS credential (inert in local/SSH/public), and every
-// rebuild of a private repo needs it — not only the fresh-executor one. It
-// authenticates two independent hops:
-//
-//   - the on-demand re-clone of a missing bare (fresh executor), and
-//   - the lazy promisor fetch the worktree-add checkout triggers on the
-//     blobless bare, which happens whether or not the bare was already here. A
-//     bare that exists is not a bare that is self-sufficient: it was cloned
-//     --filter=blob:none, so checking out HEAD goes back to origin for the
-//     blobs it deferred.
-//
-// Without it either step fails anonymously — "could not read Username", then
-// "could not fetch <sha> from promisor remote".
-func RestoreWorkspaceGit(ctx context.Context, owner, repo, wtDir string, d *GitDelta, cloneURL string, auth CloneAuth) error {
-	if d == nil {
-		return fmt.Errorf("restore: nil git delta")
-	}
-	if d.Head == "" {
-		return fmt.Errorf("restore: snapshot has no HEAD commit to check out")
-	}
-	bareDir, err := repoDir(owner, repo)
-	if err != nil {
-		return err
-	}
-	switch _, statErr := os.Stat(bareDir); {
-	case statErr == nil:
-		// Bare present (the local reboot / `/tmp`-wipe case): reuse it.
-	case os.IsNotExist(statErr):
-		// Bare absent on this host (fresh executor). Seed it from the remote so
-		// the bundle's prerequisite commits resolve. EnsureBareClone takes the
-		// per-repo lock itself, so it runs outside the WithRepoLock below.
-		if cloneURL == "" {
-			return fmt.Errorf("restore: bare %s missing and no clone URL to seed it", bareDir)
-		}
-		if _, err := EnsureBareClone(ctx, owner, repo, cloneURL, WithCloneAuth(auth)); err != nil {
-			return fmt.Errorf("restore: seed bare: %w", err)
-		}
-	default:
-		// A non-"missing" stat error (permission, I/O) is a real problem —
-		// surface it rather than masking it as a missing bare and re-cloning.
-		return fmt.Errorf("restore: stat bare %s: %w", bareDir, statErr)
-	}
-
-	branch := d.Branch
-	if err := WithRepoLock(owner, repo, func() error {
-		// Clear any stale dir + worktree registration FIRST, so the branch ref
-		// isn't "checked out" when we update it below (a surviving bare still
-		// has the pre-loss worktree registered until this prune). Privileged
-		// seam (see RemoveAt's doc): a stale dir surviving from a sandboxed
-		// run is owned by the sandbox identity.
-		_ = sandbox.RemoveRunTree(ctx, wtDir)
-		if err := gitRunCtx(ctx, bareDir, "worktree", "prune"); err != nil {
-			return fmt.Errorf("prune worktrees: %w", err)
-		}
-
-		// Get d.Head's objects into the bare and position the ref we'll check
-		// out, across four cases (bundle present/absent × branch/detached):
-		if len(d.Bundle) > 0 {
-			// The bundle carries the agent's local-only commits; its
-			// prerequisites are remote commits the (surviving or freshly
-			// cloned) bare already has, so the fetch resolves.
-			bname, cleanup, werr := writeTempBundle(d.Bundle)
-			if werr != nil {
-				return werr
-			}
-			defer cleanup()
-			if branch != "" {
-				// Force the branch ref to the bundled tip (and import objects).
-				if err := gitRunCtx(ctx, bareDir, "fetch", bname,
-					fmt.Sprintf("+refs/heads/%s:refs/heads/%s", branch, branch)); err != nil {
-					return fmt.Errorf("unbundle into branch: %w", err)
-				}
-			} else if err := gitRunCtx(ctx, bareDir, "fetch", bname, "HEAD"); err != nil {
-				// Detached: just import the objects; the detached add below
-				// resolves d.Head directly.
-				return fmt.Errorf("unbundle (detached): %w", err)
-			}
-		} else if branch != "" && !branchExists(bareDir, branch) {
-			// No local-only commits, and the branch isn't in the bare (a fresh
-			// clone, or a branch never pushed to a remote). An empty bundle
-			// means d.Head is reachable from a remote ref, so it's already in
-			// the bare — create the branch directly at the SHA rather than
-			// guessing a refs/remotes/origin/<branch> that may not exist.
-			if err := gitRunCtx(ctx, bareDir, "branch", branch, d.Head); err != nil {
-				return fmt.Errorf("create branch at %s: %w", d.Head, err)
-			}
-		}
-
-		if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
-			return fmt.Errorf("mkdir runs parent: %w", err)
-		}
-		// gitRunCtxAuth on both adds: checking out onto the blobless bare
-		// materializes deferred blobs via origin's promisor remote, so the lazy
-		// fetch carries the credential on a private repo. The bundle fetch and
-		// branch-create above stay unauth (local file / no network).
-		if branch != "" {
-			if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, branch); err != nil {
-				return fmt.Errorf("worktree add: %w", err)
-			}
-		} else if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "--detach", wtDir, d.Head); err != nil {
-			// No branch: check out the exact commit detached, mirroring the
-			// snapshotted detached HEAD.
-			return fmt.Errorf("worktree add --detach: %w", err)
-		}
-		return nil
-	}); err != nil {
-		return fmt.Errorf("restore: %w", err)
-	}
-
-	// Re-establish the managed _tfac excludes the fresh worktree lacks, then
-	// replay the uncommitted changes on top of the committed branch state.
-	if err := writeLocalExcludes(wtDir); err != nil {
-		return fmt.Errorf("restore: write excludes: %w", err)
-	}
-	if len(d.Patch) > 0 {
-		if err := applyPatch(ctx, wtDir, d.Patch); err != nil {
-			return fmt.Errorf("restore: apply patch: %w", err)
-		}
-	}
-	// Plant the jail's skills symlink LAST, after the delta landed. Ordering is
-	// load-bearing in the other direction: a snapshot predating the staged-skill
-	// mount can carry a real `.claude/skills` tree in its patch, and applying
-	// that patch over an already-planted symlink would hit git-apply's
-	// through-symlink refusal. Planting after instead force-replaces whatever the
-	// patch left there, converging on the symlink either way. This is the second
-	// of the two orchestrator-owned moments (the other is worktree build); every
-	// later step boundary needs no write into the tree at all.
-	plantSandboxSkillsLink(wtDir)
-	return nil
-}
-
-// writeTempBundle materializes bundle bytes to a temp file git can fetch from,
-// returning the path and a cleanup func.
-func writeTempBundle(bundle []byte) (string, func(), error) {
-	f, err := os.CreateTemp("", "tf-restore-*.bundle")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("bundle tempfile: %w", err)
-	}
-	name := f.Name()
-	if _, err := f.Write(bundle); err != nil {
-		_ = f.Close()
-		_ = os.Remove(name)
-		return "", func() {}, fmt.Errorf("write bundle: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return "", func() {}, fmt.Errorf("flush bundle: %w", err)
-	}
-	return name, func() { _ = os.Remove(name) }, nil
-}
-
-// applyPatch replays an uncommitted-changes patch onto the freshly rebuilt
-// worktree. --whitespace=nowarn keeps trailing-whitespace edits the agent made
+// applyPatch replays an uncommitted-changes patch file onto the freshly rebuilt
+// checkout. --whitespace=nowarn keeps trailing-whitespace edits the agent made
 // from tripping apply; --binary round-trips binary hunks. The changes land
 // unstaged (file content is what matters for resume; the agent re-stages as it
 // continues).
-func applyPatch(ctx context.Context, wtDir string, patch []byte) error {
-	f, err := os.CreateTemp("", "tf-patch-*.diff")
-	if err != nil {
-		return fmt.Errorf("patch tempfile: %w", err)
-	}
-	name := f.Name()
-	defer func() { _ = os.Remove(name) }()
-	if _, err := f.Write(patch); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write patch: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("flush patch: %w", err)
-	}
-	return gitRunCtx(ctx, wtDir, "apply", "--whitespace=nowarn", "--binary", name)
+func applyPatch(ctx context.Context, wtDir, patchPath string) error {
+	return gitRunCtx(ctx, wtDir, "apply", "--whitespace=nowarn", "--binary", patchPath)
 }
 
 // ClaudeSessionPath returns the absolute path of the Claude Code session
@@ -813,7 +561,7 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // agent's own privilege, with no network — not as the privileged capture host.
 //
 // Precisely BECAUSE that containment lives in the caller, this path must still
-// NOT be made ownership-tolerant against a chowned run root in-process: doing
+// NOT be made ownership-tolerant against a chowned checkout in-process: doing
 // so would move filter execution back to whatever privilege the in-process
 // caller holds (a local-mode operator, or a dev running the binary directly).
 // Keep it strict; the isolation is the dropped-privilege child, not any check

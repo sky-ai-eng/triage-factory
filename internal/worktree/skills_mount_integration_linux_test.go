@@ -65,7 +65,7 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 	// The shared worktree a blueprint's steps run in, built once (step 0's setup)
 	// and warm-reused by every later step.
 	const treeRootKey = "itest-skills-tree"
-	wtDir, _ := sandboxingWorktree(t, treeRootKey)
+	wtDir := sandboxingRunRoot(t, treeRootKey)
 
 	// Step 0's launch hands the whole tree to the sandbox uid. From here on the
 	// orchestrator is a genuinely unprivileged, capability-less user with respect

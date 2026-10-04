@@ -13,16 +13,20 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// repoWithLocalCommits builds a worktree whose branch carries n commits no
-// remote has, each touching several files of near-identical text, so the
-// bundle git writes for them has deltas to search.
-func repoWithLocalCommits(t *testing.T, n int) string {
+// repoWithLocalCommits builds a run root holding one checkout whose branch
+// carries n commits no remote has, each touching several files of
+// near-identical text, so the bundle git writes for them has deltas to search.
+// It returns the root and the checkout.
+func repoWithLocalCommits(t *testing.T, n int) (string, snapshotCheckout) {
 	t.Helper()
 	setupGitTestEnv(t)
 	remote := filepath.Join(t.TempDir(), "origin.git")
 	gitT(t, "", "init", "-q", "--bare", "-b", "main", remote)
-	wt := filepath.Join(t.TempDir(), "wt")
-	gitT(t, "", "clone", "-q", remote, wt)
+	root := t.TempDir()
+	co := snapshotCheckout{repoID: "acme/repo", slug: "ref-main", rel: "acme/repo/ref-main"}
+	co.path = filepath.Join(root, filepath.FromSlash(co.rel))
+	gitT(t, "", "clone", "-q", remote, co.path)
+	wt := co.path
 	writeFile(t, filepath.Join(wt, "README.md"), "base\n")
 	gitT(t, wt, "add", "-A")
 	gitT(t, wt, "commit", "-q", "-m", "base")
@@ -30,7 +34,7 @@ func repoWithLocalCommits(t *testing.T, n int) string {
 	for i := 0; i < n; i++ {
 		addLocalCommit(t, wt, i)
 	}
-	return wt
+	return root, co
 }
 
 func addLocalCommit(t *testing.T, wt string, i int) {
@@ -46,18 +50,18 @@ func addLocalCommit(t *testing.T, wt string, i int) {
 	gitT(t, wt, "commit", "-q", "-m", fmt.Sprintf("local work %d", i))
 }
 
-func captureFingerprint(t *testing.T, wt string) string {
+func captureFingerprint(t *testing.T, root string, checkouts ...snapshotCheckout) string {
 	t.Helper()
-	w := snapshotWrite{wtPath: wt, runtime: domain.ConversationRuntimeNative, reason: snapshotReasonCheckpoint}
+	w := snapshotWrite{wtPath: root, runtime: domain.ConversationRuntimeNative, reason: snapshotReasonCheckpoint, checkouts: checkouts}
 	captured, err := captureSnapshot(context.Background(), w)
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
 	defer captured.release()
-	if captured.state.Delta == nil || len(captured.state.Delta.Bundle) == 0 && captured.state.BundlePath == "" {
-		t.Fatal("the capture carried no bundle; the fixture's local commits are what this test is about")
+	if len(captured.checkouts) == 0 {
+		t.Fatal("the capture carried no checkout; the fixture's local commits are what this test is about")
 	}
-	fp, err := snapshotFingerprint(context.Background(), captured.state, wt)
+	fp, err := snapshotFingerprint(context.Background(), captured, root)
 	if err != nil {
 		t.Fatalf("fingerprint: %v", err)
 	}
@@ -71,11 +75,11 @@ func captureFingerprint(t *testing.T, wt string) string {
 // bundle carries is the same every time, and that is what the fingerprint
 // has to see.
 func TestSnapshotFingerprint_StableAcrossCapturesOfAnUnchangedTree(t *testing.T) {
-	wt := repoWithLocalCommits(t, 15)
+	root, co := repoWithLocalCommits(t, 15)
 
 	seen := map[string]int{}
 	for i := 0; i < 30; i++ {
-		seen[captureFingerprint(t, wt)]++
+		seen[captureFingerprint(t, root, co)]++
 	}
 	if len(seen) != 1 {
 		t.Fatalf("30 captures of one unchanged tree gave %d fingerprints: %v", len(seen), seen)
@@ -86,8 +90,8 @@ func TestSnapshotFingerprint_StableAcrossCapturesOfAnUnchangedTree(t *testing.T)
 	for fp := range seen {
 		before = fp
 	}
-	addLocalCommit(t, wt, 99)
-	if after := captureFingerprint(t, wt); after == before {
+	addLocalCommit(t, co.path, 99)
+	if after := captureFingerprint(t, root, co); after == before {
 		t.Fatal("a new commit left the fingerprint unchanged; the checkpoint would skip storing it")
 	}
 }
@@ -122,15 +126,15 @@ func TestSnapshotFingerprint_ScratchRewrittenWithItsOldTimes(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			wt := repoWithLocalCommits(t, 1)
-			path := filepath.Join(wt, "_tfac", "notes.txt")
+			root, co := repoWithLocalCommits(t, 1)
+			path := filepath.Join(root, "_tfac", "notes.txt")
 			writeFile(t, path, "alpha\n")
 			old, err := os.Stat(path)
 			if err != nil {
 				t.Fatal(err)
 			}
-			before := captureFingerprint(t, wt)
-			if again := captureFingerprint(t, wt); again != before {
+			before := captureFingerprint(t, root, co)
+			if again := captureFingerprint(t, root, co); again != before {
 				t.Fatal("an unchanged scratch file changed the fingerprint")
 			}
 
@@ -144,9 +148,34 @@ func TestSnapshotFingerprint_ScratchRewrittenWithItsOldTimes(t *testing.T) {
 			if now, _ := os.Stat(path); now.Size() != old.Size() || !now.ModTime().Equal(old.ModTime()) {
 				t.Fatalf("fixture: size %d mtime %v, want the old %d %v", now.Size(), now.ModTime(), old.Size(), old.ModTime())
 			}
-			if after := captureFingerprint(t, wt); after == before {
+			if after := captureFingerprint(t, root, co); after == before {
 				t.Fatal("new scratch content under the old size and modification time left the fingerprint unchanged")
 			}
 		})
+	}
+}
+
+// TestSnapshotFingerprint_SeesEveryCheckout: an uncommitted edit inside any
+// checkout under the root is a different workspace. A fingerprint that read
+// only the root's own git — and the root has none — would call a checkpoint
+// taken during such an edit unchanged, and record the skip as covering it.
+func TestSnapshotFingerprint_SeesEveryCheckout(t *testing.T) {
+	root, first := repoWithLocalCommits(t, 1)
+	second := snapshotCheckout{repoID: "acme/other", slug: "default", rel: "acme/other/default"}
+	second.path = filepath.Join(root, filepath.FromSlash(second.rel))
+	gitT(t, "", "clone", "-q", first.path, second.path)
+
+	before := captureFingerprint(t, root, first, second)
+	if again := captureFingerprint(t, root, first, second); again != before {
+		t.Fatal("an unchanged pair of checkouts changed the fingerprint")
+	}
+	writeFile(t, filepath.Join(second.path, "README.md"), "edited in the second checkout\n")
+	edited := captureFingerprint(t, root, first, second)
+	if edited == before {
+		t.Fatal("an uncommitted edit in the second checkout left the fingerprint unchanged")
+	}
+	writeFile(t, filepath.Join(first.path, "untracked.txt"), "new in the first\n")
+	if captureFingerprint(t, root, first, second) == edited {
+		t.Fatal("an untracked file in the first checkout left the fingerprint unchanged")
 	}
 }

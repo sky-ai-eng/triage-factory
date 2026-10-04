@@ -92,3 +92,10 @@ func neverReachedProxy(out, proxy string) bool {
 	}
 	return strings.Contains(out, "failed to connect") || strings.Contains(out, "couldn't connect to server")
 }
+
+// isMissingRemoteRef reports whether err is a fetch the remote answered by
+// saying it has no such ref — a branch deleted upstream, or one never pushed.
+func isMissingRemoteRef(err error) bool {
+	var gitErr *GitError
+	return errors.As(err, &gitErr) && strings.Contains(strings.ToLower(gitErr.Output), "couldn't find remote ref")
+}

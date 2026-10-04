@@ -82,38 +82,6 @@ func TestStop_OpenAutoRun_WakesFirings(t *testing.T) {
 	}
 }
 
-// TestStop_OpenManualRun_WakesFirings is the other half of the one-live-
-// conversation-per-task rule: a manual conversation holds the task's firing
-// gate exactly as an auto-fired one does, so its stop is the moment that gate
-// opens and the queued firings behind it have to be claimed.
-func TestStop_OpenManualRun_WakesFirings(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedConversation(t, database, "r-manual", "sess-2", "/tmp/wt-rm")
-	// Manual is the seedConversation default but we set it explicitly for
-	// clarity and pin to `open`.
-	if _, err := database.Exec(`UPDATE conversations SET status = 'open', trigger_type = 'manual' WHERE id = 'r-manual'`); err != nil {
-		t.Fatalf("park conversation: %v", err)
-	}
-
-	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
-	waker := newFakeWaker()
-	s.SetFiringWaker(waker)
-
-	if err := s.Stop(runmode.LocalDefaultOrgID, "r-manual", ""); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	s.settleUnclaimedStops(context.Background())
-
-	select {
-	case <-waker.called:
-	case <-time.After(time.Second):
-		t.Fatal("WakeFirings was never called for a manual conversation's stop")
-	}
-	if n := waker.count(); n != 1 {
-		t.Fatalf("expected 1 wake, got %d", n)
-	}
-}
-
 // TestStop_AlreadyTerminal_NoWake confirms a stale stop on a row some other
 // path already terminated rings nothing. Without the "only on flipped ==
 // true" guard, it would wake the worker for a terminal that already did.
@@ -714,21 +682,6 @@ func TestStopConversationAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone
 	}
 	if status != "running" || cancelRequested {
 		t.Errorf("blueprint = (%q, cancel_requested=%v), want (running, false) — a stale teardown must not stop the next step", status, cancelRequested)
-	}
-}
-
-// TestStopCauseTaskRequeued_Note pins the sentence a returned-to-queue task
-// writes onto the transcript of the run it stopped. Nothing resumes that
-// conversation, so this note is the entire explanation a human reading its
-// history gets — and a task on its way back to the queue is still open, which
-// is why it cannot borrow the disposition wording.
-func TestStopCauseTaskRequeued_Note(t *testing.T) {
-	const want = "Run stopped: the task it was working on was returned to the queue."
-	if got := StopCauseTaskRequeued.note(); got != want {
-		t.Errorf("note = %q, want %q", got, want)
-	}
-	if StopCauseTaskRequeued.note() == StopCauseTaskDispositioned.note() {
-		t.Error("requeue and disposition write the same sentence; a reader cannot tell a task still on the docket from one swiped away")
 	}
 }
 

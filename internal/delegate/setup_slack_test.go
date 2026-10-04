@@ -42,9 +42,9 @@ func slackTaskFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, domain.Ta
 	return s, database, *task
 }
 
-// TestSetupSlack_WorktreeLessShape pins the shape TFAC-591 requires: a Slack
-// run mirrors Jira's lazy worktree-less setup.
-func TestSetupSlack_WorktreeLessShape(t *testing.T) {
+// TestSetupSlack_RunRootShape: a Slack run starts at a plain run root with no
+// checkout, the shape every run without a pull request takes.
+func TestSetupSlack_RunRootShape(t *testing.T) {
 	s, _, task := slackTaskFixture(t, "shape")
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
@@ -56,14 +56,11 @@ func TestSetupSlack_WorktreeLessShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	if cfg.hasWT {
-		t.Error("setupSlack must be worktree-less (hasWT=false)")
+	if cfg.owner != "" || cfg.repo != "" || cfg.prCheckout != "" {
+		t.Errorf("expected no repo and no PR checkout, got %q/%q at %q", cfg.owner, cfg.repo, cfg.prCheckout)
 	}
-	if cfg.owner != "" || cfg.repo != "" {
-		t.Errorf("expected empty owner/repo, got %q/%q", cfg.owner, cfg.repo)
-	}
-	if cfg.wtPath == "" || cfg.wtPath != cfg.runRoot {
-		t.Errorf("expected wtPath == runRoot (both the run-root), got wtPath=%q runRoot=%q", cfg.wtPath, cfg.runRoot)
+	if cfg.runRoot == "" {
+		t.Error("expected a run root")
 	}
 	// The run-root is task-keyed (rootKey), NOT this conversation's own id —
 	// the invariant a cold rehydrate (which rebuilds under the task key) and
@@ -107,8 +104,8 @@ func TestSetupSlack_PersistsWorktreePath(t *testing.T) {
 	if err := database.QueryRow(`SELECT COALESCE(worktree_path,'') FROM conversations WHERE id = ?`, conversationID).Scan(&wtPath); err != nil {
 		t.Fatalf("read persisted worktree_path: %v", err)
 	}
-	if wtPath != cfg.wtPath {
-		t.Errorf("persisted conversations.worktree_path = %q, want %q", wtPath, cfg.wtPath)
+	if wtPath != cfg.runRoot {
+		t.Errorf("persisted conversations.worktree_path = %q, want %q", wtPath, cfg.runRoot)
 	}
 }
 
@@ -217,25 +214,22 @@ func TestBuildStepConfig_Slack_FirstClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v (slack must be a supported source)", err)
 	}
-	if cfg.hasWT {
-		t.Error("expected hasWT=false for a slack step")
-	}
-	if cfg.wtPath == "" {
-		t.Error("expected a non-empty worktree path")
+	if cfg.runRoot == "" || cfg.prCheckout != "" {
+		t.Errorf("expected a run root and no PR checkout, got root %q, checkout %q", cfg.runRoot, cfg.prCheckout)
 	}
 
 	var stampedPath string
 	if err := database.QueryRow(`SELECT worktree_path FROM blueprint_runs WHERE id = ?`, brID).Scan(&stampedPath); err != nil {
 		t.Fatalf("read blueprint_runs.worktree_path: %v", err)
 	}
-	if stampedPath != cfg.wtPath {
-		t.Errorf("blueprint_runs.worktree_path = %q, want %q", stampedPath, cfg.wtPath)
+	if stampedPath != cfg.runRoot {
+		t.Errorf("blueprint_runs.worktree_path = %q, want %q", stampedPath, cfg.runRoot)
 	}
 }
 
 // TestBuildStepConfig_Slack_LaterStep pins wire point 2 (dispatch.go's
 // later-step switch): a re-claim (or step advance) rehydrates the shared
-// worktree-less run-root and recomposes scope/toolsRef identically to the
+// run root and recomposes scope/toolsRef identically to the
 // first claim.
 func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 	s, database, brID, task, conv := slackBlueprintFixture(t, "later")
@@ -259,11 +253,8 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStepConfig: %v", err)
 	}
-	if cfg.hasWT {
-		t.Error("expected hasWT=false for a slack step")
-	}
-	if cfg.wtPath != wtDir {
-		t.Errorf("wtPath = %q, want warm-returned %q", cfg.wtPath, wtDir)
+	if cfg.runRoot != wtDir {
+		t.Errorf("runRoot = %q, want warm-returned %q", cfg.runRoot, wtDir)
 	}
 	wantScope := "Slack thread: " + task.EntitySourceID
 	if cfg.scope != wantScope {

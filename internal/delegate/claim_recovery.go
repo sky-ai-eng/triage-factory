@@ -157,14 +157,9 @@ func (s *Spawner) replayStrandedRun(ctx context.Context, st db.StrandedRun) {
 	conv.OrgID = st.OrgID
 	dispatchLog.Warn("replaying the reactor for a blueprint run whose current step concluded without it",
 		"blueprint_run", br.ID, "conversation", conv.ID, "step", conv.BlueprintStepIndex, "status", conv.Status, "org_id", st.OrgID)
-	// The PR-branch cleanup a terminal would run needs the PR coordinates,
-	// which no row carries; the worktree removal is best-effort, as it is for
-	// the settlement's cancel.
 	cfg := runConfig{
 		orgID:  st.OrgID,
 		teamID: conv.TeamID,
-		wtPath: br.WorktreePath,
-		hasWT:  br.WorktreePath != "" && task.EntitySource == "github",
 	}
 	s.reactToStepTerminal(ctx, st.OrgID, br, *conv, cfg, time.Now())
 }

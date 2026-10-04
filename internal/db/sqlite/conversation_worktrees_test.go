@@ -40,6 +40,46 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 				t.Helper()
 				trackRepoForTest(t, stores, slug)
 			},
+			SiblingConversation: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.Exec(`
+					INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id)
+					SELECT ?, task_id, prompt_id, 'completed', model, blueprint_run_id FROM conversations WHERE id = ?
+				`, id, conversationID); err != nil {
+					t.Fatalf("seed sibling conversation: %v", err)
+				}
+				return id
+			},
+			UnrelatedConversation: func(t *testing.T, suffix string) string {
+				t.Helper()
+				return seedSQLiteConversationForWorktree(t, conn, suffix)
+			},
+			TaskOf: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				var taskID string
+				if err := conn.QueryRow(`SELECT task_id FROM conversations WHERE id = ?`, conversationID).Scan(&taskID); err != nil {
+					t.Fatalf("read task: %v", err)
+				}
+				return taskID
+			},
+			Claim: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				if _, err := conn.Exec(`
+					INSERT INTO claims (id, conversation_id, executor_id, lease_expires_at)
+					VALUES (?, ?, 'exec-test', ?)
+				`, id, conversationID, time.Now().UTC().Add(time.Hour)); err != nil {
+					t.Fatalf("seed claim: %v", err)
+				}
+				return id
+			},
+			Release: func(t *testing.T, claimID string) {
+				t.Helper()
+				if _, err := conn.Exec(`UPDATE claims SET released_at = CURRENT_TIMESTAMP, outcome = 'completed' WHERE id = ?`, claimID); err != nil {
+					t.Fatalf("release claim: %v", err)
+				}
+			},
 		}
 		return stores.ConversationWorktrees, runmode.LocalDefaultOrgID, seed
 	})

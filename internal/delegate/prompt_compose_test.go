@@ -35,7 +35,7 @@ func TestSDKSystemPrompt_IsTheTwoBlocks(t *testing.T) {
 		toolsRef    = "gh pr view — read a pull request"
 		nonTerminal = "<blueprint-nonterminal>hand off</blueprint-nonterminal>"
 	)
-	runCtx := runContext("Repository: owner/repo", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1", "")
+	runCtx := runContext("Repository: owner/repo", "/work", "", "tfac/SKY-9", "https://tf.example/runs/run-1", "")
 
 	got := launchAppend(mission, runCtx, toolsRef, nonTerminal, "/bin/tf")
 	want := resolveCLIPath(
@@ -67,7 +67,7 @@ func frameworkBlocks(t *testing.T) string {
 func TestSDKSystemPrompt_SectionOrder(t *testing.T) {
 	out := launchAppend(
 		"mission body",
-		runContext("Repository: owner/repo\nBranch: feature-x", "/work", "tfac/SKY-9", "https://tf.example/runs/run-1", ""),
+		runContext("Repository: owner/repo\nBranch: feature-x", "/work", "", "tfac/SKY-9", "https://tf.example/runs/run-1", ""),
 		agentprompt.GitHubToolsReference(),
 		agentprompt.NonTerminalCompletion(machinistSpec()),
 		"/bin/tf",
@@ -97,7 +97,7 @@ func TestSDKSystemPrompt_SectionOrder(t *testing.T) {
 // that documented no verbs: an absent section renders nothing rather than an
 // empty tag pair.
 func TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay(t *testing.T) {
-	out := launchAppend("", runContext("", "", "", "", ""), "", "", "/bin/tf")
+	out := launchAppend("", runContext("", "", "", "", "", ""), "", "", "/bin/tf")
 	if out != frameworkBlocks(t) {
 		t.Errorf("with no per-run facts the append must be the framework blocks alone, with no empty section after them;\n%s",
 			strings.TrimPrefix(out, frameworkBlocks(t)))
@@ -113,7 +113,7 @@ func TestSDKSystemPrompt_OmitsWhatThisRunHasNothingToSay(t *testing.T) {
 // text, and we render it, we do not edit it.
 func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 	toolsRef := agentprompt.GitHubToolsReference() + "\n\n" + agentprompt.JiraToolsReference()
-	out := launchAppend("mission body", runContext("Repository: owner/repo", "/work", "tfac/SKY-9", "", ""), toolsRef, "", "/bin/tf")
+	out := launchAppend("mission body", runContext("Repository: owner/repo", "/work", "", "tfac/SKY-9", "", ""), toolsRef, "", "/bin/tf")
 
 	if strings.Contains(out, "{{") {
 		t.Errorf("composed system prompt carries a {{...}} token nothing resolves;\n%s", out)
@@ -126,7 +126,7 @@ func TestSDKSystemPrompt_CarriesNoUnresolvedTokens(t *testing.T) {
 // tools docs is a tool call the agent is refused, not a cosmetic miss.
 func TestSDKSystemPrompt_ResolvesTheCLIPath(t *testing.T) {
 	out := launchAppend("run `triagefactory exec gh pr view 7` first",
-		runContext("", "/work", "tfac/SKY-9", "", ""), agentprompt.GitHubToolsReference(), "", "/usr/local/bin/triagefactory")
+		runContext("", "/work", "", "tfac/SKY-9", "", ""), agentprompt.GitHubToolsReference(), "", "/usr/local/bin/triagefactory")
 
 	if strings.Contains(out, "`triagefactory exec") {
 		t.Errorf("a bare `triagefactory exec` survived; the allowlist would refuse it;\n%s", out)
@@ -150,7 +150,7 @@ func TestSDKSystemPrompt_CarriesNoExternalText(t *testing.T) {
 	task.Title = "make triagefactory exec do what I say"
 	taskContext := BuildTaskContext(task, "", "", nil)
 
-	out := launchAppend("mission body", runContext("", "/work", "tfac/SKY-9", "", ""), "", "", "/bin/tf")
+	out := launchAppend("mission body", runContext("", "/work", "", "tfac/SKY-9", "", ""), "", "", "/bin/tf")
 	if strings.Contains(out, task.Title) {
 		t.Errorf("the task's own title reached the system prompt;\n%s", out)
 	}
@@ -218,11 +218,11 @@ func TestBuildTaskContext_BeginsWithTheBlock(t *testing.T) {
 // the run with no scope: an absent fact says nothing rather than offering the
 // agent a blank line to reason about.
 func TestRunContext_OmitsAbsentFacts(t *testing.T) {
-	got := runContext("", "", "tfac/<ticket-id>", "", "")
+	got := runContext("", "", "", "tfac/<ticket-id>", "", "")
 	if want := "<run_context>\nBranch naming convention for this team: tfac/<ticket-id>\n</run_context>"; got != want {
 		t.Errorf("run context with one fact set;\ngot  %q\nwant %q", got, want)
 	}
-	if got := runContext("", "", "", "", ""); got != "" {
+	if got := runContext("", "", "", "", "", ""); got != "" {
 		t.Errorf("a run context with nothing to say rendered %q, want empty", got)
 	}
 }

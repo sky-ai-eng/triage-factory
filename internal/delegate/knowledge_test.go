@@ -86,7 +86,7 @@ func TestStageTeamKnowledge_TeamAndOrgRoots(t *testing.T) {
 	}})
 
 	cwd := t.TempDir()
-	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 
 	want := []string{
 		"org/platform/slo/latency.md",
@@ -128,13 +128,13 @@ func TestStageTeamKnowledge_ResolvesFromTheTeamAlone(t *testing.T) {
 	s := stagingSpawner(t, kb, teams)
 
 	cwdA := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, "team-a", cwdA, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, "team-a", cwdA)
 	if got := stagedTree(t, cwdA); !equalStrings(got, []string{"team/private/a.md"}) {
 		t.Fatalf("team-a run staged %v; want only its own private note", got)
 	}
 
 	cwdB := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, "team-b", cwdB, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, "team-b", cwdB)
 	if got := stagedTree(t, cwdB); !equalStrings(got, []string{"team/private/b.md"}) {
 		t.Fatalf("team-b run staged %v; want only its own private note", got)
 	}
@@ -148,14 +148,14 @@ func TestStageTeamKnowledge_EmptyStagesNothingAndSaysNothing(t *testing.T) {
 	s := stagingSpawner(t, kb, fakeTeams{})
 
 	cwd := t.TempDir()
-	if manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil); manifest != "" {
+	if manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd); manifest != "" {
 		t.Fatalf("manifest for an empty KB = %q; want empty", manifest)
 	}
 	if got := stagedTree(t, cwd); len(got) != 0 {
 		t.Fatalf("staged %v from an empty KB", got)
 	}
 	// And the composed run context says nothing about knowledge either.
-	if ctx := runContext("", "/work", "", "", ""); strings.Contains(ctx, knowledgeDirName) {
+	if ctx := runContext("", "/work", "", "", "", ""); strings.Contains(ctx, knowledgeDirName) {
 		t.Fatalf("run context mentioned knowledge with none staged;\n%s", ctx)
 	}
 }
@@ -168,7 +168,7 @@ func TestStageTeamKnowledge_NoTeamOrNoStoreStagesNothing(t *testing.T) {
 
 	withKB := stagingSpawner(t, kb, fakeTeams{})
 	cwd := t.TempDir()
-	if m := withKB.stageTeamKnowledge(context.Background(), kbOrg, "", cwd, nil); m != "" {
+	if m := withKB.stageTeamKnowledge(context.Background(), kbOrg, "", cwd); m != "" {
 		t.Errorf("a task with no team staged %q", m)
 	}
 	if got := stagedTree(t, cwd); len(got) != 0 {
@@ -177,7 +177,7 @@ func TestStageTeamKnowledge_NoTeamOrNoStoreStagesNothing(t *testing.T) {
 
 	noKB := NewSpawner(nil, db.Stores{}, nil, nil, "")
 	cwd2 := t.TempDir()
-	if m := noKB.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd2, nil); m != "" {
+	if m := noKB.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd2); m != "" {
 		t.Errorf("a spawner with no KB seam staged %q", m)
 	}
 }
@@ -195,7 +195,7 @@ func TestStageTeamKnowledge_RebuildsRatherThanAccumulates(t *testing.T) {
 	s := stagingSpawner(t, kb, fakeTeams{})
 
 	cwd := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/keep.md", "team/private/notes/retracted.md"}) {
 		t.Fatalf("first launch staged %v", got)
 	}
@@ -205,7 +205,7 @@ func TestStageTeamKnowledge_RebuildsRatherThanAccumulates(t *testing.T) {
 		t.Fatalf("delete from the KB: %v", err)
 	}
 
-	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/keep.md"}) {
 		t.Fatalf("second launch left %v; a retracted document must not stay readable", got)
 	}
@@ -229,7 +229,7 @@ func TestStageTeamKnowledge_PublishBetweenLaunchesDoesNotDuplicate(t *testing.T)
 	s := stagingSpawner(t, kb, fakeTeams{})
 
 	cwd := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/private/runbooks/deploy.md"}) {
 		t.Fatalf("first launch staged %v", got)
 	}
@@ -241,7 +241,7 @@ func TestStageTeamKnowledge_PublishBetweenLaunchesDoesNotDuplicate(t *testing.T)
 		t.Fatalf("publish: %v", err)
 	}
 
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/runbooks/deploy.md"}) {
 		t.Fatalf("after a publish the tree holds %v; the document must appear under exactly one root", got)
 	}
@@ -257,74 +257,16 @@ func TestStageTeamKnowledge_DiscardsWhatTheAgentLeft(t *testing.T) {
 	s := stagingSpawner(t, kb, fakeTeams{})
 
 	cwd := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 
 	scribble := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "my-edit.md")
 	if err := os.WriteFile(scribble, []byte("the agent's own"), 0o644); err != nil {
 		t.Fatalf("write the agent's file: %v", err)
 	}
 
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/conventions.md"}) {
 		t.Fatalf("tree = %v; an agent's own file under the knowledge tree is discarded", got)
-	}
-}
-
-// TestStageTeamKnowledge_RebuildKeepsRepoOwnedPaths: the rebuild is a walk
-// rather than one RemoveAll for exactly this case. For a GitHub PR run the run
-// tree IS the checkout, so deleting a tracked file here would ride the agent's
-// next commit into its pull request — a rebuild that "cleaned up" a
-// contributor's file would be worse than the staleness it fixes.
-func TestStageTeamKnowledge_RebuildKeepsRepoOwnedPaths(t *testing.T) {
-	kb := kbstore.NewLocalAt(t.TempDir())
-	writeKB(t, kb, kbTeam, kbstore.RootShared, "other.md", "fine")
-	s := stagingSpawner(t, kb, fakeTeams{})
-
-	cwd := t.TempDir()
-	tracked := filepath.Join(cwd, scratchDirName, knowledgeDirName, "team", "shared", "committed.md")
-	if err := os.MkdirAll(filepath.Dir(tracked), 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(tracked, []byte("the repo's own"), 0o644); err != nil {
-		t.Fatalf("write tracked file: %v", err)
-	}
-	owned := repoFiles{
-		scratchDirName + "/" + knowledgeDirName + "/team/shared/committed.md": true,
-	}
-
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, owned)
-
-	body, err := os.ReadFile(tracked)
-	if err != nil {
-		t.Fatalf("the repo-owned file was removed by the rebuild: %v", err)
-	}
-	if string(body) != "the repo's own" {
-		t.Errorf("the repo-owned file was rewritten: %q", body)
-	}
-	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/committed.md", "team/shared/other.md"}) {
-		t.Fatalf("tree = %v", got)
-	}
-}
-
-// TestStageTeamKnowledge_LeavesRepoOwnedPathsAlone: for a GitHub PR run the run
-// tree IS the checkout, and an infrastructure write onto a tracked path would
-// ride the agent's next commit into its pull request.
-func TestStageTeamKnowledge_LeavesRepoOwnedPathsAlone(t *testing.T) {
-	kb := kbstore.NewLocalAt(t.TempDir())
-	writeKB(t, kb, kbTeam, kbstore.RootShared, "conventions.md", "ours")
-	writeKB(t, kb, kbTeam, kbstore.RootShared, "other.md", "fine")
-	s := stagingSpawner(t, kb, fakeTeams{})
-
-	cwd := t.TempDir()
-	owned := repoFiles{
-		scratchDirName + "/" + knowledgeDirName + "/team/shared/conventions.md": true,
-	}
-	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, owned)
-	if got := stagedTree(t, cwd); !equalStrings(got, []string{"team/shared/other.md"}) {
-		t.Fatalf("staged %v; the repo-owned path must be left alone", got)
-	}
-	if strings.Contains(manifest, "conventions.md") {
-		t.Errorf("the manifest names a file that was not staged;\n%s", manifest)
 	}
 }
 
@@ -339,7 +281,7 @@ func TestStageTeamKnowledge_UnusableSlugFallsBackToTheID(t *testing.T) {
 	}})
 
 	cwd := t.TempDir()
-	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd, nil)
+	s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, cwd)
 	if got := stagedTree(t, cwd); !equalStrings(got, []string{"org/team-odd/note.md"}) {
 		t.Fatalf("staged %v; a traversal slug must fall back to the team id", got)
 	}
@@ -348,7 +290,7 @@ func TestStageTeamKnowledge_UnusableSlugFallsBackToTheID(t *testing.T) {
 // TestRunContext_CarriesTheManifest is the composition half: the manifest is
 // per-run data and rides <run_context>, never a framework block.
 func TestRunContext_CarriesTheManifest(t *testing.T) {
-	got := runContext("", "/work", "tfac/<ticket-id>", "", "knowledge/team/ — your team's knowledge base")
+	got := runContext("", "/work", "", "tfac/<ticket-id>", "", "knowledge/team/ — your team's knowledge base")
 	if !strings.Contains(got, "<run_context>") || !strings.Contains(got, "knowledge/team/") {
 		t.Fatalf("run context did not carry the manifest;\n%s", got)
 	}
@@ -370,7 +312,7 @@ func TestStageTeamKnowledge_SummaryIsRuneSafe(t *testing.T) {
 	writeKB(t, kb, kbTeam, kbstore.RootPrivate, "long.md", strings.Repeat("é", 4000))
 	s := stagingSpawner(t, kb, fakeTeams{})
 
-	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir(), nil)
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir())
 	if !utf8.ValidString(manifest) {
 		t.Fatalf("the manifest carries invalid UTF-8; it rides <run_context> to the model")
 	}
@@ -391,7 +333,7 @@ func TestStageTeamKnowledge_BinaryDocumentGetsNoSummary(t *testing.T) {
 	}
 	s := stagingSpawner(t, kb, fakeTeams{})
 
-	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir(), nil)
+	manifest := s.stageTeamKnowledge(context.Background(), kbOrg, kbTeam, t.TempDir())
 	if !utf8.ValidString(manifest) {
 		t.Fatalf("a binary document put invalid UTF-8 into the manifest")
 	}

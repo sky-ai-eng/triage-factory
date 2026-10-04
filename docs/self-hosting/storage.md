@@ -1,10 +1,11 @@
 # Durable workspace storage (SeaweedFS)
 
-A blueprint's workspace — the git worktree plus the scratch space its steps hand
-off through — must survive the executor that created it (an open run can outlast
-the process; an executor can scale down mid-run). The TF binary snapshots that
-workspace to an **S3-compatible object store** and rehydrates it on resume; the
-host worktree is only a warm cache.
+A blueprint's workspace — its run root, with every repository checkout beneath
+it and the scratch space its steps hand off through — must survive the executor
+that created it (an open run can outlast the process; an executor can scale down
+mid-run). The TF binary snapshots that workspace to an **S3-compatible object
+store** and rehydrates it on resume, rebuilding each checkout; the host copy is
+only a warm cache.
 
 Self-host runs **SeaweedFS** for this: one self-contained S3 container (Apache-2.0,
 Go), no Postgres or JWT coupling. The workspace snapshots are opaque

@@ -25,7 +25,7 @@ func TestWriteTaskContextFile_LandsInTheStagedTarget(t *testing.T) {
 	staged := filepath.Join(t.TempDir(), "staged-memory")
 	const rendered = "<task_context>\nPull request: #18\nTitle: fix the flaky check\n</task_context>"
 
-	writeTaskContextFile(staged, rendered, nil)
+	writeTaskContextFile(staged, rendered)
 
 	got, err := os.ReadFile(filepath.Join(staged, taskContextFileName))
 	if err != nil {
@@ -38,29 +38,18 @@ func TestWriteTaskContextFile_LandsInTheStagedTarget(t *testing.T) {
 
 // TestWriteTaskContextFile_SkipsWhatItMustNot covers the three cases where
 // writing is the wrong answer. A run with no task context has nothing to
-// retain; a repo that tracks the path owns it, and a file the agent would
-// commit is worth more than a re-read; and a launch that staged nowhere has
-// nowhere to put it.
+// retain, and a launch that staged nowhere has nowhere to put it.
 func TestWriteTaskContextFile_SkipsWhatItMustNot(t *testing.T) {
 	t.Run("no task context", func(t *testing.T) {
 		root := t.TempDir()
-		writeTaskContextFile(root, "   \n", nil)
+		writeTaskContextFile(root, "   \n")
 		if _, err := os.Stat(filepath.Join(root, taskContextFileName)); !os.IsNotExist(err) {
 			t.Error("an empty task context still wrote a file")
 		}
 	})
 
-	t.Run("repo owns the path", func(t *testing.T) {
-		root := t.TempDir()
-		owned := repoFiles{filepath.Join(scratchDirName, entityMemoryDirName, taskContextFileName): true}
-		writeTaskContextFile(root, "<task_context>\nx\n</task_context>", owned)
-		if _, err := os.Stat(filepath.Join(root, taskContextFileName)); !os.IsNotExist(err) {
-			t.Error("a repo-tracked path was overwritten")
-		}
-	})
-
 	t.Run("no staged target", func(t *testing.T) {
-		writeTaskContextFile("", "<task_context>\nx\n</task_context>", nil)
+		writeTaskContextFile("", "<task_context>\nx\n</task_context>")
 	})
 }
 
@@ -70,8 +59,8 @@ func TestWriteTaskContextFile_SkipsWhatItMustNot(t *testing.T) {
 // authority on a pull request that has moved since.
 func TestWriteTaskContextFile_OverwritesThePriorStep(t *testing.T) {
 	root := t.TempDir()
-	writeTaskContextFile(root, "<task_context>\nstep 0\n</task_context>", nil)
-	writeTaskContextFile(root, "<task_context>\nstep 1\n</task_context>", nil)
+	writeTaskContextFile(root, "<task_context>\nstep 0\n</task_context>")
+	writeTaskContextFile(root, "<task_context>\nstep 1\n</task_context>")
 
 	got, err := os.ReadFile(filepath.Join(root, taskContextFileName))
 	if err != nil {

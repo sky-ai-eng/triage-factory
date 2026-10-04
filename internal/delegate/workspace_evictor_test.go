@@ -67,7 +67,10 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	ctx := context.Background()
 
 	wsKey := taskIDForConversation(t, database, conversationID)
-	wtPath, owner, repo := setupTestWorktree(t, wsKey)
+	wtPath, err := worktree.MakeRunRoot(wsKey)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "scratch.md"), "agent scratch")
 	if err := s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, conversationID, wsKey, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
@@ -87,7 +90,7 @@ func TestEvictIdleWorkspaces_EvictedTreeResumesByRehydrate(t *testing.T) {
 	}
 
 	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: wsKey}
-	got, prov, _, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
+	got, prov, _, err := s.ensureWorkspace(ctx, runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace after eviction: %v", err)
 	}

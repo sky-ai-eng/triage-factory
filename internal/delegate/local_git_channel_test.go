@@ -266,7 +266,7 @@ func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testin
 			defer func() { _ = channel.Close() }()
 
 			upstreamURL := "https://github.com/owner/repo.git"
-			_, cloneErr := worktree.CreateForPR(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-cred",
+			_, cloneErr := createPRCheckoutForTest(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-cred",
 				worktree.WithCloneAuth(channel.cloneAuth(upstreamURL)))
 			var gitErr *worktree.GitError
 			if !errors.As(cloneErr, &gitErr) {
@@ -308,7 +308,7 @@ func TestLocalGitChannel_AGateThatCannotDecideIsARefusalNotAnOutage(t *testing.T
 	defer func() { _ = channel.Close() }()
 
 	upstreamURL := "https://github.com/owner/repo.git"
-	_, cloneErr := worktree.CreateForPR(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-gate",
+	_, cloneErr := createPRCheckoutForTest(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-gate",
 		worktree.WithCloneAuth(channel.cloneAuth(upstreamURL)))
 	var gitErr *worktree.GitError
 	if !errors.As(cloneErr, &gitErr) {

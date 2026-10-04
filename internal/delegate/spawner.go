@@ -1285,6 +1285,18 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 	return err
 }
 
+// recordCheckout writes a checkout's conversation_worktrees row for an
+// engagement, routed the way setWorktreePath routes its stamp: behind claimID's
+// fence when there is one, through the unfenced door when no claim is in scope.
+func (s *Spawner) recordCheckout(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) error {
+	if claimID != "" {
+		_, err := s.conversationWorktrees.RecordForClaimSystem(ctx, orgID, claimID, w)
+		return err
+	}
+	_, _, err := s.conversationWorktrees.InsertSystem(ctx, orgID, w)
+	return err
+}
+
 // announceTaskPlacement publishes the placement the delegation's own claim
 // stamp already made. Stamping the bot claim IS the board move — the claim
 // doors land a queued task in_progress in the same UPDATE — so what is left

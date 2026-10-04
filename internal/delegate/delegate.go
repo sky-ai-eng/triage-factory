@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -26,18 +28,12 @@ import (
 
 // runConfig holds everything the generic agent runner needs.
 //
-// Two delegation shapes share this struct:
-//
-//   - GitHub PR (eager): hasWT=true, wtPath is the worktree, runRoot=wtPath
-//     (the worktree IS the run-root), owner/repo populated from the PR.
-//     Cleanup uses RemoveAt(wtPath) + CleanupPRConfig.
-//
-//   - Jira (lazy): hasWT=false, wtPath=runRoot is the throwaway run-root
-//     (initial cwd; holds _tfac/ but no codebase), owner/repo empty.
-//     Per-repo worktrees materialize as subdirs under runRoot via the
-//     `triagefactory exec workspace add` CLI; the conversation_worktrees DB table
-//     is the source of truth for cleanup, which iterates the table at
-//     runAgent terminal.
+// Every delegation has the same layout: runRoot is a plain folder keyed by the
+// task, the agent starts there, and every checkout — a GitHub PR run's own
+// included — lives beneath it at <root>/<owner>/<repo>/<slug>, recorded in
+// conversation_worktrees. The sources differ only in what is built at setup:
+// a GitHub PR run checks out its pull request (prCheckout), every other run
+// starts with no checkout and adds what it needs with `workspace add`.
 type runConfig struct {
 	orgID   string // tenant scope for every store call inside this conversation's goroutine — set once in Delegate from opts.OrgID, then read everywhere via cfg.orgID instead of being threaded positionally
 	claimID string // the engagement driving this conversation — the claims row ClaimNextConversation minted, threaded through so teardown can stamp the claim's measured sandbox cost by id (an active-claim lookup would race the release). Empty on paths with no claimed conversation in scope, which record no actuals.
@@ -55,12 +51,14 @@ type runConfig struct {
 	teamID   string // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
 	scope    string // what the agent is scoped to (repo, PR, issue)
 	toolsRef string // tool documentation to inject
-	wtPath   string // initial cwd: GitHub PR worktree, or Jira run-root
-	hasWT    bool   // GitHub PR has a real worktree to clean up via RemoveAt; Jira's worktrees are tracked in conversation_worktrees and cleaned by iterating that table
-	runRoot  string // run-root path: GitHub PR runs == wtPath; Jira lazy runs == the throwaway parent of materialized worktrees. Always set so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves uniformly for the memory-gate retry.
-	owner    string // resolved GitHub owner (empty for Jira lazy runs)
-	repo     string // resolved GitHub repo (empty for Jira lazy runs)
-	prNumber int    // PR number (0 for non-PR runs); set so the runAgent defer can call worktree.CleanupPRConfig and reclaim the per-run branch + push remote the bare repo would otherwise accumulate
+	runRoot  string // the run root: the agent's starting directory and conversations.worktree_path, for every source
+	owner    string // resolved GitHub owner (empty for runs with no PR)
+	repo     string // resolved GitHub repo (empty for runs with no PR)
+	prNumber int    // PR number (0 for non-PR runs)
+
+	// prCheckout is the host path of a GitHub PR run's checkout of its pull
+	// request, <root>/<owner>/<repo>/pr-<N>; empty for every other run.
+	prCheckout string
 
 	// prSkeleton is the rendered PR history block folded into the run's
 	// static task context. Empty for a non-PR run, and empty (never fatal)
@@ -68,7 +66,7 @@ type runConfig struct {
 	// context it has always had.
 	prSkeleton string
 
-	// workspace is how wtPath came to be — warm from the previous engagement,
+	// workspace is how runRoot came to be — warm from the previous engagement,
 	// rehydrated from the durable snapshot, or built fresh. Resolved by the
 	// setup that produced the tree (buildStepConfig), because nothing
 	// downstream can tell a warm tree from a reconstruction of one. Empty on
@@ -97,14 +95,14 @@ type runConfig struct {
 	// skillsSourcePath is the orchestrator-owned staging dir holding this step's
 	// SKILL.md, bind-mounted read-only into the jail (agentproc's
 	// SkillsSourcePath). Set only for a sandboxed blueprint step; empty in local
-	// mode, where the skill is written into the worktree instead.
+	// mode, where the skill is written into the run root instead.
 	skillsSourcePath string
 
 	// memorySourcePath is the orchestrator-owned staging dir holding the
 	// entity-memory tree materialized for this launch, bind-mounted read-only
 	// into the jail (agentproc's MemorySourcePath). Set for every sandboxed
 	// launch; empty in local mode, where the same tree is rendered inside the
-	// worktree instead.
+	// run root instead.
 	memorySourcePath string
 
 	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
@@ -768,16 +766,59 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	} else if localGit != nil {
 		cloneAuth = localGit.cloneAuth(upstreamCloneURL)
 	}
-	// rootKey (the task id), not this conversation's own id, keys the
-	// worktree dir + its per-run push config — the PR worktree IS the shared
-	// run-root, and a cold rehydrate rebuilds it under the same key.
-	// CleanupPRConfig reclaims via filepath.Base(wtPath), so it follows this
-	// key automatically.
+	// The run root is the task's (rootKey, the task id), shared by every
+	// conversation on it. The PR checkout beneath it is built the way `workspace
+	// add --pr` builds one, and is namespaced by this conversation, the one that
+	// materialized it — so its per-run branch and push config in a shared bare
+	// are reclaimed off its conversation_worktrees row.
+	runRoot, err := freshRunRoot(rootKey)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	// A setup builds from nothing, so a checkout already at the path is what an
+	// earlier attempt that failed after its clone left behind, and the clone
+	// would refuse to land on it.
+	checkoutPath := filepath.Join(runRoot, owner, repo, worktree.PRRefSlug(prNumber))
+	if dirExists(checkoutPath) {
+		if err := worktree.RemoveAt(checkoutPath, rootKey); err != nil {
+			return runConfig{}, fmt.Errorf("clear a stale PR checkout: %w", err)
+		}
+	}
+	// Record the PR checkout in conversation_worktrees so the least-privilege
+	// gates (git proxy + exec gh) treat the task repo uniformly with
+	// workspace-add'd repos: a run may touch a repo only if its team tracks it
+	// AND it appears in this ledger. ref = pr-<N> is the materialization selector
+	// (the push gate reads the checkout's live current branch, not this row).
+	// Durable, so a resume re-derives authority with no head-ref threading, and
+	// it is what the multi-PR review anchor (add-review-comment) resolves the
+	// PR's HEAD through.
+	//
+	// The row is also the only way a workspace snapshot finds the checkout, so
+	// a setup that cannot write it fails rather than start an agent whose work
+	// no snapshot would carry. Written before the clone, as `workspace add`
+	// writes its own: the path is fixed, and a failure here leaves no checkout
+	// and no stamped worktree_path for the next claim to take for a warm tree.
+	// Behind the claim fence, and bounded: the write sits inline on the path to
+	// starting the agent.
+	if s.conversationWorktrees != nil {
+		recordCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+		err := s.recordCheckout(recordCtx, orgID, claimID, domain.ConversationWorktree{
+			ConversationID: conversationID,
+			RepoID:         owner + "/" + repo,
+			Path:           checkoutPath,
+			Ref:            worktree.PRRefSlug(prNumber),
+		})
+		cancel()
+		if err != nil {
+			return runConfig{}, fmt.Errorf("record the PR checkout in conversation_worktrees: %w", err)
+		}
+	}
+
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	// A clone that cannot finish in its bound is a setup failure, and the
 	// timeout surfaces as the error it is for the bring-up ladder to requeue.
 	cloneCtx, endClone := s.beginWorkspaceOp(cloneCtx, conversationID, "clone")
-	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
+	prCheckout, err := worktree.CreateForPRInRoot(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, conversationID, runRoot,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
@@ -792,42 +833,43 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// Fence refusals are excluded here and at the two sibling setups below:
 	// setWorktreePath already logged the ownership loss, and this line's
 	// subject is a write that failed on a row this engagement still owns.
-	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("update worktree path for conversation failed", "conversation", conversationID, "error", err)
-	}
-
-	// Record the eager worktree in conversation_worktrees so the least-privilege gates
-	// (git proxy + exec gh) treat the task repo uniformly with workspace-add'd
-	// repos: a run may touch a repo only if its team tracks it AND it appears in
-	// this ledger. ref = pr-<N> is the materialization selector (the push gate
-	// reads the worktree's live current branch, not this row). Durable, so a
-	// resume re-derives authority with no head-ref threading, and the row is
-	// what the multi-PR review anchor (add-review-comment) resolves the PR's
-	// worktree HEAD through. Log-and-continue like SetWorktreePathSystem above:
-	// a failure degrades to denied pushes (a clear 403), never a crash.
-	if s.conversationWorktrees != nil {
-		if _, _, werr := s.conversationWorktrees.InsertSystem(context.Background(), orgID, domain.ConversationWorktree{
-			ConversationID: conversationID,
-			RepoID:         owner + "/" + repo,
-			Path:           wtPath,
-			Ref:            worktree.PRRefSlug(prNumber),
-		}); werr != nil {
-			delegateLog.Warn("record eager worktree in conversation_worktrees failed; pushes to this repo will be denied until retried", "conversation", conversationID, "repo", owner+"/"+repo, "error", werr)
-		}
 	}
 
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
 		toolsRef:   s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindGitHub),
-		wtPath:     wtPath,
-		hasWT:      true,
-		runRoot:    wtPath, // GitHub PR runs: worktree IS the run-root, so $TRIAGE_FACTORY_CONVERSATION_ROOT resolves to the worktree
+		runRoot:    runRoot,
 		owner:      owner,
 		repo:       repo,
 		prNumber:   prNumber,
+		prCheckout: prCheckout,
 		prSkeleton: renderPRSkeleton(ctx, ghClient, owner, repo, prNumber),
 	}, nil
+}
+
+// dirExists reports whether path names an existing directory.
+func dirExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// freshRunRoot makes rootKey's run root for a setup that builds its workspace
+// from nothing. A root an older binary laid out — its PR checkout at the root
+// itself, so the root has a .git — is removed first rather than converted: the
+// layout it holds is one no capture or restore here understands. A removal that
+// fails fails the setup: building on top of that tree would run and snapshot a
+// layout the capture deliberately ignores.
+func freshRunRoot(rootKey string) (string, error) {
+	if root := worktree.RunRoot(rootKey); worktree.IsGitWorktree(root) {
+		delegateLog.Warn("removing a run root laid out by an older binary before building a fresh one", "root_key", rootKey)
+		if err := removeWorkspaceTree(root, rootKey); err != nil {
+			return "", fmt.Errorf("remove a run root of an older layout: %w", err)
+		}
+	}
+	return worktree.MakeRunRoot(rootKey)
 }
 
 // prReadClient resolves the client a PR-scoped read should use. On the
@@ -870,28 +912,24 @@ func renderPRSkeleton(ctx context.Context, ghClient *ghclient.Client, owner, rep
 // setupJira prepares the run-root for a Jira delegation. No repo is
 // pre-cloned — the agent decides which repo(s) it needs after reading
 // the ticket and materializes them via `triagefactory exec workspace
-// add <owner/repo>`. Each materialization lands a worktree at
-// {runRoot}/{owner}/{repo}/ and inserts a row into conversation_worktrees.
+// add <owner/repo>`. Each materialization lands a checkout at
+// {runRoot}/{owner}/{repo}/{ref} and inserts a row into conversation_worktrees.
 //
-// The agent's initial cwd is the run-root: a throwaway dir holding
-// only ./_tfac/ (whose entity-memory is materializeEntityMemories' rendering, or
-// under a jail the symlink standing in for its read-only mount). Both gh and
-// jira tool surfaces are exposed since the agent
-// will need both to implement and ship a PR.
+// The agent's initial cwd is the run-root, as for every run: a directory
+// holding only TF's state until the agent adds a checkout. Both gh and jira
+// tool surfaces are exposed since the agent will need both to implement and
+// ship a PR.
 //
 // conversations.worktree_path is set to the run-root. The resume path reads this
 // field as the cwd to resume the session in (`claude --resume` keys
 // session storage by cwd-encoded ~/.claude/projects/<encoded>, and we
-// passed cwd=runRoot to the original agentproc.Run). Even though Jira
-// runs don't have a single "the worktree" the way GitHub PR runs do,
-// the run-root IS the agent's session cwd, which is the load-bearing
-// invariant for resume.
+// passed cwd=runRoot to the original agentproc.Run).
 func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client) (runConfig, error) {
 	// The run-root is a task resource — shared by every conversation on the task
 	// and rebuilt under the same key on a cold rehydrate — so it is keyed by
 	// rootKey (the task id), not this conversation's own id. conversationID
 	// still stamps the per-conversation worktree_path record below.
-	runRoot, err := worktree.MakeRunRoot(rootKey)
+	runRoot, err := freshRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
@@ -903,8 +941,6 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 		orgID:    orgID,
 		scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
 		toolsRef: s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
-		wtPath:   runRoot,
-		hasWT:    false,
 		runRoot:  runRoot,
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
@@ -927,7 +963,7 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 	// Keyed by rootKey (the task id), not this conversation's own id — the
 	// run-root is task-scoped and cold-rehydrates under the same key.
 	// See setupJira.
-	runRoot, err := worktree.MakeRunRoot(rootKey)
+	runRoot, err := freshRunRoot(rootKey)
 	if err != nil {
 		return runConfig{}, fmt.Errorf("create run root: %w", err)
 	}
@@ -941,8 +977,6 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		orgID:    orgID,
 		scope:    fmt.Sprintf("Slack thread: %s", task.EntitySourceID),
 		toolsRef: toolsRef,
-		wtPath:   runRoot,
-		hasWT:    false,
 		runRoot:  runRoot,
 		// owner/repo intentionally empty: the agent picks repos per-thread
 		// via `workspace add`.

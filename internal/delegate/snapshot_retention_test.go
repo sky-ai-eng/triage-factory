@@ -1,8 +1,11 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -108,92 +111,47 @@ func TestProcessCompletion_FailedWritesNoSnapshot(t *testing.T) {
 	assertSnapshotPresent(t, s, taskID, false)
 }
 
-// TestTerminateBlueprint_AbortRetainsSnapshot: an aborted blueprint keeps its
-// workspace snapshot — its completed+abort step is message-resumable, and the
-// TTL sweep is what collects it later.
-func TestTerminateBlueprint_AbortRetainsSnapshot(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-abort-keep")
-	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, taskID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusAborted, "needs a human", nil, true)
-
-	assertSnapshotPresent(t, s, taskID, true)
-}
-
-// TestTerminateBlueprint_CancelRetainsSnapshot: a cancelled blueprint keeps its
-// workspace snapshot too. Its final step parked `open` rather than being torn
-// down, and throwing the workspace away at exactly the moment a user killed a
-// wedged run is the behavior this retention exists to stop — the TTL sweep is
-// what collects it instead.
-func TestTerminateBlueprint_CancelRetainsSnapshot(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-cancel-keep")
-	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, taskID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCancelled, "cancelled", nil, true)
-
-	assertSnapshotPresent(t, s, taskID, true)
-}
-
-// TestTerminateBlueprint_CompletedRetainsSnapshot: a cleanly completed blueprint
-// keeps its workspace snapshot. terminateBlueprint tears the worktree down, so
-// discarding here would delete the blob the step just wrote seconds earlier and
-// leave a successful blueprint as the one outcome with no workspace at all.
-func TestTerminateBlueprint_CompletedRetainsSnapshot(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-finish-keep")
-	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, taskID)
-
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusCompleted, "", nil, true)
-
-	assertSnapshotPresent(t, s, taskID, true)
-}
-
-// TestTerminateBlueprint_FailedRetainsSnapshotAndLifecycleRow: a failed
-// blueprint keeps its workspace too, blob and lifecycle row alike.
-//
-// The blob is keyed by the TASK, and a blueprint failing is not the task
-// failing: the infrastructure under one run died, which says nothing about the
-// tree it died in. Discarding here was what made an infra fault cost the task
-// its work — the next delegation on it would find nothing to rehydrate and
-// clone the base branch fresh, throwing away every step that had already run.
+// TestTerminateBlueprint_RetainsSnapshot: no blueprint terminal discards the
+// task's workspace, blob or lifecycle row. The blob is keyed by the TASK, and a
+// blueprint ending is not the task ending: an aborted step is message-resumable,
+// a cancelled one parked `open` at the moment a user killed a wedged run, a
+// completed one wrote the blob seconds earlier, and a failed one says only that
+// the infrastructure under one run died, not the tree it died in. The TTL sweep
+// is what collects them.
 //
 // The lifecycle row travels with the blob because the two are one answer: a
 // `written` row pointing at a blob that is gone is what a resume cannot tell
 // from a persist still in flight.
-func TestTerminateBlueprint_FailedRetainsSnapshotAndLifecycleRow(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	s, database, conversationID, taskID := setupAdvanceFixture(t, "term-failed-keep")
-	wireBlobStore(t, s)
-	bpr := blueprintRunIDForConversation(t, database, conversationID)
-	putTestSnapshot(t, s, taskID)
-	if err := s.workspaceSnapshots.BeginSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, "claim-term-failed"); err != nil {
-		t.Fatalf("record the snapshot lifecycle: %v", err)
-	}
-	if _, err := s.workspaceSnapshots.FinishSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, "claim-term-failed", true); err != nil {
-		t.Fatalf("settle the snapshot lifecycle: %v", err)
-	}
+func TestTerminateBlueprint_RetainsSnapshot(t *testing.T) {
+	for _, status := range []domain.BlueprintRunStatus{
+		domain.BlueprintRunStatusAborted, domain.BlueprintRunStatusCancelled,
+		domain.BlueprintRunStatusCompleted, domain.BlueprintRunStatusFailed,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			s, database, conversationID, taskID := setupAdvanceFixture(t, "term-keep-"+string(status))
+			wireBlobStore(t, s)
+			bpr := blueprintRunIDForConversation(t, database, conversationID)
+			putTestSnapshot(t, s, taskID)
+			if err := s.workspaceSnapshots.BeginSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, "claim-term"); err != nil {
+				t.Fatalf("record the snapshot lifecycle: %v", err)
+			}
+			if _, err := s.workspaceSnapshots.FinishSnapshotSystem(context.Background(), runmode.LocalDefaultOrgID, taskID, "claim-term", true); err != nil {
+				t.Fatalf("settle the snapshot lifecycle: %v", err)
+			}
 
-	s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
-		runConfig{orgID: runmode.LocalDefaultOrgID}, domain.BlueprintRunStatusFailed, "crashed", nil, true)
+			s.terminateBlueprint(runmode.LocalDefaultOrgID, bpr, taskID, "event", "", time.Now(),
+				runConfig{orgID: runmode.LocalDefaultOrgID}, status, "", nil, true)
 
-	assertSnapshotPresent(t, s, taskID, true)
-	state, err := s.snapshotStateFor(context.Background(), runmode.LocalDefaultOrgID, taskID)
-	if err != nil {
-		t.Fatalf("read the snapshot lifecycle after the terminal: %v", err)
-	}
-	if state == nil || state.State != domain.WorkspaceSnapshotWritten {
-		t.Errorf("snapshot lifecycle after a failed terminal = %+v, want a written row — a resume reads this to tell a kept blob from a missing one", state)
+			assertSnapshotPresent(t, s, taskID, true)
+			state, err := s.snapshotStateFor(context.Background(), runmode.LocalDefaultOrgID, taskID)
+			if err != nil {
+				t.Fatalf("read the snapshot lifecycle after the terminal: %v", err)
+			}
+			if state == nil || state.State != domain.WorkspaceSnapshotWritten {
+				t.Errorf("snapshot lifecycle after the terminal = %+v, want the written row kept", state)
+			}
+		})
 	}
 }
 
@@ -540,6 +498,26 @@ func wireBlobStore(t *testing.T, s *Spawner) {
 func putTestSnapshot(t *testing.T, s *Spawner, keyID string) {
 	t.Helper()
 	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, keyID), strings.NewReader("snapshot")); err != nil {
+		t.Fatalf("seed snapshot: %v", err)
+	}
+}
+
+// putUnrestorableSnapshot stores a blob of this layout that cannot be restored:
+// its manifest reads (so a resume is accepted at enqueue), and its zstd
+// checksum is cut short (so the rehydrate at claim fails).
+func putUnrestorableSnapshot(t *testing.T, s *Spawner, keyID string) {
+	t.Helper()
+	f, _, _, err := stageSnapshotArchive(context.Background(), &capturedSnapshot{}, t.TempDir(), snapshotManifest{})
+	if err != nil {
+		t.Fatalf("stage archive: %v", err)
+	}
+	blob, err := io.ReadAll(f)
+	_ = f.Close()
+	_ = os.Remove(f.Name())
+	if err != nil {
+		t.Fatalf("read staged archive: %v", err)
+	}
+	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, keyID), bytes.NewReader(blob[:len(blob)-1])); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 }

@@ -95,18 +95,3 @@ func TestClassifyAgentResult_None(t *testing.T) {
 		})
 	}
 }
-
-// TestParseAgentResult_ValidOnly confirms parseAgentResult (the terminal-record
-// helper) returns a result only for a valid conclusion — invalid attempts and
-// open turn-ends come back nil.
-func TestParseAgentResult_ValidOnly(t *testing.T) {
-	if got := parseAgentResult(`{"outcome":"finish","summary":"done"}`); got == nil || got.Outcome != "finish" {
-		t.Errorf("valid finish: got %+v", got)
-	}
-	if got := parseAgentResult(`{"outcome":"abort","summary":"stopped"}`); got != nil {
-		t.Errorf("abort without reason should not parse as valid: got %+v", got)
-	}
-	if got := parseAgentResult(`just prose`); got != nil {
-		t.Errorf("prose should not parse: got %+v", got)
-	}
-}

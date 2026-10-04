@@ -26,28 +26,23 @@ func sandboxingMode(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 }
 
-// TestEntityMemoryTarget_LocalRendersInTheTree: local mode owns the run tree, so
-// the layout stays exactly where released behavior puts it, no mount is
-// requested, and the repo-owned guard still applies — that tree may be a repo
-// checkout.
+// TestEntityMemoryTarget_LocalRendersInTheTree: local mode owns the run root,
+// so the layout stays at the path the agent's prompt names and no mount is
+// requested.
 func TestEntityMemoryTarget_LocalRendersInTheTree(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	runmode.SetForTest(t, runmode.ModeLocal)
 
 	cwd := t.TempDir()
-	owned := repoFiles{"_tfac/memory.md": true}
 	var cfg runConfig
 
-	dir, gotOwned := entityMemoryTarget(&cfg, "run-local", cwd, owned)
+	dir := entityMemoryTarget(&cfg, "run-local", cwd)
 
 	if want := localMemoryRoot(cwd); dir != want {
 		t.Errorf("target = %q, want the in-tree layout at %q", dir, want)
 	}
 	if cfg.memorySourcePath != "" {
 		t.Errorf("memorySourcePath = %q, want empty (local mode mounts nothing)", cfg.memorySourcePath)
-	}
-	if !gotOwned.owns("memory.md") {
-		t.Error("the repo-owned set must travel with an in-tree target")
 	}
 }
 
@@ -86,7 +81,7 @@ func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) 
 	// Step 2's pre-launch pass, in the order runAgent performs it.
 	const step2RunID = "step2-run"
 	var cfg runConfig
-	dir, gotOwned := entityMemoryTarget(&cfg, step2RunID, cwd, nil)
+	dir := entityMemoryTarget(&cfg, step2RunID, cwd)
 	t.Cleanup(func() { removeStagedMemory(dir) })
 
 	if want := sandbox.TrustedMemorySourcePath(step2RunID); dir != want {
@@ -95,11 +90,7 @@ func TestBlueprintHandoff_WarmStepReadsItsPredecessorFromTheMount(t *testing.T) 
 	if cfg.memorySourcePath != dir {
 		t.Errorf("memorySourcePath = %q, want %q — without it the launch mounts nothing", cfg.memorySourcePath, dir)
 	}
-	if gotOwned != nil {
-		t.Error("a staging dir is no repo; it must carry no repo-owned set")
-	}
-
-	materializeEntityMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dir, task.EntityID, task.ID, gotOwned)
+	materializeEntityMemories(s.taskMemory, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dir, task.EntityID, task.ID)
 
 	// Step 1's handoff is in the tree step 2 will mount...
 	assertMemoryFile(t, filepath.Join(dir, "this-task", "01-t.md"), "step 1 chose approach X because Y")
@@ -224,7 +215,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("the sandbox path (and therefore the memory mount) is Linux-only")
 	}
-	paths.SetForTest(t, t.TempDir())
+	isolateRunNamespace(t)
 	setupGitTestEnv(t)
 	// Capture side runs in local mode: multi resolves the blob store to an object
 	// store this test has no business standing up, and takes its git delta through
@@ -235,8 +226,11 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	s := newStorageSpawner(t)
 
 	const conversationID = "wt-memlink"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
+	wtPath, err := worktree.MakeRunRoot(conversationID)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
 
 	// Scratch content that DOES ride the snapshot, so the rehydrate takes the
 	// rename branch — the one that collides with an already-planted link.
@@ -244,20 +238,14 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
 		t.Fatalf("snapshotWorkspace: %v", err)
 	}
-
-	// Host loss: the tree is gone and comes back from bare + delta.
+	// Host loss: the tree is gone and comes back from the blob.
 	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
+		t.Fatalf("rm run root: %v", err)
 	}
-	bareDir, err := worktree.RepoDir(owner, repo)
-	if err != nil {
-		t.Fatalf("RepoDir: %v", err)
-	}
-	gitT(t, bareDir, "worktree", "prune")
 
 	runmode.SetForTest(t, runmode.ModeMulti)
 	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
+	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}

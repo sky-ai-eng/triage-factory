@@ -12,6 +12,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	_ "modernc.org/sqlite"
 )
 
@@ -222,4 +223,14 @@ func hasActiveClaim(t *testing.T, database *sql.DB, convID string) bool {
 		t.Fatalf("read active claim for %s: %v", convID, err)
 	}
 	return live
+}
+
+// createPRCheckoutForTest builds a PR checkout the way setupGitHub does: the
+// task's run root, and the checkout beneath it namespaced by the conversation.
+func createPRCheckoutForTest(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey string, opts ...worktree.CloneOption) (string, error) {
+	root, err := worktree.MakeRunRoot(rootKey)
+	if err != nil {
+		return "", err
+	}
+	return worktree.CreateForPRInRoot(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, rootKey, root, opts...)
 }

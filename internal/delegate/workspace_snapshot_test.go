@@ -7,524 +7,627 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestEnsureWorkspace_WarmPath_NoRehydrate is the warm-path acceptance: a run
-// that parked keeps its worktree on disk, so ensureWorkspace returns it as-is
-// and does NOT rebuild from the snapshot. A marker file written AFTER the
-// snapshot survives — proof the warm copy was used, not a rehydrate that would
-// have lost it.
-func TestEnsureWorkspace_WarmPath_NoRehydrate(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-warm"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-
-	const sessionID = "sess-warm"
-	writeSession(t, wtPath, sessionID, `{"type":"summary"}`)
-
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	// Written after the snapshot: a rehydrate rebuilds from the (older) blob and
-	// would lose this, so its survival distinguishes warm reuse from a rebuild.
-	marker := filepath.Join(wtPath, "_tfac", "notes", "warm-marker.txt")
+// TestEnsureWorkspace_WarmTreeIsReused: a parked run root that survived on disk
+// is returned as-is. A file written after the snapshot survives, which a
+// rebuild from the older blob would have lost.
+func TestEnsureWorkspace_WarmTreeIsReused(t *testing.T) {
+	f := newSnapshotFixture(t, "task-warm")
+	f.addCheckout(t, "acme/app", "default")
+	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	marker := filepath.Join(f.root, worktree.ScratchDir, "warm-marker.txt")
 	writeFile(t, marker, "warm")
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
+	got, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), nil)
 	if err != nil {
-		t.Fatalf("ensureWorkspace (warm): %v", err)
+		t.Fatalf("ensureWorkspace: %v", err)
 	}
-	if prov != domain.WorkspaceProvenanceWarm {
-		t.Errorf("warm provenance = %q, want warm — a reused tree must not be reported as a restore", prov)
+	if prov != domain.WorkspaceProvenanceWarm || got != f.root {
+		t.Errorf("ensureWorkspace = (%q, %q), want the warm root %q", got, prov, f.root)
 	}
-	if got != wtPath {
-		t.Errorf("warm cwd = %q, want the on-disk worktree %q", got, wtPath)
-	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Errorf("post-snapshot marker missing — ensureWorkspace rehydrated instead of reusing the warm copy: %v", err)
+	assertFileContains(t, marker, "warm")
+	if len(f.ledger.recordedRows()) != 0 {
+		t.Errorf("a warm tree recorded checkouts %v; nothing was rebuilt", f.ledger.recordedRows())
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot is the cold-path
-// acceptance: a parked run whose local worktree (and session JSONL) are then
-// lost — simulating host loss / a /tmp wipe — resumes by rebuilding from the
-// snapshot. The agent's committed work (carried in the git bundle), the
-// uncommitted changes (the patch), the ephemeral _tfac (minus the
-// re-materializable subdirs), and an intact `--resume` session must all be
-// restored.
-func TestEnsureWorkspace_ColdPath_RehydratesFromSnapshot(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
+// TestEnsureWorkspace_ColdRoundTrip is the restore acceptance: a run root with
+// a PR checkout and checkouts of two other repos — each with an unpushed
+// commit, an uncommitted edit and an untracked file — plus scratch and a
+// session transcript, rebuilt after the root is gone. Every checkout comes
+// back exactly, as a self-contained clone when the run trees are, the PR
+// checkout with its push tracking, and each is recorded as the restoring
+// conversation's. A snapshot of the rebuilt tree carries all three again.
+func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
+	for _, selfContained := range []bool{false, true} {
+		name := "linked"
+		if selfContained {
+			name = "self-contained"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newSnapshotFixture(t, "task-cold")
+			runmode.SetLocalSandboxForTest(t, selfContained)
 
-	const conversationID = "wt-cold"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
+			pr := f.addCheckout(t, "acme/app", "pr-7")
+			lib := f.addCheckout(t, "acme/lib", "default")
+			docs := f.addCheckout(t, "acme/docs", "ref-main")
+			gitT(t, lib, "checkout", "-q", "-b", "agent-work")
+			heads := map[string]string{}
+			for _, co := range []string{pr, lib, docs} {
+				dirtyCheckout(t, co)
+				heads[co] = strings.TrimSpace(gitOut(t, co, "rev-parse", "HEAD"))
+			}
+			prBranch := worktree.CurrentBranch(pr)
 
-	// The agent commits work (advances the branch; rides in the bundle).
-	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
-	gitT(t, wtPath, "add", "agent.txt")
-	gitT(t, wtPath, "commit", "-m", "agent work")
+			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "build.log"), "scratch note")
+			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "entity-memory", "ns", "x.md"), "memory")
+			writeFile(t, filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir, "42", "build.log"), "ci log line")
+			const sessionID = "sess-cold"
+			sessPath := writeSession(t, f.root, sessionID, `{"type":"summary","sid":"cold"}`)
 
-	// ...then leaves an uncommitted edit (rides in the patch).
-	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
+			f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+			f.loseRoot(t)
+			if err := os.Remove(sessPath); err != nil {
+				t.Fatalf("rm session: %v", err)
+			}
 
-	// Ephemeral _tfac is snapshotted; entity-memory / ci-logs are excluded
-	// (they re-materialize from the DB, or re-download from GitHub).
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), "scratch note")
-	writeFile(t, filepath.Join(wtPath, "_tfac", "entity-memory", "ns", "x.md"), "memory")
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "build.log"), "ci log line")
+			conv := f.conv(sessionID)
+			got, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), nil)
+			if err != nil {
+				t.Fatalf("ensureWorkspace: %v", err)
+			}
+			if prov != domain.WorkspaceProvenanceRehydrated || got != f.root {
+				t.Fatalf("ensureWorkspace = (%q, %q), want %q rehydrated", got, prov, f.root)
+			}
+			if worktree.IsGitWorktree(got) {
+				t.Error("the rebuilt run root is a git checkout; it is a plain folder")
+			}
+			for _, co := range []string{pr, lib, docs} {
+				assertFileContains(t, filepath.Join(co, "committed.txt"), "unpushed commit")
+				assertFileContains(t, filepath.Join(co, "README.md"), "uncommitted edit")
+				assertFileContains(t, filepath.Join(co, "untracked.txt"), "untracked file")
+				if head := strings.TrimSpace(gitOut(t, co, "rev-parse", "HEAD")); head != heads[co] {
+					t.Errorf("%s HEAD = %s, want %s", co, head, heads[co])
+				}
+				if fi, err := os.Lstat(filepath.Join(co, ".git")); err != nil || fi.IsDir() != selfContained {
+					t.Errorf("%s/.git is a directory = %v (err %v), want %v", co, fi != nil && fi.IsDir(), err, selfContained)
+				}
+			}
+			if b := worktree.CurrentBranch(pr); b != prBranch {
+				t.Errorf("PR checkout branch = %q, want %q", b, prBranch)
+			}
+			if target := worktree.PushTargetBranch(pr); target != "feature" {
+				t.Errorf("PR checkout push target = %q, want the PR head branch", target)
+			}
+			if b := worktree.CurrentBranch(lib); b != "agent-work" {
+				t.Errorf("acme/lib branch = %q, want agent-work", b)
+			}
+			if err := exec.Command("git", "-C", docs, "symbolic-ref", "-q", "HEAD").Run(); err == nil {
+				t.Error("acme/docs came back on a branch; it was detached")
+			}
 
-	const sessionID = "sess-cold"
-	sessPath := writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"cold"}`)
+			assertFileContains(t, filepath.Join(got, worktree.ScratchDir, "notes", "build.log"), "scratch note")
+			assertMissing(t, filepath.Join(got, worktree.ScratchDir, "entity-memory", "ns", "x.md"))
+			assertMissing(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir, "42", "build.log"))
+			assertFileContains(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir, ciLogsNoticeFile), "download-logs")
+			if !sessionTranscriptExists(got, sessionID) {
+				t.Error("the session transcript did not come back; a --resume would fail")
+			}
 
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+			recorded := map[string]domain.ConversationWorktree{}
+			for _, w := range f.ledger.recordedRows() {
+				recorded[w.Path] = w
+			}
+			for _, co := range []string{pr, lib, docs} {
+				if w, ok := recorded[co]; !ok || w.ConversationID != conv.ID {
+					t.Errorf("no row recorded for %s as %s's (recorded: %v)", co, conv.ID, f.ledger.recordedRows())
+				}
+			}
+
+			f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+			members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
+			for _, rel := range []string{"acme/app/pr-7", "acme/lib/default", "acme/docs/ref-main"} {
+				if !members[snapCheckoutsPrefix+rel+"/bundle"] || !members[snapCheckoutsPrefix+rel+"/patch"] {
+					t.Errorf("the snapshot of the rebuilt tree lost %s's members (members: %v)", rel, members)
+				}
+			}
+		})
 	}
+}
 
-	// Simulate host loss / /tmp wipe: the worktree and session JSONL are gone,
-	// and the bare no longer has the agent's local branch (a fresh clone only
-	// carries the remote) — so the committed state can ONLY come back via the
-	// bundle. The persistent bare itself survives (state-root, not /tmp).
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
+// TestEnsureWorkspace_FailedCheckoutLeavesNothing: one checkout that cannot be
+// rebuilt — here because GitHub could not be reached to read its PR — fails the
+// whole restore with that outage as the error, so the hand-back spends the
+// upstream budget, and nothing of the attempt is left behind — no root, no
+// checkout, no recorded row — for a later claim to take for a warm tree.
+func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
+	f := newSnapshotFixture(t, "task-fail")
+	f.addCheckout(t, "acme/lib", "default")
+	f.addCheckout(t, "acme/app", "pr-7")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restorer := f.restorer()
+	restorer.pr = func(context.Context, string, string, int) (*ghclient.PRView, error) {
+		return nil, &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}
 	}
+	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
+	if err == nil {
+		t.Fatal("ensureWorkspace succeeded with a checkout that could not be rebuilt")
+	}
+	if !upstreamSetupFailure(err) {
+		t.Errorf("ensureWorkspace error = %v, want the upstream outage that stopped it", err)
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root survived a failed restore (stat err %v)", err)
+	}
+	if rows := f.ledger.recordedRows(); len(rows) != 0 {
+		t.Errorf("a failed restore recorded %v", rows)
+	}
+}
+
+// TestEnsureWorkspace_UnreadablePRRestoresReadOnly: a PR GitHub refuses to show
+// this credential, rather than one it could not be reached for, does not cost
+// the workspace. Only push tracking needs the PR, so its checkout comes back
+// with all its work and no push remote, the way a deleted head repository
+// leaves a fresh one.
+func TestEnsureWorkspace_UnreadablePRRestoresReadOnly(t *testing.T) {
+	f := newSnapshotFixture(t, "task-unreadable-pr")
+	runmode.SetLocalSandboxForTest(t, true)
+	pr := f.addCheckout(t, "acme/app", "pr-7")
+	dirtyCheckout(t, pr)
+	head := strings.TrimSpace(gitOut(t, pr, "rev-parse", "HEAD"))
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restorer := f.restorer()
+	restorer.pr = func(context.Context, string, string, int) (*ghclient.PRView, error) {
+		return nil, ghclient.NewHTTPError(http.StatusNotFound, `{"message":"Not Found"}`, "GET /repos/acme/app/pulls/7 returned 404")
+	}
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	assertFileContains(t, filepath.Join(pr, "committed.txt"), "unpushed commit")
+	assertFileContains(t, filepath.Join(pr, "README.md"), "uncommitted edit")
+	if got := strings.TrimSpace(gitOut(t, pr, "rev-parse", "HEAD")); got != head {
+		t.Errorf("PR checkout HEAD = %s, want %s", got, head)
+	}
+	if remotes := strings.TrimSpace(gitOut(t, pr, "remote")); remotes != "origin" {
+		t.Errorf("remotes = %q, want origin alone — no push tracking without the PR", remotes)
+	}
+}
+
+// TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack: a rehydrate that
+// fails after every checkout is rebuilt — here writing the session transcript
+// — removes the root and takes each checkout's push config back out of the
+// shared bare, which removing the root alone does not.
+func TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack(t *testing.T) {
+	f := newSnapshotFixture(t, "task-late-failure")
+	runmode.SetLocalSandboxForTest(t, false)
+	f.addCheckout(t, "acme/app", "pr-7")
+	const sessionID = "sess-late"
+	sessPath := writeSession(t, f.root, sessionID, `{"type":"summary"}`)
+	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+	f.loseRoot(t)
+	bare, err := worktree.RepoDir("acme", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the transcript goes, so writing it fails.
 	if err := os.Remove(sessPath); err != nil {
-		t.Fatalf("rm session: %v", err)
+		t.Fatal(err)
 	}
-	bareDir, err := worktree.RepoDir(owner, repo)
-	if err != nil {
-		t.Fatalf("RepoDir: %v", err)
-	}
-	gitT(t, bareDir, "worktree", "prune")
-	gitT(t, bareDir, "branch", "-D", "feature")
-
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
-	if err != nil {
-		t.Fatalf("ensureWorkspace (cold): %v", err)
-	}
-	if prov != domain.WorkspaceProvenanceRehydrated {
-		t.Errorf("cold provenance = %q, want rehydrated", prov)
-	}
-	if got != wtPath {
-		t.Errorf("rehydrated cwd = %q, want %q", got, wtPath)
+	if err := os.MkdirAll(sessPath, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent") // bundle
-	assertFileContains(t, filepath.Join(got, "README.md"), "uncommitted edit")   // patch
-	assertFileContains(t, filepath.Join(got, "_tfac", "notes", "build.log"), "scratch note")
-	assertMissing(t, filepath.Join(got, "_tfac", "entity-memory", "ns", "x.md"))
-	assertMissing(t, filepath.Join(got, "_tfac", "ci-logs", "42", "build.log"))
-	// The one exclusion the agent can notice: it gets an explanation in place
-	// of the logs, not a directory that silently emptied.
-	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", ciLogsNoticeFile), "download-logs")
-
-	// The session transcript lands under the rebuilt cwd's encoded project dir
-	// so `claude --resume` reconnects.
-	sessPath2, err := worktree.ClaudeSessionPath(worktree.ResolveClaudeProjectCwd(got), sessionID)
-	if err != nil {
-		t.Fatalf("ClaudeSessionPath: %v", err)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil); err == nil {
+		t.Fatal("ensureWorkspace succeeded with a transcript it could not write")
 	}
-	assertFileContains(t, sessPath2, `"sid":"cold"`)
-}
-
-// TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable: a snapshot
-// that captured the session transcript rehydrates one back into place, so the
-// resume guard (sessionTranscriptExists) sees the run as resumable and a
-// --resume is safe. The positive half of the pair below.
-func TestEnsureWorkspace_ColdPath_TranscriptBearingSnapshotIsResumable(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-has-transcript"
-	// A non-git run-root keeps the focus on the session member (git delta is
-	// exercised by the fuller round-trip test above). Rooting it at the
-	// deterministic RunRoot(keyID) — where the cold path rebuilds — keeps
-	// wtDir == conv.WorktreePath, so ensureWorkspace doesn't take the
-	// persist-new-path branch (SetWorktreePathSystem is unwired in this spawner).
-	wtPath := worktree.RunRoot(conversationID)
-	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
-	const sessionID = "sess-present"
-	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"present"}`)
-
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root survived a failed restore (stat err %v)", err)
 	}
-	if err := os.RemoveAll(wtPath); err != nil { // host loss: only the snapshot remains
-		t.Fatalf("rm worktree: %v", err)
-	}
-
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID, SessionID: sessionID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
-	if err != nil {
-		t.Fatalf("ensureWorkspace (cold): %v", err)
-	}
-	if !sessionTranscriptExists(got, sessionID) {
-		t.Fatal("sessionTranscriptExists = false after rehydrating a transcript-bearing snapshot; the resume guard would wrongly fail a resumable run")
+	if remotes := gitOut(t, bare, "remote"); strings.Contains(remotes, "tfpush-") {
+		t.Errorf("the failed restore left its push remote in the bare:\n%s", remotes)
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable: the exact
-// shape behind the resume-fails-with-no-reason report — a run with a session id
-// whose transcript was NOT captured (writeSnapshotTar skips the member and
-// warns). The workspace rebuilds, but the resume guard must see it as
-// unresumable so the delivery path fails with an actionable reason rather than
-// handing the SDK a doomed --resume ("No conversation found").
-func TestEnsureWorkspace_ColdPath_TranscriptlessSnapshotIsNotResumable(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-no-transcript"
-	wtPath := worktree.RunRoot(conversationID)
-	t.Cleanup(func() { _ = os.RemoveAll(wtPath) })
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch survived")
-	const sessionID = "sess-lost"
-	// Deliberately NO writeSession: the conversation carries a session id but its
-	// transcript is not on disk when the snapshot is taken.
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+// TestEnsureWorkspace_RefusedState covers the state an older binary left: a
+// blob without the layout version, a blob in the old compression, a warm root
+// that is itself a git checkout, and no blob at all. None is converted. A
+// native conversation is built a fresh workspace; an SDK resume is refused as
+// expired.
+func TestEnsureWorkspace_RefusedState(t *testing.T) {
+	stage := map[string]func(t *testing.T, f *snapshotFixture){
+		"unversioned blob": func(t *testing.T, f *snapshotFixture) {
+			putTarBlob(t, f, true, func(tw *tar.Writer) {
+				man, _ := json.Marshal(snapshotManifest{SessionID: "sess-old"})
+				_ = writeTarBytes(tw, snapManifest, man)
+				_ = writeTarBytes(tw, snapScratchPrefix+"notes.txt", []byte("old layout"))
+			})
+			f.loseRoot(t)
+		},
+		"gzip blob": func(t *testing.T, f *snapshotFixture) {
+			putTarBlob(t, f, false, func(tw *tar.Writer) {
+				_ = writeTarBytes(tw, snapScratchPrefix+"notes.txt", []byte("old layout"))
+			})
+			f.loseRoot(t)
+		},
+		"warm root that is a checkout": func(t *testing.T, f *snapshotFixture) {
+			gitT(t, f.root, "init", "-q")
+		},
+		"no blob": func(t *testing.T, f *snapshotFixture) {
+			f.loseRoot(t)
+		},
 	}
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
-	}
-
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID, SessionID: sessionID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
-	if err != nil {
-		t.Fatalf("ensureWorkspace (cold): %v", err)
-	}
-	// The workspace itself rebuilt...
-	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "scratch survived")
-	// ...but no transcript rode along, so the guard must report it unresumable.
-	if sessionTranscriptExists(got, sessionID) {
-		t.Fatal("sessionTranscriptExists = true for a transcript-less snapshot; the resume guard would not fire and the SDK would get a doomed --resume")
-	}
-}
-
-// TestSnapshotWorkspace_StoresZstd: the stored blob is zstd-compressed — the
-// session transcript alone makes uncompressed storage pathological, so the
-// staged tar is wrapped in zstd before Put. Asserts on
-// the raw stored bytes: the storage seam must carry the compressed form, not
-// just hand back something the reader can parse.
-func TestSnapshotWorkspace_StoresZstd(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	// A non-git run-root is enough: format is decided by the writer wrapper,
-	// not by which members ride in the tar.
-	wtPath := t.TempDir()
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
-
-	const conversationID = "wt-zstd"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
-	if err != nil {
-		t.Fatalf("get snapshot blob: %v", err)
-	}
-	defer func() { _ = rc.Close() }()
-	magic := make([]byte, len(zstdMagic))
-	if _, err := io.ReadFull(rc, magic); err != nil {
-		t.Fatalf("read blob magic: %v", err)
-	}
-	if !bytes.Equal(magic, zstdMagic) {
-		t.Errorf("stored blob starts with % x, want zstd magic % x", magic, zstdMagic)
+	for name, setup := range stage {
+		t.Run(name, func(t *testing.T) {
+			for _, runtime := range []string{domain.ConversationRuntimeNative, domain.ConversationRuntimeSDK} {
+				f := newSnapshotFixture(t, "task-refused-"+runtime)
+				setup(t, f)
+				conv := f.conv("")
+				conv.Runtime = runtime
+				built := false
+				fresh := func(context.Context) (string, error) {
+					built = true
+					if _, err := os.Stat(filepath.Join(f.root, ".git")); !os.IsNotExist(err) {
+						t.Errorf("the fresh build found the older tree still in place (stat err %v)", err)
+					}
+					return worktree.MakeRunRoot(f.key)
+				}
+				got, prov, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), fresh)
+				if runtime == domain.ConversationRuntimeSDK {
+					if !errors.Is(err, ErrWorkspaceExpired) {
+						t.Errorf("SDK resume: err = %v, want ErrWorkspaceExpired", err)
+					}
+					continue
+				}
+				if err != nil {
+					t.Fatalf("native: ensureWorkspace: %v", err)
+				}
+				if !built || prov != domain.WorkspaceProvenanceFresh || got != f.root {
+					t.Errorf("native: ensureWorkspace = (%q, %q, built=%v), want a fresh %q", got, prov, built, f.root)
+				}
+				if _, err := os.Stat(filepath.Join(got, worktree.ScratchDir, "notes.txt")); !os.IsNotExist(err) {
+					t.Errorf("native: the older blob's scratch was restored (stat err %v)", err)
+				}
+			}
+		})
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_TruncatedZstdErrors: a stored blob whose zstd
-// checksum is truncated must fail the rehydrate
-// rather than silently rebuild onto corrupt state. The tar reader stops at the
-// archive's end-of-archive marker before the zstd footer, so the integrity
-// check only fires because rehydrate drains the reader to EOF; this guards that
-// drain. A non-git run-root keeps the focus on the integrity gate, which runs
-// before any worktree mutation.
-func TestEnsureWorkspace_ColdPath_TruncatedZstdErrors(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
+// TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout: a row names
+// a checkout by repo and slug. One recorded under another root — on another
+// host, or before a restore rebuilt the root here — still carries the checkout
+// that sits at that place under this root.
+func TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout(t *testing.T) {
+	f := newSnapshotFixture(t, "task-row-elsewhere")
+	lib := f.addCheckout(t, "acme/lib", "default")
+	dirtyCheckout(t, lib)
+	f.ledger.mu.Lock()
+	f.ledger.rows[0].Path = filepath.Join("/elsewhere", "triagefactory-runs", f.key, "acme", "lib", "default")
+	f.ledger.mu.Unlock()
 
-	const conversationID = "wt-corrupt"
-	worktree.RemoveRunRoot(conversationID)
-	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "_tfac", "notes", "x.log"), "scratch bytes the zstd frame checksum covers")
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
+	if !members[snapCheckoutsPrefix+"acme/lib/default/bundle"] {
+		t.Errorf("the snapshot dropped a checkout whose row names another root (members: %v)", members)
+	}
+}
+
+// TestSetupGitHub_FailsWithoutItsCheckoutRow: the PR checkout's row is how
+// every later snapshot finds the checkout, so a setup that cannot write it
+// fails instead of starting an agent whose work no snapshot would carry — and
+// fails before the clone and the worktree_path stamp, so the next claim finds
+// no tree to take for a warm one and runs the setup again.
+func TestSetupGitHub_FailsWithoutItsCheckoutRow(t *testing.T) {
+	f := newSnapshotFixture(t, "task-setup-row")
+	origin := f.upstream(t, "acme/app")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/app/pulls/7" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": origin}},
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": origin}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	conversations := &setupConversations{}
+	f.s.conversations = conversations
+	f.s.conversationWorktrees = refusingLedger{}
+
+	task := domain.Task{ID: f.key, EntitySource: "github", EntitySourceID: "acme/app#7"}
+	_, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "conversation_worktrees") {
+		t.Fatalf("setupGitHub = %v, want the failed row write", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "acme", "app", "pr-7")); !os.IsNotExist(err) {
+		t.Errorf("the failed setup cloned its checkout anyway (stat err %v)", err)
+	}
+	if conversations.stamped != 0 {
+		t.Errorf("the failed setup stamped worktree_path %d times; the next claim would take the root for a warm tree", conversations.stamped)
+	}
+}
+
+// setupConversations accepts the phase and worktree_path writes a setup makes,
+// counting the stamps.
+type setupConversations struct {
+	db.ConversationStore
+	stamped int
+}
+
+func (*setupConversations) SetClaimPhaseSystem(context.Context, string, string, string, string) (*domain.ExecutorClaim, error) {
+	return nil, nil
+}
+
+func (c *setupConversations) SetWorktreePathForClaimSystem(context.Context, string, string, string, string) (*domain.Conversation, error) {
+	c.stamped++
+	return nil, nil
+}
+
+// refusingLedger fails every conversation_worktrees write.
+type refusingLedger struct{ db.ConversationWorktreeStore }
+
+func (refusingLedger) RecordForClaimSystem(context.Context, string, string, domain.ConversationWorktree) (domain.ConversationWorktree, error) {
+	return domain.ConversationWorktree{}, errors.New("database is locked")
+}
+
+// TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist: a checkout the
+// capture cannot stat for any reason but its absence fails the snapshot, and
+// the blob already under the key, which carries that checkout, stands. A blob
+// written without it would replace the last one that had its work.
+func TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist(t *testing.T) {
+	f := newSnapshotFixture(t, "task-unstattable")
+	co := f.addCheckout(t, "acme/app", "default")
+	dirtyCheckout(t, co)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+
+	// A symlink loop where the owner directory was. Resolving the checkout's
+	// path fails with ELOOP, which stands in for the permission error a test
+	// running as root cannot produce.
+	owner := filepath.Join(f.root, "acme")
+	if err := os.Rename(owner, owner+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("acme", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative); err == nil {
+		t.Fatal("snapshotWorkspace succeeded with a checkout it could not stat")
+	}
+	if !snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))[snapCheckoutsPrefix+"acme/app/default/bundle"] {
+		t.Error("the blob carrying the checkout was replaced by one without it")
+	}
+}
+
+// TestSnapshotWorkspace_StalledCheckoutReadEndsWithTheBound: the read of the
+// task's checkouts is part of the capture and takes the persist's bound, so a
+// database that stops answering fails the snapshot when the bound runs out
+// instead of holding a park or a conclusion open.
+func TestSnapshotWorkspace_StalledCheckoutReadEndsWithTheBound(t *testing.T) {
+	f := newSnapshotFixture(t, "task-stalled")
+	f.s.conversationWorktrees = stalledLedger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- f.s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("snapshotWorkspace succeeded without the task's checkouts")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("snapshotWorkspace outlived its bound waiting on the checkout read")
+	}
+}
+
+// stalledLedger answers the task's checkout read only when its context ends, as
+// a database that stopped answering does.
+type stalledLedger struct{ db.ConversationWorktreeStore }
+
+func (stalledLedger) ListForTaskSystem(ctx context.Context, _, _ string) ([]domain.ConversationWorktree, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestFreshRunRoot_FailsWhenTheOlderTreeStays: a setup building from nothing
+// removes a run root an older binary laid out, and when that removal fails the
+// setup fails with it rather than building on the older tree.
+func TestFreshRunRoot_FailsWhenTheOlderTreeStays(t *testing.T) {
+	isolateRunNamespace(t)
+	setupGitTestEnv(t)
+	const key = "task-older-root"
+	root, err := worktree.MakeRunRoot(key)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(key) })
+	gitT(t, root, "init", "-q")
+
+	restoreRemoveSeam(t, func(string, string) error { return errors.New("removal refused") })
+	if _, err := freshRunRoot(key); err == nil {
+		t.Fatal("freshRunRoot succeeded with the older tree still in place")
 	}
 
-	// Remove a byte from the frame checksum. The tar itself remains complete,
-	// making the decoder drain after tar EOF the integrity gate under test.
-	key := snapshotKey(runmode.LocalDefaultOrgID, conversationID)
-	rc, err := s.Storage().Get(context.Background(), key)
+	restoreRemoveSeam(t, worktree.RemoveAt)
+	got, err := freshRunRoot(key)
 	if err != nil {
-		t.Fatalf("get snapshot blob: %v", err)
+		t.Fatalf("freshRunRoot: %v", err)
+	}
+	if worktree.IsGitWorktree(got) {
+		t.Error("the fresh run root is still a git checkout")
+	}
+}
+
+// TestSnapshotWorkspace_BlobFormat: the stored blob is zstd, its first member
+// is the manifest with this layout's version and the checkouts it carries —
+// which is what lets the layout probe answer from one short read — and
+// extracted CI logs, which are one download away, contribute nothing to it.
+func TestSnapshotWorkspace_BlobFormat(t *testing.T) {
+	f := newSnapshotFixture(t, "task-format")
+	f.addCheckout(t, "acme/app", "default")
+	logs := strings.Repeat("2026-08-20T12:00:00.0000000Z ##[group]Run go test ./...\n", 60_000)
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir, "42", "1_build.txt"), logs)
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "keep.txt"), "the agent's own intermediate")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+
+	key := snapshotKey(runmode.LocalDefaultOrgID, f.key)
+	rc, err := f.s.Storage().Get(context.Background(), key)
+	if err != nil {
+		t.Fatalf("get blob: %v", err)
 	}
 	blob, err := io.ReadAll(rc)
 	_ = rc.Close()
 	if err != nil {
-		t.Fatalf("read snapshot blob: %v", err)
+		t.Fatalf("read blob: %v", err)
 	}
-	if len(blob) < 5 {
-		t.Fatalf("snapshot blob too small to corrupt: %d bytes", len(blob))
+	if !bytes.HasPrefix(blob, zstdMagic) {
+		t.Errorf("blob starts with % x, want zstd", blob[:4])
 	}
-	blob = blob[:len(blob)-1]
-	if err := s.Storage().Put(context.Background(), key, bytes.NewReader(blob)); err != nil {
-		t.Fatalf("put corrupted blob: %v", err)
-	}
-
-	// Cold path: the warm worktree is absent, so the resume can only come from
-	// the (now corrupt) blob — which must surface as an error.
-	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: filepath.Join(t.TempDir(), "gone"), TaskID: conversationID}
-	if _, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil); err == nil {
-		t.Fatal("ensureWorkspace accepted a truncated zstd checksum; want an integrity error")
-	}
-	if _, err := os.Stat(wtDir); !os.IsNotExist(err) {
-		t.Fatalf("worktree was mutated before integrity validation: stat error = %v", err)
-	}
-}
-
-func TestEnsureWorkspace_ColdPath_LegacyGzipSnapshot(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-legacy-gzip"
-	worktree.RemoveRunRoot(conversationID)
-	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "from an old gzip snapshot")
-	var blob bytes.Buffer
-	gzw := gzip.NewWriter(&blob)
-	if err := writeSnapshotTar(context.Background(), gzw, worktree.CapturedState{}, src, snapshotManifest{}); err != nil {
-		t.Fatalf("write legacy snapshot tar: %v", err)
-	}
-	if err := gzw.Close(); err != nil {
-		t.Fatalf("close legacy gzip: %v", err)
-	}
-	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID), bytes.NewReader(blob.Bytes())); err != nil {
-		t.Fatalf("put legacy snapshot: %v", err)
+	if len(blob) > 16<<10 {
+		t.Errorf("blob = %d bytes for a tree whose only bulk is %d bytes of CI logs", len(blob), len(logs))
 	}
 
-	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
+	zr, err := zstd.NewReader(bytes.NewReader(blob))
 	if err != nil {
-		t.Fatalf("rehydrate legacy gzip snapshot: %v", err)
+		t.Fatal(err)
 	}
-	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "from an old gzip snapshot")
-}
-
-// TestSnapshotWorkspace_OmitsCILogs is the exclusion acceptance: an extracted
-// GitHub Actions log archive is re-downloadable, so it fails the snapshot's own
-// "non-recoverable state only" admission test and must contribute nothing to
-// the blob — while the scratch files that exist nowhere else still ride along.
-// The size bound is the point of the exclusion: megabytes of logs in the tree,
-// kilobytes of blob out.
-func TestSnapshotWorkspace_OmitsCILogs(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	// A non-git run-root: the git members would only add noise to the size
-	// bound, and the exclusion is decided by the scratch walk either way.
-	wtPath := t.TempDir()
-	logs := strings.Repeat("2026-08-20T12:00:00.0000000Z ##[group]Run go test ./...\n", 60_000)
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "1_build.txt"), logs)
-	writeFile(t, filepath.Join(wtPath, "_tfac", "ci-logs", "42", "2_test.txt"), logs)
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "keep.txt"), "the agent's own intermediate")
-
-	const conversationID = "wt-cilogs"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	hdr, err := tr.Next()
+	if err != nil || hdr.Name != snapManifest {
+		t.Fatalf("first member = %v (err %v), want the manifest", hdr, err)
 	}
-
-	members := snapshotMembers(t, s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
+	var man snapshotManifest
+	if err := json.NewDecoder(tr).Decode(&man); err != nil {
+		t.Fatal(err)
+	}
+	want := manifestCheckout{RepoID: "acme/app", Slug: "default", Path: "acme/app/default"}
+	if man.LayoutVersion != snapshotLayoutVersion || len(man.Checkouts) != 1 ||
+		man.Checkouts[0].RepoID != want.RepoID || man.Checkouts[0].Slug != want.Slug || man.Checkouts[0].Path != want.Path || man.Checkouts[0].Head == "" {
+		t.Errorf("manifest = %+v, want layout %d carrying %+v", man, snapshotLayoutVersion, want)
+	}
+	if !man.CILogsOmitted {
+		t.Error("manifest does not record the omitted CI logs; a restore could not explain their absence")
+	}
+	members := snapshotMembers(t, f.s.Storage(), key)
 	for name := range members {
 		if strings.HasPrefix(name, snapScratchPrefix+worktree.CILogsDir+"/") {
-			t.Errorf("snapshot carries %q; ci-logs is re-downloadable and must not ride in the blob", name)
+			t.Errorf("blob carries %q", name)
 		}
 	}
 	if !members[snapScratchPrefix+"notes/keep.txt"] {
-		t.Errorf("snapshot dropped the agent's own scratch (members: %v); only the re-fetchable subtrees are excluded", members)
+		t.Errorf("blob dropped the agent's own scratch (members: %v)", members)
 	}
 
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
-	if err != nil {
-		t.Fatalf("get snapshot blob: %v", err)
+	if p, err := f.s.snapshotLayoutAt(context.Background(), runmode.LocalDefaultOrgID, f.key); err != nil || p != snapshotRestorable {
+		t.Errorf("snapshotLayoutAt = %v, %v; want restorable", p, err)
 	}
-	defer func() { _ = rc.Close() }()
-	size, err := io.Copy(io.Discard, rc)
-	if err != nil {
-		t.Fatalf("size snapshot blob: %v", err)
-	}
-	if size > 8<<10 {
-		t.Errorf("blob = %d bytes for a workspace whose only bulk is %d bytes of CI logs; the archive phase is still paying for them", size, 2*len(logs))
+	if p, err := f.s.snapshotLayoutAt(context.Background(), runmode.LocalDefaultOrgID, "no-such-key"); err != nil || p != snapshotAbsent {
+		t.Errorf("snapshotLayoutAt(missing) = %v, %v; want absent", p, err)
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_NoCILogsNoticeWithoutOmittedLogs: the notice
-// explains a specific absence, so a workspace that never downloaded any logs
-// must not get one. Otherwise every cold rehydrate would invent a ci-logs
-// directory and tell the agent about logs that never existed.
-func TestEnsureWorkspace_ColdPath_NoCILogsNoticeWithoutOmittedLogs(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-no-cilogs"
-	worktree.RemoveRunRoot(conversationID)
-	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
-	src := t.TempDir()
-	writeFile(t, filepath.Join(src, "_tfac", "notes.txt"), "scratch note")
-	// An empty ci-logs directory is nothing dropped, so it is nothing to
-	// explain — the walk must distinguish it from a populated one.
-	if err := os.MkdirAll(filepath.Join(src, "_tfac", "ci-logs"), 0o755); err != nil {
-		t.Fatalf("mkdir ci-logs: %v", err)
+// TestEnsureWorkspace_NoCILogsNoticeWithoutOmittedLogs: the notice explains a
+// specific absence, so a tree whose ci-logs held nothing gets none.
+func TestEnsureWorkspace_NoCILogsNoticeWithoutOmittedLogs(t *testing.T) {
+	f := newSnapshotFixture(t, "task-no-cilogs")
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch note")
+	if err := os.MkdirAll(filepath.Join(f.root, worktree.ScratchDir, worktree.CILogsDir), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", src, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
+	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	f.loseRoot(t)
 
-	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
+	got, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), nil)
 	if err != nil {
-		t.Fatalf("ensureWorkspace (cold): %v", err)
+		t.Fatalf("ensureWorkspace: %v", err)
 	}
-	assertFileContains(t, filepath.Join(got, "_tfac", "notes.txt"), "scratch note")
-	if _, err := os.Stat(filepath.Join(got, "_tfac", worktree.CILogsDir)); !os.IsNotExist(err) {
-		t.Errorf("rehydrate created _tfac/ci-logs for a workspace that never had logs in it (stat error = %v)", err)
+	assertFileContains(t, filepath.Join(got, worktree.ScratchDir, "notes.txt"), "scratch note")
+	assertMissing(t, filepath.Join(got, worktree.ScratchDir, worktree.CILogsDir))
+}
+
+// TestEnsureWorkspace_TranscriptGuard: a snapshot that captured the session
+// transcript restores one the resume guard sees; one taken while the
+// transcript was missing rebuilds the tree but leaves the guard to report the
+// run unresumable, rather than hand the SDK a --resume it cannot honor.
+func TestEnsureWorkspace_TranscriptGuard(t *testing.T) {
+	for _, withTranscript := range []bool{true, false} {
+		f := newSnapshotFixture(t, "task-transcript")
+		const sessionID = "sess-guard"
+		writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch survived")
+		if withTranscript {
+			writeSession(t, f.root, sessionID, `{"type":"summary"}`)
+		}
+		f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+		f.loseRoot(t)
+
+		got, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil)
+		if err != nil {
+			t.Fatalf("ensureWorkspace: %v", err)
+		}
+		assertFileContains(t, filepath.Join(got, worktree.ScratchDir, "notes.txt"), "scratch survived")
+		if sessionTranscriptExists(got, sessionID) != withTranscript {
+			t.Errorf("transcript captured = %v, but the guard reads %v", withTranscript, !withTranscript)
+		}
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_PreExclusionSnapshotRestoresItsCILogs: blobs
-// written before the exclusion are durable state that carries its logs as
-// ordinary scratch members. Those must still restore verbatim — and must not
-// acquire a notice claiming they were dropped.
-func TestEnsureWorkspace_ColdPath_PreExclusionSnapshotRestoresItsCILogs(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
+// TestEnsureWorkspace_TruncatedZstdErrors: a blob whose zstd checksum is cut
+// short fails the rehydrate before the run root is touched. The tar ends before
+// the zstd footer, so only the drain after the last member catches it.
+func TestEnsureWorkspace_TruncatedZstdErrors(t *testing.T) {
+	f := newSnapshotFixture(t, "task-corrupt")
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "x.log"), "scratch bytes the zstd frame checksum covers")
+	f.snapshot(t, "", domain.ConversationRuntimeSDK)
+	f.loseRoot(t)
 
-	const conversationID = "wt-preexclusion"
-	worktree.RemoveRunRoot(conversationID)
-	t.Cleanup(func() { worktree.RemoveRunRoot(conversationID) })
-
-	// Hand-built, because the writer under test no longer produces this shape:
-	// scratch members under ci-logs, and a manifest with no omission recorded.
-	var blob bytes.Buffer
-	zw, err := zstd.NewWriter(&blob)
+	key := snapshotKey(runmode.LocalDefaultOrgID, f.key)
+	rc, err := f.s.Storage().Get(context.Background(), key)
 	if err != nil {
-		t.Fatalf("open zstd: %v", err)
+		t.Fatal(err)
 	}
-	tw := tar.NewWriter(zw)
-	if err := writeTarBytes(tw, snapScratchPrefix+"ci-logs/42/1_build.txt", []byte("logs an older build captured")); err != nil {
-		t.Fatalf("write legacy ci-logs member: %v", err)
-	}
-	manifest, err := json.Marshal(snapshotManifest{})
-	if err != nil {
-		t.Fatalf("marshal manifest: %v", err)
-	}
-	if err := writeTarBytes(tw, snapManifest, manifest); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	if err := tw.Close(); err != nil {
-		t.Fatalf("close tar: %v", err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatalf("close zstd: %v", err)
-	}
-	if err := s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID), bytes.NewReader(blob.Bytes())); err != nil {
-		t.Fatalf("put pre-exclusion snapshot: %v", err)
+	blob, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if err := f.s.Storage().Put(context.Background(), key, bytes.NewReader(blob[:len(blob)-1])); err != nil {
+		t.Fatal(err)
 	}
 
-	wtDir := worktree.RunRoot(conversationID)
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtDir, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, nil)
-	if err != nil {
-		t.Fatalf("rehydrate pre-exclusion snapshot: %v", err)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), nil); err == nil {
+		t.Fatal("ensureWorkspace accepted a truncated zstd checksum")
 	}
-	assertFileContains(t, filepath.Join(got, "_tfac", "ci-logs", "42", "1_build.txt"), "logs an older build captured")
-	if _, err := os.Stat(filepath.Join(got, "_tfac", worktree.CILogsDir, ciLogsNoticeFile)); !os.IsNotExist(err) {
-		t.Errorf("rehydrate planted the not-restored notice beside logs it did restore (stat error = %v)", err)
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root was written before the integrity check (stat err %v)", err)
 	}
 }
 
-// TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob: a JSONL-heavy
-// workspace — the dominant real-world shape, where the transcript carries
-// every tool call and result verbatim — must store measurably smaller than
-// its plain-tar equivalent. Loose bound only (half), not a pinned ratio.
-func TestSnapshotWorkspace_CompressionShrinksTranscriptHeavyBlob(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	wtPath := t.TempDir()
-	const sessionID = "sess-fat"
-	var jsonl strings.Builder
-	for i := 0; i < 4000; i++ {
-		fmt.Fprintf(&jsonl, `{"type":"tool_result","seq":%d,"content":"$ go test ./...\nok  \tgithub.com/sky-ai-eng/triage-factory/internal/delegate\t1.2s\n"}%s`, i, "\n")
-	}
-	writeSession(t, wtPath, sessionID, jsonl.String())
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "test.log"),
-		strings.Repeat("=== RUN   TestSomething\n--- PASS: TestSomething (0.01s)\n", 2000))
-
-	const conversationID = "wt-fat"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-	rc, err := s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, conversationID))
-	if err != nil {
-		t.Fatalf("get snapshot blob: %v", err)
-	}
-	defer func() { _ = rc.Close() }()
-	compressedSize, err := io.Copy(io.Discard, rc)
-	if err != nil {
-		t.Fatalf("size snapshot blob: %v", err)
-	}
-
-	// The same workspace through the tar writer alone = the plain equivalent.
-	// The transcript now rides in as bytes (captured agent-side), so pass the
-	// same JSONL the on-disk session holds.
-	var plain bytes.Buffer
-	if err := writeSnapshotTar(context.Background(), &plain, worktree.CapturedState{SessionID: sessionID, Transcript: []byte(jsonl.String())}, wtPath, snapshotManifest{}); err != nil {
-		t.Fatalf("writeSnapshotTar (plain): %v", err)
-	}
-	if compressedSize >= int64(plain.Len())/2 {
-		t.Errorf("compressed blob = %d bytes vs plain tar = %d bytes; compression had no real effect", compressedSize, plain.Len())
-	}
-}
-
+// TestWriteSnapshotTar_StreamsStagedCaptureMembers: members the capture child
+// staged on disk are streamed into the tar under the checkout's member names.
 func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 	staging := t.TempDir()
 	bundlePath := filepath.Join(staging, worktree.CaptureBundleFile)
@@ -534,24 +637,26 @@ func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 	writeFile(t, patchPath, "patch-bytes")
 	writeFile(t, transcriptPath, "transcript-bytes")
 
-	captured := worktree.CapturedState{
-		Delta:          &worktree.GitDelta{Branch: "aa/work", Head: "abc123"},
-		SessionID:      "sess-staged",
-		BundlePath:     bundlePath,
-		PatchPath:      patchPath,
-		TranscriptPath: transcriptPath,
+	captured := &capturedSnapshot{
+		state: worktree.CapturedState{SessionID: "sess-staged", TranscriptPath: transcriptPath},
+		checkouts: []capturedCheckout{{
+			snapshotCheckout: snapshotCheckout{repoID: "acme/app", slug: "pr-7", rel: "acme/app/pr-7"},
+			state: worktree.CapturedState{
+				Delta:      &worktree.GitDelta{Branch: "aa/work", Head: "abc123"},
+				BundlePath: bundlePath, PatchPath: patchPath,
+			},
+		}},
 	}
 	var blob bytes.Buffer
 	if err := writeSnapshotTar(context.Background(), &blob, captured, t.TempDir(), snapshotManifest{}); err != nil {
 		t.Fatalf("writeSnapshotTar: %v", err)
 	}
-
 	want := map[string]string{
-		snapBundle:  "bundle-bytes",
-		snapPatch:   "patch-bytes",
+		snapCheckoutsPrefix + "acme/app/pr-7/bundle": "bundle-bytes",
+		snapCheckoutsPrefix + "acme/app/pr-7/patch":  "patch-bytes",
 		snapSession: "transcript-bytes",
 	}
-	tr := tar.NewReader(bytes.NewReader(blob.Bytes()))
+	tr := tar.NewReader(&blob)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -560,18 +665,12 @@ func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		member, ok := want[hdr.Name]
-		if !ok {
-			continue
+		if body, ok := want[hdr.Name]; ok {
+			if got, _ := io.ReadAll(tr); string(got) != body {
+				t.Errorf("%s = %q, want %q", hdr.Name, got, body)
+			}
+			delete(want, hdr.Name)
 		}
-		got, err := io.ReadAll(tr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != member {
-			t.Errorf("%s = %q, want %q", hdr.Name, got, member)
-		}
-		delete(want, hdr.Name)
 	}
 	if len(want) != 0 {
 		t.Errorf("snapshot omitted staged members: %v", want)
@@ -593,185 +692,311 @@ func TestCapturedBytesSize_RejectsStagedSymlink(t *testing.T) {
 	}
 }
 
-// TestEnsureWorkspace_ColdPath_DetachedHead: a worktree snapshotted while HEAD
-// is detached (e.g. the agent ran `git checkout <sha>`) rehydrates to the same
-// detached commit — the manifest carries the HEAD SHA, so an empty branch no
-// longer strands the run.
-func TestEnsureWorkspace_ColdPath_DetachedHead(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-detached"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-
-	// Agent commits, then detaches HEAD at that commit.
-	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
-	gitT(t, wtPath, "add", "agent.txt")
-	gitT(t, wtPath, "commit", "-m", "agent work")
-	gitT(t, wtPath, "checkout", "--detach", "HEAD")
-	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\ndetached edit\n")
-	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
-
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	// Lose the worktree and drop the branch so the commit returns via the bundle.
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
-	}
-	bareDir, err := worktree.RepoDir(owner, repo)
-	if err != nil {
-		t.Fatalf("RepoDir: %v", err)
-	}
-	gitT(t, bareDir, "worktree", "prune")
-	gitT(t, bareDir, "branch", "-D", "feature")
-
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
-	if err != nil {
-		t.Fatalf("ensureWorkspace (detached): %v", err)
-	}
-	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent")
-	assertFileContains(t, filepath.Join(got, "README.md"), "detached edit")
-	if gotSHA := strings.TrimSpace(gitOut(t, got, "rev-parse", "HEAD")); gotSHA != headSHA {
-		t.Errorf("rehydrated HEAD = %s, want %s", gotSHA, headSHA)
-	}
-	if err := exec.Command("git", "-C", got, "symbolic-ref", "-q", "HEAD").Run(); err == nil {
-		t.Error("rehydrated HEAD is on a branch; want detached")
-	}
-}
-
-// TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits: a run on a local
-// branch that was never pushed and has no local-only commits (only uncommitted
-// changes) still rehydrates — the manifest's HEAD SHA recreates the branch even
-// though the bundle is empty and there's no refs/remotes/origin/<branch>.
-func TestEnsureWorkspace_ColdPath_NeverPushedBranchNoCommits(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-nopush"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-
-	// No commits — only an uncommitted edit on the never-pushed "feature" branch.
-	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nwork in progress\n")
-	headSHA := strings.TrimSpace(gitOut(t, wtPath, "rev-parse", "HEAD"))
-
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	// Simulate a fresh host: worktree gone and the bare lacks the never-pushed
-	// branch (only origin/* survives a fresh clone), but it still has origin/main
-	// — which is where HEAD points, since "feature" had no commits.
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
-	}
-	bareDir, err := worktree.RepoDir(owner, repo)
-	if err != nil {
-		t.Fatalf("RepoDir: %v", err)
-	}
-	gitT(t, bareDir, "worktree", "prune")
-	gitT(t, bareDir, "branch", "-D", "feature")
-
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: owner, repo: repo}, nil)
-	if err != nil {
-		t.Fatalf("ensureWorkspace (never-pushed branch): %v", err)
-	}
-	assertFileContains(t, filepath.Join(got, "README.md"), "work in progress")
-	if gotBranch := strings.TrimSpace(gitOut(t, got, "rev-parse", "--abbrev-ref", "HEAD")); gotBranch != "feature" {
-		t.Errorf("rehydrated branch = %q, want feature", gotBranch)
-	}
-	if gotSHA := strings.TrimSpace(gitOut(t, got, "rev-parse", "HEAD")); gotSHA != headSHA {
-		t.Errorf("rehydrated HEAD = %s, want %s", gotSHA, headSHA)
-	}
-}
-
-// TestEnsureWorkspace_ColdPath_NoSnapshotErrors: with the worktree gone and no
-// snapshot ever written, ensureWorkspace surfaces a clear error rather than
-// silently handing back a dead path.
-func TestEnsureWorkspace_ColdPath_NoSnapshotErrors(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	conv := &domain.Conversation{ID: "wt-missing", WorktreePath: filepath.Join(t.TempDir(), "gone")}
-	if _, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{owner: "o", repo: "r"}, nil); err == nil {
-		t.Fatal("ensureWorkspace should error when neither the worktree nor a snapshot exists")
-	}
-}
-
 // TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner: a failure does not delete
-// the task's workspace blob. Every snapshot is keyed by the task
-// (workspaceKey is the only thing that names one), and the blueprint's own
-// teardown owns that key — a delete from the conversation's failure would take
-// the workspace out from under work the failure has not ended.
+// the task's workspace blob. The blueprint's teardown owns that key, and a
+// delete from the conversation's failure would take the workspace out from
+// under work the failure has not ended.
 func TestFailRun_LeavesTheWorkspaceSnapshotToItsOwner(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
+	isolateRunNamespace(t)
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "failrun-discard")
-	blobs, err := storage.New()
-	if err != nil {
-		t.Fatalf("storage.New: %v", err)
-	}
-	s.SetStorage(blobs)
+	wireBlobStore(t, s)
 
 	ctx := context.Background()
 	key := snapshotKey(runmode.LocalDefaultOrgID, taskIDForConversation(t, database, conversationID))
-	if err := blobs.Put(ctx, key, strings.NewReader("snapshot")); err != nil {
+	if err := s.Storage().Put(ctx, key, strings.NewReader("snapshot")); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
 	s.failConversation(runmode.LocalDefaultOrgID, conversationID, taskID, holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID), "event", "boom", domain.ConversationFailureUnclassified)
 
-	if ok, _ := blobs.Exists(ctx, key); !ok {
+	if ok, _ := s.Storage().Exists(ctx, key); !ok {
 		t.Error("failConversation deleted the task's workspace snapshot; terminateBlueprint owns that blob")
 	}
 }
 
+// TestSnapshotWorkspace_PhaseSpans pins the span family a slow park is read
+// through: the punctual workspace.snapshot root split into capture / archive /
+// put children, each carrying the sizes that explain its own duration and the
+// runtime whose snapshot it was.
+func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
+	read := recordSpans(t)
+	f := newSnapshotFixture(t, "task-spans")
+	co := f.addCheckout(t, "acme/app", "default")
+	dirtyCheckout(t, co)
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes", "build.log"), strings.Repeat("scratch note\n", 200))
+	const sessionID = "sess-spans"
+	writeSession(t, f.root, sessionID, `{"type":"summary","sid":"spans"}`)
+	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+
+	spans := read()
+	roots := spansNamed(spans, "workspace.snapshot")
+	if len(roots) != 1 {
+		t.Fatalf("workspace.snapshot spans = %d, want 1", len(roots))
+	}
+	root := roots[0]
+	total := spanAttr(t, root, "size_bytes").AsInt64()
+	if total <= 0 {
+		t.Errorf("root size_bytes = %d, want > 0", total)
+	}
+	for _, name := range []string{"workspace.snapshot.capture", "workspace.snapshot.archive", "workspace.snapshot.put"} {
+		phases := spansNamed(spans, name)
+		if len(phases) != 1 {
+			t.Fatalf("%s spans = %d, want 1", name, len(phases))
+		}
+		if phases[0].Parent().SpanID() != root.SpanContext().SpanID() {
+			t.Errorf("%s does not parent to the workspace.snapshot span", name)
+		}
+		if got := spanAttr(t, phases[0], "runtime").AsString(); got != domain.ConversationRuntimeSDK {
+			t.Errorf("%s runtime = %q, want %q", name, got, domain.ConversationRuntimeSDK)
+		}
+	}
+	capture := spansNamed(spans, "workspace.snapshot.capture")[0]
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
+		if got := spanAttr(t, capture, key).AsInt64(); got <= 0 {
+			t.Errorf("capture %s = %d, want > 0 for a tree carrying that member", key, got)
+		}
+	}
+	if got := spanAttr(t, capture, "count").AsInt64(); got != 1 {
+		t.Errorf("capture count = %d, want the one checkout", got)
+	}
+	archive := spansNamed(spans, "workspace.snapshot.archive")[0]
+	raw := spanAttr(t, archive, "snapshot.raw_bytes").AsInt64()
+	compressed := spanAttr(t, archive, "size_bytes").AsInt64()
+	if raw <= compressed || compressed != total {
+		t.Errorf("archive raw=%d compressed=%d root=%d; want raw > compressed == root", raw, compressed, total)
+	}
+	if got := spanAttr(t, spansNamed(spans, "workspace.snapshot.put")[0], "size_bytes").AsInt64(); got != compressed {
+		t.Errorf("put size_bytes = %d, want the staged blob's %d", got, compressed)
+	}
+}
+
+// TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession: a native conversation
+// with no checkouts has no delta and no transcript, and those sizes report an
+// explicit zero rather than vanishing.
+func TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession(t *testing.T) {
+	read := recordSpans(t)
+	f := newSnapshotFixture(t, "task-spans-native")
+	writeFile(t, filepath.Join(f.root, worktree.ScratchDir, "notes.txt"), "scratch note")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+
+	capture := spansNamed(read(), "workspace.snapshot.capture")
+	if len(capture) != 1 {
+		t.Fatalf("workspace.snapshot.capture spans = %d, want 1", len(capture))
+	}
+	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes", "count"} {
+		if got := spanAttr(t, capture[0], key).AsInt64(); got != 0 {
+			t.Errorf("capture %s = %d, want an explicit 0", key, got)
+		}
+	}
+}
+
+// --- fixture ---------------------------------------------------------------
+
+// snapshotFixture is a task's run root with real checkouts beneath it, on a
+// spawner with a blob store and an in-memory checkout ledger: what a snapshot
+// reads and a restore rebuilds, with no database.
+type snapshotFixture struct {
+	s      *Spawner
+	ledger *checkoutLedger
+	key    string
+	root   string
+	// upstreams maps "owner/repo" to the origin its checkouts were cloned from.
+	upstreams map[string]string
+}
+
+// fixtureConversation is the conversation every fixture checkout belongs to.
+const fixtureConversation = "conv-1"
+
+func newSnapshotFixture(t *testing.T, key string) *snapshotFixture {
+	t.Helper()
+	isolateRunNamespace(t)
+	setupGitTestEnv(t)
+	s := newStorageSpawner(t)
+	root, err := worktree.MakeRunRoot(key)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(key) })
+	return &snapshotFixture{s: s, ledger: s.conversationWorktrees.(*checkoutLedger), key: key, root: root, upstreams: map[string]string{}}
+}
+
+// addCheckout builds a checkout of repoID under the root the way the run
+// would: slug pr-7 as setup builds a PR run's checkout, any other slug as
+// `workspace add` does. It records the checkout's row and returns its path.
+func (f *snapshotFixture) addCheckout(t *testing.T, repoID, slug string) string {
+	t.Helper()
+	owner, repo := parseOwnerRepo(repoID)
+	origin := f.upstream(t, repoID)
+	var (
+		path string
+		err  error
+	)
+	switch slug {
+	case "pr-7":
+		path, err = worktree.CreateForPRInRoot(context.Background(), owner, repo, origin, origin, "feature", 7, fixtureConversation, f.root)
+	case "default":
+		path, err = worktree.CreateForCheckoutInRoot(context.Background(), owner, repo, origin, "", f.key, f.root)
+	default:
+		path, err = worktree.CreateForCheckoutInRoot(context.Background(), owner, repo, origin, strings.TrimPrefix(slug, "ref-"), f.key, f.root)
+	}
+	if err != nil {
+		t.Fatalf("build %s %s: %v", repoID, slug, err)
+	}
+	f.ledger.add(domain.ConversationWorktree{ConversationID: fixtureConversation, RepoID: repoID, Path: path, Ref: slug})
+	return path
+}
+
+// upstream is repoID's origin: one commit on main, and pull request #7 whose
+// head is the branch feature.
+func (f *snapshotFixture) upstream(t *testing.T, repoID string) string {
+	t.Helper()
+	if origin, ok := f.upstreams[repoID]; ok {
+		return origin
+	}
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	gitT(t, "", "init", "-q", "--bare", "-b", "main", origin)
+	seed := filepath.Join(t.TempDir(), "seed")
+	gitT(t, "", "init", "-q", "-b", "main", seed)
+	writeFile(t, filepath.Join(seed, "README.md"), "hello\n")
+	gitT(t, seed, "add", "README.md")
+	gitT(t, seed, "commit", "-q", "-m", "init")
+	gitT(t, seed, "push", "-q", origin, "main")
+	writeFile(t, filepath.Join(seed, "feature.txt"), "the pull request's change\n")
+	gitT(t, seed, "add", "feature.txt")
+	gitT(t, seed, "commit", "-q", "-m", "feature")
+	gitT(t, seed, "push", "-q", origin, "HEAD:refs/heads/feature", "HEAD:refs/pull/7/head")
+	f.upstreams[repoID] = origin
+	return origin
+}
+
+// restorer rebuilds the fixture's checkouts from their local origins, reading
+// pull request #7 as one whose head is feature on the same origin.
+func (f *snapshotFixture) restorer() checkoutRestorer {
+	return checkoutRestorer{
+		seed: func(_ context.Context, owner, repo string) gitSeed {
+			return gitSeed{owner: owner, repo: repo, cloneURL: f.upstreams[owner+"/"+repo]}
+		},
+		pr: func(_ context.Context, owner, repo string, number int) (*ghclient.PRView, error) {
+			origin := f.upstreams[owner+"/"+repo]
+			return &ghclient.PRView{Number: number, HeadRef: "feature", BaseRef: "main", CloneURL: origin, SSHURL: origin}, nil
+		},
+	}
+}
+
+// snapshot writes the fixture tree's snapshot under its task key.
+func (f *snapshotFixture) snapshot(t *testing.T, sessionID, runtime string) {
+	t.Helper()
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, sessionID, runtime); err != nil {
+		t.Fatalf("snapshotWorkspace: %v", err)
+	}
+}
+
+// loseRoot removes the run root, as a host loss or a /tmp wipe does. The bares
+// survive, as they do on a host that keeps its state root.
+func (f *snapshotFixture) loseRoot(t *testing.T) {
+	t.Helper()
+	if err := os.RemoveAll(f.root); err != nil {
+		t.Fatalf("remove run root: %v", err)
+	}
+}
+
+// conv is the claimed conversation a resume rebuilds the fixture's tree for.
+// Its recorded path is the root itself, so a rebuild does not re-stamp it.
+func (f *snapshotFixture) conv(sessionID string) *domain.Conversation {
+	return &domain.Conversation{
+		ID: fixtureConversation, ClaimID: "claim-1", TaskID: f.key, WorktreePath: f.root,
+		SessionID: sessionID, Runtime: domain.ConversationRuntimeSDK,
+	}
+}
+
+// dirtyCheckout leaves a checkout the three kinds of work a restore has to
+// bring back: an unpushed commit, an uncommitted edit and an untracked file.
+func dirtyCheckout(t *testing.T, dir string) {
+	t.Helper()
+	writeFile(t, filepath.Join(dir, "committed.txt"), "unpushed commit\n")
+	gitT(t, dir, "add", "committed.txt")
+	gitT(t, dir, "commit", "-q", "-m", "agent work")
+	writeFile(t, filepath.Join(dir, "README.md"), "hello\nuncommitted edit\n")
+	writeFile(t, filepath.Join(dir, "untracked.txt"), "untracked file\n")
+}
+
+// putTarBlob stores a hand-built blob under the fixture's key: zstd, or the
+// gzip an older binary wrote.
+func putTarBlob(t *testing.T, f *snapshotFixture, zstdBlob bool, members func(*tar.Writer)) {
+	t.Helper()
+	var buf bytes.Buffer
+	var w io.WriteCloser
+	if zstdBlob {
+		zw, err := zstd.NewWriter(&buf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w = zw
+	} else {
+		w = gzip.NewWriter(&buf)
+	}
+	tw := tar.NewWriter(w)
+	members(tw)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.Storage().Put(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, f.key), &buf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// checkoutLedger is conversation_worktrees in memory: the rows a snapshot reads
+// for the task, and the rows a restore records through the claim fence.
+type checkoutLedger struct {
+	db.ConversationWorktreeStore
+	mu       sync.Mutex
+	rows     []domain.ConversationWorktree
+	recorded []domain.ConversationWorktree
+}
+
+func (l *checkoutLedger) add(w domain.ConversationWorktree) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows = append(l.rows, w)
+}
+
+func (l *checkoutLedger) recordedRows() []domain.ConversationWorktree {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]domain.ConversationWorktree(nil), l.recorded...)
+}
+
+func (l *checkoutLedger) ListForTaskSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]domain.ConversationWorktree(nil), l.rows...), nil
+}
+
+func (l *checkoutLedger) RecordForClaimSystem(_ context.Context, _, _ string, w domain.ConversationWorktree) (domain.ConversationWorktree, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recorded = append(l.recorded, w)
+	return w, nil
+}
+
 // --- helpers ---------------------------------------------------------------
 
-// newStorageSpawner builds a bare Spawner with only the blob store wired —
-// enough for the snapshot/rehydrate path, which touches no DB on the same host
-// (the rebuilt cwd equals the stored worktree_path, so no SetWorktreePath).
+// newStorageSpawner builds a bare Spawner with a blob store and an in-memory
+// checkout ledger — enough for the snapshot/rehydrate path, which on the same
+// host touches no other table (the rebuilt root equals the stored
+// worktree_path, so nothing re-stamps it).
 func newStorageSpawner(t *testing.T) *Spawner {
 	t.Helper()
 	blobs, err := storage.New()
 	if err != nil {
 		t.Fatalf("storage.New: %v", err)
 	}
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
+	s := NewSpawner(nil, db.Stores{ConversationWorktrees: &checkoutLedger{}}, nil, nil, "")
 	s.SetStorage(blobs)
 	return s
-}
-
-// setupTestWorktree stands up a real origin bare + a delegated worktree on a
-// "feature" branch via the production worktree path, so the snapshot/rehydrate
-// code exercises actual git plumbing. Returns the worktree path and its
-// owner/repo.
-func setupTestWorktree(t *testing.T, conversationID string) (wtPath, owner, repo string) {
-	t.Helper()
-	owner, repo = "o", "r"
-
-	origin := filepath.Join(t.TempDir(), "origin.git")
-	gitT(t, "", "init", "--bare", origin)
-	seed := filepath.Join(t.TempDir(), "seed")
-	gitT(t, "", "clone", origin, seed)
-	gitT(t, seed, "checkout", "-b", "main")
-	writeFile(t, filepath.Join(seed, "README.md"), "hello\n")
-	gitT(t, seed, "add", "README.md")
-	gitT(t, seed, "commit", "-m", "init")
-	gitT(t, seed, "push", "origin", "main")
-
-	wt, err := worktree.CreateForBranch(context.Background(), owner, repo, origin, "main", "feature", conversationID)
-	if err != nil {
-		t.Fatalf("CreateForBranch: %v", err)
-	}
-	return wt, owner, repo
 }
 
 // setupGitTestEnv isolates HOME (so ~/.claude session writes + git config land
@@ -850,125 +1075,5 @@ func assertMissing(t *testing.T, path string) {
 	t.Helper()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("%s exists or errored unexpectedly (%v); it should have been excluded from the snapshot", path, err)
-	}
-}
-
-// TestSnapshotWorkspace_PhaseSpans pins the span family a slow park is read
-// through: the punctual workspace.snapshot root split into capture / archive /
-// put children, each carrying the sizes that explain its own duration, all
-// stamped with the runtime whose snapshot this was. The worktree carries one
-// member of every kind so every size attribute has something real to measure.
-func TestSnapshotWorkspace_PhaseSpans(t *testing.T) {
-	read := recordSpans(t)
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	const conversationID = "wt-spans"
-	wtPath, _, _ := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-
-	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
-	gitT(t, wtPath, "add", "agent.txt")
-	gitT(t, wtPath, "commit", "-m", "agent work")
-	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes", "build.log"), strings.Repeat("scratch note\n", 200))
-	const sessionID = "sess-spans"
-	writeSession(t, wtPath, sessionID, `{"type":"summary","sid":"spans"}`)
-
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, sessionID, domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	spans := read()
-	roots := spansNamed(spans, "workspace.snapshot")
-	if len(roots) != 1 {
-		t.Fatalf("workspace.snapshot spans = %d, want 1", len(roots))
-	}
-	root := roots[0]
-	if got := spanAttr(t, root, "runtime").AsString(); got != domain.ConversationRuntimeSDK {
-		t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeSDK)
-	}
-	total := spanAttr(t, root, "size_bytes").AsInt64()
-	if total <= 0 {
-		t.Errorf("root size_bytes = %d, want > 0", total)
-	}
-
-	// The phases are CHILDREN of the punctual root — one trace per snapshot,
-	// since the whole operation is bounded work in one frame — and each is
-	// self-describing: runtime rides on every phase because the dashboard
-	// reads the sizes off the phase spans alone, where the parent's
-	// attributes are out of reach.
-	for _, name := range []string{"workspace.snapshot.capture", "workspace.snapshot.archive", "workspace.snapshot.put"} {
-		phases := spansNamed(spans, name)
-		if len(phases) != 1 {
-			t.Fatalf("%s spans = %d, want 1", name, len(phases))
-		}
-		p := phases[0]
-		if p.Parent().SpanID() != root.SpanContext().SpanID() {
-			t.Errorf("%s parents to %v, want the workspace.snapshot span", name, p.Parent().SpanID())
-		}
-		if got := spanAttr(t, p, "runtime").AsString(); got != domain.ConversationRuntimeSDK {
-			t.Errorf("%s runtime = %q, want %q", name, got, domain.ConversationRuntimeSDK)
-		}
-	}
-
-	capture := spansNamed(spans, "workspace.snapshot.capture")[0]
-	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
-		if got := spanAttr(t, capture, key).AsInt64(); got <= 0 {
-			t.Errorf("capture %s = %d, want > 0 for a worktree carrying that member", key, got)
-		}
-	}
-
-	archive := spansNamed(spans, "workspace.snapshot.archive")[0]
-	raw := spanAttr(t, archive, "snapshot.raw_bytes").AsInt64()
-	gz := spanAttr(t, archive, "size_bytes").AsInt64()
-	if raw <= 0 || gz <= 0 {
-		t.Fatalf("archive raw_bytes=%d size_bytes=%d, want both > 0", raw, gz)
-	}
-	if raw <= gz {
-		t.Errorf("raw_bytes (%d) <= size_bytes (%d); the members are compressible text plus tar padding, so raw in must exceed compressed out — this pair is what a codec change proves itself against", raw, gz)
-	}
-	if gz != total {
-		t.Errorf("archive size_bytes = %d, root size_bytes = %d; both name the one staged blob", gz, total)
-	}
-
-	put := spansNamed(spans, "workspace.snapshot.put")[0]
-	if got := spanAttr(t, put, "size_bytes").AsInt64(); got != gz {
-		t.Errorf("put size_bytes = %d, want the staged blob's %d", got, gz)
-	}
-}
-
-// TestSnapshotWorkspace_PhaseSpans_NonGitNoSession is the other end of the
-// coverage matrix: a native conversation never snapshots a transcript and a
-// non-git run-root has no delta, so those sizes report zero rather than
-// vanishing — a dashboard reading transcript sizes filters on runtime, and
-// the explicit zero keeps a native row from reading as a failed capture.
-func TestSnapshotWorkspace_PhaseSpans_NonGitNoSession(t *testing.T) {
-	read := recordSpans(t)
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
-	s := newStorageSpawner(t)
-
-	wtPath := t.TempDir()
-	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.txt"), "scratch note")
-
-	const conversationID = "wt-spans-native"
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeNative); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	spans := read()
-	capture := spansNamed(spans, "workspace.snapshot.capture")
-	if len(capture) != 1 {
-		t.Fatalf("workspace.snapshot.capture spans = %d, want 1", len(capture))
-	}
-	if got := spanAttr(t, capture[0], "runtime").AsString(); got != domain.ConversationRuntimeNative {
-		t.Errorf("runtime = %q, want %q", got, domain.ConversationRuntimeNative)
-	}
-	for _, key := range []string{"snapshot.bundle_bytes", "snapshot.patch_bytes", "snapshot.transcript_bytes"} {
-		if got := spanAttr(t, capture[0], key).AsInt64(); got != 0 {
-			t.Errorf("capture %s = %d, want an explicit 0 for a member this snapshot doesn't carry", key, got)
-		}
 	}
 }

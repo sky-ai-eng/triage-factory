@@ -444,54 +444,27 @@ func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 	}
 }
 
-func TestLookupJiraRuleForTaskSystem_ResolvesForJiraTask(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedJiraMirrorRule(t, database)
-	rules := sqlitestore.New(database).JiraStatusRules
-
-	team := runmode.LocalDefaultTeamID
-	task := &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123", TeamID: &team}
-	rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task)
-	if rule == nil {
-		t.Fatal("rule = nil, want the SKY rule")
-	}
-	if rule.InProgressCanonical.Name != "In Progress" || rule.DoneCanonical.Name != "Done" {
-		t.Errorf("rule = %+v, want InProgress/Done canonicals", rule)
-	}
-}
-
-func TestLookupJiraRuleForTaskSystem_NonJiraTask_Nil(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedJiraMirrorRule(t, database)
-	rules := sqlitestore.New(database).JiraStatusRules
-
-	team := runmode.LocalDefaultTeamID
-	task := &domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#1", TeamID: &team}
-	if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task); rule != nil {
-		t.Errorf("rule = %+v, want nil (GitHub task is not rule-backed)", rule)
-	}
-}
-
-func TestLookupJiraRuleForTaskSystem_NoTeam_Nil(t *testing.T) {
-	database := newDelegateTestDB(t)
-	seedJiraMirrorRule(t, database)
-	rules := sqlitestore.New(database).JiraStatusRules
-
-	task := &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123"} // TeamID nil
-	if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task); rule != nil {
-		t.Errorf("rule = %+v, want nil (no team stamped)", rule)
-	}
-}
-
-func TestLookupJiraRuleForTaskSystem_NoRuleForProject_Nil(t *testing.T) {
+// TestLookupJiraRuleForTaskSystem: a Jira task stamped with a team resolves
+// its project's rule; a task from another source, one with no team, and one
+// whose project has no rule resolve none.
+func TestLookupJiraRuleForTaskSystem(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedJiraMirrorRule(t, database) // only SKY configured
 	rules := sqlitestore.New(database).JiraStatusRules
-
 	team := runmode.LocalDefaultTeamID
-	task := &domain.Task{EntitySource: "jira", EntitySourceID: "OTHER-9", TeamID: &team}
-	if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task); rule != nil {
-		t.Errorf("rule = %+v, want nil (no rule for project OTHER)", rule)
+
+	rule := lookupJiraRuleForTaskSystem(context.Background(), rules, &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-123", TeamID: &team})
+	if rule == nil || rule.InProgressCanonical.Name != "In Progress" || rule.DoneCanonical.Name != "Done" {
+		t.Errorf("SKY task rule = %+v, want the SKY rule's InProgress/Done canonicals", rule)
+	}
+	for name, task := range map[string]*domain.Task{
+		"github task":     {EntitySource: "github", EntitySourceID: "owner/repo#1", TeamID: &team},
+		"no team":         {EntitySource: "jira", EntitySourceID: "SKY-123"},
+		"unruled project": {EntitySource: "jira", EntitySourceID: "OTHER-9", TeamID: &team},
+	} {
+		if rule := lookupJiraRuleForTaskSystem(context.Background(), rules, task); rule != nil {
+			t.Errorf("%s: rule = %+v, want nil", name, rule)
+		}
 	}
 }
 

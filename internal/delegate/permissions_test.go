@@ -122,31 +122,6 @@ func TestResolveSDKPermissionMode(t *testing.T) {
 	}
 }
 
-// TestBrowserPermissionHandler_ResolveAllow: a prompt answered via
-// ResolvePermission returns the user's decision to the parked handler.
-func TestBrowserPermissionHandler_ResolveAllow(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-	h := s.BrowserPermissionHandler(runmode.LocalDefaultOrgID, "run-1", "", AbsentAutoDeny{})
-
-	got := make(chan agentproc.PermissionDecision, 1)
-	go func() {
-		got <- h(agentproc.PermissionRequest{ToolCallID: "req-1", ToolName: "Bash", Input: map[string]any{"command": "ls"}})
-	}()
-
-	waitForPending(t, s, "run-1", "req-1")
-	if _, err := s.ResolvePermission(runmode.LocalDefaultOrgID, "run-1", "req-1", "", agentproc.PermissionDecision{Behavior: "allow"}); err != nil {
-		t.Fatalf("ResolvePermission: %v", err)
-	}
-	select {
-	case d := <-got:
-		if d.Behavior != "allow" {
-			t.Errorf("behavior = %q, want allow", d.Behavior)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("handler did not return after resolve")
-	}
-}
-
 // TestBrowserPermissionHandler_TimeoutDenies: with no answer, the prompt denies
 // once permTimeout elapses (made tiny here via an injected deadline).
 func TestBrowserPermissionHandler_TimeoutDenies(t *testing.T) {

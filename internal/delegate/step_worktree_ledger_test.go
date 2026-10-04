@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
@@ -65,9 +66,10 @@ func TestBuildStepConfig_LaterStepRecordsTheSharedTree(t *testing.T) {
 		t.Fatalf("later step has %d ledger rows, want 1 — without one its pushes are refused", len(rows))
 	}
 	got := rows[0]
-	if got.RepoID != "owner/repo" || got.Path != wt || got.Ref != worktree.PRRefSlug(7) {
+	checkout := filepath.Join(wt, "owner", "repo", worktree.PRRefSlug(7))
+	if got.RepoID != "owner/repo" || got.Path != checkout || got.Ref != worktree.PRRefSlug(7) {
 		t.Errorf("ledger row = {repo:%q path:%q ref:%q}, want {repo:%q path:%q ref:%q}",
-			got.RepoID, got.Path, got.Ref, "owner/repo", wt, worktree.PRRefSlug(7))
+			got.RepoID, got.Path, got.Ref, "owner/repo", checkout, worktree.PRRefSlug(7))
 	}
 }
 
@@ -101,9 +103,9 @@ func TestGitAuthorizeDecision_LaterStepMayPushTheSharedTreesBranch(t *testing.T)
 	f := seedStepFixture(t, "github", "ledger-push", 2, wt)
 	seedTaskRepoRegistry(t, f)
 
-	// The tree carries the task's branch: step 0 pushed it, and step 1 opens in
-	// the same checkout.
-	stubLiveBranch(t, map[string]string{wt: "tfac/task-branch"})
+	// The PR checkout carries the task's branch: step 0 pushed it, and step 1
+	// opens in the same tree.
+	stubLiveBranch(t, map[string]string{filepath.Join(wt, "owner", "repo", worktree.PRRefSlug(7)): "tfac/task-branch"})
 	stores := sqlitestore.New(f.database)
 	info := agenthost.ConversationInfo{
 		OrgID:          runmode.LocalDefaultOrgID,

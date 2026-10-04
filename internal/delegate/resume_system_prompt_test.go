@@ -20,7 +20,7 @@ import (
 func launchBlock(mission string) string {
 	return composeConversationSystemBlock(
 		mission,
-		runContext("Repository: owner/repo\nPR: #7", "/work", "tfac/SKY-9", "https://tf.example/runs/r-1", ""),
+		runContext("Repository: owner/repo\nPR: #7", "/work", "", "tfac/SKY-9", "https://tf.example/runs/r-1", ""),
 		agentprompt.GitHubToolsReference(),
 		agentprompt.NonTerminalCompletion(machinistSpec()),
 	)
@@ -462,7 +462,6 @@ func (f *launchFixture) runNative(t *testing.T, mission string) engagementDispos
 		teamID:         runmode.LocalDefaultTeamID,
 		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
-		wtPath:         f.worktree,
 		runRoot:        f.worktree,
 		toolsRef:       agentprompt.GitHubToolsReference(),
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)

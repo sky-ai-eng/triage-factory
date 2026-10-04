@@ -229,7 +229,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 			orgID:          orgID,
 			conversationID: conversationID,
 			namespace:      workspaceKey(task.ID),
-			claudeCwd:      cfg.wtPath,
+			claudeCwd:      cfg.runRoot,
 			claimID:        cfg.claimID,
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeSDK,
@@ -242,10 +242,9 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		return engagementDisposition{fenced: s.parkConversationOpen(ctx, park, sessionID)}
 	}
 
-	// Initial cwd for the child claude. Always the run-root: the worktree
-	// itself for GitHub PR runs, or the throwaway parent for Jira lazy runs
-	// (the agent cd's into a per-repo subdir after `workspace add`).
-	claudeCwd := cfg.wtPath
+	// Initial cwd for the child claude: the run root, for every run. The agent
+	// cd's into a checkout beneath it — the PR's, or one `workspace add` made.
+	claudeCwd := cfg.runRoot
 	// Nuke the ghost ~/.claude/projects/<encoded-cwd> that claude auto-creates
 	// for this cwd. Safety-railed to only touch entries under $TMPDIR.
 	defer func() {
@@ -274,25 +273,11 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// orchestrator owns outright instead.
 	handedOff := sandbox.RunTreeHandedOff(claudeCwd)
 
-	// What the REPO tracks under the scratch dir, for the writes that do land in
-	// the tree. The dir is git-excluded by writeLocalExcludes
-	// (managedExcludePatterns in internal/worktree/worktree.go), but an exclude is
-	// powerless over an already-tracked path — and for a GitHub PR run this tree
-	// IS the repo checkout, so an infrastructure write landing on one would ride
-	// the agent's next commit into the PR.
-	var owned repoFiles
 	if !handedOff {
-		// A tree an older binary built holds its scratch under the previous name;
-		// take it over before anything reads or writes there, so files an earlier
-		// step of this same workflow left behind are where this binary's prompts
-		// say they are.
-		worktree.AdoptLegacyScratchDir(ctx, claudeCwd)
-		owned = scanRepoFiles(ctx, claudeCwd)
-
 		// The symlink that stands in for the mounted memory tree, planted while
 		// the tree is still writable — once, up front, so no later step needs a
 		// write here at all. No-op in local mode, where the directory is real.
-		if err := worktree.EnsureSandboxMemoryLink(ctx, claudeCwd); err != nil {
+		if err := worktree.EnsureSandboxMemoryLink(claudeCwd); err != nil {
 			delegateLog.Warn("plant sandbox memory symlink failed; this conversation reads no prior memory", "conversation", conversationID, "cwd", claudeCwd, "error", err)
 		}
 	}
@@ -307,12 +292,12 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// between a rehydrated workspace and the agent starting — so one span
 	// covers the on-disk context the agent will read.
 	stagingCtx, stagingSpan := tracer.Start(ctx, "engagement.stage_context")
-	memoryDir, memoryOwned := entityMemoryTarget(&cfg, conversationID, claudeCwd, owned)
+	memoryDir := entityMemoryTarget(&cfg, conversationID, claudeCwd)
 	// The this-task share comes back from the materializer rather than from a
 	// read of its own: the opening rows and the this-task/ folder are two
 	// renderings of one answer, and two reads could disagree about what the
 	// folder holds and what the turn carries.
-	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID, memoryOwned)
+	taskMemories := materializeEntityMemories(s.taskMemory, orgID, cfg.teamID, memoryDir, task.EntityID, task.ID)
 
 	// The team knowledge base, copied into ./_tfac/knowledge/: the task team's
 	// own two roots plus every other team's published one, resolved from
@@ -324,7 +309,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	if handedOff {
 		delegateLog.Debug("run tree already handed to the sandbox identity; team knowledge not refreshed for this step", "conversation", conversationID, "cwd", claudeCwd)
 	} else {
-		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd, owned)
+		knowledge = s.stageTeamKnowledge(stagingCtx, orgID, cfg.teamID, claudeCwd)
 	}
 
 	// A blueprint's steps share one tree and all write the same memory filename,
@@ -336,11 +321,10 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	var priorMemory *memoryFingerprint
 	if priorSessionID == "" {
 		if !handedOff {
-			clearAgentMemoryFile(claudeCwd, owned)
+			clearAgentMemoryFile(claudeCwd)
 		}
 		// After the clear, so a file it removed leaves no fingerprint — and a file
-		// it could not remove (repo-owned, or a failure) still cannot be misread as
-		// this run's work.
+		// it could not remove still cannot be misread as this run's work.
 		priorMemory = fingerprintAgentMemoryFile(claudeCwd)
 	}
 	mirror = s.newMemoryMirror(orgID, conversationID, cfg.blueprintRunID, task.EntityID, claudeCwd, priorMemory)
@@ -372,6 +356,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// agentproc.Run rewrites the allowlist's binary path for the sandbox on its
 	// own (rewriteAllowedToolsForSandbox).
 	agentRunRoot := agentproc.AgentVisibleRoot(cfg.runRoot)
+	agentPRCheckout := agentVisibleCheckout(cfg.runRoot, cfg.prCheckout)
 	agentBin := agentproc.AgentVisibleBinary(selfBin)
 	// The team's branch-naming convention, ticket-id-resolved, surfaced to the
 	// agent as run-context guidance (TFAC-498). Not enforced — the push gate
@@ -388,7 +373,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// is what the model reads as the conversation's first turn.
 	systemBlock := composeConversationSystemBlock(
 		mission,
-		runContext(cfg.scope, agentRunRoot, branchTemplate, runURL, knowledge),
+		runContext(cfg.scope, agentRunRoot, agentPRCheckout, branchTemplate, runURL, knowledge),
 		cfg.toolsRef,
 		cfg.appendSysPrompt,
 	)
@@ -400,7 +385,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// original an agent whose summary lost a PR number re-reads. It lands inside
 	// the memory tree because that is the one per-launch location still writable
 	// on a warm step, where the run tree belongs to the sandbox identity.
-	writeTaskContextFile(memoryDir, taskContext, memoryOwned)
+	writeTaskContextFile(memoryDir, taskContext)
 
 	// The stop is read before the two fenced writes below, so a run stopped
 	// during bring-up parks here without ever asking the fence — their refusal
@@ -432,7 +417,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	extraEnv := []string{
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
-		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // Set for both sources so the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which worktree the agent has cd'd into.
+		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot, // So the completion-gate retry message can reference the absolute _tfac/memory.md path that resolves regardless of which checkout the agent has cd'd into.
 		agenthost.RunURLEnvVar + "=" + publishedRunURL,
 		// The key of the workspace this run works in. Non-absolute, so it
 		// passes through translateEnvForSandbox unchanged. Prompts that share a

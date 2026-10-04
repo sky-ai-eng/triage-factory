@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/ctlbus"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -196,5 +199,112 @@ func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *t
 		t.Fatalf("rollback: %v", err)
 	}
 
+	expectNoCredRequest(t, msgs)
+}
+
+// TestConversationWorktreeStore_Postgres_Conformance runs the shared
+// conformance suite against the Postgres impl. Each subtest resets the shared
+// harness and seeds its own org, task and conversations.
+func TestConversationWorktreeStore_Postgres_Conformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	dbtest.RunConversationWorktreeStoreConformance(t, func(t *testing.T) (db.ConversationWorktreeStore, string, dbtest.ConversationWorktreeSeeder) {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "alice")
+		promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
+		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+		onTask := func(t *testing.T, taskID string) string {
+			t.Helper()
+			return seedPgStepConversation(t, h, orgID, userID, taskID, promptID, seedPgBlueprintRun(t, h, orgID, userID, taskID), 0)
+		}
+		taskOf := func(t *testing.T, conversationID string) string {
+			t.Helper()
+			var taskID string
+			if err := h.AdminDB.QueryRow(`SELECT task_id FROM conversations WHERE id = $1`, conversationID).Scan(&taskID); err != nil {
+				t.Fatalf("read task: %v", err)
+			}
+			return taskID
+		}
+		newConversation := func(t *testing.T, _ string) string {
+			t.Helper()
+			return onTask(t, seedPgTask(t, h, orgID, userID))
+		}
+		seed := dbtest.ConversationWorktreeSeeder{
+			Conversation: newConversation,
+			DeleteConversation: func(t *testing.T, conversationID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `DELETE FROM conversations WHERE id = $1`, conversationID)
+			},
+			Repo: func(t *testing.T, slug string) {
+				t.Helper()
+				ref := domain.RepoRefFromSlug(slug)
+				var exists bool
+				if err := h.AdminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM repositories WHERE org_id = $1 AND owner = $2 AND repo = $3)`,
+					orgID, ref.Owner, ref.Repo).Scan(&exists); err != nil {
+					t.Fatalf("look up repository: %v", err)
+				}
+				if !exists {
+					pgtest.SeedRepository(t, h, orgID, ref.Owner, ref.Repo)
+				}
+			},
+			SiblingConversation: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				return onTask(t, taskOf(t, conversationID))
+			},
+			UnrelatedConversation: newConversation,
+			TaskOf:                taskOf,
+			Claim: func(t *testing.T, conversationID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				pgtest.MustExec(t, h.AdminDB, `
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+					VALUES ($1, $2, $3, 'exec-test', 1, now() + interval '1 hour')
+				`, id, orgID, conversationID)
+				return id
+			},
+			Release: func(t *testing.T, claimID string) {
+				t.Helper()
+				pgtest.MustExec(t, h.AdminDB, `UPDATE claims SET released_at = now(), outcome = 'completed' WHERE id = $1`, claimID)
+			},
+		}
+		return stores.ConversationWorktrees, orgID, seed
+	})
+}
+
+// TestConversationWorktreeStore_Postgres_RecordRingsCredDoorbell: a restore
+// recording a checkout of a repo the conversation did not hold widens its
+// authorized set exactly as an insert does, so it rings the same doorbell; a
+// path moved on a row it already held widens nothing.
+func TestConversationWorktreeStore_Postgres_RecordRingsCredDoorbell(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	ctx := context.Background()
+	orgID, userID, _ := pgtest.SeedOrgWithUser(t, h, "alice")
+	promptID := seedPgTaskMemoryPrompt(t, h, orgID, userID)
+	taskID := seedPgTask(t, h, orgID, userID)
+	conversationID := seedPgStepConversation(t, h, orgID, userID, taskID, promptID, seedPgBlueprintRun(t, h, orgID, userID, taskID), 0)
+	claimID := uuid.New().String()
+	pgtest.MustExec(t, h.AdminDB, `
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+		VALUES ($1, $2, $3, 'exec-test', 1, now() + interval '1 hour')
+	`, claimID, orgID, conversationID)
+	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+
+	msgs, ready := credDoorbells(t, h)
+	ready()
+
+	row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/a/sky-ai-eng/other-repo/default", Ref: "default"}
+	if _, err := stores.ConversationWorktrees.RecordForClaimSystem(ctx, orgID, claimID, row); err != nil {
+		t.Fatalf("RecordForClaimSystem: %v", err)
+	}
+	if got := awaitCredRequest(t, msgs); got.ConversationID != conversationID {
+		t.Errorf("doorbell = %+v, want conversation %s", got, conversationID)
+	}
+
+	row.Path = "/runs/b/sky-ai-eng/other-repo/default"
+	if _, err := stores.ConversationWorktrees.RecordForClaimSystem(ctx, orgID, claimID, row); err != nil {
+		t.Fatalf("RecordForClaimSystem (move): %v", err)
+	}
 	expectNoCredRequest(t, msgs)
 }

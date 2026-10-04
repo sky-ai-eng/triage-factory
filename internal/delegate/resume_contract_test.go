@@ -187,8 +187,8 @@ func TestBuildStepConfig_StampsWorktreePathOnEveryStepRow(t *testing.T) {
 			br := f.blueprintRun(t)
 
 			for step := 1; step < len(f.conversationIDs); step++ {
-				if cfg := f.claimStep(t, br, step); cfg.wtPath != wt {
-					t.Fatalf("step %d resolved wtPath = %q, want the shared %q", step, cfg.wtPath, wt)
+				if cfg := f.claimStep(t, br, step); cfg.runRoot != wt {
+					t.Fatalf("step %d resolved runRoot = %q, want the shared %q", step, cfg.runRoot, wt)
 				}
 			}
 
@@ -231,8 +231,8 @@ func TestBuildStepConfig_ReportsAWarmTreeAsWarm(t *testing.T) {
 	f := seedStepFixture(t, "jira", "warm-provenance", 2, wt)
 
 	cfg := f.claimStep(t, f.blueprintRun(t), 1)
-	if cfg.wtPath != wt {
-		t.Fatalf("cwd = %q, want the intact shared worktree %q", cfg.wtPath, wt)
+	if cfg.runRoot != wt {
+		t.Fatalf("cwd = %q, want the intact shared worktree %q", cfg.runRoot, wt)
 	}
 	if cfg.workspace != domain.WorkspaceProvenanceWarm {
 		t.Errorf("workspace provenance = %q, want warm", cfg.workspace)
@@ -302,8 +302,8 @@ func TestBuildStepConfig_ColdRehydrateStampsTheTreeTheSessionRunsIn(t *testing.T
 			_ = os.RemoveAll(stale)
 
 			cfg := f.claimStep(t, f.blueprintRun(t), 1)
-			if cfg.wtPath != rebuilt {
-				t.Fatalf("rehydrated cwd = %q, want %q", cfg.wtPath, rebuilt)
+			if cfg.runRoot != rebuilt {
+				t.Fatalf("rehydrated cwd = %q, want %q", cfg.runRoot, rebuilt)
 			}
 			if cfg.workspace != domain.WorkspaceProvenanceRehydrated {
 				t.Errorf("workspace provenance = %q, want rehydrated — the loop's resume notice is written off this", cfg.workspace)

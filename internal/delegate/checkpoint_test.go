@@ -477,7 +477,7 @@ func TestCheckpoint_AHardKillRestoresTheCheckpointAndNamesWhatCameAfter(t *testi
 	wt, prov, asOf, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, &domain.Conversation{
 		ID: f.conversationID, ClaimID: next.ClaimID, TaskID: f.task.ID,
 		Runtime: domain.ConversationRuntimeNative, WorktreePath: f.tree,
-	}, gitSeed{}, nil)
+	}, checkoutRestorer{}, nil)
 	if err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)
 	}
@@ -602,7 +602,7 @@ func TestCheckpoint_AnUnchangedCheckpointMovesTheRestoredPosition(t *testing.T) 
 	_, prov, asOf, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, &domain.Conversation{
 		ID: f.conversationID, ClaimID: next.ClaimID, TaskID: f.task.ID,
 		Runtime: domain.ConversationRuntimeNative, WorktreePath: f.tree,
-	}, gitSeed{}, nil)
+	}, checkoutRestorer{}, nil)
 	if err != nil || prov != domain.WorkspaceProvenanceRehydrated {
 		t.Fatalf("ensureWorkspace = (%q, %v), want rehydrated", prov, err)
 	}
@@ -699,7 +699,8 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 	pos := 41.5
 	at := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
 	withPos := stagedBlob(t, src, snapshotManifest{TranscriptPosition: &pos, ConversationID: "conv-a", CapturedAt: at})
-	man, err := s.rehydrateFromSnapshot(context.Background(), filepath.Join(t.TempDir(), "a"), gitSeed{}, withPos)
+	t.Setenv("TMPDIR", t.TempDir())
+	man, _, err := s.rehydrateFromSnapshot(context.Background(), "key-a", "", checkoutRestorer{}, withPos)
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
@@ -713,7 +714,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 		t.Errorf("captured_at = %s, want %s", man.CapturedAt, at)
 	}
 
-	man, err = s.rehydrateFromSnapshot(context.Background(), filepath.Join(t.TempDir(), "b"), gitSeed{}, stagedBlob(t, src, snapshotManifest{}))
+	man, _, err = s.rehydrateFromSnapshot(context.Background(), "key-b", "", checkoutRestorer{}, stagedBlob(t, src, snapshotManifest{}))
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
@@ -721,7 +722,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 		t.Errorf("a blob with no position restored with %v, want none", *got)
 	}
 	var raw strings.Builder
-	if err := writeSnapshotTar(context.Background(), &raw, worktree.CapturedState{}, src, snapshotManifest{}); err != nil {
+	if err := writeSnapshotTar(context.Background(), &raw, &capturedSnapshot{}, src, snapshotManifest{}); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(raw.String(), "transcript_position") || strings.Contains(raw.String(), "conversation_id") {
@@ -965,7 +966,7 @@ func checkpointCounter(t *testing.T) func(outcome string) int64 {
 // compressed blob to read back.
 func stagedBlob(t *testing.T, src string, man snapshotManifest) io.Reader {
 	t.Helper()
-	f, _, _, err := stageSnapshotArchive(context.Background(), worktree.CapturedState{}, src, man)
+	f, _, _, err := stageSnapshotArchive(context.Background(), &capturedSnapshot{}, src, man)
 	if err != nil {
 		t.Fatalf("stage archive: %v", err)
 	}

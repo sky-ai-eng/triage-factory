@@ -115,7 +115,7 @@ func TestEnsureWorkspace_ARehydrateTimeoutIsAnError(t *testing.T) {
 		ID: f.conversationID, OrgID: runmode.LocalDefaultOrgID, TaskID: f.task.ID, ClaimID: f.claimID,
 		WorktreePath: filepath.Join(t.TempDir(), "gone"),
 	}
-	_, _, _, err := f.s.ensureWorkspace(f.claimCtx, runmode.LocalDefaultOrgID, conv, gitSeed{}, failingFreshBuilder(t))
+	_, _, _, err := f.s.ensureWorkspace(f.claimCtx, runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, failingFreshBuilder(t))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("ensureWorkspace = %v, want the rehydrate's own timeout", err)
 	}
