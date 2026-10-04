@@ -442,6 +442,14 @@ func (c *leaseRecoveringConversations) MarkFailedIfActiveForClaimSystem(ctx cont
 	return changed, err
 }
 
+func (c *leaseRecoveringConversations) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (requested bool, err error) {
+	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+		requested, e = c.ConversationStore.RequestStopForClaimSystem(ctx, orgID, conversationID, claimID, reason)
+		return e
+	})
+	return requested, err
+}
+
 func (c *leaseRecoveringConversations) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (parked bool, err error) {
 	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
 		parked, e = c.ConversationStore.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, park)

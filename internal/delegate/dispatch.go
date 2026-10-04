@@ -2354,7 +2354,6 @@ func (s *Spawner) disposeOfUnreachableUpstream(orgID string, br *domain.Blueprin
 // A first engagement has nothing to protect. Its blueprint step has never run,
 // there is no workspace worth keeping, and a loud failure is the honest answer
 // — it surfaces on the task and the auto-delegation breaker keeps its signal.
-// That is today's poison pill, unchanged.
 //
 // A nil br is the resume path, which has no blueprint in scope and needs
 // none: a resume continues a conversation that has already been driven, so

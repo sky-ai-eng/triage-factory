@@ -1476,27 +1476,10 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (bool, error) {
 	requested := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		var id string
-		err := q.QueryRowContext(ctx, `
-			UPDATE conversations
-			SET stop_requested_at = COALESCE(stop_requested_at, now()),
-			    stop_requested_by = CASE WHEN stop_requested_at IS NULL
-			                             THEN NULLIF($1, '') ELSE stop_requested_by END,
-			    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
-			                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
-			WHERE org_id = $2 AND id = $3
-			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
-			RETURNING id
-		`, by, orgID, conversationID, string(reason)).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
+		var err error
+		requested, err = writeStopIntent(ctx, q, orgID, conversationID, by, reason)
+		if err != nil || !requested || signalTarget == "" {
 			return err
-		}
-		requested = true
-		if signalTarget == "" {
-			return nil
 		}
 		_, err = q.ExecContext(ctx, `
 			INSERT INTO conversation_signals (org_id, conversation_id, kind, payload, target, created_at)
@@ -1508,6 +1491,50 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 		return false, wrapAdminPoolPermErr(err, "conversations.RequestStopSystem")
 	}
 	return requested, nil
+}
+
+// RequestStopForClaimSystem writes the intent behind the claim fence. It names
+// no signal target: the engagement asking is the holder, and it stops itself
+// in process.
+func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (bool, error) {
+	requested := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var err error
+		requested, err = writeStopIntent(ctx, q, orgID, conversationID, "", reason)
+		return err
+	})
+	if err != nil {
+		return false, wrapAdminPoolPermErr(err, "conversations.RequestStopForClaimSystem")
+	}
+	return requested, nil
+}
+
+// writeStopIntent records a stop request on a non-terminal conversation and
+// reports whether it landed. See RequestStopSystem for why every column keys
+// on stop_requested_at.
+func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by string, reason domain.ParkReason) (bool, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET stop_requested_at = COALESCE(stop_requested_at, now()),
+		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
+		                             THEN NULLIF($1, '') ELSE stop_requested_by END,
+		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
+		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
+		WHERE org_id = $2 AND id = $3
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		RETURNING id
+	`, by, orgID, conversationID, string(reason)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error) {

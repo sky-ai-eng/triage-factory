@@ -279,6 +279,24 @@ func TestStall_AReleasedClaimFilesNoStop(t *testing.T) {
 	}
 }
 
+// TestStall_ALapsedLeaseFilesNoStop: an engagement whose lease lapsed has let
+// go of the conversation even though nothing has released the claim yet, so
+// its stall must not leave a stop for whoever takes the conversation over.
+func TestStall_ALapsedLeaseFilesNoStop(t *testing.T) {
+	f := newStallFixture(t, "r-stall-after-lapse", activityTimings{idle: time.Hour})
+	if _, err := f.database.Exec(
+		`UPDATE claims SET lease_expires_at = strftime('%Y-%m-%d %H:%M:%f','now','-60.000 seconds') WHERE id = ?`, f.claimID,
+	); err != nil {
+		t.Fatalf("lapse the lease: %v", err)
+	}
+	conv := &domain.Conversation{ID: f.conversationID, OrgID: runmode.LocalDefaultOrgID, ClaimID: f.claimID}
+
+	f.s.stallEngagement(conv, f.fence, stallCause{elapsed: time.Minute})
+	if recorded, reason := f.stopIntent(t); recorded {
+		t.Fatalf("a stall decided after the lease lapsed filed a stop intent (%q)", reason)
+	}
+}
+
 // TestReleaseActivity_LeavesASuccessorsWatchdogAlone: the release names the
 // claim it lets go of, so an engagement that outlived a takeover in this
 // process cannot end the watchdog of the one that took over.

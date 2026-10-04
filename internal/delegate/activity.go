@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -431,17 +432,17 @@ func (s *Spawner) stallEngagement(conv *domain.Conversation, fence context.Cance
 	}
 	if s.conversations != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), stallIntentTimeout)
-		if s.claimReleased(ctx, conv) {
-			cancel()
-			dispatchLog.Info("engagement stall decided after its claim was released; the conversation is no longer its to stop",
-				"conversation", conv.ID, "claim", conv.ClaimID, "op", cause.op, "elapsed", cause.elapsed)
+		_, err := s.conversations.RequestStopForClaimSystem(ctx, conv.OrgID, conv.ID, conv.ClaimID, domain.ParkReasonStalled)
+		cancel()
+		if errors.Is(err, db.ErrClaimReleased) {
+			dispatchLog.Info("engagement stall decided after it let go of its claim; the conversation is no longer its to stop",
+				"conversation", conv.ID, "claim", conv.ClaimID, "op", cause.op, "elapsed", cause.elapsed, "error", err)
 			return
 		}
-		if _, err := s.conversations.RequestStopSystem(ctx, conv.OrgID, conv.ID, "", "", domain.ParkReasonStalled); err != nil {
+		if err != nil {
 			dispatchLog.Warn("recording the stall's stop intent failed; stopping the engagement on its cause alone",
 				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
 		}
-		cancel()
 	}
 	fence(errStalled)
 
@@ -453,25 +454,6 @@ func (s *Spawner) stallEngagement(conv *domain.Conversation, fence context.Cance
 			"conversation", conv.ID, "claim", conv.ClaimID, "idle", cause.elapsed)
 	}
 	recordEngagementStall(cause.op)
-}
-
-// claimReleased reads the engagement's claim fresh and reports whether it has
-// been released. A claim that no longer exists went with its conversation and
-// counts as released. A failed read answers false, leaving the stall to act
-// as it would have: the read is there to keep a stop off a conversation the
-// engagement no longer holds, and a database that cannot answer it is not
-// evidence that it let go.
-func (s *Spawner) claimReleased(ctx context.Context, conv *domain.Conversation) bool {
-	if s.conversationQueue == nil || conv.ClaimID == "" {
-		return false
-	}
-	claim, err := s.conversationQueue.ClaimByIDSystem(ctx, conv.ClaimID)
-	if err != nil {
-		dispatchLog.Warn("reading the stalled engagement's claim failed; stopping it as stalled",
-			"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
-		return false
-	}
-	return claim == nil || claim.ReleasedAt != nil
 }
 
 // stallOpLabel is an operation name cut at its first colon, so every tool

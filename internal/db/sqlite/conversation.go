@@ -1330,8 +1330,32 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	return writeStopIntent(ctx, s.q, conversationID, by, reason)
+}
+
+// RequestStopForClaimSystem writes the intent behind the claim fence, in one
+// transaction with it.
+func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (bool, error) {
+	requested := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var err error
+		requested, err = writeStopIntent(ctx, q, conversationID, "", reason)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return requested, nil
+}
+
+// writeStopIntent records a stop request on a non-terminal conversation and
+// reports whether it landed.
+func writeStopIntent(ctx context.Context, q queryer, conversationID, by string, reason domain.ParkReason) (bool, error) {
 	var id string
-	err := s.q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		UPDATE conversations
 		SET stop_requested_at = COALESCE(stop_requested_at, ?),
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL

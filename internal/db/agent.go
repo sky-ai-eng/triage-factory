@@ -761,8 +761,8 @@ type ConversationStore interface {
 	// same transaction, so the intent and its hastening signal commit together
 	// or not at all. SQLite has no signal table and ignores the target.
 	// reason is the park reason the stop settles as, or "" to derive it from
-	// the actor as before; it keys on stop_requested_at like the actor, so a
-	// second request keeps the first's time, actor and reason.
+	// the actor; it keys on stop_requested_at like the actor, so a second
+	// request keeps the first's time, actor and reason.
 	// Idempotent: a second request keeps the first's time and actor.
 	// requested is false, and nothing is written, when the conversation is
 	// terminal. Admin pool: the caller has already resolved visibility under
@@ -782,6 +782,16 @@ type ConversationStore interface {
 	// conversation afterwards reads it, and should, because the holder may
 	// already have settled the stop by then.
 	RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (requested bool, err error)
+
+	// RequestStopForClaimSystem is the stop an engagement asks of itself: a
+	// system stop with reason and no actor or signal, written only while
+	// claimID is the conversation's live claim. It runs under the same claim
+	// fence as every other engagement write and refuses with
+	// db.ErrClaimReleased (db.ErrClaimLeaseExpired for a lapsed lease)
+	// otherwise. An engagement can decide to stop after it has let go of the
+	// conversation, and a stop written then would land on a conversation
+	// that is another engagement's or nobody's.
+	RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (requested bool, err error)
 
 	// SetSessionSystem is the claimless door onto sdk_session_id. Every
 	// engagement holds a claim and goes through SetSessionForClaimSystem

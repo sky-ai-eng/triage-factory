@@ -284,6 +284,11 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if _, err := stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx); err != nil {
 			t.Errorf("ConversationQueue.SettleUnclaimedStopsSystem: %v", err)
 		}
+		// The stall watchdog's stop, written behind the claim fence. It
+		// lands, so the settlement below finds a held row and leaves it.
+		if _, err := stores.Conversations.RequestStopForClaimSystem(ctx, orgID, conversationID, claimed.ClaimID, domain.ParkReasonStalled); err != nil {
+			t.Errorf("Conversations.RequestStopForClaimSystem: %v", err)
+		}
 		// The recovery passes every executor's dispatcher runs: the takeover
 		// finds nothing expired and the stranded read nothing concluded, which
 		// still proves the grants for the same reason as above.

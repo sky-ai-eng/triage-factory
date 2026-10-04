@@ -2,7 +2,9 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -447,6 +449,43 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		if got := get(t, f, user); got.StopRequestedReason != "" || got.StopRequestedBy != stopTestUser {
 			t.Errorf("user intent after a stall request = (by %q, reason %q), want the user's with no reason", got.StopRequestedBy, got.StopRequestedReason)
 		}
+	})
+
+	t.Run("RequestForClaim_WritesOnlyWhileTheClaimIsLive", func(t *testing.T) {
+		f := mk(t)
+		ask := func(conversationID, claimID string) (bool, error) {
+			return f.Stores.Conversations.RequestStopForClaimSystem(ctx, f.OrgID, conversationID, claimID, domain.ParkReasonStalled)
+		}
+
+		live, _ := f.StageStep(t)
+		liveClaim := claim(t, f, live).ClaimID
+		if ok, err := ask(live, liveClaim); err != nil || !ok {
+			t.Fatalf("RequestStopForClaimSystem on a live claim = (%v, %v), want (true, nil)", ok, err)
+		}
+		if got := get(t, f, live); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) || got.StopRequestedBy != "" {
+			t.Errorf("intent = (%v, by %q, reason %q), want set, no actor, stalled", got.StopRequestedAt, got.StopRequestedBy, got.StopRequestedReason)
+		}
+
+		// Staged and claimed before the released case below, because a
+		// released conversation goes back to the queue and the next claim
+		// would take it instead.
+		lapsed, _ := f.StageStep(t)
+		lapsedClaim := claim(t, f, lapsed).ClaimID
+		f.SetLease(t, lapsedClaim, -time.Minute)
+		if ok, err := ask(lapsed, lapsedClaim); !errors.Is(err, db.ErrClaimLeaseExpired) || ok {
+			t.Errorf("RequestStopForClaimSystem on a lapsed lease = (%v, %v), want (false, ErrClaimLeaseExpired)", ok, err)
+		}
+		assertNoIntent(t, f, lapsed, "a stop asked for under a lapsed lease")
+
+		released, _ := f.StageStep(t)
+		releasedClaim := claim(t, f, released).ClaimID
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, released, releasedClaim, db.RequeueSetupFailure, 0, ""); err != nil {
+			t.Fatalf("RequeueConversation: %v", err)
+		}
+		if ok, err := ask(released, releasedClaim); !errors.Is(err, db.ErrClaimReleased) || ok {
+			t.Errorf("RequestStopForClaimSystem on a released claim = (%v, %v), want (false, ErrClaimReleased)", ok, err)
+		}
+		assertNoIntent(t, f, released, "a stop asked for under a released claim")
 	})
 
 	t.Run("Park_DerivesTheStoredReasonFirst", func(t *testing.T) {
