@@ -420,6 +420,19 @@ func TestParseLine_APIErrorKind(t *testing.T) {
 			t.Errorf("APIError = %q on a clean result", res.APIError)
 		}
 	})
+	t.Run("an empty parent is the turn's own", func(t *testing.T) {
+		top := `{"type":"assistant","message":{"id":"m-top","content":[{"type":"text","text":"API Error"}]},"parent_tool_use_id":"","error":"overloaded"}`
+		if res := feed(top, errResult); res.APIError != "overloaded" {
+			t.Errorf("APIError = %q, want overloaded", res.APIError)
+		}
+	})
+	t.Run("a later answer clears an error the turn recovered from", func(t *testing.T) {
+		answer := `{"type":"assistant","message":{"id":"m-ok","content":[{"type":"text","text":"pong"}]},"parent_tool_use_id":null}`
+		maxTurns := `{"type":"result","subtype":"error_max_turns","is_error":true}`
+		if res := feed(apiErr, answer, maxTurns); res.APIError != "" {
+			t.Errorf("APIError = %q, want none: the provider answered after the error", res.APIError)
+		}
+	})
 	t.Run("the next turn starts clean", func(t *testing.T) {
 		s := NewStreamState()
 		for _, l := range []string{apiErr, errResult} {

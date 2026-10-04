@@ -327,6 +327,28 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 	})
 
+	t.Run("a_live_claim_outranks_a_released_one_minted_in_the_same_tick", func(t *testing.T) {
+		// Two conversations on one task, as parallel steps are, each claimed
+		// in the same clock tick. The one still running is the newer writer,
+		// whichever claim was minted first: the other engagement has ended,
+		// so the key is the live one's to take.
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "tied-live-and-released")
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		live := seed.Claim(t, seed.Conversation(t, task), base, false)
+		ended := seed.Claim(t, seed.Conversation(t, task), base, true)
+
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, ended); err != nil {
+			t.Fatalf("begin from the ended claim: %v", err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, live); err != nil {
+			t.Fatalf("a begin from the live claim over the ended one's = %v, want it to take the key", err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, ended); !errors.Is(err, db.ErrSnapshotSuperseded) {
+			t.Fatalf("a begin from the ended claim over the live one's = %v, want db.ErrSnapshotSuperseded", err)
+		}
+	})
+
 	t.Run("a_later_step_on_the_task_supersedes_an_earlier_one", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		task := seed.Task(t, "later-step")

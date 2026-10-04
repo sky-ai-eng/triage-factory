@@ -276,6 +276,52 @@ func TestCheckpoint_UnchangedTreeIsNotStored(t *testing.T) {
 	}
 }
 
+// blockingCover holds every CoverSnapshotSystem until release is closed.
+type blockingCover struct {
+	db.WorkspaceSnapshotStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingCover) CoverSnapshotSystem(ctx context.Context, orgID, keyID, claimID, fingerprint string, position float64) (bool, error) {
+	close(b.entered)
+	<-b.release
+	return b.WorkspaceSnapshotStore.CoverSnapshotSystem(ctx, orgID, keyID, claimID, fingerprint, position)
+}
+
+// TestCheckpoint_AnUnchangedTreeReleasesTheBarrierBeforeItsRecordWrite: the
+// position an unchanged checkpoint records is a database write about a tree
+// it has finished reading, so the next tool call does not wait on it.
+func TestCheckpoint_AnUnchangedTreeReleasesTheBarrierBeforeItsRecordWrite(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-unchanged-barrier")
+	c := f.start()
+	defer c.stop()
+
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+
+	cover := &blockingCover{WorkspaceSnapshotStore: f.s.workspaceSnapshots, entered: make(chan struct{}), release: make(chan struct{})}
+	f.s.workspaceSnapshots = cover
+	f.due(c)
+	c.afterToolBatch(context.Background(), 9)
+	waitFor(t, cover.entered, "the unchanged checkpoint's record write")
+
+	c.mu.Lock()
+	captured := c.captured
+	c.mu.Unlock()
+	select {
+	case <-captured:
+	case <-time.After(2 * time.Second):
+		t.Error("the barrier is still held while the unchanged checkpoint writes its record")
+	}
+	close(cover.release)
+	c.wg.Wait()
+	if got := f.outcomes(checkpointSkippedUnchanged); got != 1 {
+		t.Errorf("unchanged checkpoints = %d, want 1", got)
+	}
+}
+
 // TestCheckpoint_SingleFlightAndHostSlotsSkipRatherThanQueue: one checkpoint
 // in flight per engagement, and two capturing per host. Either limit skips the
 // checkpoint that finds it reached; nothing queues behind it.

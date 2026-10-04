@@ -456,6 +456,8 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	}
 	if res.fingerprint == lastFingerprint {
 		res.outcome = checkpointSkippedUnchanged
+		captured.release()
+		treeReleased()
 		s.coverSnapshotState(ctx, w, res.fingerprint)
 		return res
 	}

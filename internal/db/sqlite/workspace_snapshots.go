@@ -30,8 +30,11 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	// The refusal orders claims the way every "newest claim" read on this
-	// dialect does: claimed_at, then rowid for two minted in one instant.
+	// "Newer" is newestEngagementFirstSQL's order, written as a row
+	// comparison: claimed_at, then the release toward the engagement that
+	// ended later, an unreleased one latest of all, then rowid. Two claims of
+	// parallel conversations on one task can be minted in one instant, and
+	// the one still running is the newer writer whichever was minted first.
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES (?, ?, 'pending', ?, ?)
@@ -46,7 +49,8 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 			WHERE cur.id  = workspace_snapshots.writer_claim_id
 			  AND mine.id = ?
 			  AND cur.id <> mine.id
-			  AND (cur.claimed_at, cur.rowid) > (mine.claimed_at, mine.rowid)
+			  AND (cur.claimed_at, cur.released_at IS NULL, COALESCE(cur.released_at, ''), cur.rowid)
+			    > (mine.claimed_at, mine.released_at IS NULL, COALESCE(mine.released_at, ''), mine.rowid)
 		)
 	`, orgID, taskID, claimID, time.Now().UTC(), claimID)
 	if err != nil {

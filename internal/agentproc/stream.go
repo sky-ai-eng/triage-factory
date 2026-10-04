@@ -61,8 +61,9 @@ type StreamState struct {
 	// before the first line, and read only on the reader goroutine.
 	observer StreamObserver
 
-	// apiError is the `error` field of the API-error assistant message the
-	// current turn wrote, held until the turn's result carries it.
+	// apiError is the `error` field of the current turn's latest assistant
+	// message, held until the turn's result carries it: the API-error message
+	// the turn ended on, or empty once the provider answered after it.
 	apiError string
 
 	// retryNotice is whether the line ParseLine read last was a retry notice,
@@ -254,9 +255,10 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 }
 
 func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*domain.Message {
-	// A subagent's API error ends the subagent's call, not this turn.
-	if kind, _ := raw["error"].(string); kind != "" && raw["parent_tool_use_id"] == nil {
-		s.apiError = kind
+	// A subagent's messages say nothing about how this turn ended: its API
+	// error ends the subagent's call.
+	if parent, _ := raw["parent_tool_use_id"].(string); parent == "" {
+		s.apiError, _ = raw["error"].(string)
 	}
 
 	msgObj, ok := raw["message"].(map[string]any)
