@@ -67,10 +67,10 @@ func claimOutcomeForStatus(status string) string {
 //
 // Every status write that releases a claim does so on the same transaction as
 // the flip, with one exception: MarkQueuedForResume, the app-pool re-arm,
-// releases on the admin pool after its flip commits. A crash between the two
-// leaves a mid-flight conversation holding a live claim, which is not a
-// terminal-with-claim desync: the claim gate treats it as driven until its
-// lease lapses, and expiry handling releases it like any dead engagement's.
+// releases on the admin pool, a connection of its own, while its flip's
+// transaction is still open. The release commits first, so a flip that then
+// fails leaves the conversation where it was with no live claim, the state
+// its park or terminal already left it in.
 func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = $1

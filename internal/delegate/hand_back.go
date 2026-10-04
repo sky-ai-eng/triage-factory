@@ -146,11 +146,14 @@ func (s *Spawner) leaveSDKOnUpstream(ctx context.Context, park liveParkContext, 
 // sdkProviderUnavailable reports whether an SDK result ended on its model
 // provider being unavailable after the SDK's own retries: an error result
 // whose api_error_status classifies as Transient or RateLimited, or, when the
-// provider gave no HTTP answer at all (a reset connection, a request that
-// timed out), whose API error the SDK names as the provider's. Both are the
-// SDK's structured report, so the decision never reads the result's prose.
-// Every other result is the agent's failure and keeps failing the
-// conversation.
+// provider gave no HTTP answer at all (a refused or reset connection), whose
+// API error the SDK names as the provider's. Both are the SDK's structured
+// report, so the decision never reads the result's prose. Every other result
+// is the agent's failure and keeps failing the conversation.
+//
+// It sees only a result the SDK reached. The SDK's retry notices are not
+// activity, so retries that outlast the idle limit, a request held open until
+// the SDK's own timeout among them, end in a stall park before any result.
 func sdkProviderUnavailable(r *agentproc.Result) bool {
 	if r == nil || !r.IsError {
 		return false

@@ -114,16 +114,16 @@ groups:
       # tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) rather
       # than failing; tf_conversations_deferred counts the conversations
       # waiting for their next attempt. Zero is the steady state. A brief
-      # nonzero is an upstream blip the backoff rode out;
-      # a sustained one means an upstream the runs depend on has been
-      # unavailable for half an hour, and after about four hours each waiting
-      # run parks as upstream_unavailable until someone messages it.
+      # nonzero is an upstream blip the backoff rode out; a sustained one
+      # means an upstream the runs depend on has been unavailable for half an
+      # hour, and after about four hours each waiting run parks as
+      # upstream_unavailable until someone messages it.
       #
       # A warning, not a page, and not fleet-wide: one org's own upstream (its
       # Bedrock account, its GitHub Enterprise Server, a regional outage) can
-      # be the whole of it, and nothing is lost while it waits. The gauge is exported by the one pod
-      # holding the background brain, so the sum is not multiplied by the
-      # number of pods.
+      # be the whole of it, and nothing is lost while it waits. The gauge is
+      # exported by the one pod holding the background brain, so the sum is
+      # not multiplied by the number of pods.
       #
       # The rule reads each org's maximum over the last 15 minutes, not the
       # gauge as sampled. A run still retrying leaves the count between two

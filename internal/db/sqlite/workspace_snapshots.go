@@ -31,10 +31,10 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 		return err
 	}
 	// "Newer" is newestEngagementFirstSQL's order, written as a row
-	// comparison: claimed_at, then the release toward the engagement that
-	// ended later, an unreleased one latest of all, then rowid. Two claims of
-	// parallel conversations on one task can be minted in one instant, and
-	// the one still running is the newer writer whichever was minted first.
+	// comparison, for the reasons the Postgres store gives: claimed_at, then
+	// the release toward the engagement that ended later, an unreleased one
+	// latest of all, then rowid. A tie is broken the same way on both
+	// dialects.
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES (?, ?, 'pending', ?, ?)

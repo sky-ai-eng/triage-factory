@@ -555,8 +555,8 @@ type Result struct {
 	// "authentication_failed", ...), from the `error` field of the assistant
 	// message it writes for that error. Set only alongside IsError. It is the
 	// structured report for a failure with no HTTP answer to give a status:
-	// a reset connection or a request that timed out ends with APIErrorStatus
-	// zero and APIError "server_error".
+	// a refused or reset connection ends with APIErrorStatus zero and
+	// APIError "server_error".
 	APIError string
 
 	// Interrupted marks a turn that ended by interruption rather than

@@ -328,10 +328,10 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 	})
 
 	t.Run("a_live_claim_outranks_a_released_one_minted_in_the_same_tick", func(t *testing.T) {
-		// Two conversations on one task, as parallel steps are, each claimed
-		// in the same clock tick. The one still running is the newer writer,
-		// whichever claim was minted first: the other engagement has ended,
-		// so the key is the live one's to take.
+		// One conversation on a task ended and the next was claimed in the
+		// same clock tick. The one still running is the newer writer. The
+		// live claim is seeded first, so a tie broken by insert order alone
+		// would pick the ended one: the release has to decide before it.
 		store, orgID, seed := mk(t)
 		task := seed.Task(t, "tied-live-and-released")
 		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
