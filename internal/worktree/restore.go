@@ -181,7 +181,7 @@ func (c RestoredCheckout) Discard() {
 	if _, err := os.Stat(bareDir); err != nil {
 		return
 	}
-	removeWorktreeRegFor(bareDir, c.Path)
+	removeWorktreeRegFor(bareDir, c.Path, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
 	defer cancel()
 	_ = gitRunCtx(ctx, bareDir, "worktree", "prune")
@@ -364,13 +364,17 @@ func restoreLinkedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir 
 		if err := gitRunCtx(ctx, bareDir, "branch", "-f", r.Branch, r.Head); err != nil {
 			return fmt.Errorf("position branch %s: %w", r.Branch, err)
 		}
+		before := worktreeAdminEntries(bareDir)
 		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "worktree", "add", wtDir, r.Branch); err != nil {
-			removeWorktreeRegFor(bareDir, wtDir)
+			removeWorktreeRegFor(bareDir, wtDir, before)
 			return fmt.Errorf("worktree add: %w", err)
 		}
-	} else if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "worktree", "add", "--detach", wtDir, r.Head); err != nil {
-		removeWorktreeRegFor(bareDir, wtDir)
-		return fmt.Errorf("worktree add --detach: %w", err)
+	} else {
+		before := worktreeAdminEntries(bareDir)
+		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "worktree", "add", "--detach", wtDir, r.Head); err != nil {
+			removeWorktreeRegFor(bareDir, wtDir, before)
+			return fmt.Errorf("worktree add --detach: %w", err)
+		}
 	}
 	if prNumber == 0 {
 		return nil

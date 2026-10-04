@@ -203,12 +203,13 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, w
 	// Detached checkout at the fetched tip. Routed through gitRunCtxAuth so the
 	// blobless bare's lazy promisor fetch (working-tree blobs deferred by the
 	// partial clone) authenticates against origin on a private repo.
+	before := worktreeAdminEntries(bareDir)
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", "--detach", wtDir, remoteRef); err != nil {
 		// A cancelled/killed add can leave wtDir half-built and the bare's
-		// worktree registration behind. Reclaim only THIS add (keyed on wtDir)
+		// worktree registration behind. Reclaim only THIS add's registration
 		// so a concurrent add against the same bare isn't disturbed.
 		_ = os.RemoveAll(wtDir)
-		removeWorktreeRegFor(bareDir, wtDir)
+		removeWorktreeRegFor(bareDir, wtDir, before)
 		return "", fmt.Errorf("worktree add (detached %s): %w", ref, err)
 	}
 

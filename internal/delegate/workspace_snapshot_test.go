@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -238,6 +239,95 @@ func TestEnsureWorkspace_RefusedState(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist: a checkout the
+// capture cannot stat for any reason but its absence fails the snapshot, and
+// the blob already under the key, which carries that checkout, stands. A blob
+// written without it would replace the last one that had its work.
+func TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist(t *testing.T) {
+	f := newSnapshotFixture(t, "task-unstattable")
+	co := f.addCheckout(t, "acme/app", "default")
+	dirtyCheckout(t, co)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+
+	// A symlink loop where the owner directory was. Resolving the checkout's
+	// path fails with ELOOP, which stands in for the permission error a test
+	// running as root cannot produce.
+	owner := filepath.Join(f.root, "acme")
+	if err := os.Rename(owner, owner+".moved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("acme", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative); err == nil {
+		t.Fatal("snapshotWorkspace succeeded with a checkout it could not stat")
+	}
+	if !snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))[snapCheckoutsPrefix+"acme/app/default/bundle"] {
+		t.Error("the blob carrying the checkout was replaced by one without it")
+	}
+}
+
+// TestSnapshotWorkspace_StalledCheckoutReadEndsWithTheBound: the read of the
+// task's checkouts is part of the capture and takes the persist's bound, so a
+// database that stops answering fails the snapshot when the bound runs out
+// instead of holding a park or a conclusion open.
+func TestSnapshotWorkspace_StalledCheckoutReadEndsWithTheBound(t *testing.T) {
+	f := newSnapshotFixture(t, "task-stalled")
+	f.s.conversationWorktrees = stalledLedger{}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- f.s.snapshotWorkspace(ctx, runmode.LocalDefaultOrgID, fixtureConversation, f.key, "", f.root, "", domain.ConversationRuntimeNative)
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("snapshotWorkspace succeeded without the task's checkouts")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("snapshotWorkspace outlived its bound waiting on the checkout read")
+	}
+}
+
+// stalledLedger answers the task's checkout read only when its context ends, as
+// a database that stopped answering does.
+type stalledLedger struct{ db.ConversationWorktreeStore }
+
+func (stalledLedger) ListForTaskSystem(ctx context.Context, _, _ string) ([]domain.ConversationWorktree, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// TestFreshRunRoot_FailsWhenTheOlderTreeStays: a setup building from nothing
+// removes a run root an older binary laid out, and when that removal fails the
+// setup fails with it rather than building on the older tree.
+func TestFreshRunRoot_FailsWhenTheOlderTreeStays(t *testing.T) {
+	isolateRunNamespace(t)
+	setupGitTestEnv(t)
+	const key = "task-older-root"
+	root, err := worktree.MakeRunRoot(key)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(key) })
+	gitT(t, root, "init", "-q")
+
+	restoreRemoveSeam(t, func(string, string) error { return errors.New("removal refused") })
+	if _, err := freshRunRoot(key); err == nil {
+		t.Fatal("freshRunRoot succeeded with the older tree still in place")
+	}
+
+	restoreRemoveSeam(t, worktree.RemoveAt)
+	got, err := freshRunRoot(key)
+	if err != nil {
+		t.Fatalf("freshRunRoot: %v", err)
+	}
+	if worktree.IsGitWorktree(got) {
+		t.Error("the fresh run root is still a git checkout")
 	}
 }
 

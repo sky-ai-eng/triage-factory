@@ -159,16 +159,17 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	// partial clone deferred during checkout — carries the host-scoped
 	// credential. Without it that fetch is anonymous and fails on a private
 	// repo. origin is the upstream just cloned/fetched with this same auth.
+	before := worktreeAdminEntries(bareDir)
 	if err := gitRunCtxAuth(ctx, bareDir, auth, "worktree", "add", wtDir, localBranch); err != nil {
 		// A cancelled/killed add (ctx cancel when the task closes mid-setup)
-		// leaves wtDir half-built and the bare's worktrees/<rootKey>/locked=
-		// initializing marker behind. Plain `worktree prune` skips locked
+		// leaves wtDir half-built and a registration in the bare locked with
+		// git's initializing marker. Plain `worktree prune` skips locked
 		// entries, so without this the branch stays pinned as "checked out"
 		// and the next run for this PR fails its fetch. Reclaim only THIS
-		// run's registration (keyed on wtDir) so we can't disturb a
-		// concurrent add against the same bare.
+		// add's registration so we can't disturb a concurrent add against
+		// the same bare.
 		_ = os.RemoveAll(wtDir)
-		removeWorktreeRegFor(bareDir, wtDir)
+		removeWorktreeRegFor(bareDir, wtDir, before)
 		return "", fmt.Errorf("worktree add: %w", err)
 	}
 

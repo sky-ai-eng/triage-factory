@@ -849,11 +849,15 @@ func dirExists(path string) bool {
 // freshRunRoot makes rootKey's run root for a setup that builds its workspace
 // from nothing. A root an older binary laid out — its PR checkout at the root
 // itself, so the root has a .git — is removed first rather than converted: the
-// layout it holds is one no capture or restore here understands.
+// layout it holds is one no capture or restore here understands. A removal that
+// fails fails the setup: building on top of that tree would run and snapshot a
+// layout the capture deliberately ignores.
 func freshRunRoot(rootKey string) (string, error) {
-	if worktree.IsGitWorktree(worktree.RunRoot(rootKey)) {
+	if root := worktree.RunRoot(rootKey); worktree.IsGitWorktree(root) {
 		delegateLog.Warn("removing a run root laid out by an older binary before building a fresh one", "root_key", rootKey)
-		worktree.RemoveRunRoot(rootKey)
+		if err := removeWorkspaceTree(root, rootKey); err != nil {
+			return "", fmt.Errorf("remove a run root of an older layout: %w", err)
+		}
 	}
 	return worktree.MakeRunRoot(rootKey)
 }

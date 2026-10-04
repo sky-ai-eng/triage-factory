@@ -1221,13 +1221,58 @@ func TestRemoveWorktreeRegFor_UnwedgesAndIsolated(t *testing.T) {
 
 	assertReAddWedged(t, bareDir, "main")
 
-	removeWorktreeRegFor(bareDir, ghost)
+	removeWorktreeRegFor(bareDir, ghost, nil)
 
 	// The ghost's branch is reclaimable; the concurrent live worktree's
 	// registration is untouched.
 	assertReAddSucceeds(t, bareDir, "main")
 	if _, err := os.Stat(filepath.Join(bareDir, "worktrees", filepath.Base(live))); err != nil {
 		t.Fatalf("removeWorktreeRegFor must not touch the concurrent worktree %q: %v", filepath.Base(live), err)
+	}
+}
+
+// TestRemoveWorktreeRegFor_FindsAnUnrecordedEntryBehindATakenName: git names a
+// checkout's admin entry after its slug and suffixes the name when another run
+// already holds it. An add killed before it records its path leaves that
+// suffixed entry with no path at all, so neither the path nor the name finds
+// it; its absence from the listing taken before the add does. The live entry
+// whose name it shares, and an older pathless entry, are left alone.
+func TestRemoveWorktreeRegFor_FindsAnUnrecordedEntryBehindATakenName(t *testing.T) {
+	withTestHome(t)
+	upstream := makeTestUpstream(t)
+	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	if err != nil {
+		t.Fatalf("EnsureBareClone: %v", err)
+	}
+	live := filepath.Join(tfRunCheckout("run-live"), "owner", "repo", "default")
+	if out, err := exec.Command("git", "-C", bareDir, "worktree", "add", "--detach", live, "main").CombinedOutput(); err != nil {
+		t.Fatalf("add the live checkout: %v: %s", err, out)
+	}
+	worktrees := filepath.Join(bareDir, "worktrees")
+	pathless := func(name string) string {
+		t.Helper()
+		dir := filepath.Join(worktrees, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "locked"), []byte("initializing"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	older := pathless("stale")
+
+	before := worktreeAdminEntries(bareDir)
+	killed := pathless("default1")
+	removeWorktreeRegFor(bareDir, filepath.Join(tfRunCheckout("run-failed"), "owner", "repo", "default"), before)
+
+	if _, err := os.Stat(killed); !os.IsNotExist(err) {
+		t.Errorf("the failed add's entry survived (stat err %v)", err)
+	}
+	for _, kept := range []string{filepath.Join(worktrees, "default"), older} {
+		if _, err := os.Stat(kept); err != nil {
+			t.Errorf("%s was removed; only the failed add's entry is this call's: %v", kept, err)
+		}
 	}
 }
 

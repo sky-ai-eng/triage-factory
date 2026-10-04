@@ -288,8 +288,9 @@ type snapshotCheckout struct {
 // that exist and sit at <root>/<owner>/<repo>/<slug> as their row names them,
 // in path order.
 //
-// A failed read is an error, not an empty set: a blob that silently lost every
-// checkout would overwrite one that had them.
+// A failed read is an error, not an empty set, and so is a checkout that cannot
+// be statted for any reason but its absence: a blob that silently lost a
+// checkout would overwrite one that had it.
 func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root string) ([]snapshotCheckout, error) {
 	if s.conversationWorktrees == nil || taskID == "" || root == "" {
 		return nil, nil
@@ -312,7 +313,14 @@ func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root str
 			continue
 		}
 		fi, err := os.Lstat(w.Path)
-		if err != nil || !fi.IsDir() {
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("stat checkout %s: %w", rel, err)
+		}
+		if !fi.IsDir() {
+			delegateLog.Warn("snapshot: a checkout's path is not a directory; it is not carried", "checkout", rel, "path", w.Path)
 			continue
 		}
 		seen[rel] = true
@@ -437,7 +445,10 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 		}
 	}()
 
-	if w.checkouts, err = s.snapshotCheckouts(stateCtx, w.orgID, w.keyID, w.wtPath); err != nil {
+	// The persist's own ctx, not stateCtx: this read is part of the capture and
+	// takes the capture's bound, where stateCtx would let a stalled database
+	// hold the park, conclusion or shutdown open with no deadline at all.
+	if w.checkouts, err = s.snapshotCheckouts(ctx, w.orgID, w.keyID, w.wtPath); err != nil {
 		return fmt.Errorf("snapshot: %w", err)
 	}
 	captured, err := captureSnapshot(ctx, w)

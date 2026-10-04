@@ -2,7 +2,9 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -208,45 +210,60 @@ func pruneAll(baseDir string) {
 	}
 }
 
-// removeWorktreeRegFor deletes the single bare admin registration that
-// belongs to wtDir, if present. A cancelled/killed `git worktree add`
-// leaves <bare>/worktrees/<name> behind, locked with git's transient
-// "initializing" marker; plain `git worktree prune` skips locked entries
-// so the branch stays pinned.
+// worktreeAdminEntries lists the bare's worktree admin entries by name. A
+// caller takes it under the per-repo lock right before a `git worktree add`, so
+// that if the add fails, removeWorktreeRegFor can tell the entry that add made
+// from every entry that was already there. Nil when the listing fails, which
+// leaves only the recorded path to go by.
+func worktreeAdminEntries(bareDir string) map[string]bool {
+	entries, err := os.ReadDir(filepath.Join(bareDir, "worktrees"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name()] = true
+	}
+	return names
+}
+
+// removeWorktreeRegFor deletes the bare admin registration that belongs to
+// wtDir, if present. A cancelled/killed `git worktree add` leaves
+// <bare>/worktrees/<name> behind, locked with git's transient "initializing"
+// marker; plain `git worktree prune` skips locked entries, so the entry
+// outlives the add.
 //
-// git names that admin dir after the basename of the worktree path, which for
-// a checkout under a run root is its slug ("default", "pr-7") — shared by every
-// run that materialized the same slug, and disambiguated by git with a numeric
-// suffix. So the entry is found by the checkout path git recorded for it, and
-// the basename-named entry is taken only when it records no path at all (an add
-// killed before it wrote one) or records this one.
+// The entry's name cannot identify it. git derives it from the checkout's
+// basename — for a checkout under a run root, its slug, which every run that
+// materialized that slug shares — sanitizes it, and adds a numeric suffix when
+// the name is taken. So the entry is found by the checkout path git recorded in
+// it, and an entry an add left before it recorded any path is found by being
+// absent from before: worktreeAdminEntries, listed under the per-repo lock just
+// before the add. before is nil for a checkout whose add completed, which always
+// recorded its path.
 //
-// Targeting by path — rather than sweeping every locked=initializing entry in
-// the bare — is what makes this safe to call without the per-repo lock: it can
-// only ever touch this run's own dead add, never a concurrent add against the
-// same bare. A no-op when nothing matches (add failed before mkdir).
-func removeWorktreeRegFor(bareDir, wtDir string) {
+// Every other entry is left alone, a concurrent add against the same bare
+// included. The one such add this cannot tell from its own is one in another
+// process, caught in the instant between git creating its entry and recording
+// its path; that add then fails as a whole rather than leaving anything behind.
+func removeWorktreeRegFor(bareDir, wtDir string, before map[string]bool) {
 	worktreesDir := filepath.Join(bareDir, "worktrees")
-	target := ""
-	if entries, err := os.ReadDir(worktreesDir); err == nil {
-		for _, e := range entries {
-			adminDir := filepath.Join(worktreesDir, e.Name())
-			if e.IsDir() && samePath(recordedWorktreePath(adminDir), wtDir) {
-				target = adminDir
-				break
-			}
-		}
-	}
-	if target == "" {
-		named := filepath.Join(worktreesDir, filepath.Base(wtDir))
-		if recorded := recordedWorktreePath(named); recorded != "" && !samePath(recorded, wtDir) {
-			return
-		}
-		target = named
-	}
-	if err := os.RemoveAll(target); err != nil {
-		worktreeLog.Warn("clear half-built worktree failed", "dir", target, "error", err)
+	entries, err := os.ReadDir(worktreesDir)
+	if err != nil {
 		return
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		adminDir := filepath.Join(worktreesDir, e.Name())
+		recorded := recordedWorktreePath(adminDir)
+		if !samePath(recorded, wtDir) && (recorded != "" || before == nil || before[e.Name()]) {
+			continue
+		}
+		if err := os.RemoveAll(adminDir); err != nil {
+			worktreeLog.Warn("clear half-built worktree failed", "dir", adminDir, "error", err)
+		}
 	}
 }
 
