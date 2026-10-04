@@ -1,24 +1,26 @@
-// Durable blueprint workspace: snapshot a parked run's non-recoverable
-// workspace to the blob store on dormancy, and rehydrate it on resume when the
-// warm on-disk worktree is gone. The object store is the source of truth; the
-// host worktree is a warm cache. A parked workspace surviving locally is the
-// fast path (resume uses it directly, rehydrate is a no-op); a missing one
-// rebuilds from the snapshot — never a brick.
+// Durable blueprint workspace: snapshot an engagement's non-recoverable
+// workspace to the blob store, and rehydrate it on resume when the warm
+// on-disk worktree is gone. The object store is the source of truth; the host
+// worktree is a warm cache. A workspace surviving locally is the fast path
+// (resume uses it directly, rehydrate is a no-op); a missing one rebuilds from
+// the snapshot — never a brick.
 //
-// Two snapshot triggers are wired today: a park to `open` — an idle
-// hibernation, a turn that ended without a conclusion, or a stop
-// (parkConversationOpen, live.go) — and every non-failed terminal, which after
-// the terminal vocabulary shrank to completed|failed is `completed`, whatever
-// the outcome (processCompletion). A third — an executor-drain/scale-down
-// trigger — is a forward seam for the execution-plane split: there are no
-// executors to drain yet, so it is intentionally NOT wired. When it lands it
-// calls snapshotWorkspace with the same key, identically to the two triggers
-// above.
+// Three kinds of moment write a snapshot, all under the task's key:
 //
-// A park does NOT wait for its snapshot: it records that a persist is owed,
-// flips the conversation, and captures afterwards. The record is what makes
-// that safe — see parkConversationOpen for the ordering and workspace_wait.go
-// for the resume that reads it.
+//   - an engagement letting go of a conversation it has not concluded
+//     (leaveConversation, live.go): a park to `open` — a turn that ended
+//     without a conclusion, or a stop by a person or the stall watchdog — and
+//     the hand-backs that leave the conversation mid-flight, when the
+//     dispatcher is shutting down or the model provider stayed unavailable;
+//   - every non-failed terminal, `completed` whatever the outcome, before the
+//     terminal write (processCompletion, recordNativeResult);
+//   - a checkpoint of a live native engagement at a tool-batch boundary
+//     (checkpoint.go).
+//
+// A park or a hand-back does NOT wait for its snapshot: it records that a
+// persist is owed, releases the claim, and captures afterwards. The record is
+// what makes that safe — see leaveConversation for the ordering and
+// workspace_wait.go for the resume that reads it.
 //
 // The write policy and the retention sweep move together, always — and the
 // sweep is the wider of the two on purpose: it enumerates every top-level

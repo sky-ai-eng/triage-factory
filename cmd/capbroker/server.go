@@ -204,7 +204,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Time{})
 
 	// WaitRun blocks until the supervised run exits — potentially the whole
-	// agent run (minutes, idle hibernation), far past callTimeout — so it
+	// agent run, many minutes, far past callTimeout — so it
 	// runs on baseCtx directly, bounded by the run itself and unwound only
 	// on broker Shutdown (which cancels baseCtx). CaptureRunDelta shells
 	// out to git (bundle + full binary diff) against a worktree of

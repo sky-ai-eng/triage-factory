@@ -134,7 +134,7 @@ func runSetDraining(args []string, draining bool) {
 	}
 
 	if draining {
-		fmt.Printf("instance %s is now draining: it will stop claiming new runs (existing runs finish or hibernate-on-idle); check `triagefactory instance list` for RUNS reaching 0/N before retiring it.\n", id)
+		fmt.Printf("instance %s is now draining: it will stop claiming new runs (existing runs carry on until they finish or park); check `triagefactory instance list` for RUNS reaching 0/N before retiring it.\n", id)
 	} else {
 		fmt.Printf("instance %s is no longer draining: it will resume claiming new runs on its next heartbeat.\n", id)
 	}
@@ -154,8 +154,8 @@ NOTES
   Draining takes effect within one heartbeat interval (a few seconds) of
   the running instance itself, not immediately on this command's return —
   it writes instances.draining, which the instance reads back on its next
-  heartbeat. A drained instance's live runs finish (or hibernate-on-idle);
-  no new claims start. Safe to retire once RUNS reaches 0.
+  heartbeat. A drained instance's live runs carry on until they finish or
+  park; no new claims start. Safe to retire once RUNS reaches 0.
 
   Local mode: the single instance's row still exists (N=1) — drain works
   the same way, useful for a controlled shutdown ahead of an upgrade.`)
