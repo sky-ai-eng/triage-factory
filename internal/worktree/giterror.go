@@ -13,6 +13,10 @@ type GitError struct {
 	Args   []string
 	Output string // combined stdout/stderr
 	Err    error  // the *exec.ExitError or the context error
+	// Proxy is the base URL of the per-run git proxy the command's network
+	// git was routed through (CloneAuthViaGitProxy), empty when it went to
+	// the git host directly.
+	Proxy string
 }
 
 // Error is "cancelled" for a command its context stopped, and the exit error
@@ -55,16 +59,36 @@ var transientGitMarkers = []string{
 // network failure rather than a refusal. A command its deadline stopped is
 // never one, whatever it printed before it was stopped: it ran out of the
 // time it was given, which is not an answer from the remote.
+//
+// Nor is a command routed through the run's own git proxy whose connection
+// to the proxy never opened. Every network request of that command goes to
+// the proxy, so the failure says the proxy is down, a fault on this host. The
+// git host being unreachable behind a live proxy reaches git as the proxy's
+// 502, and a transfer dropped partway can be the host's drop passed through,
+// so both still count.
 func IsTransientGitError(err error) bool {
 	var gitErr *GitError
 	if !errors.As(err, &gitErr) || errors.Is(gitErr.Err, context.DeadlineExceeded) {
 		return false
 	}
 	out := strings.ToLower(gitErr.Output)
+	if gitErr.Proxy != "" && neverReachedProxy(out, strings.ToLower(gitErr.Proxy)) {
+		return false
+	}
 	for _, marker := range transientGitMarkers {
 		if strings.Contains(out, marker) {
 			return true
 		}
 	}
 	return false
+}
+
+// neverReachedProxy reports whether a command's lowercased output says git
+// could not open a connection to proxy, the base URL git reports as the one
+// it could not access when the command is routed through it.
+func neverReachedProxy(out, proxy string) bool {
+	if !strings.Contains(out, "unable to access '"+strings.TrimRight(proxy, "/")+"/") {
+		return false
+	}
+	return strings.Contains(out, "failed to connect") || strings.Contains(out, "couldn't connect to server")
 }

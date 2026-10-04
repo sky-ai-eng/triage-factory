@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os/exec"
 	"testing"
 )
@@ -140,5 +141,68 @@ func TestIsTransientGitError(t *testing.T) {
 	}
 	if IsTransientGitError(nil) {
 		t.Error("IsTransientGitError(nil) = true")
+	}
+}
+
+// TestIsTransientGitError_AProxyThatNeverAnsweredIsNotTheHost: a command
+// routed through the run's own git proxy sends every network request to that
+// proxy, so a connection to it that never opened says the proxy is down, not
+// the git host. That is not a transient failure of the remote. A proxy that
+// answered (its 502 for a host it could not reach) or that dropped a transfer
+// partway (which can be the host's drop passed through) still is, and the
+// same failure on a command that went to the host directly is unchanged.
+func TestIsTransientGitError_AProxyThatNeverAnsweredIsNotTheHost(t *testing.T) {
+	const proxy = "http://10.42.0.5:7070/"
+	viaProxy := func(output string) error {
+		return fmt.Errorf("bare clone: %w", &GitError{Args: []string{"clone"}, Output: output, Err: errors.New("exit status 128"), Proxy: proxy})
+	}
+	local := map[string]string{
+		"refused":         "fatal: unable to access 'http://10.42.0.5:7070/o/r.git/': Failed to connect to 10.42.0.5 port 7070 after 0 ms: Couldn't connect to server",
+		"refused, older":  "fatal: unable to access 'http://10.42.0.5:7070/o/r.git/': Failed to connect to 10.42.0.5 port 7070: Connection refused",
+		"connect timeout": "fatal: unable to access 'http://10.42.0.5:7070/o/r.git/': Failed to connect to 10.42.0.5 port 7070 after 130001 ms: Connection timed out",
+	}
+	for name, output := range local {
+		if IsTransientGitError(viaProxy(output)) {
+			t.Errorf("%s: a connection to the run's own proxy that never opened reads as the git host failing", name)
+		}
+		direct := fmt.Errorf("bare clone: %w", &GitError{Args: []string{"clone"}, Output: output, Err: errors.New("exit status 128")})
+		if !IsTransientGitError(direct) {
+			t.Errorf("%s: the same failure on a direct route is no longer transient", name)
+		}
+	}
+	upstream := map[string]string{
+		"the proxy's 502":    "fatal: unable to access 'http://10.42.0.5:7070/o/r.git/': The requested URL returned error: 502",
+		"a dropped transfer": "error: RPC failed; curl 18 transfer closed with outstanding read data remaining\nfatal: early EOF",
+		"a reset mid-read":   "fatal: unable to access 'http://10.42.0.5:7070/o/r.git/': Recv failure: Connection reset by peer",
+	}
+	for name, output := range upstream {
+		if !IsTransientGitError(viaProxy(output)) {
+			t.Errorf("%s through the proxy no longer reads as the git host failing", name)
+		}
+	}
+}
+
+// TestGitRunCtxAuth_ARefusedProxyIsNotTheHost drives a real clone through a
+// git proxy route whose port nothing listens on, so the classification is
+// pinned against the text git actually prints.
+func TestGitRunCtxAuth_ARefusedProxyIsNotTheHost(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	proxy := "http://" + ln.Addr().String()
+	_ = ln.Close()
+
+	auth := CloneAuthViaGitProxy(proxy, "https://github.com", "per-run-placeholder")
+	err = gitRunCtxAuth(context.Background(), "", auth, "clone", "--bare", "https://github.com/o/r.git", t.TempDir()+"/r.git")
+	var gitErr *GitError
+	if !errors.As(err, &gitErr) {
+		t.Fatalf("clone through a closed proxy = %v, want a GitError", err)
+	}
+	if gitErr.Proxy == "" {
+		t.Error("the GitError does not record the proxy the command was routed through")
+	}
+	if IsTransientGitError(err) {
+		t.Errorf("a clone the run's own proxy refused reads as the git host failing: %s", gitErr.Output)
 	}
 }
