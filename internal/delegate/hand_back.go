@@ -145,51 +145,74 @@ func (s *Spawner) leaveSDKOnUpstream(ctx context.Context, park liveParkContext, 
 
 // sdkProviderUnavailable reports whether an SDK result ended on its model
 // provider being unavailable after the SDK's own retries: an error result
-// whose api_error_status classifies as Transient or RateLimited. The status
-// is the SDK's structured report of the provider's answer, so the decision
-// never reads the result's prose. A result with no status (0), and every
-// other class, is the agent's failure and keeps failing the conversation.
+// whose api_error_status classifies as Transient or RateLimited, or, when the
+// provider gave no HTTP answer at all (a refused or reset connection), whose
+// API error the SDK names as the provider's. Both are the SDK's structured
+// report, so the decision never reads the result's prose. Every other result
+// is the agent's failure and keeps failing the conversation.
+//
+// It sees only a result the SDK reached. The SDK's retry notices are not
+// activity, so retries that outlast the idle limit, a request held open until
+// the SDK's own timeout among them, end in a stall park before any result.
 func sdkProviderUnavailable(r *agentproc.Result) bool {
-	if r == nil || !r.IsError || r.APIErrorStatus == 0 {
+	if r == nil || !r.IsError {
 		return false
 	}
-	switch inference.ClassifyStatus(r.APIErrorStatus) {
-	case upstream.Transient, upstream.RateLimited:
+	if r.APIErrorStatus != 0 {
+		switch inference.ClassifyStatus(r.APIErrorStatus) {
+		case upstream.Transient, upstream.RateLimited:
+			return true
+		}
+		return false
+	}
+	switch r.APIError {
+	case "server_error", "overloaded", "rate_limit":
 		return true
 	}
 	return false
 }
 
 // sdkUpstreamSummary is what an SDK hand-back logs and keeps on
-// result_summary: the status the provider answered with. The runtime's own
-// text is left out, because it renders the provider's response body, and an
-// upstream body reaches neither a log line nor a person's screen.
+// result_summary: the status the provider answered with, or the SDK's name
+// for the failure when it gave no answer. The runtime's own text is left out,
+// because it renders the provider's response body, and an upstream body
+// reaches neither a log line nor a person's screen.
 func sdkUpstreamSummary(r *agentproc.Result) string {
+	if r.APIErrorStatus == 0 {
+		return fmt.Sprintf("model provider unavailable (no response, %s)", r.APIError)
+	}
 	return fmt.Sprintf("model provider unavailable (HTTP %d)", r.APIErrorStatus)
 }
 
 // upstreamSetupFailure reports whether a failure before the agent ran was an
 // upstream the engagement fetches from being unreachable, rather than
-// something about the conversation or the host: a GitHub API call during
-// setup (the pull-request fetch) that failed Transient or RateLimited, or a
-// git command whose output names a network failure.
+// something about the conversation or the host: a git command whose output
+// names a network failure, or an error its client marked as an upstream's
+// (upstream.Classified) with the class Transient or RateLimited, such as
+// GitHub's answer to the pull-request read.
 //
-// A git command is read by IsTransientGitError alone, which never reads one
-// its deadline stopped as transient. Its GitError unwraps to the context
-// error then, and upstream.ClassOf reads context.DeadlineExceeded as a
-// transport timeout, so without this a clone that outlasts its bound because
-// the repository is large would spend the upstream budget instead of the
-// setup budget.
+// Only the mark counts, never the shape of the error. The bring-up's local
+// steps (a socket bind, a broker or sidecar call, a database read, a write
+// past its deadline) fail with a net.Error or a context deadline too, and a
+// deterministic one of those read as an outage would retry for four hours and
+// then tell a person a service was unreachable, where the setup budget fails
+// it within seconds naming the cause.
 func upstreamSetupFailure(cause error) bool {
-	if worktree.IsTransientGitError(cause) {
-		return true
-	}
-	var gitErr *worktree.GitError
-	if errors.As(cause, &gitErr) {
+	return worktree.IsTransientGitError(cause) || markedUpstreamOutage(cause)
+}
+
+// markedUpstreamOutage reports whether err carries a client's mark
+// (upstream.Classified) saying an upstream was unreachable or rate limited.
+// Only the mark counts, for the reason upstreamSetupFailure gives: a local
+// step's own deadline has the shape of a timeout, and a refused local socket
+// the shape of an unreachable host.
+func markedUpstreamOutage(err error) bool {
+	var marked upstream.Classified
+	if !errors.As(err, &marked) {
 		return false
 	}
-	class, ok := upstream.ClassOf(cause)
-	return ok && (class == upstream.Transient || class == upstream.RateLimited)
+	class := marked.UpstreamClass()
+	return class == upstream.Transient || class == upstream.RateLimited
 }
 
 // upstreamSetupReason is what a person is told when an upstreamSetupFailure

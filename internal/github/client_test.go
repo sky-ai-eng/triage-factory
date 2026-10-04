@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 func TestHTTPError_Error(t *testing.T) {
@@ -506,6 +509,44 @@ func TestPostGraphQL_ContextCancellation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("PostGraphQL did not return after ctx cancellation — the GraphQL path is not ctx-aware")
+	}
+}
+
+// TestNewProxyClient_AnUnreachableProxyIsNotAnUpstreamOutage: a proxy
+// client's base is the run's own credential proxy, so a connection to it that
+// fails is a fault on this host, not GitHub being unreachable. Its error
+// carries no upstream mark, so a setup that fails on it spends the setup
+// budget rather than waiting out the upstream one, and it is not retried.
+// GitHub being unreachable behind a live proxy reaches the client as the
+// proxy's 502, which keeps its class. The same failure from a client that
+// talks to GitHub directly is still marked.
+func TestNewProxyClient_AnUnreachableProxyIsNotAnUpstreamOutage(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	closed := "http://" + ln.Addr().String()
+	_ = ln.Close()
+
+	rt := &attemptCounter{base: &http.Transport{}}
+	proxied := NewProxyClient(closed, "per-run-placeholder")
+	proxied.http = &http.Client{Timeout: 5 * time.Second, Transport: rt}
+	_, err = proxied.Get(context.Background(), "/repos/o/r/pulls/7")
+	if err == nil {
+		t.Fatal("a closed proxy answered")
+	}
+	var marked upstream.Classified
+	if errors.As(err, &marked) {
+		t.Errorf("a refused connection to the run's own proxy is marked %q, want no upstream mark", marked.UpstreamClass())
+	}
+	if got := rt.n.Load(); got != 1 {
+		t.Errorf("the request to a refused proxy made %d attempts, want 1", got)
+	}
+
+	direct := &Client{baseURL: closed, pat: "t", http: &http.Client{Timeout: 5 * time.Second}}
+	_, err = direct.Get(context.Background(), "/repos/o/r/pulls/7")
+	if class, ok := upstream.ClassOf(err); !ok || class != upstream.Transient {
+		t.Errorf("a refused connection to GitHub itself = %v (class %q), want a transient failure", err, class)
 	}
 }
 

@@ -373,3 +373,74 @@ func TestParseLine_APIErrorStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestParseLine_APIErrorKind pins where a failure with no HTTP status gets its
+// classification: the `error` field of the assistant message the runtime
+// writes for the API error, carried onto the turn's result. The lines are what
+// the runtime emitted for a provider that reset every connection, trimmed to
+// the fields under test: the retry notices name the error "unknown", the
+// result has no status at all, and only the assistant message says
+// "server_error".
+func TestParseLine_APIErrorKind(t *testing.T) {
+	feed := func(lines ...string) *Result {
+		t.Helper()
+		s := NewStreamState()
+		var res *Result
+		for _, l := range lines {
+			if _, r := s.ParseLine([]byte(l), "t"); r != nil {
+				res = r
+			}
+		}
+		if res == nil {
+			t.Fatal("expected Result")
+		}
+		return res
+	}
+	const (
+		retry     = `{"type":"system","subtype":"api_retry","attempt":1,"max_retries":2,"retry_delay_ms":500,"error_status":null,"error":"unknown"}`
+		apiErr    = `{"type":"assistant","message":{"id":"m-err","content":[{"type":"text","text":"API Error: Connection dropped (ECONNRESET)"}]},"parent_tool_use_id":null,"error":"server_error"}`
+		errResult = `{"type":"result","subtype":"success","is_error":true,"api_error_status":null,"result":"API Error: Connection dropped (ECONNRESET)"}`
+	)
+
+	t.Run("a reset connection", func(t *testing.T) {
+		res := feed(retry, retry, apiErr, errResult)
+		if res.APIError != "server_error" || res.APIErrorStatus != 0 {
+			t.Errorf("APIError = %q, APIErrorStatus = %d; want server_error with no status", res.APIError, res.APIErrorStatus)
+		}
+	})
+	t.Run("a subagent's error is not the turn's", func(t *testing.T) {
+		sub := `{"type":"assistant","message":{"id":"m-sub","content":[{"type":"text","text":"API Error"}]},"parent_tool_use_id":"toolu_1","error":"server_error"}`
+		if res := feed(sub, errResult); res.APIError != "" {
+			t.Errorf("APIError = %q, want empty", res.APIError)
+		}
+	})
+	t.Run("a turn that recovered carries none", func(t *testing.T) {
+		ok := `{"type":"result","subtype":"success","is_error":false,"result":"pong"}`
+		if res := feed(apiErr, ok); res.APIError != "" {
+			t.Errorf("APIError = %q on a clean result", res.APIError)
+		}
+	})
+	t.Run("an empty parent is the turn's own", func(t *testing.T) {
+		top := `{"type":"assistant","message":{"id":"m-top","content":[{"type":"text","text":"API Error"}]},"parent_tool_use_id":"","error":"overloaded"}`
+		if res := feed(top, errResult); res.APIError != "overloaded" {
+			t.Errorf("APIError = %q, want overloaded", res.APIError)
+		}
+	})
+	t.Run("a later answer clears an error the turn recovered from", func(t *testing.T) {
+		answer := `{"type":"assistant","message":{"id":"m-ok","content":[{"type":"text","text":"pong"}]},"parent_tool_use_id":null}`
+		maxTurns := `{"type":"result","subtype":"error_max_turns","is_error":true}`
+		if res := feed(apiErr, answer, maxTurns); res.APIError != "" {
+			t.Errorf("APIError = %q, want none: the provider answered after the error", res.APIError)
+		}
+	})
+	t.Run("the next turn starts clean", func(t *testing.T) {
+		s := NewStreamState()
+		for _, l := range []string{apiErr, errResult} {
+			s.ParseLine([]byte(l), "t")
+		}
+		_, res := s.ParseLine([]byte(`{"type":"result","subtype":"error_max_turns","is_error":true}`), "t")
+		if res == nil || res.APIError != "" {
+			t.Errorf("second turn's result = %+v, want no APIError", res)
+		}
+	})
+}

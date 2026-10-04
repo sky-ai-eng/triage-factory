@@ -395,3 +395,38 @@ func TestSecretStore_SQLite_PerUserRejectsNonLocalOrg(t *testing.T) {
 		t.Errorf("DeleteUser with non-local orgID succeeded; want error")
 	}
 }
+
+// TestSecretStore_SQLite_DeleteUserSystemIfValue is the Postgres twin's
+// compare-and-delete against the keychain: the entry goes only while it holds
+// the value the caller read.
+func TestSecretStore_SQLite_DeleteUserSystemIfValue(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	const userID = "11111111-1111-1111-1111-111111111111"
+	const key = "jira_token/acme.atlassian.net"
+
+	if err := stores.Secrets.PutUserSystem(ctx, org, userID, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, org, userID, key, "envelope_v0"); err != nil || deleted {
+		t.Fatalf("delete naming a value the entry no longer holds = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, org, userID, key); err != nil || got != "envelope_v1" {
+		t.Fatalf("value after the refused delete = (%q, %v), want envelope_v1", got, err)
+	}
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, org, userID, key, "envelope_v1"); err != nil || !deleted {
+		t.Fatalf("delete naming the held value = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, org, userID, key); err != nil || got != "" {
+		t.Fatalf("value after the delete = (%q, %v), want none", got, err)
+	}
+	if deleted, err := stores.Secrets.DeleteUserSystemIfValue(ctx, org, userID, key, "envelope_v1"); err != nil || deleted {
+		t.Fatalf("delete of a missing entry = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if _, err := stores.Secrets.DeleteUserSystemIfValue(ctx, "22222222-2222-2222-2222-222222222222", userID, key, "x"); err == nil {
+		t.Fatal("a non-local org was accepted")
+	}
+}

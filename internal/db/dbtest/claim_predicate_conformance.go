@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -99,11 +100,30 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 	t.Helper()
 	ctx := context.Background()
 
+	// claims records, per conversation, the claim it was last claimed under:
+	// release's requeue arms are fenced on it.
+	var claimsMu sync.Mutex
+	claims := map[string]string{}
+	lastClaim := func(t *testing.T, convID string) string {
+		t.Helper()
+		claimsMu.Lock()
+		defer claimsMu.Unlock()
+		id, ok := claims[convID]
+		if !ok {
+			t.Fatalf("release: conversation %s was never claimed in this suite", convID)
+		}
+		return id
+	}
 	claim := func(t *testing.T, h ClaimPredicateHarness) *domain.Conversation {
 		t.Helper()
 		got, err := h.Stores.ConversationQueue.ClaimNextConversation(ctx, predicateExecutorID, predicateBootEpoch, db.ClaimPlacement{}, db.DefaultClaimLease)
 		if err != nil {
 			t.Fatalf("ClaimNextConversation: %v", err)
+		}
+		if got != nil {
+			claimsMu.Lock()
+			claims[got.ID] = got.ClaimID
+			claimsMu.Unlock()
 		}
 		return got
 	}
@@ -137,9 +157,9 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		var err error
 		switch outcome {
 		case "requeued":
-			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueSetupFailure, 0, "")
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, lastClaim(t, convID), db.RequeueSetupFailure, 0, "")
 		case "requeued_credentials":
-			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, db.RequeueAwaitingCredentials, 0, "")
+			_, err = h.Stores.ConversationQueue.RequeueConversation(ctx, orgID, convID, lastClaim(t, convID), db.RequeueAwaitingCredentials, 0, "")
 		case "requeued_shutdown":
 			_, err = h.Stores.ConversationQueue.ReleaseOwnClaimsOnShutdownSystem(ctx, predicateExecutorID, predicateBootEpoch, []string{convID})
 		case "reaped":

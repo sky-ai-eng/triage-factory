@@ -486,6 +486,110 @@ func TestClaimFence_SerializesAgainstAConcurrentRelease(t *testing.T) {
 	}
 }
 
+// TestClaimFence_ConversationWritersTakeTheReleaseOrder: a release that also
+// writes the conversation, as a requeue or a hand-back does, locks the
+// conversation and then the claim. A fenced writer that writes the
+// conversation row has to take the two in the same order. Taking the claim
+// first, it could hold the claim lock the release waits for while waiting on
+// the release's conversation, and Postgres would abort one of them.
+//
+// The release is held open on its own connection with the conversation
+// locked, each writer starts against it, and then the release takes the
+// claim. Both have to finish: the release without a deadlock, and the writer
+// refused once the release commits.
+func TestClaimFence_ConversationWritersTakeTheReleaseOrder(t *testing.T) {
+	h := pgtest.Shared(t)
+	ctx := context.Background()
+
+	writers := []struct {
+		name  string
+		write func(fx fenceFixture) error
+	}{
+		{"RequestStop", func(fx fenceFixture) error {
+			_, err := fx.store.RequestStopForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, domain.ParkReasonStalled)
+			return err
+		}},
+		{"ParkOpen", func(fx fenceFixture) error {
+			_, err := fx.store.ParkOpenForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, db.ParkStopped("user_cancelled", "Run cancelled by user"))
+			return err
+		}},
+		{"Complete", func(fx fenceFixture) error {
+			_, err := fx.store.CompleteForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "completed", 1.5, 100, 2, "done", "finish", "", "")
+			return err
+		}},
+		{"MarkFailed", func(fx fenceFixture) error {
+			_, err := fx.store.MarkFailedIfActiveForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, string(domain.ConversationFailureCrash))
+			return err
+		}},
+		{"SetSession", func(fx fenceFixture) error {
+			_, err := fx.store.SetSessionForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "sess-racing")
+			return err
+		}},
+		{"SetSystemBlock", func(fx fenceFixture) error {
+			_, err := fx.store.SetSystemBlockForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "block")
+			return err
+		}},
+		{"SetWorktreePath", func(fx fenceFixture) error {
+			_, err := fx.store.SetWorktreePathForClaimSystem(ctx, fx.orgID, fx.conversationID, fx.claimID, "/tmp/triagefactory-runs/racing")
+			return err
+		}},
+	}
+	for _, w := range writers {
+		t.Run(w.name, func(t *testing.T) {
+			fx := newFenceFixture(t, h, "exec-fence-order")
+
+			release, err := h.AdminDB.BeginTx(ctx, nil)
+			if err != nil {
+				t.Fatalf("begin release tx: %v", err)
+			}
+			defer func() { _ = release.Rollback() }()
+			if _, err := release.ExecContext(ctx, `
+				SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+			`, fx.orgID, fx.conversationID); err != nil {
+				t.Fatalf("lock the conversation: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- w.write(fx) }()
+
+			// Let the writer run until it waits on a lock. It is the only
+			// other session on this database.
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				var waiting int
+				if err := h.AdminDB.QueryRowContext(ctx, `
+					SELECT count(*) FROM pg_stat_activity
+					WHERE wait_event_type = 'Lock' AND datname = current_database()
+				`).Scan(&waiting); err != nil {
+					t.Fatalf("read pg_stat_activity: %v", err)
+				}
+				if waiting > 0 {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+
+			if _, err := release.ExecContext(ctx, `
+				UPDATE claims SET released_at = now(), outcome = 'reaped' WHERE id = $1
+			`, fx.claimID); err != nil {
+				t.Fatalf("release the claim while the writer waits on the conversation: %v", err)
+			}
+			if err := release.Commit(); err != nil {
+				t.Fatalf("commit release: %v", err)
+			}
+
+			select {
+			case werr := <-done:
+				if !errors.Is(werr, db.ErrClaimReleased) {
+					t.Fatalf("writer after the release committed = %v, want ErrClaimReleased", werr)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("writer never returned after the release committed")
+			}
+		})
+	}
+}
+
 // TestClaimFence_SuccessorWritesWhileTheZombieIsRefused is the full
 // requeue-and-reclaim shape: reap, hand the conversation to a second
 // executor, and then have both engagements write. Only one of them owns the

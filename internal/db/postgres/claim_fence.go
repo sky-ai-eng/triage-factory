@@ -51,10 +51,10 @@ import (
 // conversation, never existed — is one answer: this caller is not the owner.
 // The one refinement is that an unreleased claim whose lease lapsed says so,
 // as db.ErrClaimLeaseExpired, which is still db.ErrClaimReleased to every
-// caller that asks only that. The row is read whatever its state rather than
-// matched by the predicate, so it is locked whenever it exists, which adds no
-// window: a row the old predicate skipped was one no write could land on
-// anyway.
+// caller that asks only that. The row is read whatever its state, and the
+// ownership test is applied to what was read, so the row is locked whenever
+// it exists. Locking a row that then fails the test opens no window: a
+// released or lapsed claim is one no fenced write can land on anyway.
 //
 // statement_timestamp() rather than now(): the expiry has to be read against
 // fresh database time, not the instant the caller's transaction began, or a
@@ -74,6 +74,26 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 		return fmt.Errorf("%w: conversation %q is not a valid id", db.ErrClaimReleased, conversationID)
 	}
 	return claimRefusal(ctx, q, orgID, conversationID, claimID, "FOR SHARE")
+}
+
+// assertClaimActiveForConversationWrite is assertClaimActive for a fenced
+// write that also writes the conversation row, and it locks that row before
+// the claim. Every writer that touches a conversation and one of its claims
+// takes them in that order, so none can hold a claim another is waiting on
+// while it waits for that writer's conversation, the cycle Postgres breaks by
+// aborting one of them. A fenced write that touches only messages needs no
+// conversation lock: its foreign key takes KEY SHARE, which no conversation
+// write conflicts with.
+func assertClaimActiveForConversationWrite(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
+	if _, err := q.ExecContext(ctx, `
+		SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+	`, orgID, conversationID); err != nil {
+		return err
+	}
+	return assertClaimActive(ctx, q, orgID, conversationID, claimID)
 }
 
 // claimRefusal reads the named claim's state and answers whether a holder

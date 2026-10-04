@@ -12,7 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// takeoverBatch bounds how many expired claims one dispatch pass takes over.
+// takeoverBatch bounds how many expired claims one recovery pass takes over.
 // A pass runs every scan interval, so a backlog larger than this drains over
 // a few passes rather than in one transaction that locks all of it.
 const takeoverBatch = 100
@@ -20,10 +20,11 @@ const takeoverBatch = 100
 // strandedRunGrace is how long a concluded step waits before its run counts
 // as stranded. An ordinary reactor runs within milliseconds of the step's
 // terminal commit; the grace keeps the replay off one that is merely running
-// on another executor right now.
-const strandedRunGrace = 60 * time.Second
+// on another executor right now. It is the settlement's grace for the same
+// reason, so the two cannot disagree about whose run it still is.
+const strandedRunGrace = db.ReactorGrace
 
-// strandedRunLimit bounds how many stranded runs one dispatch pass replays.
+// strandedRunLimit bounds how many stranded runs one recovery pass replays.
 const strandedRunLimit = 20
 
 // ShutdownClaimReleaseTimeout bounds the clean-shutdown release. The process

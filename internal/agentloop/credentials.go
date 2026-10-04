@@ -51,7 +51,21 @@ func (c *EnvCredentials) ForCall(ctx context.Context) (schemas.ModelProvider, Pr
 	if err != nil {
 		return "", nil, nil, err
 	}
-	return creds.Provider, client, release, nil
+	return creds.Provider, client, closeInBackground(release), nil
+}
+
+// closeInBackground is the release ForCall returns. Closing a client waits
+// for every request it still has in flight, and after a cancelled call that
+// can be a request to a provider that took it and then went silent, which the
+// client keeps reading until its own request timeout, minutes after the
+// cancel. Nothing else holds the client, so nothing needs the close to have
+// finished, and after a call that ran to its end it has nothing in flight and
+// closes at once.
+func closeInBackground(release func()) func() {
+	if release == nil {
+		return nil
+	}
+	return func() { go release() }
 }
 
 func defaultNewClient(account schemas.Account) (Provider, func(), error) {

@@ -41,6 +41,13 @@ curl -fsS http://localhost:3000/readyz | jq .
 }
 ```
 
+A poller check (`poller_github`, `poller_jira`) fails when that source's poll
+loop has made no progress for 90 seconds: it has not woken, completed a request
+to the upstream, waited on a rate limit or a retry backoff, or finished an
+org's poll. A cycle that runs longer than that while its requests keep
+completing (many orgs, or one org on a slow host), or while it waits out a
+`Retry-After` of up to five minutes, is not a failure.
+
 An org absent from `rate_limit.github` has no observation yet this process (never
 polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
 disabled), not zero remaining budget.
@@ -274,7 +281,9 @@ retries it: it stays parked until someone sends it a message, which resumes it.
 The exception is a native engagement whose `provider` operation stalled: a
 model provider that sends nothing is an outage rather than a stuck run, so the
 engagement is handed back `requeued_upstream` (below) instead of parked. The
-SDK runtime reports no provider operation, so its stalls all park.
+SDK runtime reports no provider operation, so its stalls all park, including
+one on a provider that never answers: the retry notices the SDK writes while it
+waits do not count as activity.
 
 An engagement can also **hand its claim back**: release it with the
 conversation still mid-flight, so the next claim continues the conversation
@@ -286,7 +295,7 @@ some wait before the next claim:
 | `requeued` | The engagement failed before its agent ran: a workspace that would not build, a runtime that would not start. | Setup: 5 in a row. | At once. |
 | `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
 | `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
-| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status. Also a native engagement whose provider sent nothing for 150 seconds, and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status, or names the failure when the connection was refused or reset. Also a native engagement whose provider sent nothing for 150 seconds (an SDK engagement whose provider holds a request open without answering parks `stalled` at the 10-minute idle limit instead), and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
 
 A run that spends its upstream budget parks `open` with park reason
 `upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
@@ -338,9 +347,9 @@ sum by (outcome) (increase(tf_conversations_handed_back_total[1h]))             
 
 The bundled Prometheus loads the deferred-conversation rule as
 `ConversationsDeferred` from `docker/observability/rules/tf-connections.yml`,
-at severity `warning`. It fires for a single org, because one org's provider
-account can be the whole of the outage, and nothing is lost while the runs
-wait. It reads each org's maximum over 15 minutes rather than the gauge
+at severity `warning`. It fires for a single org, because one org's own
+upstream (its model provider account, its GitHub Enterprise Server) can be the
+whole of the outage, and nothing is lost while the runs wait. It reads each org's maximum over 15 minutes rather than the gauge
 itself: a run that is still retrying drops out of the count while it is due
 or claimed between two waits, and a sample taken then would restart the
 30-minute timer. The dashboard's Connections row graphs it as "Conversations waiting to
@@ -452,6 +461,23 @@ speak TLS), and a timeout, which has already spent the client's whole time
 budget. A rate-limited request was refused
 before it was processed, which is why Jira can safely send even a mutation
 again after a 429.
+
+Within one org's poll cycle, GitHub and Jira stop retrying a host once a
+request to it has ended in a transient failure, after whatever retries that
+request was allowed: every later request in the cycle to the same host gets one
+attempt, with no backoff and no `Retry-After` wait. The cycle has already
+recorded the connection as lost, and the next cycle retries in full, so an org
+whose host is unreachable costs one retry sequence per cycle rather than one
+per repo, and the orgs polled after it are not held up. Timeouts go further,
+because a timed-out attempt is the client's whole time budget: once two
+requests to a host have timed out with no answer from it in between, later
+requests in the cycle to that host are not sent at all, and fail as those
+timeouts did. They are not counted, since they never reached the host. One
+timeout is not enough, so a single read that always outlasts the timeout costs
+only itself. If the host answers another request after one that timed out was
+sent, the host was serving while that request hung: the timeout does not
+count, and a silent host's later requests are sent again. Requests made outside
+a poll cycle, such as a delegated run's, keep every retry.
 
 The error a client returns for a failed request carries the status and either
 the upstream's own error message from a JSON body, cut to at most 200

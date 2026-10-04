@@ -141,7 +141,9 @@ tool-batch boundary, and only when a tool has run since the last one:
 - **What it costs.** The same blob a park writes, overwriting the one before
   it: one blob per task, so storage stays flat and the cost is upload bandwidth
   and executor CPU. A tree unchanged since the last checkpoint (the agent only
-  read files) costs one git capture and uploads nothing. At most two
+  read files) costs one git capture and one small database write, and uploads
+  nothing; a restore still counts every tool call up to it as covered. At most
+  two
   checkpoints capture at once per executor; one that finds no slot, or finds
   its engagement's previous checkpoint still uploading, is skipped until the
   next boundary.

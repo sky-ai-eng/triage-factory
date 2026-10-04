@@ -301,10 +301,11 @@ type installationTokenResponse struct {
 // body). Callers that want a least-privilege token narrowed to one repo
 // (or a permission subset) use MintScopedInstallationToken.
 //
-// Network failures, non-2xx responses, and malformed JSON all surface
-// as errors with the HTTP status and an excerpt of the body
-// (upstream.Excerpt) included for debuggability. A successful return guarantees Value != "" and
-// ExpiresAt is non-zero and in the future at receipt time.
+// A non-2xx response is an *APIStatusError, so the poller can tell an
+// unreachable host from a refused credential (upstream.ClassOf); a transport
+// failure is an *upstream.TransportError, unless the caller abandoned the
+// request. A successful return guarantees Value != "" and ExpiresAt is
+// non-zero and in the future at receipt time.
 func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64) (Token, error) {
 	return m.mintInstallationToken(ctx, installationID, nil)
 }
@@ -398,16 +399,26 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 	}
 
 	resp, err := m.httpClient.Do(req)
+	// A poll cycle on an App org makes this request too, and its liveness is
+	// the requests it finishes (upstream.WithProgress).
+	upstream.ReportProgress(ctx)
 	if err != nil {
-		return Token{}, fmt.Errorf("githubapp: mint installation token: %w", err)
+		err = fmt.Errorf("githubapp: mint installation token: %w", err)
+		// Marked, because the mint is the first request a GitHub run's setup
+		// makes on an App org, and a setup failure counts as an outage only
+		// when its client says the upstream produced it.
+		if _, counted := upstream.ClassifyTransport(ctx, err); counted {
+			return Token{}, &upstream.TransportError{Err: err}
+		}
+		return Token{}, err
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if resp.StatusCode != http.StatusCreated {
-		return Token{}, fmt.Errorf("githubapp: mint installation token: status %d: %s",
-			resp.StatusCode, upstream.Excerpt(respBody))
+		errBody, _ := upstream.ReadErrorBody(resp.Body)
+		return Token{}, newAPIStatusError("mint installation token", resp, errBody)
 	}
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 
 	var parsed installationTokenResponse
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
@@ -483,8 +494,10 @@ func (it installationListItem) installation() Installation {
 // accounts (100/page) is returned in full.
 //
 // This is the read side of the installation mirror: the backfill reconcile
-// upserts whatever this returns. A non-2xx response or malformed JSON
-// surfaces as an error with the HTTP status and an excerpt of the body.
+// upserts whatever this returns. A non-2xx response is an *APIStatusError, for
+// the same reason as MintInstallationToken's: the reconcile runs at the top of
+// every poll cycle, and its failure is part of what the cycle learns about
+// the connection.
 func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) {
 	appJWT, err := m.AppJWT()
 	if err != nil {
@@ -504,16 +517,18 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 		req.Header.Set("User-Agent", "triage-factory-githubapp")
 
 		resp, err := m.httpClient.Do(req)
+		upstream.ReportProgress(ctx) // as the mint reports it
 		if err != nil {
 			return nil, fmt.Errorf("githubapp: list installations: %w", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			errBody, _ := upstream.ReadErrorBody(resp.Body)
+			resp.Body.Close()
+			return nil, newAPIStatusError("list installations", resp, errBody)
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		linkHeader := resp.Header.Get("Link")
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, fmt.Errorf("githubapp: list installations: status %d: %s",
-				resp.StatusCode, upstream.Excerpt(body))
-		}
 
 		var page []installationListItem
 		if err := json.Unmarshal(body, &page); err != nil {
@@ -578,13 +593,14 @@ func (m *Minter) GetInstallation(ctx context.Context, installationID int64) (Ins
 	return item.installation(), nil
 }
 
-// APIStatusError is a non-2xx answer from an App-JWT-authenticated endpoint —
-// GetApp, which is where a refused status has to be told apart from a transport
-// failure. It carries the status alongside the message so a caller can tell one
-// refusal from another. 401 is the one that most needs telling apart: it is what
-// GitHub answers a JWT whose iss does not match the signing key, so it means the
-// App ID and private key are not a pair — which wants a different operator
-// message from a GitHub that is simply not answering.
+// APIStatusError is a non-2xx answer from an App-JWT-authenticated endpoint:
+// the token mint, the installation reads and GetApp. It carries the status and
+// the upstream class alongside the message, so a caller can tell one refusal
+// from another and an unreachable host from a refused credential. 401 is the
+// one that most needs telling apart: it is what GitHub answers a JWT whose iss
+// does not match the signing key, so it means the App ID and private key are
+// not a pair — which wants a different operator message from a GitHub that is
+// simply not answering.
 //
 // Op names the operation rather than the URL, since the URL carries the
 // configured API base and the message is read by operators, not resolved by

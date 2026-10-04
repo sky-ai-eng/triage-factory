@@ -126,6 +126,9 @@ func (f *fakeSecretStore) PutUserSystem(context.Context, string, string, string,
 func (f *fakeSecretStore) DeleteUser(context.Context, string, string, string) (bool, error) {
 	return false, nil
 }
+func (f *fakeSecretStore) DeleteUserSystemIfValue(context.Context, string, string, string, string) (bool, error) {
+	return false, nil
+}
 
 // ---------- rig ----------
 

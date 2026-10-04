@@ -41,6 +41,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -61,11 +62,94 @@ const (
 // token, and there's nothing durable to store).
 const ConnectScopes = "read:jira-work write:jira-work read:me offline_access"
 
-// ErrTokenEndpoint wraps a logical failure reported by the Atlassian token
-// endpoint (e.g. invalid_grant on an exhausted/rotated refresh token), as
-// distinct from a transport error. Callers can errors.Is it to tell "the
-// stored refresh token is dead, re-Connect" apart from "the network blipped".
+// ErrTokenEndpoint wraps a refusal from the Atlassian token endpoint (e.g.
+// invalid_grant on an exhausted/rotated refresh token), as distinct from an
+// endpoint that was unavailable or could not be reached. Callers can
+// errors.Is it to tell "the stored refresh token is dead, re-Connect" apart
+// from "try again".
 var ErrTokenEndpoint = errors.New("jiraoauth: token endpoint error")
+
+// The operations a StatusError names.
+const (
+	opToken     = "token request"
+	opResources = "accessible-resources request"
+)
+
+// StatusError is an answer from one of Atlassian's OAuth endpoints that is a
+// failure: a non-200 status, or the token endpoint's error member on a 200.
+// Class says whether the endpoint refused the request or was unavailable
+// (upstream.Classified), which is what decides whether retrying the same
+// request can help.
+type StatusError struct {
+	Op         string
+	StatusCode int
+	// Code is the token endpoint's OAuth error code (invalid_grant), empty
+	// when the answer carried none.
+	Code        string
+	BodyExcerpt string
+	Class       upstream.Class
+}
+
+func (e *StatusError) Error() string {
+	detail := e.BodyExcerpt
+	if e.Code != "" && !strings.Contains(detail, e.Code) {
+		detail = e.Code + ": " + detail
+	}
+	return fmt.Sprintf("jiraoauth: %s: status %d: %s", e.Op, e.StatusCode, detail)
+}
+
+// UpstreamClass implements upstream.Classified.
+func (e *StatusError) UpstreamClass() upstream.Class { return e.Class }
+
+// Unwrap makes a refusal from the token endpoint an ErrTokenEndpoint: the
+// endpoint answered and said no, which the same refresh token will hear again.
+// An unavailable or rate-limiting endpoint said nothing about the token.
+func (e *StatusError) Unwrap() error {
+	if e.Op == opToken && e.Class != upstream.Transient && e.Class != upstream.RateLimited {
+		return ErrTokenEndpoint
+	}
+	return nil
+}
+
+func newStatusError(op string, resp *http.Response, body []byte) *StatusError {
+	var oauth struct {
+		Error string `json:"error"`
+	}
+	_ = json.Unmarshal(body, &oauth)
+	return &StatusError{
+		Op:          op,
+		StatusCode:  resp.StatusCode,
+		Code:        oauthErrorCode(oauth.Error),
+		BodyExcerpt: upstream.Excerpt(body),
+		Class:       upstream.ClassifyResponse(resp.StatusCode, resp.Header, body),
+	}
+}
+
+// oauthErrorCode is s when it reads as an OAuth error code, and "" otherwise.
+// RFC 6749 limits a code to a short run of printable ASCII; anything else is
+// body text, which reaches an error message only through upstream.Excerpt.
+func oauthErrorCode(s string) string {
+	if len(s) > 64 {
+		return ""
+	}
+	for _, r := range s {
+		if r < 0x21 || r > 0x7e || r == '"' || r == '\\' {
+			return ""
+		}
+	}
+	return s
+}
+
+// transportError is err, a request that failed in transit, marked as an
+// upstream outcome unless the caller abandoned it. The mark is what tells a
+// caller the Atlassian endpoint was unreachable rather than that something on
+// this host failed.
+func transportError(ctx context.Context, err error) error {
+	if _, counted := upstream.ClassifyTransport(ctx, err); counted {
+		return &upstream.TransportError{Err: err}
+	}
+	return err
+}
 
 // Token is one minted access token, the rotated refresh token returned
 // alongside it, and the access token's expiry (computed from expires_in).
@@ -149,8 +233,8 @@ func (m *Minter) ExchangeCode(ctx context.Context, app jira.OAuthApp, code, redi
 // Refresh trades a refresh token for a new token set
 // (grant_type=refresh_token). The returned Token.RefreshToken is the ROTATED
 // token — Atlassian invalidates the one passed in, so the caller MUST persist
-// the new one. An invalid_grant from a dead/already-rotated token surfaces
-// wrapped in ErrTokenEndpoint.
+// the new one. An invalid_grant from a dead/already-rotated token is a
+// *StatusError that is also ErrTokenEndpoint.
 func (m *Minter) Refresh(ctx context.Context, app jira.OAuthApp, refreshToken string) (Token, error) {
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
@@ -164,16 +248,17 @@ func (m *Minter) Refresh(ctx context.Context, app jira.OAuthApp, refreshToken st
 // On a logical failure the endpoint returns a non-2xx with an `error` /
 // `error_description` body instead.
 type tokenResponse struct {
-	AccessToken      string `json:"access_token"`
-	RefreshToken     string `json:"refresh_token"`
-	ExpiresIn        int    `json:"expires_in"`
-	Error            string `json:"error"`
-	ErrorDescription string `json:"error_description"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	ExpiresIn    int    `json:"expires_in"`
+	Error        string `json:"error"`
 }
 
 // requestToken POSTs the form to the token endpoint and parses the result.
-// A transport failure returns a plain wrapped error; a non-2xx or an `error`
-// field wraps ErrTokenEndpoint so the rotation-dead case is distinguishable.
+// A transport failure is an *upstream.TransportError, unless the caller
+// abandoned the request; a non-200 or an `error` field is a *StatusError, and
+// a refusal is also ErrTokenEndpoint so the rotation-dead case is
+// distinguishable.
 func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, err error) {
 	// The OAuth round trip hides inside credential resolution: a token-cache
 	// miss ends up here doing a full refresh against Atlassian, and under
@@ -184,7 +269,7 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, er
 	//
 	// Named error return so the failure exits below don't each need a
 	// status line. Fixed message, not err.Error() — a failed token
-	// request's error text embeds a truncated response body.
+	// request's error text carries the endpoint's own error message.
 	ctx, span := tracer.Start(ctx, "jiraoauth.token_request",
 		trace.WithAttributes(telemetry.Disposition(form.Get("grant_type"))))
 	defer span.End()
@@ -203,27 +288,33 @@ func (m *Minter) requestToken(ctx context.Context, form url.Values) (_ Token, er
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return Token{}, fmt.Errorf("jiraoauth: token request: %w", err)
+		return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: token request: %w", err))
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	var parsed tokenResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		// A non-JSON body (e.g. a proxy/load-balancer "502 Bad Gateway") would
-		// otherwise drop its content behind the unmarshal error — surface a
-		// truncated copy so the failure is diagnosable.
-		return Token{}, fmt.Errorf("jiraoauth: parse token response (status %d): %w: body: %s", resp.StatusCode, err, truncate(string(body), 200))
+	if resp.StatusCode != http.StatusOK {
+		body, rerr := upstream.ReadErrorBody(resp.Body)
+		if rerr != nil {
+			return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: read token response: %w", rerr))
+		}
+		return Token{}, newStatusError(opToken, resp, body)
 	}
-	if resp.StatusCode != http.StatusOK || parsed.Error != "" {
-		detail := parsed.Error
-		if parsed.ErrorDescription != "" {
-			detail = parsed.Error + ": " + parsed.ErrorDescription
-		}
-		if detail == "" {
-			detail = fmt.Sprintf("status %d", resp.StatusCode)
-		}
-		return Token{}, fmt.Errorf("%w: %s", ErrTokenEndpoint, detail)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return Token{}, transportError(ctx, fmt.Errorf("jiraoauth: read token response: %w", err))
+	}
+	var parsed tokenResponse
+	if json.Unmarshal(body, &parsed) != nil {
+		// A body that is not a token response is described by its size, never
+		// quoted: upstream bodies do not reach a log line.
+		return Token{}, fmt.Errorf("jiraoauth: parse token response: %s", upstream.Excerpt(body))
+	}
+	if parsed.Error != "" {
+		// An error member is a refusal whatever status carried it, and a 200
+		// classifies as OK.
+		se := newStatusError(opToken, resp, body)
+		se.Class = upstream.Rejected
+		return Token{}, se
 	}
 	if parsed.AccessToken == "" {
 		return Token{}, fmt.Errorf("%w: response missing access_token", ErrTokenEndpoint)
@@ -254,24 +345,21 @@ func (m *Minter) AccessibleResources(ctx context.Context, accessToken string) ([
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("jiraoauth: accessible-resources request: %w", err)
+		return nil, transportError(ctx, fmt.Errorf("jiraoauth: accessible-resources request: %w", err))
 	}
 	defer resp.Body.Close()
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("jiraoauth: accessible-resources status %d: %s", resp.StatusCode, truncate(string(body), 256))
+		body, rerr := upstream.ReadErrorBody(resp.Body)
+		if rerr != nil {
+			return nil, transportError(ctx, fmt.Errorf("jiraoauth: read accessible-resources response: %w", rerr))
+		}
+		return nil, newStatusError(opResources, resp, body)
 	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 256*1024))
 	var resources []Resource
 	if err := json.Unmarshal(body, &resources); err != nil {
 		return nil, fmt.Errorf("jiraoauth: parse accessible-resources: %w", err)
 	}
 	return resources, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

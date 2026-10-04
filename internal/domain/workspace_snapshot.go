@@ -36,4 +36,11 @@ type WorkspaceSnapshotState struct {
 	State         string
 	WriterClaimID string
 	UpdatedAt     time.Time
+	// CoveredPosition is a transcript position, later than the one in the
+	// blob's manifest, that the written blob is known to reflect, and
+	// CoveredFingerprint the tree it describes. A checkpoint that found the
+	// tree unchanged records them (WorkspaceSnapshotStore.
+	// CoverSnapshotSystem); nil and "" otherwise.
+	CoveredPosition    *float64
+	CoveredFingerprint string
 }

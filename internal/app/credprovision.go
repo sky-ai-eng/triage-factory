@@ -6,7 +6,7 @@ import (
 )
 
 // buildCredProvisioner constructs the brain-side sealed-credential-bundle
-// provisioner (TFAC-614) for brain-capable roles in multi mode, nil
+// provisioner for brain-capable roles in multi mode, nil
 // elsewhere (local mode and TF_ROLE=executor never build one). Runs after
 // openStores/buildExecution
 // so a.stores is the real, secret-bearing bundle (never the disabled one

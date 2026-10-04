@@ -121,6 +121,13 @@ func TestNoBareListOptsLiteral(t *testing.T) {
 			case ".git", "node_modules", "frontend", "target", "dist", "vendor":
 				return fs.SkipDir
 			}
+			// A directory with its own .git is another checkout, such as a
+			// git worktree nested under the repo, and its files are not ours.
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+					return fs.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

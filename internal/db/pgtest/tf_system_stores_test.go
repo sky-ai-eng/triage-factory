@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -78,6 +80,29 @@ func TestTfSystem_WorkspaceSnapshotStoreConformance(t *testing.T) {
 			DeleteTask: func(t *testing.T, taskID string) {
 				t.Helper()
 				MustExec(t, h.AdminDB, `DELETE FROM tasks WHERE id = $1`, taskID)
+			},
+			Conversation: func(t *testing.T, taskID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				MustExec(t, h.AdminDB, `
+					INSERT INTO conversations (id, org_id, task_id, team_id, origin, trigger_type, creator_user_id, visibility)
+					VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+					        'interactive', 'manual', $4, 'team')
+				`, id, orgID, taskID, userID)
+				return id
+			},
+			Claim: func(t *testing.T, conversationID string, claimedAt time.Time, released bool) string {
+				t.Helper()
+				id := uuid.New().String()
+				var releasedAt, outcome any
+				if released {
+					releasedAt, outcome = claimedAt.Add(time.Second), "parked"
+				}
+				MustExec(t, h.AdminDB, `
+					INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, lease_expires_at)
+					VALUES ($1, $2, $3, 'snapshot-conformance', 1, $4, $5, $6, $7)
+				`, id, orgID, conversationID, claimedAt, releasedAt, outcome, claimedAt.Add(5*time.Minute))
+				return id
 			},
 		}
 		// The store bundle whose admin half is tf_system — the shape a

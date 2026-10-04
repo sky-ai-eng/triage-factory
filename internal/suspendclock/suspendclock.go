@@ -35,8 +35,9 @@ func init() {
 }
 
 // Suspended returns the system's cumulative suspended time and whether
-// this platform can report it. ok is false where it cannot; callers treat
-// that as "no suspend observed", which is the behavior before this package.
+// this platform can report it. ok is false where it cannot, and the reading
+// then means "no suspend observed": a platform without the clocks must never
+// make an ordinary pause look like a suspend.
 func Suspended() (d time.Duration, ok bool) {
 	return (*source.Load())()
 }

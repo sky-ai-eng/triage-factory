@@ -67,10 +67,10 @@ func claimOutcomeForStatus(status string) string {
 //
 // Every status write that releases a claim does so on the same transaction as
 // the flip, with one exception: MarkQueuedForResume, the app-pool re-arm,
-// releases on the admin pool after its flip commits. A crash between the two
-// leaves a mid-flight conversation holding a live claim, which is not a
-// terminal-with-claim desync: the claim gate treats it as driven until its
-// lease lapses, and expiry handling releases it like any dead engagement's.
+// releases on the admin pool, a connection of its own, while its flip's
+// transaction is still open. The release commits first, so a flip that then
+// fails leaves the conversation where it was with no live claim, the state
+// its park or terminal already left it in.
 func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, outcome string) error {
 	_, err := q.ExecContext(ctx, `
 		UPDATE claims SET released_at = now(), outcome = $1
@@ -92,7 +92,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		if err := settleCompletionCostAndClaim(ctx, q, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
@@ -274,7 +274,7 @@ func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, conv
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
@@ -360,6 +360,18 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // creator-scoped for manual runs, so a non-creator teammate's subquery would
 // find nothing and the guard would fail OPEN on exactly the rows it protects.
 //
+// The `open` arm's guard, that the conversation's run was not called off,
+// cannot take that route: no definer function answers it, so the run is read
+// on the admin pool instead. That read sits between two statements of one
+// transaction so that it cannot race the cancel it guards against. The first
+// locks the conversation, so a settlement cannot park it or cancel its run through it
+// until this transaction ends, and a run's terminal parks it only afterwards;
+// the read then sees every cancel committed before the lock was taken,
+// including one whose settlement this lock had to wait out; and the flip binds
+// the answer. A single UPDATE that waited on the settlement would re-check the
+// row it waited for, find it parked again, and read the run off the snapshot
+// it began with.
+//
 // Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
@@ -385,51 +397,95 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // no invisible-row arm for the lookup to fall through.
 //
 // queued_at is re-stamped too: it marks when the conversation entered the
-// queue in the current episode, and a wake starts one. Two readers depend on
+// queue in the current episode, and a wake starts one. Three readers depend on
 // that — the placement claim's aging window opens from it (so the affinity
 // stamp above is actually exclusive for a full window, whatever the
-// conversation's age), and the UI's queue-dwell readout measures the latest
-// episode from it. started_at is untouched: it is the scheduler's fairness
-// order and the UI's "started" time, neither of which a resume changes.
+// conversation's age), the retry budgets count only the hand-backs released
+// since it (db.EpisodeStartSQL), and the UI's queue-dwell
+// readout measures the latest episode from it. started_at is untouched: it is
+// the scheduler's fairness order and the UI's "started" time, neither of which
+// a resume changes.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE conversations SET status = NULL,
-		                parked_at = NULL, park_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
-		                next_attempt_at = NULL,
-		                queued_at = now(),
-		                preferred_executor_id = (
-		                    SELECT c.executor_id FROM claims c
-		                    WHERE c.org_id = conversations.org_id
-		                      AND c.conversation_id = conversations.id
-		                    `+newestEngagementFirstSQL("c")+`
-		                    LIMIT 1)
-		WHERE org_id = $1 AND id = $2
-		  AND ended_at IS NULL
-		  AND (status = 'open'
-		       OR (status = 'completed'
-		           AND NOT tf.blueprint_run_is_running(
-		                     conversations.blueprint_run_id, conversations.org_id)))
-	`, orgID, conversationID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	flipped := n > 0
-	if flipped {
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var locked int
+		err := q.QueryRowContext(ctx, `
+			SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+		`, orgID, conversationID).Scan(&locked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		calledOff, err := conversationRunCalledOff(ctx, s.admin, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations SET status = NULL,
+			                parked_at = NULL, park_reason = NULL,
+			                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                next_attempt_at = NULL,
+			                queued_at = now(),
+			                preferred_executor_id = (
+			                    SELECT c.executor_id FROM claims c
+			                    WHERE c.org_id = conversations.org_id
+			                      AND c.conversation_id = conversations.id
+			                    `+newestEngagementFirstSQL("c")+`
+			                    LIMIT 1)
+			WHERE org_id = $1 AND id = $2
+			  AND ended_at IS NULL
+			  AND ((status = 'open' AND NOT $3::boolean)
+			       OR (status = 'completed'
+			           AND NOT tf.blueprint_run_is_running(
+			                     conversations.blueprint_run_id, conversations.org_id)))
+		`, orgID, conversationID, calledOff)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
 		if err := releaseActiveClaim(ctx, s.admin, orgID, conversationID, "requeued"); err != nil {
-			return false, err
+			return err
 		}
 		// tf_wake doorbell: resume-by-enqueue re-queues an
 		// EXISTING row rather than inserting one, so it needs its own
 		// notify — the doorbell a step mint rings does not fire for this
 		// path. Best-effort, same "never the only path" contract as there.
-		_ = wakebus.Publish(ctx, s.q, wakebus.KindEvent, orgID)
+		_ = wakebus.Publish(ctx, q, wakebus.KindEvent, orgID)
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return flipped, nil
+}
+
+// conversationRunCalledOff reports whether the conversation's blueprint run
+// was called off: cancel requested, or cancelled. It is the claim gate's
+// blueprintDrivableSQL clause for a called-off run, read on the admin pool so
+// a teammate who cannot see another user's manual run gets the same answer as
+// its creator. A conversation with no run, or no such conversation, answers
+// false.
+func conversationRunCalledOff(ctx context.Context, admin queryer, orgID, conversationID string) (bool, error) {
+	var calledOff bool
+	err := admin.QueryRowContext(ctx, `
+		SELECT COALESCE(br.cancel_requested OR br.status = 'cancelled', false)
+		FROM conversations c
+		LEFT JOIN blueprint_runs br ON br.id = c.blueprint_run_id AND br.org_id = c.org_id
+		WHERE c.org_id = $1 AND c.id = $2
+	`, orgID, conversationID).Scan(&calledOff)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return calledOff, err
 }
 
 // workspaceKeyMembersSQL is which conversations a workspace key's lifetime is
@@ -668,7 +724,7 @@ func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, convers
 func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := setConversationSession(ctx, q, orgID, conversationID, sessionID)
@@ -901,7 +957,7 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := writeConversationReturning(ctx, q, `
@@ -939,7 +995,7 @@ func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conver
 func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := setConversationWorktreePath(ctx, q, orgID, conversationID, path)
@@ -969,7 +1025,7 @@ func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversa
 func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
@@ -1289,7 +1345,7 @@ const pgConversationAttentionSQL = `(
 // `attempts` here is the LIFETIME claim count — engagement history for a
 // human, matching the lifetime sums beside it. It is deliberately not the
 // same quantity ClaimNextConversation returns under that name, which is the retry
-// budget's current-episode counter (EpisodeAttemptsSQL, conversation_queue.go). Two
+// budget's current-episode counter (episodeHandBacksSQL, conversation_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
 const conversationClaimLateral = `
@@ -1420,27 +1476,10 @@ func (s *conversationStore) GetSystem(ctx context.Context, orgID, conversationID
 func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conversationID, by, signalTarget string, reason domain.ParkReason) (bool, error) {
 	requested := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		var id string
-		err := q.QueryRowContext(ctx, `
-			UPDATE conversations
-			SET stop_requested_at = COALESCE(stop_requested_at, now()),
-			    stop_requested_by = CASE WHEN stop_requested_at IS NULL
-			                             THEN NULLIF($1, '') ELSE stop_requested_by END,
-			    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
-			                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
-			WHERE org_id = $2 AND id = $3
-			  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
-			RETURNING id
-		`, by, orgID, conversationID, string(reason)).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
+		var err error
+		requested, err = writeStopIntent(ctx, q, orgID, conversationID, by, reason)
+		if err != nil || !requested || signalTarget == "" {
 			return err
-		}
-		requested = true
-		if signalTarget == "" {
-			return nil
 		}
 		_, err = q.ExecContext(ctx, `
 			INSERT INTO conversation_signals (org_id, conversation_id, kind, payload, target, created_at)
@@ -1452,6 +1491,50 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 		return false, wrapAdminPoolPermErr(err, "conversations.RequestStopSystem")
 	}
 	return requested, nil
+}
+
+// RequestStopForClaimSystem writes the intent behind the claim fence. It names
+// no signal target: the engagement asking is the holder, and it stops itself
+// in process.
+func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (bool, error) {
+	requested := false
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var err error
+		requested, err = writeStopIntent(ctx, q, orgID, conversationID, "", reason)
+		return err
+	})
+	if err != nil {
+		return false, wrapAdminPoolPermErr(err, "conversations.RequestStopForClaimSystem")
+	}
+	return requested, nil
+}
+
+// writeStopIntent records a stop request on a non-terminal conversation and
+// reports whether it landed. See RequestStopSystem for why every column keys
+// on stop_requested_at.
+func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by string, reason domain.ParkReason) (bool, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `
+		UPDATE conversations
+		SET stop_requested_at = COALESCE(stop_requested_at, now()),
+		    stop_requested_by = CASE WHEN stop_requested_at IS NULL
+		                             THEN NULLIF($1, '') ELSE stop_requested_by END,
+		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
+		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
+		WHERE org_id = $2 AND id = $3
+		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		RETURNING id
+	`, by, orgID, conversationID, string(reason)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *conversationStore) LookupOrgForConversationSystem(ctx context.Context, conversationID string) (string, error) {

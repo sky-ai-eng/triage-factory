@@ -216,7 +216,7 @@ func (c *Client) MarkPRReady(ctx context.Context, owner, repo string, number int
 			"id": nodeID,
 		},
 	}
-	_, err = c.PostGraphQL(ctx, mutation)
+	_, err = c.PostGraphQLMutation(ctx, mutation)
 	return err
 }
 
@@ -243,7 +243,7 @@ func (c *Client) ConvertPRToDraft(ctx context.Context, owner, repo string, numbe
 			"id": nodeID,
 		},
 	}
-	_, err = c.PostGraphQL(ctx, mutation)
+	_, err = c.PostGraphQLMutation(ctx, mutation)
 	return err
 }
 

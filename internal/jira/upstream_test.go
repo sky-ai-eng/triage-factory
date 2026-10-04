@@ -92,7 +92,8 @@ func epicServer(t *testing.T, rejectBody string) (*httptest.Server, *[]string) {
 }
 
 // TestSetParent_EpicFallbackReadsBody: the Epic Link fallback triggers on
-// Jira's error body, which the message no longer carries whole.
+// Jira's error body, read from StatusError.Body, because the message carries
+// only an excerpt of it.
 func TestSetParent_EpicFallbackReadsBody(t *testing.T) {
 	srv, payloads := epicServer(t, `{"errorMessages":[],"errors":{"customfield_10100":"gh.epic.error.not.found"}}`)
 

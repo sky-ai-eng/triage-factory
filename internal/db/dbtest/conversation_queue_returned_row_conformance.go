@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -33,8 +34,8 @@ type ConversationQueueReturnedRowFactory func(t *testing.T) (
 // RunConversationQueueReturnedRowConformance covers the returned-row standard
 // for ConversationQueueStore's one conversations-row write:
 // RequeueConversation returns the requeued row on a mid-flight conversation
-// with a live claim, or nil — the guard declining — when there is nothing to
-// hand back (the EntityStore.Close shape).
+// whose named claim is live, and ErrClaimReleased with no row once that claim
+// has been released.
 //
 // There is no app-pool arm here. ConversationQueueStore is wired only
 // against the admin pool in production — it is a system-service store, the
@@ -46,7 +47,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 	t.Helper()
 	ctx := context.Background()
 
-	t.Run("RequeueConversation_returns_the_requeued_row_then_declines", func(t *testing.T) {
+	t.Run("RequeueConversation_returns_the_requeued_row_then_refuses", func(t *testing.T) {
 		queue, store, orgID, scaffold := mk(t)
 		conversationID := scaffold(t)
 
@@ -55,7 +56,7 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 			t.Fatalf("ClaimNextConversation = (%+v, %v), want conversation %s", claimed, err, conversationID)
 		}
 
-		conv, err := queue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "transient rr failure")
+		conv, err := queue.RequeueConversation(ctx, orgID, conversationID, claimed.ClaimID, db.RequeueSetupFailure, 0, "transient rr failure")
 		if err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
@@ -65,24 +66,20 @@ func RunConversationQueueReturnedRowConformance(t *testing.T, mk ConversationQue
 		AssertWriteReturnedStoredRow(t, "RequeueConversation", *conv,
 			func() (*domain.Conversation, error) { return store.GetSystem(ctx, orgID, conversationID) })
 
-		// The guard-declined shape: the call above already released the only
-		// claim, so there is nothing mid-flight-with-a-live-claim left to hand
-		// back.
-		declined, err := queue.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "duplicate")
-		if err != nil {
-			t.Fatalf("RequeueConversation (duplicate): %v", err)
-		}
-		if declined != nil {
-			t.Errorf("RequeueConversation on an already-requeued conversation = %+v, want nil (the guard declining)", declined)
+		// The call above already released the claim it named, so a second
+		// call naming it is refused by the fence.
+		declined, err := queue.RequeueConversation(ctx, orgID, conversationID, claimed.ClaimID, db.RequeueSetupFailure, 0, "duplicate")
+		if !errors.Is(err, db.ErrClaimReleased) || declined != nil {
+			t.Errorf("RequeueConversation on an already-requeued claim = (%+v, %v), want ErrClaimReleased and no row", declined, err)
 		}
 	})
 
-	t.Run("RequeueConversation_declines_on_a_missing_conversation", func(t *testing.T) {
+	t.Run("RequeueConversation_refuses_on_a_missing_conversation", func(t *testing.T) {
 		queue, _, orgID, _ := mk(t)
 		missingID := uuid.New().String()
-		conv, err := queue.RequeueConversation(ctx, orgID, missingID, db.RequeueSetupFailure, 0, "x")
-		if err != nil || conv != nil {
-			t.Errorf("RequeueConversation on a missing conversation id = (%+v, %v), want (nil, nil) — the guard declining", conv, err)
+		conv, err := queue.RequeueConversation(ctx, orgID, missingID, uuid.New().String(), db.RequeueSetupFailure, 0, "x")
+		if !errors.Is(err, db.ErrClaimReleased) || conv != nil {
+			t.Errorf("RequeueConversation on a missing conversation id = (%+v, %v), want ErrClaimReleased and no row", conv, err)
 		}
 	})
 }

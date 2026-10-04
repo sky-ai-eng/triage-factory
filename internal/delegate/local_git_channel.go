@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
@@ -185,13 +186,7 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 		cfg.Upstream = base
 	}
 	cfg.ConversationID = info.ConversationID
-	cfg.TokenSource = func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
-		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
-		if err != nil {
-			return gitproxy.Token{}, err
-		}
-		return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
-	}
+	cfg.TokenSource = localGitTokenSource(scoped, orgID)
 	cfg.ProbeCredentials = func(ctx context.Context) error {
 		ok, err := scoped.HasAnyCredential(ctx, orgID)
 		if err != nil {
@@ -209,4 +204,28 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	}
 	delegateLog.Info("local git channel up", "conversation", info.ConversationID)
 	return &localGitChannel{proxy: proxy}, nil
+}
+
+// localGitTokenSource resolves the credential the local git proxy injects,
+// from the live resolver.
+//
+// Only a failure that GitHub explains, by being unreachable or by asking TF to
+// wait, keeps the 502 a retry can clear. Anything else the resolver returns
+// meets the same answer on the next request (an App with no installation on
+// the repository's owner, a credential GitHub refuses) or is a fault of TF's
+// own, so it is answered as a missing credential, the 403 a sidecar answers
+// one with. Git reports a 502 as an unreachable host, and a clone during setup
+// that fails that way is retried for hours on the upstream schedule; a 403 is
+// a refusal, which fails the setup within its own budget instead.
+func localGitTokenSource(scoped ghclient.ScopedResolver, orgID string) gitproxy.TokenSource {
+	return func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
+		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
+		if err != nil {
+			if markedUpstreamOutage(err) {
+				return gitproxy.Token{}, err
+			}
+			return gitproxy.Token{}, fmt.Errorf("%w: %w", credbundle.ErrNoRepoToken, err)
+		}
+		return gitproxy.Token{Value: tok.Value, ExpiresAt: tok.ExpiresAt}, nil
+	}
 }

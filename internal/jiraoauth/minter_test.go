@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 func testApp() jira.OAuthApp {
@@ -107,6 +108,120 @@ func TestRequestToken_MissingRefreshToken(t *testing.T) {
 	_, err := m.ExchangeCode(context.Background(), testApp(), "c", "r")
 	if !errors.Is(err, ErrTokenEndpoint) {
 		t.Fatalf("err = %v, want ErrTokenEndpoint", err)
+	}
+}
+
+// TestMinter_ErrorsCarryOnlyAnExcerpt: a failed token or accessible-resources
+// request reaches a log line, so its error carries the status and the
+// upstream's own message from a JSON body, and only the size of anything
+// else, such as a proxy's HTML page.
+func TestMinter_ErrorsCarryOnlyAnExcerpt(t *testing.T) {
+	page := "<html><body><h1>502 Bad Gateway</h1>" + strings.Repeat("<p>cloudfront</p>", 50) + "</body></html>"
+	calls := []struct {
+		name string
+		call func(*Minter) error
+	}{
+		{name: "token", call: func(m *Minter) error {
+			_, err := m.Refresh(context.Background(), testApp(), "ref")
+			return err
+		}},
+		{name: "accessible resources", call: func(m *Minter) error {
+			_, err := m.AccessibleResources(context.Background(), "acc")
+			return err
+		}},
+	}
+	for _, c := range calls {
+		for _, tc := range []struct {
+			name    string
+			body    string
+			want    string
+			notWant string
+		}{
+			{name: "proxy page", body: page, want: "502", notWant: "<"},
+			{name: "json", body: `{"code":502,"message":"Bad gateway, try again","trace":"abc123"}`, want: "Bad gateway, try again", notWant: "abc123"},
+		} {
+			t.Run(c.name+"/"+tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.WriteHeader(http.StatusBadGateway)
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
+
+				err := c.call(&Minter{httpClient: srv.Client(), tokenURL: srv.URL, resourcesURL: srv.URL})
+				if err == nil {
+					t.Fatal("a 502 returned no error")
+				}
+				msg := err.Error()
+				if !strings.Contains(msg, tc.want) {
+					t.Errorf("error %q does not carry %q", msg, tc.want)
+				}
+				if strings.Contains(msg, tc.notWant) || strings.Contains(msg, "cloudfront") {
+					t.Errorf("error carries the response body: %q", msg)
+				}
+			})
+		}
+	}
+}
+
+// TestMinter_FailuresCarryTheirUpstreamClass: a failed mint says whether
+// Atlassian refused the request or could not serve it, by the mark every
+// upstream client puts on its errors (upstream.Classified). Only a refusal
+// from the token endpoint is ErrTokenEndpoint, since an outage says nothing
+// about the stored refresh token.
+func TestMinter_FailuresCarryTheirUpstreamClass(t *testing.T) {
+	refresh := func(m *Minter) error {
+		_, err := m.Refresh(context.Background(), testApp(), "ref")
+		return err
+	}
+	resources := func(m *Minter) error {
+		_, err := m.AccessibleResources(context.Background(), "acc")
+		return err
+	}
+	for name, tc := range map[string]struct {
+		call      func(*Minter) error
+		status    int
+		body      string
+		class     upstream.Class
+		refusal   bool
+		unreached bool
+	}{
+		"token endpoint unavailable": {call: refresh, status: http.StatusServiceUnavailable, body: `{"message":"Service Unavailable"}`, class: upstream.Transient},
+		"a proxy's 502 page":         {call: refresh, status: http.StatusBadGateway, body: "<html>502 Bad Gateway</html>", class: upstream.Transient},
+		"token endpoint rate limit":  {call: refresh, status: http.StatusTooManyRequests, body: `{"error":"rate_limited"}`, class: upstream.RateLimited},
+		"refresh token is dead": {call: refresh, status: http.StatusForbidden,
+			body: `{"error":"invalid_grant","error_description":"refresh token is invalid"}`, class: upstream.Auth, refusal: true},
+		"malformed request": {call: refresh, status: http.StatusBadRequest,
+			body: `{"error":"invalid_request"}`, class: upstream.Rejected, refusal: true},
+		"an error member on a 200": {call: refresh, status: http.StatusOK,
+			body: `{"error":"invalid_grant"}`, class: upstream.Rejected, refusal: true},
+		"token endpoint unreachable":       {call: refresh, unreached: true, class: upstream.Transient},
+		"accessible resources unavailable": {call: resources, status: http.StatusServiceUnavailable, body: `{"message":"down"}`, class: upstream.Transient},
+		"accessible resources unreachable": {call: resources, unreached: true, class: upstream.Transient},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			target := srv.URL
+			if tc.unreached {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+
+			err := tc.call(&Minter{httpClient: srv.Client(), tokenURL: target, resourcesURL: target})
+			var marked upstream.Classified
+			if !errors.As(err, &marked) {
+				t.Fatalf("err = %v, want one its client marked with an upstream class", err)
+			}
+			if got := marked.UpstreamClass(); got != tc.class {
+				t.Errorf("class = %q, want %q (err %v)", got, tc.class, err)
+			}
+			if got := errors.Is(err, ErrTokenEndpoint); got != tc.refusal {
+				t.Errorf("errors.Is(err, ErrTokenEndpoint) = %v, want %v (err %v)", got, tc.refusal, err)
+			}
+		})
 	}
 }
 

@@ -27,6 +27,7 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -77,6 +78,8 @@ const (
 const checkpointStoppingNotice = "This tool call was not run: the engagement stopped before it could start."
 
 // Outcomes of a checkpoint that came due, on tf_workspace_checkpoints_total.
+// skipped_busy counts a stretch of due checkpoints that could not start, once
+// however many batch boundaries it spans.
 const (
 	checkpointWritten          = "written"
 	checkpointSkippedUnchanged = "skipped_unchanged"
@@ -168,6 +171,11 @@ type checkpointer struct {
 	sandboxCalls int
 	// inflight is true from a checkpoint's start to the end of its upload.
 	inflight bool
+	// busyCounted is set once a due checkpoint that could not start has been
+	// counted, and cleared when a checkpoint starts or finishes. The
+	// boundaries behind one slow upload, or one stretch without a host slot,
+	// are one skip.
+	busyCounted bool
 	// captured is the in-flight checkpoint's barrier: closed once it has
 	// stopped reading the tree. Nil before the first checkpoint.
 	captured chan struct{}
@@ -280,10 +288,15 @@ func (c *checkpointer) afterToolBatch(_ context.Context, position float64) {
 		return
 	}
 	if c.inflight || !c.s.acquireCheckpointSlot() {
+		count := !c.busyCounted
+		c.busyCounted = true
 		c.mu.Unlock()
-		recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		if count {
+			recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		}
 		return
 	}
+	c.busyCounted = false
 	c.lastStarted = time.Now()
 	c.sandboxCalls = 0
 	c.inflight = true
@@ -314,6 +327,7 @@ func (c *checkpointer) run(position float64, lastFingerprint string, captured ch
 
 	c.mu.Lock()
 	c.inflight = false
+	c.busyCounted = false
 	switch res.outcome {
 	case checkpointWritten:
 		c.lastFingerprint = res.fingerprint
@@ -442,16 +456,27 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	}
 	if res.fingerprint == lastFingerprint {
 		res.outcome = checkpointSkippedUnchanged
+		captured.release()
+		treeReleased()
+		s.coverSnapshotState(ctx, w, res.fingerprint)
 		return res
 	}
+	w.fingerprint = res.fingerprint
 
 	// A stopped checkpointer opens no record: the ending that stopped it is
 	// about to open its own, and waits for this goroutine before it does.
+	// That check cannot see a takeover that happened while this checkpoint
+	// captured: a key a newer engagement already holds comes back
+	// superseded, and is left to it, blob and record alike.
 	if err = ctx.Err(); err != nil {
 		return res
 	}
 	stateCtx := context.WithoutCancel(ctx)
-	owned := s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+	record := s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+	if record == snapshotSuperseded {
+		return res
+	}
+	owned := record.owned()
 	settled := false
 	defer func() {
 		if owned && !settled {
@@ -488,14 +513,20 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 }
 
 // snapshotFingerprint digests what a snapshot of this capture would carry: the
-// git delta's identity and bytes, the transcript, and a stat walk of the
-// scratch the archive would walk. Two captures with the same fingerprint
-// would archive to the same members, so a checkpoint that matches the last
-// one written has nothing to store.
+// git delta's identity, the commits its bundle carries and the bytes of its
+// patch, the transcript, and a stat walk of the scratch the archive would
+// walk. Two captures with the same fingerprint carry the same workspace, so a
+// checkpoint that matches the last one written has nothing to store.
 //
-// The scratch half is path, size and modification time, not content. It is
-// the cheap half on purpose: the scratch is the unbounded part of a workspace,
-// and hashing it would cost what compressing it costs.
+// The bundle is read by its header, not its bytes: git does not pack the same
+// commits into the same bytes twice, and a fingerprint over them would take
+// every capture of a tree with unpushed commits for a changed one.
+//
+// The scratch half is a stat of each file, not its content: path, size,
+// modification time, and the inode and change time (scratchChangeStamp),
+// which catch a rewrite that kept the old size and put the old modification
+// time back. It is the cheap half on purpose: the scratch is the unbounded
+// part of a workspace, and hashing it would cost what compressing it costs.
 func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, wtPath string) (string, error) {
 	h := sha256.New()
 	field := func(parts ...string) {
@@ -505,7 +536,7 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 	}
 	if d := captured.Delta; d != nil {
 		field("git", d.Branch, d.Head)
-		if err := hashMember(h, d.Bundle, captured.BundlePath); err != nil {
+		if err := hashBundle(h, d.Bundle, captured.BundlePath); err != nil {
 			return "", fmt.Errorf("fingerprint bundle: %w", err)
 		}
 		if err := hashMember(h, d.Patch, captured.PatchPath); err != nil {
@@ -519,7 +550,7 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
 	omittedCILogs, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {
-		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10))
+		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10), scratchChangeStamp(fi))
 		return nil
 	})
 	if err != nil {
@@ -527,6 +558,33 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 	}
 	field("ci-logs", strconv.FormatBool(omittedCILogs))
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashBundle feeds the bundle's header into h, from memory or from its staged
+// file, or a marker when the capture carried no bundle.
+func hashBundle(h hash.Hash, data []byte, path string) error {
+	var r io.Reader
+	switch {
+	case path != "":
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		r = f
+	case len(data) != 0:
+		r = bytes.NewReader(data)
+	default:
+		fmt.Fprint(h, "no-bundle;")
+		return nil
+	}
+	header, err := worktree.BundleHeader(r)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(h, "%d;", len(header))
+	_, _ = h.Write(header)
+	return nil
 }
 
 // hashMember feeds one captured member into h, length first, from memory or

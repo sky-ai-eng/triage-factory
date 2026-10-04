@@ -114,16 +114,16 @@ groups:
       # tried again on a backoff (30s, 1m, 2m, 5m, then every 10m) rather
       # than failing; tf_conversations_deferred counts the conversations
       # waiting for their next attempt. Zero is the steady state. A brief
-      # nonzero is an upstream blip the backoff rode out;
-      # a sustained one means an upstream the runs depend on has been
-      # unavailable for half an hour, and after about four hours each waiting
-      # run parks as upstream_unavailable until someone messages it.
+      # nonzero is an upstream blip the backoff rode out; a sustained one
+      # means an upstream the runs depend on has been unavailable for half an
+      # hour, and after about four hours each waiting run parks as
+      # upstream_unavailable until someone messages it.
       #
-      # A warning, not a page, and not fleet-wide: one org's provider (its own
-      # Bedrock account, a regional outage) can be the whole of it, and
-      # nothing is lost while it waits. The gauge is exported by the one pod
-      # holding the background brain, so the sum is not multiplied by the
-      # number of pods.
+      # A warning, not a page, and not fleet-wide: one org's own upstream (its
+      # Bedrock account, its GitHub Enterprise Server, a regional outage) can
+      # be the whole of it, and nothing is lost while it waits. The gauge is
+      # exported by the one pod holding the background brain, so the sum is
+      # not multiplied by the number of pods.
       #
       # The rule reads each org's maximum over the last 15 minutes, not the
       # gauge as sampled. A run still retrying leaves the count between two
@@ -139,13 +139,16 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Delegated runs have been waiting on an unavailable model provider for 30 minutes"
+          summary: "Delegated runs have been waiting on an unavailable upstream for 30 minutes"
           description: >-
-            Conversations have been waiting to retry because their model
-            provider was unavailable, with no 15-minute stretch free of them
-            for 30 minutes, though not necessarily the same conversations; up
-            to {{ $value }} in the last 15 minutes, summing each org's peak.
-            Break it down with sum by (org_id)
+            Conversations have been waiting to retry because an upstream they
+            depend on was unavailable: their model provider, or GitHub while
+            the run set up its workspace. There has been no 15-minute stretch
+            free of them for 30 minutes, though not necessarily the same
+            conversations; up to {{ $value }} in the last 15 minutes, summing
+            each org's peak. Break it down with sum by (org_id)
             (tf_conversations_deferred), and read
-            sum by (upstream, org_id, outcome) (rate(tf_upstream_requests_total{upstream=~"anthropic|bedrock"}[5m]))
-            for what the provider is answering.
+            sum by (upstream, org_id, outcome) (rate(tf_upstream_requests_total{upstream=~"anthropic|bedrock|github"}[5m]))
+            for what the providers and GitHub's API are answering. A clone or
+            fetch that could not reach the git host is not a request counted
+            there; the executor's log line for the hand-back names it.

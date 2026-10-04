@@ -945,15 +945,18 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 	if err != nil {
 		return nil, domain.TeamModels{}, err
 	}
-	return s.resolveGHClient(ctx, orgID, owner, repo), models, nil
+	gh, _ := s.resolveGHClient(ctx, orgID, owner, repo)
+	return gh, models, nil
 }
 
 // resolveGHClient resolves the per-(org, owner) GitHub client via the
 // resolver, falling back to the constructor-supplied client when
-// no resolver is wired (test fixtures). A resolve failure returns nil:
-// setupGitHub surfaces "GitHub credentials not configured" for GitHub
-// tasks, and Jira runs don't need a client. The error is logged so a real
-// backend failure (e.g. vault outage) isn't silent.
+// no resolver is wired (test fixtures). A resolve failure returns a nil
+// client and the error, and is logged here: a run that needs no client (a
+// Jira run) carries on without one and reports the failure nowhere else. A
+// GitHub run's setup refuses without one, and that refusal has to carry the
+// error (withGitHubResolveCause), because only the error tells an App token
+// mint GitHub did not answer from a credential nobody bound.
 //
 // repo is the specific repo the call concerns, when the caller has one in
 // view (every real caller does — see ownerRepoForTask). It disambiguates
@@ -963,7 +966,7 @@ func (s *Spawner) resolveRunCredentials(ctx context.Context, orgID, owner, repo,
 // covers more than one repo under the same account — passing "" there
 // would let credbundle.ResolveRepoToken's map iteration pick an arbitrary sibling
 // repo's token, which then 403s every call it's used for.
-func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) *ghclient.Client {
+func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string) (*ghclient.Client, error) {
 	// TF_ROLE=executor never reaches here for a run's GetPR — setupGitHub
 	// builds its client against the credential sidecar's GitHub-REST proxy
 	// (sidecar), so this resolver path serves only all/local.
@@ -972,14 +975,14 @@ func (s *Spawner) resolveGHClient(ctx context.Context, orgID, owner, repo string
 	fallback := s.ghClient
 	s.mu.Unlock()
 	if resolver == nil {
-		return fallback
+		return fallback, nil
 	}
 	client, err := resolver.ClientFor(ctx, orgID, owner)
 	if err != nil {
 		delegateLog.Warn("resolve GitHub client failed", "org", orgID, "target", owner, "error", err)
-		return nil
+		return nil, err
 	}
-	return client
+	return client, nil
 }
 
 // gitAuthorizeDecision is the git proxy's live per-repo gate (Layer 2 + the

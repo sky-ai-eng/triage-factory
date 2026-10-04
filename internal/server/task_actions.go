@@ -186,20 +186,14 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 
 	// A Jira-backed claim assigns the ticket to the claiming user and
 	// transitions it — a write that must act as THAT user. Resolve the acting
-	// user's credential up front; the RequireJiraIdentity gate guarantees
-	// presence in the normal flow, so this 409 is defense-in-depth.
+	// user's credential up front, before anything is written. The
+	// RequireJiraIdentity gate guarantees one is stored, but not that Jira
+	// still accepts it: a Cloud OAuth grant can be revoked or expire.
 	var jiraUserClient *jira.Client
 	if task.EntitySource == "jira" {
 		c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
-		if errors.Is(jerr, jira.ErrNoJiraUserCredential) {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-				Reason:  httpx.ReasonNotConfigured,
-				Message: "connect your Jira to act on tickets",
-			})
-			return nil, claimLandingIdempotent, false
-		}
 		if jerr != nil {
-			internalError(w, "tasks", jerr)
+			writeJiraUserClientError(w, "tasks", jerr)
 			return nil, claimLandingIdempotent, false
 		}
 		jiraUserClient = c

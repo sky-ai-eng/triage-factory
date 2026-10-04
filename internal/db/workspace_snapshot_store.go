@@ -2,9 +2,15 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrSnapshotSuperseded is BeginSnapshotSystem's refusal of a writer whose
+// successor already holds the key. The caller writes nothing: no blob and no
+// lifecycle outcome, both of which are the successor's.
+var ErrSnapshotSuperseded = errors.New("db: a newer engagement holds this workspace snapshot key")
 
 // WorkspaceSnapshotStore owns the workspace_snapshots table — one row per
 // snapshot key recording whether that key's workspace blob is being written,
@@ -41,15 +47,48 @@ import (
 // it) rather than a picture of the row a caller could carry forward as truth.
 type WorkspaceSnapshotStore interface {
 	// BeginSnapshotSystem records that claimID owes a snapshot for this key:
-	// state='pending', writer_claim_id=claimID, updated_at=now. An
-	// unconditional upsert — a newer engagement starting its own snapshot
-	// takes the key over, which is exactly what makes the completion CAS
-	// below able to detect the older writer.
+	// state='pending', writer_claim_id=claimID, updated_at=now. A newer
+	// engagement starting its own snapshot takes the key over, which is
+	// exactly what makes the completion CAS below able to detect the older
+	// writer.
+	//
+	// An older engagement never takes it back. The begin is refused with
+	// ErrSnapshotSuperseded, and the row left as it is, when the key's
+	// current writer is a claim minted after claimID: that writer holds a
+	// newer tree, and an older begin landing late would re-own the key, make
+	// the newer writer's own upload read itself as superseded, and leave the
+	// key with no blob at all. Newer is by claim mint time, whichever
+	// conversation on the task the claim belongs to, because every step of
+	// a blueprint shares the key. Two claims minted in the same instant are
+	// still ordered, so of any two one is the newer; otherwise each could
+	// take the key back from the other. Whether claimID is still live does not
+	// enter into it: a park releases its claim before it snapshots, and that
+	// snapshot is the newest tree there is until a later claim exists. A
+	// writer whose claim row is not found supersedes nothing and is
+	// superseded by nothing.
 	//
 	// Called before the capture starts, so that "a persist is owed" is
 	// durable before a waiter could ever observe the conversation as
 	// resumable-with-no-blob.
+	//
+	// A begin that lands clears the covered position: it describes the blob
+	// being replaced.
 	BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error
+
+	// CoverSnapshotSystem records that claimID's written blob also reflects
+	// the transcript up to position: a checkpoint captured the tree, found its
+	// fingerprint equal to the blob's, and skipped the upload, which leaves
+	// the position in the blob's manifest older than what the blob covers.
+	// fingerprint is the tree the position describes; a restore applies the
+	// position only to a blob whose manifest carries the same fingerprint and
+	// writer, so it is never read against a different tree.
+	//
+	// A CAS on writer_claim_id = claimID and state 'written': that is what
+	// makes the blob under the key the one this claim last wrote, the one its
+	// fingerprint was compared against. matched=false means another writer
+	// holds the key or this claim's latest write did not finish, and nothing
+	// is recorded.
+	CoverSnapshotSystem(ctx context.Context, orgID, taskID, claimID, fingerprint string, position float64) (matched bool, err error)
 
 	// FinishSnapshotSystem closes out claimID's write: a CAS that flips
 	// 'pending' to 'written' (ok) or 'failed' (not ok) only while

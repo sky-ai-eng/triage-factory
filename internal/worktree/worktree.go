@@ -745,9 +745,9 @@ func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...stri
 			return nil
 		}
 		if ctx.Err() != nil {
-			return &GitError{Args: args, Output: string(out), Err: ctx.Err()}
+			return &GitError{Args: args, Output: string(out), Err: ctx.Err(), Proxy: auth.proxyBase}
 		}
-		runErr := &GitError{Args: args, Output: string(out), Err: err}
+		runErr := &GitError{Args: args, Output: string(out), Err: err, Proxy: auth.proxyBase}
 		if attempt >= worktreeAddLockRaceMaxAttempts || !isWorktreeAddLockRace(args, out) {
 			return runErr
 		}
@@ -766,7 +766,7 @@ func gitRunCtxAuth(ctx context.Context, dir string, auth CloneAuth, args ...stri
 		// caller blocked for the full backoff instead of returning promptly.
 		select {
 		case <-ctx.Done():
-			return &GitError{Args: args, Output: string(out), Err: ctx.Err()}
+			return &GitError{Args: args, Output: string(out), Err: ctx.Err(), Proxy: auth.proxyBase}
 		case <-time.After(worktreeAddLockRaceBackoff):
 		}
 	}

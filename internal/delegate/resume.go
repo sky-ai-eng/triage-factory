@@ -30,11 +30,11 @@ import (
 // see the actual state.
 //
 // A competing RESUME is not in this set, and that is the whole distinction the
-// lost-flip path has to make (see lostWakeOutcome). Two wakes race, one loses,
-// and the loser's message is queued alongside the winner's for the winner's
-// claim to deliver — nothing about that is a conflict to report. A flip lost
-// to a conversation that went terminal instead IS one: nothing will claim it,
-// so the queued message is never delivered.
+// lost-flip path has to make (see wakeParked). Two wakes race, one loses, and
+// the loser's message is queued alongside the winner's for the winner's claim
+// to deliver — nothing about that is a conflict to report. A flip lost to a
+// conversation that went terminal instead IS one: nothing will claim it, so
+// the message is refused and not queued.
 var ErrConversationNotResumable = errors.New("resume: conversation not in a resumable state")
 
 // ErrConversationConcluded is returned when a conversation's workspace is
@@ -104,55 +104,6 @@ var ErrStepHandedOff = errors.New("resume: this step just handed off to the next
 // clear "this workspace has expired" signal rather than seeing the run
 // silently fail mid-resume. Callers map it to 410 Gone.
 var ErrWorkspaceExpired = errors.New("resume: this conversation's workspace has expired and can no longer be resumed")
-
-// lostWakeOutcome answers for a wake whose compare-and-swap found the
-// conversation already moved. The message is queued either way — the only
-// question left is whether anything is coming to drain it, and the CAS refuses
-// two situations that answer it oppositely:
-//
-//   - another wake won the race, or an engagement has since claimed the row.
-//     Something is driving the conversation and drains whatever is queued, so
-//     this wake succeeded and there is nothing to report.
-//   - the conversation moved to a terminal. No claim predicate spans it, so
-//     the queued row is never delivered. Reporting success there is a lie the
-//     caller cannot detect, so it gets the same "the state moved under you"
-//     answer the up-front guard gives.
-//
-// The distinction is exactly the displayed status, which is derived: `queued`
-// and the active statuses are "a claim will drive it" and "a claim is driving
-// it". `open` cannot appear — this wake's own undelivered row derives a parked
-// conversation to `queued` — so everything else is a terminal.
-//
-// The queued row is left where it is on the refusing path. It is what the user
-// typed, it is inert while the conversation stays terminal (nothing claims it),
-// and a wake that later revives the conversation should carry it rather than
-// find it deleted.
-//
-// A re-read that fails answers like a terminal: unable to prove delivery is
-// coming, and a false success is worse here than a conflict the client
-// resolves by refreshing.
-//
-// One shape reaches the terminal arm without having moved at all: a concluded
-// step the CAS's hand-off guard refused after the pre-check let it through. The
-// conflict is right (nothing claims it while the reactor still owes it a
-// decision); only the log line's "went terminal" overstates what happened.
-func (s *Spawner) lostWakeOutcome(ctx context.Context, orgID, conversationID string) error {
-	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil {
-		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; reporting a conflict",
-			"conversation", conversationID, "org_id", orgID, "error", err)
-		return ErrConversationNotResumable
-	}
-	if conv == nil {
-		return ErrConversationNotResumable
-	}
-	if conv.Status == domain.StatusQueued || domain.IsActiveConversationStatus(conv.Status) {
-		return nil
-	}
-	delegateLog.Warn("resume: lost the wake race to a conversation that went terminal; the queued message will not be delivered",
-		"conversation", conversationID, "org_id", orgID, "status", conv.Status)
-	return ErrConversationNotResumable
-}
 
 // recordResumeTaskEvent puts a follow-up on its task's timeline.
 //

@@ -108,8 +108,9 @@ func (s *Spawner) wakeDispatcher() {
 // RunDispatcher is the conversation-queue drain loop — the queue-driven
 // orchestrator's worker. On boot it reconciles conversations/blueprint_runs
 // stranded by a crash, then claims queued steps and drives each through
-// runAgent + the reactor until ctx is cancelled. A nil ConversationQueueStore
-// makes this a logged no-op.
+// runAgent + the reactor until ctx is cancelled. The recovery pass runs beside
+// it on its own loop (runRecovery), started and stopped with it. A nil
+// ConversationQueueStore makes this a logged no-op.
 func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration) {
 	if s.conversationQueue == nil {
 		dispatchLog.Warn("conversation-queue dispatcher not started: no ConversationQueueStore wired")
@@ -123,6 +124,17 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 	defer s.dispatcherRunning.Store(false)
 
 	s.reconcileConversationQueue(ctx)
+
+	// Joined before dispatcherRunning clears (defers run last-in first-out),
+	// so a caller that sees the dispatcher stopped sees no recovery pass still
+	// writing either: the shutdown claim release and the pool close run after
+	// that signal.
+	recoveryDone := make(chan struct{})
+	go func() {
+		defer close(recoveryDone)
+		s.runRecovery(ctx, scanInterval)
+	}()
+	defer func() { <-recoveryDone }()
 
 	scan := time.NewTicker(scanInterval)
 	defer scan.Stop()
@@ -139,6 +151,57 @@ func (s *Spawner) RunDispatcher(ctx context.Context, scanInterval time.Duration)
 			s.drainConversationQueue(ctx)
 		}
 	}
+}
+
+// runRecovery runs the recovery pass at once and then on every scan tick until
+// ctx is cancelled. It is a loop of its own, apart from the claim loop,
+// because the claim loop waits: on a free slot when every one is held, which
+// lasts as long as the engagements holding them run. Recovery needs no slot,
+// so a saturated executor still takes over a dead executor's claims, settles
+// stops and replays stranded runs, and a fleet in which every executor is full
+// still recovers.
+//
+// One goroutine runs every pass, so a pass never overlaps another: a pass that
+// outlasts the interval is followed by the next at once (the ticker keeps one
+// tick), never by two at once.
+func (s *Spawner) runRecovery(ctx context.Context, interval time.Duration) {
+	tick := time.NewTicker(interval)
+	defer tick.Stop()
+	for {
+		s.recoverOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
+}
+
+// recoverOnce is one recovery pass. The releases run before the settlement so
+// a stop pending on a conversation whose engagement was lost settles in the
+// same pass: this executor's own expired claims first (only it can tell a
+// finished engagement from one still tearing down), then everyone else's. The
+// stranded-run replay runs last.
+//
+// No step waits on any of the claim loop's gates (capacity, the memory gate,
+// the drain, and the identity and partition fences), because each of those
+// answers whether this executor may start new work and none of these steps
+// starts any. The own-claim release is the only release a fenced engagement's
+// claim gets short of another executor's takeover a lease later, and in local
+// mode it is the only release at all. The takeover's safety is the lease that lapsed on database
+// time, not the health of the executor taking it over; the settlement writes
+// only conversations no live claim holds; and the replay runs a reactor whose
+// writes are compare-and-swap guarded, enqueuing at most a step that any
+// executor may claim. Every executor runs the pass, so the fleet recovers
+// while any one of them is up.
+func (s *Spawner) recoverOnce(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+	s.releaseOwnExpiredClaims(ctx)
+	s.takeOverExpiredClaims(ctx)
+	s.settleUnclaimedStops(ctx)
+	s.replayStrandedRuns(ctx)
 }
 
 // reconcileConversationQueue is the boot crash-recovery sweep. Every claim an
@@ -214,7 +277,8 @@ func (s *Spawner) resetPriorBootClaims(ctx context.Context) {
 // settleUnclaimedStops is the dispatcher's settlement pass over conversations
 // no live claim holds: a stop-requested one parks and cancels a run whose
 // cancel was requested, and a step a run's cancel never reached parks and
-// cancels its run (ConversationQueueStore.SettleUnclaimedStopsSystem). It is
+// cancels its run once its last engagement has had db.ReactorGrace to reach
+// its own reactor (ConversationQueueStore.SettleUnclaimedStopsSystem). It is
 // the settlement for work that is queued, parked, or whose engagement was
 // lost; a live engagement settles its own.
 //
@@ -321,18 +385,6 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 // semaphore is what keeps a burst of queued steps from fanning into an
 // unbounded number of agent subprocesses on one host.
 func (s *Spawner) drainConversationQueue(ctx context.Context) {
-	// Recovery first, ahead of every gate below: none of it needs a slot, so a
-	// saturated host or a memory gate must not hold it back, and every
-	// executor runs it, so a fleet recovers as long as any one of them is
-	// dispatching. The releases run before the settlement so a stop or a
-	// cancel on a conversation whose engagement was lost settles this pass:
-	// this executor's own expired claims first (only it can tell a finished
-	// engagement from one still tearing down), then everyone else's.
-	s.releaseOwnExpiredClaims(ctx)
-	s.takeOverExpiredClaims(ctx)
-	s.settleUnclaimedStops(ctx)
-	s.replayStrandedRuns(ctx)
-
 	// Capture the semaphore once and use it for both acquire and release so a
 	// startup-time SetMaxConcurrentRuns can't strand a token on a replaced
 	// channel.
@@ -847,10 +899,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}) {
 			return true
 		}
-		// The park is this step's settlement, and nothing else is going to
-		// read it: the dispatcher settles only stops nobody holds, and this
-		// engagement cleared the intent it would have looked for. A stop that
-		// came with a blueprint cancel ends the run here or not at all.
+		// The park is this step's settlement, and the reactor below is what
+		// ends a run whose cancel came with the stop. The park cleared the
+		// intent and released the claim, so the dispatcher's settlement would
+		// read the step as one the cancel never reached; it leaves the step
+		// alone for db.ReactorGrace after that release, and cancels the run
+		// in this engagement's place only if the reactor has not by then.
 		parked := *conv
 		parked.Status = "open"
 		s.reactToStepTerminal(ctx, orgID, br, parked, runConfig{
@@ -919,9 +973,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// through the sidecar's GitHub-REST proxy instead — this client is unused
 	// there (the executor's secret store is disabled).
 	owner, repo := ownerRepoForTask(*task)
-	var gh *ghclient.Client
+	var (
+		gh           *ghclient.Client
+		ghResolveErr error
+	)
 	if sidecar == nil {
-		gh = s.resolveGHClient(ctx, orgID, owner, repo)
+		gh, ghResolveErr = s.resolveGHClient(ctx, orgID, owner, repo)
 	}
 
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
@@ -932,6 +989,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		if disposedDuringBringUp() {
 			return
 		}
+		err = withGitHubResolveCause(err, ghResolveErr)
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
@@ -2191,9 +2249,7 @@ type engagementDisposition struct {
 func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, conv domain.Conversation, cause error) (survived bool) {
 	if errors.Is(cause, errAwaitingCredentialsTimeout) {
 		dispatchLog.Warn("credential bundle never arrived; handing the conversation back without spending its setup budget", "conversation", conv.ID, "error", cause)
-		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueAwaitingCredentials, 0, cause.Error()); err != nil {
-			dispatchLog.Warn("requeue conversation after a credentials timeout failed", "conversation", conv.ID, "error", err)
-		} else if requeued != nil {
+		if s.requeueClaim(orgID, conv, db.RequeueAwaitingCredentials, 0, cause, "after a credentials timeout") {
 			recordHandBack(orgID, string(db.RequeueAwaitingCredentials), 1)
 		}
 		return true
@@ -2206,12 +2262,45 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 		return s.disposeOfExhaustedConversation(orgID, br, conv, cause)
 	}
 	dispatchLog.Warn("engagement failed before the agent ran, requeuing", "conversation", conv.ID, "attempt", attempt, "error", cause)
-	if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueSetupFailure, 0, cause.Error()); err != nil {
-		dispatchLog.Warn("requeue conversation after a pre-agent failure failed", "conversation", conv.ID, "error", err)
-	} else if requeued != nil {
+	if s.requeueClaim(orgID, conv, db.RequeueSetupFailure, 0, cause, "after a pre-agent failure") {
 		recordHandBack(orgID, string(db.RequeueSetupFailure), 1)
 	}
 	return true
+}
+
+// requeueClaim hands conv back through RequeueConversation, fenced on the
+// claim this engagement was minted with, and reports whether this call
+// requeued it. The fence refuses when that claim was released while this
+// engagement set up — taken over after its lease lapsed, most often by an
+// executor that now holds the conversation — and then the conversation is no
+// longer this engagement's to hand back, so nothing is recorded.
+//
+// It refuses a claim whose lease lapsed too, unless the lapse was a suspend
+// the engagement can recover from. Otherwise the claim is left for the
+// takeover, which releases it as reaped: an engagement that outlived its
+// authority is a lost one, whatever it was doing when it noticed.
+func (s *Spawner) requeueClaim(orgID string, conv domain.Conversation, outcome db.RequeueOutcome, delay time.Duration, cause error, after string) bool {
+	ctx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
+	var requeued *domain.Conversation
+	err := s.retryAfterRecovery(ctx, conv.ClaimID, func() (e error) {
+		requeued, e = s.conversationQueue.RequeueConversation(ctx, orgID, conv.ID, conv.ClaimID, outcome, delay, cause.Error())
+		return e
+	})
+	switch {
+	case errors.Is(err, db.ErrClaimLeaseExpired):
+		dispatchLog.Warn("claim lease lapsed before the requeue — leaving the conversation to the takeover; recording nothing",
+			"conversation", conv.ID, "claim_id", conv.ClaimID, "outcome", outcome, "org_id", orgID)
+		return false
+	case errors.Is(err, db.ErrClaimReleased):
+		dispatchLog.Warn("claim fence refused the requeue — this engagement no longer holds the conversation; recording nothing",
+			"conversation", conv.ID, "claim_id", conv.ClaimID, "outcome", outcome, "org_id", orgID)
+		return false
+	case err != nil:
+		dispatchLog.Warn("requeue conversation "+after+" failed", "conversation", conv.ID, "error", err)
+		return false
+	}
+	return requeued != nil
 }
 
 // handBackUnreachableUpstream is handlePreAgentFailure's arm for an upstream
@@ -2234,9 +2323,7 @@ func (s *Spawner) handBackUnreachableUpstream(orgID string, br *domain.Blueprint
 		delay := policy.Delay(prior)
 		dispatchLog.Info("an upstream was unreachable while the engagement set up; handing the conversation back to retry later",
 			"conversation", conv.ID, "upstream_hand_backs", prior, "delay", delay, "error", cause)
-		if requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, db.RequeueUpstreamUnavailable, delay, cause.Error()); err != nil {
-			dispatchLog.Warn("requeue conversation after an unreachable upstream failed", "conversation", conv.ID, "error", err)
-		} else if requeued != nil {
+		if s.requeueClaim(orgID, conv, db.RequeueUpstreamUnavailable, delay, cause, "after an unreachable upstream") {
 			recordHandBack(orgID, db.HandBackUpstream, 1)
 			s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
 		}
@@ -2285,7 +2372,6 @@ func (s *Spawner) disposeOfUnreachableUpstream(orgID string, br *domain.Blueprin
 // A first engagement has nothing to protect. Its blueprint step has never run,
 // there is no workspace worth keeping, and a loud failure is the honest answer
 // — it surfaces on the task and the auto-delegation breaker keeps its signal.
-// That is today's poison pill, unchanged.
 //
 // A nil br is the resume path, which has no blueprint in scope and needs
 // none: a resume continues a conversation that has already been driven, so
@@ -2395,6 +2481,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 // toast: an upstream outage is not raised as one.
 func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
 	bgCtx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
 		ConversationID: conv.ID,
 		UserID:         conv.CreatorUserID,
@@ -2447,6 +2534,7 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversation, reason string) {
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	bgCtx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
 	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",

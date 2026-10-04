@@ -483,10 +483,12 @@ func (s *Spawner) recordSteeredMessage(ctx context.Context, orgID, conversationI
 // one alike. What differs between those is not what happens to the message but
 // what already exists to read it, which is the `wake` split below.
 //
-// Ordering is the invariant that makes the two halves separable: the message
-// row is written BEFORE the status flip. A crash between them leaves an
-// undelivered row the next claim drains (nothing is lost); the reverse order
-// would leave a claimable conversation with nothing to say.
+// The flip and the message commit together, so a wake the flip refuses writes
+// nothing: the send is refused with no row behind it, nothing is streamed, and
+// retrying it cannot queue the message twice. The flip runs first within the
+// transaction, so a refused one can read what moved the conversation before
+// its own message is there: an undelivered row reads a parked conversation as
+// queued.
 //
 // The out-of-band <system-note> prepends (staged injections + the artifact
 // ledger) are deliberately NOT composed here. Delivery belongs to whichever
@@ -538,7 +540,14 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// conversation is claimed when its wait is over, as it was going to be.
 	msg := pendingUserInput(conv.ID, userID, text)
 	var cleared *domain.Conversation
-	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+	var flipped bool
+	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
+		if wake {
+			var wErr error
+			if flipped, wErr = s.wakeParked(ctx, ts, orgID, conv); wErr != nil {
+				return wErr
+			}
+		}
 		id, iErr := ts.Conversations.InsertMessage(ctx, orgID, msg)
 		if iErr != nil {
 			return iErr
@@ -547,7 +556,11 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 		var cErr error
 		cleared, cErr = ts.Conversations.ClearNextAttempt(ctx, orgID, conv.ID)
 		return cErr
-	}); err != nil {
+	})
+	if errors.Is(err, errWakeRefused) {
+		return s.refusedWakeError(ctx, orgID, conv)
+	}
+	if err != nil {
 		return fmt.Errorf("queue follow-up: %w", err)
 	}
 	// Broadcast for both runtimes: the row above is the message's one
@@ -563,12 +576,15 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 		s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
 	}
 
-	if !wake {
-		// A driver already exists (or is about to claim) and drains before its
-		// next call, so the write was the delivery.
-		return nil
+	if flipped {
+		s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
+		s.recordResumeTaskEvent(ctx, orgID, userID, conv)
+		// Same-process fast path (local): the wake is a ~ms in-process
+		// dispatcher nudge. Cross-pod there is no wake nudge by design — the
+		// claiming executor's own scan-interval backstop picks the row up.
+		s.wakeDispatcher()
 	}
-	return s.wakeParked(ctx, orgID, conv, userID)
+	return nil
 }
 
 // pendingUserInput builds the one row an input to a conversation takes: an
@@ -759,18 +775,27 @@ func (s *Spawner) unwakeableFollowUpBlock(ctx context.Context, orgID string, con
 	return s.modelFollowUpBlock(ctx, orgID, conv, br)
 }
 
+// errWakeRefused rolls back a follow-up whose wake was refused, message and
+// all; refusedWakeError then says why.
+var errWakeRefused = errors.New("wake refused")
+
 // wakeParked flips a parked conversation back to `queued` so the dispatcher
-// claims it again, re-opening an aborted blueprint in the same transaction.
+// claims it again, re-opening an aborted blueprint in the same transaction,
+// and reports whether this wake was the one that flipped it. It runs inside
+// the follow-up's transaction, ahead of the message write.
 //
-// The flip alone: the message is already queued by the caller, and it is the
-// claim's own drain (native) or the resume dispatch (SDK) that delivers it.
-//
-// The two writes are deliberately unbound from the message write. The queue
-// appends, so a wake that loses the compare-and-swap to ANOTHER wake has still
-// queued its message and the winner's claim carries it — which is why the lost
-// flip is resolved by lostWakeOutcome rather than reported as a conflict on
-// sight.
-func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conversation, userID string) error {
+// A flip that loses the compare-and-swap is not a refusal on sight. The queue
+// appends, so if another wake already re-queued the conversation, or an
+// engagement has since claimed it, the message joins whatever that claim
+// drains, and the send succeeded. Anything else the flip refuses (a run called
+// off since the gate looked, a conversation gone terminal, a step its
+// blueprint still owes a decision) has nothing coming to read the message, and
+// is errWakeRefused. The conversation is re-read through the transaction to
+// tell them apart: `queued` and the active statuses are a claim that will
+// drive it or one driving it now. A re-read that fails is a refusal too,
+// since it cannot show delivery is coming and a false success is worse than a
+// conflict the client resolves by refreshing.
+func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, conv domain.Conversation) (flipped bool, err error) {
 	// A completed+abort conversation's blueprint already terminated (aborted)
 	// when the step stopped. Re-open it to running in the same tx as the flip so
 	// the resumed step's new conclusion re-finalizes it through the normal
@@ -783,39 +808,65 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 	// no-op there, and on a still-running blueprint).
 	reopenAbortedBlueprint := conv.Status == domain.StatusCompleted && domain.ConversationOutcome(conv.Outcome) == domain.ConversationOutcomeAbort
 
-	var flipped bool
-	err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(ts db.TxStores) error {
-		f, fErr := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
-		if fErr != nil {
-			return fErr
-		}
-		flipped = f
-		if !f {
-			return nil // lost the wake CAS — see lostWakeOutcome
-		}
+	f, err := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
+	if err != nil {
+		return false, fmt.Errorf("flip status: %w", err)
+	}
+	if f {
 		// Atomic with the flip: a failure rolls back the flip too, so the
 		// conversation and its blueprint never split across the
 		// resumable/terminal boundary.
 		if reopenAbortedBlueprint && conv.BlueprintRunID != "" {
-			if _, rErr := ts.Blueprints.ReopenRunForResume(ctx, orgID, conv.BlueprintRunID); rErr != nil {
-				return rErr
+			if _, err := ts.Blueprints.ReopenRunForResume(ctx, orgID, conv.BlueprintRunID); err != nil {
+				return false, fmt.Errorf("flip status: %w", err)
 			}
 		}
-		return nil
-	})
+		return true, nil
+	}
+	now, err := ts.Conversations.Get(ctx, orgID, conv.ID)
 	if err != nil {
-		return fmt.Errorf("flip status: %w", err)
+		delegateLog.Warn("resume: lost the wake race and could not re-read the conversation; refusing the message",
+			"conversation", conv.ID, "org_id", orgID, "error", err)
+		return false, errWakeRefused
 	}
-	if !flipped {
-		return s.lostWakeOutcome(ctx, orgID, conv.ID)
+	if now != nil && (now.Status == domain.StatusQueued || domain.IsActiveConversationStatus(now.Status)) {
+		return false, nil
 	}
-	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
-	s.recordResumeTaskEvent(ctx, orgID, userID, conv)
-	// Same-process fast path (local): the wake is a ~ms in-process dispatcher
-	// nudge. Cross-pod there is no wake nudge by design — the claiming
-	// executor's own scan-interval backstop picks the row up.
-	s.wakeDispatcher()
-	return nil
+	return false, errWakeRefused
+}
+
+// refusedWakeError is what a send whose wake was refused returns, read once
+// the refusal has rolled back. A run called off since the gate looked is
+// reported as the gate reports one already called off when it looked; any
+// other refusal, and a re-read that cannot rule a cancel out, is a conflict.
+func (s *Spawner) refusedWakeError(ctx context.Context, orgID string, conv domain.Conversation) error {
+	calledOff, err := s.blueprintCalledOffNow(ctx, orgID, conv)
+	if err != nil {
+		delegateLog.Warn("resume: re-read of a refused wake's blueprint run failed; reporting a conflict",
+			"conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
+		return ErrConversationNotResumable
+	}
+	if calledOff {
+		return blockedFollowUpError(ResumeBlockedBlueprintCancelled)
+	}
+	delegateLog.Warn("resume: the wake was refused after the gate passed; the message was not queued",
+		"conversation", conv.ID, "org_id", orgID)
+	return ErrConversationNotResumable
+}
+
+// blueprintCalledOffNow re-reads the conversation's blueprint run and reports
+// whether it is called off (blueprintCalledOff). A conversation with no run
+// answers false: the caller then reads the lost wake the way it reads every
+// other.
+func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv domain.Conversation) (bool, error) {
+	if s.blueprints == nil || conv.BlueprintRunID == "" {
+		return false, nil
+	}
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
+	if err != nil {
+		return false, err
+	}
+	return blueprintCalledOff(br), nil
 }
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended

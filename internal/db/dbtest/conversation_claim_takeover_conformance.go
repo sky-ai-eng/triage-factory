@@ -259,7 +259,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		c := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
 		for _, outcome := range []db.RequeueOutcome{"", "reaped", "requeued_shutdown", "completed"} {
-			got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, outcome, 0, "boom")
+			got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, outcome, 0, "boom")
 			if !errors.Is(err, db.ErrInvalidRequeueOutcome) || got != nil {
 				t.Errorf("RequeueConversation(%q) = (%+v, %v), want ErrInvalidRequeueOutcome", outcome, got, err)
 			}
@@ -361,6 +361,123 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 		if after := runOf(t, f, c.ID); after.Status != domain.BlueprintRunStatusRunning {
 			t.Errorf("run = %q, want running", after.Status)
+		}
+	})
+
+	t.Run("Settle_LeavesAStepItsHolderJustParkedUnderACancelToTheHoldersReactor", func(t *testing.T) {
+		// A cancel's holder parks the step (the park clears the intent),
+		// releases its claim, and only then runs the reactor that cancels the
+		// run. Between the release and the reactor the step is open, carries
+		// no intent, and nobody holds it, under a running cancel-requested
+		// run: the settlement's no-intent arm has to leave it to the holder.
+		f := mk(t)
+		c := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+		br := runOf(t, f, c.ID)
+		taskID := get(t, f, c.ID).TaskID
+		if _, err := f.Stores.Blueprints.RequestRunCancelSystem(ctx, f.OrgID, br.ID); err != nil {
+			t.Fatalf("RequestRunCancelSystem: %v", err)
+		}
+		if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, c.ID, stopTestUser, "", ""); err != nil || !ok {
+			t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+		}
+		if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
+			t.Fatalf("ParkOpenForClaimSystem = (%v, %v)", ok, err)
+		}
+
+		settled, err := f.Stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+		if err != nil {
+			t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+		}
+		if len(settled) != 0 {
+			t.Fatalf("settled = %+v, want nothing — the step's holder released it inside the reactor grace", settled)
+		}
+		if settled, err := f.Stores.ConversationQueue.SettleUnclaimedStopsForTaskSystem(ctx, f.OrgID, taskID); err != nil || len(settled) != 0 {
+			t.Fatalf("SettleUnclaimedStopsForTaskSystem = (%+v, %v), want nothing for the same reason", settled, err)
+		}
+		if after := runOf(t, f, c.ID); after.Status != domain.BlueprintRunStatusRunning || !after.CancelRequested {
+			t.Errorf("run = (%q, cancel requested %v), want (running, true) — the holder's reactor ends it", after.Status, after.CancelRequested)
+		}
+		if got := get(t, f, c.ID); got.Status != domain.StatusOpen || got.ParkReason != domain.ParkReasonUserCancelled {
+			t.Errorf("step = (%q, %q), want (open, user_cancelled) as its holder parked it", got.Status, got.ParkReason)
+		}
+
+		// Once the grace has passed, the holder is presumed gone and the arm
+		// settles the step and cancels the run in its place.
+		f.BackdateConclusion(t, c.ID, 2*db.ReactorGrace)
+		settled, err = f.Stores.ConversationQueue.SettleUnclaimedStopsSystem(ctx)
+		if err != nil {
+			t.Fatalf("SettleUnclaimedStopsSystem after the grace: %v", err)
+		}
+		if len(settled) != 1 || settled[0].ConversationID != c.ID || settled[0].BlueprintRunID != br.ID {
+			t.Fatalf("settled after the grace = %+v, want %s with run %s cancelled", settled, c.ID, br.ID)
+		}
+		if after := runOf(t, f, c.ID); after.Status != domain.BlueprintRunStatusCancelled {
+			t.Errorf("run after the grace = %q, want cancelled", after.Status)
+		}
+	})
+
+	t.Run("Requeue_NamingAStaleClaimLeavesTheSuccessorsClaimAlone", func(t *testing.T) {
+		// An executor that was paused past its lease comes back and fails its
+		// setup. By then its claim was taken over and another executor holds
+		// the conversation; the late requeue must not release that claim.
+		f := mk(t)
+		stale := stageClaimed(t, f, takeoverOtherExecutor, 1)
+		f.SetLease(t, stale.ClaimID, -time.Minute)
+		if got := takeOver(t, f, 100); len(got) != 1 {
+			t.Fatalf("taken over = %v, want the one expired claim", got)
+		}
+		successor, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)
+		if err != nil || successor == nil || successor.ID != stale.ID {
+			t.Fatalf("successor claim = (%+v, %v), want conversation %s", successor, err, stale.ID)
+		}
+
+		got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, stale.ID, stale.ClaimID, db.RequeueSetupFailure, time.Minute, "late setup failure")
+		if !errors.Is(err, db.ErrClaimReleased) || got != nil {
+			t.Errorf("RequeueConversation naming the stale claim = (%+v, %v), want ErrClaimReleased", got, err)
+		}
+		if released, _ := claimState(t, f, successor.ClaimID); released {
+			t.Fatal("the late requeue released the successor's claim")
+		}
+		if after := get(t, f, stale.ID); after.ResultSummary == "late setup failure" || after.NextAttemptAt != nil {
+			t.Errorf("conversation after the refused requeue = (summary %q, next attempt %v), want neither written", after.ResultSummary, after.NextAttemptAt)
+		}
+
+		// The successor's own requeue still lands.
+		if got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, stale.ID, successor.ClaimID, db.RequeueSetupFailure, 0, "its own failure"); err != nil || got == nil {
+			t.Fatalf("RequeueConversation naming the live claim = (%+v, %v), want the requeued row", got, err)
+		}
+		if released, outcome := claimState(t, f, successor.ClaimID); !released || outcome != string(db.RequeueSetupFailure) {
+			t.Errorf("successor claim after its requeue = (released %v, %q), want (true, requeued)", released, outcome)
+		}
+	})
+
+	t.Run("RequeueAndHandBack_RefusedOnALapsedLeaseAndLeftToTheTakeover", func(t *testing.T) {
+		// Nobody has taken the conversation over yet, but the holder's
+		// authority ended with its lease. Its release is refused, and the
+		// takeover is what releases the claim, as reaped.
+		f := mk(t)
+		c := stageClaimed(t, f, takeoverOtherExecutor, 1)
+		f.SetLease(t, c.ClaimID, -time.Minute)
+
+		got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, db.RequeueSetupFailure, time.Minute, "late setup failure")
+		if !errors.Is(err, db.ErrClaimLeaseExpired) || got != nil {
+			t.Errorf("RequeueConversation on a lapsed lease = (%+v, %v), want ErrClaimLeaseExpired", got, err)
+		}
+		if err := f.Stores.ConversationQueue.HandBackClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.HandBackUpstream, time.Minute, "late hand-back"); !errors.Is(err, db.ErrClaimLeaseExpired) {
+			t.Errorf("HandBackClaimSystem on a lapsed lease = %v, want ErrClaimLeaseExpired", err)
+		}
+		if released, _ := claimState(t, f, c.ClaimID); released {
+			t.Fatal("a refused release released the lapsed claim")
+		}
+		if after := get(t, f, c.ID); after.ResultSummary != "" || after.NextAttemptAt != nil {
+			t.Errorf("conversation after the refused releases = (summary %q, next attempt %v), want neither written", after.ResultSummary, after.NextAttemptAt)
+		}
+
+		if taken := takeOver(t, f, 100); len(taken) != 1 {
+			t.Fatalf("taken over = %v, want the lapsed claim", taken)
+		}
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != db.HandBackReaped {
+			t.Errorf("claim after the takeover = (released %v, %q), want (true, %s)", released, outcome, db.HandBackReaped)
 		}
 	})
 

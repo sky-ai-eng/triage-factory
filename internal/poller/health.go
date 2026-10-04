@@ -9,10 +9,12 @@ import (
 )
 
 // heartbeatStaleFactor is the multiple of basePollInterval past which a
-// source's base-tick loop is considered dead by the /readyz hard check
-// (TFAC-573). 3x basePollInterval = 90s: generous enough that one slow
-// cycle doesn't false-positive, tight enough to surface a genuinely
-// stuck/crashed loop within a couple of minutes.
+// source's poll loop is considered dead by the /readyz hard check: in that
+// long it has not woken, completed an upstream request, waited on a rate
+// limit or a retry backoff, or finished an org's poll. 3x basePollInterval =
+// 90s: a cycle that is making progress stamps far more often than that however
+// long the whole cycle runs, and a stuck or crashed loop surfaces within a
+// couple of minutes.
 const heartbeatStaleFactor = 3
 
 // HealthSnapshot is the poller state GET /readyz needs, gathered fresh on
@@ -34,12 +36,12 @@ type HealthSnapshot struct {
 
 // SourceHealth is one poll source's (github/jira) liveness state.
 type SourceHealth struct {
-	// Alive reports whether the base-tick loop woke within
+	// Alive reports whether the poll loop made progress within
 	// heartbeatStaleFactor*basePollInterval of now — the /readyz hard
 	// check. False both for a stalled/crashed loop and for the brief
 	// window right after boot before the loop's first tick lands.
 	Alive bool
-	// LastTick is the wall-clock time of the last base-tick heartbeat; the
+	// LastTick is the wall-clock time of the loop's last heartbeat; the
 	// zero Time if the loop has never woken.
 	LastTick time.Time
 	// Orgs is keyed by org ID, one entry per org ListActiveSystem returned

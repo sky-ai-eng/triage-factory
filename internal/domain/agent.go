@@ -533,7 +533,10 @@ type Conversation struct {
 	//     SetupFailures and LostEngagements below, each counting one kind of
 	//     hand-back over the same episode. An engagement that got anywhere
 	//     ends the episode, so a conversation resumed four times still claims
-	//     at 1.
+	//     at 1, and so does the conversation entering the queue again — a
+	//     wake, or a claim taking it straight off its park — so a person's
+	//     message starts afresh even after a stop the dispatcher settled,
+	//     which leaves no engagement outcome behind.
 	//   - The display reads (Get / GetSystem / the list projections) fill it
 	//     with every claim the conversation has ever had, alongside the
 	//     lifetime duration/turn sums it is bundled with. That is engagement
@@ -937,7 +940,7 @@ type Claim struct {
 	ReleasedAt *time.Time `json:"released_at,omitempty"`
 	// Outcome is how the engagement ended: "completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown". Empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream". Empty while live.
 	Outcome string `json:"outcome,omitempty"`
 	Error   string `json:"error,omitempty"`
 	// Engagement telemetry the runtime reports per invocation — not
@@ -977,7 +980,7 @@ type ExecutorClaim struct {
 	LeaseExpiresAt *time.Time
 	// Outcome is how the engagement ended ("completed" | "failed" |
 	// "cancelled" | "parked" | "requeued" | "requeued_credentials" |
-	// "reaped" | "requeued_shutdown"); empty while live.
+	// "reaped" | "requeued_shutdown" | "requeued_upstream"); empty while live.
 	Outcome string
 	// LastActivityAt / CurrentOp are what the holder's last renewal stamped:
 	// when the engagement last did anything the stall watchdog counts as

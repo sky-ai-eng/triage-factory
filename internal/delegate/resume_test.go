@@ -315,14 +315,12 @@ func (c staleOpenConversations) GetSystem(ctx context.Context, orgID, conversati
 }
 
 // TestFollowUp_LostWakeRaceStillDelivers pins what append buys: a wake
-// that loses the MarkQueuedForResume CAS is a SUCCESS, not a 409, because its
-// message is already queued and the winner's claim drains whatever is queued.
+// that loses the MarkQueuedForResume CAS to another wake is a SUCCESS, not a
+// 409, because the winner's claim drains whatever is queued, the loser's
+// message included.
 //
-// Under the replace contract this could not be true — the loser's write would
-// have clobbered the winner's — which is exactly why the input write used to be
-// bound into the CAS's transaction. It no longer is, so this walks the race to
-// its end: the winner flips, the loser queues onto the row it read as still
-// parked, and one claim carries both messages away.
+// It walks the race to its end: the winner flips, the loser queues onto the
+// row it read as still parked, and one claim carries both messages away.
 func TestFollowUp_LostWakeRaceStillDelivers(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)

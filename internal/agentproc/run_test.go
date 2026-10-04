@@ -349,3 +349,50 @@ func TestNewDirectCommand_FiltersInheritedJSCJITKey(t *testing.T) {
 		t.Errorf("got %q, want BUN_JSC_useJIT=0 (the inherited BUN_JSC_useJIT=1 must be filtered, not left to race the appended default)", matches[0])
 	}
 }
+
+// lineCountingSink counts the lines a reader reports to its observer.
+type lineCountingSink struct {
+	NoopSink
+	lines int
+}
+
+func (c *lineCountingSink) OnLine()                    { c.lines++ }
+func (c *lineCountingSink) OnToolUse(string, string)   {}
+func (c *lineCountingSink) OnToolResult(string)        {}
+func (c *lineCountingSink) OnTurnEnd()                 {}
+func (c *lineCountingSink) OnPermission(string) func() { return func() {} }
+
+// TestStreamReaders_RetryNoticesAreNotLines: a provider that keeps failing
+// makes the runtime write a retry notice per attempt, and an observer that
+// counted them as lines would read a stalled engagement as a busy one. Both
+// readers keep them back and report every other line, control lines included.
+func TestStreamReaders_RetryNoticesAreNotLines(t *testing.T) {
+	retry := `{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":null,"error":"unknown"}`
+	body := []string{
+		`{"type":"system","subtype":"init","session_id":"sess-r"}`,
+		retry, retry, retry,
+		`{"type":"assistant","message":{"id":"m1","content":[{"type":"text","text":"API Error"}]},"parent_tool_use_id":null,"error":"server_error"}`,
+		`{"type":"result","subtype":"success","is_error":true,"result":"API Error"}`,
+	}
+
+	t.Run("one-shot", func(t *testing.T) {
+		sink := &lineCountingSink{}
+		if _, err := consumeStream(strings.NewReader(strings.Join(body, "\n")+"\n"), sink, NewStreamState(), "t"); err != nil {
+			t.Fatal(err)
+		}
+		if sink.lines != 3 {
+			t.Errorf("OnLine called %d times, want 3 (init, assistant, result)", sink.lines)
+		}
+	})
+	t.Run("interactive", func(t *testing.T) {
+		sink := &lineCountingSink{}
+		lines := append([]string{`{"type":"control","subtype":"ready"}`}, body...)
+		lr := &LiveRun{ready: make(chan struct{})}
+		if _, err := lr.consumeStreamInteractive(strings.NewReader(strings.Join(lines, "\n")+"\n"), sink, NewStreamState(), nil, nil, "t"); err != nil {
+			t.Fatal(err)
+		}
+		if sink.lines != 4 {
+			t.Errorf("OnLine called %d times, want 4 (ready, init, assistant, result)", sink.lines)
+		}
+	})
+}

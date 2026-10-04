@@ -58,6 +58,24 @@ type Classified interface {
 	UpstreamClass() Class
 }
 
+// TransportError is a request that failed in transit: the connection to the
+// upstream could not be made, or broke before a response arrived. A client
+// returns it in place of the error from http.Client.Do once ClassifyTransport
+// has counted that error as an upstream outcome. A caller that must not
+// mistake a local fault for an outage reads the mark rather than the error's
+// type, because a unix-socket bind, a database dial and a request to a
+// process on the same host fail with a net.Error too.
+type TransportError struct {
+	Err error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// UpstreamClass implements Classified.
+func (e *TransportError) UpstreamClass() Class { return Transient }
+
 // ClassifyResponse is the default classification of an HTTP response. The
 // header is accepted so a caller hands over the whole response; the default
 // reads only the status and, for a 403, the body.
@@ -199,11 +217,7 @@ func RetryableTransport(err error, idempotent bool) bool {
 		errors.As(err, &recordErr), errors.Is(err, http.ErrSchemeMismatch):
 		return false
 	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return false
-	}
-	return true
+	return !timedOut(err)
 }
 
 // maxRetryAfter is the longest wait RetryAfter reports. It is far above any
@@ -257,19 +271,40 @@ func Backoff(attempt int, base, max time.Duration) time.Duration {
 	return base << shift
 }
 
+// sleepProgressInterval is how often a wait under a progress report
+// (WithProgress) reports while it lasts.
+var sleepProgressInterval = 15 * time.Second
+
 // Sleep waits d, or returns ctx.Err() as soon as ctx is done, so the caller's
 // deadline bounds every wait regardless of a client's retry cap.
+//
+// Under a progress report, the wait reports when it starts and every
+// sleepProgressInterval until it ends. A client waiting out a rate limit or a
+// backoff is doing what it should, and a caller that judges its liveness by
+// progress would otherwise read a wait of minutes as a stuck loop.
 func Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
+	report := progressFrom(ctx)
+	var tick <-chan time.Time
+	if report != nil {
+		report()
+		ticker := time.NewTicker(sleepProgressInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		case <-tick:
+			report()
+		}
 	}
 }
 

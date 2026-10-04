@@ -474,7 +474,10 @@ type Sink interface {
 // Every method is called on the reader goroutine and must not block: a
 // blocked observer stalls the stream it is observing.
 type StreamObserver interface {
-	// OnLine reports a line read off the stream, whatever it carried.
+	// OnLine reports a line read off the stream, whatever it carried, except
+	// a retry notice. The runtime writes one each time its provider fails a
+	// request it will retry, so a provider that keeps failing produces a
+	// steady stream of them, and none of it is progress.
 	OnLine()
 	// OnToolUse reports an assistant line handing tool call id to the
 	// harness, which runs it as soon as the block lands.
@@ -812,10 +815,10 @@ func consumeStream(stdout io.Reader, sink Sink, stream *StreamState, traceID str
 		// the bytes before reacting to the error so a final unterminated
 		// event isn't dropped.
 		if len(line) > 0 {
-			if observer != nil {
+			messages, result := stream.ParseLine(line, traceID)
+			if observer != nil && !stream.retryNotice {
 				observer.OnLine()
 			}
-			messages, result := stream.ParseLine(line, traceID)
 
 			if !sessionDelivered {
 				if sid := stream.SessionID(); sid != "" {

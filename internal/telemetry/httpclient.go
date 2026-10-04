@@ -9,8 +9,9 @@ import (
 
 // TracedTransport wraps an outbound RoundTripper so every request through
 // it produces a client span. A nil base means http.DefaultTransport, the
-// same convention http.Client uses, behind a check that drops its idle
-// connections on the first request after a system suspend (sharedTransport).
+// same convention http.Client uses, behind a check that moves to a fresh
+// connection pool on the first request after a system suspend
+// (sharedTransport).
 //
 // upstream ("github", "jira", "slack", "llm") becomes the span name as
 // "<upstream>.http" — one name per client, since otelhttp's default of

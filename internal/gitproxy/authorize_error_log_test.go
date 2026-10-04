@@ -14,7 +14,7 @@ import (
 )
 
 // TestGatedProxy_AuthorizeErrorIsLogged pins the one place a gate error's cause
-// survives. The 502 body deliberately tells the agent nothing about server
+// survives. The 403 body deliberately tells the agent nothing about server
 // internals and git prints that body as its entire explanation; the audit
 // record's Reason is a fixed vocabulary with no room for an error string. So
 // without this line the operator-visible account of a run that cannot touch git
@@ -40,8 +40,8 @@ func TestGatedProxy_AuthorizeErrorIsLogged(t *testing.T) {
 		t.Fatalf("roundtrip: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.StatusCode)
 	}
 
 	got := buf.String()

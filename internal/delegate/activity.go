@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -37,7 +38,10 @@ const (
 	toolCallDeadline   = 30 * time.Minute
 	toolSocketDeadline = toolCallDeadline + time.Minute
 
-	// Clone, fetch, snapshot rehydrate: one workspace operation.
+	// One workspace operation: a clone, a snapshot rehydrate, or the
+	// snapshot an ending takes. This is the operation's own timeout; the
+	// watchdog tracks it backstopMargin past this, so the timeout fails the
+	// operation as the error it is before the watchdog could call it a stall.
 	workspaceOpDeadline = 10 * time.Minute
 
 	// A permission prompt waiting on a person (SDK runtime only).
@@ -109,6 +113,12 @@ type activityTracker struct {
 	// decided is set once the watchdog has stopped the engagement, and
 	// stopped once the engagement has ended: either way nothing re-arms.
 	decided, stopped bool
+	// claimID is the claim the engagement holds. A release names it, so an
+	// engagement letting go of the conversation reaches only its own tracker.
+	claimID string
+	// firing covers a decided stall while its callback runs, so stop can
+	// wait for the stop the callback is filing.
+	firing sync.WaitGroup
 }
 
 type inflightOp struct {
@@ -199,15 +209,18 @@ func (a *activityTracker) snapshot() (idle time.Duration, op string) {
 }
 
 // stop ends the watchdog with the engagement. A callback already dispatched
-// reads stopped and stands down.
+// reads stopped and stands down; a stall already decided is waited for, so
+// nothing the engagement writes after stop returns can race the stop that
+// stall is filing.
 func (a *activityTracker) stop() {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.stopped = true
 	a.timer.Stop()
+	a.mu.Unlock()
+	a.firing.Wait()
 }
 
 // rearmLocked points the one timer at whichever deadline governs now: the
@@ -250,7 +263,9 @@ func (a *activityTracker) check() {
 	}
 	a.decided = true
 	stalled := a.stalled
+	a.firing.Add(1)
 	a.mu.Unlock()
+	defer a.firing.Done()
 	stalled(cause)
 }
 
@@ -279,6 +294,12 @@ type activityTimings struct {
 // fails it.
 func (t activityTimings) toolSocket() time.Duration {
 	return t.toolCall + (toolSocketDeadline - toolCallDeadline)
+}
+
+// workspaceOpBackstop is the watchdog's deadline for a workspace operation,
+// past the operation's own timeout so that timeout fires first.
+func (t activityTimings) workspaceOpBackstop() time.Duration {
+	return t.workspaceOp + backstopMargin
 }
 
 // setActivityTimings overrides the watchdog's bounds. Nothing in the running
@@ -320,6 +341,7 @@ func (s *Spawner) startActivityTracker(conv *domain.Conversation, fence context.
 	a := newActivityTracker(s.resolvedActivityTimings().idle, func(cause stallCause) {
 		s.stallEngagement(conv, fence, cause)
 	})
+	a.claimID = conv.ClaimID
 	s.mu.Lock()
 	s.activity[conv.ID] = a
 	s.mu.Unlock()
@@ -341,6 +363,44 @@ func (s *Spawner) activityFor(conversationID string) *activityTracker {
 	return s.activity[conversationID]
 }
 
+// releaseActivity ends the watchdog of the engagement holding claimID on
+// conversationID. Every write that lets a claim go calls it first: a park, a
+// hand-back, a terminal, and the exits of an engagement its lease fenced.
+// Past that point a stall is not the engagement's to report. The stop it
+// would file is written against the conversation, not the claim, so it would
+// turn a park's reason into a stall, take a handed-back conversation out of
+// the queue, or stop whatever engagement holds the conversation next. The
+// work an engagement still does after letting go — the snapshot that follows
+// a park or a hand-back — carries a bound of its own instead.
+//
+// Matching the claim keeps a successor in this process out of reach: its
+// tracker is registered under the same conversation, and only its own
+// release may end it.
+func (s *Spawner) releaseActivity(conversationID, claimID string) {
+	a := s.activityFor(conversationID)
+	if a == nil || a.claimID != claimID {
+		return
+	}
+	a.stop()
+}
+
+// beginWorkspaceOp bounds one workspace operation and reports it to the
+// watchdog. The returned context carries the operation's own timeout, so a
+// clone, a rehydrate or a snapshot that stops making progress fails as the
+// error it is: a setup failure the bring-up ladder retries, or a snapshot
+// the ending logs and goes past. The watchdog's deadline sits backstopMargin
+// beyond that timeout, for an operation that ignores its context. end
+// releases both.
+func (s *Spawner) beginWorkspaceOp(ctx context.Context, conversationID, name string) (opCtx context.Context, end func()) {
+	timings := s.resolvedActivityTimings()
+	opCtx, cancel := context.WithTimeout(ctx, timings.workspaceOp)
+	endOp := s.activityFor(conversationID).begin(name, timings.workspaceOpBackstop())
+	return opCtx, func() {
+		endOp()
+		cancel()
+	}
+}
+
 // stallEngagement stops an engagement the watchdog found stalled. The intent
 // goes first, so an executor that dies mid-stop still leaves a record the
 // settlement parks as stalled; the cancel runs whatever the write did, since
@@ -354,6 +414,14 @@ func (s *Spawner) activityFor(conversationID string) *activityTracker {
 // lease lapses, and the takeover requeues it. The SDK reports no provider
 // operation (a wait on its provider surfaces as the idle arm), so this only
 // ever applies to a native engagement.
+//
+// The intent is written against the conversation, which outlives the claim,
+// so a stall decided once the claim is already released — the lease fenced
+// the engagement, or a takeover released it from under a holder that did not
+// know — files nothing: the conversation is no longer this engagement's, and
+// a stop would land on whoever holds it next. The engagement's own releases
+// end the watchdog before they write (releaseActivity), so this read is for
+// the releases it does not make itself.
 func (s *Spawner) stallEngagement(conv *domain.Conversation, fence context.CancelCauseFunc, cause stallCause) {
 	if cause.op == agentloop.ProviderActivityOp {
 		fence(errUpstreamStalled)
@@ -364,11 +432,17 @@ func (s *Spawner) stallEngagement(conv *domain.Conversation, fence context.Cance
 	}
 	if s.conversations != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), stallIntentTimeout)
-		if _, err := s.conversations.RequestStopSystem(ctx, conv.OrgID, conv.ID, "", "", domain.ParkReasonStalled); err != nil {
+		_, err := s.conversations.RequestStopForClaimSystem(ctx, conv.OrgID, conv.ID, conv.ClaimID, domain.ParkReasonStalled)
+		cancel()
+		if errors.Is(err, db.ErrClaimReleased) {
+			dispatchLog.Info("engagement stall decided after it let go of its claim; the conversation is no longer its to stop",
+				"conversation", conv.ID, "claim", conv.ClaimID, "op", cause.op, "elapsed", cause.elapsed, "error", err)
+			return
+		}
+		if err != nil {
 			dispatchLog.Warn("recording the stall's stop intent failed; stopping the engagement on its cause alone",
 				"conversation", conv.ID, "claim", conv.ClaimID, "error", err)
 		}
-		cancel()
 	}
 	fence(errStalled)
 

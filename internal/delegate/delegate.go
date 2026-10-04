@@ -655,6 +655,23 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, c
 	return agentprompt.ToolsReferenceForSources(append(kinds, base...))
 }
 
+// errNoGitHubClient is setupGitHub's refusal when it was handed no client to
+// read the pull request with.
+var errNoGitHubClient = errors.New("GitHub credentials not configured")
+
+// withGitHubResolveCause replaces a setup's refusal for want of a GitHub
+// client with the reason the resolve gave none. The refusal alone reads as a
+// credential nobody bound, which spends the setup budget. The resolve's own
+// error says whether it was that or an App token mint GitHub did not answer,
+// and only that error carries the mark the hand-back reads to choose the
+// upstream budget instead.
+func withGitHubResolveCause(err, resolveErr error) error {
+	if resolveErr == nil || !errors.Is(err, errNoGitHubClient) {
+		return err
+	}
+	return fmt.Errorf("resolve the GitHub client: %w", resolveErr)
+}
+
 // setupGitHub prepares a worktree for a GitHub PR task.
 //
 // On the executor path (sidecar non-nil) the GetPR client and the host-side
@@ -665,7 +682,7 @@ func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, c
 func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task, ghClient *ghclient.Client, sidecar *runSidecar, localGit *localGitChannel) (runConfig, error) {
 	ghClient = prReadClient(orgID, ghClient, sidecar)
 	if ghClient == nil {
-		return runConfig{}, fmt.Errorf("GitHub credentials not configured")
+		return runConfig{}, errNoGitHubClient
 	}
 
 	owner, repo, prNumber := domain.SplitGitHubEntitySourceID(task.EntitySourceID)
@@ -759,18 +776,13 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	// A clone that cannot finish in its bound is a setup failure, and the
 	// timeout surfaces as the error it is for the bring-up ladder to requeue.
-	// The watchdog's operation is the backstop for a clone that ignores its
-	// context.
-	timings := s.resolvedActivityTimings()
-	cloneCtx, cancelClone := context.WithTimeout(cloneCtx, timings.workspaceOp)
-	endClone := s.activityFor(conversationID).begin("clone", timings.workspaceOp)
+	cloneCtx, endClone := s.beginWorkspaceOp(cloneCtx, conversationID, "clone")
 	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
 	endClone()
-	cancelClone()
 	recordSpanError(cloneSpan, err)
 	cloneSpan.End()
 	if err != nil {

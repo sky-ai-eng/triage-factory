@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // ErrNoGitHubCredentials is returned by ClientFor when no credential tier
@@ -700,8 +701,10 @@ func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, 
 	tok, err := r.installationToken(ctx, orgID, app, inst, base)
 	if err != nil {
 		// A mint failure on an active-App org is a hard error (no PAT to fall
-		// to) — usually a bad/rotated PEM or a revoked installation.
-		ghResolverLog.Warn("mint installation token failed",
+		// to). One the host answered or failed to answer is the connection's
+		// state, which the poller reports once rather than once per mint;
+		// anything else (a PEM that will not parse) keeps Warn.
+		ghResolverLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "mint installation token failed",
 			"org", orgID, "target", target, "installation", inst.InstallationID, "error", err)
 		return githubapp.Token{}, err
 	}

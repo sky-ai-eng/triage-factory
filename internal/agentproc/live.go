@@ -544,10 +544,10 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 	for {
 		line, readErr := readLine(reader, maxStreamLineBytes)
 		if len(line) > 0 {
-			if observer != nil {
-				observer.OnLine()
-			}
 			if ctl, ok := parseControlLine(line); ok {
+				if observer != nil {
+					observer.OnLine()
+				}
 				switch ctl.Subtype {
 				case "ready":
 					l.markReady()
@@ -574,6 +574,9 @@ func (l *LiveRun) consumeStreamInteractive(stdout io.Reader, sink Sink, stream *
 				// Control lines are not sink content.
 			} else {
 				messages, result := stream.ParseLine(line, traceID)
+				if observer != nil && !stream.retryNotice {
+					observer.OnLine()
+				}
 
 				if !sessionDelivered {
 					if sid := stream.SessionID(); sid != "" {

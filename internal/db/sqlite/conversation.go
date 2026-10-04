@@ -316,8 +316,14 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 //
 // queued_at is re-stamped for the same reason: a wake starts a new queue
 // episode, and the column marks when the current one began. Placement's
-// aging window never reads it at N=1, but the queue-dwell readout does, and
-// a resumed conversation's wait is measured from the wake, not the mint.
+// aging window never reads it at N=1, but the retry budgets count from it and
+// the queue-dwell readout measures from it, so a resumed conversation's wait
+// and its budgets both start at the wake, not the mint.
+//
+// The `open` arm refuses a conversation whose blueprint run was called off,
+// as the claim gate does. The IMMEDIATE transaction serializes this statement
+// against the cancel and its settlement, so the guard reads the run in the
+// same statement that flips the row.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
@@ -337,7 +343,10 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			                    LIMIT 1)
 			WHERE id = ?
 			  AND ended_at IS NULL
-			  AND (status = 'open'
+			  AND ((status = 'open'
+			        AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
+			                        WHERE br.id = conversations.blueprint_run_id
+			                          AND (br.cancel_requested = 1 OR br.status = 'cancelled')))
 			       OR (status = 'completed'
 			           AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                           WHERE br.id = conversations.blueprint_run_id
@@ -1321,8 +1330,32 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	return writeStopIntent(ctx, s.q, conversationID, by, reason)
+}
+
+// RequestStopForClaimSystem writes the intent behind the claim fence, in one
+// transaction with it.
+func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (bool, error) {
+	requested := false
+	err := inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		var err error
+		requested, err = writeStopIntent(ctx, q, conversationID, "", reason)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return requested, nil
+}
+
+// writeStopIntent records a stop request on a non-terminal conversation and
+// reports whether it landed.
+func writeStopIntent(ctx context.Context, q queryer, conversationID, by string, reason domain.ParkReason) (bool, error) {
 	var id string
-	err := s.q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		UPDATE conversations
 		SET stop_requested_at = COALESCE(stop_requested_at, ?),
 		    stop_requested_by = CASE WHEN stop_requested_at IS NULL

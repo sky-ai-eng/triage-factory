@@ -182,6 +182,20 @@ const undeliveredInputExistsSQL = `EXISTS (
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = false
 		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
 
+// undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
+// person messages that arrived while the claim claimExpr names held the
+// conversation. A message insert attributes the row to the claim live at that
+// moment, so the attribution answers "sent after this engagement was claimed"
+// on the claim row itself, with no comparison between the clock of the
+// process that wrote the message and the database's.
+func undeliveredInputDuringClaimSQL(claimExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM messages m_i
+		WHERE m_i.conversation_id = r.id AND m_i.delivered = false
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.claim_id = ` + claimExpr + `)`
+}
+
 // needsDrivingSQL is the eligibility predicate, identical for every surface:
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
@@ -311,8 +325,11 @@ func taskLiveConversationSQL(orgExpr, taskExpr string) string {
 
 // conversationQueueClaimSelect is the candidate CTE's projection —
 // everything the dispatcher needs to branch on and drive the claimed
-// conversation.
-const conversationQueueClaimSelect = `r.id, r.org_id,
+// conversation, plus the three columns db.EpisodeStartSQL reads. Those are read
+// as the candidate stood before this claim, which is the reading the episode
+// needs: a claim that takes a conversation off its park sees it parked here,
+// while the same statement's un-park clears the status.
+const conversationQueueClaimSelect = `r.id, r.org_id, r.status, r.queued_at, r.started_at,
 	COALESCE(r.type, '')                  AS type,
 	COALESCE(r.task_id::text, '')         AS task_id,
 	COALESCE(r.prompt_id, '')             AS prompt_id,
@@ -347,6 +364,16 @@ var handedBackOutcomesSQL = db.HandBackOutcomesSQL()
 // an outcome of its own, because that is an engagement that got somewhere —
 // and the budgets exist to stop retrying one that never does.
 //
+// It also starts no earlier than the moment the conversation last entered the
+// queue (db.EpisodeStartSQL), because a person asking for the work again is a
+// fresh start whatever the claims say. The two boundaries are needed together:
+// the dispatcher's settlement of a stop parks a conversation without writing a
+// claim, so no claim outcome marks the end of the episode that stop ended, and
+// the entry into the queue that follows is the only record that one began.
+// The comparison against that entry is strict, for the reason the release
+// comparison below is written the way it is: a hand-back stamped in the same
+// instant as the entry is not counted, which can only under-count.
+//
 // Counting the conversation's LIFETIME claims instead is not a harsher budget
 // but a wrong one. Every stop, resume and wake mints a claim, so a
 // conversation picked up four times would reach its next claim already over
@@ -372,6 +399,7 @@ func episodeHandBacksSQL(convAlias, outcomesSQL string) string {
 	return `(SELECT COUNT(*) FROM claims c2
 	WHERE c2.conversation_id = ` + convAlias + `.id
 	  AND c2.outcome IN (` + outcomesSQL + `)
+	  AND COALESCE(c2.released_at, c2.claimed_at) > ` + db.EpisodeStartSQL(convAlias) + `
 	  AND NOT EXISTS (
 	      SELECT 1 FROM claims c3
 	      WHERE c3.conversation_id = c2.conversation_id
@@ -552,7 +580,11 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			-- park_reason in particular must not survive its own park. A
 			-- deferred row is mid-flight, so the only column it carries here
 			-- is next_attempt_at: the wait it named is over once it is claimed.
+			-- A row taken off its park enters the queue with this claim, so it
+			-- re-stamps queued_at (db.EpisodeStartSQL).
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
+			                         queued_at = CASE WHEN conversations.status IS NOT NULL THEN now()
+			                                          ELSE conversations.queued_at END,
 			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 			                         next_attempt_at = NULL
 			FROM candidate
@@ -653,7 +685,7 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
 	`, lease.Seconds(), claimID, orgID, conversationID, activity.Idle.Seconds(), activity.Op, checkpointAge).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
+		return db.ClaimRenewal{}, liveGuardRefusal(ctx, s.conn, orgID, conversationID, claimID)
 	}
 	if err != nil {
 		return db.ClaimRenewal{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
@@ -661,16 +693,19 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	return out, nil
 }
 
-// renewalRefusal classifies a renewal its guard refused, with one follow-up
-// read of the claim. It runs only on the refusal path, so the renewal itself
-// stays the one guarded statement it has to be.
+// liveGuardRefusal classifies a holder write that its live-claim guard
+// (unreleased, lease in the future) refused, with one follow-up read of the
+// claim. It runs only on the refusal path, so the write itself stays the one
+// guarded statement it has to be.
 //
 // A claim the follow-up finds live was restored between the two statements,
 // and the only write that takes an unreleased claim from lapsed to live is
-// ReacquireClaimLeaseSystem: the refusal this renewal met was still the lapse.
-// A follow-up that fails answers the unclassified refusal, which is what every
-// caller treated a refusal as before the lapse had its own name.
-func renewalRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+// ReacquireClaimLeaseSystem: the refusal this write met was still the lapse.
+// A follow-up that fails answers the unclassified refusal, ErrClaimReleased:
+// every caller already treats that as the end of its ownership, and only the
+// lapse is ever recoverable, so a refusal that cannot be shown to be a lapse
+// is read as one that is not.
+func liveGuardRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
 	err := claimRefusal(ctx, q, orgID, conversationID, claimID, "")
 	switch {
 	case err == nil:
@@ -717,8 +752,13 @@ func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, 
 // run only when that run is one the first statement locked. A run's terminal
 // write (markBlueprintRunStatus) locks the run and then parks its children, so
 // a settlement that locked a child first and its run second could wait on it
-// while it waited on the child. Both now take the run first, and a run another
+// while it waited on the child. Both take the run first, and a run another
 // writer holds is skipped (SKIP LOCKED) and settled on the next pass.
+//
+// The arm for a step no intent reached leaves out a step whose latest claim was
+// released inside db.ReactorGrace (settleReleasedRecentlySQL), and the first
+// statement does not lock its run for it either: that engagement is between
+// its release and the reactor that ends the run.
 //
 // Inside the second statement the victims' FOR UPDATE serializes against
 // ClaimNextConversation's FOR UPDATE OF r: whichever commits second re-reads
@@ -744,15 +784,29 @@ func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.C
 // see SettleUnclaimedStopsSystem's contract.
 const settleNoLiveClaimSQL = `NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)`
 
+// settleReleasedRecentlySQL is true of a conversation, against the alias r,
+// whose latest claim was released less than graceArg seconds ago on database
+// time: the measure StrandedBlueprintRunsSystem keeps a run out by. A cancel's
+// holder parks its step, which clears the intent, and releases its claim
+// before its reactor cancels the run, so for that long the step looks like
+// one the cancel never reached.
+func settleReleasedRecentlySQL(graceArg string) string {
+	return `EXISTS (SELECT 1 FROM claims cl_g
+		WHERE cl_g.conversation_id = r.id
+		  AND cl_g.released_at > now() - make_interval(secs => ` + graceArg + `))`
+}
+
 // settleUnclaimedStops runs the settlement over the conversations scope
 // narrows to; scope is an AND-clause over the victims' alias r, binding args.
 func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
-	lockedArg := "$" + strconv.Itoa(len(args)+1)
+	graceArg := "$" + strconv.Itoa(len(args)+1) + "::float8"
+	lockedArg := "$" + strconv.Itoa(len(args)+2)
+	args = append(append([]any{}, args...), db.ReactorGrace.Seconds())
 	var out []db.SettledStop
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		// 1. The runs a settlement may cancel: running, cancel-requested, and
-		// holding a non-terminal conversation nobody drives. Every victim that
-		// cancels a run is one of those, whether it carries an intent or not.
+		// holding a non-terminal conversation nobody drives that one of the
+		// arms below admits. Every victim that cancels a run is one of those.
 		rows, err := q.QueryContext(ctx, `
 			SELECT br.id::text FROM blueprint_runs br
 			WHERE br.status = 'running' AND br.cancel_requested = true
@@ -761,6 +815,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			      WHERE r.blueprint_run_id = br.id
 			        AND (r.status IS NULL OR r.status = 'open')
 			        AND `+settleNoLiveClaimSQL+`
+			        AND (r.stop_requested_at IS NOT NULL OR NOT `+settleReleasedRecentlySQL(graceArg)+`)
 			        `+scope+`
 			  )
 			ORDER BY br.id
@@ -784,7 +839,8 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 
 		// 2. The settlement. The first victim arm is the intent; the second is
 		// a non-terminal step under a cancel-requested run that no intent ever
-		// reached. The last clause is the lock order: a victim whose
+		// reached, once its latest engagement has had the grace to reach its
+		// reactor. The last clause is the lock order: a victim whose
 		// settlement writes its run is admitted only when that run is locked.
 		rows, err = q.QueryContext(ctx, `
 			WITH victims AS (
@@ -795,7 +851,8 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				WHERE `+settleNoLiveClaimSQL+`
 				  AND (r.stop_requested_at IS NOT NULL
 				       OR ((r.status IS NULL OR r.status = 'open')
-				           AND br.status = 'running' AND br.cancel_requested = true))
+				           AND br.status = 'running' AND br.cancel_requested = true
+				           AND NOT `+settleReleasedRecentlySQL(graceArg)+`))
 				  AND (br.id IS NULL
 				       OR NOT (br.status = 'running' AND br.cancel_requested = true)
 				       OR r.status IN (`+conversationTerminalStatusesSQL+`)
@@ -1102,7 +1159,8 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		}
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = $4
-			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+			  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		`, claimID, orgID, conversationID, outcome)
 		if err != nil {
 			return err
@@ -1110,16 +1168,16 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
 		}
 		_, err = q.ExecContext(ctx, `
 			UPDATE conversations r
-			SET next_attempt_at = CASE WHEN $1::float8 > 0 AND NOT `+undeliveredInputExistsSQL+`
+			SET next_attempt_at = CASE WHEN $1::float8 > 0 AND NOT `+undeliveredInputDuringClaimSQL("$5::uuid")+`
 			                           THEN statement_timestamp() + make_interval(secs => $1::float8) END,
 			    result_summary = COALESCE(NULLIF($2, ''), r.result_summary),
 			    preferred_executor_id = NULL
 			WHERE r.org_id = $3 AND r.id = $4 AND r.status IS NULL
-		`, delay.Seconds(), lastErr, orgID, conversationID)
+		`, delay.Seconds(), lastErr, orgID, conversationID, claimID)
 		return err
 	})
 	if err != nil && !errors.Is(err, db.ErrClaimReleased) {
@@ -1207,42 +1265,51 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 	return out, rows.Err()
 }
 
-// RequeueConversation releases the claim FIRST and flips the conversation
-// row SECOND, as two separate statements in one transaction — NOT the single
-// combined CTE the pre-conversion version used. Postgres runs every
-// data-modifying CTE in a WITH clause against one shared snapshot (they
-// "cannot see one another's effects on the target tables" per the Postgres
-// docs), so a single statement's claims release would be invisible to that
-// same statement's conversationClaimLateral read — the returned row would
-// show the just-released claim as still active. Two statements in the same
-// transaction don't have that restriction: the second sees the first's write
-// directly, which is what makes the final RETURNING's derived display status
-// ('queued', no active claim) agree with a follow-up Get. See
-// writeConversationReturning's doc for the single-CTE version of this
-// caveat.
+// RequeueConversation locks the conversation, releases the claim, and then
+// writes the conversation, the order HandBackClaimSystem takes for the reason
+// it gives: every writer that touches a conversation and its claims locks the
+// conversation first, so this one cannot hold a claim another writer is
+// waiting on while it waits on that writer's conversation.
 //
-// The guard — a mid-flight conversation with a live claim — moves onto the
-// claims release itself (matched only when the owning conversation's status
-// IS NULL), so RowsAffected there tells the whole guard's outcome; the
-// conversations flip that follows needs no guard of its own; nothing else in
-// this transaction could have changed the row in between.
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
+// The release and the conversation write are separate statements so the
+// second sees the first. Every data-modifying CTE in one statement reads one
+// snapshot, so a single statement's conversationClaimLateral would still show
+// the claim it had just released, and the returned row's derived display
+// status would disagree with a follow-up Get.
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, claimID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
 	if !outcome.Valid() {
 		return nil, fmt.Errorf("%w: %q", db.ErrInvalidRequeueOutcome, outcome)
 	}
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) || !isValidUUID(claimID) {
+		return nil, fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
 	var result *domain.Conversation
 	err := inTx(ctx, s.conn, func(q queryer) error {
-		res, err := q.ExecContext(ctx, `
-			UPDATE claims SET released_at = now(), outcome = $3
-			WHERE org_id = $1 AND conversation_id = $2 AND released_at IS NULL
-			  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.status IS NULL)
-		`, orgID, conversationID, string(outcome))
+		var midFlight bool
+		err := q.QueryRowContext(ctx, `
+			SELECT status IS NULL FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+		`, orgID, conversationID).Scan(&midFlight)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+		}
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil || n == 0 {
+		res, err := q.ExecContext(ctx, `
+			UPDATE claims SET released_at = now(), outcome = $4
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+			  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
+		`, claimID, orgID, conversationID, string(outcome))
+		if err != nil {
 			return err
+		}
+		if n, err := res.RowsAffected(); err != nil {
+			return err
+		} else if n == 0 {
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
+		}
+		if !midFlight {
+			return nil
 		}
 		// preferred_executor_id is cleared: a requeue's stamp likely points at
 		// the executor that just failed the conversation; NULL means "unowned,
@@ -1262,10 +1329,10 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		result = r
 		return nil
 	})
-	if err != nil {
-		return nil, err
+	if err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		return nil, wrapAdminPoolPermErr(err, "conversation_queue.RequeueConversation")
 	}
-	return result, nil
+	return result, err
 }
 
 func (s *conversationQueueStore) MarkAwaitingCredentials(ctx context.Context, orgID, conversationID, credPubKey string) (bool, error) {

@@ -28,9 +28,7 @@ const (
 )
 
 // MissReason maps a credential-lookup error to the closed vocabulary above. An
-// error wrapping none of the sentinels is MissOther, which is what every
-// local-mode source answers: those resolve against the live secret store and
-// report their own failures.
+// error wrapping none of the sentinels is MissOther.
 func MissReason(err error) string {
 	switch {
 	case errors.Is(err, ErrNoBundle):

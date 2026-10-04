@@ -70,12 +70,45 @@ func attrs(name Name, orgID string, c Class) metric.AddOption {
 
 // Record counts one HTTP attempt against name, made for orgID, that ended in
 // c. orgID is empty for a request made for no org. If ctx carries a Tally,
-// the attempt is added to it as well.
+// the attempt is added to it as well, and if it carries a progress report
+// (WithProgress), that is called.
 func Record(ctx context.Context, name Name, orgID string, c Class) {
 	current().requests.Add(context.Background(), 1, attrs(name, orgID, c))
 	if t := tallyFrom(ctx); t != nil {
 		t.add(c)
 	}
+	if report := progressFrom(ctx); report != nil {
+		report()
+	}
+}
+
+type progressKey struct{}
+
+// ReportProgress calls the progress report on ctx (WithProgress), if any, for
+// a request that ended, answered or not, and that its client does not count
+// with Record.
+func ReportProgress(ctx context.Context) {
+	if report := progressFrom(ctx); report != nil {
+		report()
+	}
+}
+
+// WithProgress returns a context under which every attempt Record counts
+// also calls report, whatever its outcome. It is for a caller whose liveness
+// is the requests it completes rather than how long its work takes: a poll
+// cycle against a slow host is alive for as long as its requests keep
+// finishing, however long the whole cycle runs. report must be cheap and safe
+// for concurrent use.
+func WithProgress(ctx context.Context, report func()) context.Context {
+	return context.WithValue(ctx, progressKey{}, report)
+}
+
+func progressFrom(ctx context.Context) func() {
+	if ctx == nil {
+		return nil
+	}
+	report, _ := ctx.Value(progressKey{}).(func())
+	return report
 }
 
 // RecordRetry counts one decision to retry a request against name; c is the

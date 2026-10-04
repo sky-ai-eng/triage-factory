@@ -3,8 +3,10 @@ package github
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -204,7 +206,7 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 }
 
 // doWithRetry is the shared request loop behind every request-core method
-// (request, GetConditional, PostGraphQL, DownloadArtifact — the last supplies
+// (request, GetConditional, postGraphQL, DownloadArtifact — the last supplies
 // its own hc with an extended timeout, everything else passes c.http). Every
 // attempt is classified and counted (upstream.Record) against the client's
 // org.
@@ -225,6 +227,12 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
 // the caller unchanged.
+//
+// Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
+// transient failure marks its host unreachable, and every later request to
+// that host gets one attempt the same way a mutation does. A request that
+// timed out counts toward its host's silence, and a later request to a silent
+// host is not sent (upstream.Silent).
 //
 // Any response that isn't retried is returned to the caller. A success keeps
 // its body untouched and still open, so callers that stream
@@ -249,21 +257,35 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		if err != nil {
 			return nil, err
 		}
+		host := req.URL.Host
+		if upstream.Silent(ctx, host) {
+			return nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
+		}
+		sent := time.Now()
 		resp, err := hc.Do(req)
 		if err != nil {
+			if c.viaProxy && dialFailed(err) {
+				// The base is the run's own credential proxy, so a connection
+				// to it that fails says the proxy is down, not GitHub. That is
+				// a fault on this host, returned unmarked and uncounted: GitHub
+				// unreachable behind a live proxy arrives as the proxy's 502.
+				return nil, err
+			}
 			class, counted := upstream.ClassifyTransport(ctx, err)
 			if !counted {
 				return nil, err
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts {
-				return nil, err
+			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
+				upstream.MarkTransportFailure(ctx, host, sent, err)
+				return nil, &upstream.TransportError{Err: err}
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
 				return nil, err
 			}
 			continue
 		}
+		upstream.MarkAnswered(ctx, host)
 		c.recordRateLimit(resp.Header)
 
 		if resp.StatusCode < 400 {
@@ -276,6 +298,8 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		if readErr != nil {
 			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
 				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+				upstream.MarkUnreachable(ctx, host)
+				return nil, &upstream.TransportError{Err: readErr}
 			}
 			return nil, readErr
 		}
@@ -303,22 +327,21 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				wait = upstream.Backoff(attempt, rateLimitBackoffBase, maxRateLimitWait)
 			}
 
-			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts {
+			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
 				return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, err
 			}
 		case upstream.Transient:
-			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts {
-				return resp, nil
-			}
 			wait := transientBackoff(attempt)
 			if hasRetryAfter {
-				if retryAfter > transientBackoffMax {
-					return resp, nil
-				}
 				wait = retryAfter
+			}
+			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts ||
+				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, host)
+				return resp, nil
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, err
@@ -371,4 +394,10 @@ func isSecondaryRateLimitBody(body []byte) bool {
 // normally by the caller.
 func newBodyReader(data []byte) io.ReadCloser {
 	return io.NopCloser(bytes.NewReader(data))
+}
+
+// dialFailed reports whether err is a connection that never opened.
+func dialFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
