@@ -186,10 +186,9 @@ func (s *Spawner) runRecovery(ctx context.Context, interval time.Duration) {
 // No step waits on any of the claim loop's gates (capacity, the memory gate,
 // the drain, and the identity and partition fences), because each of those
 // answers whether this executor may start new work and none of these steps
-// starts any. The own-claim
-// release is the only release a fenced engagement's claim gets short of
-// another executor's takeover a lease later, and in local mode it is the only
-// release at all. The takeover's safety is the lease that lapsed on database
+// starts any. The own-claim release is the only release a fenced engagement's
+// claim gets short of another executor's takeover a lease later, and in local
+// mode it is the only release at all. The takeover's safety is the lease that lapsed on database
 // time, not the health of the executor taking it over; the settlement writes
 // only conversations no live claim holds; and the replay runs a reactor whose
 // writes are compare-and-swap guarded, enqueuing at most a step that any
