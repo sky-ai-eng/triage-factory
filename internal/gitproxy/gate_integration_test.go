@@ -178,8 +178,10 @@ func TestGatedProxy_DenyReasonAndMessagePropagate(t *testing.T) {
 }
 
 // TestGatedProxy_AuthorizeErrorFailsClosedAndAudits pins that an authz-backend
-// error fails closed (502, no upstream) AND still records a denial, so an
-// outage/misconfig leaves an audit trail of blocked git activity.
+// error fails closed (403, no upstream) AND still records a denial, so an
+// outage/misconfig leaves an audit trail of blocked git activity. A 403, not a
+// 502: the gate's data is TF's own, and git reports a 502 as the git host
+// being unreachable.
 func TestGatedProxy_AuthorizeErrorFailsClosedAndAudits(t *testing.T) {
 	rec := &fakeUpstreamRecord{}
 	upstream := fakeGitHub(rec)
@@ -198,8 +200,8 @@ func TestGatedProxy_AuthorizeErrorFailsClosedAndAudits(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("status = %d, want 502 on an authz-backend error", resp.StatusCode)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 on an authz-backend error", resp.StatusCode)
 	}
 	if rec.hits.Load() != 0 {
 		t.Errorf("upstream hit despite a failed authz check; want fail-closed")

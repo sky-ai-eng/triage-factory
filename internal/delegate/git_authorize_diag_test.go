@@ -14,7 +14,7 @@ import (
 
 // TestGitAuthorizeDecision_ErrorNamesTheFailingRead pins the diagnostic half of
 // the push gate. Every read here fails the decision closed, and the proxy turns
-// that into a 502 whose body deliberately tells the agent nothing — so the
+// that into a 403 whose body deliberately tells the agent nothing — so the
 // error text is the whole explanation an operator ever gets, at the far end of
 // a relay hop, in a different process from the store that produced it. A bare
 // driver error ("column X does not exist") says what broke without saying which

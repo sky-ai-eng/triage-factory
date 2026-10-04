@@ -446,9 +446,15 @@ func (s *Server) Handler() http.Handler {
 
 		// Live per-repo authorization. A nil Authorize is allow-all
 		// (loopback/test); in multi mode the wiring always sets it. A backend
-		// error fails closed with a 502 (the gate is up but its data source is
-		// broken — don't forward); a !Allowed decision is a 403. Both are
-		// blocked git activity, so both leave an audit trail.
+		// error fails closed (the gate is up but its data source is broken —
+		// don't forward), and so does a !Allowed decision. Both are blocked git
+		// activity, so both leave an audit trail.
+		//
+		// Both answer 403. The gate's data is TF's own (a store read, a relay
+		// call), so its failure is never the git host being unreachable, and a
+		// 502 is how git reports one: a setup clone refused that way would be
+		// retried on the upstream schedule for hours, where a refusal fails it
+		// within the setup budget, naming the cause in the log line below.
 		decision := Decision{Allowed: true}
 		if s.cfg.Authorize != nil {
 			d, err := s.cfg.Authorize(r.Context(), owner, repo)
@@ -458,7 +464,7 @@ func (s *Server) Handler() http.Handler {
 				//
 				// Log the cause: this is the only place it survives. The audit
 				// record's Reason is a fixed vocabulary with no room for it, the
-				// 502 body deliberately tells the agent nothing about server
+				// 403 body deliberately tells the agent nothing about server
 				// internals, and git prints that body as the whole explanation.
 				// A gate error stops every git operation the run makes, and it
 				// is always a server-side fault — a broken store read, a relay
@@ -467,7 +473,7 @@ func (s *Server) Handler() http.Handler {
 				gitproxyLog.Error("authorize gate errored; failing closed",
 					"owner", owner, "repo", repo, "op", op, "error", err)
 				s.recordDenial(DeniedGitOp{Owner: owner, Repo: repo, Op: op, Reason: "authorize-error"})
-				http.Error(w, "gitproxy: authorization check failed", http.StatusBadGateway)
+				http.Error(w, "gitproxy: authorization check failed", http.StatusForbidden)
 				return
 			}
 			if !d.Allowed {
