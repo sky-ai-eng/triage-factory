@@ -43,9 +43,10 @@ curl -fsS http://localhost:3000/readyz | jq .
 
 A poller check (`poller_github`, `poller_jira`) fails when that source's poll
 loop has made no progress for 90 seconds: it has not woken, completed a request
-to the upstream, or finished an org's poll. A cycle that runs longer than that
-while its requests keep completing (many orgs, or one org on a slow host) is
-not a failure.
+to the upstream, waited on a rate limit or a retry backoff, or finished an
+org's poll. A cycle that runs longer than that while its requests keep
+completing (many orgs, or one org on a slow host), or while it waits out a
+`Retry-After` of up to five minutes, is not a failure.
 
 An org absent from `rate_limit.github` has no observation yet this process (never
 polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
@@ -294,7 +295,7 @@ some wait before the next claim:
 | `requeued` | The engagement failed before its agent ran: a workspace that would not build, a runtime that would not start. | Setup: 5 in a row. | At once. |
 | `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
 | `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
-| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status, or names the failure when no answer came at all. Also a native engagement whose provider sent nothing for 150 seconds, and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status, or names the failure when the connection was refused or reset. Also a native engagement whose provider sent nothing for 150 seconds (an SDK engagement whose provider holds a request open without answering parks `stalled` at the 10-minute idle limit instead), and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
 
 A run that spends its upstream budget parks `open` with park reason
 `upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),
@@ -467,14 +468,16 @@ request was allowed: every later request in the cycle to the same host gets one
 attempt, with no backoff and no `Retry-After` wait. The cycle has already
 recorded the connection as lost, and the next cycle retries in full, so an org
 whose host is unreachable costs one retry sequence per cycle rather than one
-per repo, and the orgs polled after it are not held up. A timeout goes further,
-because its one attempt is the client's whole time budget: once a request to a
-host times out, later requests in the cycle to that host are not sent at all,
-and fail as that timeout did. They are not counted, since they never reached
-the host. If the host answers another request after the one that timed out
-was sent, the host was serving while that request hung, and later requests
-are sent again. Requests made outside a poll cycle, such as a delegated run's, keep every
-retry.
+per repo, and the orgs polled after it are not held up. Timeouts go further,
+because a timed-out attempt is the client's whole time budget: once two
+requests to a host have timed out with no answer from it in between, later
+requests in the cycle to that host are not sent at all, and fail as those
+timeouts did. They are not counted, since they never reached the host. One
+timeout is not enough, so a single read that always outlasts the timeout costs
+only itself. If the host answers another request after one that timed out was
+sent, the host was serving while that request hung: the timeout does not
+count, and a silent host's later requests are sent again. Requests made outside
+a poll cycle, such as a delegated run's, keep every retry.
 
 The error a client returns for a failed request carries the status and either
 the upstream's own error message from a JSON body, cut to at most 200

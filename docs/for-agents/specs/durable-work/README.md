@@ -528,20 +528,23 @@ Healthy runs have no automatic total-duration limit. Claim age alone must not st
 contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Explicit stop and cancel controls remain.
 
 Lease renewal proves ownership and database connectivity, not agent progress, so a stalled
-engagement whose executor still renews is detected separately (O4), the same way in both
+engagement whose executor still renews is detected separately (O4), by one watchdog in both
 runtimes:
 
 - Every blocking operation an engagement performs has a bound: 150s for a provider stream that
-  sends no bytes, 30m for a tool call, 10m for a workspace operation (clone, fetch, rehydrate),
-  150s for a permission prompt, and 30s for a detached write. Each engagement records the
-  operation in flight and its deadline.
+  sends no bytes (native only: the SDK reports no provider operation), 30m for a tool call, 10m
+  for a workspace operation (clone, rehydrate, snapshot), 150s for a permission prompt, and 30s
+  for a detached write. Each engagement records the operation in flight and its deadline.
 - One watchdog per engagement stops it when it has been idle with nothing in flight for 10m, or
   when an operation has passed its own deadline, which catches a bound that failed to fire. An
   operation that also carries its own timeout gets a watchdog deadline a margin later, so a
   timeout that fires is handled as the error it is.
 - The watchdog's stop is a system stop through D2 with the reason `stalled`: the conversation
-  parks `open` and waits for a person. A provider that stays silent is not a stall; the
-  engagement hands back on the upstream budget (D4).
+  parks `open` and waits for a person. A native engagement's provider that stays silent is not
+  a stall: the provider bound hands the engagement back on the upstream budget (D4). An SDK
+  engagement has no such bound, and the SDK's retry notices are not activity, so a provider
+  that holds its request open without answering leaves it idle until it parks `stalled` at the
+  10m limit. A provider that refuses or resets the connection is still a hand-back (D4).
 - Once an engagement has released its claim, its watchdog files no stop.
 - The renewal stamps `claims.last_activity_at` and `claims.current_op`, which the run page, the
   fleet view and the oldest-idle gauge read.
