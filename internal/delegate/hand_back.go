@@ -170,26 +170,27 @@ func sdkUpstreamSummary(r *agentproc.Result) string {
 
 // upstreamSetupFailure reports whether a failure before the agent ran was an
 // upstream the engagement fetches from being unreachable, rather than
-// something about the conversation or the host: a GitHub API call during
-// setup (the pull-request fetch) that failed Transient or RateLimited, or a
-// git command whose output names a network failure.
+// something about the conversation or the host: a git command whose output
+// names a network failure, or an error its client marked as an upstream's
+// (upstream.Classified) with the class Transient or RateLimited, such as
+// GitHub's answer to the pull-request read.
 //
-// A git command is read by IsTransientGitError alone, which never reads one
-// its deadline stopped as transient. Its GitError unwraps to the context
-// error then, and upstream.ClassOf reads context.DeadlineExceeded as a
-// transport timeout, so without this a clone that outlasts its bound because
-// the repository is large would spend the upstream budget instead of the
-// setup budget.
+// Only the mark counts, never the shape of the error. The bring-up's local
+// steps (a socket bind, a broker or sidecar call, a database read, a write
+// past its deadline) fail with a net.Error or a context deadline too, and a
+// deterministic one of those read as an outage would retry for four hours and
+// then tell a person a service was unreachable, where the setup budget fails
+// it within seconds naming the cause.
 func upstreamSetupFailure(cause error) bool {
 	if worktree.IsTransientGitError(cause) {
 		return true
 	}
-	var gitErr *worktree.GitError
-	if errors.As(cause, &gitErr) {
+	var marked upstream.Classified
+	if !errors.As(cause, &marked) {
 		return false
 	}
-	class, ok := upstream.ClassOf(cause)
-	return ok && (class == upstream.Transient || class == upstream.RateLimited)
+	class := marked.UpstreamClass()
+	return class == upstream.Transient || class == upstream.RateLimited
 }
 
 // upstreamSetupReason is what a person is told when an upstreamSetupFailure

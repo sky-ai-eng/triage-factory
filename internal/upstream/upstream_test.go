@@ -188,6 +188,28 @@ func TestClassOf(t *testing.T) {
 	}
 }
 
+// TestTransportError: the mark keeps the error it wraps readable as it was, so
+// a client that starts returning it changes nothing for a caller that reads
+// the text or reaches for the *url.Error, and ClassOf reads it as Transient
+// from its mark rather than from what it wraps.
+func TestTransportError(t *testing.T) {
+	for name, err := range transportErrors(t) {
+		t.Run(name, func(t *testing.T) {
+			marked := fmt.Errorf("request /x: %w", &TransportError{Err: err})
+			if got, want := marked.Error(), fmt.Errorf("request /x: %w", err).Error(); got != want {
+				t.Errorf("Error() = %q, want the unmarked text %q", got, want)
+			}
+			var mark Classified
+			if !errors.As(marked, &mark) || mark.UpstreamClass() != Transient {
+				t.Errorf("errors.As(Classified) on %v = %v, want a Transient mark", marked, mark)
+			}
+			if !errors.Is(marked, err) {
+				t.Errorf("errors.Is(%v, the wrapped error) = false", marked)
+			}
+		})
+	}
+}
+
 // TestLogLevel: a transient or auth failure logs at Debug, because the poller
 // reports the connection's loss and restoration once each. A rejected request
 // and a rate limit leave the connection up, so nothing else would report them

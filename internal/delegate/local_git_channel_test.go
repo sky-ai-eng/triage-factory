@@ -2,16 +2,23 @@ package delegate
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 type localGitResolver struct {
@@ -194,5 +201,84 @@ func TestStartLocalGitChannel_SSHProtocolDoesNotExcuseAnUnconfiguredOrg(t *testi
 		agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-none"})
 	if err == nil || !strings.Contains(err.Error(), "refuses to fall back") {
 		t.Fatalf("startLocalGitChannel error = %v, want the ambient-credential refusal", err)
+	}
+}
+
+// A credential the local resolver can never produce for a repository (here,
+// an App with no installation on the repository's owner) is answered the way
+// the sidecar answers a missing one: a 403, which git reports as a refusal.
+// Driven through the clone a GitHub setup runs, through the real gate and
+// token source, that makes it an ordinary setup failure rather than an
+// unreachable git host that would be retried for four hours. A resolver that
+// could not reach GitHub, or that GitHub rate-limited, keeps the 502 an
+// outage is answered with.
+func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	for name, tc := range map[string]struct {
+		resolveErr error
+		wantStatus string
+		upstream   bool
+	}{
+		"no installation for the owner": {
+			resolveErr: fmt.Errorf("%w: org=%s: app has no installation for owner", ghclient.ErrNoGitHubCredentials, runmode.LocalDefaultOrgID),
+			wantStatus: "The requested URL returned error: 403",
+		},
+		"GitHub unreachable while minting": {
+			resolveErr: fmt.Errorf("githubapp: mint installation token: %w", &url.Error{
+				Op: "Post", URL: "https://api.github.com/app/installations/1/access_tokens", Err: errors.New("dial tcp: lookup api.github.com: no such host"),
+			}),
+			wantStatus: "The requested URL returned error: 502",
+			upstream:   true,
+		},
+		"GitHub rate-limited the mint": {
+			resolveErr: &githubapp.APIStatusError{Op: "mint installation token", StatusCode: 429, Class: upstream.RateLimited},
+			wantStatus: "The requested URL returned error: 502",
+			upstream:   true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			database := newDelegateTestDB(t)
+			stores := sqlitestore.New(database)
+			ctx := context.Background()
+			seedConversation(t, database, "run-cred", "sess", "")
+			if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				[]domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
+				t.Fatalf("track repo: %v", err)
+			}
+			if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+				Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://github.com/owner/repo.git", ProfileText: "t",
+			}); err != nil {
+				t.Fatalf("seed repository: %v", err)
+			}
+
+			s := NewSpawner(nil, stores, nil, nil, "")
+			s.SetStores(stores)
+			s.SetRunCredentialResolvers(&localGitResolver{fakeResolver: &fakeResolver{
+				err: tc.resolveErr, baseURL: "https://github.com",
+			}}, nil, nil)
+			channel, err := s.startLocalGitChannel(ctx, runmode.LocalDefaultOrgID,
+				domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#run-cred"},
+				agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-cred"})
+			if err != nil {
+				t.Fatalf("startLocalGitChannel: %v", err)
+			}
+			defer func() { _ = channel.Close() }()
+
+			upstreamURL := "https://github.com/owner/repo.git"
+			_, cloneErr := worktree.CreateForPR(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-cred",
+				worktree.WithCloneAuth(channel.cloneAuth(upstreamURL)))
+			var gitErr *worktree.GitError
+			if !errors.As(cloneErr, &gitErr) {
+				t.Fatalf("clone error = %v, want a git command that failed", cloneErr)
+			}
+			if !strings.Contains(gitErr.Output, tc.wantStatus) {
+				t.Errorf("git output = %q, want it to report %q", gitErr.Output, tc.wantStatus)
+			}
+			cause := fmt.Errorf("failed to create worktree: %w", cloneErr)
+			if got := upstreamSetupFailure(cause); got != tc.upstream {
+				t.Errorf("upstreamSetupFailure = %v, want %v", got, tc.upstream)
+			}
+		})
 	}
 }
