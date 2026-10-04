@@ -84,6 +84,15 @@ func Record(ctx context.Context, name Name, orgID string, c Class) {
 
 type progressKey struct{}
 
+// ReportProgress calls the progress report on ctx (WithProgress), if any, for
+// a request that ended, answered or not, and that its client does not count
+// with Record.
+func ReportProgress(ctx context.Context) {
+	if report := progressFrom(ctx); report != nil {
+		report()
+	}
+}
+
 // WithProgress returns a context under which every attempt Record counts
 // also calls report, whatever its outcome. It is for a caller whose liveness
 // is the requests it completes rather than how long its work takes: a poll

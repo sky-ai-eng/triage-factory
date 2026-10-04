@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -96,4 +97,48 @@ func minterAgainst(t *testing.T, apiBase string, hc *http.Client) *githubapp.Min
 		t.Fatalf("NewMinter: %v", err)
 	}
 	return m
+}
+
+// TestAppTokenCalls_ReportProgress: the mint and the listing are requests a
+// poll cycle makes against its org's host, so each one that ends, answered
+// or not, reports progress. A cycle on an App org whose host times out would
+// otherwise spend minutes in these calls with no heartbeat, and its liveness
+// check would fail while it handles the outage.
+func TestAppTokenCalls_ReportProgress(t *testing.T) {
+	calls := map[string]func(context.Context, *githubapp.Minter) error{
+		"mint": func(ctx context.Context, m *githubapp.Minter) error {
+			_, err := m.MintInstallationToken(ctx, 1)
+			return err
+		},
+		"list installations": func(ctx context.Context, m *githubapp.Minter) error {
+			_, err := m.ListInstallations(ctx)
+			return err
+		},
+	}
+	for name, call := range calls {
+		t.Run(name+"/answered", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer srv.Close()
+			reports := 0
+			ctx := upstream.WithProgress(context.Background(), func() { reports++ })
+			_ = call(ctx, minterAgainst(t, srv.URL, srv.Client()))
+			if reports != 1 {
+				t.Errorf("an answered request reported progress %d times, want 1", reports)
+			}
+		})
+		t.Run(name+"/timed out", func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				<-r.Context().Done()
+			}))
+			defer srv.Close()
+			reports := 0
+			ctx := upstream.WithProgress(context.Background(), func() { reports++ })
+			_ = call(ctx, minterAgainst(t, srv.URL, &http.Client{Timeout: 100 * time.Millisecond}))
+			if reports != 1 {
+				t.Errorf("a timed-out request reported progress %d times, want 1", reports)
+			}
+		})
+	}
 }

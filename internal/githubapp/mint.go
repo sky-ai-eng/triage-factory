@@ -399,6 +399,9 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 	}
 
 	resp, err := m.httpClient.Do(req)
+	// A poll cycle on an App org makes this request too, and its liveness is
+	// the requests it finishes (upstream.WithProgress).
+	upstream.ReportProgress(ctx)
 	if err != nil {
 		err = fmt.Errorf("githubapp: mint installation token: %w", err)
 		// Marked, because the mint is the first request a GitHub run's setup
@@ -514,6 +517,7 @@ func (m *Minter) ListInstallations(ctx context.Context) ([]Installation, error) 
 		req.Header.Set("User-Agent", "triage-factory-githubapp")
 
 		resp, err := m.httpClient.Do(req)
+		upstream.ReportProgress(ctx) // as the mint reports it
 		if err != nil {
 			return nil, fmt.Errorf("githubapp: list installations: %w", err)
 		}
