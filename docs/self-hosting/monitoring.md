@@ -338,9 +338,9 @@ sum by (outcome) (increase(tf_conversations_handed_back_total[1h]))             
 
 The bundled Prometheus loads the deferred-conversation rule as
 `ConversationsDeferred` from `docker/observability/rules/tf-connections.yml`,
-at severity `warning`. It fires for a single org, because one org's provider
-account can be the whole of the outage, and nothing is lost while the runs
-wait. It reads each org's maximum over 15 minutes rather than the gauge
+at severity `warning`. It fires for a single org, because one org's own
+upstream (its model provider account, its GitHub Enterprise Server) can be the
+whole of the outage, and nothing is lost while the runs wait. It reads each org's maximum over 15 minutes rather than the gauge
 itself: a run that is still retrying drops out of the count while it is due
 or claimed between two waits, and a sample taken then would restart the
 30-minute timer. The dashboard's Connections row graphs it as "Conversations waiting to
