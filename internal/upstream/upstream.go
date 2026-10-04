@@ -58,6 +58,24 @@ type Classified interface {
 	UpstreamClass() Class
 }
 
+// TransportError is a request that failed in transit: the connection to the
+// upstream could not be made, or broke before a response arrived. A client
+// returns it in place of the error from http.Client.Do once ClassifyTransport
+// has counted that error as an upstream outcome. A caller that must not
+// mistake a local fault for an outage reads the mark rather than the error's
+// type, because a unix-socket bind, a database dial and a request to a
+// process on the same host fail with a net.Error too.
+type TransportError struct {
+	Err error
+}
+
+func (e *TransportError) Error() string { return e.Err.Error() }
+
+func (e *TransportError) Unwrap() error { return e.Err }
+
+// UpstreamClass implements Classified.
+func (e *TransportError) UpstreamClass() Class { return Transient }
+
 // ClassifyResponse is the default classification of an HTTP response. The
 // header is accepted so a caller hands over the whole response; the default
 // reads only the status and, for a 403, the body.

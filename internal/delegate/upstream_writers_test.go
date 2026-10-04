@@ -21,6 +21,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -218,9 +219,12 @@ func TestUpstreamSetupFailure_ReadsTheCause(t *testing.T) {
 		"git: refused credential":   {gitFailure("fatal: unable to access 'https://github.com/o/r/': The requested URL returned error: 403\n"), false},
 		"git: its deadline":         {deadline, false},
 		"git: its deadline, late":   {deadlineAfterEOF, false},
-		"github: transport": {fmt.Errorf("failed to fetch PR: %w", &url.Error{
+		"github: transport": {fmt.Errorf("failed to fetch PR: %w", &upstream.TransportError{Err: &url.Error{
 			Op: "Get", URL: "https://api.github.com/repos/o/r/pulls/7", Err: errors.New("dial tcp: lookup api.github.com: no such host"),
-		}), true},
+		}}), true},
+		"unmarked transport": {fmt.Errorf("failed to fetch PR: %w", &url.Error{
+			Op: "Get", URL: "https://api.github.com/repos/o/r/pulls/7", Err: errors.New("dial tcp: lookup api.github.com: no such host"),
+		}), false},
 		"github: 502":          {fmt.Errorf("failed to fetch PR: %w", ghclient.NewHTTPError(502, "<html>bad gateway</html>", "github: 502")), true},
 		"github: rate limited": {fmt.Errorf("failed to fetch PR: %w", &ghclient.ErrRateLimited{ResumeAt: time.Now().Add(time.Minute)}), true},
 		"github: 401":          {fmt.Errorf("failed to fetch PR: %w", ghclient.NewHTTPError(401, `{"message":"Bad credentials"}`, "github: 401")), false},
