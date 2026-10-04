@@ -59,7 +59,9 @@ type WorkspaceSnapshotStore interface {
 	// the newer writer's own upload read itself as superseded, and leave the
 	// key with no blob at all. Newer is by claim mint time, whichever
 	// conversation on the task the claim belongs to, because every step of
-	// a blueprint shares the key. Whether claimID is still live does not
+	// a blueprint shares the key. Two claims minted in the same instant are
+	// still ordered, so of any two one is the newer; otherwise each could
+	// take the key back from the other. Whether claimID is still live does not
 	// enter into it: a park releases its claim before it snapshots, and that
 	// snapshot is the newest tree there is until a later claim exists. A
 	// writer whose claim row is not found supersedes nothing and is

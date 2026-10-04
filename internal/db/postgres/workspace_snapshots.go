@@ -23,6 +23,12 @@ func newWorkspaceSnapshotStore(admin queryer) db.WorkspaceSnapshotStore {
 var _ db.WorkspaceSnapshotStore = (*workspaceSnapshotStore)(nil)
 
 func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error {
+	// "Newer" is newestEngagementFirstSQL's order, written as a row
+	// comparison: claimed_at is the minting transaction's timestamp, so two
+	// claims can tie on it, and a tie read as "neither is newer" would let
+	// each take the key back from the other. The release breaks it toward
+	// the engagement that ended later, an unreleased one latest of all, and
+	// the id makes the order total.
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO workspace_snapshots AS ws (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES ($1::uuid, $2::uuid, 'pending', $3::uuid, now())
@@ -35,7 +41,8 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 			WHERE cur.id  = ws.writer_claim_id
 			  AND mine.id = $3::uuid
 			  AND cur.id <> mine.id
-			  AND cur.claimed_at > mine.claimed_at
+			  AND (cur.claimed_at, COALESCE(cur.released_at, 'infinity'), cur.id)
+			    > (mine.claimed_at, COALESCE(mine.released_at, 'infinity'), mine.id)
 		)
 	`, orgID, taskID, claimID)
 	if err != nil {

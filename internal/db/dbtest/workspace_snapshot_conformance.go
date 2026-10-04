@@ -244,6 +244,28 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 	})
 
+	t.Run("begin_breaks_a_claimed_at_tie_toward_the_successor", func(t *testing.T) {
+		// Two claims minted in one clock tick. The successor, still live and
+		// minted second, is the newer writer, so the released one cannot take
+		// the key back from it.
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "tied-claims")
+		conv := seed.Conversation(t, task)
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		zombie := seed.Claim(t, conv, base, true)
+		successor := seed.Claim(t, conv, base, false)
+
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, successor); err != nil {
+			t.Fatalf("successor begin: %v", err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, zombie); !errors.Is(err, db.ErrSnapshotSuperseded) {
+			t.Fatalf("a begin from the tied, released claim = %v, want db.ErrSnapshotSuperseded", err)
+		}
+		if matched, err := store.FinishSnapshotSystem(ctx, orgID, task, successor, true); err != nil || !matched {
+			t.Fatalf("successor finish = (%v, %v), want matched", matched, err)
+		}
+	})
+
 	t.Run("a_later_step_on_the_task_supersedes_an_earlier_one", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		task := seed.Task(t, "later-step")
