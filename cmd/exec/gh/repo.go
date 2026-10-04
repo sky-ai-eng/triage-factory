@@ -21,10 +21,13 @@ import (
 //     value (e.g. it's the last token), we error immediately — the user
 //     expressed explicit intent and the safe behavior is to fail loudly
 //     rather than silently fall through and possibly target the wrong repo.
-//  2. remote.origin.url of the checkout containing the current directory.
-//     `git config` finds the checkout from any subfolder of it, and a
-//     self-contained PR clone's origin is the base repo, which is what the
-//     PR verbs address.
+//  2. remote.origin.url of the checkout containing the current directory,
+//     read from that repository's own config only (`git config --local`).
+//     It finds the checkout from any subfolder of it, and a self-contained
+//     PR clone's origin is the base repo, which is what the PR verbs address.
+//     Outside a checkout it fails, so a remote.origin.url in the global or
+//     system config can't stand in for the missing checkout and silently
+//     resolve an unrelated repo.
 //
 // Nothing run-scoped stands in between: a run that works in two repos would
 // otherwise keep addressing the first one after the agent moved to the second.
@@ -46,7 +49,7 @@ func resolveRepo(ctx context.Context, checkouts runCheckouts, args []string) (ow
 	}
 
 	// 2. origin of the checkout containing the current directory.
-	out, gitErr := exec.Command("git", "config", "--get", "remote.origin.url").Output()
+	out, gitErr := exec.Command("git", "config", "--local", "--get", "remote.origin.url").Output()
 	if gitErr == nil {
 		if o, r, ok := parseGitRemoteURL(strings.TrimSpace(string(out))); ok {
 			return o, r, nil

@@ -323,6 +323,48 @@ func TestResolveRepo_TwoCheckouts(t *testing.T) {
 	}
 }
 
+// TestResolveRepo_IgnoresGlobalOrigin pins the lookup to the repository's own
+// config. A remote.origin.url in the global config is what plain `git config
+// --get` answers from a folder outside every checkout, which would resolve
+// that unrelated repo instead of failing and listing the run's checkouts.
+// Inside a checkout, its own origin still answers.
+func TestResolveRepo_IgnoresGlobalOrigin(t *testing.T) {
+	isolateGit(t)
+	globalConfig := filepath.Join(t.TempDir(), "gitconfig")
+	if err := os.WriteFile(globalConfig, []byte("[remote \"origin\"]\n\turl = https://github.com/global-owner/global-repo.git\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+
+	root := t.TempDir()
+	checkout := filepath.Join(root, "owner-a", "repo-a", "default")
+	gitCheckoutWithOrigin(t, checkout, "https://github.com/owner-a/repo-a.git")
+	checkouts := fakeCheckouts{
+		hostRoot:  root,
+		agentRoot: root,
+		rows:      []domain.ConversationWorktree{{RepoID: "owner-a/repo-a", Ref: "default", Path: checkout}},
+	}
+
+	t.Chdir(root)
+	// The setup reproduces the hazard: unscoped, git answers the global value here.
+	if out, err := exec.Command("git", "config", "--get", "remote.origin.url").Output(); err != nil || !strings.Contains(string(out), "global-owner/global-repo") {
+		t.Fatalf("test setup: plain git config should see the global origin, got %q (err %v)", out, err)
+	}
+	owner, repo, err := resolveRepo(context.Background(), checkouts, nil)
+	if err == nil {
+		t.Fatalf("from the run root: resolved %s/%s from the global config; want the no-checkout error", owner, repo)
+	}
+	if !strings.Contains(err.Error(), "owner-a/repo-a  "+checkout) {
+		t.Errorf("error should list the run's checkout: %v", err)
+	}
+
+	t.Chdir(checkout)
+	owner, repo, err = resolveRepo(context.Background(), checkouts, nil)
+	if err != nil || owner != "owner-a" || repo != "repo-a" {
+		t.Errorf("inside the checkout: got (%s/%s, %v), want owner-a/repo-a", owner, repo, err)
+	}
+}
+
 // TestResolveRepo_NoCheckoutsYet covers a run that has materialized nothing:
 // the error says so and names how to get one, rather than listing nothing.
 func TestResolveRepo_NoCheckoutsYet(t *testing.T) {
