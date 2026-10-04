@@ -12,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -33,6 +34,16 @@ func TestWorkspaceSnapshotStore_SQLite(t *testing.T) {
 				if _, err := conn.Exec(`DELETE FROM tasks WHERE id = ?`, taskID); err != nil {
 					t.Fatalf("delete task: %v", err)
 				}
+			},
+			Conversation: func(t *testing.T, taskID string) string {
+				t.Helper()
+				id := uuid.New().String()
+				dbtest.SeedConversation(t, conn, domain.Conversation{ID: id, TaskID: taskID})
+				return id
+			},
+			Claim: func(t *testing.T, conversationID string, claimedAt time.Time, released bool) string {
+				t.Helper()
+				return seedSQLiteClaimForSnapshot(t, conn, conversationID, claimedAt, released)
 			},
 		}
 		return stores.WorkspaceSnapshots, runmode.LocalDefaultOrgID, seed
@@ -58,6 +69,26 @@ func TestWorkspaceSnapshotStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if err := stores.WorkspaceSnapshots.DeleteSnapshotStateSystem(ctx, badOrg, "t1"); err == nil {
 		t.Error("DeleteSnapshotStateSystem(non-local org) should error")
 	}
+}
+
+// seedSQLiteClaimForSnapshot mints a claim on conversationID at claimedAt,
+// with claimed_at bound as a Go time the way the claim door binds it, so the
+// stored text sorts against a production-minted claim the way production's
+// own do.
+func seedSQLiteClaimForSnapshot(t *testing.T, conn *sql.DB, conversationID string, claimedAt time.Time, released bool) string {
+	t.Helper()
+	id := uuid.New().String()
+	var releasedAt, outcome any
+	if released {
+		releasedAt, outcome = claimedAt.Add(time.Second), "parked"
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, lease_expires_at)
+		VALUES (?, ?, ?, 'snapshot-conformance', 1, ?, ?, ?, ?)
+	`, id, runmode.LocalDefaultOrgID, conversationID, claimedAt.UTC(), releasedAt, outcome, claimedAt.Add(5*time.Minute).UTC()); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	return id
 }
 
 // seedSQLiteTaskForSnapshot seeds the entity + event + task chain the snapshot

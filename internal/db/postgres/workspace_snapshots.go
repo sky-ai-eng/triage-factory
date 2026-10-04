@@ -23,15 +23,32 @@ func newWorkspaceSnapshotStore(admin queryer) db.WorkspaceSnapshotStore {
 var _ db.WorkspaceSnapshotStore = (*workspaceSnapshotStore)(nil)
 
 func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error {
-	_, err := s.admin.ExecContext(ctx, `
-		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
+	res, err := s.admin.ExecContext(ctx, `
+		INSERT INTO workspace_snapshots AS ws (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES ($1::uuid, $2::uuid, 'pending', $3::uuid, now())
 		ON CONFLICT (org_id, task_id) DO UPDATE SET
 			state           = EXCLUDED.state,
 			writer_claim_id = EXCLUDED.writer_claim_id,
 			updated_at      = EXCLUDED.updated_at
+		WHERE NOT EXISTS (
+			SELECT 1 FROM claims cur, claims mine
+			WHERE cur.id  = ws.writer_claim_id
+			  AND mine.id = $3::uuid
+			  AND cur.id <> mine.id
+			  AND cur.claimed_at > mine.claimed_at
+		)
 	`, orgID, taskID, claimID)
-	return err
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return db.ErrSnapshotSuperseded
+	}
+	return nil
 }
 
 func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID, taskID, claimID string, ok bool) (bool, error) {

@@ -2,7 +2,9 @@ package postgres_test
 
 import (
 	"context"
+	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -35,9 +37,49 @@ func TestWorkspaceSnapshotStore_Postgres(t *testing.T) {
 					t.Fatalf("delete task: %v", err)
 				}
 			},
+			Conversation: func(t *testing.T, taskID string) string {
+				t.Helper()
+				return seedPgSnapshotConversation(t, h.AdminDB, orgID, userID, taskID)
+			},
+			Claim: func(t *testing.T, conversationID string, claimedAt time.Time, released bool) string {
+				t.Helper()
+				return seedPgSnapshotClaim(t, h.AdminDB, orgID, conversationID, claimedAt, released)
+			},
 		}
 		return stores.WorkspaceSnapshots, orgID, seed
 	})
+}
+
+// seedPgSnapshotConversation inserts a conversation on taskID, interactive so
+// the origin CHECK asks for no blueprint parents.
+func seedPgSnapshotConversation(t *testing.T, conn *sql.DB, orgID, userID, taskID string) string {
+	t.Helper()
+	id := uuid.New().String()
+	if _, err := conn.Exec(`
+		INSERT INTO conversations (id, org_id, task_id, team_id, origin, trigger_type, creator_user_id, visibility)
+		VALUES ($1, $2, $3, (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
+		        'interactive', 'manual', $4, 'team')
+	`, id, orgID, taskID, userID); err != nil {
+		t.Fatalf("seed conversation: %v", err)
+	}
+	return id
+}
+
+// seedPgSnapshotClaim mints a claim on conversationID at claimedAt.
+func seedPgSnapshotClaim(t *testing.T, conn *sql.DB, orgID, conversationID string, claimedAt time.Time, released bool) string {
+	t.Helper()
+	id := uuid.New().String()
+	var releasedAt, outcome any
+	if released {
+		releasedAt, outcome = claimedAt.Add(time.Second), "parked"
+	}
+	if _, err := conn.Exec(`
+		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, lease_expires_at)
+		VALUES ($1, $2, $3, 'snapshot-conformance', 1, $4, $5, $6, $7)
+	`, id, orgID, conversationID, claimedAt, releasedAt, outcome, claimedAt.Add(5*time.Minute)); err != nil {
+		t.Fatalf("seed claim: %v", err)
+	}
+	return id
 }
 
 // TestWorkspaceSnapshotStore_Postgres_OrgScoped pins org_id defense-in-depth:

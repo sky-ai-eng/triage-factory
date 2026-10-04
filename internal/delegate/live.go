@@ -536,10 +536,16 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// entirely with no workspace to capture (a cancel during setup), which the
 	// persist would reject anyway. A record that could not be opened does not
 	// hold up the release either: the persist below retries the open on its
-	// own way through.
+	// own way through. A key a newer engagement already holds is left to it,
+	// and nothing is captured.
 	snapCtx := context.WithoutCancel(ctx)
 	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
-	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+	leaseHeld := false
+	if willSnapshot {
+		record := s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+		leaseHeld = record.owned()
+		willSnapshot = record != snapshotSuperseded
+	}
 
 	// Spend lands BEFORE the release: the broadcast after it is what makes
 	// every watcher refetch, and the figure has to be on the ledger by then.

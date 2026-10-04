@@ -2,9 +2,15 @@ package db
 
 import (
 	"context"
+	"errors"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrSnapshotSuperseded is BeginSnapshotSystem's refusal of a writer whose
+// successor already holds the key. The caller writes nothing: no blob and no
+// lifecycle outcome, both of which are the successor's.
+var ErrSnapshotSuperseded = errors.New("db: a newer engagement holds this workspace snapshot key")
 
 // WorkspaceSnapshotStore owns the workspace_snapshots table — one row per
 // snapshot key recording whether that key's workspace blob is being written,
@@ -41,10 +47,23 @@ import (
 // it) rather than a picture of the row a caller could carry forward as truth.
 type WorkspaceSnapshotStore interface {
 	// BeginSnapshotSystem records that claimID owes a snapshot for this key:
-	// state='pending', writer_claim_id=claimID, updated_at=now. An
-	// unconditional upsert — a newer engagement starting its own snapshot
-	// takes the key over, which is exactly what makes the completion CAS
-	// below able to detect the older writer.
+	// state='pending', writer_claim_id=claimID, updated_at=now. A newer
+	// engagement starting its own snapshot takes the key over, which is
+	// exactly what makes the completion CAS below able to detect the older
+	// writer.
+	//
+	// An older engagement never takes it back. The begin is refused with
+	// ErrSnapshotSuperseded, and the row left as it is, when the key's
+	// current writer is a claim minted after claimID: that writer holds a
+	// newer tree, and an older begin landing late would re-own the key, make
+	// the newer writer's own upload read itself as superseded, and leave the
+	// key with no blob at all. Newer is by claim mint time, whichever
+	// conversation on the task the claim belongs to, because every step of
+	// a blueprint shares the key. Whether claimID is still live does not
+	// enter into it: a park releases its claim before it snapshots, and that
+	// snapshot is the newest tree there is until a later claim exists. A
+	// writer whose claim row is not found supersedes nothing and is
+	// superseded by nothing.
 	//
 	// Called before the capture starts, so that "a persist is owed" is
 	// durable before a waiter could ever observe the conversation as

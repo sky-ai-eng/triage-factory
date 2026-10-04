@@ -30,15 +30,34 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
-	_, err := s.q.ExecContext(ctx, `
+	// The refusal orders claims the way every "newest claim" read on this
+	// dialect does: claimed_at, then rowid for two minted in one instant.
+	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES (?, ?, 'pending', ?, ?)
 		ON CONFLICT(org_id, task_id) DO UPDATE SET
 			state           = excluded.state,
 			writer_claim_id = excluded.writer_claim_id,
 			updated_at      = excluded.updated_at
-	`, orgID, taskID, claimID, time.Now().UTC())
-	return err
+		WHERE NOT EXISTS (
+			SELECT 1 FROM claims cur, claims mine
+			WHERE cur.id  = workspace_snapshots.writer_claim_id
+			  AND mine.id = ?
+			  AND cur.id <> mine.id
+			  AND (cur.claimed_at, cur.rowid) > (mine.claimed_at, mine.rowid)
+		)
+	`, orgID, taskID, claimID, time.Now().UTC(), claimID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return db.ErrSnapshotSuperseded
+	}
+	return nil
 }
 
 func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID, taskID, claimID string, ok bool) (bool, error) {

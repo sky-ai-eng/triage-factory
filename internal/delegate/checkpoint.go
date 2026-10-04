@@ -447,11 +447,18 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 
 	// A stopped checkpointer opens no record: the ending that stopped it is
 	// about to open its own, and waits for this goroutine before it does.
+	// That check cannot see a takeover that happened while this checkpoint
+	// captured: a key a newer engagement already holds comes back
+	// superseded, and is left to it, blob and record alike.
 	if err = ctx.Err(); err != nil {
 		return res
 	}
 	stateCtx := context.WithoutCancel(ctx)
-	owned := s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+	record := s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+	if record == snapshotSuperseded {
+		return res
+	}
+	owned := record.owned()
 	settled := false
 	defer func() {
 		if owned && !settled {
