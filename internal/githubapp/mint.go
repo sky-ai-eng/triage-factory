@@ -303,9 +303,9 @@ type installationTokenResponse struct {
 //
 // A non-2xx response is an *APIStatusError, so the poller can tell an
 // unreachable host from a refused credential (upstream.ClassOf); a transport
-// failure wraps the client's own error, which classifies as transient. A
-// successful return guarantees Value != "" and ExpiresAt is non-zero and in
-// the future at receipt time.
+// failure is an *upstream.TransportError, unless the caller abandoned the
+// request. A successful return guarantees Value != "" and ExpiresAt is
+// non-zero and in the future at receipt time.
 func (m *Minter) MintInstallationToken(ctx context.Context, installationID int64) (Token, error) {
 	return m.mintInstallationToken(ctx, installationID, nil)
 }
@@ -400,7 +400,14 @@ func (m *Minter) mintInstallationToken(ctx context.Context, installationID int64
 
 	resp, err := m.httpClient.Do(req)
 	if err != nil {
-		return Token{}, fmt.Errorf("githubapp: mint installation token: %w", err)
+		err = fmt.Errorf("githubapp: mint installation token: %w", err)
+		// Marked, because the mint is the first request a GitHub run's setup
+		// makes on an App org, and a setup failure counts as an outage only
+		// when its client says the upstream produced it.
+		if _, counted := upstream.ClassifyTransport(ctx, err); counted {
+			return Token{}, &upstream.TransportError{Err: err}
+		}
+		return Token{}, err
 	}
 	defer resp.Body.Close()
 

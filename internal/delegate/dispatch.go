@@ -973,9 +973,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	// through the sidecar's GitHub-REST proxy instead — this client is unused
 	// there (the executor's secret store is disabled).
 	owner, repo := ownerRepoForTask(*task)
-	var gh *ghclient.Client
+	var (
+		gh           *ghclient.Client
+		ghResolveErr error
+	)
 	if sidecar == nil {
-		gh = s.resolveGHClient(ctx, orgID, owner, repo)
+		gh, ghResolveErr = s.resolveGHClient(ctx, orgID, owner, repo)
 	}
 
 	// Build (step 0, first claim) or rehydrate (later steps / crash re-claim) the
@@ -986,6 +989,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		if disposedDuringBringUp() {
 			return
 		}
+		err = withGitHubResolveCause(err, ghResolveErr)
 		s.failEngagement(conv.ID, err)
 		s.handlePreAgentFailure(orgID, br, *conv, err)
 		return
