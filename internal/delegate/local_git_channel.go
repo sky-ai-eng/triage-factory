@@ -15,7 +15,6 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -222,7 +221,7 @@ func localGitTokenSource(scoped ghclient.ScopedResolver, orgID string) gitproxy.
 	return func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		tok, err := ghclient.TokenForManagedGit(ctx, scoped, orgID, owner, repo)
 		if err != nil {
-			if class, ok := upstream.ClassOf(err); ok && (class == upstream.Transient || class == upstream.RateLimited) {
+			if markedUpstreamOutage(err) {
 				return gitproxy.Token{}, err
 			}
 			return gitproxy.Token{}, fmt.Errorf("%w: %w", credbundle.ErrNoRepoToken, err)

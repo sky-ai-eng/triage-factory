@@ -19,7 +19,6 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // noopChannelCloser stands in for a channel that never started, so callers can
@@ -153,7 +152,7 @@ func localGHTokenSource(resolver ghclient.Resolver, orgID, owner string) ghinjec
 	return func(ctx context.Context) (string, error) {
 		tok, err := resolver.TokenFor(ctx, orgID, owner)
 		if err != nil {
-			if class, ok := upstream.ClassOf(err); ok && (class == upstream.Transient || class == upstream.RateLimited) {
+			if markedUpstreamOutage(err) {
 				return "", err
 			}
 			return "", fmt.Errorf("%w: %w", credbundle.ErrNoCLIToken, err)

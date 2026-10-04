@@ -224,9 +224,9 @@ func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testin
 			wantStatus: "The requested URL returned error: 403",
 		},
 		"GitHub unreachable while minting": {
-			resolveErr: fmt.Errorf("githubapp: mint installation token: %w", &url.Error{
+			resolveErr: fmt.Errorf("githubapp: mint installation token: %w", &upstream.TransportError{Err: &url.Error{
 				Op: "Post", URL: "https://api.github.com/app/installations/1/access_tokens", Err: errors.New("dial tcp: lookup api.github.com: no such host"),
-			}),
+			}}),
 			wantStatus: "The requested URL returned error: 502",
 			upstream:   true,
 		},

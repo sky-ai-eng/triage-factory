@@ -195,11 +195,17 @@ func sdkUpstreamSummary(r *agentproc.Result) string {
 // then tell a person a service was unreachable, where the setup budget fails
 // it within seconds naming the cause.
 func upstreamSetupFailure(cause error) bool {
-	if worktree.IsTransientGitError(cause) {
-		return true
-	}
+	return worktree.IsTransientGitError(cause) || markedUpstreamOutage(cause)
+}
+
+// markedUpstreamOutage reports whether err carries a client's mark
+// (upstream.Classified) saying an upstream was unreachable or rate limited.
+// Only the mark counts, for the reason upstreamSetupFailure gives: a local
+// step's own deadline has the shape of a timeout, and a refused local socket
+// the shape of an unreachable host.
+func markedUpstreamOutage(err error) bool {
 	var marked upstream.Classified
-	if !errors.As(cause, &marked) {
+	if !errors.As(err, &marked) {
 		return false
 	}
 	class := marked.UpstreamClass()

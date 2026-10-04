@@ -3,8 +3,10 @@ package github
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"time"
@@ -229,8 +231,8 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks its host unreachable, and every later request to
 // that host gets one attempt the same way a mutation does. A request that
-// timed out makes its host silent, and a later request to a silent host is
-// not sent (upstream.Silent).
+// timed out counts toward its host's silence, and a later request to a silent
+// host is not sent (upstream.Silent).
 //
 // Any response that isn't retried is returned to the caller. A success keeps
 // its body untouched and still open, so callers that stream
@@ -262,6 +264,13 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		sent := time.Now()
 		resp, err := hc.Do(req)
 		if err != nil {
+			if c.viaProxy && dialFailed(err) {
+				// The base is the run's own credential proxy, so a connection
+				// to it that fails says the proxy is down, not GitHub. That is
+				// a fault on this host, returned unmarked and uncounted: GitHub
+				// unreachable behind a live proxy arrives as the proxy's 502.
+				return nil, err
+			}
 			class, counted := upstream.ClassifyTransport(ctx, err)
 			if !counted {
 				return nil, err
@@ -385,4 +394,10 @@ func isSecondaryRateLimitBody(body []byte) bool {
 // normally by the caller.
 func newBodyReader(data []byte) io.ReadCloser {
 	return io.NopCloser(bytes.NewReader(data))
+}
+
+// dialFailed reports whether err is a connection that never opened.
+func dialFailed(err error) bool {
+	var op *net.OpError
+	return errors.As(err, &op) && op.Op == "dial"
 }
