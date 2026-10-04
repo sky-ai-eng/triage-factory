@@ -282,3 +282,42 @@ func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testin
 		})
 	}
 }
+
+// A gate that cannot read its own data refuses the request, and git reports
+// the refusal as one: the clone a GitHub setup runs then fails as an ordinary
+// setup failure. The data is TF's own, so this is never the git host being
+// unreachable, which is what the 502 git reports would claim.
+func TestLocalGitChannel_AGateThatCannotDecideIsARefusalNotAnOutage(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedConversation(t, database, "run-gate", "sess", "")
+	stores.TeamGitHubRepos = failingTracksStore{TeamGitHubReposStore: stores.TeamGitHubRepos, err: errors.New("database is locked")}
+
+	s := NewSpawner(nil, stores, nil, nil, "")
+	s.SetStores(stores)
+	s.SetRunCredentialResolvers(&localGitResolver{fakeResolver: &fakeResolver{baseURL: "https://github.com"}}, nil, nil)
+	channel, err := s.startLocalGitChannel(ctx, runmode.LocalDefaultOrgID,
+		domain.Task{EntitySource: "github", EntitySourceID: "owner/repo#run-gate"},
+		agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-gate"})
+	if err != nil {
+		t.Fatalf("startLocalGitChannel: %v", err)
+	}
+	defer func() { _ = channel.Close() }()
+
+	upstreamURL := "https://github.com/owner/repo.git"
+	_, cloneErr := worktree.CreateForPR(ctx, "owner", "repo", upstreamURL, "", "feature", 7, "task-gate",
+		worktree.WithCloneAuth(channel.cloneAuth(upstreamURL)))
+	var gitErr *worktree.GitError
+	if !errors.As(cloneErr, &gitErr) {
+		t.Fatalf("clone error = %v, want a git command that failed", cloneErr)
+	}
+	if !strings.Contains(gitErr.Output, "The requested URL returned error: 403") {
+		t.Errorf("git output = %q, want it to report a 403", gitErr.Output)
+	}
+	if upstreamSetupFailure(fmt.Errorf("failed to create worktree: %w", cloneErr)) {
+		t.Error("upstreamSetupFailure = true, want false: the gate's own store failed, not the git host")
+	}
+}

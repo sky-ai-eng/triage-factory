@@ -222,16 +222,21 @@ func TestResolveRunCredentials_FallbackWithoutSeam(t *testing.T) {
 }
 
 // TestResolveGHClient_ResolveErrorReturnsNil pins that a resolver error
-// yields a nil client (setupGitHub then surfaces "GitHub credentials not
-// configured") rather than the stale fallback — a resolve failure must not
-// silently route the run through a different org's process-global client.
+// yields a nil client and the resolver's error rather than the stale
+// fallback — a resolve failure must not silently route the run through a
+// different org's process-global client.
 func TestResolveGHClient_ResolveErrorReturnsNil(t *testing.T) {
-	resolver := &fakeResolver{err: errors.New("vault down")}
+	vaultDown := errors.New("vault down")
+	resolver := &fakeResolver{err: vaultDown}
 	s := NewSpawner(nil, db.Stores{}, ghclient.NewClient("https://fallback", "fallback-tok"), nil, "m")
 	s.SetRunCredentialResolvers(resolver, nil, nil)
 
-	if got := s.resolveGHClient(context.Background(), "org", "owner", "repo"); got != nil {
+	got, err := s.resolveGHClient(context.Background(), "org", "owner", "repo")
+	if got != nil {
 		t.Errorf("resolveGHClient on resolver error = %v; want nil", got)
+	}
+	if !errors.Is(err, vaultDown) {
+		t.Errorf("resolveGHClient error = %v; want the resolver's", err)
 	}
 }
 

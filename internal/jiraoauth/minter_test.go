@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 func testApp() jira.OAuthApp {
@@ -159,6 +160,68 @@ func TestMinter_ErrorsCarryOnlyAnExcerpt(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestMinter_FailuresCarryTheirUpstreamClass: a failed mint says whether
+// Atlassian refused the request or could not serve it, by the mark every
+// upstream client puts on its errors (upstream.Classified). Only a refusal
+// from the token endpoint is ErrTokenEndpoint, since an outage says nothing
+// about the stored refresh token.
+func TestMinter_FailuresCarryTheirUpstreamClass(t *testing.T) {
+	refresh := func(m *Minter) error {
+		_, err := m.Refresh(context.Background(), testApp(), "ref")
+		return err
+	}
+	resources := func(m *Minter) error {
+		_, err := m.AccessibleResources(context.Background(), "acc")
+		return err
+	}
+	for name, tc := range map[string]struct {
+		call      func(*Minter) error
+		status    int
+		body      string
+		class     upstream.Class
+		refusal   bool
+		unreached bool
+	}{
+		"token endpoint unavailable": {call: refresh, status: http.StatusServiceUnavailable, body: `{"message":"Service Unavailable"}`, class: upstream.Transient},
+		"a proxy's 502 page":         {call: refresh, status: http.StatusBadGateway, body: "<html>502 Bad Gateway</html>", class: upstream.Transient},
+		"token endpoint rate limit":  {call: refresh, status: http.StatusTooManyRequests, body: `{"error":"rate_limited"}`, class: upstream.RateLimited},
+		"refresh token is dead": {call: refresh, status: http.StatusForbidden,
+			body: `{"error":"invalid_grant","error_description":"refresh token is invalid"}`, class: upstream.Auth, refusal: true},
+		"malformed request": {call: refresh, status: http.StatusBadRequest,
+			body: `{"error":"invalid_request"}`, class: upstream.Rejected, refusal: true},
+		"an error member on a 200": {call: refresh, status: http.StatusOK,
+			body: `{"error":"invalid_grant"}`, class: upstream.Rejected, refusal: true},
+		"token endpoint unreachable":       {call: refresh, unreached: true, class: upstream.Transient},
+		"accessible resources unavailable": {call: resources, status: http.StatusServiceUnavailable, body: `{"message":"down"}`, class: upstream.Transient},
+		"accessible resources unreachable": {call: resources, unreached: true, class: upstream.Transient},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			target := srv.URL
+			if tc.unreached {
+				srv.Close()
+			} else {
+				defer srv.Close()
+			}
+
+			err := tc.call(&Minter{httpClient: srv.Client(), tokenURL: target, resourcesURL: target})
+			var marked upstream.Classified
+			if !errors.As(err, &marked) {
+				t.Fatalf("err = %v, want one its client marked with an upstream class", err)
+			}
+			if got := marked.UpstreamClass(); got != tc.class {
+				t.Errorf("class = %q, want %q (err %v)", got, tc.class, err)
+			}
+			if got := errors.Is(err, ErrTokenEndpoint); got != tc.refusal {
+				t.Errorf("errors.Is(err, ErrTokenEndpoint) = %v, want %v (err %v)", got, tc.refusal, err)
+			}
+		})
 	}
 }
 

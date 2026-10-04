@@ -3,12 +3,14 @@ package delegate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghbin"
 	"github.com/sky-ai-eng/triage-factory/internal/ghchannel"
@@ -17,6 +19,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // noopChannelCloser stands in for a channel that never started, so callers can
@@ -96,16 +99,7 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		// next call. Local mode has no executor split and no sealed bundle,
 		// which is why reading the live store here is correct rather than the
 		// recurring executor-side bug it would be in multi.
-		TokenSource: func(ctx context.Context) (string, error) {
-			tok, err := resolver.TokenFor(ctx, orgID, owner)
-			if err != nil {
-				return "", err
-			}
-			if tok.Value == "" {
-				return "", ghclient.ErrNoGitHubCredentials
-			}
-			return tok.Value, nil
-		},
+		TokenSource: localGHTokenSource(resolver, orgID, owner),
 		ObserveWrite: func(ctx context.Context, w ghinjector.ObservedWrite) {
 			if !storesSet {
 				return
@@ -144,6 +138,31 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		BinDir:         ch.BinDir,
 		ConfigDir:      ch.ConfigDir,
 	}, ch
+}
+
+// localGHTokenSource resolves the credential the local gh channel's injector
+// attaches, from the live resolver.
+//
+// A failure is answered as localGitTokenSource answers one, and for the same
+// reason. Only a failure GitHub explains, by being unreachable or by asking
+// TF to wait, keeps the 502 a retry can clear. Anything else meets the same
+// answer on the next request or is a fault of TF's own, so it is answered as a
+// missing gh credential, the 403 a sidecar answers one with: gh and the agent
+// read a 502 as an outage to wait out, and a 403 as a refusal to act on.
+func localGHTokenSource(resolver ghclient.Resolver, orgID, owner string) ghinjector.TokenSource {
+	return func(ctx context.Context) (string, error) {
+		tok, err := resolver.TokenFor(ctx, orgID, owner)
+		if err != nil {
+			if class, ok := upstream.ClassOf(err); ok && (class == upstream.Transient || class == upstream.RateLimited) {
+				return "", err
+			}
+			return "", fmt.Errorf("%w: %w", credbundle.ErrNoCLIToken, err)
+		}
+		if tok.Value == "" {
+			return "", fmt.Errorf("%w: %w", credbundle.ErrNoCLIToken, ghclient.ErrNoGitHubCredentials)
+		}
+		return tok.Value, nil
+	}
 }
 
 // githubAPIUpstreamFor resolves the REST API base the local gh channel's
