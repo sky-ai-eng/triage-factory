@@ -411,7 +411,8 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = ?, outcome = ?
-			WHERE id = ? AND org_id = ? AND conversation_id = ? AND released_at IS NULL
+			WHERE id = ? AND org_id = ? AND conversation_id = ?
+			  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		`, time.Now().UTC(), string(outcome), claimID, orgID, conversationID)
 		if err != nil {
 			return err
@@ -419,7 +420,7 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
 		}
 		var nextAttempt any
 		if delay > 0 {
@@ -1031,7 +1032,7 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
 	`, sqliteLeaseModifier(lease), sqliteLeaseModifier(-activity.Idle), activity.Op, checkpointAge, checkpointAge, claimID, orgID, conversationID).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
+		return db.ClaimRenewal{}, liveGuardRefusal(ctx, s.conn, orgID, conversationID, claimID)
 	}
 	if err != nil {
 		return db.ClaimRenewal{}, err
@@ -1039,12 +1040,12 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	return out, nil
 }
 
-// renewalRefusal is the Postgres twin's classification of a refused renewal,
-// by the same follow-up read and with the same two edge answers: a claim
-// found live was restored by a re-acquire between the statements, so the
-// refusal was the lapse; a follow-up that fails answers the unclassified
-// refusal.
-func renewalRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+// liveGuardRefusal is the Postgres twin's classification of a holder write
+// its live-claim guard refused, by the same follow-up read and with the same
+// two edge answers: a claim found live was restored by a re-acquire between
+// the statements, so the refusal was the lapse; a follow-up that fails
+// answers the unclassified refusal.
+func liveGuardRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
 	err := claimRefusal(ctx, q, orgID, conversationID, claimID)
 	switch {
 	case err == nil:
@@ -1449,7 +1450,8 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 	return inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = ?, outcome = ?
-			WHERE id = ? AND org_id = ? AND conversation_id = ? AND released_at IS NULL
+			WHERE id = ? AND org_id = ? AND conversation_id = ?
+			  AND released_at IS NULL AND lease_expires_at > `+sqliteNowExpr+`
 		`, time.Now().UTC(), outcome, claimID, orgID, conversationID)
 		if err != nil {
 			return err
@@ -1457,7 +1459,7 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
 		}
 		var nextAttempt any
 		if delay > 0 {

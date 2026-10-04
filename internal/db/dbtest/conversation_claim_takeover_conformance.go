@@ -451,6 +451,36 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 	})
 
+	t.Run("RequeueAndHandBack_RefusedOnALapsedLeaseAndLeftToTheTakeover", func(t *testing.T) {
+		// Nobody has taken the conversation over yet, but the holder's
+		// authority ended with its lease. Its release is refused, and the
+		// takeover is what releases the claim, as reaped.
+		f := mk(t)
+		c := stageClaimed(t, f, takeoverOtherExecutor, 1)
+		f.SetLease(t, c.ClaimID, -time.Minute)
+
+		got, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, db.RequeueSetupFailure, time.Minute, "late setup failure")
+		if !errors.Is(err, db.ErrClaimLeaseExpired) || got != nil {
+			t.Errorf("RequeueConversation on a lapsed lease = (%+v, %v), want ErrClaimLeaseExpired", got, err)
+		}
+		if err := f.Stores.ConversationQueue.HandBackClaimSystem(ctx, f.OrgID, c.ID, c.ClaimID, db.HandBackUpstream, time.Minute, "late hand-back"); !errors.Is(err, db.ErrClaimLeaseExpired) {
+			t.Errorf("HandBackClaimSystem on a lapsed lease = %v, want ErrClaimLeaseExpired", err)
+		}
+		if released, _ := claimState(t, f, c.ClaimID); released {
+			t.Fatal("a refused release released the lapsed claim")
+		}
+		if after := get(t, f, c.ID); after.ResultSummary != "" || after.NextAttemptAt != nil {
+			t.Errorf("conversation after the refused releases = (summary %q, next attempt %v), want neither written", after.ResultSummary, after.NextAttemptAt)
+		}
+
+		if taken := takeOver(t, f, 100); len(taken) != 1 {
+			t.Fatalf("taken over = %v, want the lapsed claim", taken)
+		}
+		if released, outcome := claimState(t, f, c.ClaimID); !released || outcome != db.HandBackReaped {
+			t.Errorf("claim after the takeover = (released %v, %q), want (true, %s)", released, outcome, db.HandBackReaped)
+		}
+	})
+
 	t.Run("Stranded_FindsAConcludedCurrentStepPastTheGraceOnly", func(t *testing.T) {
 		f := mk(t)
 		const grace = time.Minute

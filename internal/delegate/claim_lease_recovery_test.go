@@ -376,6 +376,91 @@ func TestSuspendRecovery_SinkWriteRetriedThroughTheWrapper(t *testing.T) {
 	f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
 }
 
+// claimOutcome reads the fixture claim's release outcome, "" while it is
+// unreleased.
+func (f *suspendFixture) claimOutcome(t *testing.T) string {
+	t.Helper()
+	var outcome sql.NullString
+	if err := f.database.QueryRow(
+		`SELECT CASE WHEN released_at IS NULL THEN NULL ELSE outcome END FROM claims WHERE id = ?`,
+		f.conv.ClaimID,
+	).Scan(&outcome); err != nil {
+		t.Fatalf("read the claim's outcome: %v", err)
+	}
+	return outcome.String
+}
+
+// TestSuspendRecovery_ClaimReleasesRetriedAfterTheReacquire: a requeue or a
+// hand-back that meets a lapse a suspend caused takes the claim back and
+// releases it with its own outcome, as any other holder write would.
+func TestSuspendRecovery_ClaimReleasesRetriedAfterTheReacquire(t *testing.T) {
+	cases := []struct {
+		name    string
+		release func(f *suspendFixture) bool
+		want    string
+	}{
+		{"requeue", func(f *suspendFixture) bool {
+			return f.s.requeueClaim(f.conv.OrgID, *f.conv, db.RequeueSetupFailure, 0, errors.New("clone failed"), "after a pre-agent failure")
+		}, string(db.RequeueSetupFailure)},
+		{"hand_back", func(f *suspendFixture) bool {
+			return !f.s.handBackClaim(context.Background(), liveParkContext{orgID: f.conv.OrgID, conversationID: f.conv.ID, claimID: f.conv.ClaimID}, db.HandBackShutdown, 0, "")
+		}, db.HandBackShutdown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSuspendFixture(t)
+			f.register(t, time.Now().Add(-renewedRecently))
+			f.lapse(t)
+			f.sleep(suspendPastTheLease)
+
+			if !tc.release(f) {
+				t.Fatal("the release was refused after a suspend the engagement recovers from")
+			}
+			if got := f.claimOutcome(t); got != tc.want {
+				t.Errorf("claim outcome = %q, want %q", got, tc.want)
+			}
+			if _, _, reacquires := f.queue.counts(); reacquires != 1 {
+				t.Errorf("re-acquires = %d, want 1", reacquires)
+			}
+			f.assertRecoveries(t, map[string]int64{suspendRecoveryReacquired: 1})
+		})
+	}
+}
+
+// TestSuspendRecovery_ClaimReleasesRefusedOnALapseWithNoSuspend: the same
+// releases on a lapse with no suspend behind it record nothing, and leave the
+// claim unreleased for the takeover to release as reaped.
+func TestSuspendRecovery_ClaimReleasesRefusedOnALapseWithNoSuspend(t *testing.T) {
+	cases := []struct {
+		name    string
+		release func(f *suspendFixture) bool
+	}{
+		{"requeue", func(f *suspendFixture) bool {
+			return f.s.requeueClaim(f.conv.OrgID, *f.conv, db.RequeueSetupFailure, 0, errors.New("clone failed"), "after a pre-agent failure")
+		}},
+		{"hand_back", func(f *suspendFixture) bool {
+			return !f.s.handBackClaim(context.Background(), liveParkContext{orgID: f.conv.OrgID, conversationID: f.conv.ID, claimID: f.conv.ClaimID}, db.HandBackShutdown, 0, "")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSuspendFixture(t)
+			f.register(t, time.Now().Add(-renewedRecently))
+			f.lapse(t)
+
+			if tc.release(f) {
+				t.Fatal("the release landed on a lapsed lease with no suspend behind it")
+			}
+			if got := f.claimOutcome(t); got != "" {
+				t.Errorf("claim released as %q, want it left unreleased for the takeover", got)
+			}
+			if _, _, reacquires := f.queue.counts(); reacquires != 0 {
+				t.Errorf("re-acquires = %d, want none without a suspend", reacquires)
+			}
+		})
+	}
+}
+
 // TestSuspendRecovery_NoSuspendFencesAsToday: the same lapse with no suspend
 // on the clock is a lease the engagement really lost, and it fences.
 func TestSuspendRecovery_NoSuspendFencesAsToday(t *testing.T) {

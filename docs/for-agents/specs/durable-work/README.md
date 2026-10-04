@@ -503,7 +503,9 @@ A self-fenced engagement writes nothing further and is cancelled, which tears do
 and sandbox.
 
 A paused process can miss its cleanup deadline. Database expiry checks must still reject its
-writes. Test a paused holder returning after takeover. External requests already in flight
+writes, including its own release of the claim: a requeue or hand-back on a lapsed lease is
+refused, and the claim is left for recovery to release as `reaped`, so the loss budget counts the
+engagement. Test a paused holder returning both before and after takeover. External requests already in flight
 remain outside this contract (§3).
 
 A whole-system suspend (laptop sleep, `systemctl suspend`, hibernate) is the one pause a claim

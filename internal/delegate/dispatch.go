@@ -2270,9 +2270,23 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 // engagement set up — taken over after its lease lapsed, most often by an
 // executor that now holds the conversation — and then the conversation is no
 // longer this engagement's to hand back, so nothing is recorded.
+//
+// It refuses a claim whose lease lapsed too, unless the lapse was a suspend
+// the engagement can recover from. Otherwise the claim is left for the
+// takeover, which releases it as reaped: an engagement that outlived its
+// authority is a lost one, whatever it was doing when it noticed.
 func (s *Spawner) requeueClaim(orgID string, conv domain.Conversation, outcome db.RequeueOutcome, delay time.Duration, cause error, after string) bool {
-	requeued, err := s.conversationQueue.RequeueConversation(context.Background(), orgID, conv.ID, conv.ClaimID, outcome, delay, cause.Error())
+	ctx := context.Background()
+	var requeued *domain.Conversation
+	err := s.retryAfterRecovery(ctx, conv.ClaimID, func() (e error) {
+		requeued, e = s.conversationQueue.RequeueConversation(ctx, orgID, conv.ID, conv.ClaimID, outcome, delay, cause.Error())
+		return e
+	})
 	switch {
+	case errors.Is(err, db.ErrClaimLeaseExpired):
+		dispatchLog.Warn("claim lease lapsed before the requeue — leaving the conversation to the takeover; recording nothing",
+			"conversation", conv.ID, "claim_id", conv.ClaimID, "outcome", outcome, "org_id", orgID)
+		return false
 	case errors.Is(err, db.ErrClaimReleased):
 		dispatchLog.Warn("claim fence refused the requeue — this engagement no longer holds the conversation; recording nothing",
 			"conversation", conv.ID, "claim_id", conv.ClaimID, "outcome", outcome, "org_id", orgID)

@@ -685,7 +685,7 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 		          (SELECT COALESCE(r.stop_requested_by, '') FROM conversations r WHERE r.id = claims.conversation_id)
 	`, lease.Seconds(), claimID, orgID, conversationID, activity.Idle.Seconds(), activity.Op, checkpointAge).Scan(&out.ExpiresAt, &out.StopRequested, &out.StopRequestedBy)
 	if errors.Is(err, sql.ErrNoRows) {
-		return db.ClaimRenewal{}, renewalRefusal(ctx, s.conn, orgID, conversationID, claimID)
+		return db.ClaimRenewal{}, liveGuardRefusal(ctx, s.conn, orgID, conversationID, claimID)
 	}
 	if err != nil {
 		return db.ClaimRenewal{}, wrapAdminPoolPermErr(err, "conversation_queue.RenewClaimLeaseSystem")
@@ -693,18 +693,19 @@ func (s *conversationQueueStore) RenewClaimLeaseSystem(ctx context.Context, orgI
 	return out, nil
 }
 
-// renewalRefusal classifies a renewal its guard refused, with one follow-up
-// read of the claim. It runs only on the refusal path, so the renewal itself
-// stays the one guarded statement it has to be.
+// liveGuardRefusal classifies a holder write that its live-claim guard
+// (unreleased, lease in the future) refused, with one follow-up read of the
+// claim. It runs only on the refusal path, so the write itself stays the one
+// guarded statement it has to be.
 //
 // A claim the follow-up finds live was restored between the two statements,
 // and the only write that takes an unreleased claim from lapsed to live is
-// ReacquireClaimLeaseSystem: the refusal this renewal met was still the lapse.
+// ReacquireClaimLeaseSystem: the refusal this write met was still the lapse.
 // A follow-up that fails answers the unclassified refusal, ErrClaimReleased:
 // every caller already treats that as the end of its ownership, and only the
 // lapse is ever recoverable, so a refusal that cannot be shown to be a lapse
 // is read as one that is not.
-func renewalRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+func liveGuardRefusal(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
 	err := claimRefusal(ctx, q, orgID, conversationID, claimID, "")
 	switch {
 	case err == nil:
@@ -1158,7 +1159,8 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		}
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = $4
-			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+			  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		`, claimID, orgID, conversationID, outcome)
 		if err != nil {
 			return err
@@ -1166,7 +1168,7 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
 		}
 		_, err = q.ExecContext(ctx, `
 			UPDATE conversations r
@@ -1295,7 +1297,8 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		}
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = now(), outcome = $4
-			WHERE id = $1 AND org_id = $2 AND conversation_id = $3 AND released_at IS NULL
+			WHERE id = $1 AND org_id = $2 AND conversation_id = $3
+			  AND released_at IS NULL AND lease_expires_at > statement_timestamp()
 		`, claimID, orgID, conversationID, string(outcome))
 		if err != nil {
 			return err
@@ -1303,7 +1306,7 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		if n, err := res.RowsAffected(); err != nil {
 			return err
 		} else if n == 0 {
-			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
+			return liveGuardRefusal(ctx, q, orgID, conversationID, claimID)
 		}
 		if !midFlight {
 			return nil

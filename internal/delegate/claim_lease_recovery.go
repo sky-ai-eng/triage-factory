@@ -327,7 +327,9 @@ type leaseRecoveringConversations struct {
 }
 
 // retryAfterRecovery runs write, and once more if it was refused on a lapsed
-// lease that recoverClaimLease took back.
+// lease that recoverClaimLease took back. The wrapper's writes go through it,
+// and so do the claim releases on the queue store, which a lapse refuses the
+// same way.
 //
 // The re-acquire reads the conversation's stop intent back the way a renewal
 // does, and a stop requested while the machine slept is often first seen
@@ -336,8 +338,8 @@ type leaseRecoveringConversations struct {
 // errStopRequested, as the renewal loop does. The write is still retried,
 // since the claim is held again, and the stop settles through the
 // engagement's fenced park, which needs that claim.
-func (c *leaseRecoveringConversations) retryAfterRecovery(ctx context.Context, claimID string, write func() error) error {
-	st := c.s.claimLeaseFor(claimID)
+func (s *Spawner) retryAfterRecovery(ctx context.Context, claimID string, write func() error) error {
+	st := s.claimLeaseFor(claimID)
 	var seen uint64
 	if st != nil {
 		seen = st.reacquired.Load()
@@ -346,7 +348,7 @@ func (c *leaseRecoveringConversations) retryAfterRecovery(ctx context.Context, c
 	if st == nil || !errors.Is(err, db.ErrClaimLeaseExpired) {
 		return err
 	}
-	renewal, ok := c.s.recoverClaimLease(ctx, st, seen)
+	renewal, ok := s.recoverClaimLease(ctx, st, seen)
 	if !ok {
 		return err
 	}
@@ -359,7 +361,7 @@ func (c *leaseRecoveringConversations) retryAfterRecovery(ctx context.Context, c
 }
 
 func (c *leaseRecoveringConversations) InsertMessageForClaimSystem(ctx context.Context, orgID, claimID string, msg *domain.Message) (id int64, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		id, e = c.ConversationStore.InsertMessageForClaimSystem(ctx, orgID, claimID, msg)
 		return e
 	})
@@ -367,7 +369,7 @@ func (c *leaseRecoveringConversations) InsertMessageForClaimSystem(ctx context.C
 }
 
 func (c *leaseRecoveringConversations) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (conv *domain.Conversation, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		conv, e = c.ConversationStore.SetSessionForClaimSystem(ctx, orgID, conversationID, claimID, sessionID)
 		return e
 	})
@@ -375,7 +377,7 @@ func (c *leaseRecoveringConversations) SetSessionForClaimSystem(ctx context.Cont
 }
 
 func (c *leaseRecoveringConversations) SetExecutorForClaimSystem(ctx context.Context, orgID, conversationID, claimID, executorID string, bootEpoch int64) (claim *domain.ExecutorClaim, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		claim, e = c.ConversationStore.SetExecutorForClaimSystem(ctx, orgID, conversationID, claimID, executorID, bootEpoch)
 		return e
 	})
@@ -383,7 +385,7 @@ func (c *leaseRecoveringConversations) SetExecutorForClaimSystem(ctx context.Con
 }
 
 func (c *leaseRecoveringConversations) SetClaimPhaseSystem(ctx context.Context, orgID, conversationID, claimID, phase string) (claim *domain.ExecutorClaim, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		claim, e = c.ConversationStore.SetClaimPhaseSystem(ctx, orgID, conversationID, claimID, phase)
 		return e
 	})
@@ -391,7 +393,7 @@ func (c *leaseRecoveringConversations) SetClaimPhaseSystem(ctx context.Context, 
 }
 
 func (c *leaseRecoveringConversations) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (conv *domain.Conversation, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		conv, e = c.ConversationStore.SetWorktreePathForClaimSystem(ctx, orgID, conversationID, claimID, path)
 		return e
 	})
@@ -399,7 +401,7 @@ func (c *leaseRecoveringConversations) SetWorktreePathForClaimSystem(ctx context
 }
 
 func (c *leaseRecoveringConversations) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (conv *domain.Conversation, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		conv, e = c.ConversationStore.SetSystemBlockForClaimSystem(ctx, orgID, conversationID, claimID, block)
 		return e
 	})
@@ -407,19 +409,19 @@ func (c *leaseRecoveringConversations) SetSystemBlockForClaimSystem(ctx context.
 }
 
 func (c *leaseRecoveringConversations) MarkDeliveredForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, ids []int, subtype string) error {
-	return c.retryAfterRecovery(ctx, claimID, func() error {
+	return c.s.retryAfterRecovery(ctx, claimID, func() error {
 		return c.ConversationStore.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, ids, subtype)
 	})
 }
 
 func (c *leaseRecoveringConversations) CompactForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, replyRow, resultRow *domain.Message, inactiveIDs []int) error {
-	return c.retryAfterRecovery(ctx, claimID, func() error {
+	return c.s.retryAfterRecovery(ctx, claimID, func() error {
 		return c.ConversationStore.CompactForClaimSystem(ctx, orgID, conversationID, claimID, replyRow, resultRow, inactiveIDs)
 	})
 }
 
 func (c *leaseRecoveringConversations) SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (msg *domain.Message, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		msg, e = c.ConversationStore.SettleCompactionRequestForClaimSystem(ctx, orgID, conversationID, claimID, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUSD, reason)
 		return e
 	})
@@ -427,7 +429,7 @@ func (c *leaseRecoveringConversations) SettleCompactionRequestForClaimSystem(ctx
 }
 
 func (c *leaseRecoveringConversations) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (conv *domain.Conversation, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		conv, e = c.ConversationStore.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, status, costUSD, durationMs, numTurns, resultSummary, outcome, outcomeReason, failureKind)
 		return e
 	})
@@ -435,7 +437,7 @@ func (c *leaseRecoveringConversations) CompleteForClaimSystem(ctx context.Contex
 }
 
 func (c *leaseRecoveringConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (changed bool, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		changed, e = c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind)
 		return e
 	})
@@ -443,7 +445,7 @@ func (c *leaseRecoveringConversations) MarkFailedIfActiveForClaimSystem(ctx cont
 }
 
 func (c *leaseRecoveringConversations) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (requested bool, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		requested, e = c.ConversationStore.RequestStopForClaimSystem(ctx, orgID, conversationID, claimID, reason)
 		return e
 	})
@@ -451,7 +453,7 @@ func (c *leaseRecoveringConversations) RequestStopForClaimSystem(ctx context.Con
 }
 
 func (c *leaseRecoveringConversations) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (parked bool, err error) {
-	err = c.retryAfterRecovery(ctx, claimID, func() (e error) {
+	err = c.s.retryAfterRecovery(ctx, claimID, func() (e error) {
 		parked, e = c.ConversationStore.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, park)
 		return e
 	})

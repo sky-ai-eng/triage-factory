@@ -610,7 +610,10 @@ type ConversationQueueStore interface {
 	// which its insert stamps with the claim live at that moment.
 	//
 	// Fenced on claimID like every holder write: ErrClaimReleased when the
-	// claim is no longer live. A non-empty lastErr is written to
+	// claim is released, and ErrClaimLeaseExpired, which wraps it, when it is
+	// unreleased with a lapsed lease. A lapsed claim is the takeover's to
+	// release, as reaped, so the loss budget counts an engagement that lost
+	// its authority. A non-empty lastErr is written to
 	// result_summary; preferred_executor_id is cleared, for the reason
 	// ReleaseOwnClaimsOnShutdownSystem clears it. The
 	// conversation is written only while it is mid-flight (no stored status):
@@ -649,10 +652,13 @@ type ConversationQueueStore interface {
 	// ErrInvalidRequeueOutcome and nothing is written.
 	//
 	// Fenced on claimID like every holder write: only that claim is released,
-	// and ErrClaimReleased is returned with nothing written when it is no
-	// longer live. An executor that was paused past its lease and then failed
-	// its setup would otherwise release the claim of the executor that took
-	// the conversation over. The conversation is locked before the claim, the
+	// and nothing is written when it is no longer live. A released claim is
+	// refused with ErrClaimReleased: an executor that was paused past its
+	// lease and then failed its setup would otherwise release the claim of
+	// the executor that took the conversation over. An unreleased claim whose
+	// lease lapsed is refused with ErrClaimLeaseExpired, which wraps it: the
+	// takeover releases that claim as reaped, so the loss budget counts the
+	// engagement. The conversation is locked before the claim, the
 	// order every writer that touches both takes. A conversation another
 	// writer parked or concluded while the claim was live keeps its row as
 	// that writer left it: only the claim is released, and the call returns

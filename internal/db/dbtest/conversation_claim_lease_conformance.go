@@ -444,6 +444,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// Released, the answer is the release whatever the lease says: a
 		// released claim may have a successor, and only the lapse of an
 		// unreleased one is ever recoverable.
+		f.SetLease(t, conv.ClaimID, testClaimLease)
 		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
@@ -531,6 +532,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		refused(t, "the claim named under another conversation", otherID, claimLeaseExecutor, claimLeaseBootEpoch)
 		refused(t, "another executor's claim", conversationID, "reacquire-other-exec", claimLeaseBootEpoch)
 		refused(t, "another boot's claim", conversationID, claimLeaseExecutor, claimLeaseBootEpoch+1)
+		f.SetLease(t, conv.ClaimID, testClaimLease)
 		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
@@ -663,8 +665,8 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("oldest past expiry = %s, want about %s", age, past)
 		}
 
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
-			t.Fatalf("RequeueConversation: %v", err)
+		if released, err := f.Stores.ConversationQueue.ReleaseExpiredClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID); err != nil || !released {
+			t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v), want the lapsed claim released", released, err)
 		}
 		if n, age, err := f.Stores.ConversationQueue.ExpiredClaimsSystem(ctx); err != nil || n != 0 || age != 0 {
 			t.Errorf("ExpiredClaimsSystem after release = (%d, %s, %v), want (0, 0s, nil)", n, age, err)

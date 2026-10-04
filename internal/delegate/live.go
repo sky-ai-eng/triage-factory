@@ -583,6 +583,8 @@ func (s *Spawner) releaseClaimOnShutdown(ctx context.Context, park liveParkConte
 // leaves the conversation mid-flight, claimable after delay (at once for 0).
 // The write is fenced like a park's, and for the same reason: a successor that
 // already holds the conversation owns it, and this engagement records nothing.
+// A lapsed lease is refused the same way unless a suspend recovery takes the
+// claim back; the takeover then releases it as reaped.
 func (s *Spawner) handBackClaim(ctx context.Context, park liveParkContext, outcome string, delay time.Duration, lastErr string) (fenced bool) {
 	if s.conversationQueue == nil {
 		return false // test fixture with no DB wired
@@ -593,7 +595,10 @@ func (s *Spawner) handBackClaim(ctx context.Context, park liveParkContext, outco
 		return true
 	}
 	s.releaseActivity(park.conversationID, park.claimID)
-	err := s.conversationQueue.HandBackClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, outcome, delay, lastErr)
+	writeCtx := context.WithoutCancel(ctx)
+	err := s.retryAfterRecovery(writeCtx, park.claimID, func() error {
+		return s.conversationQueue.HandBackClaimSystem(writeCtx, park.orgID, park.conversationID, park.claimID, outcome, delay, lastErr)
+	})
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the hand-back — this engagement no longer holds the conversation; recording nothing",
 			"conversation", park.conversationID, "claim_id", park.claimID, "org_id", park.orgID, "outcome", outcome, "error", err)
