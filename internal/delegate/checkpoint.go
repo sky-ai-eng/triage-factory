@@ -27,6 +27,7 @@
 package delegate
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -495,10 +496,14 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 }
 
 // snapshotFingerprint digests what a snapshot of this capture would carry: the
-// git delta's identity and bytes, the transcript, and a stat walk of the
-// scratch the archive would walk. Two captures with the same fingerprint
-// would archive to the same members, so a checkpoint that matches the last
-// one written has nothing to store.
+// git delta's identity, the commits its bundle carries and the bytes of its
+// patch, the transcript, and a stat walk of the scratch the archive would
+// walk. Two captures with the same fingerprint carry the same workspace, so a
+// checkpoint that matches the last one written has nothing to store.
+//
+// The bundle is read by its header, not its bytes: git does not pack the same
+// commits into the same bytes twice, and a fingerprint over them would take
+// every capture of a tree with unpushed commits for a changed one.
 //
 // The scratch half is path, size and modification time, not content. It is
 // the cheap half on purpose: the scratch is the unbounded part of a workspace,
@@ -512,7 +517,7 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 	}
 	if d := captured.Delta; d != nil {
 		field("git", d.Branch, d.Head)
-		if err := hashMember(h, d.Bundle, captured.BundlePath); err != nil {
+		if err := hashBundle(h, d.Bundle, captured.BundlePath); err != nil {
 			return "", fmt.Errorf("fingerprint bundle: %w", err)
 		}
 		if err := hashMember(h, d.Patch, captured.PatchPath); err != nil {
@@ -534,6 +539,33 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 	}
 	field("ci-logs", strconv.FormatBool(omittedCILogs))
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hashBundle feeds the bundle's header into h, from memory or from its staged
+// file, or a marker when the capture carried no bundle.
+func hashBundle(h hash.Hash, data []byte, path string) error {
+	var r io.Reader
+	switch {
+	case path != "":
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		r = f
+	case len(data) != 0:
+		r = bytes.NewReader(data)
+	default:
+		fmt.Fprint(h, "no-bundle;")
+		return nil
+	}
+	header, err := worktree.BundleHeader(r)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(h, "%d;", len(header))
+	_, _ = h.Write(header)
+	return nil
 }
 
 // hashMember feeds one captured member into h, length first, from memory or
