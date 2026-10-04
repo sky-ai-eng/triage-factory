@@ -1378,7 +1378,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			upstream.Record(ctx, upstream.Jira, c.orgID, class)
 			if !upstream.RetryableTransport(err, idempotent) || attempt > maxRateLimitRetries || upstream.Unreachable(ctx, host) {
 				upstream.MarkUnreachable(ctx, host)
-				return 0, nil, err
+				return 0, nil, &upstream.TransportError{Err: err}
 			}
 			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
 				return 0, nil, serr
@@ -1398,6 +1398,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			if class, counted := upstream.ClassifyTransport(ctx, rerr); counted {
 				upstream.Record(ctx, upstream.Jira, c.orgID, class)
 				upstream.MarkUnreachable(ctx, host)
+				return 0, nil, &upstream.TransportError{Err: rerr}
 			}
 			return 0, nil, rerr
 		}

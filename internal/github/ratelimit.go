@@ -263,7 +263,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
 				upstream.MarkUnreachable(ctx, host)
-				return nil, err
+				return nil, &upstream.TransportError{Err: err}
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
 				return nil, err
@@ -283,6 +283,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
 				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 				upstream.MarkUnreachable(ctx, host)
+				return nil, &upstream.TransportError{Err: readErr}
 			}
 			return nil, readErr
 		}

@@ -30,7 +30,7 @@ func TestSuspendCheckingTransport_DropsIdleAfterSuspend(t *testing.T) {
 	t.Cleanup(srv.Close)
 	base := &http.Transport{}
 	t.Cleanup(base.CloseIdleConnections)
-	client := &http.Client{Transport: dropIdleAfterSuspend(base)}
+	client := &http.Client{Transport: freshPoolAfterSuspend(base)}
 
 	reused := func() bool {
 		t.Helper()
@@ -102,7 +102,7 @@ func TestSuspendCheckingTransport_HTTP2BusyConnectionNotReused(t *testing.T) {
 	})
 
 	base := srv.Client().Transport.(*http.Transport)
-	rt := dropIdleAfterSuspend(base)
+	rt := freshPoolAfterSuspend(base)
 	t.Cleanup(func() { rt.(*suspendCheckingTransport).CloseIdleConnections() })
 	client := &http.Client{Transport: rt}
 
@@ -163,7 +163,7 @@ func TestSuspendCheckingTransport_HTTP2BusyConnectionNotReused(t *testing.T) {
 func TestDropIdleAfterSuspend_PassesThroughWhenUnsupported(t *testing.T) {
 	suspendclock.SetSourceForTest(t, func() (time.Duration, bool) { return 0, false })
 	base := &http.Transport{}
-	if got := dropIdleAfterSuspend(base); got != http.RoundTripper(base) {
-		t.Errorf("dropIdleAfterSuspend wrapped the transport on a platform that cannot report suspended time: %T", got)
+	if got := freshPoolAfterSuspend(base); got != http.RoundTripper(base) {
+		t.Errorf("freshPoolAfterSuspend wrapped the transport on a platform that cannot report suspended time: %T", got)
 	}
 }

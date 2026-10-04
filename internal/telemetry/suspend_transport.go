@@ -16,7 +16,7 @@ const suspendThreshold = time.Second
 
 // sharedTransport is what TracedTransport sends through when it is given no
 // base: http.DefaultTransport's connection pool, behind a suspend check.
-var sharedTransport = dropIdleAfterSuspend(http.DefaultTransport)
+var sharedTransport = freshPoolAfterSuspend(http.DefaultTransport)
 
 // suspendCheckingTransport moves to a fresh connection pool on the first
 // request after a system suspend, before that request takes a connection. A
@@ -41,10 +41,10 @@ type suspendCheckingTransport struct {
 	last    time.Duration
 }
 
-// dropIdleAfterSuspend wraps rt in the suspend check. rt is returned as it is
+// freshPoolAfterSuspend wraps rt in the suspend check. rt is returned as it is
 // when it is not an *http.Transport, which has no pool to replace, or when
 // this platform cannot report suspended time.
-func dropIdleAfterSuspend(rt http.RoundTripper) http.RoundTripper {
+func freshPoolAfterSuspend(rt http.RoundTripper) http.RoundTripper {
 	base, ok := rt.(*http.Transport)
 	if !ok {
 		return rt

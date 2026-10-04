@@ -36,7 +36,7 @@ func watchSuspendForConnections(ctx context.Context) {
 //
 // The polls this makes due need no ordering against the connection watcher
 // above: the GitHub and Jira clients send through telemetry.TracedTransport,
-// which drops the idle pool itself on the first request after a suspend.
+// which moves to a fresh connection pool on its first request after a suspend.
 func (a *App) watchSuspendForPolls(ctx context.Context) {
 	suspendclock.Watch(ctx, suspendCheckInterval, suspendThreshold, func(time.Duration) {
 		a.pollerMgr.PollAllSoon()
@@ -45,10 +45,7 @@ func (a *App) watchSuspendForPolls(ctx context.Context) {
 
 // dropIdleConnections closes http.DefaultTransport's idle connections, which
 // may be dead after a suspend because the NAT or VPN state behind them is
-// gone. The clients built on telemetry.TracedHTTPClient (GitHub, Jira, the
-// Jira OAuth and GitHub App flows, Slack) already make this check before
-// every request, so for them this only frees the dead sockets sooner; it is
-// what covers a caller that uses http.DefaultTransport directly.
+// gone. It covers callers that send through http.DefaultTransport directly.
 func dropIdleConnections() {
 	if t, ok := http.DefaultTransport.(*http.Transport); ok {
 		t.CloseIdleConnections()

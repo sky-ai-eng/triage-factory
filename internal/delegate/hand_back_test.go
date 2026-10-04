@@ -13,7 +13,6 @@ import (
 
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -98,16 +97,15 @@ func TestUpstreamSetupFailure_AnUnreachableUpstreamCounts(t *testing.T) {
 		t.Fatal("clone from a closed port succeeded")
 	}
 
-	_, dropped := http.Get("http://" + closedLoopbackAddr(t) + "/repos/o/r/pulls/7")
-	if dropped == nil {
-		t.Fatal("request to a closed port succeeded")
+	_, unreached := ghclient.NewClient("http://"+closedLoopbackAddr(t), "test-token").GetPR(context.Background(), "o", "r", 7, false)
+	if unreached == nil {
+		t.Fatal("GetPR against a closed port succeeded")
 	}
 
 	for name, cause := range map[string]error{
-		"pull-request read answered 503": fmt.Errorf("failed to fetch PR: %w", prErr),
-		"git fetch could not connect":    fmt.Errorf("failed to create worktree: %w", cloneErr),
-		"pull-request read its client marked as a transport failure": fmt.Errorf("failed to fetch PR: %w",
-			fmt.Errorf("request /repos/o/r/pulls/7: %w", &upstream.TransportError{Err: dropped})),
+		"pull-request read answered 503":      fmt.Errorf("failed to fetch PR: %w", prErr),
+		"git fetch could not connect":         fmt.Errorf("failed to create worktree: %w", cloneErr),
+		"pull-request read could not connect": fmt.Errorf("failed to fetch PR: %w", unreached),
 	} {
 		if !upstreamSetupFailure(cause) {
 			t.Errorf("%s: upstreamSetupFailure(%v) = false, want true", name, cause)
