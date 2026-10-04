@@ -238,7 +238,7 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 
 // TestProcessCompletion_FinishReturnsNotParked: a terminal finish returns
 // parked=false so runAgent's cleanup defers tear the worktree down. A completed
-// run never parks anymore — only an idle-hibernated `open` turn does,
+// run does not park; a turn that ends without a conclusion parks `open`,
 // covered elsewhere.
 func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
 	s, _, conversationID, taskID := setupAdvanceFixture(t, "pc-finish")

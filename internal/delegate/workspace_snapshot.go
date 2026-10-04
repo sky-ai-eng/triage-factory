@@ -1,24 +1,26 @@
-// Durable blueprint workspace: snapshot a parked run's non-recoverable
-// workspace to the blob store on dormancy, and rehydrate it on resume when the
-// warm on-disk worktree is gone. The object store is the source of truth; the
-// host worktree is a warm cache. A parked workspace surviving locally is the
-// fast path (resume uses it directly, rehydrate is a no-op); a missing one
-// rebuilds from the snapshot — never a brick.
+// Durable blueprint workspace: snapshot an engagement's non-recoverable
+// workspace to the blob store, and rehydrate it on resume when the warm
+// on-disk worktree is gone. The object store is the source of truth; the host
+// worktree is a warm cache. A workspace surviving locally is the fast path
+// (resume uses it directly, rehydrate is a no-op); a missing one rebuilds from
+// the snapshot — never a brick.
 //
-// Two snapshot triggers are wired today: a park to `open` — an idle
-// hibernation, a turn that ended without a conclusion, or a stop
-// (parkConversationOpen, live.go) — and every non-failed terminal, which after
-// the terminal vocabulary shrank to completed|failed is `completed`, whatever
-// the outcome (processCompletion). A third — an executor-drain/scale-down
-// trigger — is a forward seam for the execution-plane split: there are no
-// executors to drain yet, so it is intentionally NOT wired. When it lands it
-// calls snapshotWorkspace with the same key, identically to the two triggers
-// above.
+// Three kinds of moment write a snapshot, all under the task's key:
 //
-// A park does NOT wait for its snapshot: it records that a persist is owed,
-// flips the conversation, and captures afterwards. The record is what makes
-// that safe — see parkConversationOpen for the ordering and workspace_wait.go
-// for the resume that reads it.
+//   - an engagement letting go of a conversation it has not concluded
+//     (leaveConversation, live.go): a park to `open` — a turn that ended
+//     without a conclusion, or a stop by a person or the stall watchdog — and
+//     the hand-backs that leave the conversation mid-flight, when the
+//     dispatcher is shutting down or the model provider stayed unavailable;
+//   - every non-failed terminal, `completed` whatever the outcome, before the
+//     terminal write (processCompletion, recordNativeResult);
+//   - a checkpoint of a live native engagement at a tool-batch boundary
+//     (checkpoint.go).
+//
+// A park or a hand-back does NOT wait for its snapshot: it records that a
+// persist is owed, releases the claim, and captures afterwards. The record is
+// what makes that safe — see leaveConversation for the ordering and
+// workspace_wait.go for the resume that reads it.
 //
 // The write policy and the retention sweep move together, always — and the
 // sweep is the wider of the two on purpose: it enumerates every top-level
@@ -282,6 +284,8 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 	// owned says this engagement holds the key's lifecycle. False for a
 	// claimless caller or an unwired store, and then the branches below skip
 	// the guard and the terminal write: the blob is still produced, untracked.
+	// A newer engagement already holding the key ends the persist here, with
+	// nothing written.
 	//
 	// The lifecycle writes run detached from cancellation — the same
 	// WithoutCancel the park's own writes take, and for a sharper reason: a
@@ -290,7 +294,14 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 	// pending forever and a later resume waiting out its full bound on a
 	// persist nobody is producing.
 	stateCtx := context.WithoutCancel(ctx)
-	owned := leaseHeld || s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+	owned := leaseHeld
+	if !leaseHeld {
+		record := s.beginSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID)
+		if record == snapshotSuperseded {
+			return nil
+		}
+		owned = record.owned()
+	}
 	defer func() {
 		// A durable 'failed' is what lets a waiting resume stop waiting and
 		// fall back, so every error exit below lands here rather than leaving
@@ -504,25 +515,59 @@ func (s *Spawner) uploadSnapshot(ctx context.Context, w snapshotWrite, staged *s
 	return true, nil
 }
 
+// snapshotRecord is what opening a key's lifecycle record came to, and so
+// what the write that follows may do.
+type snapshotRecord int
+
+const (
+	// snapshotUntracked: nothing was recorded. The write goes ahead with
+	// neither the pre-upload guard nor an outcome.
+	snapshotUntracked snapshotRecord = iota
+	// snapshotOwned: this engagement holds the key's lifecycle, guards its
+	// upload on still holding it, and records the outcome.
+	snapshotOwned
+	// snapshotSuperseded: a newer engagement holds the key. This one writes
+	// nothing at all, since both the blob and the outcome are the newer
+	// engagement's.
+	snapshotSuperseded
+)
+
+func (r snapshotRecord) owned() bool { return r == snapshotOwned }
+
+// snapshotRecordTimeout bounds each write to a key's lifecycle record. The
+// writes run detached from the engagement's cancellation so a stopped
+// engagement still records its outcome, which would otherwise leave them
+// with no bound at all.
+const snapshotRecordTimeout = detachedWriteDeadline
+
 // beginSnapshotState records that claimID owes a snapshot for this key and
-// reports whether this engagement now holds the key's lifecycle. False when
-// there is nothing to record against — no store wired (a fixture), no claim to
-// fence on (a claimless caller) — and the caller then neither guards its upload
-// nor writes a terminal state.
+// reports what that came to. Untracked when there is nothing to record
+// against — no store wired (a fixture), no claim to fence on (a claimless
+// caller) — and the caller then neither guards its upload nor writes a
+// terminal state. Superseded when a newer engagement already holds the key,
+// and the caller then writes nothing.
 //
 // A failure to record is not a failure to snapshot: the blob is the thing the
 // resume actually reads, so a store error logs and the snapshot proceeds
 // untracked rather than being abandoned.
-func (s *Spawner) beginSnapshotState(ctx context.Context, orgID, keyID, claimID string) bool {
+func (s *Spawner) beginSnapshotState(ctx context.Context, orgID, keyID, claimID string) snapshotRecord {
 	if s.workspaceSnapshots == nil || claimID == "" {
-		return false
+		return snapshotUntracked
 	}
-	if err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, orgID, keyID, claimID); err != nil {
+	ctx, cancel := context.WithTimeout(ctx, snapshotRecordTimeout)
+	defer cancel()
+	err := s.workspaceSnapshots.BeginSnapshotSystem(ctx, orgID, keyID, claimID)
+	if errors.Is(err, db.ErrSnapshotSuperseded) {
+		delegateLog.Info("a newer engagement holds the workspace snapshot key; not writing",
+			"org", orgID, "key_id", keyID, "claim_id", claimID)
+		return snapshotSuperseded
+	}
+	if err != nil {
 		delegateLog.Warn("record workspace snapshot as pending failed; snapshotting untracked",
 			"org", orgID, "key_id", keyID, "claim_id", claimID, "error", err)
-		return false
+		return snapshotUntracked
 	}
-	return true
+	return snapshotOwned
 }
 
 // finishSnapshotState closes out this engagement's write. An unmatched CAS is
@@ -533,6 +578,8 @@ func (s *Spawner) finishSnapshotState(ctx context.Context, orgID, keyID, claimID
 	if s.workspaceSnapshots == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(ctx, snapshotRecordTimeout)
+	defer cancel()
 	matched, err := s.workspaceSnapshots.FinishSnapshotSystem(ctx, orgID, keyID, claimID, ok)
 	if err != nil {
 		delegateLog.Warn("record workspace snapshot outcome failed",
@@ -922,12 +969,9 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	// that bound up. The wait for an in-flight persist is not part of it — it
 	// has a bound of its own, which an operator sets — and the fresh-build
 	// rung reports its own operations.
-	timings := s.resolvedActivityTimings()
 	activity := s.activityFor(conv.ID)
 	beginRehydrate := func() (context.Context, func()) {
-		opCtx, cancel := context.WithTimeout(ctx, timings.workspaceOp)
-		end := activity.begin("rehydrate", timings.workspaceOp)
-		return opCtx, func() { end(); cancel() }
+		return s.beginWorkspaceOp(ctx, conv.ID, "rehydrate")
 	}
 	opCtx, endOp := beginRehydrate()
 	defer func() { endOp() }()

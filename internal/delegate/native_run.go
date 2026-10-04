@@ -720,7 +720,15 @@ func (s *Spawner) recordNativeResult(
 	startTime time.Time,
 	result agentloop.Result,
 	mirror *memoryMirror,
-) engagementDisposition {
+) (disp engagementDisposition) {
+	// A fenced engagement holds no claim, so its watchdog has nothing left to
+	// stop.
+	defer func() {
+		if disp.fenced {
+			s.releaseActivity(conversationID, cfg.claimID)
+		}
+	}()
+
 	// Every ending below starts here, and the engagement's checkpointer stops
 	// before any of them writes: cancelled, and waited for through its last
 	// record write. A checkpoint still uploading is the same writer to the key
@@ -791,6 +799,7 @@ func (s *Spawner) recordNativeResult(
 		if result.Err != nil {
 			reason = result.Err.Error()
 		}
+		s.releaseActivity(conversationID, cfg.claimID)
 		return engagementDisposition{fenced: s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, reason, result.FailureKind)}
 
 	case agentloop.ResultUpstreamUnavailable:
@@ -865,7 +874,12 @@ func (s *Spawner) recordNativeResult(
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
-	if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative); err != nil {
+	// The claim is still held, so the snapshot is one of the engagement's
+	// operations: bounded, and the idle limit does not apply while it runs.
+	snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
+	err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, cfg.claimID, claudeCwd, "", domain.ConversationRuntimeNative)
+	endSnap()
+	if err != nil {
 		delegateLog.Warn("snapshot workspace at native conclusion failed", "conversation", conversationID, "error", err)
 	}
 
@@ -882,6 +896,7 @@ func (s *Spawner) recordNativeResult(
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
 	bgCtx := context.WithoutCancel(ctx)
+	s.releaseActivity(conversationID, cfg.claimID)
 	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
 	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {

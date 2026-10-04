@@ -759,18 +759,13 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	// A clone that cannot finish in its bound is a setup failure, and the
 	// timeout surfaces as the error it is for the bring-up ladder to requeue.
-	// The watchdog's operation is the backstop for a clone that ignores its
-	// context.
-	timings := s.resolvedActivityTimings()
-	cloneCtx, cancelClone := context.WithTimeout(cloneCtx, timings.workspaceOp)
-	endClone := s.activityFor(conversationID).begin("clone", timings.workspaceOp)
+	cloneCtx, endClone := s.beginWorkspaceOp(cloneCtx, conversationID, "clone")
 	wtPath, err := worktree.CreateForPR(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, rootKey,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).
 		worktree.WithBaseBranch(pr.BaseRef))
 	endClone()
-	cancelClone()
 	recordSpanError(cloneSpan, err)
 	cloneSpan.End()
 	if err != nil {

@@ -8,6 +8,7 @@
 package worktree
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -294,6 +295,31 @@ func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Write
 		return false, fmt.Errorf("git bundle: %w", err)
 	}
 	return true, nil
+}
+
+// BundleHeader reads a git bundle's header from r: the signature line, any
+// capability lines, the prerequisite commits and the refs, through the blank
+// line where the pack begins. It is the bundle's identity. The refs name the
+// commits it carries and the prerequisites the commits it stops at, and object
+// ids are hashes of content, so two bundles with one header carry the same
+// objects. Their bytes need not match: git writes the pack on several threads
+// and chooses its deltas differently from one run to the next.
+func BundleHeader(r io.Reader) ([]byte, error) {
+	br := bufio.NewReader(r)
+	var header bytes.Buffer
+	for first := true; ; first = false {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read bundle header: %w", err)
+		}
+		if first && !bytes.HasPrefix(line, []byte("# v2 git bundle")) && !bytes.HasPrefix(line, []byte("# v3 git bundle")) {
+			return nil, fmt.Errorf("not a git bundle: signature %q", bytes.TrimSpace(line))
+		}
+		header.Write(line)
+		if len(line) == 1 {
+			return header.Bytes(), nil
+		}
+	}
 }
 
 // skillsExcludePath is the capture's git-pathspec spelling of the skills path

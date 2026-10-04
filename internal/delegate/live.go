@@ -407,6 +407,7 @@ func (s *Spawner) markConversationOpen(ctx context.Context, park liveParkContext
 	// stop IS a cancel) — expressed as WithoutCancel so the write stays inside
 	// the engagement's trace rather than orphaning into one of its own.
 	bgCtx := context.WithoutCancel(ctx)
+	s.releaseActivity(park.conversationID, park.claimID)
 	flipped, err := s.conversations.ParkOpenForClaimSystem(bgCtx, park.orgID, park.conversationID, park.claimID, park.reason)
 	if errors.Is(err, db.ErrClaimReleased) {
 		// Whoever released the claim — expiry handling after a lapsed lease,
@@ -535,10 +536,16 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// entirely with no workspace to capture (a cancel during setup), which the
 	// persist would reject anyway. A record that could not be opened does not
 	// hold up the release either: the persist below retries the open on its
-	// own way through.
+	// own way through. A key a newer engagement already holds is left to it,
+	// and nothing is captured.
 	snapCtx := context.WithoutCancel(ctx)
 	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
-	leaseHeld := willSnapshot && s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+	leaseHeld := false
+	if willSnapshot {
+		record := s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
+		leaseHeld = record.owned()
+		willSnapshot = record != snapshotSuperseded
+	}
 
 	// Spend lands BEFORE the release: the broadcast after it is what makes
 	// every watcher refetch, and the figure has to be on the ledger by then.
@@ -548,11 +555,18 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 
 	fenced = release(ctx, park)
 
+	// The release ended the stall watchdog with the claim, so the snapshot's
+	// bound is the only thing that ends a capture or an upload that stops
+	// answering. It is a workspace operation's bound, the same one a
+	// snapshot taken before a terminal runs under.
 	if willSnapshot {
-		if err := s.persistWorkspaceSnapshot(snapCtx, snapshotWrite{
+		persistCtx, cancel := context.WithTimeout(snapCtx, s.resolvedActivityTimings().workspaceOp)
+		err := s.persistWorkspaceSnapshot(persistCtx, snapshotWrite{
 			orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
 			wtPath: park.claudeCwd, sessionID: sessionID, runtime: park.runtime, reason: reason,
-		}, leaseHeld); err != nil {
+		}, leaseHeld)
+		cancel()
+		if err != nil {
 			delegateLog.Warn("snapshot workspace on leaving the conversation failed", "conversation", park.conversationID, "error", err)
 		}
 	}
@@ -578,6 +592,7 @@ func (s *Spawner) handBackClaim(ctx context.Context, park liveParkContext, outco
 			"conversation", park.conversationID, "org_id", park.orgID, "outcome", outcome)
 		return true
 	}
+	s.releaseActivity(park.conversationID, park.claimID)
 	err := s.conversationQueue.HandBackClaimSystem(context.WithoutCancel(ctx), park.orgID, park.conversationID, park.claimID, outcome, delay, lastErr)
 	if errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Error("claim fence refused the hand-back — this engagement no longer holds the conversation; recording nothing",

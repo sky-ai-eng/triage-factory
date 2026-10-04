@@ -2,7 +2,9 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -25,6 +27,14 @@ type WorkspaceSnapshotSeeder struct {
 	// DeleteTask removes the tasks row, so the cascade subtest can prove a
 	// purged task takes its snapshot state with it.
 	DeleteTask func(t *testing.T, taskID string)
+
+	// Conversation inserts a conversation on taskID and returns its id.
+	Conversation func(t *testing.T, taskID string) (conversationID string)
+
+	// Claim inserts a claim on conversationID minted at claimedAt, released
+	// when released is true, and returns its id — the engagements whose
+	// order decides which writer supersedes which.
+	Claim func(t *testing.T, conversationID string, claimedAt time.Time, released bool) (claimID string)
 }
 
 // Claim ids the suite writes as writers. Real uuids because the Postgres
@@ -39,8 +49,9 @@ const (
 // RunWorkspaceSnapshotStoreConformance covers the contract every backend must
 // hold: the begin/finish/get/delete round-trip in both terminal directions,
 // the completion CAS refusing a writer a successor has displaced, the
-// unconditional takeover that displaces it, per-key isolation, and the FK
-// cascade that keeps a purged task from leaving lifecycle behind.
+// takeover that displaces it, the begin refused to a writer whose successor
+// already holds the key, per-key isolation, and the FK cascade that keeps a
+// purged task from leaving lifecycle behind.
 func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -177,8 +188,8 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 			t.Fatalf("finish A: %v", err)
 		}
 		// A later engagement parking the same task starts a new
-		// lifecycle on the same key: unconditional, so a written row is not a
-		// tombstone that blocks the next snapshot.
+		// lifecycle on the same key: whatever state the row is in, a written
+		// row is not a tombstone that blocks the next snapshot.
 		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterC); err != nil {
 			t.Fatalf("begin C: %v", err)
 		}
@@ -188,6 +199,104 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 		if got == nil || got.State != domain.WorkspaceSnapshotPending || got.WriterClaimID != snapshotWriterC {
 			t.Fatalf("row after re-begin = %+v, want pending under %q", got, snapshotWriterC)
+		}
+	})
+
+	t.Run("begin_refuses_a_writer_its_successor_superseded", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "late-begin")
+		conv := seed.Conversation(t, task)
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		// The engagement whose lease lapsed, and the one that took the
+		// conversation over after it.
+		zombie := seed.Claim(t, conv, base, true)
+		successor := seed.Claim(t, conv, base.Add(time.Minute), false)
+
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, successor); err != nil {
+			t.Fatalf("successor begin: %v", err)
+		}
+		err := store.BeginSnapshotSystem(ctx, orgID, task, zombie)
+		if !errors.Is(err, db.ErrSnapshotSuperseded) {
+			t.Fatalf("a begin from the superseded claim = %v, want db.ErrSnapshotSuperseded", err)
+		}
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got == nil || got.State != domain.WorkspaceSnapshotPending || got.WriterClaimID != successor {
+			t.Fatalf("row after the refused begin = %+v, want pending under the successor %q", got, successor)
+		}
+
+		// Nor may it take a key the successor has finished writing: its tree
+		// is older than the blob the key holds.
+		if matched, err := store.FinishSnapshotSystem(ctx, orgID, task, successor, true); err != nil || !matched {
+			t.Fatalf("successor finish = (%v, %v), want matched", matched, err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, zombie); !errors.Is(err, db.ErrSnapshotSuperseded) {
+			t.Fatalf("a begin from the superseded claim over a written row = %v, want db.ErrSnapshotSuperseded", err)
+		}
+		got, err = store.GetSnapshotStateSystem(ctx, orgID, task)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got == nil || got.State != domain.WorkspaceSnapshotWritten || got.WriterClaimID != successor {
+			t.Fatalf("row after the second refused begin = %+v, want written under the successor %q", got, successor)
+		}
+	})
+
+	t.Run("a_later_step_on_the_task_supersedes_an_earlier_one", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "later-step")
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		earlier := seed.Claim(t, seed.Conversation(t, task), base, true)
+		later := seed.Claim(t, seed.Conversation(t, task), base.Add(time.Minute), false)
+
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, later); err != nil {
+			t.Fatalf("later step begin: %v", err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, earlier); !errors.Is(err, db.ErrSnapshotSuperseded) {
+			t.Fatalf("a begin from the earlier step's claim = %v, want db.ErrSnapshotSuperseded", err)
+		}
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got == nil || got.WriterClaimID != later {
+			t.Fatalf("row = %+v, want it still under the later step %q", got, later)
+		}
+	})
+
+	t.Run("a_released_claim_with_no_successor_may_begin", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "post-release")
+		conv := seed.Conversation(t, task)
+		base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+		earlier := seed.Claim(t, conv, base, true)
+		parked := seed.Claim(t, conv, base.Add(time.Minute), true)
+
+		// The key holds an earlier engagement's snapshot, and the engagement
+		// that has just parked — its claim released, as a park's is before
+		// its snapshot runs — takes the key over from it.
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, earlier); err != nil {
+			t.Fatalf("earlier begin: %v", err)
+		}
+		if _, err := store.FinishSnapshotSystem(ctx, orgID, task, earlier, true); err != nil {
+			t.Fatalf("earlier finish: %v", err)
+		}
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, parked); err != nil {
+			t.Fatalf("a released claim with no successor was refused: %v", err)
+		}
+		got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if got == nil || got.State != domain.WorkspaceSnapshotPending || got.WriterClaimID != parked {
+			t.Fatalf("row = %+v, want pending under the parked engagement %q", got, parked)
+		}
+		// Its own claim again — a checkpoint, then its ending — is not a
+		// successor of itself.
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, parked); err != nil {
+			t.Fatalf("a writer re-beginning its own key was refused: %v", err)
 		}
 	})
 
