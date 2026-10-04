@@ -363,6 +363,35 @@ func TestTokenCache_RefusedGrantOfATokenAnotherProcessRotatedRetries(t *testing.
 	}
 }
 
+// TestTokenCache_RefusedAgainAfterASecondRotationAsksToConnectAgain: the
+// retry's token is rotated away under it too, so the refresh cannot settle the
+// credential here. The refusal still reads as one the user fixes by connecting
+// again, never as a refusal of the org's OAuth app, which would send them to
+// an admin with nothing to fix. The credential another process stored is kept.
+func TestTokenCache_RefusedAgainAfterASecondRotationAsksToConnectAgain(t *testing.T) {
+	secrets := newFakeSecrets()
+	seedOAuthEnvelope(t, secrets, "ref-0")
+	endpoint := &fakeTokenEndpoint{}
+	endpoint.answer = func(token string) (int, string) {
+		switch token {
+		case "ref-0":
+			seedOAuthEnvelope(t, secrets, "ref-other")
+		case "ref-other":
+			seedOAuthEnvelope(t, secrets, "ref-third")
+		}
+		return http.StatusBadRequest, `{"error":"invalid_grant"}`
+	}
+	cache := newTokenCache(endpoint.minter(t), fakeAppResolver{}, secrets)
+
+	_, _, err := cache.AccessTokenForUser(context.Background(), cOrg, cUser, cHost)
+	if !errors.Is(err, jira.ErrJiraUserCredentialRefused) {
+		t.Fatalf("err = %v, want ErrJiraUserCredentialRefused", err)
+	}
+	if got := storedRefresh(t, secrets); got != "ref-third" {
+		t.Errorf("stored refresh token = %q, want the other process's ref-third kept", got)
+	}
+}
+
 // TestTokenCache_OtherFailuresKeepTheCredential: a refusal of the org's OAuth
 // app, a rate limit and an outage say nothing about the user's grant, so the
 // credential stays and the error carries its class.

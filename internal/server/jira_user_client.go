@@ -15,9 +15,10 @@ import (
 //
 // Only the user connecting again fixes a missing or refused credential, so both
 // are 409 NOT_CONFIGURED, the refusal saying why. A Cloud OAuth mint the token
-// endpoint did not answer, or rate limited, clears on a retry. One it refused
-// for any reason but the user's grant is about the org's OAuth app, which an
-// admin fixes. Anything else is this server's fault.
+// endpoint did not answer, or rate limited, clears on a retry; a rate limit is
+// 429 RATE_LIMITED, the status that reason has wherever it is answered. One
+// it refused for any reason but the user's grant is about the org's OAuth app,
+// which an admin fixes. Anything else is this server's fault.
 //
 // The upstream answers are read only off the mint's own error types: a secret
 // store read that failed on a network error is classified Transient too, and
@@ -53,7 +54,7 @@ func writeJiraUserClientError(w http.ResponseWriter, scope string, err error) {
 	serverLog.Warn("could not mint the acting user's Jira access token", "scope", scope, "class", class, "error", err)
 	switch class {
 	case upstream.RateLimited:
-		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
+		httpx.WriteErrors(w, http.StatusTooManyRequests, httpx.ErrorItem{
 			Reason:  httpx.ReasonRateLimited,
 			Message: "Jira is rate limiting sign-in requests; try again shortly" + httpx.LocalDetail(err),
 		})

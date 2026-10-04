@@ -1348,10 +1348,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 		return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
 	}
 	// Phase 1: Discovery
+	// A discovery error is returned once the entities it did discover are
+	// seeded, and the poller logs it with the org, so it is not logged here.
 	discovered, discoveryErr := t.discoverJira(ctx, client, baseURL, projects)
-	if discoveryErr != nil {
-		trackerLog.Log(ctx, upstream.LogLevel(discoveryErr, slog.LevelError), "jira discovery error", "error", discoveryErr)
-	}
 
 	for _, state := range discovered {
 		snap := state.Snap
@@ -1426,8 +1425,8 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	}
 
 	if discoveryErr != nil {
-		// Every discovery query failed and the connection is why: the cycle
-		// fetched nothing, so it must not go on to report a completed poll.
+		// Every discovery query failed, on the connection or a rate limit: the
+		// cycle fetched nothing, so it must not go on to report a completed poll.
 		// With no active entities, Phase 2 would emit the completion sentinel,
 		// which marks Jira ready without Jira having answered once.
 		return 0, discoveryErr

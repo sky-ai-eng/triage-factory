@@ -302,7 +302,7 @@ var jiraUserClientFailures = []struct {
 	{"no_credential", jira.ErrNoJiraUserCredential, http.StatusConflict, httpx.ReasonNotConfigured, "connect your Jira"},
 	{"mint_unreachable", fmt.Errorf("mint: %w", &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},
 	{"mint_unavailable", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 503, Class: upstream.Transient}), http.StatusBadGateway, httpx.ReasonUpstreamUnavailable, "did not answer"},
-	{"mint_rate_limited", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 429, Class: upstream.RateLimited}), http.StatusBadGateway, httpx.ReasonRateLimited, "rate limiting"},
+	{"mint_rate_limited", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 429, Class: upstream.RateLimited}), http.StatusTooManyRequests, httpx.ReasonRateLimited, "rate limiting"},
 	{"oauth_app_refused", fmt.Errorf("mint: %w", &jiraoauth.StatusError{Op: "token request", StatusCode: 401, Code: "invalid_client", Class: upstream.Auth}), http.StatusBadGateway, httpx.ReasonUpstreamRejected, "org admin"},
 	{"secret_store_network", fmt.Errorf("read credential: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}), http.StatusInternalServerError, httpx.ReasonInternal, ""},
 }

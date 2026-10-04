@@ -140,7 +140,10 @@ func (c *TokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, host
 // token. The singleflight covers one process, and another one refreshing the
 // same user rotates the token under this one, which Atlassian then refuses
 // here; the credential it stored is live, so the refresh is tried once more
-// with it instead.
+// with it instead. A refusal that loses to a rotation again is one this
+// refresh cannot settle. It is still the user's credential and not the org's
+// OAuth app, so it gets the same answer, and connecting again replaces
+// whatever is stored by then.
 func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key string) (cachedToken, error) {
 	for attempt := 0; ; attempt++ {
 		ct, raw, err := c.refreshOnce(ctx, orgID, userID, host, key)
@@ -160,7 +163,7 @@ func (c *TokenCache) refresh(ctx context.Context, orgID, userID, host, key strin
 				"org", orgID, "user", userID, "host", host)
 			return cachedToken{}, fmt.Errorf("%w: %w", jira.ErrJiraUserCredentialRefused, err)
 		case attempt > 0:
-			return cachedToken{}, err
+			return cachedToken{}, fmt.Errorf("%w: %w", jira.ErrJiraUserCredentialRefused, err)
 		}
 	}
 }
