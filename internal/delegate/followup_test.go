@@ -560,3 +560,46 @@ func TestFollowUp_WakeRefusedUnderARunCancelledSinceTheGateIsReportedAsTheCancel
 		t.Errorf("stored status = %q, want open — nothing drives a step under a cancelled run", st)
 	}
 }
+
+// unreadableAfterGateBlueprint is staleLiveBlueprint whose every read after
+// the gate's fails.
+type unreadableAfterGateBlueprint struct {
+	staleLiveBlueprint
+}
+
+func (b unreadableAfterGateBlueprint) GetRunSystem(ctx context.Context, orgID, id string) (*domain.BlueprintRun, error) {
+	if *b.reads >= 1 {
+		*b.reads++
+		return nil, errors.New("blueprint read failed")
+	}
+	return b.staleLiveBlueprint.GetRunSystem(ctx, orgID, id)
+}
+
+// TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict: a wake whose flip
+// was refused, and whose run cannot be re-read to say why, is reported as a
+// conflict. The written message makes the parked conversation read as
+// queued, so falling through to the lost-race reading would report success
+// for a message nothing delivers.
+func TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	database := newDelegateTestDB(t)
+	seedConversation(t, database, "r-unreadable", "sess-unreadable", "/tmp/does-not-exist-unreadable")
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', park_reason = 'user_cancelled' WHERE id = 'r-unreadable'`); err != nil {
+		t.Fatalf("park: %v", err)
+	}
+	brID := blueprintRunIDForConversation(t, database, "r-unreadable")
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 1 WHERE id = ?`, brID); err != nil {
+		t.Fatalf("cancel the run: %v", err)
+	}
+	stores := testSpawnerStores(database)
+	stores.Blueprints = unreadableAfterGateBlueprint{staleLiveBlueprint{BlueprintStore: stores.Blueprints, reads: new(int)}}
+	s := NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
+
+	err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, "r-unreadable", runmode.LocalDefaultUserID, "carry on")
+	if !errors.Is(err, ErrConversationNotResumable) {
+		t.Fatalf("SendMessage = %v, want ErrConversationNotResumable", err)
+	}
+	if st := storedStatus(t, database, "r-unreadable"); st != "open" {
+		t.Errorf("stored status = %q, want open", st)
+	}
+}

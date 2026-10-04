@@ -813,7 +813,15 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 		// the gate reports a run already called off when it looked. It is
 		// asked before the lost-race reading below, which would read the
 		// written message as a conversation queued again and report success.
-		if s.blueprintCalledOffNow(ctx, orgID, conv) {
+		// A re-read that fails cannot rule the cancel out, so it is answered
+		// as lostWakeOutcome answers a re-read it cannot make: a conflict.
+		calledOff, err := s.blueprintCalledOffNow(ctx, orgID, conv)
+		if err != nil {
+			delegateLog.Warn("resume: re-read of a refused wake's blueprint run failed; reporting a conflict",
+				"conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
+			return ErrConversationNotResumable
+		}
+		if calledOff {
 			return blockedFollowUpError(ResumeBlockedBlueprintCancelled)
 		}
 		return s.lostWakeOutcome(ctx, orgID, conv.ID)
@@ -828,20 +836,18 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 }
 
 // blueprintCalledOffNow re-reads the conversation's blueprint run and reports
-// whether it is called off (blueprintCalledOff). A conversation with no run,
-// or a read that fails, answers false: the caller then reads the lost wake the
-// way it reads every other.
-func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv domain.Conversation) bool {
+// whether it is called off (blueprintCalledOff). A conversation with no run
+// answers false: the caller then reads the lost wake the way it reads every
+// other.
+func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv domain.Conversation) (bool, error) {
 	if s.blueprints == nil || conv.BlueprintRunID == "" {
-		return false
+		return false, nil
 	}
 	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
 	if err != nil {
-		delegateLog.Warn("resume: re-read of a refused wake's blueprint run failed; reporting it as a lost wake",
-			"conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
-		return false
+		return false, err
 	}
-	return blueprintCalledOff(br)
+	return blueprintCalledOff(br), nil
 }
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
