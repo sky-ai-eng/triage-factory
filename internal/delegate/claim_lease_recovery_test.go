@@ -537,6 +537,43 @@ func TestSuspendRecovery_StoppedEngagementStillReacquires(t *testing.T) {
 	}
 }
 
+// TestSuspendRecovery_WriteThatReacquiresStopsOnAPendingStop: a stop requested
+// while the machine slept is read back by the re-acquire, whichever of the
+// engagement's calls makes it. When a write makes it, the write still lands,
+// and the engagement stops exactly as a renewal that read the stop would
+// stop it.
+func TestSuspendRecovery_WriteThatReacquiresStopsOnAPendingStop(t *testing.T) {
+	f := newSuspendFixture(t)
+	f.register(t, time.Now().Add(-renewedRecently))
+	f.lapse(t)
+	f.sleep(suspendPastTheLease)
+	if _, err := f.database.Exec(
+		`UPDATE conversations SET stop_requested_at = CURRENT_TIMESTAMP, stop_requested_by = ? WHERE id = ?`,
+		"user-who-stopped", f.conv.ID,
+	); err != nil {
+		t.Fatalf("request a stop: %v", err)
+	}
+
+	sink := newConversationSink(f.s, f.conv.OrgID, f.conv.ID, f.conv.ClaimID, "event", "")
+	if err := sink.OnMessage(&domain.Message{ConversationID: f.conv.ID, Role: "assistant", Content: "after the wake"}); err != nil {
+		t.Fatalf("OnMessage after a suspend: %v", err)
+	}
+	if n := f.transcript(t, "after the wake"); n != 1 {
+		t.Errorf("transcript rows = %d, want exactly 1", n)
+	}
+	if _, _, reacquires := f.queue.counts(); reacquires != 1 {
+		t.Errorf("re-acquires = %d, want 1", reacquires)
+	}
+	if cause := context.Cause(f.claimCtx); !errors.Is(cause, errStopRequested) {
+		t.Errorf("claim context cause = %v, want errStopRequested", cause)
+	}
+	// The stop settles through the engagement's fenced park, which needs the
+	// lease the re-acquire took back.
+	if !f.leaseLive(t) {
+		t.Error("the claim's lease is not live after the re-acquire")
+	}
+}
+
 // TestSuspendRecovery_TwoRefusalsOneReacquire: the renewal and a sink write
 // meeting the same lapse spend one re-acquire, and both proceed on it.
 func TestSuspendRecovery_TwoRefusalsOneReacquire(t *testing.T) {

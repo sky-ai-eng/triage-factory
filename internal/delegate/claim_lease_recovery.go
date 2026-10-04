@@ -162,8 +162,8 @@ func (s *Spawner) claimLeaseFor(claimID string) *claimLeaseState {
 
 // recoverClaimLease is the answer to a refusal classified db.ErrClaimLeaseExpired:
 // whether the engagement may carry on, having taken its claim back, or must
-// fence as it would have before a lapse had its own name. seen is st.reacquired
-// as the caller read it before issuing the refused call.
+// fence as it would on any other refusal. seen is st.reacquired as the caller
+// read it before issuing the refused call.
 //
 // A re-acquire is safe only where the engagement provably did nothing while its
 // lease was lapsed, which is the case exactly when the whole machine was
@@ -328,6 +328,14 @@ type leaseRecoveringConversations struct {
 
 // retryAfterRecovery runs write, and once more if it was refused on a lapsed
 // lease that recoverClaimLease took back.
+//
+// The re-acquire reads the conversation's stop intent back the way a renewal
+// does, and a stop requested while the machine slept is often first seen
+// here: the write that meets the lapse is usually ahead of the loop's next
+// renewal. So a re-acquire that reports one stops the engagement with
+// errStopRequested, as the renewal loop does. The write is still retried,
+// since the claim is held again, and the stop settles through the
+// engagement's fenced park, which needs that claim.
 func (c *leaseRecoveringConversations) retryAfterRecovery(ctx context.Context, claimID string, write func() error) error {
 	st := c.s.claimLeaseFor(claimID)
 	var seen uint64
@@ -338,8 +346,14 @@ func (c *leaseRecoveringConversations) retryAfterRecovery(ctx context.Context, c
 	if st == nil || !errors.Is(err, db.ErrClaimLeaseExpired) {
 		return err
 	}
-	if _, ok := c.s.recoverClaimLease(ctx, st, seen); !ok {
+	renewal, ok := c.s.recoverClaimLease(ctx, st, seen)
+	if !ok {
 		return err
+	}
+	if renewal.StopRequested {
+		dispatchLog.Info("claim re-acquire observed a pending stop; stopping this engagement",
+			"conversation", st.conv.ID, "claim", st.conv.ClaimID, "requested_by", renewal.StopRequestedBy)
+		st.fence(errStopRequested)
 	}
 	return write()
 }

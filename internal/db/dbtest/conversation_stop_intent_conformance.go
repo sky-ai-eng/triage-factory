@@ -233,6 +233,52 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		assertNoIntent(t, f, id, "MarkQueuedForResume")
 	})
 
+	t.Run("Resume_RefusesAnOpenStepUnderACalledOffRun", func(t *testing.T) {
+		// The claim gate drives nothing under a run that was called off, and
+		// once the run is cancelled nothing settles or replays its steps
+		// either. A wake there would leave the step mid-flight with nothing
+		// that ever moves it, so the wake refuses it.
+		parkedStep := func(t *testing.T, f ClaimLeaseFixture) string {
+			t.Helper()
+			id, _ := f.StageStep(t)
+			conv := claim(t, f, id)
+			if ok, err := f.Stores.Conversations.ParkOpenForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, db.ParkIdle()); err != nil || !ok {
+				t.Fatalf("park: (%v, %v)", ok, err)
+			}
+			return id
+		}
+		refused := func(t *testing.T, f ClaimLeaseFixture, id, under string) {
+			t.Helper()
+			if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, id); err != nil || ok {
+				t.Fatalf("MarkQueuedForResume under a %s run = (%v, %v), want (false, nil)", under, ok, err)
+			}
+			if got := get(t, f, id); got.Status != domain.StatusOpen {
+				t.Errorf("status after a refused wake under a %s run = %q, want open", under, got.Status)
+			}
+		}
+
+		f := mk(t)
+		requested := parkedStep(t, f)
+		if _, err := f.Stores.Blueprints.RequestRunCancelSystem(ctx, f.OrgID, runOf(t, f, requested).ID); err != nil {
+			t.Fatalf("RequestRunCancelSystem: %v", err)
+		}
+		refused(t, f, requested, "cancel-requested")
+
+		g := mk(t)
+		cancelled := parkedStep(t, g)
+		if changed, err := g.Stores.Blueprints.MarkRunStatusSystem(ctx, g.OrgID, runOf(t, g, cancelled).ID, domain.BlueprintRunStatusCancelled, "cancelled", nil); err != nil || !changed {
+			t.Fatalf("MarkRunStatusSystem(cancelled) = (%v, %v)", changed, err)
+		}
+		refused(t, g, cancelled, "cancelled")
+
+		// Under a run still going, the same wake lands.
+		h := mk(t)
+		running := parkedStep(t, h)
+		if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, running); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume under a running run = (%v, %v), want (true, nil)", ok, err)
+		}
+	})
+
 	t.Run("ClaimGate_RefusesAStopRequestedConversation", func(t *testing.T) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
@@ -503,9 +549,9 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// whole, and the settlement parks the row with the stored reason.
 		f := mk(t)
 		id, _ := f.StageStep(t)
-		claim(t, f, id)
+		conv := claim(t, f, id)
 		requestStall(t, f, id)
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, id, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, id, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		if got := get(t, f, id); got.StopRequestedAt == nil || got.StopRequestedReason != string(domain.ParkReasonStalled) {

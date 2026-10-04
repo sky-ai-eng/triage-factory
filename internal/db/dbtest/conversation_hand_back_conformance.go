@@ -192,6 +192,109 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		mustClaim(t, f, c.ID)
 	})
 
+	t.Run("HandBack_AMessageOlderThanTheClaimDoesNotSkipTheWait", func(t *testing.T) {
+		// A message that was already waiting when the engagement was claimed
+		// is the input that engagement was claimed to deliver. If the
+		// engagement hands back before delivering it (a compaction that
+		// failed on a provider outage, say), the message is no reason to try
+		// again at once, and skipping the wait for it would retry without a
+		// pause on every claim.
+		f := mk(t)
+		id, _ := f.StageStep(t)
+		pending := false
+		person := func(t *testing.T, content string) {
+			t.Helper()
+			if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+				ConversationID: id, Role: "user", Content: content,
+				Delivered: &pending, WindowState: domain.MessageWindowActive,
+			}); err != nil {
+				t.Fatalf("InsertMessage(%q): %v", content, err)
+			}
+		}
+		person(t, "sent before the claim")
+		c := mustClaim(t, f, id)
+		handBack(t, f, c, db.HandBackUpstream, handBackWait)
+		waitIs(t, f, id, handBackWait)
+
+		// A message sent while the next engagement runs is a person asking
+		// for another try: that hand-back sets no wait.
+		f.SetNextAttempt(t, id, -time.Second)
+		c = mustClaim(t, f, id)
+		person(t, "sent during the engagement")
+		handBack(t, f, c, db.HandBackUpstream, handBackWait)
+		noWait(t, f, id)
+
+		// One immediate retry per message: the engagement after that one
+		// finds both messages already older than its claim, and waits.
+		c = mustClaim(t, f, id)
+		handBack(t, f, c, db.HandBackUpstream, handBackWait)
+		waitIs(t, f, id, handBackWait)
+	})
+
+	t.Run("Budgets_StartFreshWhenAPersonWakesAStopTheDispatcherSettled", func(t *testing.T) {
+		// A stop the dispatcher settles writes no claim, so no claim outcome
+		// marks the end of the episode the stop ended. A person's next message
+		// still starts a fresh episode, whichever way the conversation comes
+		// back: through the wake, or claimed straight off its park.
+		for _, viaWake := range []bool{true, false} {
+			name := "claimed_off_the_park"
+			if viaWake {
+				name = "woken"
+			}
+			t.Run(name, func(t *testing.T) {
+				f := mk(t)
+				id, _ := f.StageStep(t)
+				q := f.Stores.ConversationQueue
+
+				c := mustClaim(t, f, id)
+				if got, err := q.RequeueConversation(ctx, f.OrgID, id, c.ClaimID, db.RequeueSetupFailure, 0, "setup failed"); err != nil || got == nil {
+					t.Fatalf("RequeueConversation = (%+v, %v)", got, err)
+				}
+				c = mustClaim(t, f, id)
+				handBack(t, f, c, db.HandBackUpstream, 0)
+				c = mustClaim(t, f, id)
+				f.SetLease(t, c.ClaimID, -time.Minute)
+				if released, err := q.ReleaseExpiredClaimSystem(ctx, f.OrgID, id, c.ClaimID); err != nil || !released {
+					t.Fatalf("ReleaseExpiredClaimSystem = (%v, %v)", released, err)
+				}
+				c = mustClaim(t, f, id)
+				if c.SetupFailures != 1 || c.UpstreamHandBacks != 1 || c.LostEngagements != 1 {
+					t.Fatalf("claim after one hand-back of each budget = (setup %d, upstream %d, lost %d), want (1, 1, 1)",
+						c.SetupFailures, c.UpstreamHandBacks, c.LostEngagements)
+				}
+				handBack(t, f, c, db.HandBackShutdown, 0)
+
+				if ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, stopTestUser, "", ""); err != nil || !ok {
+					t.Fatalf("RequestStopSystem = (%v, %v)", ok, err)
+				}
+				if _, err := q.SettleUnclaimedStopsSystem(ctx); err != nil {
+					t.Fatalf("SettleUnclaimedStopsSystem: %v", err)
+				}
+				if got := get(t, f, id); got.Status != domain.StatusOpen {
+					t.Fatalf("status after the settlement = %q, want open", got.Status)
+				}
+
+				pending := false
+				if _, err := f.Stores.Conversations.InsertMessage(ctx, f.OrgID, &domain.Message{
+					ConversationID: id, Role: "user", Content: "carry on",
+					Delivered: &pending, WindowState: domain.MessageWindowActive,
+				}); err != nil {
+					t.Fatalf("InsertMessage: %v", err)
+				}
+				if viaWake {
+					if ok, err := f.Stores.Conversations.MarkQueuedForResume(ctx, f.OrgID, id); err != nil || !ok {
+						t.Fatalf("MarkQueuedForResume = (%v, %v)", ok, err)
+					}
+				}
+				c = mustClaim(t, f, id)
+				if c.SetupFailures != 0 || c.UpstreamHandBacks != 0 || c.LostEngagements != 0 || c.Attempts != 1 {
+					t.Errorf("claim after the person's message = (setup %d, upstream %d, lost %d, attempts %d), want (0, 0, 0, 1)",
+						c.SetupFailures, c.UpstreamHandBacks, c.LostEngagements, c.Attempts)
+				}
+			})
+		}
+	})
+
 	t.Run("HandBack_LeavesAConversationAnotherWriterParkedAsItIs", func(t *testing.T) {
 		f := mk(t)
 		c := stageClaimed(t, f)
@@ -319,7 +422,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		// The other budgets' hand-backs are not upstream ones.
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueSetupFailure, 0, ""); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, db.RequeueSetupFailure, 0, ""); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		c = mustClaim(t, f, c.ID)
@@ -356,7 +459,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}); err != nil {
 			t.Fatalf("InsertMessage(follow-up): %v", err)
 		}
-		got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueUpstreamUnavailable, handBackWait, "Could not resolve host: github.com")
+		got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, db.RequeueUpstreamUnavailable, handBackWait, "Could not resolve host: github.com")
 		if err != nil || got == nil {
 			t.Fatalf("RequeueConversation(requeued_upstream) = (%+v, %v), want the requeued row", got, err)
 		}
@@ -381,7 +484,7 @@ func RunHandBackConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		// The setup budget's requeue sets no wait.
-		if got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, db.RequeueSetupFailure, 0, "runsc: exit status 128"); err != nil || got == nil {
+		if got, err := q.RequeueConversation(ctx, f.OrgID, c.ID, c.ClaimID, db.RequeueSetupFailure, 0, "runsc: exit status 128"); err != nil || got == nil {
 			t.Fatalf("RequeueConversation(requeued) = (%+v, %v)", got, err)
 		}
 		noWait(t, f, c.ID)

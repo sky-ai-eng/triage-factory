@@ -360,6 +360,18 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // creator-scoped for manual runs, so a non-creator teammate's subquery would
 // find nothing and the guard would fail OPEN on exactly the rows it protects.
 //
+// The `open` arm's guard, that the conversation's run was not called off,
+// cannot take that route: no definer function answers it, so the run is read
+// on the admin pool instead. That read sits between two statements of one
+// transaction so that it cannot race the cancel it guards against. The first
+// locks the conversation, so a settlement cannot park it or cancel its run through it
+// until this transaction ends, and a run's terminal parks it only afterwards;
+// the read then sees every cancel committed before the lock was taken,
+// including one whose settlement this lock had to wait out; and the flip binds
+// the answer. A single UPDATE that waited on the settlement would re-check the
+// row it waited for, find it parked again, and read the run off the snapshot
+// it began with.
+//
 // Always claims-scoped — resume is always user-initiated, so
 // there is no admin-pool "...System" variant. The active claim releases as
 // 'requeued' (ownership is re-established when ClaimNextConversation mints a fresh
@@ -385,51 +397,95 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 // no invisible-row arm for the lookup to fall through.
 //
 // queued_at is re-stamped too: it marks when the conversation entered the
-// queue in the current episode, and a wake starts one. Two readers depend on
+// queue in the current episode, and a wake starts one. Three readers depend on
 // that — the placement claim's aging window opens from it (so the affinity
 // stamp above is actually exclusive for a full window, whatever the
-// conversation's age), and the UI's queue-dwell readout measures the latest
-// episode from it. started_at is untouched: it is the scheduler's fairness
-// order and the UI's "started" time, neither of which a resume changes.
+// conversation's age), the retry budgets count only the hand-backs released
+// since it (db.EpisodeStartSQL), and the UI's queue-dwell
+// readout measures the latest episode from it. started_at is untouched: it is
+// the scheduler's fairness order and the UI's "started" time, neither of which
+// a resume changes.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE conversations SET status = NULL,
-		                parked_at = NULL, park_reason = NULL,
-		                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
-		                next_attempt_at = NULL,
-		                queued_at = now(),
-		                preferred_executor_id = (
-		                    SELECT c.executor_id FROM claims c
-		                    WHERE c.org_id = conversations.org_id
-		                      AND c.conversation_id = conversations.id
-		                    `+newestEngagementFirstSQL("c")+`
-		                    LIMIT 1)
-		WHERE org_id = $1 AND id = $2
-		  AND ended_at IS NULL
-		  AND (status = 'open'
-		       OR (status = 'completed'
-		           AND NOT tf.blueprint_run_is_running(
-		                     conversations.blueprint_run_id, conversations.org_id)))
-	`, orgID, conversationID)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	flipped := n > 0
-	if flipped {
+	var flipped bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		var locked int
+		err := q.QueryRowContext(ctx, `
+			SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+		`, orgID, conversationID).Scan(&locked)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		calledOff, err := conversationRunCalledOff(ctx, s.admin, orgID, conversationID)
+		if err != nil {
+			return err
+		}
+		res, err := q.ExecContext(ctx, `
+			UPDATE conversations SET status = NULL,
+			                parked_at = NULL, park_reason = NULL,
+			                stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
+			                next_attempt_at = NULL,
+			                queued_at = now(),
+			                preferred_executor_id = (
+			                    SELECT c.executor_id FROM claims c
+			                    WHERE c.org_id = conversations.org_id
+			                      AND c.conversation_id = conversations.id
+			                    `+newestEngagementFirstSQL("c")+`
+			                    LIMIT 1)
+			WHERE org_id = $1 AND id = $2
+			  AND ended_at IS NULL
+			  AND ((status = 'open' AND NOT $3::boolean)
+			       OR (status = 'completed'
+			           AND NOT tf.blueprint_run_is_running(
+			                     conversations.blueprint_run_id, conversations.org_id)))
+		`, orgID, conversationID, calledOff)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		flipped = n > 0
+		if !flipped {
+			return nil
+		}
 		if err := releaseActiveClaim(ctx, s.admin, orgID, conversationID, "requeued"); err != nil {
-			return false, err
+			return err
 		}
 		// tf_wake doorbell: resume-by-enqueue re-queues an
 		// EXISTING row rather than inserting one, so it needs its own
 		// notify — the doorbell a step mint rings does not fire for this
 		// path. Best-effort, same "never the only path" contract as there.
-		_ = wakebus.Publish(ctx, s.q, wakebus.KindEvent, orgID)
+		_ = wakebus.Publish(ctx, q, wakebus.KindEvent, orgID)
+		return nil
+	})
+	if err != nil {
+		return false, err
 	}
 	return flipped, nil
+}
+
+// conversationRunCalledOff reports whether the conversation's blueprint run
+// was called off: cancel requested, or cancelled. It is the claim gate's
+// blueprintDrivableSQL clause for a called-off run, read on the admin pool so
+// a teammate who cannot see another user's manual run gets the same answer as
+// its creator. A conversation with no run, or no such conversation, answers
+// false.
+func conversationRunCalledOff(ctx context.Context, admin queryer, orgID, conversationID string) (bool, error) {
+	var calledOff bool
+	err := admin.QueryRowContext(ctx, `
+		SELECT COALESCE(br.cancel_requested OR br.status = 'cancelled', false)
+		FROM conversations c
+		LEFT JOIN blueprint_runs br ON br.id = c.blueprint_run_id AND br.org_id = c.org_id
+		WHERE c.org_id = $1 AND c.id = $2
+	`, orgID, conversationID).Scan(&calledOff)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return calledOff, err
 }
 
 // workspaceKeyMembersSQL is which conversations a workspace key's lifetime is
@@ -1289,7 +1345,7 @@ const pgConversationAttentionSQL = `(
 // `attempts` here is the LIFETIME claim count — engagement history for a
 // human, matching the lifetime sums beside it. It is deliberately not the
 // same quantity ClaimNextConversation returns under that name, which is the retry
-// budget's current-episode counter (EpisodeAttemptsSQL, conversation_queue.go). Two
+// budget's current-episode counter (episodeHandBacksSQL, conversation_queue.go). Two
 // questions, one field; see domain.Conversation.Attempts before carrying
 // either one somewhere new.
 const conversationClaimLateral = `

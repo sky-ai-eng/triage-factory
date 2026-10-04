@@ -807,6 +807,15 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 		return fmt.Errorf("flip status: %w", err)
 	}
 	if !flipped {
+		// The flip refuses an `open` conversation whose run was called off
+		// after the gate read it: nothing would ever drive it, and the message
+		// already written is one nothing delivers. That refusal is reported as
+		// the gate reports a run already called off when it looked. It is
+		// asked before the lost-race reading below, which would read the
+		// written message as a conversation queued again and report success.
+		if s.blueprintCalledOffNow(ctx, orgID, conv) {
+			return blockedFollowUpError(ResumeBlockedBlueprintCancelled)
+		}
 		return s.lostWakeOutcome(ctx, orgID, conv.ID)
 	}
 	s.broadcastConversationUpdate(orgID, conv.ID, domain.StatusQueued)
@@ -816,6 +825,23 @@ func (s *Spawner) wakeParked(ctx context.Context, orgID string, conv domain.Conv
 	// executor's own scan-interval backstop picks the row up.
 	s.wakeDispatcher()
 	return nil
+}
+
+// blueprintCalledOffNow re-reads the conversation's blueprint run and reports
+// whether it is called off (blueprintCalledOff). A conversation with no run,
+// or a read that fails, answers false: the caller then reads the lost wake the
+// way it reads every other.
+func (s *Spawner) blueprintCalledOffNow(ctx context.Context, orgID string, conv domain.Conversation) bool {
+	if s.blueprints == nil || conv.BlueprintRunID == "" {
+		return false
+	}
+	br, err := s.blueprints.GetRunSystem(ctx, orgID, conv.BlueprintRunID)
+	if err != nil {
+		delegateLog.Warn("resume: re-read of a refused wake's blueprint run failed; reporting it as a lost wake",
+			"conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", err)
+		return false
+	}
+	return blueprintCalledOff(br)
 }
 
 // resumeSystemPrepends assembles the out-of-band <system-note> blocks prepended
