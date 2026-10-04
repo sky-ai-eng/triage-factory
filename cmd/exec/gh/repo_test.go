@@ -1,10 +1,14 @@
 package gh
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func TestParseGitRemoteURL(t *testing.T) {
@@ -110,12 +114,63 @@ func TestSplitOwnerRepoStr(t *testing.T) {
 	}
 }
 
-// TestResolveRepo_FlagWins verifies the explicit flag beats the env var.
-// Uses t.Setenv so the env state is scoped to this test and auto-restored.
-func TestResolveRepo_FlagWins(t *testing.T) {
-	t.Setenv("TRIAGE_FACTORY_REPO", "env-owner/env-repo")
+// fakeCheckouts is a runCheckouts that hands back canned
+// conversation_worktrees rows (host view) and a root pair to translate them.
+type fakeCheckouts struct {
+	rows                []domain.ConversationWorktree
+	hostRoot, agentRoot string
+	listErr             error
+}
 
-	owner, repo, err := resolveRepo([]string{"--repo", "flag-owner/flag-repo"})
+func (f fakeCheckouts) ListConversationWorktrees(context.Context) ([]domain.ConversationWorktree, error) {
+	return f.rows, f.listErr
+}
+
+func (f fakeCheckouts) WorkspaceRoots(context.Context) (string, string, error) {
+	return f.hostRoot, f.agentRoot, nil
+}
+
+// isolateGit points HOME and XDG_CONFIG_HOME at an empty directory so the
+// developer's global git config (a templateDir that pre-populates remotes, say)
+// can't influence what `git config --get remote.origin.url` answers.
+func isolateGit(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not in PATH")
+	}
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
+}
+
+// gitCheckoutWithOrigin makes dir a git checkout whose origin is originURL.
+// Neither step needs a user identity (unlike a commit).
+func gitCheckoutWithOrigin(t *testing.T, dir, originURL string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	for _, argv := range [][]string{
+		{"git", "init", "-q"},
+		{"git", "remote", "add", "origin", originURL},
+	} {
+		cmd := exec.Command(argv[0], argv[1:]...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %v\noutput: %s", argv, err, out)
+		}
+	}
+}
+
+// TestResolveRepo_FlagWins verifies the explicit flag beats the checkout the
+// current directory sits in.
+func TestResolveRepo_FlagWins(t *testing.T) {
+	isolateGit(t)
+	dir := t.TempDir()
+	gitCheckoutWithOrigin(t, dir, "https://github.com/checkout-owner/checkout-repo.git")
+	t.Chdir(dir)
+
+	owner, repo, err := resolveRepo(context.Background(), nil, []string{"--repo", "flag-owner/flag-repo"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,46 +179,31 @@ func TestResolveRepo_FlagWins(t *testing.T) {
 	}
 }
 
-func TestResolveRepo_EnvWhenNoFlag(t *testing.T) {
-	t.Setenv("TRIAGE_FACTORY_REPO", "env-owner/env-repo")
-
-	owner, repo, err := resolveRepo(nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if owner != "env-owner" || repo != "env-repo" {
-		t.Errorf("got (%q, %q), want (env-owner, env-repo)", owner, repo)
-	}
-}
-
 // TestResolveRepo_HardErrorWhenNothingResolves runs from a temp directory
-// with no env var and no git checkout, so every resolution path fails and
-// the resolver returns a clear error.
+// outside any checkout with no run context, so every resolution path fails and
+// the resolver returns an error naming both ways out.
 func TestResolveRepo_HardErrorWhenNothingResolves(t *testing.T) {
-	t.Setenv("TRIAGE_FACTORY_REPO", "")
+	isolateGit(t)
+	t.Chdir(t.TempDir())
 
-	tmp := t.TempDir()
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(tmp); err != nil {
-		t.Fatalf("chdir tmp: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origWd) })
-
-	_, _, err = resolveRepo(nil)
+	_, _, err := resolveRepo(context.Background(), nil, nil)
 	if err == nil {
 		t.Fatal("expected error when no resolution path succeeds, got nil")
+	}
+	if !strings.Contains(err.Error(), "--repo") {
+		t.Errorf("error should point at --repo: %v", err)
 	}
 }
 
 // TestResolveRepo_InvalidFlagFormat — a malformed --repo value should
-// error, not fall through to env/git/hardcoded.
+// error, not fall through to the checkout.
 func TestResolveRepo_InvalidFlagFormat(t *testing.T) {
-	t.Setenv("TRIAGE_FACTORY_REPO", "env-owner/env-repo")
+	isolateGit(t)
+	dir := t.TempDir()
+	gitCheckoutWithOrigin(t, dir, "https://github.com/checkout-owner/checkout-repo.git")
+	t.Chdir(dir)
 
-	_, _, err := resolveRepo([]string{"--repo", "not-a-valid-format"})
+	_, _, err := resolveRepo(context.Background(), nil, []string{"--repo", "not-a-valid-format"})
 	if err == nil {
 		t.Fatal("expected error on invalid flag value, got nil")
 	}
@@ -172,14 +212,15 @@ func TestResolveRepo_InvalidFlagFormat(t *testing.T) {
 // TestResolveRepo_EmptyFlagValue is the regression guard for the
 // "--repo without a value" case. flagVal returns "" both when --repo
 // isn't present AND when --repo is the last token in args (no value to
-// consume). The old resolveRepo(flagValue string) signature couldn't
-// tell these apart and silently fell through to env/git resolution,
-// potentially targeting the wrong repository despite the user's
-// explicit --repo intent. The fix disambiguates via hasFlag.
+// consume). resolveRepo disambiguates via hasFlag so an explicit --repo
+// with no value fails instead of silently resolving the checkout's repo.
 func TestResolveRepo_EmptyFlagValue(t *testing.T) {
-	// Set env so there IS a fallback available — the test is that we
-	// error instead of quietly using it.
-	t.Setenv("TRIAGE_FACTORY_REPO", "env-owner/env-repo")
+	// Stand in a checkout so there IS a fallback available — the test is
+	// that we error instead of quietly using it.
+	isolateGit(t)
+	dir := t.TempDir()
+	gitCheckoutWithOrigin(t, dir, "https://github.com/checkout-owner/checkout-repo.git")
+	t.Chdir(dir)
 
 	cases := [][]string{
 		{"--repo"},                      // last arg, no value
@@ -193,7 +234,7 @@ func TestResolveRepo_EmptyFlagValue(t *testing.T) {
 			// returns "--some-other-flag" as the value, and splitOwnerRepoStr
 			// rejects it as malformed. Either way it errors, which is the
 			// behavior we want.
-			_, _, err := resolveRepo(args)
+			_, _, err := resolveRepo(context.Background(), nil, args)
 			if err == nil {
 				t.Errorf("args %v: expected error on empty/invalid --repo, got nil", args)
 			}
@@ -201,58 +242,98 @@ func TestResolveRepo_EmptyFlagValue(t *testing.T) {
 	}
 }
 
-// TestResolveRepo_GitConfigFallback exercises the third resolution path:
-// read remote.origin.url via `git config --get`. The first two paths
-// (flag, env var) are table-tested above, but the git-config fallback
-// is the one that actually runs when users invoke the CLI manually from
-// a real checkout. Without a test, a regression here would only surface
-// in production. Uses real git commands rather than hand-crafting the
-// git config format, because the config path goes through `git config`
-// at runtime and a synthetic fixture would miss parser quirks.
-//
-// Skipped if git isn't on PATH — in any realistic dev environment it is,
-// and CI environments installing the test suite should have it too.
+// TestResolveRepo_GitConfigFallback exercises the checkout path: read
+// remote.origin.url via `git config --get`, from the checkout root and from a
+// folder nested inside it. Uses real git commands rather than hand-crafting the
+// git config format, because the config path goes through `git config` at
+// runtime and a synthetic fixture would miss parser quirks.
 func TestResolveRepo_GitConfigFallback(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not in PATH")
+	isolateGit(t)
+	dir := t.TempDir()
+	gitCheckoutWithOrigin(t, dir, "https://github.com/test-owner/test-repo.git")
+	nested := filepath.Join(dir, "pkg", "sub")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
-	t.Setenv("TRIAGE_FACTORY_REPO", "")
-
-	// Use a fresh HOME so the user's global git config can't influence
-	// the test (e.g., a templateDir that pre-populates remotes).
-	fakeHome := t.TempDir()
-	t.Setenv("HOME", fakeHome)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(fakeHome, ".config"))
-
-	workDir := t.TempDir()
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
+	for _, wd := range []string{dir, nested} {
+		t.Run(filepath.Base(wd), func(t *testing.T) {
+			t.Chdir(wd)
+			owner, repo, err := resolveRepo(context.Background(), nil, nil)
+			if err != nil {
+				t.Fatalf("resolveRepo via git config: %v", err)
+			}
+			if owner != "test-owner" || repo != "test-repo" {
+				t.Errorf("got (%q, %q), want (test-owner, test-repo)", owner, repo)
+			}
+		})
 	}
-	if err := os.Chdir(workDir); err != nil {
-		t.Fatalf("chdir workDir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origWd) })
+}
 
-	// git init + remote add origin. Neither requires a user identity
-	// (unlike commits), so no additional config needed.
-	for _, argv := range [][]string{
-		{"git", "init"},
-		{"git", "remote", "add", "origin", "https://github.com/test-owner/test-repo.git"},
+// TestResolveRepo_TwoCheckouts pins the multi-repo run: with checkouts of two
+// different repos, a verb run from inside either one targets that one, and
+// from the run root — inside neither — it fails with an error that lists both
+// checkouts by repo and by a path this process can cd into.
+func TestResolveRepo_TwoCheckouts(t *testing.T) {
+	isolateGit(t)
+	root := t.TempDir()
+	pathA := filepath.Join(root, "owner-a", "repo-a", "pr-7")
+	pathB := filepath.Join(root, "owner-b", "repo-b", "default")
+	gitCheckoutWithOrigin(t, pathA, "https://github.com/owner-a/repo-a.git")
+	gitCheckoutWithOrigin(t, pathB, "git@github.com:owner-b/repo-b.git")
+
+	// Rows are recorded in host view; the agent sees the same tree at root.
+	const hostRoot = "/host/runs/task-1"
+	checkouts := fakeCheckouts{
+		hostRoot:  hostRoot,
+		agentRoot: root,
+		rows: []domain.ConversationWorktree{
+			{RepoID: "owner-a/repo-a", Ref: "pr-7", Path: hostRoot + "/owner-a/repo-a/pr-7"},
+			{RepoID: "owner-b/repo-b", Ref: "default", Path: hostRoot + "/owner-b/repo-b/default"},
+		},
+	}
+
+	for _, tc := range []struct{ wd, owner, repo string }{
+		{pathA, "owner-a", "repo-a"},
+		{pathB, "owner-b", "repo-b"},
 	} {
-		cmd := exec.Command(argv[0], argv[1:]...)
-		cmd.Dir = workDir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("%v: %v\noutput: %s", argv, err, out)
+		t.Chdir(tc.wd)
+		owner, repo, err := resolveRepo(context.Background(), checkouts, nil)
+		if err != nil {
+			t.Fatalf("from %s: %v", tc.wd, err)
+		}
+		if owner != tc.owner || repo != tc.repo {
+			t.Errorf("from %s: got %s/%s, want %s/%s", tc.wd, owner, repo, tc.owner, tc.repo)
 		}
 	}
 
-	owner, repo, err := resolveRepo(nil)
-	if err != nil {
-		t.Fatalf("resolveRepo via git config: %v", err)
+	t.Chdir(root)
+	_, _, err := resolveRepo(context.Background(), checkouts, nil)
+	if err == nil {
+		t.Fatal("from the run root: expected an error, got nil")
 	}
-	if owner != "test-owner" || repo != "test-repo" {
-		t.Errorf("got (%q, %q), want (test-owner, test-repo)", owner, repo)
+	for _, want := range []string{
+		"owner-a/repo-a  " + pathA,
+		"owner-b/repo-b  " + pathB,
+		"--repo",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error should contain %q:\n%v", want, err)
+		}
+	}
+}
+
+// TestResolveRepo_NoCheckoutsYet covers a run that has materialized nothing:
+// the error says so and names how to get one, rather than listing nothing.
+func TestResolveRepo_NoCheckoutsYet(t *testing.T) {
+	isolateGit(t)
+	t.Chdir(t.TempDir())
+
+	_, _, err := resolveRepo(context.Background(), fakeCheckouts{}, nil)
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if !strings.Contains(err.Error(), "no checkouts yet") || !strings.Contains(err.Error(), "workspace add") {
+		t.Errorf("error should say the run has no checkouts and name workspace add: %v", err)
 	}
 }

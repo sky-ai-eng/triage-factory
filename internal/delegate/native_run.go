@@ -530,9 +530,6 @@ func (s *Spawner) nativeAgentEnv(ctx context.Context, orgID, conversationID, nam
 		"TRIAGE_FACTORY_CONVERSATION_ROOT=" + cfg.runRoot,
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	if cfg.owner != "" && cfg.repo != "" {
-		env = append(env, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)
-	}
 	if id := s.resolveCommitIdentity(ctx, orgID, triggerType, creatorUserID); id.CoAuthorTrailer != "" {
 		env = append(env, "TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER="+id.CoAuthorTrailer)
 	}

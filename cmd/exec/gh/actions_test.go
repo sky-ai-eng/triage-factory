@@ -298,12 +298,12 @@ func TestTopLevelEntries_EmptyDir(t *testing.T) {
 // the path components exist yet — we just construct the path, no safety
 // rejections needed.
 func TestSafeDestDirForRun_HappyPath(t *testing.T) {
-	cwd := t.TempDir()
-	dest, err := safeDestDirForRun(cwd, 123)
+	root := t.TempDir()
+	dest, err := safeDestDirForRun(root, 123)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(cwd, "_tfac", "ci-logs", "123")
+	want := filepath.Join(root, "_tfac", "ci-logs", "123")
 	if dest != want {
 		t.Errorf("dest = %q, want %q", dest, want)
 	}
@@ -311,57 +311,57 @@ func TestSafeDestDirForRun_HappyPath(t *testing.T) {
 
 // TestSafeDestDirForRun_AllowsRealDirectories confirms that pre-existing
 // real directories on the path are fine — only symlinks are rejected.
-// This covers the "run #2 on the same cwd" case where _tfac and
+// This covers the "second capture in the same run" case where _tfac and
 // _tfac/ci-logs already exist from a previous run.
 func TestSafeDestDirForRun_AllowsRealDirectories(t *testing.T) {
-	cwd := t.TempDir()
-	mustMkdir(t, filepath.Join(cwd, "_tfac", "ci-logs"))
+	root := t.TempDir()
+	mustMkdir(t, filepath.Join(root, "_tfac", "ci-logs"))
 
-	dest, err := safeDestDirForRun(cwd, 456)
+	dest, err := safeDestDirForRun(root, 456)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(cwd, "_tfac", "ci-logs", "456")
+	want := filepath.Join(root, "_tfac", "ci-logs", "456")
 	if dest != want {
 		t.Errorf("dest = %q, want %q", dest, want)
 	}
 }
 
 // TestSafeDestDirForRun_RejectsSymlinkedComponent is the regression guard
-// for the symlink-escape bug: if any component under cwd (including the
+// for the symlink-escape bug: if any component under root (including the
 // run_id leaf itself) exists as a symlink, we must refuse to proceed.
 // Otherwise downloadAndExtractLogs would RemoveAll / MkdirAll / extract
 // through the symlink and touch paths outside the working directory.
 func TestSafeDestDirForRun_RejectsSymlinkedComponent(t *testing.T) {
 	cases := []struct {
 		name  string
-		setup func(t *testing.T, cwd string)
+		setup func(t *testing.T, root string)
 	}{
 		{
 			"_tfac is a symlink to somewhere outside",
-			func(t *testing.T, cwd string) {
+			func(t *testing.T, root string) {
 				outside := t.TempDir()
-				if err := os.Symlink(outside, filepath.Join(cwd, "_tfac")); err != nil {
+				if err := os.Symlink(outside, filepath.Join(root, "_tfac")); err != nil {
 					t.Fatalf("symlink: %v", err)
 				}
 			},
 		},
 		{
 			"_tfac/ci-logs is a symlink",
-			func(t *testing.T, cwd string) {
+			func(t *testing.T, root string) {
 				outside := t.TempDir()
-				mustMkdir(t, filepath.Join(cwd, "_tfac"))
-				if err := os.Symlink(outside, filepath.Join(cwd, "_tfac", "ci-logs")); err != nil {
+				mustMkdir(t, filepath.Join(root, "_tfac"))
+				if err := os.Symlink(outside, filepath.Join(root, "_tfac", "ci-logs")); err != nil {
 					t.Fatalf("symlink: %v", err)
 				}
 			},
 		},
 		{
 			"run_id leaf is a symlink",
-			func(t *testing.T, cwd string) {
+			func(t *testing.T, root string) {
 				outside := t.TempDir()
-				mustMkdir(t, filepath.Join(cwd, "_tfac", "ci-logs"))
-				if err := os.Symlink(outside, filepath.Join(cwd, "_tfac", "ci-logs", "789")); err != nil {
+				mustMkdir(t, filepath.Join(root, "_tfac", "ci-logs"))
+				if err := os.Symlink(outside, filepath.Join(root, "_tfac", "ci-logs", "789")); err != nil {
 					t.Fatalf("symlink: %v", err)
 				}
 			},
@@ -370,10 +370,10 @@ func TestSafeDestDirForRun_RejectsSymlinkedComponent(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cwd := t.TempDir()
-			tc.setup(t, cwd)
+			root := t.TempDir()
+			tc.setup(t, root)
 
-			_, err := safeDestDirForRun(cwd, 789)
+			_, err := safeDestDirForRun(root, 789)
 			if err == nil {
 				t.Fatal("expected symlink rejection, got nil error")
 			}
@@ -389,13 +389,13 @@ func TestSafeDestDirForRun_RejectsSymlinkedComponent(t *testing.T) {
 // not a directory). MkdirAll would fail on the real operation; we fail
 // earlier with a clearer message.
 func TestSafeDestDirForRun_RejectsNonDirectoryComponent(t *testing.T) {
-	cwd := t.TempDir()
+	root := t.TempDir()
 	// Create _tfac as a file instead of a directory
-	if err := os.WriteFile(filepath.Join(cwd, "_tfac"), []byte("nope"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "_tfac"), []byte("nope"), 0644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err := safeDestDirForRun(cwd, 123)
+	_, err := safeDestDirForRun(root, 123)
 	if err == nil {
 		t.Fatal("expected error on non-directory component, got nil")
 	}
@@ -509,7 +509,7 @@ func TestDownloadAndExtractLogs_FailureCleansUp(t *testing.T) {
 
 // TestDownloadAndExtractLogs_ClobberStaleRunDir verifies that re-running
 // download-logs for the same run_id does NOT leave behind files from a
-// previous extraction. The command owns <cwd>/_tfac/ci-logs/<run_id>
+// previous extraction. The command owns <root>/_tfac/ci-logs/<run_id>
 // completely, so any stale entries — an old job directory that no longer
 // exists in the current workflow run, a renamed matrix leg — have to be
 // cleared before the fresh extract. Otherwise the agent reading back the

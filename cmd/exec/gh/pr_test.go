@@ -116,14 +116,14 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 		filesBody: files,
 	})
 
-	cwd := t.TempDir()
+	root := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(context.Background(), client, localCheckout{}, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
 
-	wantDir := filepath.Join(cwd, "_tfac", "pr-diffs", "owner__repo__42")
+	wantDir := filepath.Join(root, "_tfac", "pr-diffs", "owner__repo__42")
 	if m.Dir != wantDir {
 		t.Errorf("Dir = %q, want %q", m.Dir, wantDir)
 	}
@@ -132,6 +132,10 @@ func TestPersistPRDiff_WritesFullDiffAndManifest(t *testing.T) {
 	}
 	if m.Truncated {
 		t.Error("Truncated should be false on the verbatim path")
+	}
+	// No checkout of the PR, so the diff is the API's — and the manifest says so.
+	if m.Source != diffSourceAPI || !strings.Contains(m.Warning, "no checkout of the PR") {
+		t.Errorf("the API fallback must be announced: source=%q warning=%q", m.Source, m.Warning)
 	}
 	got, err := os.ReadFile(m.FullDiffPath)
 	if err != nil {
@@ -163,9 +167,9 @@ func TestPersistPRDiff_406Reassembles(t *testing.T) {
 		filesBody:  files,
 	})
 
-	cwd := t.TempDir()
+	root := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(context.Background(), client, localCheckout{}, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -199,9 +203,9 @@ func TestPersistPRDiff_BinaryAndRename(t *testing.T) {
 		filesBody: files,
 	})
 
-	cwd := t.TempDir()
+	root := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(context.Background(), client, localCheckout{}, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -235,9 +239,9 @@ func TestPersistPRDiff_MissingHeadSHATolerated(t *testing.T) {
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})
-	cwd := t.TempDir()
+	root := t.TempDir()
 	client := ghclient.NewClient(srv.URL, "test-token")
-	m, err := persistPRDiff(context.Background(), client, localCheckout{}, cwd, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff with empty head SHA: %v", err)
 	}
@@ -253,7 +257,7 @@ func TestPersistPRDiff_MissingHeadSHATolerated(t *testing.T) {
 // same PR overwrites the capture in place (same dir, stale files gone,
 // content/head_sha refreshed) — there is no per-SHA proliferation.
 func TestPersistPRDiff_ReDiff(t *testing.T) {
-	cwd := t.TempDir()
+	root := t.TempDir()
 	files := jsonPRFiles(t, []map[string]any{
 		{"filename": "foo.go", "status": "modified", "additions": 1, "deletions": 0, "patch": "@@ -1 +1,2 @@\n a\n+b"},
 	})
@@ -262,7 +266,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+b\n",
 		filesBody: files,
 	})
-	m1, err := persistPRDiff(context.Background(), ghclient.NewClient(srv1.URL, "test-token"), localCheckout{}, cwd, "owner", "repo", 42)
+	m1, err := persistPRDiff(context.Background(), ghclient.NewClient(srv1.URL, "test-token"), localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("first persistPRDiff: %v", err)
 	}
@@ -278,7 +282,7 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 		diffBody:  "diff --git a/foo.go b/foo.go\n@@ -1 +1,2 @@\n a\n+c\n",
 		filesBody: files,
 	})
-	m2, err := persistPRDiff(context.Background(), ghclient.NewClient(srv2.URL, "test-token"), localCheckout{}, cwd, "owner", "repo", 42)
+	m2, err := persistPRDiff(context.Background(), ghclient.NewClient(srv2.URL, "test-token"), localCheckout{}, root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("re-diff: %v", err)
 	}
@@ -303,9 +307,9 @@ func TestPersistPRDiff_ReDiff(t *testing.T) {
 // TestPersistPRDiff_RejectsSymlinkedScratch confirms the shared symlink guard
 // fires for the pr-diffs path too: a symlinked _tfac component is refused.
 func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
-	cwd := t.TempDir()
+	root := t.TempDir()
 	outside := t.TempDir()
-	if err := os.Symlink(outside, filepath.Join(cwd, "_tfac")); err != nil {
+	if err := os.Symlink(outside, filepath.Join(root, "_tfac")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
 	srv := newPRDiffServer(t, prDiffBackend{
@@ -314,7 +318,7 @@ func TestPersistPRDiff_RejectsSymlinkedScratch(t *testing.T) {
 		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "foo.go", "status": "modified", "patch": "@@ -1 +1,2 @@\n a\n+b"}}),
 	})
 	client := ghclient.NewClient(srv.URL, "test-token")
-	_, err := persistPRDiff(context.Background(), client, localCheckout{}, cwd, "owner", "repo", 42)
+	_, err := persistPRDiff(context.Background(), client, localCheckout{}, root, "owner", "repo", 42)
 	if err == nil {
 		t.Fatal("expected symlink rejection, got nil")
 	}
@@ -472,7 +476,7 @@ func (h *touchCapturingHost) RecordReadTouch(_ context.Context, provider, target
 }
 
 // TestPrThreadView_HonorsRepoFlag pins that `gh pr thread-view` resolves the
-// repo from an explicit --repo (not the cwd/env fallback) for BOTH the read and
+// repo from an explicit --repo (not the root/env fallback) for BOTH the read and
 // the touch it records — a regression guard on the args-slicing that used to
 // hide the flag from resolveRepo.
 func TestPrThreadView_HonorsRepoFlag(t *testing.T) {

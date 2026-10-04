@@ -140,7 +140,7 @@ type RunOptions struct {
 
 	// ExtraEnv is appended to os.Environ() for the subprocess. Use
 	// this for run-scoped variables like TRIAGE_FACTORY_CONVERSATION_ID and
-	// TRIAGE_FACTORY_REPO that the delegated CLI subcommands read.
+	// TRIAGE_FACTORY_CONVERSATION_ROOT that the delegated CLI subcommands read.
 	ExtraEnv []string
 
 	// GitUserName / GitUserEmail, when both set, stamp the org's GitHub

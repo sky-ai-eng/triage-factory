@@ -237,7 +237,6 @@ var allowedSandboxEnvKeys = map[string]struct{}{
 	"TRIAGE_FACTORY_CONVERSATION_ID":      {},
 	"TRIAGE_FACTORY_CONVERSATION_ROOT":    {},
 	"TRIAGE_FACTORY_WORKSPACE_KEY":        {},
-	"TRIAGE_FACTORY_REPO":                 {},
 	"TRIAGE_FACTORY_GIT_COAUTHOR_TRAILER": {},
 	"TRIAGE_FACTORY_BIN":                  {},
 

@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
@@ -235,15 +234,11 @@ type ResumeOptions struct {
 	// would reintroduce exactly that mid-run drift.
 	Model string
 
-	// RepoEnv, if non-empty, is passed to the resumed subprocess as
-	// TRIAGE_FACTORY_REPO=<value>. Preserves the GitHub repo context that
-	// the initial runAgent invocation set up for gh subcommands so
-	// resumes don't lose the implicit --repo default. Format is
-	// "owner/name" — composed by the caller from cfg.owner and cfg.repo.
-	//
-	// Left empty for Jira-no-match runs that never had repo context in
-	// the first place.
-	RepoEnv string
+	// GitHubOwner is the owner of the GitHub repo the run started on — the
+	// owner the initial invocation keyed its local gh channel's credential
+	// to, so the resumed session's channel resolves the same one. Empty for
+	// runs that never had a repo context.
+	GitHubOwner string
 
 	// SystemBlock is this conversation's own system block as its launch
 	// composed it — conversations.system_block, read back by the claim
@@ -397,13 +392,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		return nil, fmt.Errorf("resume: missing namespace (caller must pass the workspace namespace captured at run start)")
 	}
 	extraEnv = append(extraEnv, "TRIAGE_FACTORY_WORKSPACE_KEY="+opts.Namespace)
-	// Preserve the initial run's GitHub repo context so gh subcommands
-	// in the resumed session keep their implicit --repo default. Without
-	// this, a resumed run on a GitHub task could suddenly fail any gh
-	// invocation that relied on the env var set in runAgent.
-	if opts.RepoEnv != "" {
-		extraEnv = append(extraEnv, "TRIAGE_FACTORY_REPO="+opts.RepoEnv)
-	}
 
 	// Resume runs follow the same sandbox-branch path as the initial
 	// invocation, so wire the same per-run agenthost socket mount. The
@@ -423,8 +411,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// the sidecar's in multi, a fresh loopback injector in local (the channel is
 	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
 	// needs its own listener, placeholder and trust file).
-	ownerForGH, _, _ := strings.Cut(opts.RepoEnv, "/")
-	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, conversationID, ownerForGH, agenthost.ConversationInfo{
+	localGH, localGHCloser := s.startLocalGHChannel(ctx, orgID, conversationID, opts.GitHubOwner, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           creatorUserID,
 		ConversationID:   conversationID,

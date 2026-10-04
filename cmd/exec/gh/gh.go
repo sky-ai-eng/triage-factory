@@ -15,10 +15,12 @@ import (
 const PRHelpText = `GitHub PR Commands:
   gh pr view <number> [--repo o/r] [-v]                  PR details + reviews + comments
   gh pr diff <number> [--repo o/r] [--file <path>] [--stdout]
-                                                          Persists the diff to
-                                                          ./_tfac/pr-diffs/<owner>__<repo>__<number>/
+                                                          Persists the diff to <run root>/_tfac/
+                                                          pr-diffs/<owner>__<repo>__<number>/
                                                           (full.diff + manifest.json) and prints the
                                                           manifest JSON. Use Read/Grep on full.diff.
+                                                          Diffs against the run's checkout of the PR;
+                                                          without one, the API diff, with a warning.
                                                           --file <path>: print one file's diff inline.
                                                           --stdout: print the whole diff inline.
   gh pr files <number> [--repo o/r]                       Slim per-file summary (path, status,
@@ -88,15 +90,15 @@ Direct Comments (hit GitHub API immediately):
 const ActionsHelpText = `GitHub Actions Commands:
   gh actions download-logs <run_id> [--repo o/r]          Download & extract the full log
                                                           archive for a workflow run into
-                                                          ./_tfac/ci-logs/<run_id>/
+                                                          <run root>/_tfac/ci-logs/<run_id>/
   gh actions list-runs (--pr <N> | --sha <SHA>) [--repo o/r]
                                                           List recent workflow runs for a PR's head
                                                           commit or an explicit SHA.`
 
 // RepoResolutionHelpText applies to every gh command, so both halves append it.
 const RepoResolutionHelpText = `Repo Resolution (all gh commands):
-  Priority order: --repo flag > TRIAGE_FACTORY_REPO env var > .git/config origin of cwd.
-  Commands fail with a clear error if none resolve.`
+  --repo flag, else the origin of the checkout you are standing in (any folder inside it).
+  Outside every checkout, commands fail and list this run's checkouts.`
 
 // HelpText is the full gh help, shared with the top-level exec help.
 var HelpText = PRHelpText + "\n\n" + ActionsHelpText + "\n\n" + RepoResolutionHelpText

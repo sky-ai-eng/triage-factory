@@ -118,7 +118,8 @@ the work that read it still happened. To get the identical content back:
 
     triagefactory exec gh actions download-logs <run_id>
 
-That writes ./_tfac/ci-logs/<run_id>/ exactly as it was.
+That writes <run_id>/ back into this directory exactly as it was, from
+whichever directory you run it in.
 `
 
 // restoreWorkspaceGit is the git half of a cold rehydrate. A package var, in the

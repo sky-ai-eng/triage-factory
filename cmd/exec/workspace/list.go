@@ -107,7 +107,7 @@ func listWorkspaces(host agenthost.Client) (listOutput, error) {
 		materializedSet[r.RepoID] = struct{}{}
 		materialized = append(materialized, listMaterialized{
 			Repo: r.RepoID,
-			Path: agentViewPath(hostRoot, agentRoot, r.Path),
+			Path: agenthost.AgentViewPath(hostRoot, agentRoot, r.Path),
 			Ref:  r.Ref,
 		})
 	}

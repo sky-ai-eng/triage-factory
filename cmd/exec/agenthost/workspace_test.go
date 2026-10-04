@@ -443,3 +443,24 @@ func TestLocalClient_CreateWorkspaceCheckout_CreateErrorPropagates(t *testing.T)
 		t.Errorf("err = %v, want the create failure to propagate", err)
 	}
 }
+
+func TestAgentViewPath(t *testing.T) {
+	cases := []struct {
+		name                string
+		hostRoot, agentRoot string
+		in, want            string
+	}{
+		{"identity when roots equal", "/tmp/runs/r1", "/tmp/runs/r1", "/tmp/runs/r1/o/r/default", "/tmp/runs/r1/o/r/default"},
+		{"prefix swap", "/tmp/runs/r1", "/work", "/tmp/runs/r1/o/r/pr-7", "/work/o/r/pr-7"},
+		{"root itself", "/tmp/runs/r1", "/work", "/tmp/runs/r1", "/work"},
+		{"outside host root passes through", "/tmp/runs/r1", "/work", "/somewhere/else", "/somewhere/else"},
+		{"empty passes through", "/tmp/runs/r1", "/work", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := AgentViewPath(c.hostRoot, c.agentRoot, c.in); got != c.want {
+				t.Errorf("AgentViewPath(%q, %q, %q) = %q, want %q", c.hostRoot, c.agentRoot, c.in, got, c.want)
+			}
+		})
+	}
+}

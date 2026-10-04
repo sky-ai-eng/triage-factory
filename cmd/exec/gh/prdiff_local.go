@@ -4,48 +4,95 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // localCheckout describes the git checkout `pr diff` / `add-review-comment`
 // resolve their diff and comment anchor from. The agent reads the PR through
-// its worktree (CreateForPR checks out the PR head), so the commit it is
-// actually looking at is the worktree HEAD — NOT the live PR head, which a
+// its checkout (CreateForPR checks out the PR head), so the commit it is
+// actually looking at is the checkout's HEAD — NOT the live PR head, which a
 // concurrent push can move out from under it. Sourcing the diff, the comment
 // validation, and the comment's anchor commit all from this one HEAD keeps the
 // three in the same frame: a line the agent read maps to the same line GitHub
 // anchors the submitted comment to.
 //
-// ok is false when the cwd isn't inside a git worktree (no checkout to anchor
+// ok is false when dir isn't inside a git worktree (no checkout to anchor
 // against) — callers fall back to the GitHub API path, which is internally
 // consistent on its own (anchor + validation both off the live head).
 type localCheckout struct {
-	cwd     string
+	dir     string
 	headSHA string
 	ok      bool
 }
 
-// resolveLocalCheckout returns the worktree HEAD for cwd, or ok=false when cwd
-// isn't a git worktree. A detached/empty HEAD is treated as unusable so callers
-// fall back to the API rather than anchoring to a meaningless ref.
-func resolveLocalCheckout(cwd string) localCheckout {
-	if cwd == "" {
+// resolveLocalCheckout returns the HEAD of the checkout at dir, or ok=false
+// when dir isn't a git worktree. A detached/empty HEAD is treated as unusable
+// so callers fall back to the API rather than anchoring to a meaningless ref.
+func resolveLocalCheckout(dir string) localCheckout {
+	if dir == "" {
 		return localCheckout{}
 	}
-	if err := exec.Command("git", "-C", cwd, "rev-parse", "--is-inside-work-tree").Run(); err != nil {
+	if err := exec.Command("git", "-C", dir, "rev-parse", "--is-inside-work-tree").Run(); err != nil {
 		return localCheckout{}
 	}
-	head, err := gitOutput(cwd, "rev-parse", "HEAD")
+	head, err := gitOutput(dir, "rev-parse", "HEAD")
 	if err != nil || head == "" {
 		return localCheckout{}
 	}
-	return localCheckout{cwd: cwd, headSHA: head, ok: true}
+	return localCheckout{dir: dir, headSHA: head, ok: true}
 }
 
-// gitOutput runs `git -C cwd <args...>` and returns trimmed stdout.
-func gitOutput(cwd string, args ...string) (string, error) {
-	full := append([]string{"-C", cwd}, args...)
+// prCheckout returns the run's checkout of PR number in owner/repo: the
+// conversation_worktrees row whose repo matches and whose ref is exactly
+// pr-<number>, resolved to its HEAD. The current directory plays no part, so
+// an agent standing at the run root or in another repo's checkout still diffs
+// against the PR's own code. ok=false when the run holds no such checkout; the
+// caller then uses the API diff and says so. A registry read failure is noted
+// on stderr and degrades the same way.
+func prCheckout(ctx context.Context, host runCheckouts, owner, repo string, number int) localCheckout {
+	rows, err := listRunCheckouts(ctx, host)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pr diff: could not read this run's checkouts (%v); using the GitHub API diff\n", err)
+		return localCheckout{}
+	}
+	repoID := owner + "/" + repo
+	ref := worktree.PRRefSlug(number)
+	for _, w := range rows {
+		if strings.EqualFold(w.RepoID, repoID) && w.Ref == ref {
+			return resolveLocalCheckout(w.Path)
+		}
+	}
+	return localCheckout{}
+}
+
+// apiDiffWarning explains why a diff came from the GitHub API instead of a
+// local checkout, so that fallback is never silent: either the run holds no
+// checkout of this PR, or the one it holds could not be diffed locally (almost
+// always because the PR's base commit is not in it). Either way the diff is the
+// live PR head, which may not match code the agent has on disk.
+func apiDiffWarning(checkout localCheckout, owner, repo string, number int) string {
+	if checkout.ok {
+		return fmt.Sprintf(
+			"This diff is PR #%d's live head from the GitHub API, not a local checkout: your checkout at %s (HEAD %s) "+
+				"could not be diffed locally, most often because the PR's base commit is not in it. It may not match the code in that checkout.",
+			number, checkout.dir, shortSHA(checkout.headSHA),
+		)
+	}
+	return fmt.Sprintf(
+		"This diff is PR #%d's live head from the GitHub API, not a local checkout: this run has no checkout of the PR. "+
+			"It may not match code you have on disk. To diff against a checkout, run `%s workspace add %s/%s --pr %d` and re-run pr diff.",
+		number, prog.Prefix(), owner, repo, number,
+	)
+}
+
+// gitOutput runs `git -C dir <args...>` and returns trimmed stdout.
+func gitOutput(dir string, args ...string) (string, error) {
+	full := append([]string{"-C", dir}, args...)
 	out, err := exec.Command("git", full...).Output()
 	if err != nil {
 		return "", err
@@ -60,7 +107,7 @@ func gitOutput(cwd string, args ...string) (string, error) {
 // local branch, then the bare name verbatim. Returns ok=false when none
 // resolve — the base branch was created after the clone, or pruned — and the
 // caller falls back to the API diff.
-func resolveBaseCommit(cwd, baseRef string) (string, bool) {
+func resolveBaseCommit(dir, baseRef string) (string, bool) {
 	if baseRef == "" {
 		return "", false
 	}
@@ -70,7 +117,7 @@ func resolveBaseCommit(cwd, baseRef string) (string, bool) {
 		"refs/heads/" + baseRef,
 		baseRef,
 	} {
-		if sha, err := gitOutput(cwd, "rev-parse", "--verify", "--quiet", cand+"^{commit}"); err == nil && sha != "" {
+		if sha, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", cand+"^{commit}"); err == nil && sha != "" {
 			return sha, true
 		}
 	}
@@ -94,14 +141,14 @@ func resolveBaseCommit(cwd, baseRef string) (string, bool) {
 //   - no recorded baseSHA (host didn't populate base.sha) → best-effort resolve
 //     the base branch's tracking ref, which CreateForPR now refreshes at
 //     materialization (WithBaseBranch).
-func resolveDiffBase(cwd, baseSHA, baseRef string) (string, bool) {
+func resolveDiffBase(dir, baseSHA, baseRef string) (string, bool) {
 	if baseSHA != "" {
-		if sha, err := gitOutput(cwd, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err == nil && sha != "" {
+		if sha, err := gitOutput(dir, "rev-parse", "--verify", "--quiet", baseSHA+"^{commit}"); err == nil && sha != "" {
 			return sha, true
 		}
 		return "", false
 	}
-	return resolveBaseCommit(cwd, baseRef)
+	return resolveBaseCommit(dir, baseRef)
 }
 
 // localUnifiedDiff returns the worktree-HEAD-framed unified diff for the PR:
@@ -114,12 +161,12 @@ func resolveDiffBase(cwd, baseSHA, baseRef string) (string, bool) {
 // a base ref that has fallen BEHIND the branch point (a clone-time-frozen
 // origin/<base>) collapses the merge-base to that stale ancestor and replays
 // every intervening already-merged commit as a phantom hunk (TFAC-505).
-func localUnifiedDiff(cwd, baseCommit, file string) (string, error) {
+func localUnifiedDiff(dir, baseCommit, file string) (string, error) {
 	args := []string{"diff", "--no-color", "-M", baseCommit + "...HEAD"}
 	if file != "" {
 		args = append(args, "--", file)
 	}
-	return gitOutput(cwd, args...)
+	return gitOutput(dir, args...)
 }
 
 // parseDiffSummaries derives the per-file manifest rows from a unified diff in a
