@@ -38,16 +38,23 @@ func TestFailFast_ScopedPerHost(t *testing.T) {
 	}
 }
 
-// TestFailFast_SilentAfterATimeoutUntilTheHostAnswers pins which failures
-// stop a scope sending to a host: a timeout does, a refused connection does
-// not, and an answer from the host lifts it, while leaving the host
+// TestFailFast_SilentAfterTwoTimeoutsUntilTheHostAnswers pins which failures
+// stop a scope sending to a host: a second timeout with no answer from the
+// host since the first does, a single timeout does not, a refused connection
+// never does, and an answer from the host lifts it while leaving the host
 // unreachable. A timeout of a request the host has answered another request
 // since does not count, because the host was serving while it hung.
-func TestFailFast_SilentAfterATimeoutUntilTheHostAnswers(t *testing.T) {
+//
+// One timeout is not enough because a poll cycle sends its requests one after
+// another: nothing can answer while a slow request is out, so a single heavy
+// read that always exceeds the client timeout would silence the host for the
+// rest of every cycle.
+func TestFailFast_SilentAfterTwoTimeoutsUntilTheHostAnswers(t *testing.T) {
 	timeout := &url.Error{Op: "Get", URL: "https://ghes.corp.example/x", Err: context.DeadlineExceeded}
 	refused := &url.Error{Op: "Get", URL: "https://ghes.corp.example/x", Err: syscall.ECONNREFUSED}
 
 	plain := context.Background()
+	MarkTransportFailure(plain, "ghes.corp.example", time.Now(), timeout)
 	MarkTransportFailure(plain, "ghes.corp.example", time.Now(), timeout)
 	if Silent(plain, "ghes.corp.example") {
 		t.Error("a host is silent outside any fail-fast scope")
@@ -58,16 +65,21 @@ func TestFailFast_SilentAfterATimeoutUntilTheHostAnswers(t *testing.T) {
 	if !Unreachable(scope, "ghes.corp.example") {
 		t.Error("a refused host is not unreachable")
 	}
+	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), refused)
 	if Silent(scope, "ghes.corp.example") {
-		t.Error("a refused connection made the host silent")
+		t.Error("refused connections made the host silent")
 	}
 
 	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), timeout)
+	if Silent(scope, "ghes.corp.example") {
+		t.Fatal("one timeout made the host silent")
+	}
+	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), timeout)
 	if !Silent(scope, "ghes.corp.example") {
-		t.Fatal("a timeout did not make the host silent")
+		t.Fatal("a second timeout with no answer between did not make the host silent")
 	}
 	if Silent(scope, "api.atlassian.com") {
-		t.Error("a timeout against one host made another silent")
+		t.Error("timeouts against one host made another silent")
 	}
 
 	MarkAnswered(scope, "ghes.corp.example")
@@ -77,12 +89,18 @@ func TestFailFast_SilentAfterATimeoutUntilTheHostAnswers(t *testing.T) {
 	if !Unreachable(scope, "ghes.corp.example") {
 		t.Error("an answer cleared the host's unreachable mark")
 	}
+	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), timeout)
+	if Silent(scope, "ghes.corp.example") {
+		t.Error("a timeout before the answer still counted toward silence after it")
+	}
 
+	MarkAnswered(scope, "ghes.corp.example")
 	sent := time.Now()
 	MarkAnswered(scope, "ghes.corp.example")
 	MarkTransportFailure(scope, "ghes.corp.example", sent, timeout)
+	MarkTransportFailure(scope, "ghes.corp.example", time.Now(), timeout)
 	if Silent(scope, "ghes.corp.example") {
-		t.Error("a timeout made the host silent though it answered another request while this one was out")
+		t.Error("a timeout counted toward silence though the host answered another request while it was out")
 	}
 }
 

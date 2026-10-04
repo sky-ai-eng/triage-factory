@@ -124,12 +124,13 @@ func hungListener(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// TestFailFastScope_StopsSendingToAHostThatTimedOut: inside a fail-fast
-// scope, once a request to a Jira times out, later requests to it are not
-// sent, so a cycle over many projects does not wait out the client's timeout
-// once per request. The skipped request still fails as a transport failure.
-// The same host outside any scope is still sent to.
-func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
+// TestFailFastScope_StopsSendingToAHostThatTimedOutTwice: inside a fail-fast
+// scope, once two requests to a Jira have timed out with no answer from it
+// between, later requests to it are not sent, so a cycle over many projects
+// does not wait out the client's timeout once per request. The skipped
+// request still fails as a transport failure. The same host outside any scope
+// is still sent to.
+func TestFailFastScope_StopsSendingToAHostThatTimedOutTwice(t *testing.T) {
 	const timeout = 200 * time.Millisecond
 	base := "http://" + hungListener(t)
 	rt := &attemptCounter{base: &http.Transport{}}
@@ -143,6 +144,12 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
 	if got := rt.n.Load(); got != 1 {
 		t.Fatalf("the request that timed out made %d attempts, want 1", got)
 	}
+	if _, err := c.get(ctx, base+"/rest/api/2/serverInfo"); err == nil {
+		t.Fatal("a host that never answers answered")
+	}
+	if got := rt.n.Load(); got != 2 {
+		t.Fatalf("the request after one timeout made %d attempts, want 1", got-1)
+	}
 
 	start := time.Now()
 	for range 3 {
@@ -151,7 +158,7 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
 			t.Errorf("a request not sent to a silent host returned %v (class %q), want a transient failure", err, class)
 		}
 	}
-	if got := rt.n.Load() - 1; got != 0 {
+	if got := rt.n.Load() - 2; got != 0 {
 		t.Errorf("three later requests to the host that timed out made %d attempts, want none", got)
 	}
 	if elapsed := time.Since(start); elapsed >= timeout {
@@ -162,5 +169,39 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
 	_, _ = c.get(context.Background(), base+"/rest/api/2/myself")
 	if got := rt.n.Load() - before; got != 1 {
 		t.Errorf("a request outside the scope made %d attempts, want 1", got)
+	}
+}
+
+// TestFailFastScope_OneSlowRequestDoesNotStopTheRest: a request that
+// outlasts the client's timeout on a Jira that answers everything else does
+// not stop the scope sending to it. A poll cycle sends one request at a time,
+// so a single heavy search that always times out would otherwise end every
+// cycle at that search.
+func TestFailFastScope_OneSlowRequestDoesNotStopTheRest(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/2/search" {
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	rt := &attemptCounter{base: &http.Transport{}}
+	c := testClient(srv.URL)
+	c.http = &http.Client{Timeout: timeout, Transport: rt}
+	ctx := upstream.WithFailFast(context.Background())
+
+	if _, err := c.get(ctx, srv.URL+"/rest/api/2/search"); err == nil {
+		t.Fatal("the heavy search answered inside the timeout")
+	}
+	before := rt.n.Load()
+	for range 3 {
+		if _, err := c.get(ctx, srv.URL+"/rest/api/2/myself"); err != nil {
+			t.Errorf("a request after one slow search failed: %v", err)
+		}
+	}
+	if got := rt.n.Load() - before; got != 3 {
+		t.Errorf("three requests after one slow search made %d attempts, want 3", got)
 	}
 }

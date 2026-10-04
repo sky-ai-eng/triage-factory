@@ -73,7 +73,7 @@ func TestFailFastScope_StopsRetryingAHostThatFailed(t *testing.T) {
 	}
 
 	before := rt.n.Load()
-	_, _ = c.Get(context.Background(), "/repos/o/e/pulls")
+	_, _ = c.Get(context.Background(), "/repos/o/f/pulls")
 	if got := rt.n.Load() - before; got != 1+maxRateLimitRetries {
 		t.Errorf("a request outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
 	}
@@ -114,13 +114,14 @@ func hungListener(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// TestFailFastScope_StopsSendingToAHostThatTimedOut: inside a fail-fast
-// scope, once a request to a host times out, later requests to that host are
-// not sent, so a cycle over many repos does not wait out the client's timeout
-// once per repo. The skipped request still fails as a transport failure, so a
-// caller handles it as it would the timeout. Another host in the same scope,
-// and the same host outside any scope, are still sent to.
-func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
+// TestFailFastScope_StopsSendingToAHostThatTimedOutTwice: inside a fail-fast
+// scope, once two requests to a host have timed out with no answer from it
+// between, later requests to that host are not sent, so a cycle over many
+// repos does not wait out the client's timeout once per repo. The skipped
+// request still fails as a transport failure, so a caller handles it as it
+// would the timeout. Another host in the same scope, and the same host
+// outside any scope, are still sent to.
+func TestFailFastScope_StopsSendingToAHostThatTimedOutTwice(t *testing.T) {
 	const timeout = 200 * time.Millisecond
 	rt := &attemptCounter{base: &http.Transport{}}
 	c := &Client{baseURL: "http://" + hungListener(t), pat: "t", http: &http.Client{Timeout: timeout, Transport: rt}}
@@ -132,15 +133,21 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
 	if got := rt.n.Load(); got != 1 {
 		t.Fatalf("the request that timed out made %d attempts, want 1", got)
 	}
+	if _, err := c.Get(ctx, "/repos/o/b/pulls"); err == nil {
+		t.Fatal("a host that never answers answered")
+	}
+	if got := rt.n.Load(); got != 2 {
+		t.Fatalf("the request after one timeout made %d attempts, want 1", got-1)
+	}
 
 	start := time.Now()
-	for _, repo := range []string{"b", "c", "d"} {
+	for _, repo := range []string{"c", "d", "e"} {
 		_, err := c.Get(ctx, "/repos/o/"+repo+"/pulls")
 		if class, ok := upstream.ClassOf(err); !ok || class != upstream.Transient {
 			t.Errorf("a request not sent to a silent host returned %v (class %q), want a transient failure", err, class)
 		}
 	}
-	if got := rt.n.Load() - 1; got != 0 {
+	if got := rt.n.Load() - 2; got != 0 {
 		t.Errorf("three later requests to the host that timed out made %d attempts, want none", got)
 	}
 	if elapsed := time.Since(start); elapsed >= timeout {
@@ -156,9 +163,42 @@ func TestFailFastScope_StopsSendingToAHostThatTimedOut(t *testing.T) {
 	}
 
 	before := rt.n.Load()
-	_, _ = c.Get(context.Background(), "/repos/o/e/pulls")
+	_, _ = c.Get(context.Background(), "/repos/o/f/pulls")
 	if got := rt.n.Load() - before; got != 1 {
 		t.Errorf("a request outside the scope made %d attempts, want 1", got)
+	}
+}
+
+// TestFailFastScope_OneSlowRequestDoesNotStopTheRest: a request that
+// outlasts the client's timeout on a host that answers everything else does
+// not stop the scope sending to that host. A poll cycle sends one request at
+// a time, so a single heavy read that always times out would otherwise end
+// every cycle at that read.
+func TestFailFastScope_OneSlowRequestDoesNotStopTheRest(t *testing.T) {
+	const timeout = 200 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/repos/o/heavy/pulls" {
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	rt := &attemptCounter{base: &http.Transport{}}
+	c := &Client{baseURL: srv.URL, pat: "t", http: &http.Client{Timeout: timeout, Transport: rt}}
+	ctx := upstream.WithFailFast(context.Background())
+
+	if _, err := c.Get(ctx, "/repos/o/heavy/pulls"); err == nil {
+		t.Fatal("the heavy read answered inside the timeout")
+	}
+	before := rt.n.Load()
+	for _, repo := range []string{"a", "b", "c"} {
+		if _, err := c.Get(ctx, "/repos/o/"+repo+"/pulls"); err != nil {
+			t.Errorf("a request after one slow read failed: %v", err)
+		}
+	}
+	if got := rt.n.Load() - before; got != 3 {
+		t.Errorf("three requests after one slow read made %d attempts, want 3", got)
 	}
 }
 

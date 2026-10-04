@@ -1353,8 +1353,8 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks its host unreachable, and every later request to
 // that host gets one attempt, with no retry and no wait. A request that timed
-// out makes its host silent, and a later request to a silent host is not sent
-// (upstream.Silent).
+// out counts toward its host's silence, and a later request to a silent host
+// is not sent (upstream.Silent).
 func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
 	for attempt := 1; ; attempt++ {
 		var reader io.Reader

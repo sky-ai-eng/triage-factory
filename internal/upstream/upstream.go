@@ -271,19 +271,40 @@ func Backoff(attempt int, base, max time.Duration) time.Duration {
 	return base << shift
 }
 
+// sleepProgressInterval is how often a wait under a progress report
+// (WithProgress) reports while it lasts.
+var sleepProgressInterval = 15 * time.Second
+
 // Sleep waits d, or returns ctx.Err() as soon as ctx is done, so the caller's
 // deadline bounds every wait regardless of a client's retry cap.
+//
+// Under a progress report, the wait reports when it starts and every
+// sleepProgressInterval until it ends. A client waiting out a rate limit or a
+// backoff is doing what it should, and a caller that judges its liveness by
+// progress would otherwise read a wait of minutes as a stuck loop.
 func Sleep(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return nil
 	}
 	t := time.NewTimer(d)
 	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
+	report := progressFrom(ctx)
+	var tick <-chan time.Time
+	if report != nil {
+		report()
+		ticker := time.NewTicker(sleepProgressInterval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-t.C:
+			return nil
+		case <-tick:
+			report()
+		}
 	}
 }
 

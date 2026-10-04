@@ -17,9 +17,11 @@ type failFastKey struct{}
 type failFast struct {
 	mu   sync.Mutex
 	down map[string]bool
-	// silent holds the hosts a request timed out against with no answer from
-	// the host since that request was sent.
-	silent map[string]bool
+	// timedOut holds the hosts a request timed out against with no answer
+	// from the host since that request was sent, and silent the hosts where
+	// that has happened twice with no answer between.
+	timedOut map[string]bool
+	silent   map[string]bool
 	// answered is when each host last answered a request in the scope.
 	answered map[string]time.Time
 }
@@ -27,13 +29,14 @@ type failFast struct {
 // ErrHostSilent is the error a client returns, inside a TransportError, for a
 // request it did not send because its host is silent in the fail-fast scope
 // (Silent).
-var ErrHostSilent = errors.New("not sent: an earlier request to this host timed out in this poll cycle")
+var ErrHostSilent = errors.New("not sent: earlier requests to this host timed out in this poll cycle")
 
 // WithFailFast returns a context that opens a fail-fast scope. Under it, once
 // one request to a host has ended in a transient failure, after whatever
 // retries its client allowed, every later request to that host gets a single
-// attempt: no retry, no backoff and no Retry-After wait. Once a request to a
-// host has timed out, later requests to it are not sent at all (Silent).
+// attempt: no retry, no backoff and no Retry-After wait. Once two requests to
+// a host have timed out with no answer from it between them, later requests
+// to it are not sent at all (Silent).
 //
 // It is for a caller that will try again on its own schedule and has already
 // learned what it needs from the first failure: one org's poll cycle, which
@@ -48,13 +51,17 @@ var ErrHostSilent = errors.New("not sent: an earlier request to this host timed 
 // a refused connection or a 5xx comes back in milliseconds, and a host that
 // recovers partway through the cycle answers it. A timeout is the exception,
 // since the attempt is the client's whole time budget, so a cycle over many
-// repos would again wait once per repo.
+// repos would again wait once per repo. One timeout alone is not enough to
+// stop sending: a cycle sends its requests one after another, so nothing can
+// answer while a slow request is out, and a single read that always outlasts
+// the timeout would otherwise end every cycle at that read.
 //
 // The scope is per host, so it never stops retries against a host that has
 // not failed. A scope already on ctx is replaced for the derived context.
 func WithFailFast(ctx context.Context) context.Context {
 	return context.WithValue(ctx, failFastKey{}, &failFast{
 		down:     map[string]bool{},
+		timedOut: map[string]bool{},
 		silent:   map[string]bool{},
 		answered: map[string]time.Time{},
 	})
@@ -82,9 +89,11 @@ func MarkUnreachable(ctx context.Context, host string) {
 
 // MarkTransportFailure is MarkUnreachable for a request, sent at sent, that
 // got no response at all: err is the error from http.Client.Do. A timeout
-// also makes host silent, unless the host has answered another request since
-// this one was sent. That answer shows the host was serving while this
-// request hung, so the timeout was about the request rather than the host.
+// also counts toward host's silence, unless the host has answered another
+// request since this one was sent. That answer shows the host was serving
+// while this request hung, so the timeout was about the request rather than
+// the host. The second timeout that counts, with no answer since the first,
+// makes host silent.
 func MarkTransportFailure(ctx context.Context, host string, sent time.Time, err error) {
 	f := failFastFrom(ctx)
 	if f == nil {
@@ -93,9 +102,13 @@ func MarkTransportFailure(ctx context.Context, host string, sent time.Time, err 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.down[host] = true
-	if timedOut(err) && !f.answered[host].After(sent) {
+	if !timedOut(err) || f.answered[host].After(sent) {
+		return
+	}
+	if f.timedOut[host] {
 		f.silent[host] = true
 	}
+	f.timedOut[host] = true
 }
 
 // MarkAnswered records that host returned a response, of any status. A host
@@ -107,6 +120,7 @@ func MarkAnswered(ctx context.Context, host string) {
 	}
 	f.mu.Lock()
 	f.answered[host] = time.Now()
+	delete(f.timedOut, host)
 	delete(f.silent, host)
 	f.mu.Unlock()
 }
@@ -124,11 +138,11 @@ func Unreachable(ctx context.Context, host string) bool {
 	return f.down[host]
 }
 
-// Silent reports whether ctx is a fail-fast scope in which a request to host
-// timed out and nothing from host has answered since, so a client does not
-// send its request to host at all and returns ErrHostSilent in a
-// TransportError instead. The request is not counted: it never reached the
-// upstream, and the timeout that made the host silent was counted already.
+// Silent reports whether ctx is a fail-fast scope in which two requests to
+// host timed out with nothing from host answering since the first, so a
+// client does not send its request to host at all and returns ErrHostSilent in
+// a TransportError instead. The request is not counted: it never reached the
+// upstream, and the timeouts that made the host silent were counted already.
 func Silent(ctx context.Context, host string) bool {
 	f := failFastFrom(ctx)
 	if f == nil {

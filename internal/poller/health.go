@@ -10,10 +10,11 @@ import (
 
 // heartbeatStaleFactor is the multiple of basePollInterval past which a
 // source's poll loop is considered dead by the /readyz hard check: in that
-// long it has not woken, completed an upstream request, or finished an org's
-// poll. 3x basePollInterval = 90s: a cycle that is making progress stamps far
-// more often than that however long the whole cycle runs, and a stuck or
-// crashed loop surfaces within a couple of minutes.
+// long it has not woken, completed an upstream request, waited on a rate
+// limit or a retry backoff, or finished an org's poll. 3x basePollInterval =
+// 90s: a cycle that is making progress stamps far more often than that however
+// long the whole cycle runs, and a stuck or crashed loop surfaces within a
+// couple of minutes.
 const heartbeatStaleFactor = 3
 
 // HealthSnapshot is the poller state GET /readyz needs, gathered fresh on
