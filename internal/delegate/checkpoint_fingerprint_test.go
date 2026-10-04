@@ -3,9 +3,12 @@ package delegate
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -86,5 +89,64 @@ func TestSnapshotFingerprint_StableAcrossCapturesOfAnUnchangedTree(t *testing.T)
 	addLocalCommit(t, wt, 99)
 	if after := captureFingerprint(t, wt); after == before {
 		t.Fatal("a new commit left the fingerprint unchanged; the checkpoint would skip storing it")
+	}
+}
+
+// TestSnapshotFingerprint_ScratchRewrittenWithItsOldTimes: a tool can replace
+// a scratch file with same-sized content and put its old modification time
+// back — cp -p does, an archive extraction does. Size and modification time
+// then match the last checkpoint's, and a fingerprint of those alone would
+// skip storing the new content and record the skip as covering it: a restore
+// then brings back the old file with nothing saying it is old.
+func TestSnapshotFingerprint_ScratchRewrittenWithItsOldTimes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the change stamp reads Linux's stat")
+	}
+	for _, tc := range []struct {
+		name    string
+		rewrite func(t *testing.T, path string)
+	}{
+		{"in place, like cp -p", func(t *testing.T, path string) {
+			if err := os.WriteFile(path, []byte("bravo\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"replaced by a new file, like an extraction", func(t *testing.T, path string) {
+			tmp := path + ".new"
+			if err := os.WriteFile(tmp, []byte("bravo\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(tmp, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wt := repoWithLocalCommits(t, 1)
+			path := filepath.Join(wt, "_tfac", "notes.txt")
+			writeFile(t, path, "alpha\n")
+			old, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := captureFingerprint(t, wt)
+			if again := captureFingerprint(t, wt); again != before {
+				t.Fatal("an unchanged scratch file changed the fingerprint")
+			}
+
+			// Past the coarsest clock tick a filesystem stamps change times
+			// with, so the rewrite's change time differs from the write's.
+			time.Sleep(50 * time.Millisecond)
+			tc.rewrite(t, path)
+			if err := os.Chtimes(path, old.ModTime(), old.ModTime()); err != nil {
+				t.Fatal(err)
+			}
+			if now, _ := os.Stat(path); now.Size() != old.Size() || !now.ModTime().Equal(old.ModTime()) {
+				t.Fatalf("fixture: size %d mtime %v, want the old %d %v", now.Size(), now.ModTime(), old.Size(), old.ModTime())
+			}
+			if after := captureFingerprint(t, wt); after == before {
+				t.Fatal("new scratch content under the old size and modification time left the fingerprint unchanged")
+			}
+		})
 	}
 }

@@ -520,9 +520,11 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 // commits into the same bytes twice, and a fingerprint over them would take
 // every capture of a tree with unpushed commits for a changed one.
 //
-// The scratch half is path, size and modification time, not content. It is
-// the cheap half on purpose: the scratch is the unbounded part of a workspace,
-// and hashing it would cost what compressing it costs.
+// The scratch half is a stat of each file, not its content: path, size,
+// modification time, and the inode and change time (scratchChangeStamp),
+// which catch a rewrite that kept the old size and put the old modification
+// time back. It is the cheap half on purpose: the scratch is the unbounded
+// part of a workspace, and hashing it would cost what compressing it costs.
 func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, wtPath string) (string, error) {
 	h := sha256.New()
 	field := func(parts ...string) {
@@ -546,7 +548,7 @@ func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, w
 		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
 	omittedCILogs, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {
-		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10))
+		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10), scratchChangeStamp(fi))
 		return nil
 	})
 	if err != nil {
