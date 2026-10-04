@@ -2281,6 +2281,7 @@ func (s *Spawner) handlePreAgentFailure(orgID string, br *domain.BlueprintRun, c
 // authority is a lost one, whatever it was doing when it noticed.
 func (s *Spawner) requeueClaim(orgID string, conv domain.Conversation, outcome db.RequeueOutcome, delay time.Duration, cause error, after string) bool {
 	ctx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
 	var requeued *domain.Conversation
 	err := s.retryAfterRecovery(ctx, conv.ClaimID, func() (e error) {
 		requeued, e = s.conversationQueue.RequeueConversation(ctx, orgID, conv.ID, conv.ClaimID, outcome, delay, cause.Error())
@@ -2480,6 +2481,7 @@ func (s *Spawner) disposeOfModelRefusal(orgID string, br *domain.BlueprintRun, c
 // toast: an upstream outage is not raised as one.
 func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reason domain.ParkReason, note, toastMsg string) {
 	bgCtx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
 	if _, err := s.conversations.InsertMessageForClaimSystem(bgCtx, orgID, conv.ClaimID, &domain.Message{
 		ConversationID: conv.ID,
 		UserID:         conv.CreatorUserID,
@@ -2532,6 +2534,7 @@ func (s *Spawner) parkWithStopNote(orgID string, conv domain.Conversation, reaso
 func (s *Spawner) failClaimedConversation(orgID string, conv *domain.Conversation, reason string) {
 	dispatchLog.Error("marking conversation failed", "conversation", conv.ID, "reason", reason)
 	bgCtx := context.Background()
+	s.releaseActivity(conv.ID, conv.ClaimID)
 	_, err := s.conversations.MarkFailedIfActiveForClaimSystem(bgCtx, orgID, conv.ID, conv.ClaimID, string(domain.ConversationFailureUnclassified))
 	if errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Error("claim fence refused the orphaned-conversation terminal — a successor owns this conversation; recording nothing",

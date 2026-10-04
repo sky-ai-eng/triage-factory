@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentloop"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -350,4 +352,93 @@ func TestActivityTracker_StopWaitsForADecidedStall(t *testing.T) {
 	}
 	close(release)
 	waitFor(t, stopped, "stop after the stall finished")
+}
+
+// releaseWatcher records, at each claim-releasing write a pre-agent failure
+// makes, whether the engagement's watchdog had already been stopped.
+type releaseWatcher struct {
+	s              *Spawner
+	conversationID string
+	mu             sync.Mutex
+	seen           map[string]bool
+}
+
+func (w *releaseWatcher) note(write string) {
+	a := w.s.activityFor(w.conversationID)
+	stopped := true
+	if a != nil {
+		a.mu.Lock()
+		stopped = a.stopped
+		a.mu.Unlock()
+	}
+	w.mu.Lock()
+	w.seen[write] = stopped
+	w.mu.Unlock()
+}
+
+type watchedQueue struct {
+	db.ConversationQueueStore
+	w *releaseWatcher
+}
+
+func (q watchedQueue) RequeueConversation(ctx context.Context, orgID, conversationID, claimID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
+	q.w.note("requeue")
+	return q.ConversationQueueStore.RequeueConversation(ctx, orgID, conversationID, claimID, outcome, delay, lastErr)
+}
+
+type watchedConversations struct {
+	db.ConversationStore
+	w *releaseWatcher
+}
+
+func (c watchedConversations) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
+	c.w.note("park")
+	return c.ConversationStore.ParkOpenForClaimSystem(ctx, orgID, conversationID, claimID, park)
+}
+
+func (c watchedConversations) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
+	c.w.note("fail")
+	return c.ConversationStore.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, failureKind)
+}
+
+// TestPreAgentFailure_EveryReleaseStopsTheWatchdogFirst: a requeue, a park and
+// a terminal that a failure before the agent ran writes each let the claim go,
+// so the watchdog is stopped before each. A stall it filed between the
+// failure and the release would land while the claim is still held, survive
+// the release, and settle as a `stalled` park: a retry turned into a wait for
+// a person, or a park's own reason replaced.
+func TestPreAgentFailure_EveryReleaseStopsTheWatchdogFirst(t *testing.T) {
+	for _, tc := range []struct {
+		write string
+		fail  func(f stallFixture, conv domain.Conversation)
+	}{
+		{"requeue", func(f stallFixture, conv domain.Conversation) {
+			f.s.handlePreAgentFailure(runmode.LocalDefaultOrgID, nil, conv, errors.New("clone failed"))
+		}},
+		{"park", func(f stallFixture, conv domain.Conversation) {
+			f.s.parkWithStopNote(runmode.LocalDefaultOrgID, conv, domain.ParkReasonLaunchFailed, "could not start", "")
+		}},
+		{"fail", func(f stallFixture, conv domain.Conversation) {
+			f.s.failClaimedConversation(runmode.LocalDefaultOrgID, &conv, "could not start")
+		}},
+	} {
+		t.Run(tc.write, func(t *testing.T) {
+			f := newStallFixture(t, "r-pre-agent-"+tc.write, activityTimings{idle: time.Hour})
+			w := &releaseWatcher{s: f.s, conversationID: f.conversationID, seen: map[string]bool{}}
+			f.s.conversationQueue = watchedQueue{ConversationQueueStore: f.s.conversationQueue, w: w}
+			f.s.conversations = watchedConversations{ConversationStore: f.s.conversations, w: w}
+
+			tc.fail(f, domain.Conversation{ID: f.conversationID, OrgID: runmode.LocalDefaultOrgID, TaskID: f.task.ID, ClaimID: f.claimID})
+
+			w.mu.Lock()
+			stopped, wrote := w.seen[tc.write]
+			w.mu.Unlock()
+			if !wrote {
+				t.Fatalf("the %s was never written", tc.write)
+			}
+			if !stopped {
+				t.Errorf("the %s let the claim go with the watchdog still running", tc.write)
+			}
+		})
+	}
 }
