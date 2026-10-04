@@ -88,6 +88,53 @@ func TestSDKProviderUnavailable_ClassifiesByStatus(t *testing.T) {
 	}
 }
 
+// TestSDKProviderUnavailable_WithNoStatusClassifiesByKind: a provider that
+// reset the connection or never answered leaves no status, and the SDK's own
+// name for the failure decides. The provider-side names hand back; a refusal,
+// or an error the SDK could not place, is the agent's failure.
+func TestSDKProviderUnavailable_WithNoStatusClassifiesByKind(t *testing.T) {
+	for kind, want := range map[string]bool{
+		"server_error": true, "overloaded": true, "rate_limit": true,
+		"authentication_failed": false, "billing_error": false, "invalid_request": false,
+		"model_not_found": false, "unknown": false, "": false,
+	} {
+		r := &agentproc.Result{IsError: true, APIError: kind}
+		if got := sdkProviderUnavailable(r); got != want {
+			t.Errorf("sdkProviderUnavailable(IsError, no status, %q) = %v, want %v", kind, got, want)
+		}
+	}
+	if sdkProviderUnavailable(&agentproc.Result{IsError: true, APIErrorStatus: 401, APIError: "server_error"}) {
+		t.Error("a status the provider answered with was overridden by the SDK's name for it")
+	}
+}
+
+// TestSDKUpstream_AResetConnectionHandsBack: the SDK gave up on a provider
+// that reset every connection, so its result has no status. It is handed back
+// on the upstream schedule like a 529, and the summary says no answer came.
+func TestSDKUpstream_AResetConnectionHandsBack(t *testing.T) {
+	f := newLaunchFixture(t, "sdk-reset")
+	f.open(t)
+
+	reset := &agentproc.Result{IsError: true, Subtype: "success", APIError: "server_error", Result: "API Error: Connection dropped (ECONNRESET)"}
+	disp, ok := f.s.leaveSDKOnUpstream(context.Background(), f.sdkPark(), reset, "sess-reset", 0, runmode.LocalDefaultUserID)
+	if !ok || !disp.handedBack || disp.fenced {
+		t.Fatalf("leaveSDKOnUpstream = (%+v, %v), want handed back and unfenced", disp, ok)
+	}
+	if got := f.claimOutcomes(t); len(got) != 1 || got[0] != db.HandBackUpstream {
+		t.Errorf("claim outcomes = %v, want [%s]", got, db.HandBackUpstream)
+	}
+	if in, ok := f.nextAttemptIn(t); !ok || in > 30*time.Second || in < 20*time.Second {
+		t.Errorf("next_attempt_at = now + %v (set %v), want about now + 30s", in, ok)
+	}
+	var summary string
+	if err := f.database.QueryRow(`SELECT COALESCE(result_summary, '') FROM conversations WHERE id = ?`, f.conv.ID).Scan(&summary); err != nil {
+		t.Fatalf("read result_summary: %v", err)
+	}
+	if summary != "model provider unavailable (no response, server_error)" {
+		t.Errorf("result_summary = %q", summary)
+	}
+}
+
 // TestSDKUpstream_An529HandsBackAndTheNextClaimSaysWhy: an SDK result the
 // provider ended with 529 is handed back 'requeued_upstream' on the schedule
 // rather than failed, and the claim after the wait carries the outcome that
@@ -161,8 +208,9 @@ func TestSDKUpstream_An529HandsBackAndTheNextClaimSaysWhy(t *testing.T) {
 }
 
 // TestSDKUpstream_ARefusalOrAnUnreportedStatusStillFails: a 401 is the
-// provider refusing the credential, and a result with no status is the agent's
-// own error. Neither is handed back, and both fail the conversation as before.
+// provider refusing the credential, and a result with no status and no
+// provider failure named is the agent's own error. Neither is handed back, and
+// both fail the conversation as before.
 func TestSDKUpstream_ARefusalOrAnUnreportedStatusStillFails(t *testing.T) {
 	for _, status := range []int{401, 0} {
 		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {

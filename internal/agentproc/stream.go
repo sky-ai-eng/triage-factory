@@ -60,6 +60,14 @@ type StreamState struct {
 	// parsed rather than when a message is flushed. Set once by the reader
 	// before the first line, and read only on the reader goroutine.
 	observer StreamObserver
+
+	// apiError is the `error` field of the API-error assistant message the
+	// current turn wrote, held until the turn's result carries it.
+	apiError string
+
+	// retryNotice is whether the line ParseLine read last was a retry notice,
+	// which the readers keep from the observer's OnLine.
+	retryNotice bool
 }
 
 // observeSink installs sink as this stream's observer when it implements
@@ -186,6 +194,7 @@ func (s *StreamState) flush() *domain.Message {
 // caller's choice of identifier (delegate uses the conversation id). Storage
 // decisions live in the Sink, not here.
 func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message, *Result) {
+	s.retryNotice = false
 	var raw map[string]any
 	if err := json.Unmarshal(line, &raw); err != nil {
 		return nil, nil
@@ -198,10 +207,13 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 		// system/init carries session_id we need for --resume. Other
 		// system subtypes are ignored — they're metadata for the
 		// harness, not content the consumer needs to persist.
-		if subtype, _ := raw["subtype"].(string); subtype == "init" {
+		switch subtype, _ := raw["subtype"].(string); subtype {
+		case "init":
 			if sid, ok := raw["session_id"].(string); ok {
 				s.sessionID = sid
 			}
+		case "api_retry":
+			s.retryNotice = true
 		}
 		return nil, nil
 
@@ -230,13 +242,23 @@ func (s *StreamState) ParseLine(line []byte, traceID string) ([]*domain.Message,
 		if s.observer != nil {
 			s.observer.OnTurnEnd()
 		}
-		return out, parseResult(raw)
+		res := parseResult(raw)
+		if res.IsError {
+			res.APIError = s.apiError
+		}
+		s.apiError = ""
+		return out, res
 	}
 
 	return nil, nil
 }
 
 func (s *StreamState) handleAssistant(raw map[string]any, traceID string) []*domain.Message {
+	// A subagent's API error ends the subagent's call, not this turn.
+	if kind, _ := raw["error"].(string); kind != "" && raw["parent_tool_use_id"] == nil {
+		s.apiError = kind
+	}
+
 	msgObj, ok := raw["message"].(map[string]any)
 	if !ok {
 		return nil
@@ -525,6 +547,15 @@ type Result struct {
 	// on an authentication failure, so a caller sorting refusals from outages
 	// reads this.
 	APIErrorStatus int
+
+	// APIError is the runtime's own name for the API error the invocation
+	// ended on ("server_error", "overloaded", "rate_limit",
+	// "authentication_failed", ...), from the `error` field of the assistant
+	// message it writes for that error. Set only alongside IsError. It is the
+	// structured report for a failure with no HTTP answer to give a status:
+	// a reset connection or a request that timed out ends with APIErrorStatus
+	// zero and APIError "server_error".
+	APIError string
 
 	// Interrupted marks a turn that ended by interruption rather than
 	// completion. Primary source: the result's terminal_reason field

@@ -280,7 +280,9 @@ retries it: it stays parked until someone sends it a message, which resumes it.
 The exception is a native engagement whose `provider` operation stalled: a
 model provider that sends nothing is an outage rather than a stuck run, so the
 engagement is handed back `requeued_upstream` (below) instead of parked. The
-SDK runtime reports no provider operation, so its stalls all park.
+SDK runtime reports no provider operation, so its stalls all park, including
+one on a provider that never answers: the retry notices the SDK writes while it
+waits do not count as activity.
 
 An engagement can also **hand its claim back**: release it with the
 conversation still mid-flight, so the next claim continues the conversation
@@ -292,7 +294,7 @@ some wait before the next claim:
 | `requeued` | The engagement failed before its agent ran: a workspace that would not build, a runtime that would not start. | Setup: 5 in a row. | At once. |
 | `requeued_credentials` | The credential bundle never arrived. | None. | At once. |
 | `requeued_shutdown` | The executor stopped or drained. | None. | At once. |
-| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status. Also a native engagement whose provider sent nothing for 150 seconds, and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
+| `requeued_upstream` | The run's model provider was unavailable (a 5xx, a rate limit, a connection that failed) through the engagement's own retries: a native engagement's 5 attempts, or the SDK's, which reports the provider's status, or names the failure when no answer came at all. Also a native engagement whose provider sent nothing for 150 seconds, and an engagement that could not reach GitHub while it set up its workspace (the clone, a fetch, the pull-request read). | Upstream: 27 in a row. Setup failures of this kind do not spend the setup budget. | After 30s, 1m, 2m, 5m, then every 10m: about 4 hours of retrying in all. |
 
 A run that spends its upstream budget parks `open` with park reason
 `upstream_unavailable` (shown in the UI as "Paused: provider unavailable"),

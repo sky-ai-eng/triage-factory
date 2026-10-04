@@ -145,26 +145,39 @@ func (s *Spawner) leaveSDKOnUpstream(ctx context.Context, park liveParkContext, 
 
 // sdkProviderUnavailable reports whether an SDK result ended on its model
 // provider being unavailable after the SDK's own retries: an error result
-// whose api_error_status classifies as Transient or RateLimited. The status
-// is the SDK's structured report of the provider's answer, so the decision
-// never reads the result's prose. A result with no status (0), and every
-// other class, is the agent's failure and keeps failing the conversation.
+// whose api_error_status classifies as Transient or RateLimited, or, when the
+// provider gave no HTTP answer at all (a reset connection, a request that
+// timed out), whose API error the SDK names as the provider's. Both are the
+// SDK's structured report, so the decision never reads the result's prose.
+// Every other result is the agent's failure and keeps failing the
+// conversation.
 func sdkProviderUnavailable(r *agentproc.Result) bool {
-	if r == nil || !r.IsError || r.APIErrorStatus == 0 {
+	if r == nil || !r.IsError {
 		return false
 	}
-	switch inference.ClassifyStatus(r.APIErrorStatus) {
-	case upstream.Transient, upstream.RateLimited:
+	if r.APIErrorStatus != 0 {
+		switch inference.ClassifyStatus(r.APIErrorStatus) {
+		case upstream.Transient, upstream.RateLimited:
+			return true
+		}
+		return false
+	}
+	switch r.APIError {
+	case "server_error", "overloaded", "rate_limit":
 		return true
 	}
 	return false
 }
 
 // sdkUpstreamSummary is what an SDK hand-back logs and keeps on
-// result_summary: the status the provider answered with. The runtime's own
-// text is left out, because it renders the provider's response body, and an
-// upstream body reaches neither a log line nor a person's screen.
+// result_summary: the status the provider answered with, or the SDK's name
+// for the failure when it gave no answer. The runtime's own text is left out,
+// because it renders the provider's response body, and an upstream body
+// reaches neither a log line nor a person's screen.
 func sdkUpstreamSummary(r *agentproc.Result) string {
+	if r.APIErrorStatus == 0 {
+		return fmt.Sprintf("model provider unavailable (no response, %s)", r.APIError)
+	}
 	return fmt.Sprintf("model provider unavailable (HTTP %d)", r.APIErrorStatus)
 }
 
