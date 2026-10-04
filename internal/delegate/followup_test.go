@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
 
 // finishBlueprint settles a seeded blueprint_run on the step its conversation
@@ -577,9 +578,8 @@ func (b unreadableAfterGateBlueprint) GetRunSystem(ctx context.Context, orgID, i
 
 // TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict: a wake whose flip
 // was refused, and whose run cannot be re-read to say why, is reported as a
-// conflict. The written message makes the parked conversation read as
-// queued, so falling through to the lost-race reading would report success
-// for a message nothing delivers.
+// conflict: nothing shows the cancel, and nothing will drive the
+// conversation.
 func TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
@@ -601,5 +601,74 @@ func TestFollowUp_WakeRefusedWithAnUnreadableRunIsAConflict(t *testing.T) {
 	}
 	if st := storedStatus(t, database, "r-unreadable"); st != "open" {
 		t.Errorf("stored status = %q, want open", st)
+	}
+}
+
+// TestFollowUp_ARefusedWakeLeavesNoMessage: a send the wake refuses is answered
+// with a conflict, and a conflict is all it leaves. The message is not on the
+// transcript and was not streamed: a client shown a message that will never
+// run would display it, and retrying the refused send would queue it twice.
+func TestFollowUp_ARefusedWakeLeavesNoMessage(t *testing.T) {
+	for name, tc := range map[string]struct {
+		setup func(t *testing.T, database *sql.DB, stores *db.Stores, id string)
+		want  error
+	}{
+		"a cancel landed after the gate": {
+			setup: func(t *testing.T, database *sql.DB, stores *db.Stores, id string) {
+				cancelRunOf(t, database, id)
+				stores.Blueprints = staleLiveBlueprint{BlueprintStore: stores.Blueprints, reads: new(int)}
+			},
+			want: ErrBlueprintCancelled,
+		},
+		"the run could not be re-read": {
+			setup: func(t *testing.T, database *sql.DB, stores *db.Stores, id string) {
+				cancelRunOf(t, database, id)
+				stores.Blueprints = unreadableAfterGateBlueprint{staleLiveBlueprint{BlueprintStore: stores.Blueprints, reads: new(int)}}
+			},
+			want: ErrConversationNotResumable,
+		},
+		"the conversation went terminal": {
+			setup: func(t *testing.T, database *sql.DB, stores *db.Stores, id string) {
+				if _, err := database.Exec(`UPDATE conversations SET status = 'failed' WHERE id = ?`, id); err != nil {
+					t.Fatalf("fail: %v", err)
+				}
+				stores.Conversations = staleOpenOnce(stores.Conversations)
+			},
+			want: ErrConversationNotResumable,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			paths.SetForTest(t, t.TempDir())
+			database := newDelegateTestDB(t)
+			const id = "r-refused-wake"
+			seedConversation(t, database, id, "sess-refused", "/tmp/does-not-exist-refused")
+			if _, err := database.Exec(`UPDATE conversations SET status = 'open', park_reason = 'user_cancelled' WHERE id = ?`, id); err != nil {
+				t.Fatalf("park: %v", err)
+			}
+			stores := testSpawnerStores(database)
+			tc.setup(t, database, &stores, id)
+			hub := websocket.NewHub()
+			captured := &capturedEvents{}
+			hub.SetBackplane(captured)
+			s := NewSpawner(database, stores, nil, hub, "claude-sonnet-4-6")
+
+			err := s.SendMessage(context.Background(), runmode.LocalDefaultOrgID, id, runmode.LocalDefaultUserID, "carry on")
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("SendMessage = %v, want %v", err, tc.want)
+			}
+			if rows := pendingRows(t, s, id); len(rows) != 0 {
+				t.Errorf("a refused send left %d queued rows", len(rows))
+			}
+			if streamed := captured.messages(); len(streamed) != 0 {
+				t.Errorf("a refused send streamed %d messages", len(streamed))
+			}
+		})
+	}
+}
+
+func cancelRunOf(t *testing.T, database *sql.DB, conversationID string) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'cancelled', cancel_requested = 1 WHERE id = ?`, blueprintRunIDForConversation(t, database, conversationID)); err != nil {
+		t.Fatalf("cancel the run: %v", err)
 	}
 }

@@ -866,7 +866,7 @@ func (ag *agentHandler) handleMessage(w http.ResponseWriter, r *http.Request) {
 // queued alongside the winner's and delivered by the winner's claim, so it
 // returns nil and the client is told "sent", which is what happened. A wake
 // that loses to a conversation going terminal still 409s — nothing will claim
-// it, so nothing delivers the message. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
+// it, so the message is not queued. An expired workspace (ErrWorkspaceExpired) is 410 Gone: the
 // conversation's saved state was reaped after the retention window, so retrying won't
 // help — the client surfaces the clear error rather than a transient conflict.
 // A model the conversation's team may no longer pick (domain.ErrModelNotEnabled)
