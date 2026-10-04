@@ -456,8 +456,10 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	}
 	if res.fingerprint == lastFingerprint {
 		res.outcome = checkpointSkippedUnchanged
+		s.coverSnapshotState(ctx, w, res.fingerprint)
 		return res
 	}
+	w.fingerprint = res.fingerprint
 
 	// A stopped checkpointer opens no record: the ending that stopped it is
 	// about to open its own, and waits for this goroutine before it does.

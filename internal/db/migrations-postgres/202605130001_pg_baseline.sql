@@ -5601,12 +5601,22 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_permissions TO tf_syst
 -- stopped instead of cloning fresh. The cascade is the task's, which is what
 -- keeps a purged task from leaving a lifecycle row pointing at a blob nothing
 -- will ever ask for again.
+--
+-- covered_position and covered_fingerprint are a later transcript position
+-- the written blob is known to reflect: a checkpoint that found the tree
+-- unchanged records them instead of uploading the same tree again, so the
+-- position inside the blob's manifest can be older than what the blob
+-- covers. covered_fingerprint is the tree they describe, which a restore
+-- matches against the manifest before trusting them. Both NULL until such a
+-- checkpoint, and cleared by every begin.
 CREATE TABLE public.workspace_snapshots (
     org_id uuid NOT NULL,
     task_id uuid NOT NULL,
     state text NOT NULL,
     writer_claim_id uuid NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    covered_position double precision,
+    covered_fingerprint text,
     CONSTRAINT workspace_snapshots_state_check CHECK ((state = ANY (ARRAY['pending'::text, 'written'::text, 'failed'::text])))
 );
 

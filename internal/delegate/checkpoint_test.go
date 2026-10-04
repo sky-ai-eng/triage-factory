@@ -494,6 +494,152 @@ func TestCheckpoint_AHardKillRestoresTheCheckpointAndNamesWhatCameAfter(t *testi
 	}
 }
 
+// TestCheckpoint_AnUnchangedCheckpointMovesTheRestoredPosition: a checkpoint
+// that finds the tree unchanged uploads nothing, and the restore after a hard
+// kill still reflects every call up to it. The notice names only the call that
+// came after it, not the read-only calls the unchanged tree already covers.
+func TestCheckpoint_AnUnchangedCheckpointMovesTheRestoredPosition(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-covered")
+	c := f.start()
+	f.pastInterval(c)
+
+	killCtx, kill := context.WithCancel(context.Background())
+	defer kill()
+	tools := &treeToolHost{root: f.tree, blockOn: "write four.txt", ctx: killCtx, entered: make(chan struct{})}
+	provider := &hookedProvider{
+		inner: &scriptedGateProvider{turns: []gateTurn{
+			{calls: []domain.ToolCall{bashCall("c1", "write one.txt")}},
+			{calls: []domain.ToolCall{bashCall("c2", "read one.txt"), bashCall("c3", "read notes.txt")}},
+			{calls: []domain.ToolCall{bashCall("c4", "write four.txt")}},
+		}},
+		onCall: func(n int) {
+			switch n {
+			case 2:
+				// The first batch's checkpoint has landed; the second batch's
+				// comes due too.
+				c.wg.Wait()
+				f.pastInterval(c)
+			case 3:
+				// The second batch's checkpoint found the tree unchanged, and
+				// none comes due after it.
+				c.wg.Wait()
+				c.mu.Lock()
+				c.interval = time.Hour
+				c.mu.Unlock()
+			}
+		},
+	}
+	done := make(chan agentloop.Result, 1)
+	go func() { done <- f.runEngine(t, killCtx, c, provider, tools, agentloop.Params{}) }()
+	waitFor(t, tools.entered, "the fourth call to be running")
+	kill()
+	<-done
+	c.stop()
+	if w, u := f.outcomes(checkpointWritten), f.outcomes(checkpointSkippedUnchanged); w != 1 || u != 1 {
+		t.Fatalf("checkpoints = (%d written, %d unchanged), want one of each", w, u)
+	}
+	c1, c3 := f.resultRow(t, "c1"), f.resultRow(t, "c3")
+	if man, _ := f.blob(t); man.TranscriptPosition == nil || *man.TranscriptPosition != c1 {
+		t.Fatalf("the blob's own position = %v, want c1's result %v: the unchanged checkpoint uploads nothing", man.TranscriptPosition, c1)
+	}
+	if err := os.RemoveAll(f.tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.database.Exec(`UPDATE claims SET released_at = CURRENT_TIMESTAMP, outcome = 'reaped' WHERE id = ?`, f.claimID); err != nil {
+		t.Fatalf("take the claim over: %v", err)
+	}
+	next, err := f.s.conversationQueue.ClaimNextConversation(context.Background(), "exec-successor", 1, db.ClaimPlacement{}, time.Minute)
+	if err != nil || next == nil || next.ID != f.conversationID {
+		t.Fatalf("successor claim = (%+v, %v), want conversation %s", next, err, f.conversationID)
+	}
+
+	_, prov, asOf, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, &domain.Conversation{
+		ID: f.conversationID, ClaimID: next.ClaimID, TaskID: f.task.ID,
+		Runtime: domain.ConversationRuntimeNative, WorktreePath: f.tree,
+	}, gitSeed{}, nil)
+	if err != nil || prov != domain.WorkspaceProvenanceRehydrated {
+		t.Fatalf("ensureWorkspace = (%q, %v), want rehydrated", prov, err)
+	}
+	if asOf == nil || *asOf != c3 {
+		t.Fatalf("restored position = %v, want c3's result %v, where the unchanged checkpoint was taken", asOf, c3)
+	}
+
+	capture := capturingProvider{rows: make(chan []domain.Message, 1)}
+	successorCtx, stopSuccessor := context.WithCancel(context.Background())
+	defer stopSuccessor()
+	successorDone := make(chan struct{})
+	go func() {
+		defer close(successorDone)
+		engine := &agentloop.Engine{
+			Transcript:  newNativeTranscript(f.s, runmode.LocalDefaultOrgID, f.conversationID, next.ClaimID),
+			Credentials: staticGateCredentials{provider: capture},
+			Tools:       &recordingToolHost{},
+			Retry:       agentloop.RetryPolicy{Sleep: func(context.Context, time.Duration) error { return nil }},
+		}
+		engine.Run(successorCtx, agentloop.Params{
+			OrgID: runmode.LocalDefaultOrgID, ConversationID: f.conversationID,
+			Model: "claude-sonnet-4-5", SystemPrompt: "system", HasBlueprint: true,
+			Workspace: prov, WorkspaceAsOf: asOf,
+		})
+	}()
+	var rows []domain.Message
+	select {
+	case rows = <-capture.rows:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the successor never asked the model anything")
+	}
+	stopSuccessor()
+	<-successorDone
+
+	var notice string
+	for _, r := range rows {
+		if r.Subtype == domain.MessageSubtypeInjectionExecutorChanged {
+			notice = r.Content
+		}
+	}
+	if !strings.Contains(notice, "`bash: write four.txt` came after the checkpoint") {
+		t.Errorf("the notice must name only the call after the unchanged checkpoint: %q", notice)
+	}
+	if strings.Contains(notice, "read one.txt") {
+		t.Errorf("the read-only calls the unchanged checkpoint covers must not be named as missing: %q", notice)
+	}
+}
+
+// TestSnapshotManifest_CoveredPosition: a later position on the key's record
+// applies to a checkpoint blob only when it names that blob's tree and writer,
+// and never moves the position backwards.
+func TestSnapshotManifest_CoveredPosition(t *testing.T) {
+	at := func(v float64) *float64 { return &v }
+	man := snapshotManifest{TranscriptPosition: at(10), ConversationID: "conv-a", Fingerprint: "fp-1", WriterClaimID: "claim-1"}
+	row := func(pos float64, fp, writer string) *domain.WorkspaceSnapshotState {
+		return &domain.WorkspaceSnapshotState{CoveredPosition: at(pos), CoveredFingerprint: fp, WriterClaimID: writer}
+	}
+	cases := []struct {
+		name string
+		man  snapshotManifest
+		st   *domain.WorkspaceSnapshotState
+		want float64
+	}{
+		{"no_row", man, nil, 10},
+		{"row_without_a_covered_position", man, &domain.WorkspaceSnapshotState{WriterClaimID: "claim-1"}, 10},
+		{"this_tree_and_writer", man, row(20, "fp-1", "claim-1"), 20},
+		{"another_tree", man, row(20, "fp-2", "claim-1"), 10},
+		{"another_writer", man, row(20, "fp-1", "claim-2"), 10},
+		{"earlier_than_the_manifest", man, row(5, "fp-1", "claim-1"), 10},
+		{"a_manifest_with_no_fingerprint", snapshotManifest{TranscriptPosition: at(10), ConversationID: "conv-a"}, row(20, "", ""), 10},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.man.positionFor("conv-a", tc.st); got == nil || *got != tc.want {
+				t.Errorf("positionFor = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if got := man.positionFor("conv-b", row(20, "fp-1", "claim-1")); got != nil {
+		t.Errorf("position for another conversation = %v, want none whatever the row says", *got)
+	}
+}
+
 // TestSnapshotManifest_TranscriptPosition: a checkpoint's position survives the
 // blob, belongs to the conversation that wrote it and to no other on the task,
 // and a blob with none — every ending's, and every blob written before
@@ -511,10 +657,10 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
-	if got := man.positionFor("conv-a"); got == nil || *got != pos {
+	if got := man.positionFor("conv-a", nil); got == nil || *got != pos {
 		t.Errorf("position for its own conversation = %v, want %v", got, pos)
 	}
-	if got := man.positionFor("conv-b"); got != nil {
+	if got := man.positionFor("conv-b", nil); got != nil {
 		t.Errorf("position for another conversation on the task = %v, want none", *got)
 	}
 	if !man.CapturedAt.Equal(at) {
@@ -525,7 +671,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
-	if got := man.positionFor("conv-a"); got != nil {
+	if got := man.positionFor("conv-a", nil); got != nil {
 		t.Errorf("a blob with no position restored with %v, want none", *got)
 	}
 	var raw strings.Builder
@@ -541,7 +687,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"branch":"","head":"","session_id":"","has_git":false}`), &legacy); err != nil {
 		t.Fatal(err)
 	}
-	if legacy.positionFor("conv-a") != nil || !legacy.CapturedAt.IsZero() {
+	if legacy.positionFor("conv-a", nil) != nil || !legacy.CapturedAt.IsZero() {
 		t.Errorf("a pre-checkpoint manifest reads as %+v, want no position and no capture time", legacy)
 	}
 }

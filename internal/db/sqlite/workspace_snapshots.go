@@ -36,9 +36,11 @@ func (s *workspaceSnapshotStore) BeginSnapshotSystem(ctx context.Context, orgID,
 		INSERT INTO workspace_snapshots (org_id, task_id, state, writer_claim_id, updated_at)
 		VALUES (?, ?, 'pending', ?, ?)
 		ON CONFLICT(org_id, task_id) DO UPDATE SET
-			state           = excluded.state,
-			writer_claim_id = excluded.writer_claim_id,
-			updated_at      = excluded.updated_at
+			state               = excluded.state,
+			writer_claim_id     = excluded.writer_claim_id,
+			updated_at          = excluded.updated_at,
+			covered_position    = NULL,
+			covered_fingerprint = NULL
 		WHERE NOT EXISTS (
 			SELECT 1 FROM claims cur, claims mine
 			WHERE cur.id  = workspace_snapshots.writer_claim_id
@@ -83,22 +85,45 @@ func (s *workspaceSnapshotStore) FinishSnapshotSystem(ctx context.Context, orgID
 	return n > 0, nil
 }
 
+func (s *workspaceSnapshotStore) CoverSnapshotSystem(ctx context.Context, orgID, taskID, claimID, fingerprint string, position float64) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `
+		UPDATE workspace_snapshots
+		SET covered_position = ?, covered_fingerprint = ?
+		WHERE org_id = ? AND task_id = ? AND writer_claim_id = ? AND state = 'written'
+	`, position, fingerprint, orgID, taskID, claimID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *workspaceSnapshotStore) GetSnapshotStateSystem(ctx context.Context, orgID, taskID string) (*domain.WorkspaceSnapshotState, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	var st domain.WorkspaceSnapshotState
+	var coveredFingerprint sql.NullString
 	err := s.q.QueryRowContext(ctx, `
-		SELECT org_id, task_id, state, writer_claim_id, updated_at
+		SELECT org_id, task_id, state, writer_claim_id, updated_at,
+		       covered_position, covered_fingerprint
 		FROM workspace_snapshots
 		WHERE org_id = ? AND task_id = ?
-	`, orgID, taskID).Scan(&st.OrgID, &st.TaskID, &st.State, &st.WriterClaimID, &st.UpdatedAt)
+	`, orgID, taskID).Scan(&st.OrgID, &st.TaskID, &st.State, &st.WriterClaimID, &st.UpdatedAt,
+		&st.CoveredPosition, &coveredFingerprint)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	st.CoveredFingerprint = coveredFingerprint.String
 	return &st, nil
 }
 

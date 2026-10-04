@@ -244,6 +244,67 @@ func RunWorkspaceSnapshotStoreConformance(t *testing.T, mk WorkspaceSnapshotStor
 		}
 	})
 
+	t.Run("cover_records_a_position_only_on_the_writers_written_blob", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		task := seed.Task(t, "covered")
+		const fp = "fingerprint-of-the-written-tree"
+		cover := func(t *testing.T, claimID string, position float64) bool {
+			t.Helper()
+			matched, err := store.CoverSnapshotSystem(ctx, orgID, task, claimID, fp, position)
+			if err != nil {
+				t.Fatalf("cover by %s: %v", claimID, err)
+			}
+			return matched
+		}
+		covered := func(t *testing.T) (*float64, string) {
+			t.Helper()
+			got, err := store.GetSnapshotStateSystem(ctx, orgID, task)
+			if err != nil || got == nil {
+				t.Fatalf("get = (%+v, %v)", got, err)
+			}
+			return got.CoveredPosition, got.CoveredFingerprint
+		}
+
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterA); err != nil {
+			t.Fatalf("begin A: %v", err)
+		}
+		if cover(t, snapshotWriterA, 7) {
+			t.Error("cover matched a pending write: its blob is not the one the fingerprint was compared against")
+		}
+		if matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterA, true); err != nil || !matched {
+			t.Fatalf("finish A = (%v, %v)", matched, err)
+		}
+		if pos, got := covered(t); pos != nil || got != "" {
+			t.Fatalf("covered after a plain write = (%v, %q), want none", pos, got)
+		}
+		if cover(t, snapshotWriterB, 7) {
+			t.Error("cover matched for a claim that did not write the blob")
+		}
+		if !cover(t, snapshotWriterA, 7.5) {
+			t.Fatal("cover by the writer of the written blob did not match")
+		}
+		if pos, got := covered(t); pos == nil || *pos != 7.5 || got != fp {
+			t.Fatalf("covered = (%v, %q), want (7.5, %q)", pos, got, fp)
+		}
+
+		// A begin replaces the blob the position described, so it clears it.
+		if err := store.BeginSnapshotSystem(ctx, orgID, task, snapshotWriterB); err != nil {
+			t.Fatalf("begin B: %v", err)
+		}
+		if pos, got := covered(t); pos != nil || got != "" {
+			t.Errorf("covered after a new begin = (%v, %q), want cleared", pos, got)
+		}
+		if cover(t, snapshotWriterA, 9) {
+			t.Error("cover matched for a writer the key has moved on from")
+		}
+		if matched, err := store.FinishSnapshotSystem(ctx, orgID, task, snapshotWriterB, false); err != nil || !matched {
+			t.Fatalf("finish B as failed = (%v, %v)", matched, err)
+		}
+		if cover(t, snapshotWriterB, 9) {
+			t.Error("cover matched a write that failed")
+		}
+	})
+
 	t.Run("begin_breaks_a_claimed_at_tie_toward_the_successor", func(t *testing.T) {
 		// Two claims minted in one clock tick. The successor, still live and
 		// minted second, is the newer writer, so the released one cannot take

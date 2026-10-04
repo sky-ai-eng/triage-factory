@@ -70,7 +70,25 @@ type WorkspaceSnapshotStore interface {
 	// Called before the capture starts, so that "a persist is owed" is
 	// durable before a waiter could ever observe the conversation as
 	// resumable-with-no-blob.
+	//
+	// A begin that lands clears the covered position: it describes the blob
+	// being replaced.
 	BeginSnapshotSystem(ctx context.Context, orgID, taskID, claimID string) error
+
+	// CoverSnapshotSystem records that claimID's written blob also reflects
+	// the transcript up to position: a checkpoint captured the tree, found its
+	// fingerprint equal to the blob's, and skipped the upload, which leaves
+	// the position in the blob's manifest older than what the blob covers.
+	// fingerprint is the tree the position describes; a restore applies the
+	// position only to a blob whose manifest carries the same fingerprint and
+	// writer, so it is never read against a different tree.
+	//
+	// A CAS on writer_claim_id = claimID and state 'written': that is what
+	// makes the blob under the key the one this claim last wrote, the one its
+	// fingerprint was compared against. matched=false means another writer
+	// holds the key or this claim's latest write did not finish, and nothing
+	// is recorded.
+	CoverSnapshotSystem(ctx context.Context, orgID, taskID, claimID, fingerprint string, position float64) (matched bool, err error)
 
 	// FinishSnapshotSystem closes out claimID's write: a CAS that flips
 	// 'pending' to 'written' (ok) or 'failed' (not ok) only while

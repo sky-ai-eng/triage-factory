@@ -157,16 +157,35 @@ type snapshotManifest struct {
 	// conversation's transcript says nothing about its own.
 	TranscriptPosition *float64 `json:"transcript_position,omitempty"`
 	ConversationID     string   `json:"conversation_id,omitempty"`
+	// Fingerprint (snapshotFingerprint) and WriterClaimID identify the tree a
+	// checkpoint stored and the engagement that stored it, so a later position
+	// the key's lifecycle row records for that tree can be told apart from one
+	// recorded for any other. A checkpoint records both; nothing else does.
+	Fingerprint   string `json:"fingerprint,omitempty"`
+	WriterClaimID string `json:"writer_claim_id,omitempty"`
 }
 
 // positionFor is the transcript position this manifest's tree reflects for
 // conversationID, or nil when it reflects the whole transcript — a snapshot
 // taken at an ending, or a checkpoint of some other conversation on the task.
-func (m snapshotManifest) positionFor(conversationID string) *float64 {
+//
+// st is the key's lifecycle row, or nil. A checkpoint that found the tree
+// unchanged records a later position there instead of rewriting the blob
+// (CoverSnapshotSystem), and it is the answer when it names this tree and the
+// engagement that wrote it: the tree has not changed since, so it reflects the
+// transcript that far. Any other row describes a different blob and is
+// ignored, which leaves the manifest's own position, never a later one than
+// the tree carries.
+func (m snapshotManifest) positionFor(conversationID string, st *domain.WorkspaceSnapshotState) *float64 {
 	if m.TranscriptPosition == nil || m.ConversationID != conversationID {
 		return nil
 	}
 	pos := *m.TranscriptPosition
+	if st != nil && st.CoveredPosition != nil && m.Fingerprint != "" &&
+		st.CoveredFingerprint == m.Fingerprint && st.WriterClaimID == m.WriterClaimID &&
+		*st.CoveredPosition > pos {
+		pos = *st.CoveredPosition
+	}
 	return &pos
 }
 
@@ -216,6 +235,9 @@ type snapshotWrite struct {
 	// position is the transcript position a checkpoint's capture covers, and
 	// nil for an ending, which covers all of it.
 	position *float64
+	// fingerprint is the checkpoint's snapshotFingerprint of the capture, ""
+	// for an ending.
+	fingerprint string
 }
 
 // snapshotWorkspace writes a finished engagement's non-recoverable workspace
@@ -459,6 +481,8 @@ func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSna
 		pos := *w.position
 		man.TranscriptPosition = &pos
 		man.ConversationID = w.conversationID
+		man.Fingerprint = w.fingerprint
+		man.WriterClaimID = w.claimID
 	}
 	f, rawBytes, compressedBytes, err := stageSnapshotArchive(ctx, captured.state, w.wtPath, man)
 	if err != nil {
@@ -601,6 +625,50 @@ func (s *Spawner) snapshotStateFor(ctx context.Context, orgID, keyID string) (*d
 		return nil, nil
 	}
 	return s.workspaceSnapshots.GetSnapshotStateSystem(ctx, orgID, keyID)
+}
+
+// coverSnapshotState records that the blob this engagement last wrote also
+// reflects the transcript up to w.position, for a checkpoint that found the
+// tree unchanged and uploaded nothing (CoverSnapshotSystem). Best-effort: a
+// restore without it reads the older position in the blob's manifest, which
+// overstates what was lost and never understates it.
+//
+// Detached from the checkpoint's context, as the record writes are: a stop
+// that lands after the capture does not make the position untrue, and the
+// ending that follows clears it with its own begin.
+func (s *Spawner) coverSnapshotState(ctx context.Context, w snapshotWrite, fingerprint string) {
+	if s.workspaceSnapshots == nil || w.claimID == "" || w.position == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), snapshotRecordTimeout)
+	defer cancel()
+	matched, err := s.workspaceSnapshots.CoverSnapshotSystem(ctx, w.orgID, w.keyID, w.claimID, fingerprint, *w.position)
+	if err != nil {
+		delegateLog.Warn("record an unchanged checkpoint's position failed; a restore reads the blob's older one",
+			"org", w.orgID, "key_id", w.keyID, "claim_id", w.claimID, "error", err)
+		return
+	}
+	if !matched {
+		delegateLog.Info("the key no longer holds this engagement's written checkpoint; position not recorded",
+			"org", w.orgID, "key_id", w.keyID, "claim_id", w.claimID)
+	}
+}
+
+// coveredStateFor reads the key's lifecycle row for positionFor, when the
+// restored blob is a checkpoint of this conversation and so has a position a
+// row could improve on; nil otherwise. A read that fails is nil as well: the
+// manifest's own position is still right, only less exact.
+func (s *Spawner) coveredStateFor(ctx context.Context, orgID, keyID, conversationID string, man snapshotManifest) *domain.WorkspaceSnapshotState {
+	if man.positionFor(conversationID, nil) == nil || man.Fingerprint == "" {
+		return nil
+	}
+	st, err := s.snapshotStateFor(ctx, orgID, keyID)
+	if err != nil {
+		delegateLog.Warn("rehydrate: reading the snapshot record for a later checkpoint position failed; using the blob's",
+			"conversation", conversationID, "key_id", keyID, "error", err)
+		return nil
+	}
+	return st
 }
 
 // snapshotSuperseded reports whether the key's lifecycle row has moved to
@@ -918,8 +986,9 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 //
 // asOf is the other half of that answer for a rehydrated tree: the transcript
 // position the blob's capture covers, when a checkpoint of this conversation
-// wrote it. Nil on every other rung, and for a blob an ending wrote, which
-// covers the whole transcript.
+// wrote it, or the later one an unchanged checkpoint recorded for that same
+// tree. Nil on every other rung, and for a blob an ending wrote, which covers
+// the whole transcript.
 //
 // conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path,
 // and that write is this engagement's to make only while it still holds the
@@ -1030,7 +1099,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 		return "", "", nil, rErr
 	}
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)
-	asOf = man.positionFor(conv.ID)
+	asOf = man.positionFor(conv.ID, s.coveredStateFor(ctx, orgID, keyID, conv.ID, man))
 	delegateLog.Info("workspace rehydrated from snapshot", "conversation", conv.ID, "key_id", keyID,
 		"captured_at", man.CapturedAt, "checkpoint", asOf != nil)
 	return wtDir, domain.WorkspaceProvenanceRehydrated, asOf, nil
