@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -75,6 +76,25 @@ func (c *LocalClient) WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot s
 		root = worktree.RunRoot(conv.TaskID)
 	}
 	return root, root, nil
+}
+
+// AgentViewPath translates a HOST-view path under hostRoot — the view every
+// conversation_worktrees row records — into the calling process's view of the
+// same directory, given the pair WorkspaceRoots returns. In local mode both
+// roots are the same string and this is the identity; in the sandbox the host
+// run root is bind-mounted at agentRoot (/work), so the host prefix is
+// swapped. A path outside hostRoot passes through unchanged — there is nothing
+// to translate it against, and returning it verbatim keeps the failure legible
+// (a stat/cd on it fails loudly rather than pointing somewhere wrong).
+func AgentViewPath(hostRoot, agentRoot, p string) string {
+	if hostRoot == agentRoot || p == "" {
+		return p
+	}
+	rel, err := filepath.Rel(hostRoot, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return filepath.Join(agentRoot, rel)
 }
 
 // CreateWorkspaceCheckout implements Client: it materializes the checkout for

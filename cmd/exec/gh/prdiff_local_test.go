@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
@@ -92,6 +93,17 @@ func TestDiffHeaderNewPath(t *testing.T) {
 func gitInit(t *testing.T) (dir, headSHA, baseSHA string) {
 	t.Helper()
 	dir = t.TempDir()
+	headSHA, baseSHA = gitInitAt(t, dir)
+	return dir, headSHA, baseSHA
+}
+
+// gitInitAt is gitInit into a directory the caller chose (created if
+// missing), so a test can lay a checkout out where a run tree puts one.
+func gitInitAt(t *testing.T, dir string) (headSHA, baseSHA string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	run := func(args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
@@ -117,7 +129,7 @@ func gitInit(t *testing.T) (dir, headSHA, baseSHA string) {
 	run("add", ".")
 	run("commit", "-q", "-m", "feature change")
 	headSHA = run("rev-parse", "HEAD")
-	return dir, headSHA, baseSHA
+	return headSHA, baseSHA
 }
 
 // TestPersistPRDiff_LocalCheckout pins the primary path: with a worktree the
@@ -131,12 +143,20 @@ func TestPersistPRDiff_LocalCheckout(t *testing.T) {
 	srv := newPRDiffServer(t, prDiffBackend{prJSON: prJSON(t, headSHA, "main", baseSHA, 1, 0, 1)})
 	client := ghclient.NewClient(srv.URL, "test-token")
 
-	m, err := persistPRDiff(context.Background(), client, resolveLocalCheckout(dir), dir, "owner", "repo", 42)
+	root := t.TempDir()
+	m, err := persistPRDiff(context.Background(), client, resolveLocalCheckout(dir), root, "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
 	if m.Source != diffSourceLocal {
 		t.Errorf("Source = %q, want %q", m.Source, diffSourceLocal)
+	}
+	if want := filepath.Join(root, "_tfac", "pr-diffs", "owner__repo__42"); m.Dir != want {
+		t.Errorf("Dir = %q, want %q (under the run root, not the checkout)", m.Dir, want)
+	}
+	assertNoScratch(t, dir)
+	if m.Warning != "" {
+		t.Errorf("a fresh local-checkout diff should carry no warning, got %q", m.Warning)
 	}
 	if m.HeadSHA != headSHA {
 		t.Errorf("HeadSHA = %q, want local HEAD %q", m.HeadSHA, headSHA)
@@ -179,7 +199,7 @@ func TestPersistPRDiff_LocalCheckout_StaleWarns(t *testing.T) {
 	t.Cleanup(srv.Close)
 	client := ghclient.NewClient(srv.URL, "test-token")
 
-	m, err := persistPRDiff(context.Background(), client, resolveLocalCheckout(dir), dir, "owner", "repo", 42)
+	m, err := persistPRDiff(context.Background(), client, resolveLocalCheckout(dir), t.TempDir(), "owner", "repo", 42)
 	if err != nil {
 		t.Fatalf("persistPRDiff: %v", err)
 	}
@@ -288,5 +308,86 @@ func TestResolveDiffBase_RecordedBaseAvoidsPhantomHunks(t *testing.T) {
 	// the base branch tracking ref.
 	if base, ok := resolveDiffBase(dir, "", "main"); !ok || base != staleSHA {
 		t.Errorf("empty baseSHA should fall back to origin/main (%q), got (%q, %v)", staleSHA, base, ok)
+	}
+}
+
+// assertNoScratch fails when TF wrote its scratch directory into a checkout.
+func assertNoScratch(t *testing.T, checkout string) {
+	t.Helper()
+	if _, err := os.Lstat(filepath.Join(checkout, "_tfac")); !os.IsNotExist(err) {
+		t.Errorf("checkout %s gained a _tfac/ (stat err: %v); scratch output belongs under the run root", checkout, err)
+	}
+}
+
+// TestPersistPRDiff_CheckoutWithoutBaseWarns covers the second API fallback: the
+// run holds a checkout of the PR, but the PR's recorded base commit is not in
+// it, so there is no local frame. The manifest says the diff is the live head
+// and names the checkout it could not use.
+func TestPersistPRDiff_CheckoutWithoutBaseWarns(t *testing.T) {
+	dir, headSHA, _ := gitInit(t)
+	srv := newPRDiffServer(t, prDiffBackend{
+		prJSON:    prJSON(t, headSHA, "main", fakeBaseSHA, 1, 0, 1),
+		diffBody:  "diff --git a/f.go b/f.go\n@@ -1,2 +1,3 @@\n line1\n line2\n+line3\n",
+		filesBody: jsonPRFiles(t, []map[string]any{{"filename": "f.go", "status": "modified", "additions": 1, "patch": "@@ -1,2 +1,3 @@\n line1\n line2\n+line3"}}),
+	})
+
+	m, err := persistPRDiff(context.Background(), ghclient.NewClient(srv.URL, "test-token"), resolveLocalCheckout(dir), t.TempDir(), "owner", "repo", 42)
+	if err != nil {
+		t.Fatalf("persistPRDiff: %v", err)
+	}
+	if m.Source != diffSourceAPI {
+		t.Fatalf("Source = %q, want %q (the recorded base is not in the checkout)", m.Source, diffSourceAPI)
+	}
+	for _, want := range []string{"live head", "not a local checkout", dir} {
+		if !strings.Contains(m.Warning, want) {
+			t.Errorf("warning should contain %q: %q", want, m.Warning)
+		}
+	}
+}
+
+// TestPRCheckout_ExactPRNumber pins the registry match: the row whose repo
+// matches (case-insensitively) and whose ref is exactly pr-<N>. pr-4 must not
+// answer for 42 or the reverse, another repo's pr-42 must not answer for this
+// one, and the recorded host-view path is translated into this process's view.
+func TestPRCheckout_ExactPRNumber(t *testing.T) {
+	agentRoot := t.TempDir()
+	for _, d := range []string{"owner/repo/pr-4", "owner/repo/pr-42", "other/repo/pr-42"} {
+		gitInitAt(t, filepath.Join(agentRoot, filepath.FromSlash(d)))
+	}
+
+	const hostRoot = "/host/runs/task-1"
+	host := fakeCheckouts{
+		hostRoot:  hostRoot,
+		agentRoot: agentRoot,
+		rows: []domain.ConversationWorktree{
+			{RepoID: "owner/repo", Ref: "pr-4", Path: hostRoot + "/owner/repo/pr-4"},
+			{RepoID: "Owner/Repo", Ref: "pr-42", Path: hostRoot + "/owner/repo/pr-42"},
+			{RepoID: "other/repo", Ref: "pr-42", Path: hostRoot + "/other/repo/pr-42"},
+			{RepoID: "owner/repo", Ref: "default", Path: hostRoot + "/owner/repo/default"},
+		},
+	}
+
+	cases := []struct {
+		owner, repo string
+		number      int
+		wantDir     string
+	}{
+		{"owner", "repo", 42, filepath.Join(agentRoot, "owner", "repo", "pr-42")},
+		{"owner", "repo", 4, filepath.Join(agentRoot, "owner", "repo", "pr-4")},
+		{"other", "repo", 42, filepath.Join(agentRoot, "other", "repo", "pr-42")},
+		{"owner", "repo", 420, ""},
+		{"nobody", "repo", 42, ""},
+	}
+	for _, c := range cases {
+		got := prCheckout(context.Background(), host, c.owner, c.repo, c.number)
+		if c.wantDir == "" {
+			if got.ok {
+				t.Errorf("%s/%s#%d: want no checkout, got %+v", c.owner, c.repo, c.number, got)
+			}
+			continue
+		}
+		if !got.ok || got.dir != c.wantDir {
+			t.Errorf("%s/%s#%d: got %+v, want dir %s", c.owner, c.repo, c.number, got, c.wantDir)
+		}
 	}
 }

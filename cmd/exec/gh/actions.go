@@ -145,7 +145,7 @@ func actionsListRuns(ctx context.Context, host agenthost.Client, args []string) 
 		exitErr("usage: " + prog.Prefix() + " gh actions list-runs (--pr <N> | --sha <SHA>) [--repo owner/repo]")
 	}
 
-	owner, repo, err := resolveRepo(args)
+	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -292,7 +292,7 @@ type jobInfo struct {
 
 // actionsDownloadLogs implements `gh actions download-logs <run_id>`.
 //
-// Fetches workflow run logs into <cwd>/_tfac/ci-logs/<run_id>/ and
+// Fetches workflow run logs into <run root>/_tfac/ci-logs/<run_id>/ and
 // prints a structured JSON result on stdout so agents can parse it the
 // same way they parse every other exec gh command. Errors go to stderr
 // with a non-zero exit.
@@ -326,23 +326,23 @@ func actionsDownloadLogs(ctx context.Context, host agenthost.Client, args []stri
 		exitErr(fmt.Sprintf("invalid run_id %q: expected a positive integer", runIDStr))
 	}
 
-	owner, repo, err := resolveRepo(args)
+	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
 		exitErr(err.Error())
 	}
 	client := newHostAPI(host, owner, repo)
 
-	// Destination: <cwd>/_tfac/ci-logs/<run_id>/. Resolving to absolute
-	// so the success output gives the agent a path it can use directly
-	// without needing to reason about cwd. safeDestDirForRun also walks
+	// Destination: <run root>/_tfac/ci-logs/<run_id>/, wherever the agent
+	// is standing — the run root is absolute, so the success output gives
+	// the agent a path it can use directly. safeDestDirForRun also walks
 	// each path component to reject pre-existing symlinks — otherwise a
 	// symlinked `_tfac` (accidental or malicious) would let our
-	// RemoveAll / MkdirAll / zip extraction escape the working directory.
-	cwd, err := os.Getwd()
+	// RemoveAll / MkdirAll / zip extraction escape the run root.
+	root, err := runRoot()
 	if err != nil {
-		exitErr(fmt.Sprintf("resolve cwd: %v", err))
+		exitErr(err.Error())
 	}
-	destDir, err := safeDestDirForRun(cwd, runID)
+	destDir, err := safeDestDirForRun(root, runID)
 	if err != nil {
 		exitErr(err.Error())
 	}
@@ -585,7 +585,7 @@ func downloadPerJobLogsToDir(ctx context.Context, client ghAPI, owner, repo, des
 // Returns the number of bytes downloaded on success.
 func downloadAndExtractLogs(ctx context.Context, client ghAPI, owner, repo string, runID int64, destDir string) (int64, error) {
 	// Clobber any previous extraction for the same run_id. The command owns
-	// this directory completely (<cwd>/_tfac/ci-logs/<run_id>), so a
+	// this directory completely (<run root>/_tfac/ci-logs/<run_id>), so a
 	// re-run should produce a clean state — otherwise stale entries from an
 	// older extraction (jobs that no longer exist, renamed matrix legs)
 	// would sit alongside the current run's files and mislead the agent
@@ -647,11 +647,11 @@ func downloadAndExtractLogs(ctx context.Context, client ghAPI, owner, repo strin
 	return bytesDownloaded, nil
 }
 
-// safeDestDirForRun resolves the <cwd>/_tfac/ci-logs/<run_id> destination
+// safeDestDirForRun resolves the <root>/_tfac/ci-logs/<run_id> destination
 // path for a given workflow run via the shared, symlink-safe scratch
 // resolver. See safeScratchSubdir for the safety contract.
-func safeDestDirForRun(cwd string, runID int64) (string, error) {
-	return safeScratchSubdir(cwd, worktree.ScratchDir, worktree.CILogsDir, strconv.FormatInt(runID, 10))
+func safeDestDirForRun(root string, runID int64) (string, error) {
+	return safeScratchSubdir(root, worktree.ScratchDir, worktree.CILogsDir, strconv.FormatInt(runID, 10))
 }
 
 // extractZip safely extracts zipPath into destDir. Rejects any entry whose

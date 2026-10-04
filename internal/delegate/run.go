@@ -440,16 +440,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// review passes) name their directory through this.
 		"TRIAGE_FACTORY_WORKSPACE_KEY=" + namespace,
 	}
-	// Set TRIAGE_FACTORY_REPO when the run has a resolved GitHub repo context
-	// (GitHub PR runs only) so gh subcommands can default to the right target
-	// without the agent needing to pass --repo. Jira lazy runs leave it unset:
-	// after the agent cd's into a worktree materialized by `workspace add`,
-	// cmd/exec/gh/repo.go:resolveRepo falls through to .git/config, which is
-	// the correct per-repo answer.
-	if cfg.owner != "" && cfg.repo != "" {
-		extraEnv = append(extraEnv, "TRIAGE_FACTORY_REPO="+cfg.owner+"/"+cfg.repo)
-	}
-
 	// Resolve the org's GitHub commit identity once for this run (TFAC-452). The
 	// org identity authors + commits every agent commit (injected as
 	// user.name/user.email via baseOpts below, both run modes); a manual run

@@ -1650,6 +1650,20 @@ func (c *LocalClient) GithubCreatePendingReview(ctx context.Context, owner, repo
 	return stored.ID, nil
 }
 
+// ReviewDraftTarget implements Client: the owner/repo#number recorded on this
+// conversation's review draft when start-review created it.
+func (c *LocalClient) ReviewDraftTarget(ctx context.Context, reviewID string) (string, string, int, error) {
+	art, err := c.conversationReviewArtifact(ctx, reviewID)
+	if err != nil {
+		return "", "", 0, err
+	}
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
+	if !ok {
+		return "", "", 0, fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	}
+	return owner, repo, number, nil
+}
+
 // GithubAddPendingReviewComment appends one inline comment to this conversation's review
 // draft, staged entirely TF-side (TFAC-494) — no GitHub *write*. It locates the
 // conversation's pending review artifact, validates the local handle, mints a stable
@@ -1697,10 +1711,15 @@ func (c *LocalClient) GithubAddPendingReviewComment(ctx context.Context, owner, 
 
 	// The PR number comes from the artifact target (the handle the agent passes
 	// carries no coordinates). Needed for both the live-head fallback and to
-	// resolve the base ref the compare-validation diffs against.
-	_, _, number, ok := domain.ParsePRTarget(art.Target)
+	// resolve the base ref the compare-validation diffs against. owner/repo
+	// must name the same repo: validating against another repo's PR of the
+	// same number would accept lines from the wrong diff.
+	targetOwner, targetRepo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
 		return "", fmt.Errorf("review artifact has a malformed target %q", art.Target)
+	}
+	if !strings.EqualFold(owner+"/"+repo, targetOwner+"/"+targetRepo) {
+		return "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s", art.ID, targetOwner, targetRepo, number, owner, repo)
 	}
 	client, err := c.githubClientForRepo(ctx, owner, repo)
 	if err != nil {

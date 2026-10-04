@@ -190,6 +190,14 @@ func (c *IPCClient) ResetReviewDraft(ctx context.Context, owner, repo string, nu
 	return res.ReviewID, res.CommitSHA, nil
 }
 
+func (c *IPCClient) ReviewDraftTarget(ctx context.Context, reviewID string) (string, string, int, error) {
+	var res reviewDraftTargetResult
+	if err := c.call(ctx, methodReviewDraftTarget, reviewDraftTargetArgs{ReviewID: reviewID}, &res); err != nil {
+		return "", "", 0, err
+	}
+	return res.Owner, res.Repo, res.Number, nil
+}
+
 func (c *IPCClient) UpdateStagedReviewComment(ctx context.Context, commentID, body string) error {
 	return c.call(ctx, methodUpdateStagedReviewComment, updateStagedReviewCommentArgs{CommentID: commentID, Body: body}, nil)
 }

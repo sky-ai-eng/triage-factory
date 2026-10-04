@@ -284,12 +284,12 @@ func TestTranslateEnvForSandbox(t *testing.T) {
 			name: "non_path_values_passthrough",
 			env: []string{
 				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
-				"TRIAGE_FACTORY_REPO=owner/repo",
+				"TRIAGE_FACTORY_WORKSPACE_KEY=task-1",
 			},
 			cwd: "/data/worktrees/abc",
 			want: []string{
 				"TRIAGE_FACTORY_CONVERSATION_ID=abc-123",
-				"TRIAGE_FACTORY_REPO=owner/repo",
+				"TRIAGE_FACTORY_WORKSPACE_KEY=task-1",
 			},
 		},
 		{

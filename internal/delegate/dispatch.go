@@ -1413,10 +1413,6 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// the queued rows become this turn's message.
 	flushPendingInput()
 
-	repoEnv := ""
-	if owner != "" && repo != "" {
-		repoEnv = owner + "/" + repo
-	}
 	// Prepend the out-of-band <system-note> blocks that accumulated while
 	// the run wasn't running — deferred to here (claim time), not the
 	// enqueue step, so injections staged AFTER the enqueue are still
@@ -1432,7 +1428,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	outcome, rerr := s.ResumeWithMessage(stepCtx, orgID, conv.ID, conv.SessionID, resumeCwd, message, ResumeOptions{
 		Model:             conv.Model,
 		SystemBlock:       s.launchedSystemBlock(stepCtx, orgID, conv.ID),
-		RepoEnv:           repoEnv,
+		GitHubOwner:       owner,
 		ExtraAllowedTools: extraTools,
 		Namespace:         namespace,
 		TeamID:            conv.TeamID,

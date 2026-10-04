@@ -1,35 +1,45 @@
 package gh
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // resolveRepo determines the target (owner, repo) for a gh subcommand
-// by inspecting the full args slice plus ambient state.
+// by inspecting the full args slice plus the current directory.
 //
 // Resolution order, highest priority first:
 //
 //  1. --repo owner/repo flag. If --repo is present in args but has no
 //     value (e.g. it's the last token), we error immediately — the user
 //     expressed explicit intent and the safe behavior is to fail loudly
-//     rather than silently fall through to env/git resolution and
-//     possibly target the wrong repo.
-//  2. TRIAGE_FACTORY_REPO env var (set by the spawner for delegated runs;
-//     never has a value for Jira-without-repo runs).
-//  3. git config remote.origin.url of the current working directory
-//     (fallback for manual invocation from a checkout).
+//     rather than silently fall through and possibly target the wrong repo.
+//  2. remote.origin.url of the checkout containing the current directory,
+//     read from that repository's own config only (`git config --local`).
+//     It finds the checkout from any subfolder of it, and a self-contained
+//     PR clone's origin is the base repo, which is what the PR verbs address.
+//     Outside a checkout it fails, so a remote.origin.url in the global or
+//     system config can't stand in for the missing checkout and silently
+//     resolve an unrelated repo.
 //
-// Returns a clear error if none of the above resolve. Never falls back
-// to a hardcoded default — running a gh command against the wrong repo
-// (log downloads, comments, reviews) is costly enough to warrant a hard
-// error over a silent misfire.
-func resolveRepo(args []string) (owner, repo string, err error) {
+// Nothing run-scoped stands in between: a run that works in two repos would
+// otherwise keep addressing the first one after the agent moved to the second.
+// From a folder outside every checkout the error lists the run's checkouts
+// (read through checkouts, which may be nil) so the agent can cd into the
+// right one. Never falls back to a default — running a gh command against the
+// wrong repo (log downloads, comments, reviews) is costly enough to warrant a
+// hard error over a silent misfire.
+func resolveRepo(ctx context.Context, checkouts runCheckouts, args []string) (owner, repo string, err error) {
 	// 1. Explicit flag. hasFlag + flagVal together disambiguate "flag
 	// not present" from "flag present but empty" — the latter is
-	// user error, the former is a normal fallthrough to env/git.
+	// user error, the former is a normal fallthrough to git.
 	if hasFlag(args, "--repo") {
 		flagValue := flagVal(args, "--repo")
 		if flagValue == "" {
@@ -38,21 +48,67 @@ func resolveRepo(args []string) (owner, repo string, err error) {
 		return splitOwnerRepoStr(flagValue, "--repo flag")
 	}
 
-	// 2. Env var from delegation context
-	if env := os.Getenv("TRIAGE_FACTORY_REPO"); env != "" {
-		return splitOwnerRepoStr(env, "TRIAGE_FACTORY_REPO env var")
-	}
-
-	// 3. git config origin of cwd
-	cmd := exec.Command("git", "config", "--get", "remote.origin.url")
-	out, gitErr := cmd.Output()
+	// 2. origin of the checkout containing the current directory.
+	out, gitErr := exec.Command("git", "config", "--local", "--get", "remote.origin.url").Output()
 	if gitErr == nil {
 		if o, r, ok := parseGitRemoteURL(strings.TrimSpace(string(out))); ok {
 			return o, r, nil
 		}
 	}
 
-	return "", "", fmt.Errorf("could not resolve repo: pass --repo owner/repo, set TRIAGE_FACTORY_REPO, or run from a git checkout with an origin remote")
+	return "", "", noCheckoutError(ctx, checkouts)
+}
+
+// runCheckouts is the part of agenthost.Client the gh verbs read the run's
+// checkouts through: the conversation_worktrees rows, whose paths are recorded
+// in host view, and the root pair that translates them into this process's.
+type runCheckouts interface {
+	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
+	WorkspaceRoots(ctx context.Context) (hostRoot, agentRoot string, err error)
+}
+
+// listRunCheckouts returns the run's materialized checkouts with each path in
+// this process's view — a directory it can cd into or run git against.
+func listRunCheckouts(ctx context.Context, checkouts runCheckouts) ([]domain.ConversationWorktree, error) {
+	rows, err := checkouts.ListConversationWorktrees(ctx)
+	if err != nil || len(rows) == 0 {
+		return nil, err
+	}
+	hostRoot, agentRoot, err := checkouts.WorkspaceRoots(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]domain.ConversationWorktree, len(rows))
+	for i, w := range rows {
+		w.Path = agenthost.AgentViewPath(hostRoot, agentRoot, w.Path)
+		out[i] = w
+	}
+	return out, nil
+}
+
+// noCheckoutError is resolveRepo's failure from a folder that is not inside a
+// checkout with a GitHub origin. It names the run's checkouts, one
+// `owner/repo  <path>` line each, because the fix is almost always to cd into
+// one of them. When the list can't be read (a manual invocation outside a run)
+// the error still names both ways out.
+func noCheckoutError(ctx context.Context, checkouts runCheckouts) error {
+	const head = "could not resolve the repo: the current directory is not inside a checkout with a GitHub origin remote"
+	if checkouts != nil {
+		if rows, err := listRunCheckouts(ctx, checkouts); err == nil {
+			if len(rows) == 0 {
+				return fmt.Errorf("%s, and this run has no checkouts yet. Pass --repo owner/repo, or run `%s workspace add <owner/repo>` and cd into the path it prints", head, prog.Prefix())
+			}
+			var b strings.Builder
+			b.WriteString(head)
+			b.WriteString(". This run's checkouts:\n")
+			for _, w := range rows {
+				fmt.Fprintf(&b, "  %s  %s\n", w.RepoID, w.Path)
+			}
+			b.WriteString("cd into the one you mean, or pass --repo owner/repo")
+			return errors.New(b.String())
+		}
+	}
+	return fmt.Errorf("%s. cd into a checkout of the repo you mean, or pass --repo owner/repo", head)
 }
 
 // splitOwnerRepoStr splits an "owner/repo" string, returning a descriptive

@@ -243,6 +243,13 @@ type Client interface {
 	// lives entirely in the artifact.
 	ResetReviewDraft(ctx context.Context, owner, repo string, number int) (reviewID, commitSHA string, err error)
 
+	// ReviewDraftTarget returns the pull request this conversation's review
+	// draft reviewID was started on — the coordinates start-review recorded on
+	// it. A read of the caller's own draft, scoped like FinalizeReviewDraft, so
+	// add-review-comment can find that PR's checkout without the agent
+	// restating which PR the handle names.
+	ReviewDraftTarget(ctx context.Context, reviewID string) (owner, repo string, number int, err error)
+
 	// --- workspace (workspace add + list) ---
 
 	GetConversation(ctx context.Context) (*domain.Conversation, error)
@@ -367,9 +374,11 @@ type Client interface {
 	// dedup key is conversation-scoped — so there is no identity branch and no collision
 	// error.
 	//
-	// GithubAddPendingReviewComment's commitSHA is the conversation's worktree HEAD: the
-	// commit the CLI validated the comment's (path, line, start_line) against and
-	// the commit the submitted comment anchors to. The CLI passes it because the
+	// GithubAddPendingReviewComment's owner/repo must be the repo the review was
+	// started on; any other is refused. Its commitSHA is the HEAD of the run's
+	// checkout of the reviewed PR: the commit the host validates the comment's
+	// (path, line, start_line) against and the commit the submitted comment
+	// anchors to. The CLI passes it because the
 	// agent reads the diff from its checkout, not the live PR head — sourcing the
 	// anchor and the validation from that same HEAD keeps a line the agent saw
 	// mapped to the line GitHub anchors to. Empty when the CLI had no checkout, in

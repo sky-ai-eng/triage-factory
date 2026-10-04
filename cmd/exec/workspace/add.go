@@ -311,18 +311,18 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	}
 
 	if existing != nil {
-		_, statErr := deps.statPath(agentViewPath(hostRoot, agentRoot, existing.Path))
+		_, statErr := deps.statPath(agenthost.AgentViewPath(hostRoot, agentRoot, existing.Path))
 		switch {
 		case statErr == nil:
 			// Path exists on disk — live worktree, return it.
-			return agentViewPath(hostRoot, agentRoot, existing.Path), nil
+			return agenthost.AgentViewPath(hostRoot, agentRoot, existing.Path), nil
 		case errors.Is(statErr, os.ErrNotExist):
 			age := deps.now().Sub(existing.CreatedAt)
 			if age < staleReservationAge {
 				// In-flight winner: another invocation reserved the row
 				// and is currently creating the worktree. Return its
 				// path; agent's cd succeeds once the create lands.
-				return agentViewPath(hostRoot, agentRoot, existing.Path), nil
+				return agenthost.AgentViewPath(hostRoot, agentRoot, existing.Path), nil
 			}
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
@@ -385,7 +385,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	}
 	if !inserted {
 		// Lost the reservation race. Return the winner's path.
-		return agentViewPath(hostRoot, agentRoot, winningPath), nil
+		return agenthost.AgentViewPath(hostRoot, agentRoot, winningPath), nil
 	}
 
 	// Wire the host-side create unless a test stubbed it. Production routes
@@ -417,25 +417,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		workspaceLog.Warn("created path diverges from reserved; investigate", "got_path", gotPath, "reserved_path", wtPath, "conversation", info.ConversationID, "repo", repoID, "ref", ref)
 	}
 
-	return agentViewPath(hostRoot, agentRoot, wtPath), nil
-}
-
-// agentViewPath translates a HOST-view path under hostRoot into the calling
-// process's view of the same directory (TFAC-546). In local mode both roots
-// are the same string and this is the identity; in the sandbox the host run
-// root is bind-mounted at agentRoot (/work), so the host prefix is swapped. A
-// path outside hostRoot passes through unchanged — there is nothing to
-// translate it against, and returning it verbatim keeps the failure legible
-// (a stat/cd on it fails loudly rather than pointing somewhere wrong).
-func agentViewPath(hostRoot, agentRoot, p string) string {
-	if hostRoot == agentRoot || p == "" {
-		return p
-	}
-	rel, err := filepath.Rel(hostRoot, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return p
-	}
-	return filepath.Join(agentRoot, rel)
+	return agenthost.AgentViewPath(hostRoot, agentRoot, wtPath), nil
 }
 
 // refForSpec computes the conversation_worktrees ref for a checkout spec — the

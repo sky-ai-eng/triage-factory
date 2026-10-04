@@ -507,6 +507,17 @@ type resetReviewDraftResult struct {
 	CommitSHA string `json:"commit_sha"`
 }
 
+// reviewDraftTargetArgs / reviewDraftTargetResult carry the review handle in
+// and the pull request its draft was started on out.
+type reviewDraftTargetArgs struct {
+	ReviewID string `json:"review_id"`
+}
+
+type reviewDraftTargetResult struct {
+	githubRepoRef
+	Number int `json:"number"`
+}
+
 // updateStagedReviewCommentArgs / deleteStagedReviewCommentArgs address one
 // comment on the conversation's review draft by its TF-local id (not a repo-scoped op —
 // the host resolves the owning draft from the conversation's artifacts).
@@ -642,6 +653,7 @@ const (
 	methodLookupConversation                  = "LookupConversation"
 	methodFinalizeReviewDraft                 = "FinalizeReviewDraft"
 	methodResetReviewDraft                    = "ResetReviewDraft"
+	methodReviewDraftTarget                   = "ReviewDraftTarget"
 	methodUpdateStagedReviewComment           = "UpdateStagedReviewComment"
 	methodDeleteStagedReviewComment           = "DeleteStagedReviewComment"
 	methodGetConversation                     = "GetConversation"

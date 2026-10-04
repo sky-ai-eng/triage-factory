@@ -54,9 +54,9 @@ func lookupConversation(host agenthost.Client) agenthost.ConversationInfo {
 // back to the env-var-reference form when the root is unset (subcommand invoked
 // outside a delegated run) so the message still reads coherently.
 func agentMemoryFile() string {
-	root := os.Getenv("TRIAGE_FACTORY_CONVERSATION_ROOT")
+	root := os.Getenv(conversationRootEnv)
 	if root == "" {
-		return "$TRIAGE_FACTORY_CONVERSATION_ROOT/" + worktree.ScratchDir + "/memory.md"
+		return "$" + conversationRootEnv + "/" + worktree.ScratchDir + "/memory.md"
 	}
 	return filepath.Join(root, worktree.ScratchDir, "memory.md")
 }
@@ -114,19 +114,19 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 
 	switch action {
 	case "create":
-		prCreate(ctx, api, flags)
+		prCreate(ctx, api, host, flags)
 	case "view":
-		prView(ctx, api, flags)
+		prView(ctx, api, host, flags)
 	case "diff":
 		prDiff(ctx, host, flags)
 	case "files":
-		prFiles(ctx, api, flags)
+		prFiles(ctx, api, host, flags)
 	case "thread-view":
 		prThreadView(ctx, api, host, flags)
 	case "review-view":
-		prReviewView(ctx, api, flags)
+		prReviewView(ctx, api, host, flags)
 	case "review-dismiss":
-		prReviewDismiss(ctx, api, flags)
+		prReviewDismiss(ctx, api, host, flags)
 	case "start-review":
 		prStartReview(ctx, api, host, flags)
 	case "add-review-comment":
@@ -134,11 +134,11 @@ func handlePR(ctx context.Context, host agenthost.Client, args []string) {
 	case "finalize-review":
 		prFinalizeReview(ctx, host, flags)
 	case "add-comment":
-		prAddComment(ctx, api, flags)
+		prAddComment(ctx, api, host, flags)
 	case "comment-reply":
-		prCommentReply(ctx, api, flags)
+		prCommentReply(ctx, api, host, flags)
 	case "comment-react":
-		prCommentReact(ctx, api, flags)
+		prCommentReact(ctx, api, host, flags)
 	case "comment-update":
 		prCommentUpdate(ctx, api, host, flags)
 	case "comment-delete":
@@ -161,8 +161,8 @@ func prHelpText(prefix string) string {
 		prefix, PRHelpText, RepoResolutionHelpText)
 }
 
-func prView(ctx context.Context, client ghAPI, args []string) {
-	owner, repo, number := parseRepoAndNumber(args)
+func prView(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	pr, err := client.GetPR(ctx, owner, repo, number, verbose)
 	exitOnErr(err)
@@ -177,13 +177,14 @@ func prView(ctx context.Context, client ghAPI, args []string) {
 // patches rather than fetched verbatim.
 //
 // Source records which frame full.diff is in: "local_checkout" means it was
-// produced from the run's worktree HEAD (the commit the agent is actually
-// looking at, and the commit add-review-comment anchors to), "github_api"
-// means the live-head diff from the API fallback. HeadSHA is the commit that
-// frame is against; BaseSHA is the base it's diffed against — the PR's recorded
-// base.sha on the local_checkout path (TFAC-505), so a reader can confirm the
-// diff was framed against the true base and not a stale base ref. When the local
-// checkout has fallen behind the live PR head, RemoteHeadSHA / BehindBy / Stale
+// produced from the HEAD of the run's checkout of this PR (the commit the agent
+// is actually looking at), "github_api" means the live-head diff from the API
+// fallback. HeadSHA is the commit that frame is against; BaseSHA is the base
+// it's diffed against — the PR's recorded base.sha on the local_checkout path
+// (TFAC-505), so a reader can confirm the diff was framed against the true base
+// and not a stale base ref. Warning is set on every github_api manifest, saying
+// why there was no local frame, and on a local_checkout manifest whose checkout
+// has fallen behind the live PR head, where RemoteHeadSHA / BehindBy / Stale
 // describe the gap and Warning tells the agent to `git pull` for the current code.
 type diffManifest struct {
 	Owner         string        `json:"owner"`
@@ -229,30 +230,31 @@ const (
 	manifestFilename = "manifest.json"
 )
 
-// prDiff persists the PR diff under _tfac/ and prints a manifest, rather
-// than dumping the whole diff to stdout (which lands the entire thing in the
-// delegated agent's context in one shot — unbounded and not navigable with
-// Read/Grep/Glob).
+// prDiff persists the PR diff under the run root's _tfac/ and prints a
+// manifest, rather than dumping the whole diff to stdout (which lands the
+// entire thing in the delegated agent's context in one shot — unbounded and
+// not navigable with Read/Grep/Glob).
 //
-// The diff is framed against the run's WORKTREE HEAD — the commit the agent's
-// checkout is actually on, which is also the commit add-review-comment anchors
-// comments to. Reading and commenting against the same frame is what keeps a
-// line the agent saw mapped to the line GitHub anchors the comment to. If the
-// live PR head has moved past the local checkout, the manifest carries a
-// staleness warning pointing the agent at `git pull`; the diff still reflects
-// the code the agent has in hand. Outside a worktree (no checkout to anchor
-// against) it falls back to the live-head diff from the GitHub API.
+// The diff is framed against the HEAD of the run's checkout of THIS PR, found
+// through the run's recorded checkouts (prCheckout) rather than the current
+// directory: the agent may be standing at the run root or in another repo's
+// checkout. That HEAD is the commit the agent has in hand. If the live PR head
+// has moved past it, the manifest carries a staleness warning pointing the
+// agent at `git pull`; the diff still reflects the code in the checkout. With
+// no checkout of the PR in the run it uses the live-head diff from the GitHub
+// API, and the manifest's warning says so.
 //
 // Two escape hatches keep the inline behavior available:
 //   - --file <path>: targeted single-file diff stays inline (bounded). No
 //     file written.
 //   - --stdout: whole-diff-to-stdout, for scripts/pipelines. No file written.
 //
-// Both inline paths prefer the local-checkout diff and fall back to the API
-// (including persistPRDiff's HTTP-406 "diff too large" reassembly from per-file
-// patches) when there's no worktree.
+// Both inline paths prefer the checkout diff and fall back to the API
+// (including the HTTP-406 "diff too large" reassembly from per-file patches),
+// noting the fallback on stderr since they carry no manifest. Only the
+// persisting path needs the run root, so only it fails without one.
 func prDiff(ctx context.Context, host agenthost.Client, args []string) {
-	owner, repo, number := parseRepoAndNumber(args)
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	// Repo-scoped adapter so the raw compare Get used for the staleness check
 	// resolves the org's credential tier (the bare PR dispatch builds an
 	// owner/repo-less client; the compare endpoint needs both).
@@ -260,31 +262,29 @@ func prDiff(ctx context.Context, host agenthost.Client, args []string) {
 	file := flagVal(args, "--file")
 	stdout := hasFlag(args, "--stdout")
 
-	cwd, err := os.Getwd()
-	if err != nil {
-		exitErr(fmt.Sprintf("resolve cwd: %v", err))
-	}
-	checkout := resolveLocalCheckout(cwd)
-
 	if file != "" || stdout {
+		checkout := prCheckout(ctx, host, owner, repo, number)
 		fmt.Print(inlineDiff(ctx, client, checkout, owner, repo, number, file))
 		return
 	}
 
-	manifest, err := persistPRDiff(ctx, client, checkout, cwd, owner, repo, number)
+	root, err := runRoot()
+	exitOnErr(err)
+	checkout := prCheckout(ctx, host, owner, repo, number)
+	manifest, err := persistPRDiff(ctx, client, checkout, root, owner, repo, number)
 	exitOnErr(err)
 	printJSON(manifest)
 }
 
 // inlineDiff returns the diff text for the --file / --stdout escape hatches.
-// Prefers the worktree-HEAD diff (same frame as the persisted manifest and the
-// comment anchors); falls back to the live-head API diff — with the HTTP-406
-// per-file reassembly — when there's no local checkout.
+// Prefers the checkout-HEAD diff (same frame as the persisted manifest); falls
+// back to the live-head API diff — with the HTTP-406 per-file reassembly — when
+// there's no usable checkout, and says so on stderr.
 func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner, repo string, number int, file string) string {
 	if checkout.ok {
 		if pr, err := client.GetPR(ctx, owner, repo, number, false); err == nil {
-			if base, ok := resolveDiffBase(checkout.cwd, pr.BaseSHA, pr.BaseRef); ok {
-				if diff, err := localUnifiedDiff(checkout.cwd, base, file); err == nil {
+			if base, ok := resolveDiffBase(checkout.dir, pr.BaseSHA, pr.BaseRef); ok {
+				if diff, err := localUnifiedDiff(checkout.dir, base, file); err == nil {
 					if file != "" && strings.TrimSpace(diff) == "" {
 						exitErr(fmt.Sprintf("file %q is not part of PR #%d's diff", file, number))
 					}
@@ -294,6 +294,7 @@ func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner
 		}
 	}
 
+	fmt.Fprintln(os.Stderr, "pr diff: "+apiDiffWarning(checkout, owner, repo, number))
 	diff, err := client.GetPRDiff(ctx, owner, repo, number, file)
 	if err != nil {
 		if !ghclient.IsHTTP406(err) {
@@ -314,17 +315,17 @@ func inlineDiff(ctx context.Context, client ghAPI, checkout localCheckout, owner
 }
 
 // persistPRDiff writes full.diff and manifest.json into a per-PR directory
-// under _tfac/ and returns the manifest. The directory is keyed by (owner,
-// repo, number) — the task's identity, which the agent always knows — so a
-// later blueprint step can locate an earlier capture without first looking up
-// the head SHA. Each `pr diff` overwrites the capture in place.
+// under <root>/_tfac/pr-diffs/ and returns the manifest. The directory is keyed
+// by (owner, repo, number) — the task's identity, which the agent always knows
+// — so a later blueprint step can locate an earlier capture without first
+// looking up the head SHA. Each `pr diff` overwrites the capture in place.
 //
-// When the run has a local checkout, full.diff is the worktree-HEAD diff and
-// manifest.head_sha is that worktree HEAD — the same frame add-review-comment
-// anchors against. The live PR head + a behind-by count are recorded alongside
-// so a reader can detect (and the agent can act on) the checkout having fallen
-// behind. Outside a worktree it falls back to the live-head API diff.
-func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, cwd, owner, repo string, number int) (diffManifest, error) {
+// When the run has a checkout of the PR, full.diff is that checkout's HEAD diff
+// and manifest.head_sha is its HEAD. The live PR head + a behind-by count are
+// recorded alongside so a reader can detect (and the agent can act on) the
+// checkout having fallen behind. Without one it falls back to the live-head API
+// diff, with a warning naming the fallback.
+func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, root, owner, repo string, number int) (diffManifest, error) {
 	pr, err := client.GetPR(ctx, owner, repo, number, false)
 	if err != nil {
 		return diffManifest{}, fmt.Errorf("fetch PR #%d: %w", number, err)
@@ -346,12 +347,13 @@ func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, cw
 		if err != nil {
 			return diffManifest{}, err
 		}
+		manifest.Warning = apiDiffWarning(checkout, owner, repo, number)
 	}
 
 	// Key on the task identity (owner, repo, number) the agent always knows,
 	// so it can locate an earlier capture without first resolving the head SHA.
 	dirKey := owner + "__" + repo + "__" + strconv.Itoa(number)
-	destDir, err := safeScratchSubdir(cwd, worktree.ScratchDir, "pr-diffs", dirKey)
+	destDir, err := safeScratchSubdir(root, worktree.ScratchDir, "pr-diffs", dirKey)
 	if err != nil {
 		return diffManifest{}, err
 	}
@@ -384,20 +386,20 @@ func persistPRDiff(ctx context.Context, client ghAPI, checkout localCheckout, cw
 	return manifest, nil
 }
 
-// buildLocalDiffManifest fills the manifest from the run's worktree-HEAD diff
-// and returns the full diff text + ok=true. Returns ok=false (caller falls back
-// to the API) when there's no checkout or the base ref can't be resolved
-// locally. Populates head_sha = worktree HEAD, the per-file rows from the diff
-// itself, and the staleness fields when the live head has moved ahead.
+// buildLocalDiffManifest fills the manifest from the checkout-HEAD diff and
+// returns the full diff text + ok=true. Returns ok=false (caller falls back to
+// the API) when there's no checkout or the base ref can't be resolved locally.
+// Populates head_sha = checkout HEAD, the per-file rows from the diff itself,
+// and the staleness fields when the live head has moved ahead.
 func buildLocalDiffManifest(ctx context.Context, client ghAPI, checkout localCheckout, owner, repo string, manifest *diffManifest, pr *ghclient.PRView) (string, bool) {
 	if !checkout.ok {
 		return "", false
 	}
-	base, ok := resolveDiffBase(checkout.cwd, pr.BaseSHA, pr.BaseRef)
+	base, ok := resolveDiffBase(checkout.dir, pr.BaseSHA, pr.BaseRef)
 	if !ok {
 		return "", false
 	}
-	diff, err := localUnifiedDiff(checkout.cwd, base, "")
+	diff, err := localUnifiedDiff(checkout.dir, base, "")
 	if err != nil {
 		return "", false
 	}
@@ -436,7 +438,7 @@ func buildLocalDiffManifest(ctx context.Context, client ghAPI, checkout localChe
 }
 
 // buildAPIDiffManifest fills the manifest from the live-head GitHub diff (the
-// no-worktree fallback). head_sha is the live PR head; per-file rows come from
+// no-checkout fallback). head_sha is the live PR head; per-file rows come from
 // GetPRFiles, which doubles as the HTTP-406 reassembly source.
 func buildAPIDiffManifest(ctx context.Context, client ghAPI, owner, repo string, number int, manifest *diffManifest, pr *ghclient.PRView) (string, error) {
 	files, err := client.GetPRFiles(ctx, owner, repo, number)
@@ -535,8 +537,8 @@ func buildPRFilesResult(files []ghclient.PRFile) prFilesResult {
 	return result
 }
 
-func prFiles(ctx context.Context, client ghAPI, args []string) {
-	owner, repo, number := parseRepoAndNumber(args)
+func prFiles(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	files, err := client.GetPRFiles(ctx, owner, repo, number)
 	exitOnErr(err)
 	printJSON(buildPRFilesResult(files))
@@ -550,7 +552,7 @@ func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	// (resolveRepo scans for it); firstPositional already skips flags, so the
 	// number still binds to the leading <pr_number> positional. Slicing to
 	// args[:1] here would hide --repo and silently resolve the wrong repo.
-	owner, repo, number := parseRepoAndNumber(args)
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	commentID := mustInt(args[1], "comment_id")
 	page := 1
 	if v := flagVal(args, "--page"); v != "" {
@@ -566,7 +568,7 @@ func prThreadView(ctx context.Context, client ghAPI, host agenthost.Client, args
 	printJSON(thread)
 }
 
-func prReviewView(ctx context.Context, client ghAPI, args []string) {
+func prReviewView(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-view <review_id> --pr <pr_number> [-v]")
 	}
@@ -584,7 +586,7 @@ func prReviewView(ctx context.Context, client ghAPI, args []string) {
 			reviewID, reviewID,
 		))
 	}
-	owner, repo := ownerRepo(args)
+	owner, repo := ownerRepo(ctx, host, args)
 	prNumber := mustInt(prFlag, "pr_number")
 	verbose := hasFlag(args, "-v") || hasFlag(args, "--verbose")
 	detail, err := client.GetReviewDetail(ctx, owner, repo, prNumber, reviewID, verbose)
@@ -592,12 +594,12 @@ func prReviewView(ctx context.Context, client ghAPI, args []string) {
 	printJSON(detail)
 }
 
-func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
+func prReviewDismiss(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr review-dismiss <review_id> --pr <number> --body <reason>")
 	}
 	reviewID := mustInt(args[0], "review_id")
-	owner, repo := ownerRepo(args)
+	owner, repo := ownerRepo(ctx, host, args)
 	prNumber := mustInt(flagVal(args, "--pr"), "pr_number")
 	body := flagVal(args, "--body")
 	if body == "" {
@@ -627,7 +629,7 @@ func prReviewDismiss(ctx context.Context, client ghAPI, args []string) {
 // On a clean slate (no prior start-review in this run) --fresh has nothing to
 // reset and falls through to a normal start.
 func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
-	owner, repo, number := parseRepoAndNumber(args)
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	_ = lookupConversation(host) // validates identity is present; routing happens inside host
 
 	if hasFlag(args, "--fresh") {
@@ -679,14 +681,14 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 // prAddReviewComment bakes the severity badge into the comment body, then stages
 // it on this run's review draft (→ GithubAddPendingReviewComment, a local write).
 //
-// The comment is anchored to — and validated against — the run's WORKTREE HEAD:
-// the commit the agent's checkout is on, which is the frame the agent read the
-// diff in (`pr diff` shows that same frame). Validating the (path, line,
-// start_line) against the local checkout's diff and anchoring the submitted
-// comment to that same commit is what keeps a line the agent saw mapped to the
-// line GitHub anchors to — sourcing either from the live PR head would re-open
-// the skew when the checkout has fallen behind. Outside a worktree it hands an
-// empty anchor to the host, which falls back to live-head validation.
+// The comment is anchored to — and validated against — the HEAD of the run's
+// checkout of the reviewed PR: the frame `pr diff` shows the agent. Validating
+// the (path, line, start_line) against that checkout's diff and anchoring the
+// submitted comment to the same commit is what keeps a line the agent saw
+// mapped to the line GitHub anchors to — sourcing either from the live PR head
+// would re-open the skew when the checkout has fallen behind. With no checkout
+// of the PR it hands an empty anchor to the host, which falls back to live-head
+// validation, the same frame `pr diff` falls back to.
 //
 // Severity lives only in the comment body (the overlay parses it back out for
 // the chip).
@@ -741,32 +743,9 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 		startLine = &v
 	}
 
-	owner, repo := ownerRepo(args)
 	_ = lookupConversation(host)
-
-	// Resolve the anchor: the reviewed PR's worktree HEAD — the commit the
-	// agent's checkout is on, which is the frame it read the diff in. The host
-	// validates the range against this commit's diff (compare base...HEAD) and
-	// pins the submitted comment to it. Empty when there's no checkout, in which
-	// case the host falls back to live-head validation + anchoring.
-	//
-	// Prefer the PR's worktree resolved from the conversation's
-	// (conversation, repo, ref) registry over cwd: in a multi-PR conversation
-	// cwd may sit in a DIFFERENT PR's checkout (TFAC-494/TFAC-502), which would
-	// anchor this comment to the wrong commit. Falls back to cwd HEAD when the
-	// registry has no unambiguous PR worktree for this repo (single-PR
-	// conversations, or a path the CLI can't rev-parse), preserving prior
-	// behavior.
-	cwd, err := os.Getwd()
-	if err != nil {
-		exitErr(fmt.Sprintf("resolve cwd: %v", err))
-	}
-	anchorSHA := resolveLocalCheckout(cwd).headSHA
-	if wt := reviewedPRWorktreePath(host, owner, repo); wt != "" {
-		if sha := resolveLocalCheckout(wt).headSHA; sha != "" {
-			anchorSHA = sha
-		}
-	}
+	owner, repo, anchorSHA, err := reviewCommentTarget(ctx, host, reviewID, args)
+	exitOnErr(err)
 
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
 	// the run's review artifact, validates the range against the anchor commit's
@@ -783,42 +762,41 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	})
 }
 
-// reviewedPRWorktreePath returns the absolute worktree path of the PR being
-// reviewed in owner/repo, resolved from the conversation's
-// (conversation, repo, ref) worktree registry: the unique
-// conversation_worktrees row whose repo matches and whose ref is a PR ref
-// ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT PR's
-// worktree HEAD in a multi-PR conversation instead of trusting cwd (TFAC-502).
+// reviewHost is the part of agenthost.Client reviewCommentTarget reads: the
+// review draft's recorded PR and the run's checkouts.
+type reviewHost interface {
+	runCheckouts
+	ReviewDraftTarget(ctx context.Context, reviewID string) (owner, repo string, number int, err error)
+}
+
+// reviewCommentTarget resolves the repo a staged comment belongs to and the
+// commit it anchors to. Both follow from the PR the review draft was started
+// on, read back from the host's record of it, so neither depends on where the
+// agent is standing: an agent in another repo's checkout, or another PR's
+// checkout of the same repo, still comments on the reviewed PR. An explicit
+// --repo must agree with the review.
 //
-// Returns "" when there is no such row, or more than one (two PRs reviewed in
-// the SAME repo within one conversation is ambiguous without the PR number,
-// so the caller falls back to cwd — the agent is expected to have cd'd into
-// the reviewed PR's worktree). A list error is non-fatal: anchoring degrades
-// to cwd, never blocking the comment.
-func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
-	rows, err := host.ListConversationWorktrees(context.Background())
+// The anchor is the HEAD of the run's checkout of exactly that PR (prCheckout,
+// the lookup `pr diff` frames its diff with), or "" when the run holds none, in
+// which case the host anchors to the live head. The HEAD is read here, in the
+// agent's own process, from a checkout the agent can write; the host never runs
+// git in the run tree. It treats the anchor as a claim and checks it against
+// GitHub's compare diff for the reviewed PR before staging anything.
+func reviewCommentTarget(ctx context.Context, host reviewHost, reviewID string, args []string) (owner, repo, anchorSHA string, err error) {
+	owner, repo, number, err := host.ReviewDraftTarget(ctx, reviewID)
 	if err != nil {
-		return ""
+		return "", "", "", err
 	}
-	repoID := owner + "/" + repo
-	match := ""
-	for _, w := range rows {
-		if !strings.EqualFold(w.RepoID, repoID) || !strings.HasPrefix(w.Ref, "pr-") {
-			continue
+	if hasFlag(args, "--repo") {
+		flagOwner, flagRepo, err := splitOwnerRepoStr(flagVal(args, "--repo"), "--repo flag")
+		if err != nil {
+			return "", "", "", err
 		}
-		if match != "" {
-			// Two PR worktrees in one repo for this run — we can't tell which PR
-			// this comment targets from owner/repo alone, so fall back to cwd
-			// HEAD. Warn (stderr, so the success JSON on stdout stays clean) so a
-			// "comment anchored to the wrong commit" symptom is diagnosable: the
-			// agent must run add-review-comment from inside the reviewed PR's
-			// worktree in that case.
-			fmt.Fprintf(os.Stderr, "gh pr add-review-comment: %s has multiple PR worktrees this run; anchoring to cwd HEAD — run this from the reviewed PR's worktree\n", repoID)
-			return ""
+		if !strings.EqualFold(flagOwner+"/"+flagRepo, owner+"/"+repo) {
+			return "", "", "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s; drop --repo, or start a review on the PR you mean", reviewID, owner, repo, number, flagOwner, flagRepo)
 		}
-		match = w.Path
 	}
-	return match
+	return owner, repo, prCheckout(ctx, host, owner, repo, number).headSHA, nil
 }
 
 // prFinalizeReview hands the finished review to the host, which snapshots the
@@ -931,7 +909,7 @@ func prFinalizeReview(ctx context.Context, host agenthost.Client, args []string)
 // the host choke point (LocalClient.GithubCreatePR), which also records the
 // durable pull_request artifact, deduped on the PR number — the idempotency
 // guard against a repeated `pr create`.
-func prCreate(ctx context.Context, client ghAPI, args []string) {
+func prCreate(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	title := flagVal(args, "--title")
 	body := flagVal(args, "--body")
 	bodyFile := flagVal(args, "--body-file")
@@ -979,7 +957,7 @@ func prCreate(ctx context.Context, client ghAPI, args []string) {
 	// forgot to remove it.
 	body = stripClaudeCodeCitation(body)
 
-	owner, repo := ownerRepo(args)
+	owner, repo := ownerRepo(ctx, host, args)
 
 	// If --head wasn't supplied, derive from the current branch. The
 	// agent's cwd inside a materialized worktree is `feature/<KEY>`
@@ -1043,8 +1021,8 @@ func prCreate(ctx context.Context, client ghAPI, args []string) {
 
 // --- Direct comments (hit GitHub API) ---
 
-func prAddComment(ctx context.Context, client ghAPI, args []string) {
-	owner, repo, number := parseRepoAndNumber(args)
+func prAddComment(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
+	owner, repo, number := parseRepoAndNumber(ctx, host, args)
 	body := flagVal(args, "--body")
 	if body == "" {
 		exitErr("--body is required")
@@ -1054,12 +1032,12 @@ func prAddComment(ctx context.Context, client ghAPI, args []string) {
 	printJSON(map[string]any{"comment_id": commentID})
 }
 
-func prCommentReply(ctx context.Context, client ghAPI, args []string) {
+func prCommentReply(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-reply <comment_id> --body <text> --pr <number>")
 	}
 	commentID := mustInt(args[0], "comment_id")
-	owner, repo := ownerRepo(args)
+	owner, repo := ownerRepo(ctx, host, args)
 	prNumber := mustInt(flagVal(args, "--pr"), "pr_number")
 	body := flagVal(args, "--body")
 	if body == "" {
@@ -1070,12 +1048,12 @@ func prCommentReply(ctx context.Context, client ghAPI, args []string) {
 	printJSON(map[string]any{"reply_id": replyID})
 }
 
-func prCommentReact(ctx context.Context, client ghAPI, args []string) {
+func prCommentReact(ctx context.Context, client ghAPI, host agenthost.Client, args []string) {
 	if len(args) < 1 {
 		exitErr("usage: gh pr comment-react <comment_id> --emoji <emoji>")
 	}
 	commentID := mustInt(args[0], "comment_id")
-	owner, repo := ownerRepo(args)
+	owner, repo := ownerRepo(ctx, host, args)
 	emoji := flagVal(args, "--emoji")
 	if emoji == "" {
 		exitErr("--emoji is required (+1, -1, laugh, confused, heart, hooray, rocket, eyes)")
@@ -1110,7 +1088,7 @@ func prCommentUpdate(ctx context.Context, client ghAPI, host agenthost.Client, a
 	// Numeric → live GitHub comment (REST path, unchanged). --severity is
 	// meaningless for a submitted comment (no chip), so it's ignored there.
 	if id, err := strconv.Atoi(args[0]); err == nil {
-		owner, repo := ownerRepo(args)
+		owner, repo := ownerRepo(ctx, host, args)
 		exitOnErr(client.UpdateComment(ctx, owner, repo, id, body))
 		printJSON(map[string]any{"ok": true})
 		return
@@ -1144,7 +1122,7 @@ func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, a
 	}
 
 	if id, err := strconv.Atoi(args[0]); err == nil {
-		owner, repo := ownerRepo(args)
+		owner, repo := ownerRepo(ctx, host, args)
 		exitOnErr(client.DeleteComment(ctx, owner, repo, id))
 		printJSON(map[string]any{"ok": true})
 		return
@@ -1157,8 +1135,8 @@ func prCommentDelete(ctx context.Context, client ghAPI, host agenthost.Client, a
 
 // --- argument parsing helpers ---
 
-func parseRepoAndNumber(args []string) (string, string, int) {
-	owner, repo := ownerRepo(args)
+func parseRepoAndNumber(ctx context.Context, host runCheckouts, args []string) (string, string, int) {
+	owner, repo := ownerRepo(ctx, host, args)
 	// Find first positional arg (not a flag or flag value)
 	num := firstPositional(args)
 	if num == "" {
@@ -1192,13 +1170,12 @@ func firstPositional(args []string) string {
 }
 
 // ownerRepo resolves the target repo for a PR subcommand. Delegates to the
-// shared resolveRepo so --repo flag, TRIAGE_FACTORY_REPO env, and .git/config
-// fallback all behave consistently across every gh command. Passes the
-// full args slice (not just the flag value) so resolveRepo can detect
-// "--repo present but empty" and fail loudly instead of silently falling
-// back to env/git resolution.
-func ownerRepo(args []string) (string, string) {
-	owner, repo, err := resolveRepo(args)
+// shared resolveRepo so the --repo flag and the current checkout's origin
+// behave consistently across every gh command. Passes the full args slice
+// (not just the flag value) so resolveRepo can detect "--repo present but
+// empty" and fail loudly instead of silently falling back to the checkout.
+func ownerRepo(ctx context.Context, host runCheckouts, args []string) (string, string) {
+	owner, repo, err := resolveRepo(ctx, host, args)
 	if err != nil {
 		exitErr(err.Error())
 	}
