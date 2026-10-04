@@ -407,7 +407,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 	if err = a.buildPlacement(); err != nil {
 		return nil, err
 	}
-	// Brain-side sealed-credential-bundle provisioner (TFAC-614) — brain-
+	// Brain-side sealed-credential-bundle provisioner — brain-
 	// capable roles in multi mode only. After buildExecution, so the
 	// conversation-signal/instance/conversation-queue stores it reads
 	// (a.stores) are already the real bundle.

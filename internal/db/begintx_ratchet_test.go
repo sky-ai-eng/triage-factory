@@ -112,6 +112,13 @@ func filesCalling(root, needle string) ([]string, error) {
 			if name := entry.Name(); name == "node_modules" || name == ".git" || name == "frontend" {
 				return filepath.SkipDir
 			}
+			// A directory with its own .git is another checkout, such as a
+			// git worktree nested under the repo, and its files are not ours.
+			if path != root {
+				if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
+					return filepath.SkipDir
+				}
+			}
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {

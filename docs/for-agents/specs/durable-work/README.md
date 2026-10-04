@@ -1,10 +1,10 @@
 # The Durable Work Contract
 
-**Status: Draft.** The scope is agreed: internal durability is included; external-effect durability
-is separate work. Approve the contract before creating the P0/P1 implementation tickets.
+**Status: Adopted.** Internal durability is in scope; external-effect durability is separate work
+(§3). Every phase in §7.2 is implemented, and §5 describes the claim lifecycle as built.
 
 TF must remember unfinished work after a crash and prevent an old worker from changing work that
-another worker now owns. Today, its queues and claim lifecycle solve these problems separately.
+another worker now owns. Before this contract, its queues and claim lifecycle solved these problems separately.
 This design gives them shared recovery rules, implemented in `internal/db/workitem` and adopted
 one table at a time.
 
@@ -147,7 +147,8 @@ the row lock.
   domain mutations as well as the disposition.
 - **`FencedReplay`:** every constituent transaction checks the live receipt under lock, in addition
   to its domain replay fence.
-- **Claims adapter:** apply the same generation and expiry rule to claim-owned writes.
+- **Claims adapter:** a claim-owned write requires the claim to be unreleased and its lease
+  unexpired on database time. A claim row is one acquisition, so its id is the generation (D3).
 
 ### 1.4 Preventing duplicate admission
 
@@ -462,44 +463,48 @@ The live holder, or the dispatcher handling expired/unclaimed work, parks the co
 requested. User follow-up clears the request to re-arm the conversation. A plain stop leaves the
 blueprint unchanged. Cancellation uses the same request/disposition separation (§1.7).
 
+The request records who asked and why (`stop_requested_by`, `stop_requested_reason`), and the park
+derives `park_reason` from them, so a user stop, a system stop and a stall each park with their
+own reason. A stop does not withdraw input already queued: a parked conversation with an
+undelivered user message is claimable again once the stop settles, and the user can stop it again.
+
 ### D3. Give claims leases and takeover
 
 Claims use an explicit adapter. They adopt:
 
-- `lease_expires_at` and `lease_generation`.
-- Strict renewal (§1.6), included in every fenced write and on a `RenewEvery` ticker.
+- `lease_expires_at`, set from database time at acquisition and at each renewal. A claim row is
+  one acquisition, so its id serves as the generation; claims have no `lease_generation` column.
+- Renewal on a ticker. A fenced write checks the lease but does not renew it, so the fence's
+  `FOR SHARE` lock never serializes concurrent writes on one claim.
 
-Claims do not adopt work-item `status`, `unique_key`, or per-row attempt accounting. Their
-existing loss-episode accounting remains; D4 defines the outcomes.
+Claims do not adopt work-item `status`, `unique_key`, or per-row attempt accounting. D4 defines
+their budgets.
 
 #### Timing
 
-Validate this ordering at startup:
+The timings are constants, not configuration, and a test pins their order:
 
 ```text
-renew_interval < self_fence_deadline < takeover_after
+renew every 20s < self-fence after 45s < lease 75s
 ```
 
-For claims, `policy.Lease = takeover_after`. Acquisition and successful renewal set
-`lease_expires_at = database_now + takeover_after`. Takeover is eligible at that expiry, with no
-additional delay.
+Acquisition and successful renewal set `lease_expires_at = database_now + 75s`. Takeover is
+eligible at that expiry, with no additional delay. Ordinary work items keep their 60s default
+lease. P4 in §7.2 records why these values were chosen.
 
-Initial defaults: renewal every 20s, self-fence after 45s, and claim lease/takeover after 75s.
-Validate these values in failure tests; configuration must preserve the ordering above.
-Ordinary work items keep their 60s default lease. P4 in §7.2 records how these values differ
-from the current reaper defaults and why.
-
-If renewal succeeds at database time T and none succeeds afterward, the worker aims to
-self-fence by roughly T+45s. A successor can take over at T+75s.
+If renewal succeeds at database time T and none succeeds afterward, the holder fences itself by
+roughly T+45s. A successor can take over at T+75s. The 30s between the two is the time a fenced
+engagement has to tear down its sidecar and sandbox before anyone else may start the work.
 
 The watchdog uses the local monotonic clock, anchored conservatively to the request start of the
 last successful acquisition or renewal. Network delay must not extend that bound. Renewal calls
 have deadlines; the watchdog runs independently; a late response cannot revive a fenced claim.
-Self-fencing stops new claims, refuses writes and egress, and kills the sidecar and sandbox.
+A self-fenced engagement writes nothing further and is cancelled, which tears down its sidecar
+and sandbox.
 
-A paused process can miss its cleanup deadline. Database generation and expiry checks must still
-reject its writes. Test a paused holder returning after takeover. External requests already in
-flight remain outside this contract (§3).
+A paused process can miss its cleanup deadline. Database expiry checks must still reject its
+writes. Test a paused holder returning after takeover. External requests already in flight
+remain outside this contract (§3).
 
 A whole-system suspend (laptop sleep, `systemctl suspend`, hibernate) is the one pause a claim
 holder may recover from. The monotonic clock the watchdog runs on stops while the machine sleeps,
@@ -511,120 +516,153 @@ the claim being unreleased and minted by the holder's own executor boot, which i
 successor exists. A release is final, since `released_at` is set once and never cleared, and
 `idx_claims_one_active` admits one unreleased claim per conversation, so a successor can be minted
 only after this claim is released. Any release during the suspend, by a takeover or by any other
-path, therefore refuses the re-acquire, and the holder fences as above. A stopped process (SIGSTOP) is not a suspend: its monotonic clock kept running, so it
-fails the deadline condition and is refused like any other paused holder.
+path, therefore refuses the re-acquire, and the holder fences as above. A stopped process
+(SIGSTOP) is not a suspend: its monotonic clock kept running, so it fails the deadline condition
+and is refused like any other paused holder.
 
 #### Run health
 
 Healthy runs have no automatic total-duration limit. Claim age alone must not stop a run; this
-contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Preserve existing operation-specific timeouts
-and explicit stop/cancel controls. The work-item `UnitDeadline` and renewal RPC deadlines bound
-individual operations, not the lifetime of an agent conversation.
+contract adds no `deadline_at` or `TF_RUN_DEADLINE`. Explicit stop and cancel controls remain.
 
-Lease renewal proves ownership and database connectivity, not agent progress. An executor can
-keep renewing while its agent or tool is stuck, and ongoing activity does not prove useful
-progress. O4 must define what detects and handles a stalled but renewing run, accounting for both
-SDK and native runtimes, long-running tools, and deliberate waits. Do not treat renewal alone as
-a complete health signal or substitute a fixed maximum run age for that decision. Any resulting
-system stop uses D2's durable intent, kill signal, and parking the conversation `open`.
+Lease renewal proves ownership and database connectivity, not agent progress, so a stalled
+engagement whose executor still renews is detected separately (O4), the same way in both
+runtimes:
 
-#### Takeover transaction
+- Every blocking operation an engagement performs has a bound: 150s for a provider stream that
+  sends no bytes, 30m for a tool call, 10m for a workspace operation (clone, fetch, rehydrate),
+  150s for a permission prompt, and 30s for a detached write. Each engagement records the
+  operation in flight and its deadline.
+- One watchdog per engagement stops it when it has been idle with nothing in flight for 10m, or
+  when an operation has passed its own deadline, which catches a bound that failed to fire. An
+  operation that also carries its own timeout gets a watchdog deadline a margin later, so a
+  timeout that fires is handled as the error it is.
+- The watchdog's stop is a system stop through D2 with the reason `stalled`: the conversation
+  parks `open` and waits for a person. A provider that stays silent is not a stall; the
+  engagement hands back on the upstream budget (D4).
+- Once an engagement has released its claim, its watchdog files no stop.
+- The renewal stamps `claims.last_activity_at` and `claims.current_op`, which the run page, the
+  fleet view and the oldest-idle gauge read.
 
-Remove `internal/reaper`. The dispatcher reclaims expired claims as part of acquiring work.
-In `needsDrivingSQL`, an unreleased claim stops counting as an active driver when
-`lease_expires_at <= now()` on database time.
+#### Takeover, settlement, and replay
 
-The claim transaction applies these rules in order:
+There is no reaper. Every dispatcher runs recovery on its own scan loop, independent of execution
+capacity, the memory gate and the claim fences, so a fleet at capacity still recovers. Each pass
+runs these steps in order:
 
-1. **Blueprint cancellation requested:** park the conversation `open` with `system_cancelled`,
-   mark the blueprint `cancelled`, and release the claim as `reaped`. Do not create a successor.
-2. **Plain stop requested:** park the conversation `open`, release the claim, and leave the
-   blueprint unchanged. Do not create a successor. Apply the same stop settlement to queued
-   conversations with no claim.
-3. **Loss episode at or above `TF_MAX_CLAIM_ATTEMPTS`:** fail with `executor_lost`, mark the
-   blueprint `failed`, stamp end times, and release the claim as `reaped`. No successor.
-4. **Otherwise:** release the expired claim as `reaped`, increment its generation, and create
-   the successor in the same transaction. Ignore `preferred_executor_id`; the expired lease
-   no longer owns the work.
+1. **Own expired claims.** An executor releases its own current-boot claims whose lease lapsed,
+   as `reaped`, once no engagement in the process still holds the conversation. Only that
+   process can tell a finished engagement from one still tearing down.
+2. **Takeover.** Every dispatcher releases expired claims it does not own, which includes its
+   own claims from earlier boots, as `reaped`. It is a claims-only `FOR UPDATE SKIP LOCKED`
+   statement, batched, that also clears `preferred_executor_id`. Takeover never mints the
+   successor: the released conversation is claimable through the ordinary claim query, so a
+   successor starts only where a slot is free. Takeover does not run inside the claim
+   transaction, for two reasons: a saturated dispatcher never runs that transaction, and locking
+   conversations before claims there deadlocks with a live holder's fence.
+3. **Settlement.** One statement settles the stops nobody holds. A conversation with stop intent
+   and no live claim parks `open` with the reason its intent records. A non-terminal step with no
+   live claim under a running, cancel-requested blueprint run parks with `blueprint_cancelled`,
+   and the run is marked `cancelled` in the same transaction. A step whose claim was released in
+   the last 60s is left alone: its holder's reactor is still finishing the run, and it owns the
+   run's cleanup. Postgres locks the run before its conversations, the same order as
+   `markBlueprintRunStatus`.
+4. **Stranded-run replay.** A running blueprint run whose current step completed or failed more
+   than 60s ago, and whose step has had no unreleased claim for that long, never had its step
+   reactor run. The dispatcher replays the reactor. Its side effects run only when its status
+   write changed the run. An `open` step is never stranded: a plain stop leaves its run running
+   on purpose.
 
-`idx_claims_one_active` remains the mutual-exclusion constraint. Release the old claim in a
-statement before inserting the new one, not in a sibling CTE: a uniqueness check in the same
-statement can still see the old active tuple.
+An unreleased claim keeps its conversation out of the queue until it is released, expired or
+not: `idx_claims_one_active` refuses a second claim while it stands, so offering the work would
+only produce a rejected insert. Takeover's release is what returns the conversation to the queue.
 
-Settlement runs on every dispatcher tick, even with no execution capacity. Starting a successor
-requires a slot. Run settlement before capacity and memory gates; acquire only available
-execution slots and return to the next tick when full. Never block the tick on the execution
-semaphore. Test full capacity, memory-gated dispatch, and queued stop intent.
-
-This places work only where capacity exists. Implement the same rules in SQLite's
-`ClaimNextConversation`, so local mode can recover during operation as well as at startup.
+At claim, a conversation whose episode has spent its loss budget (D4) fails with
+`executor_lost` instead of running again.
 
 #### Display and monitoring
 
-Derive the display's `running` state from lease expiry, not just `released_at`. A dead engagement
-must appear as awaiting takeover.
+The display treats an unreleased claim past its lease as not live: the conversation shows as
+`queued` while it waits for takeover.
 
-Expose a database-derived gauge of active claims past expiry and alert on their age. Collect it
-outside the dispatcher loop so a missing or stuck dispatcher cannot suppress its own alarm.
+A database-derived gauge counts active claims past expiry and reports the oldest one's age. It
+is collected by the background brain, outside the dispatcher loop, so a missing or stuck
+dispatcher cannot suppress its own alarm.
 
 #### Other cleanup responsibilities
 
-Removing the reaper requires assigning each of its other jobs:
-
-- **Terminal conversations with unreleased claims:** prevent this inconsistent state through D2.
-  Request paths cannot update claims (`tf_app` has no claims UPDATE grant), so they write intent
-  only. The holder and dispatcher are the only settlement writers; each releases the claim in
-  the same transaction as the conversation status change. The startup checker counts and alerts
-  on violations without repairing them. Before implementation, enumerate every app-pool terminal
-  writer and convert it to an intent write.
-- **Blueprint runs created without a first conversation:** prevent this through the atomic
-  creation rule (§2). Keep the startup invariant checker; delete the periodic repair sweep.
-- **Stale instance records:** move garbage collection to `internal/instance`, in a daily loop
-  gated by the background-brain lease. Continue deleting instances heartbeat-stale for over 7d.
-
-Retire `TF_REAPER_STALE_SEC`; its replacement uses claim vocabulary and the `takeover_after`
-meaning above. Keep `TF_SELF_FENCE_SEC` as the instance-wide fence: prolonged heartbeat-write
-failure kills every cell and stops claiming. Per-claim renewal failure is a finer-grained fence.
-Both self-fence deadlines must be strictly below takeover. Keep `TF_MAX_CLAIM_ATTEMPTS` as the
-loss-episode budget.
+- **Terminal conversations with unreleased claims:** prevented through D2. Request paths cannot
+  update claims (`tf_app` has no claims UPDATE grant), so they write intent only. The holder and
+  the dispatcher are the only settlement writers, and each releases the claim in the same
+  transaction as the conversation status change. A startup checker counts violations without
+  repairing them.
+- **Blueprint runs created without a first conversation:** prevented through the atomic creation
+  rule (§2). A startup checker remains.
+- **Stale instance records:** `internal/instance` deletes instances heartbeat-stale for over 7
+  days, in a loop gated by the background-brain lease.
+- **Retired settings:** `TF_REAPER_STALE_SEC` and `TF_SELF_FENCE_SEC` no longer exist.
+  `TF_MAX_CLAIM_ATTEMPTS` is the loss budget.
+- **Partition fence:** an executor whose heartbeat writes keep failing past its deadline stops
+  claiming new work. It does not kill running engagements; their own leases decide whether they
+  continue.
 
 The instance heartbeat remains responsible for registry garbage collection, fleet display, and
-placement's dead-preferred-executor check. It no longer determines claim liveness.
+placement's dead-preferred-executor check. It does not determine claim liveness.
 
-#### Startup ordering
+#### Startup and shutdown
 
 The instance-ID file lock (`flock`) proves the preceding process with that ID has exited. It
 does not prove its jails and sidecars have exited.
 
-Complete predecessor cell teardown before early claim release or handback. If teardown cannot
-be confirmed, withhold the fast path and use ordinary lease expiry. Waiting alone does not prove
-an external action absent (§3).
+At boot, an executor releases every claim its earlier boots left unreleased, as `reaped`. This
+counts against the loss budget: a conversation that crashes the process would otherwise be
+retried forever. The release runs only after the predecessor's sandbox cells are confirmed torn
+down; if that cannot be confirmed, the claims are left to lease expiry and takeover.
+
+A clean shutdown waits for in-flight dispatches, then releases the claims it still holds as
+`requeued_shutdown`, which spends no budget. A drain hands back the same way.
 
 Test an old executor crashing and an attempt to reuse the same state root concurrently. Assert
 that the file lock excludes the latter.
 
 #### Claim migration
 
-No multi-mode deployment has shipped. Until a persistent one exists, add lease columns directly
-to the Postgres baseline; there is no older executor population to support.
-
-SQLite has installed databases and needs a forward migration. Terminal claims keep NULL lease
-columns as historical records. A live claim surviving an upgrade belongs to the previous boot
-and is handled by startup self-recovery.
-
-Recheck deployment reality before this phase begins. If a persistent multi deployment exists,
-use the staged upgrade rules in §7.1. The transition must support legacy NULL leases, require
-both lease expiry and a stale heartbeat while old executors remain, and verify that no active
-claims still require legacy handling before retiring it.
+The lease columns are in the Postgres baseline; SQLite gained them through a forward migration.
+Terminal claims keep NULL lease columns as historical records. A live claim that survives an
+upgrade belongs to the previous boot, and the boot release handles it. Once a persistent multi
+deployment exists, any further change to claim columns follows the staged upgrade rules in §7.1.
 
 ### D4. Count loss episodes consistently
 
-Work items use the attempt rules in §1.2 and §1.6. Claims keep episode-based accounting:
-only `reaped` counts toward the takeover loss budget. `requeued_credentials` and `requeued_boot`
-are separate outcomes and do not extend a loss episode.
+Work items use the attempt rules in §1.2 and §1.6. Claims count by episode. A hand-back is a
+claim released with the conversation left mid-flight. An episode is the run of hand-backs since
+the conversation last ended a claim with a recorded outcome, or since a person last resumed it.
 
-Ship those outcome changes with the claim migration. The deployment rules in D3 determine
-whether that migration needs a staged cutover.
+`db.HandBackPolicies` is the one table of hand-back outcomes. Each row names the budget the
+outcome spends and the wait before the next claim, and both dialects render their SQL from it:
+
+| Outcome | Written when | Budget | Limit per episode | Wait before the next claim |
+| --- | --- | --- | --- | --- |
+| `requeued` | Setup failed before the agent ran | setup | 5 | none |
+| `requeued_credentials` | The credentials wait timed out | none | none | none |
+| `reaped` | The lease lapsed: own release, takeover, or boot release | loss | `TF_MAX_CLAIM_ATTEMPTS`, default 2 | none |
+| `requeued_shutdown` | The executor shut down or drained cleanly | none | none | none |
+| `requeued_upstream` | An upstream stayed unavailable through the engagement's retries | upstream | 27 | 30s, 1m, 2m, 5m, then 10m |
+
+The wait is `conversations.next_attempt_at`, on database time. The claim query skips the
+conversation until the wait passes, and a person's new message clears it. The upstream budget
+counts attempts rather than time, because a machine that sleeps advances database time while
+nobody retries.
+
+When a budget runs out:
+
+- **Loss:** the conversation fails with `executor_lost`.
+- **Setup:** a first engagement fails with the setup error; a conversation with a transcript
+  parks `open` with a note instead, so its work is not discarded.
+- **Upstream:** the conversation parks `upstream_unavailable` until a person writes.
+
+A new reason to hand a conversation back is one row in the table plus the writer that releases
+with it.
 
 ## 6. Existing guarantees to preserve
 
@@ -705,18 +743,18 @@ orders of the score-revision race.
 
 Implement D3/D4: leases, renewal, dispatcher takeover in both dialects, reaper removal,
 all reassigned cleanup jobs, and startup ordering. Include settlement under full capacity and
-independent stale-claim monitoring. Resolve O4's stalled-run health policy; test that healthy
-renewing runs are not stopped because of their age. This addresses claim ownership, recovery,
-and durable stop intent without adding a blanket run-duration limit.
+independent stale-claim monitoring. Ship stall detection (O4, D3 "Run health") and test that
+healthy renewing runs are not stopped because of their age. This addresses claim ownership,
+recovery, and durable stop intent without adding a blanket run-duration limit.
 
 **Timing change, stated explicitly.** The takeover defaults are a deliberate step up from the
 current multi-mode reaper defaults (self-fence 15s, stale-reap 30s, on a 4s instance heartbeat)
 to self-fence 45s and takeover 75s on a 20s renewal. The old numbers priced a per-instance
-heartbeat; the new ones price a per-claim renewal that also rides every fenced write. They also
+heartbeat; the new ones price a per-claim renewal. They also
 weigh a false takeover of an agent run (sandbox killed, workspace re-cloned, transcript replayed,
 visible to the user) as far costlier than an extra 45s before a genuinely dead run is retaken.
-No deployment slows down: no multi-mode deployment has shipped, and local mode has no takeover
-at all until restart today, so it goes from never to 75s. Revisit the values with the failure
+No deployment slows down: no multi-mode deployment had shipped, and local mode, which recovered
+a lost claim only at restart, now recovers it after 75s. Revisit the values with the failure
 tests D3 requires.
 
 #### P5 — Entity repair
@@ -742,7 +780,9 @@ delivery ID and retains tombstones. This is a design check, not an implementatio
   close in flight, and the router closes from it under the same version-guarded transaction a
   real terminating transition takes; the tracker never closes inline. D1 defines what each poll
   must enforce; the coverage gate it named is what the checker's read-only posture rests on.
-- **O4 — Stalled-run health:** which operation bounds or progress signals should detect and
-  handle a stalled agent whose executor still renews its lease? Healthy runs have no total-duration
-  cap. D3 sets initial lease timings and distinguishes ownership from progress; P4 must resolve
-  the remaining health policy for both runtimes, including long tools and deliberate waits.
+- **O4 — Stalled-run health (decided):** bound every blocking operation, and stop an engagement
+  that is idle with nothing in flight or has an operation past its own deadline. Both halves are
+  needed: the bounds catch a known operation that hangs, and the idle arm catches a hang no bound
+  anticipated. The stop is a system stop with the reason `stalled`, which parks the conversation
+  for a person rather than retrying it. There is still no total-duration cap. D3 "Run health"
+  states the bounds.
