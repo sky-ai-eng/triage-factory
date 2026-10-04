@@ -101,6 +101,18 @@ const undeliveredInputExistsSQL = `EXISTS (
 		WHERE m_i.conversation_id = r.id AND m_i.delivered = 0
 		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active')`
 
+// undeliveredInputDuringClaimSQL is undeliveredInputExistsSQL narrowed to the
+// person messages that arrived while the claim claimExpr names held the
+// conversation, read off the attribution a message insert stamps. The
+// Postgres twin says why the attribution rather than a timestamp comparison.
+func undeliveredInputDuringClaimSQL(claimExpr string) string {
+	return `EXISTS (
+		SELECT 1 FROM messages m_i
+		WHERE m_i.conversation_id = r.id AND m_i.delivered = 0
+		  AND m_i.role = 'user' AND m_i.subtype = '' AND m_i.window_state = 'active'
+		  AND m_i.claim_id = ` + claimExpr + `)`
+}
+
 // needsDrivingSQL is the eligibility predicate, identical for every surface:
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
@@ -170,10 +182,18 @@ var handedBackOutcomesSQL = db.HandBackOutcomesSQL()
 // outcome is in outcomesSQL, against the conversation alias convAlias. The one
 // definition of where an episode starts, shared by every count below so they
 // cannot disagree about it; the Postgres twin carries the model.
+//
+// The episode start is compared as text, as the claims' own timestamps are
+// beside it. queued_at is written two ways, CURRENT_TIMESTAMP at the mint and
+// a bound Go time at a wake or an un-park, and both order correctly as text
+// against the bound Go times the claims carry: the mint's whole second is a
+// prefix of every instant inside it. julianday would read all of them to the
+// millisecond, and a wake would tie with the hand-backs just before it.
 func episodeHandBacksSQL(convAlias, outcomesSQL string) string {
 	return `(SELECT COUNT(*) FROM claims c2
 	WHERE c2.conversation_id = ` + convAlias + `.id
 	  AND c2.outcome IN (` + outcomesSQL + `)
+	  AND COALESCE(c2.released_at, c2.claimed_at) > ` + db.EpisodeStartSQL(convAlias) + `
 	  AND NOT EXISTS (
 	      SELECT 1 FROM claims c3
 	      WHERE c3.conversation_id = c2.conversation_id
@@ -293,6 +313,26 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		if err != nil || claimed == nil {
 			return err
 		}
+		// The episode counts read the conversation before the un-park below,
+		// which is the reading db.EpisodeStartSQL needs: a conversation taken off
+		// its park begins its episode with this claim. The claim this
+		// transaction mints is no candidate for any of them, unreleased and
+		// without an outcome, so counting first changes nothing else. The
+		// last column is the outcome of the most recent released claim.
+		var handBacks int
+		if err := q.QueryRowContext(ctx, `
+			SELECT `+episodeHandBacksSQL("r", handedBackOutcomesSQL)+`,
+			       `+EpisodeSetupFailuresSQL("r")+`,
+			       `+EpisodeLostEngagementsSQL("r")+`,
+			       `+EpisodeUpstreamHandBacksSQL("r")+`,
+			       COALESCE((SELECT prior.outcome FROM claims prior
+			                 WHERE prior.conversation_id = r.id AND prior.released_at IS NOT NULL
+			                 ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.rowid DESC
+			                 LIMIT 1), '')
+			FROM conversations r WHERE r.id = ?
+		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks, &claimed.LastHandBackOutcome); err != nil {
+			return err
+		}
 		// The claim id is minted here and handed back on the claimed conversation: the
 		// executor needs to name this engagement at teardown, when it has
 		// already been released and can no longer be found as the
@@ -311,12 +351,17 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 		//
 		// A deferred row is mid-flight, so next_attempt_at is the only column
 		// it carries here: the wait it named is over once it is claimed.
+		//
+		// A row taken off its park enters the queue with this claim, so it
+		// re-stamps queued_at (db.EpisodeStartSQL), with the instant the
+		// claim row carries.
 		if _, err := q.ExecContext(ctx, `
 			UPDATE conversations SET status = NULL, parked_at = NULL, park_reason = NULL,
+			                         queued_at = CASE WHEN status IS NOT NULL THEN ? ELSE queued_at END,
 			                         stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL,
 			                         next_attempt_at = NULL
 			WHERE id = ? AND (status IS NOT NULL OR next_attempt_at IS NOT NULL)
-		`, claimed.ID); err != nil {
+		`, claimedAt, claimed.ID); err != nil {
 			return err
 		}
 		claimID := uuid.New().String()
@@ -334,22 +379,6 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 			return err
 		}
 		claimed.ClaimID = claimID
-		// The last column is the outcome of the most recent released claim;
-		// the one just minted is unreleased, so it is not a candidate.
-		var handBacks int
-		if err := q.QueryRowContext(ctx, `
-			SELECT `+episodeHandBacksSQL("r", handedBackOutcomesSQL)+`,
-			       `+EpisodeSetupFailuresSQL("r")+`,
-			       `+EpisodeLostEngagementsSQL("r")+`,
-			       `+EpisodeUpstreamHandBacksSQL("r")+`,
-			       COALESCE((SELECT prior.outcome FROM claims prior
-			                 WHERE prior.conversation_id = r.id AND prior.released_at IS NOT NULL
-			                 ORDER BY prior.released_at DESC, prior.claimed_at DESC, prior.rowid DESC
-			                 LIMIT 1), '')
-			FROM conversations r WHERE r.id = ?
-		`, claimed.ID).Scan(&handBacks, &claimed.SetupFailures, &claimed.LostEngagements, &claimed.UpstreamHandBacks, &claimed.LastHandBackOutcome); err != nil {
-			return err
-		}
 		claimed.ExecutorID = executorID
 		claimed.ClaimedAt = &claimedAt
 		claimed.Attempts = handBacks + 1
@@ -362,17 +391,16 @@ func (s *conversationQueueStore) ClaimNextConversation(ctx context.Context, exec
 	return conv, nil
 }
 
-// RequeueConversation releases the claim FIRST and flips the conversation
+// RequeueConversation releases the claim FIRST and writes the conversation
 // row SECOND, in that order, because the returned row's
 // derived display status (sqliteReturningDisplayStatusSQL, folded into
 // sqliteConversationReturningColumns) reads 'queued' only once no active
 // claim remains, so the release has to be visible to the LAST statement's
-// RETURNING for the answer to agree with a follow-up Get. The guard — a
-// mid-flight conversation with a live claim — moves onto the claims release
-// itself (matched only when the owning conversation's status IS NULL), so
-// checking RowsAffected there tells the whole guard's outcome without a
-// separate probe.
-func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
+// RETURNING for the answer to agree with a follow-up Get. The release is
+// fenced on claimID; the IMMEDIATE transaction holds the database's one write
+// lock from BEGIN, so the lock order the Postgres twin takes has nothing to
+// do here.
+func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID, conversationID, claimID string, outcome db.RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -383,15 +411,15 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		res, err := q.ExecContext(ctx, `
 			UPDATE claims SET released_at = ?, outcome = ?
-			WHERE conversation_id = ? AND released_at IS NULL
-			  AND EXISTS (SELECT 1 FROM conversations c WHERE c.id = claims.conversation_id AND c.status IS NULL)
-		`, time.Now().UTC(), string(outcome), conversationID)
+			WHERE id = ? AND org_id = ? AND conversation_id = ? AND released_at IS NULL
+		`, time.Now().UTC(), string(outcome), claimID, orgID, conversationID)
 		if err != nil {
 			return err
 		}
-		n, err := res.RowsAffected()
-		if err != nil || n == 0 {
+		if n, err := res.RowsAffected(); err != nil {
 			return err
+		} else if n == 0 {
+			return fmt.Errorf("%w: claim %s on conversation %s", db.ErrClaimReleased, claimID, conversationID)
 		}
 		var nextAttempt any
 		if delay > 0 {
@@ -400,9 +428,12 @@ func (s *conversationQueueStore) RequeueConversation(ctx context.Context, orgID,
 		row := q.QueryRowContext(ctx, `
 			UPDATE conversations SET result_summary = ?, preferred_executor_id = NULL,
 			    next_attempt_at = CASE WHEN ? IS NOT NULL THEN `+sqliteNowPlusExpr+` END
-			WHERE id = ?
+			WHERE id = ? AND status IS NULL
 			RETURNING `+sqliteConversationReturningColumns, lastErr, nextAttempt, nextAttempt, conversationID)
 		r, err := scanConversationReturning(row)
+		if errors.Is(err, db.ErrNoSuchConversation) {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
@@ -1080,6 +1111,12 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		step                          sql.NullInt64
 	}
 	var out []db.SettledStop
+	// The no-intent arm leaves out a step whose latest claim was released
+	// inside db.ReactorGrace, for the reason the Postgres twin gives. The
+	// cutoff is bound as a time, the way released_at is written, so the
+	// comparison is one layout against itself, as in
+	// StrandedBlueprintRunsSystem.
+	cutoff := time.Now().UTC().Add(-db.ReactorGrace)
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
 			SELECT r.id, r.org_id, COALESCE(r.status, ''), COALESCE(r.stop_requested_by, ''),
@@ -1090,10 +1127,12 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			WHERE NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
 			  AND (r.stop_requested_at IS NOT NULL
 			       OR ((r.status IS NULL OR r.status = 'open')
-			           AND br.status = 'running' AND br.cancel_requested = 1))
+			           AND br.status = 'running' AND br.cancel_requested = 1
+			           AND NOT EXISTS (SELECT 1 FROM claims cl_g
+			                           WHERE cl_g.conversation_id = r.id AND cl_g.released_at > ?)))
 			  `+scope+`
 			ORDER BY r.id
-		`, args...)
+		`, append([]any{cutoff}, args...)...)
 		if err != nil {
 			return err
 		}
@@ -1426,12 +1465,12 @@ func (s *conversationQueueStore) HandBackClaimSystem(ctx context.Context, orgID,
 		}
 		_, err = q.ExecContext(ctx, `
 			UPDATE conversations AS r
-			SET next_attempt_at = CASE WHEN ? IS NOT NULL AND NOT `+undeliveredInputExistsSQL+`
+			SET next_attempt_at = CASE WHEN ? IS NOT NULL AND NOT `+undeliveredInputDuringClaimSQL("?")+`
 			                           THEN `+sqliteNowPlusExpr+` END,
 			    result_summary = COALESCE(NULLIF(?, ''), r.result_summary),
 			    preferred_executor_id = NULL
 			WHERE r.org_id = ? AND r.id = ? AND r.status IS NULL
-		`, nextAttempt, nextAttempt, lastErr, orgID, conversationID)
+		`, nextAttempt, claimID, nextAttempt, lastErr, orgID, conversationID)
 		return err
 	})
 }

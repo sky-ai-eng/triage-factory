@@ -204,7 +204,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		})
 
 		t.Run("released", func(t *testing.T) {
-			if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+			if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 			before, _, ok := f.Lease(t, conv.ClaimID)
@@ -359,7 +359,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		}
 
 		// Released, the conversation no longer reports a live claim's stamps.
-		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		cv, _ = f.Stores.Conversations.GetSystem(ctx, f.OrgID, conversationID)
@@ -409,10 +409,10 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f.SetLease(t, a.ClaimID, testClaimLease)
 
 		// Released claims are not read either.
-		if _, err := q.RequeueConversation(ctx, f.OrgID, first, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := q.RequeueConversation(ctx, f.OrgID, first, a.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
-		if _, err := q.RequeueConversation(ctx, f.OrgID, second, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := q.RequeueConversation(ctx, f.OrgID, second, b.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		if d, err := q.OldestIdleClaimSystem(ctx); err != nil || d != 0 {
@@ -444,7 +444,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// Released, the answer is the release whatever the lease says: a
 		// released claim may have a successor, and only the lapse of an
 		// unreleased one is ever recoverable.
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		for _, in := range []time.Duration{-time.Second, testClaimLease} {
@@ -514,6 +514,9 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		conv := claim(t, f, conversationID)
 		q := f.Stores.ConversationQueue
 		f.SetLease(t, conv.ClaimID, -30*time.Second)
+		// A real conversation, so the refusal comes from the statement's
+		// guard rather than from an id the backend rejects before running it.
+		otherID, _ := f.StageStep(t)
 		refused := func(t *testing.T, what, onConversation, executorID string, bootEpoch int64) {
 			t.Helper()
 			before, _, _ := f.Lease(t, conv.ClaimID)
@@ -525,10 +528,10 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}
 		}
 
-		refused(t, "the claim named under another conversation", "reacquire-other-conversation", claimLeaseExecutor, claimLeaseBootEpoch)
+		refused(t, "the claim named under another conversation", otherID, claimLeaseExecutor, claimLeaseBootEpoch)
 		refused(t, "another executor's claim", conversationID, "reacquire-other-exec", claimLeaseBootEpoch)
 		refused(t, "another boot's claim", conversationID, claimLeaseExecutor, claimLeaseBootEpoch+1)
-		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := q.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		refused(t, "a released claim", conversationID, claimLeaseExecutor, claimLeaseBootEpoch)
@@ -625,8 +628,8 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f.SetLease(t, a.ClaimID, testClaimLease)
 
 		// Nor is a released one.
-		for _, id := range []string{first, second, third} {
-			if _, err := q.RequeueConversation(ctx, f.OrgID, id, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		for _, claimed := range []*domain.Conversation{a, b, c} {
+			if _, err := q.RequeueConversation(ctx, f.OrgID, claimed.ID, claimed.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 				t.Fatalf("RequeueConversation: %v", err)
 			}
 		}
@@ -660,7 +663,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("oldest past expiry = %s, want about %s", age, past)
 		}
 
-		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := f.Stores.ConversationQueue.RequeueConversation(ctx, f.OrgID, conversationID, conv.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		if n, age, err := f.Stores.ConversationQueue.ExpiredClaimsSystem(ctx); err != nil || n != 0 || age != 0 {

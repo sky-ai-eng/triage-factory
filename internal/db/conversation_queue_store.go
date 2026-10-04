@@ -251,6 +251,28 @@ func renderOutcomesSQL(keep func(HandBackPolicy) bool) string {
 	return strings.Join(parts, ",")
 }
 
+// EpisodeStartSQL renders when a conversation's current queue episode began,
+// against the conversation alias convAlias as it stood before the claim the
+// episode is being counted for. Both dialects' episode counts compare their
+// hand-backs' releases against it.
+//
+// queued_at is the moment the conversation last entered the queue: the mint
+// stamps it, every wake (ConversationStore.MarkQueuedForResume) re-stamps it,
+// and so does a claim that takes the conversation straight off its park, which
+// is how a person's message comes back when it was written and no wake
+// followed. No hand-back writes it, so the hand-backs released after it are
+// the ones this queue entry has seen. started_at stands in for a row minted
+// before the column existed.
+//
+// A conversation that is still parked when it is claimed is the last case,
+// and the claim being counted for is itself the start, so the answer is NULL,
+// which a comparison matches against nothing. That claim's re-stamp is what
+// the claims after it read.
+func EpisodeStartSQL(convAlias string) string {
+	return `(CASE WHEN ` + convAlias + `.status IS NULL
+	            THEN COALESCE(` + convAlias + `.queued_at, ` + convAlias + `.started_at) END)`
+}
+
 // StrandedRun names a running blueprint run whose current step concluded
 // without its reactor running, with the step conversation the reactor has to
 // be replayed for.
@@ -310,6 +332,16 @@ type ClaimPlacement struct {
 // gone.
 const DefaultClaimLease = 75 * time.Second
 
+// ReactorGrace is how long a step whose engagement released its claim is left
+// to that engagement before a recovery pass acts on its run in the
+// engagement's place. An engagement releases its claim when it writes the
+// step's outcome and only then runs the reactor that advances or ends the
+// run, so for a short while after every release the run is still the
+// releasing engagement's to move. The settlement's arm for a step a cancel
+// never reached measures it from the step's latest claim release, and the
+// stranded-run replay is given it as its grace.
+const ReactorGrace = 60 * time.Second
+
 // ConversationQueueStore owns the claim loop — the ONE scan that finds
 // conversations needing to be driven, on every surface. It is the sibling of
 // EventQueueStore: where the event queue feeds the router, this feeds the
@@ -351,7 +383,9 @@ type ConversationQueueStore interface {
 	// type-conditional gates. Nothing on the conversation row changes except
 	// the un-park: a claim taken on the parked-and-woken arm ends the park by
 	// definition, so the row goes back to mid-flight and "parked" and "being
-	// driven" stay disjoint at every instant.
+	// driven" stay disjoint at every instant. The un-park also re-stamps
+	// queued_at, since no wake did: the person's message that made the row
+	// claimable is its entry into the queue, and the episode begins there.
 	//
 	// placement (TFAC-587) selects the claim discipline. Disabled (the zero
 	// value): the globally-oldest claimable conversation, ORDER BY
@@ -384,7 +418,12 @@ type ConversationQueueStore interface {
 	// The returned Attempts, SetupFailures, LostEngagements and
 	// UpstreamHandBacks are scoped to the conversation's current queue episode
 	// rather than its lifetime — see the dialects' episodeHandBacksSQL for the
-	// model, which the SQL is the definition of. The last three are the
+	// model, which the SQL is the definition of. An episode ends at an
+	// engagement that recorded an outcome of its own, and also where the
+	// conversation last entered the queue: its mint, a wake, or this claim
+	// itself when it takes the conversation straight off a park. A person's
+	// message therefore starts every budget afresh, including after a stop the
+	// dispatcher settled, which writes no claim. The last three are the
 	// budgets HandBackPolicies names. LastHandBackOutcome is the outcome of
 	// the conversation's most recent released claim, read in the same claim.
 	//
@@ -453,6 +492,12 @@ type ConversationQueueStore interface {
 	//     step a cancel never reached — minted after the cancel listed the
 	//     run's steps, or left behind by a cascade that failed after its
 	//     commit — which the claim gate refuses and nothing else would end.
+	//     A step whose latest claim was released less than ReactorGrace ago
+	//     is left out: its holder parks it, clearing the intent, and releases
+	//     its claim before the reactor that cancels the run, so for that long
+	//     the step only looks unreached. Settling it then would cancel the run
+	//     under the holder, whose own terminal write would find the run
+	//     already cancelled and skip its cleanup.
 	//
 	// An intent on the row wins over the second shape. Returns the
 	// conversations settled, with the blueprint runs cancelled, for the
@@ -554,12 +599,20 @@ type ConversationQueueStore interface {
 	// claim is released with outcome, the conversation stays mid-flight, and
 	// it becomes claimable after delay, measured on database time and stamped
 	// as next_attempt_at. It is claimable at once when delay is 0, and when a
-	// person's message is waiting undelivered: one sent while the engagement
-	// was failing asks to try again now, which is what ClearNextAttempt
-	// answers for a message sent after the hand-back. Fenced on claimID like
-	// every holder write: ErrClaimReleased when the claim is no longer live. A
-	// non-empty lastErr is written to result_summary; preferred_executor_id is
-	// cleared, for the reason ReleaseOwnClaimsOnShutdownSystem clears it. The
+	// person's message sent during this engagement is waiting undelivered:
+	// one sent while the engagement was failing asks to try again now, which
+	// is what ClearNextAttempt answers for a message sent after the hand-back.
+	// A message already waiting when the engagement was claimed is the input
+	// the engagement was claimed to deliver and does not lift the wait, so an
+	// engagement that hands back before delivering it (a compaction that fails
+	// on a provider outage, say) does not retry at once on every claim. "Sent
+	// during this engagement" is read off the message's claim attribution,
+	// which its insert stamps with the claim live at that moment.
+	//
+	// Fenced on claimID like every holder write: ErrClaimReleased when the
+	// claim is no longer live. A non-empty lastErr is written to
+	// result_summary; preferred_executor_id is cleared, for the reason
+	// ReleaseOwnClaimsOnShutdownSystem clears it. The
 	// conversation is written only while it is mid-flight (no stored status):
 	// one another writer parked or concluded while the claim was still live
 	// keeps its row as that writer left it, and only the claim is released.
@@ -593,9 +646,17 @@ type ConversationQueueStore interface {
 	// RequeueSetupFailure is what the next claim's SetupFailures counts, so
 	// the dispatcher can stop retrying a conversation that fails the same way
 	// every time. An outcome outside the vocabulary is refused with
-	// ErrInvalidRequeueOutcome and nothing is written. Guarded on a mid-flight
-	// conversation with a live claim, so a stale call can't act on a terminal
-	// or parked row.
+	// ErrInvalidRequeueOutcome and nothing is written.
+	//
+	// Fenced on claimID like every holder write: only that claim is released,
+	// and ErrClaimReleased is returned with nothing written when it is no
+	// longer live. An executor that was paused past its lease and then failed
+	// its setup would otherwise release the claim of the executor that took
+	// the conversation over. The conversation is locked before the claim, the
+	// order every writer that touches both takes. A conversation another
+	// writer parked or concluded while the claim was live keeps its row as
+	// that writer left it: only the claim is released, and the call returns
+	// nil.
 	//
 	// A positive delay stamps next_attempt_at at database now plus delay, the
 	// wait HandBackClaimSystem stamps; 0 leaves the conversation claimable at
@@ -606,12 +667,8 @@ type ConversationQueueStore interface {
 	// after the requeue clears the wait the way it clears any other.
 	//
 	// Returns the requeued row (ConversationStore.Get/GetSystem's
-	// projection), or nil when the guard declined — nothing mid-flight with a
-	// live claim to hand back (already terminal, parked, or claimless). The
-	// EntityStore.Close shape: a second requeue of an already-requeued
-	// conversation is not an error, and the caller that wants to know whether
-	// this call was the one that requeued it now can.
-	RequeueConversation(ctx context.Context, orgID, conversationID string, outcome RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error)
+	// projection), or nil when the conversation was not mid-flight.
+	RequeueConversation(ctx context.Context, orgID, conversationID, claimID string, outcome RequeueOutcome, delay time.Duration, lastErr string) (*domain.Conversation, error)
 
 	// ResetProcessingConversations is the boot reset: every claim this
 	// executor minted in a strictly earlier boot (executor_id = executorID AND

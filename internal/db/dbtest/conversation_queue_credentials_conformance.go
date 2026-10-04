@@ -84,7 +84,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		if first.ClaimID == "" {
 			t.Fatal("ClaimNextConversation returned no claim id; teardown has nothing to stamp")
 		}
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, first.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		second := claim(t, store, conversationID)
@@ -191,7 +191,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 	t.Run("RequeueConversation_clears_key", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.StageStep(t)
-		claim(t, store, conversationID)
+		claimed := claim(t, store, conversationID)
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
@@ -200,7 +200,7 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// failure requeues it.
 		seed.SetActivePhase(t, conversationID, "")
 
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "transient"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, claimed.ClaimID, db.RequeueSetupFailure, 0, "transient"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, conversationID)
@@ -224,13 +224,13 @@ func RunClaimCredentialsConformance(t *testing.T, mk ClaimCredentialsFactory) {
 		// sweep re-seals its bundle every tick.
 		store, orgID, seed := mk(t)
 		conversationID := seed.StageStep(t)
-		claim(t, store, conversationID)
+		claimed := claim(t, store, conversationID)
 		if matched, err := store.MarkAwaitingCredentials(ctx, orgID, conversationID, pubKey); err != nil || !matched {
 			t.Fatalf("MarkAwaitingCredentials = (%v, %v), want (true, nil)", matched, err)
 		}
 
 		// Requeue straight from the parked shape the failed bring-up leaves.
-		if _, err := store.RequeueConversation(ctx, orgID, conversationID, db.RequeueSetupFailure, 0, "sidecar bring-up failed"); err != nil {
+		if _, err := store.RequeueConversation(ctx, orgID, conversationID, claimed.ClaimID, db.RequeueSetupFailure, 0, "sidecar bring-up failed"); err != nil {
 			t.Fatalf("RequeueConversation: %v", err)
 		}
 		got, ok, err := store.GetClaim(ctx, orgID, conversationID)

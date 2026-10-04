@@ -51,10 +51,10 @@ import (
 // conversation, never existed — is one answer: this caller is not the owner.
 // The one refinement is that an unreleased claim whose lease lapsed says so,
 // as db.ErrClaimLeaseExpired, which is still db.ErrClaimReleased to every
-// caller that asks only that. The row is read whatever its state rather than
-// matched by the predicate, so it is locked whenever it exists, which adds no
-// window: a row the old predicate skipped was one no write could land on
-// anyway.
+// caller that asks only that. The row is read whatever its state, and the
+// ownership test is applied to what was read, so the row is locked whenever
+// it exists. Locking a row that then fails the test opens no window: a
+// released or lapsed claim is one no fenced write can land on anyway.
 //
 // statement_timestamp() rather than now(): the expiry has to be read against
 // fresh database time, not the instant the caller's transaction began, or a

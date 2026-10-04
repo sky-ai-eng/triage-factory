@@ -249,8 +249,10 @@ type ConversationStore interface {
 	//
 	// Re-stamps queued_at to now as well: the wake opens a new queue episode,
 	// and the column marks when the current one began — the placement
-	// claim's aging window and the UI's queue-dwell readout both measure
-	// from it. started_at is never touched.
+	// claim's aging window, the retry budgets (which count only hand-backs
+	// released after it, so a person's message starts every budget afresh)
+	// and the UI's queue-dwell readout all measure from it. started_at is
+	// never touched.
 	// A conversation carrying a boundary (ended_at) is refused whatever its
 	// status. An ended conversation is not the task's any more: the
 	// task-level claim arm claims only the newest un-ended row, so a wake
@@ -261,17 +263,27 @@ type ConversationStore interface {
 	//
 	// ok=false means the conversation is no longer resumable (a boundary
 	// already ended it, or a concurrent resume/cancel/claim already moved it,
-	// or it failed) — the caller maps the miss to 409.
+	// or it failed, or its blueprint run was called off) — the caller maps the
+	// miss to 409.
 	//
-	// One blueprint fact IS checked here, in the same statement, because it
-	// is the one no caller can check without racing: a `completed` row whose
+	// Two blueprint facts ARE checked here, in the write, because no caller
+	// can check them without racing. The first: a `completed` row whose
 	// blueprint is still running is refused. That row has handed its terminal
 	// to the reactor and is moments from being advanced past or finalized;
 	// un-terminaling it makes the reactor read a successor's state where this
-	// engagement's terminal should be, and the blueprint dies on it. The
-	// `open` arm is unconditional by contrast — a stopped mid-blueprint step
-	// is a paused step continuing, and its conclusion SHOULD advance the
-	// sequence.
+	// engagement's terminal should be, and the blueprint dies on it.
+	//
+	// The second is the `open` arm's: it refuses a step whose run was called
+	// off (cancel requested, or cancelled), the run the claim gate drives
+	// nothing under. A follow-up's gate refuses that too, but a cancel and its
+	// settlement can land between the gate and this write, and a step woken
+	// under a called-off run is a mid-flight row the claim gate refuses, no
+	// settlement arm matches once the run is cancelled, and the stranded-run
+	// replay ignores. Otherwise the `open` arm is unconditional — a stopped
+	// mid-blueprint step is a paused step continuing, and its conclusion
+	// SHOULD advance the sequence. The check reads the run past blueprint_runs
+	// RLS, so a teammate who cannot see another user's manual run gets the
+	// creator's answer.
 	//
 	// WHICH step of a finished blueprint may be woken is still not checked
 	// here — only the last one may, and that gate needs an admin-pool read
