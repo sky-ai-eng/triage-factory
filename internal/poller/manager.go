@@ -138,12 +138,15 @@ type Manager struct {
 	cursorMu sync.Mutex
 	ghCursor map[string]string
 
-	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped once per
+	// heartbeatMu guards lastGithubTick/lastJiraTick — stamped at every
 	// wake of runGitHubCycle/runJiraCycle regardless of whether any org
-	// was due that wake (TFAC-573). Distinct from nextPoll/dueMu: nextPoll
-	// only gets a slot for orgs actually polled, so an org roster of zero
-	// (or every org not-yet-due) would otherwise look identical to a dead
-	// loop. This is the /readyz hard "is the base-tick loop alive" check.
+	// was due that wake, and within a cycle as each upstream request
+	// completes and each org's poll finishes. Distinct from nextPoll/dueMu:
+	// nextPoll only gets a slot for orgs actually polled, so an org roster
+	// of zero (or every org not-yet-due) would otherwise look identical to a
+	// dead loop. This is the /readyz hard "is the poll loop alive" check,
+	// and it goes stale when the loop stops making progress, not when a
+	// cycle runs long.
 	heartbeatMu    sync.Mutex
 	lastGithubTick time.Time
 	lastJiraTick   time.Time
@@ -152,7 +155,7 @@ type Manager struct {
 	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
 	// call without error and did not leave the org's connection down. This
 	// is the /readyz soft signal: it proves an org's poll actually completed,
-	// where the heartbeat above only proves the loop woke.
+	// where the heartbeat above only proves the loop is moving.
 	pollSuccessMu     sync.Mutex
 	lastGithubSuccess map[string]time.Time
 	lastJiraSuccess   map[string]time.Time
@@ -517,6 +520,12 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 	ctx, span := tracer.Start(context.Background(), "poll.github",
 		trace.WithAttributes(telemetry.Source("github")))
 	defer span.End()
+	// The heartbeat is the poller making progress, not the cycle being short:
+	// a cycle over many orgs, or one org on a slow host, can run past the
+	// /readyz window while every request in it completes. It is stamped as
+	// each request completes and as each org's poll finishes, so it goes
+	// stale only when the cycle stops moving.
+	ctx = upstream.WithProgress(ctx, m.stampGitHubHeartbeat)
 
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -566,6 +575,7 @@ func (m *Manager) runGitHubCycle(stop <-chan struct{}) {
 		polled++
 		refreshManaged()
 		m.runGitHubCycleForOrg(ctx, orgID)
+		m.stampGitHubHeartbeat()
 	}
 	m.prunePoll("github", orgIDs)
 }
@@ -1286,6 +1296,9 @@ func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 	ctx, span := tracer.Start(context.Background(), "poll.jira",
 		trace.WithAttributes(telemetry.Source("jira")))
 	defer span.End()
+	// The heartbeat is progress, stamped per request and per org, for the
+	// reasons in runGitHubCycle.
+	ctx = upstream.WithProgress(ctx, m.stampJiraHeartbeat)
 
 	now := time.Now()
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
@@ -1317,6 +1330,7 @@ func (m *Manager) runJiraCycle(stop <-chan struct{}) {
 		}
 		polled++
 		m.runJiraCycleForOrg(ctx, sysResolver, orgID, now)
+		m.stampJiraHeartbeat()
 	}
 	m.prunePoll("jira", orgIDs)
 }

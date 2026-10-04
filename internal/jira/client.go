@@ -1349,6 +1349,10 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 // is buffered as bytes so each attempt gets a fresh reader (an http.Request
 // body isn't reusable across attempts). Every wait is ctx-aware, so the
 // caller's deadline bounds total blocking regardless of the retry cap.
+//
+// Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
+// transient failure marks its host unreachable, and every later request to
+// that host gets one attempt, with no retry and no wait.
 func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
 	for attempt := 1; ; attempt++ {
 		var reader io.Reader
@@ -1363,6 +1367,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			return 0, nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		host := req.URL.Host
 
 		resp, err := c.http.Do(req)
 		if err != nil {
@@ -1371,7 +1376,8 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 				return 0, nil, err
 			}
 			upstream.Record(ctx, upstream.Jira, c.orgID, class)
-			if !upstream.RetryableTransport(err, idempotent) || attempt > maxRateLimitRetries {
+			if !upstream.RetryableTransport(err, idempotent) || attempt > maxRateLimitRetries || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, host)
 				return 0, nil, err
 			}
 			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
@@ -1391,22 +1397,23 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 		if rerr != nil {
 			if class, counted := upstream.ClassifyTransport(ctx, rerr); counted {
 				upstream.Record(ctx, upstream.Jira, c.orgID, class)
+				upstream.MarkUnreachable(ctx, host)
 			}
 			return 0, nil, rerr
 		}
 
 		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
 		upstream.Record(ctx, upstream.Jira, c.orgID, class)
-		if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt > maxRateLimitRetries {
-			return resp.StatusCode, data, nil
-		}
-
+		// A wait longer than maxRateLimitWait is not honored inline: the
+		// response goes back to the caller, which turns it into its normal
+		// error, rather than pinning the goroutine (and, on the agent path, a
+		// run slot) waiting it out.
 		wait := rateLimitWait(resp.Header, attempt)
-		if wait > maxRateLimitWait {
-			// Retry-After is longer than we're willing to block for: surface the
-			// throttled response so the caller turns it into its normal error
-			// rather than pinning the goroutine (and, on the agent path, a run
-			// slot) waiting it out.
+		if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt > maxRateLimitRetries ||
+			wait > maxRateLimitWait || upstream.Unreachable(ctx, host) {
+			if class == upstream.Transient {
+				upstream.MarkUnreachable(ctx, host)
+			}
 			return resp.StatusCode, data, nil
 		}
 		if serr := c.retryAfter(ctx, attempt, class, wait, "throttled"); serr != nil {

@@ -41,6 +41,12 @@ curl -fsS http://localhost:3000/readyz | jq .
 }
 ```
 
+A poller check (`poller_github`, `poller_jira`) fails when that source's poll
+loop has made no progress for 90 seconds: it has not woken, completed a request
+to the upstream, or finished an org's poll. A cycle that runs longer than that
+while its requests keep completing (many orgs, or one org on a slow host) is
+not a failure.
+
 An org absent from `rate_limit.github` has no observation yet this process (never
 polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
 disabled), not zero remaining budget.
@@ -452,6 +458,15 @@ speak TLS), and a timeout, which has already spent the client's whole time
 budget. A rate-limited request was refused
 before it was processed, which is why Jira can safely send even a mutation
 again after a 429.
+
+Within one org's poll cycle, GitHub and Jira stop retrying a host once a
+request to it has ended in a transient failure, after whatever retries that
+request was allowed: every later request in the cycle to the same host gets one
+attempt, with no backoff and no `Retry-After` wait. The cycle has already
+recorded the connection as lost, and the next cycle retries in full, so an org
+whose host is unreachable costs one retry sequence per cycle rather than one
+per repo, and the orgs polled after it are not held up. Requests made outside
+a poll cycle, such as a delegated run's, keep every retry.
 
 The error a client returns for a failed request carries the status and either
 the upstream's own error message from a JSON body, cut to at most 200
