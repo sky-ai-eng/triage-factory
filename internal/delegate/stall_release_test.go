@@ -132,7 +132,7 @@ func TestEnsureWorkspace_ARehydrateTimeoutIsAnError(t *testing.T) {
 // would turn the idle park into a stalled one, or stop whatever holds the
 // conversation next.
 func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
-	const idle = 200 * time.Millisecond
+	const idle = 400 * time.Millisecond
 	f := newWorkspaceStallFixture(t, "r-park-slow-snapshot", activityTimings{idle: idle})
 	f.s.SetStorage(&slowPutStorage{Storage: f.s.Storage(), delay: 3 * idle})
 
@@ -171,7 +171,7 @@ func TestStall_AnIdleParkWithASlowSnapshotFilesNoStop(t *testing.T) {
 // snapshot would take a conversation the queue is about to run again out of
 // the queue.
 func TestStall_AShutdownHandBackWithASlowSnapshotFilesNoStop(t *testing.T) {
-	const idle = 200 * time.Millisecond
+	const idle = 400 * time.Millisecond
 	f := newWorkspaceStallFixture(t, "r-handback-slow-snapshot", activityTimings{idle: idle})
 	f.s.SetStorage(&slowPutStorage{Storage: f.s.Storage(), delay: 3 * idle})
 
@@ -194,7 +194,7 @@ func TestStall_AShutdownHandBackWithASlowSnapshotFilesNoStop(t *testing.T) {
 // bound. A snapshot slower than the idle limit but inside that bound is not
 // a stall, and the blob it writes lands.
 func TestStall_ASlowPreTerminalSnapshotWithinItsBoundCompletes(t *testing.T) {
-	const idle = 150 * time.Millisecond
+	const idle = 300 * time.Millisecond
 	f := newWorkspaceStallFixture(t, "r-conclude-slow-snapshot", activityTimings{idle: idle, workspaceOp: time.Minute})
 	f.s.SetStorage(&slowPutStorage{Storage: f.s.Storage(), delay: 4 * idle})
 
