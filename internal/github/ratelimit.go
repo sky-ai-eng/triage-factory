@@ -228,7 +228,9 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks its host unreachable, and every later request to
-// that host gets one attempt the same way a mutation does.
+// that host gets one attempt the same way a mutation does. A request that
+// timed out makes its host silent, and a later request to a silent host is
+// not sent (upstream.Silent).
 //
 // Any response that isn't retried is returned to the caller. A success keeps
 // its body untouched and still open, so callers that stream
@@ -254,6 +256,10 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			return nil, err
 		}
 		host := req.URL.Host
+		if upstream.Silent(ctx, host) {
+			return nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
+		}
+		sent := time.Now()
 		resp, err := hc.Do(req)
 		if err != nil {
 			class, counted := upstream.ClassifyTransport(ctx, err)
@@ -262,7 +268,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
-				upstream.MarkUnreachable(ctx, host)
+				upstream.MarkTransportFailure(ctx, host, sent, err)
 				return nil, &upstream.TransportError{Err: err}
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
@@ -270,6 +276,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			}
 			continue
 		}
+		upstream.MarkAnswered(ctx, host)
 		c.recordRateLimit(resp.Header)
 
 		if resp.StatusCode < 400 {

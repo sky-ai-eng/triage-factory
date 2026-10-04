@@ -217,11 +217,7 @@ func RetryableTransport(err error, idempotent bool) bool {
 		errors.As(err, &recordErr), errors.Is(err, http.ErrSchemeMismatch):
 		return false
 	}
-	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return false
-	}
-	return true
+	return !timedOut(err)
 }
 
 // maxRetryAfter is the longest wait RetryAfter reports. It is far above any

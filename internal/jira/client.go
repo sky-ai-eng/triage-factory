@@ -1352,7 +1352,9 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks its host unreachable, and every later request to
-// that host gets one attempt, with no retry and no wait.
+// that host gets one attempt, with no retry and no wait. A request that timed
+// out makes its host silent, and a later request to a silent host is not sent
+// (upstream.Silent).
 func (c *Client) doRequest(ctx context.Context, method, url string, body []byte, idempotent bool) (int, []byte, error) {
 	for attempt := 1; ; attempt++ {
 		var reader io.Reader
@@ -1368,7 +1370,11 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 		}
 		req.Header.Set("Content-Type", "application/json")
 		host := req.URL.Host
+		if upstream.Silent(ctx, host) {
+			return 0, nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
+		}
 
+		sent := time.Now()
 		resp, err := c.http.Do(req)
 		if err != nil {
 			class, counted := upstream.ClassifyTransport(ctx, err)
@@ -1377,7 +1383,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			}
 			upstream.Record(ctx, upstream.Jira, c.orgID, class)
 			if !upstream.RetryableTransport(err, idempotent) || attempt > maxRateLimitRetries || upstream.Unreachable(ctx, host) {
-				upstream.MarkUnreachable(ctx, host)
+				upstream.MarkTransportFailure(ctx, host, sent, err)
 				return 0, nil, &upstream.TransportError{Err: err}
 			}
 			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
@@ -1385,6 +1391,7 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 			}
 			continue
 		}
+		upstream.MarkAnswered(ctx, host)
 
 		var data []byte
 		var rerr error

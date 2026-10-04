@@ -465,8 +465,14 @@ request was allowed: every later request in the cycle to the same host gets one
 attempt, with no backoff and no `Retry-After` wait. The cycle has already
 recorded the connection as lost, and the next cycle retries in full, so an org
 whose host is unreachable costs one retry sequence per cycle rather than one
-per repo, and the orgs polled after it are not held up. Requests made outside
-a poll cycle, such as a delegated run's, keep every retry.
+per repo, and the orgs polled after it are not held up. A timeout goes further,
+because its one attempt is the client's whole time budget: once a request to a
+host times out, later requests in the cycle to that host are not sent at all,
+and fail as that timeout did. They are not counted, since they never reached
+the host. If the host answers another request after the one that timed out
+was sent, the host was serving while that request hung, and later requests
+are sent again. Requests made outside a poll cycle, such as a delegated run's, keep every
+retry.
 
 The error a client returns for a failed request carries the status and either
 the upstream's own error message from a JSON body, cut to at most 200
