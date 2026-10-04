@@ -922,12 +922,9 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	// that bound up. The wait for an in-flight persist is not part of it — it
 	// has a bound of its own, which an operator sets — and the fresh-build
 	// rung reports its own operations.
-	timings := s.resolvedActivityTimings()
 	activity := s.activityFor(conv.ID)
 	beginRehydrate := func() (context.Context, func()) {
-		opCtx, cancel := context.WithTimeout(ctx, timings.workspaceOp)
-		end := activity.begin("rehydrate", timings.workspaceOp)
-		return opCtx, func() { end(); cancel() }
+		return s.beginWorkspaceOp(ctx, conv.ID, "rehydrate")
 	}
 	opCtx, endOp := beginRehydrate()
 	defer func() { endOp() }()

@@ -187,6 +187,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// is the fence's doing, not the work's, and the database still
 		// accepts a terminal until the lease actually lapses.
 		if leaseFenced(ctx) {
+			s.releaseActivity(conversationID, cfg.claimID)
 			parked = true
 			return true
 		}
@@ -195,6 +196,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// and a failed conversation is exactly the one a person will want it
 		// from.
 		mirror.settle(ctx)
+		s.releaseActivity(conversationID, cfg.claimID)
 		if !s.failConversation(orgID, conversationID, task.ID, cfg.claimID, triggerType, msg, kind) {
 			return false
 		}
@@ -220,6 +222,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	cancelled := func(sessionID string, costUSD float64) engagementDisposition {
 		parked = true
 		if leaseFenced(ctx) {
+			s.releaseActivity(conversationID, cfg.claimID)
 			return engagementDisposition{fenced: true}
 		}
 		park := liveParkContext{
@@ -962,6 +965,13 @@ func (s *Spawner) processCompletion(
 		span.SetAttributes(telemetry.Outcome(terminal))
 		span.End()
 	}()
+	// A fenced engagement holds no claim, so its watchdog has nothing left to
+	// stop.
+	defer func() {
+		if fenced {
+			s.releaseActivity(conversationID, claimID)
+		}
+	}()
 
 	// A result in hand is not authority to record it. The lease fence cancels
 	// the step context, and the driver's select races that cancellation
@@ -1122,8 +1132,14 @@ func (s *Spawner) processCompletion(
 	// is also the claim release, so the instant it commits a follow-up can be
 	// accepted and a claim minted — for a workspace that, the other way round, is
 	// still being written.
+	//
+	// The claim is still held, so the snapshot is one of the engagement's
+	// operations: bounded, and the idle limit does not apply while it runs.
 	if status == "completed" {
-		if err := s.snapshotWorkspace(ctx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK); err != nil {
+		snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
+		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK)
+		endSnap()
+		if err != nil {
 			delegateLog.Warn("snapshot workspace for completed conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
 		}
 	}
@@ -1132,6 +1148,7 @@ func (s *Spawner) processCompletion(
 	// and a claimless caller has no engagement to speak for. An empty claimID
 	// is refused by the store as a released claim, which lands in the branch
 	// below and records nothing.
+	s.releaseActivity(conversationID, claimID)
 	completedRow, completeErr := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, claimID, status, completion.CostUSD, completion.DurationMs, completion.NumTurns, resultSummary, outcome, outcomeReason, string(failureKind))
 	if errors.Is(completeErr, db.ErrClaimReleased) {
 		// A successor owns the conversation, so this result is not the run's

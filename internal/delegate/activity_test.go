@@ -58,6 +58,15 @@ func TestActivityTimings(t *testing.T) {
 	if got := (activityTimings{toolCall: time.Second}).toolSocket(); got <= time.Second {
 		t.Errorf("toolSocket for an injected 1s tool bound = %s, want above it", got)
 	}
+	// A workspace operation's own timeout fires first, so a clone or a
+	// rehydrate that runs out of time is the setup failure it is, and a
+	// snapshot that does is a snapshot that failed — never a stall.
+	if got := (activityTimings{workspaceOp: workspaceOpDeadline}).workspaceOpBackstop(); got <= workspaceOpDeadline {
+		t.Errorf("workspace operation's watchdog deadline %s is not above its own timeout %s", got, workspaceOpDeadline)
+	}
+	if got := (activityTimings{workspaceOp: time.Second}).workspaceOpBackstop(); got <= time.Second {
+		t.Errorf("workspaceOpBackstop for an injected 1s bound = %s, want above it", got)
+	}
 }
 
 // stallRecorder collects what a tracker's watchdog decided.
@@ -660,9 +669,9 @@ func (f stallFixture) parkLikeRunAgent(t *testing.T) {
 	}
 }
 
-// TestSDKStall_ARunningToolIsNotIdle is the case the retired idle timer got
-// wrong: a tool call running past the idle limit emits nothing, and it is
-// work. It is stopped only once it outlives its own bound.
+// TestSDKStall_ARunningToolIsNotIdle: a tool call running past the idle limit
+// emits nothing, and it is work, not idleness. It is stopped only once it
+// outlives its own bound.
 func TestSDKStall_ARunningToolIsNotIdle(t *testing.T) {
 	stalls := stallCounter(t)
 	f := newStallFixture(t, "r-sdk-tool", activityTimings{idle: 60 * time.Millisecond, toolCall: 400 * time.Millisecond})
