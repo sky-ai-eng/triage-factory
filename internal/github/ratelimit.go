@@ -204,7 +204,7 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 }
 
 // doWithRetry is the shared request loop behind every request-core method
-// (request, GetConditional, PostGraphQL, DownloadArtifact — the last supplies
+// (request, GetConditional, postGraphQL, DownloadArtifact — the last supplies
 // its own hc with an extended timeout, everything else passes c.http). Every
 // attempt is classified and counted (upstream.Record) against the client's
 // org.
