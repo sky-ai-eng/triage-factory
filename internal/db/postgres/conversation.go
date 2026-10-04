@@ -92,7 +92,7 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		if err := settleCompletionCostAndClaim(ctx, q, orgID, conversationID, status, costUSD, durationMs, numTurns); err != nil {
@@ -274,7 +274,7 @@ func releaseActiveClaimWithTelemetry(ctx context.Context, q queryer, orgID, conv
 func (s *conversationStore) ParkOpenForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, park db.Park) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
@@ -724,7 +724,7 @@ func (s *conversationStore) SetSessionSystem(ctx context.Context, orgID, convers
 func (s *conversationStore) SetSessionForClaimSystem(ctx context.Context, orgID, conversationID, claimID, sessionID string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := setConversationSession(ctx, q, orgID, conversationID, sessionID)
@@ -957,7 +957,7 @@ func (s *conversationStore) SetWorktreePathSystem(ctx context.Context, orgID, co
 func (s *conversationStore) SetSystemBlockForClaimSystem(ctx context.Context, orgID, conversationID, claimID, block string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := writeConversationReturning(ctx, q, `
@@ -995,7 +995,7 @@ func (s *conversationStore) SystemBlockSystem(ctx context.Context, orgID, conver
 func (s *conversationStore) SetWorktreePathForClaimSystem(ctx context.Context, orgID, conversationID, claimID, path string) (*domain.Conversation, error) {
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		r, err := setConversationWorktreePath(ctx, q, orgID, conversationID, path)
@@ -1025,7 +1025,7 @@ func setConversationWorktreePath(ctx context.Context, q queryer, orgID, conversa
 func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error) {
 	var flipped bool
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error
@@ -1499,7 +1499,7 @@ func (s *conversationStore) RequestStopSystem(ctx context.Context, orgID, conver
 func (s *conversationStore) RequestStopForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, reason domain.ParkReason) (bool, error) {
 	requested := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
 			return err
 		}
 		var err error

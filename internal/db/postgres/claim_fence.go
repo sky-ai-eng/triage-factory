@@ -76,6 +76,26 @@ func assertClaimActive(ctx context.Context, q queryer, orgID, conversationID, cl
 	return claimRefusal(ctx, q, orgID, conversationID, claimID, "FOR SHARE")
 }
 
+// assertClaimActiveForConversationWrite is assertClaimActive for a fenced
+// write that also writes the conversation row, and it locks that row before
+// the claim. Every writer that touches a conversation and one of its claims
+// takes them in that order, so none can hold a claim another is waiting on
+// while it waits for that writer's conversation, the cycle Postgres breaks by
+// aborting one of them. A fenced write that touches only messages needs no
+// conversation lock: its foreign key takes KEY SHARE, which no conversation
+// write conflicts with.
+func assertClaimActiveForConversationWrite(ctx context.Context, q queryer, orgID, conversationID, claimID string) error {
+	if !isValidUUID(orgID) || !isValidUUID(conversationID) {
+		return fmt.Errorf("%w: claim %q on conversation %q", db.ErrClaimReleased, claimID, conversationID)
+	}
+	if _, err := q.ExecContext(ctx, `
+		SELECT 1 FROM conversations WHERE org_id = $1 AND id = $2 FOR NO KEY UPDATE
+	`, orgID, conversationID); err != nil {
+		return err
+	}
+	return assertClaimActive(ctx, q, orgID, conversationID, claimID)
+}
+
 // claimRefusal reads the named claim's state and answers whether a holder
 // write against it would be refused: nil while it is live, db.ErrClaimReleased
 // when there is no such claim on the conversation or it is released, and
