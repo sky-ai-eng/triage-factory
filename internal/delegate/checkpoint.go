@@ -78,6 +78,8 @@ const (
 const checkpointStoppingNotice = "This tool call was not run: the engagement stopped before it could start."
 
 // Outcomes of a checkpoint that came due, on tf_workspace_checkpoints_total.
+// skipped_busy counts a stretch of due checkpoints that could not start, once
+// however many batch boundaries it spans.
 const (
 	checkpointWritten          = "written"
 	checkpointSkippedUnchanged = "skipped_unchanged"
@@ -169,6 +171,11 @@ type checkpointer struct {
 	sandboxCalls int
 	// inflight is true from a checkpoint's start to the end of its upload.
 	inflight bool
+	// busyCounted is set once a due checkpoint that could not start has been
+	// counted, and cleared when a checkpoint starts or finishes. The
+	// boundaries behind one slow upload, or one stretch without a host slot,
+	// are one skip.
+	busyCounted bool
 	// captured is the in-flight checkpoint's barrier: closed once it has
 	// stopped reading the tree. Nil before the first checkpoint.
 	captured chan struct{}
@@ -281,10 +288,15 @@ func (c *checkpointer) afterToolBatch(_ context.Context, position float64) {
 		return
 	}
 	if c.inflight || !c.s.acquireCheckpointSlot() {
+		count := !c.busyCounted
+		c.busyCounted = true
 		c.mu.Unlock()
-		recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		if count {
+			recordWorkspaceCheckpoint(checkpointSkippedBusy)
+		}
 		return
 	}
+	c.busyCounted = false
 	c.lastStarted = time.Now()
 	c.sandboxCalls = 0
 	c.inflight = true
@@ -315,6 +327,7 @@ func (c *checkpointer) run(position float64, lastFingerprint string, captured ch
 
 	c.mu.Lock()
 	c.inflight = false
+	c.busyCounted = false
 	switch res.outcome {
 	case checkpointWritten:
 		c.lastFingerprint = res.fingerprint
