@@ -11,7 +11,7 @@ The pull request opens as a draft and the verb prints its number and url; do not
 2. `tfac gh pr add-review-comment <handle> --file <path> --line <N> --severity <blocker|major|minor|clean> --body <text>` — one call per finding. Use `--body-file <path>` for anything multi-line or containing backticks; it avoids shell quoting entirely. `--severity` renders a badge on the posted comment, and omitting it drops the badge silently. `comment-update` and `comment-delete` take the id this returns.
 3. `tfac gh pr finalize-review <handle> --event <approve|comment|request_changes> --body <summary>` — ends the review. Start the summary with a `##` heading.
 
-Comments anchor to the commit your worktree is on, so review the code you actually have in front of you.
+Comments anchor to the commit your checkout of that pull request is on, wherever you run the verb from, so review the code you actually have in front of you.
 If you `git pull` partway through, start over with `--fresh` rather than mixing comments across two commits.
 
 `finalize-review` is your last call on a review.

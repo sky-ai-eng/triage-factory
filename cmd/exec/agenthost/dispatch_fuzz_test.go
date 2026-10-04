@@ -115,6 +115,7 @@ func FuzzHandleConn(f *testing.F) {
 		{methodCreateWorkspaceCheckout, `{"owner":"o","repo":"r","ref":"refs/heads/main","pr":7}`},
 		{methodGithubGetPR, `{"owner":"o","repo":"r","number":7,"verbose":true}`},
 		{methodGithubAddPendingReviewComment, `{"owner":"o","repo":"r","review_id":"rv-1","path":"a.go","body":"b","line":-1,"start_line":-9}`},
+		{methodReviewDraftTarget, `{"review_id":"rv-1"}`},
 		{methodGithubDownloadArtifact, `{"owner":"o","repo":"r","path":"actions/runs/1/logs","max_bytes":9223372036854775807}`},
 		{methodJiraSearchIssues, `{"jql":"project = X","fields":["summary"],"max_results":-1}`},
 		{methodJiraUpdateIssue, `{"key":"SKY-1","fields":{"summary":"s"}}`},

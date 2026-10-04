@@ -681,14 +681,14 @@ func prStartReview(ctx context.Context, client ghAPI, host agenthost.Client, arg
 // prAddReviewComment bakes the severity badge into the comment body, then stages
 // it on this run's review draft (→ GithubAddPendingReviewComment, a local write).
 //
-// The comment is anchored to — and validated against — the run's WORKTREE HEAD:
-// the commit the agent's checkout is on, which is the frame the agent read the
-// diff in (`pr diff` shows that same frame). Validating the (path, line,
-// start_line) against the local checkout's diff and anchoring the submitted
-// comment to that same commit is what keeps a line the agent saw mapped to the
-// line GitHub anchors to — sourcing either from the live PR head would re-open
-// the skew when the checkout has fallen behind. Outside a worktree it hands an
-// empty anchor to the host, which falls back to live-head validation.
+// The comment is anchored to — and validated against — the HEAD of the run's
+// checkout of the reviewed PR: the frame `pr diff` shows the agent. Validating
+// the (path, line, start_line) against that checkout's diff and anchoring the
+// submitted comment to the same commit is what keeps a line the agent saw
+// mapped to the line GitHub anchors to — sourcing either from the live PR head
+// would re-open the skew when the checkout has fallen behind. With no checkout
+// of the PR it hands an empty anchor to the host, which falls back to live-head
+// validation, the same frame `pr diff` falls back to.
 //
 // Severity lives only in the comment body (the overlay parses it back out for
 // the chip).
@@ -743,32 +743,9 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 		startLine = &v
 	}
 
-	owner, repo := ownerRepo(ctx, host, args)
 	_ = lookupConversation(host)
-
-	// Resolve the anchor: the reviewed PR's worktree HEAD — the commit the
-	// agent's checkout is on, which is the frame it read the diff in. The host
-	// validates the range against this commit's diff (compare base...HEAD) and
-	// pins the submitted comment to it. Empty when there's no checkout, in which
-	// case the host falls back to live-head validation + anchoring.
-	//
-	// Prefer the PR's worktree resolved from the conversation's
-	// (conversation, repo, ref) registry over cwd: in a multi-PR conversation
-	// cwd may sit in a DIFFERENT PR's checkout (TFAC-494/TFAC-502), which would
-	// anchor this comment to the wrong commit. Falls back to cwd HEAD when the
-	// registry has no unambiguous PR worktree for this repo (single-PR
-	// conversations, or a path the CLI can't rev-parse), preserving prior
-	// behavior.
-	cwd, err := os.Getwd()
-	if err != nil {
-		exitErr(fmt.Sprintf("resolve cwd: %v", err))
-	}
-	anchorSHA := resolveLocalCheckout(cwd).headSHA
-	if wt := reviewedPRWorktreePath(host, owner, repo); wt != "" {
-		if sha := resolveLocalCheckout(wt).headSHA; sha != "" {
-			anchorSHA = sha
-		}
-	}
+	owner, repo, anchorSHA, err := reviewCommentTarget(ctx, host, reviewID, args)
+	exitOnErr(err)
 
 	// Bake the badge in, then stage onto this run's review draft. The host resolves
 	// the run's review artifact, validates the range against the anchor commit's
@@ -785,42 +762,41 @@ func prAddReviewComment(ctx context.Context, host agenthost.Client, args []strin
 	})
 }
 
-// reviewedPRWorktreePath returns the absolute worktree path of the PR being
-// reviewed in owner/repo, resolved from the conversation's
-// (conversation, repo, ref) worktree registry: the unique
-// conversation_worktrees row whose repo matches and whose ref is a PR ref
-// ("pr-<N>"). This is what lets add-review-comment anchor to the RIGHT PR's
-// worktree HEAD in a multi-PR conversation instead of trusting cwd (TFAC-502).
+// reviewHost is the part of agenthost.Client reviewCommentTarget reads: the
+// review draft's recorded PR and the run's checkouts.
+type reviewHost interface {
+	runCheckouts
+	ReviewDraftTarget(ctx context.Context, reviewID string) (owner, repo string, number int, err error)
+}
+
+// reviewCommentTarget resolves the repo a staged comment belongs to and the
+// commit it anchors to. Both follow from the PR the review draft was started
+// on, read back from the host's record of it, so neither depends on where the
+// agent is standing: an agent in another repo's checkout, or another PR's
+// checkout of the same repo, still comments on the reviewed PR. An explicit
+// --repo must agree with the review.
 //
-// Returns "" when there is no such row, or more than one (two PRs reviewed in
-// the SAME repo within one conversation is ambiguous without the PR number,
-// so the caller falls back to cwd — the agent is expected to have cd'd into
-// the reviewed PR's worktree). A list error is non-fatal: anchoring degrades
-// to cwd, never blocking the comment.
-func reviewedPRWorktreePath(host agenthost.Client, owner, repo string) string {
-	rows, err := host.ListConversationWorktrees(context.Background())
+// The anchor is the HEAD of the run's checkout of exactly that PR (prCheckout,
+// the lookup `pr diff` frames its diff with), or "" when the run holds none, in
+// which case the host anchors to the live head. The HEAD is read here, in the
+// agent's own process, from a checkout the agent can write; the host never runs
+// git in the run tree. It treats the anchor as a claim and checks it against
+// GitHub's compare diff for the reviewed PR before staging anything.
+func reviewCommentTarget(ctx context.Context, host reviewHost, reviewID string, args []string) (owner, repo, anchorSHA string, err error) {
+	owner, repo, number, err := host.ReviewDraftTarget(ctx, reviewID)
 	if err != nil {
-		return ""
+		return "", "", "", err
 	}
-	repoID := owner + "/" + repo
-	match := ""
-	for _, w := range rows {
-		if !strings.EqualFold(w.RepoID, repoID) || !strings.HasPrefix(w.Ref, "pr-") {
-			continue
+	if hasFlag(args, "--repo") {
+		flagOwner, flagRepo, err := splitOwnerRepoStr(flagVal(args, "--repo"), "--repo flag")
+		if err != nil {
+			return "", "", "", err
 		}
-		if match != "" {
-			// Two PR worktrees in one repo for this run — we can't tell which PR
-			// this comment targets from owner/repo alone, so fall back to cwd
-			// HEAD. Warn (stderr, so the success JSON on stdout stays clean) so a
-			// "comment anchored to the wrong commit" symptom is diagnosable: the
-			// agent must run add-review-comment from inside the reviewed PR's
-			// worktree in that case.
-			fmt.Fprintf(os.Stderr, "gh pr add-review-comment: %s has multiple PR worktrees this run; anchoring to cwd HEAD — run this from the reviewed PR's worktree\n", repoID)
-			return ""
+		if !strings.EqualFold(flagOwner+"/"+flagRepo, owner+"/"+repo) {
+			return "", "", "", fmt.Errorf("review %s is for %s/%s#%d, not %s/%s; drop --repo, or start a review on the PR you mean", reviewID, owner, repo, number, flagOwner, flagRepo)
 		}
-		match = w.Path
 	}
-	return match
+	return owner, repo, prCheckout(ctx, host, owner, repo, number).headSHA, nil
 }
 
 // prFinalizeReview hands the finished review to the host, which snapshots the

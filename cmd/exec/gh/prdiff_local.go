@@ -49,15 +49,16 @@ func resolveLocalCheckout(dir string) localCheckout {
 
 // prCheckout returns the run's checkout of PR number in owner/repo: the
 // conversation_worktrees row whose repo matches and whose ref is exactly
-// pr-<number>, resolved to its HEAD. The current directory plays no part, so
-// an agent standing at the run root or in another repo's checkout still diffs
-// against the PR's own code. ok=false when the run holds no such checkout; the
+// pr-<number>, resolved to its HEAD. It is the one frame `pr diff` diffs in and
+// `add-review-comment` anchors to. The current directory plays no part, so an
+// agent standing at the run root or in another repo's checkout still reaches
+// the PR's own code. ok=false when the run holds no such checkout; the
 // caller then uses the API diff and says so. A registry read failure is noted
 // on stderr and degrades the same way.
 func prCheckout(ctx context.Context, host runCheckouts, owner, repo string, number int) localCheckout {
 	rows, err := listRunCheckouts(ctx, host)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pr diff: could not read this run's checkouts (%v); using the GitHub API diff\n", err)
+		fmt.Fprintf(os.Stderr, "could not read this run's checkouts (%v); using PR #%d's live head from the GitHub API\n", err, number)
 		return localCheckout{}
 	}
 	repoID := owner + "/" + repo

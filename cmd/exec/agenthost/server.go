@@ -441,6 +441,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return resetReviewDraftResult{ReviewID: reviewID, CommitSHA: commitSHA}, nil
 
+	case methodReviewDraftTarget:
+		var a reviewDraftTargetArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		owner, repo, number, err := client.ReviewDraftTarget(ctx, a.ReviewID)
+		if err != nil {
+			return nil, err
+		}
+		return reviewDraftTargetResult{githubRepoRef: githubRepoRef{Owner: owner, Repo: repo}, Number: number}, nil
+
 	case methodUpdateStagedReviewComment:
 		var a updateStagedReviewCommentArgs
 		if err := dec(&a); err != nil {

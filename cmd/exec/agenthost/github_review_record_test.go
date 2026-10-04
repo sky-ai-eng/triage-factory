@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -610,5 +611,70 @@ func TestLocalClient_PerCommentHeadSHA_CapturedAcrossCheckoutAdvance(t *testing.
 	if d.StagedComments[0].CommitSHA != "commit_v1" || d.StagedComments[1].CommitSHA != "commit_v2" {
 		t.Errorf("per-comment anchors = %q,%q, want commit_v1,commit_v2",
 			d.StagedComments[0].CommitSHA, d.StagedComments[1].CommitSHA)
+	}
+}
+
+// TestReviewDraftTarget_ReturnsRecordedPR pins the read add-review-comment
+// finds the reviewed PR's checkout through: the coordinates start-review
+// recorded on the draft, over the in-process client and over the socket the
+// jailed CLI dials. A handle that names no draft of this conversation is
+// refused rather than answered.
+func TestReviewDraftTarget_ReturnsRecordedPR(t *testing.T) {
+	stores, info, local := newGithubRecordingClient(t, "http://127.0.0.1:0", true)
+	handle, err := local.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+
+	sockPath := tempSocket(t)
+	listener, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := NewServer(stores, info, nil)
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = srv.Shutdown(context.Background())
+	})
+	ipc := Dial(sockPath)
+	t.Cleanup(func() { _ = ipc.Close() })
+
+	for name, c := range map[string]Client{"local": local, "ipc": ipc} {
+		owner, repo, number, err := c.ReviewDraftTarget(context.Background(), handle)
+		if err != nil || owner != "octo" || repo != "repo" || number != 7 {
+			t.Errorf("%s: got (%s/%s#%d, %v), want octo/repo#7", name, owner, repo, number, err)
+		}
+		if _, _, _, err := c.ReviewDraftTarget(context.Background(), "not-a-review"); err == nil {
+			t.Errorf("%s: an unknown handle should be refused", name)
+		}
+	}
+}
+
+// TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo pins the
+// host's own check that a staged comment's repo is the review's. The PR number
+// always comes from the draft, so a different owner/repo would validate the
+// comment against another repo's PR of the same number. Refused before any
+// GitHub call, and nothing is staged.
+func TestLocalClient_GithubAddPendingReviewComment_RefusesOtherRepo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected GitHub call for a mismatched repo: %s %s", r.Method, r.URL.Path)
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(srv.Close)
+	stores, info, client := newGithubRecordingClient(t, srv.URL, true)
+
+	handle, err := client.GithubCreatePendingReview(context.Background(), "octo", "repo", 7, "headsha7", nil)
+	if err != nil {
+		t.Fatalf("GithubCreatePendingReview: %v", err)
+	}
+	_, err = client.GithubAddPendingReviewComment(context.Background(), "octo", "other", handle, "a.go", "nit", 3, nil, "anchor")
+	if err == nil || !strings.Contains(err.Error(), "is for octo/repo#7") {
+		t.Fatalf("want a refusal naming the review's PR, got %v", err)
+	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	d, _ := domain.ParseReviewArtifactDetails(arts[0].DetailsJSON)
+	if len(d.StagedComments) != 0 {
+		t.Errorf("a refused comment must not be staged, got %+v", d.StagedComments)
 	}
 }
