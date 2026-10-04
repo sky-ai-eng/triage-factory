@@ -47,7 +47,7 @@ func TestCaptureWorkspaceGit_LocalModeSkipsIsolation(t *testing.T) {
 // the privileged capture op's worktree.CapturedState envelope: empty output
 // means nothing captured; a nil-delta object means "not a git worktree" (nil
 // delta, nil error); a delta decodes; a staged transcript path rides alongside
-// even when the delta is nil (the Jira/Slack lazy shape); garbage is a clear error.
+// even when the delta is nil (a run root with no git of its own); garbage is a clear error.
 func TestCaptureIsolated_DecodesState(t *testing.T) {
 	orig := captureViaSandbox
 	t.Cleanup(func() { captureViaSandbox = orig })

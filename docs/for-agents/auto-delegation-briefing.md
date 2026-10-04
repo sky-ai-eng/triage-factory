@@ -42,7 +42,7 @@ Worktrees are **destroyed after every run** (`internal/worktree/worktree.go`). D
 3. Agent reads/writes files normally
 4. Spawner ingests new/modified files back to the DB on teardown
 
-This is how SKY-141 (task memory) works, and it's how SKY-146 puts log archives under the managed scratch dir (`_tfac/`, `_scratch/` before it was renamed) inside the worktree.
+This is how SKY-141 (task memory) works, and it's how SKY-146 puts log archives under the managed scratch dir (`_tfac/`) in the run root.
 
 ### 3. Filesystem > tool proxy for agent data access
 
@@ -81,9 +81,9 @@ Note the distinction between `task_unsolvable` (voluntary, agent-declared) and `
 
 Per project convention: update `CREATE TABLE` in `internal/db/db.go` directly. Assume a full DB wipe is acceptable. Schema evolution is basically free — change the definition and move on. If you're tempted to add a backwards-compat shim, don't.
 
-### 9. Local excludes, not committed gitignore
+### 9. Nothing of TF's lives in a checkout
 
-The managed scratch directory `_tfac/` (covering both `_tfac/entity-memory/` from SKY-141 and `_tfac/ci-logs/` from SKY-146) is added to `.git/info/exclude` at worktree creation, **not** to a committed `.gitignore`. We don't want to pollute the tracked repo with entries for our internal scratch dirs. One prefix exclude covers everything under it.
+Every run's root is a plain folder (`worktree.RunRoot`), and every repository checkout sits beneath it at `<owner>/<repo>/<slug>` — a PR run's own checkout included. The managed scratch directory `_tfac/` (covering `_tfac/entity-memory/`, `_tfac/ci-logs/` and the rest), the memory link and `.claude/skills` live only at that root, outside every checkout. Checkout builders write nothing of TF's into a checkout: no exclude block, no skills link.
 
 ### 10. Build order
 
@@ -140,7 +140,7 @@ Several tickets touch the same plumbing. You can assume you're the only agent ma
 ### Managed scratch directory convention
 
 - **Built in**: SKY-141 (for `entity-memory/`) and SKY-146 (for `ci-logs/`)
-- Subsumed under a single prefix in SKY-219 — `_scratch/` then, `_tfac/` now (the old name stays excluded so a worktree built by an older binary can't leak leftovers into a commit). One `.git/info/exclude` entry covers everything under it.
+- Subsumed under a single prefix in SKY-219: `_tfac/`, at the run root, outside every checkout.
 
 ### `trigger_source` column
 
@@ -201,7 +201,7 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 
 5. **Worktree cleanup deletes `~/.claude/projects/<cwd-hash>/` too** (commit `ba1df6b`). Preserve that behavior; removing it leaks ghost sessions.
 
-6. **Don't commit memories or scratch files.** Local exclude via `.git/info/exclude` at worktree creation. The guardrails block also tells the agent not to commit them — belt and suspenders.
+6. **Don't commit memories or scratch files.** `_tfac/` sits at the run root, outside every checkout, so nothing in it is in a repository to commit. The guardrails block also tells the agent not to copy anything from it into a checkout.
 
 7. **Shipped prompts need BOTH a file AND a seed-list entry.** If you add `internal/promptseed/prompts/ci-fix.txt`, you also need an entry in `promptseed.Prompts()` (and, so the drift sync reaches it, a wrapping blueprint in `promptseed.Blueprints()`). Missing either half results in a prompt that doesn't exist or a dangling reference.
 

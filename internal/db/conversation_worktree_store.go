@@ -102,6 +102,22 @@ type ConversationWorktreeStore interface {
 	// Exempt from the returned-row rule: it is a delete.
 	DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error
 
+	// ListForTaskSystem returns the rows of every conversation on taskID, in
+	// insertion order. A task's conversations share one run root, so this is
+	// the set of checkouts that root can hold: what a workspace snapshot
+	// captures and what a blueprint's cleanup reclaims. Admin pool only — the
+	// callers are delegate goroutines with no JWT claims in scope.
+	ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.ConversationWorktree, error)
+
+	// RecordForClaimSystem records w for its conversation behind claimID's
+	// fence: inserted when the conversation holds no row for (repo, ref), its
+	// path moved to w.Path when it does. A workspace restore calls it for every
+	// checkout it rebuilt, so the restoring conversation holds each one at the
+	// path it has now — which is what the push gate and the next snapshot read.
+	// Refused with db.ErrClaimReleased once claimID no longer owns the
+	// conversation. Returns the row it stored.
+	RecordForClaimSystem(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) (domain.ConversationWorktree, error)
+
 	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
 	//
 	// `triagefactory exec workspace add` invoked by an event-triggered

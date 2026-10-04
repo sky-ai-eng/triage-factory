@@ -444,8 +444,9 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 }
 
 // authorizedRepos returns the conversation's authorized repo set as "owner/repo"
-// strings: every distinct repo in the conversation's conversation_worktrees ledger, PLUS the
-// task's own primary repo — both filtered to what the team tracks. The
+// strings: every distinct repo in the conversation_worktrees ledger of the
+// conversation and of the rest of its task's conversations, PLUS the task's own
+// primary repo — all filtered to what the team tracks. The
 // conversation_worktrees half is the credential-minting mirror of
 // gitAuthorizeDecision (internal/delegate/spawner.go), which enforces the
 // same intersection live at the git proxy; minting outside that set would
@@ -495,6 +496,17 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
 		if err != nil {
 			return nil, err
+		}
+		// The rest of the task's conversations' checkouts too: they share one
+		// run tree, so this conversation can be the one that restores them from
+		// the task's snapshot — whose rebuild runs through this bundle — before
+		// it records them as its own.
+		if taskID != "" {
+			taskRows, err := m.stores.ConversationWorktrees.ListForTaskSystem(ctx, orgID, taskID)
+			if err != nil {
+				return nil, err
+			}
+			rows = append(rows, taskRows...)
 		}
 		for _, w := range rows {
 			add(w.RepoID)

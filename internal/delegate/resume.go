@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // ErrConversationNotResumable is returned when a wake's compare-and-swap found the
@@ -154,8 +155,10 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 // workspaceRecoverable reports whether a parked run can still be resumed. Four
 // rungs, most-certain-first, and only the last is a judgement call:
 //
-//   - the warm worktree survives on disk;
-//   - the durable snapshot blob is present to cold-rehydrate from;
+//   - the warm worktree survives on disk (and is not one an older binary laid
+//     out, which the claim removes rather than reuses);
+//   - the durable snapshot blob is present to cold-rehydrate from, of the
+//     layout this binary restores — an older blob is no snapshot;
 //   - neither, but the record says a persist is in flight and the engagement
 //     that owes it is still there to finish it. That is the gap a park
 //     deliberately opens — the status flips before the capture runs — and the
@@ -176,7 +179,11 @@ func (s *Spawner) recordResumeTaskEvent(ctx context.Context, orgID, userID strin
 func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *domain.Conversation) bool {
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
-			return true
+			// A tree an older binary laid out is not one the claim will reuse;
+			// it answers as though it were gone.
+			if !worktree.IsGitWorktree(conv.WorktreePath) {
+				return true
+			}
 		} else if !os.IsNotExist(err) {
 			// A stat we couldn't complete (permission, I/O) is not proof the
 			// worktree is gone — count it as recoverable rather than emit a
@@ -190,12 +197,12 @@ func (s *Spawner) workspaceRecoverable(ctx context.Context, orgID string, conv *
 		return true
 	}
 	keyID := workspaceKey(conv.TaskID)
-	ok, err := blobs.Exists(ctx, snapshotKey(orgID, keyID))
+	presence, err := s.snapshotLayoutAt(ctx, orgID, keyID)
 	if err != nil {
 		delegateLog.Warn("resume: snapshot existence check failed", "conversation", conv.ID, "error", err)
 		return true
 	}
-	if ok {
+	if presence == snapshotRestorable {
 		return true
 	}
 	state, sErr := s.snapshotStateFor(ctx, orgID, keyID)
@@ -373,9 +380,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		"TRIAGE_FACTORY_CONVERSATION_ID=" + conversationID,
 		// Mirror runAgent's TRIAGE_FACTORY_CONVERSATION_ROOT setting. The resume
 		// cwd IS the original run-root (runAgent passed runRoot as the
-		// agentproc Cwd; for GitHub PR runs the worktree IS the run-root,
-		// for Jira lazy runs the run-root is the throwaway parent of
-		// per-repo worktrees). Without this, the memory-gate retry
+		// agentproc Cwd, for every source). Without this, the memory-gate retry
 		// message — which references
 		// $TRIAGE_FACTORY_CONVERSATION_ROOT/_tfac/memory.md for
 		// absolute-path resilience across `cd`s — would resolve to

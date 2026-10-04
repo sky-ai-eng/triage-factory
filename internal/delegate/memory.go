@@ -12,9 +12,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 
@@ -371,45 +369,6 @@ func (m *memoryMirror) afterToolCall(ctx context.Context, _ domain.ToolCall, out
 	return out
 }
 
-// repoFiles is the set of paths under the scratch dir that belong to the REPO,
-// not to TF — what git tracks there, slash-separated and repo-relative. For a
-// GitHub PR run the run tree IS the repo checkout, and .git/info/exclude does
-// nothing for an already-tracked path, so every infrastructure write and delete
-// in the tree consults this first: a mutation TF makes to a tracked file rides
-// the agent's next `git add -A` straight into its PR.
-//
-// The zero value permits everything, which is the honest answer for a run root
-// that is no repo at all (Jira, taskless) and for the overwhelmingly common repo
-// that tracks nothing under our directory.
-type repoFiles map[string]bool
-
-// owns reports whether the repo — not TF — owns the scratch-relative path parts.
-func (r repoFiles) owns(parts ...string) bool {
-	if len(r) == 0 {
-		return false
-	}
-	return r[path.Join(append([]string{scratchDirName}, parts...)...)]
-}
-
-// scanRepoFiles asks git what the repo tracks under the scratch dir and warns
-// when the answer isn't "nothing" — a repo that stores files there and an agent
-// run that treats the directory as its own are on a collision course TF can
-// only half-prevent: it can refuse to touch those paths, but the agent writes
-// its own files and may still bury one.
-func scanRepoFiles(ctx context.Context, cwd string) repoFiles {
-	tracked := worktree.TrackedUnder(ctx, cwd, scratchDirName)
-	if len(tracked) > 0 {
-		names := make([]string, 0, len(tracked))
-		for p := range tracked {
-			names = append(names, p)
-		}
-		sort.Strings(names)
-		delegateLog.Warn("repo tracks files under the agent scratch directory; leaving them untouched (an agent writing there may still dirty them)",
-			"cwd", cwd, "paths", strings.Join(names, ", "))
-	}
-	return tracked
-}
-
 // clearAgentMemoryFile drops any memory file already sitting at the fixed write
 // path when a fresh run starts in the tree. The steps of one blueprint run share
 // a worktree and every step writes the same filename, so a step that terminates
@@ -418,15 +377,9 @@ func scanRepoFiles(ctx context.Context, cwd string) repoFiles {
 // when the run is starting a new conversation in the tree: a resumed run's own
 // file is its work, not a leftover.
 //
-// A repo-owned path is left alone: the collision costs this run's memory
-// attribution, which is worth strictly less than the user's committed file.
-//
-// Best-effort otherwise. A failure leaves a stale file, which is the state a run
-// that skipped this would have had anyway.
-func clearAgentMemoryFile(cwd string, owned repoFiles) {
-	if owned.owns(agentMemoryFileName) {
-		return
-	}
+// Best-effort. A failure leaves a stale file, which is the state a run that
+// skipped this would have had anyway.
+func clearAgentMemoryFile(cwd string) {
 	file := filepath.Join(cwd, scratchDirName, agentMemoryFileName)
 	if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
 		delegateLog.Warn("clear stale memory file failed", "path", file, "error", err)
@@ -473,11 +426,8 @@ func clearAgentMemoryFile(cwd string, owned repoFiles) {
 // without materialized priors is still useful, just without the
 // cross-run memory benefit. This "advisory" posture only holds for
 // the read side — the write-before-finish gate is enforced separately
-// for NEW memories produced during the run. It extends to a repo-owned
-// target: a name that collides with a tracked file yields that file to the
-// repo and skips the prior, rather than overwriting content the agent would
-// then commit.
-func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, taskID string, owned repoFiles) []domain.TaskMemory {
+// for NEW memories produced during the run.
+func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, root, entityID, taskID string) []domain.TaskMemory {
 	thisTaskDir := filepath.Join(root, currentTaskDirName)
 	historyDir := filepath.Join(root, priorRunsDirName)
 	for _, dir := range []string{thisTaskDir, historyDir} {
@@ -515,9 +465,6 @@ func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, roo
 	used := map[string]bool{}
 	for i, m := range thisTask {
 		name := uniqueMemoryFileName(used, fmt.Sprintf("%02d", i+1), memorySlug(m.PromptName))
-		if owned.owns(entityMemoryDirName, currentTaskDirName, name) {
-			continue
-		}
 		if writeMemoryFile(filepath.Join(thisTaskDir, name), m.Content) {
 			written++
 		}
@@ -525,9 +472,6 @@ func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, roo
 	used = map[string]bool{}
 	for _, m := range history {
 		name := uniqueMemoryFileName(used, m.CreatedAt.UTC().Format(historyDateLayoutUTC), memorySlug(m.PromptName))
-		if owned.owns(entityMemoryDirName, priorRunsDirName, name) {
-			continue
-		}
 		if writeMemoryFile(filepath.Join(historyDir, name), m.Content) {
 			written++
 		}
@@ -556,15 +500,9 @@ func materializeEntityMemories(taskMemory db.TaskMemoryStore, orgID, teamID, roo
 //
 // Best-effort, like the prior memories rendered next to it: an agent that
 // cannot re-read the original still has the summary, and a run must not fail
-// for a file it may never open. A repo-owned name yields to the repo for the
-// reason every other write here does — the collision costs a re-read, the
-// user's committed file is worth more.
-func writeTaskContextFile(root, taskContext string, owned repoFiles) {
+// for a file it may never open.
+func writeTaskContextFile(root, taskContext string) {
 	if root == "" || strings.TrimSpace(taskContext) == "" {
-		return
-	}
-	if owned.owns(entityMemoryDirName, taskContextFileName) {
-		delegateLog.Warn("repo tracks the task-context path; this run's task context is not retained as a file", "path", filepath.Join(root, taskContextFileName))
 		return
 	}
 	if err := os.MkdirAll(root, 0755); err != nil {
@@ -579,24 +517,20 @@ func writeTaskContextFile(root, taskContext string, owned repoFiles) {
 
 // entityMemoryTarget resolves where THIS launch's prior-memory tree is
 // rendered, and records the staging path on cfg when the launch will mount it.
-// Returns the target directory plus the repo-owned set that applies to it.
 //
 // The branch is the sandbox gate, not the run mode: a jailed agent reads its
 // handoff from a read-only bind mount of an orchestrator-owned staging dir, keyed
 // by its own conversation id, because nothing TF writes may touch the run tree
 // after its first launch — and every blueprint step but the first launches into a
 // tree that was already handed off. An un-jailed run keeps writing the real
-// directory inside the tree it owns.
-//
-// The repo-owned set only travels with the in-tree target. A staging dir is TF's
-// outright, is no repo, and shares no path with one.
-func entityMemoryTarget(cfg *runConfig, conversationID, cwd string, owned repoFiles) (string, repoFiles) {
+// directory inside the run root it owns.
+func entityMemoryTarget(cfg *runConfig, conversationID, root string) string {
 	if !agentproc.WillSandbox() {
-		return filepath.Join(cwd, scratchDirName, entityMemoryDirName), owned
+		return filepath.Join(root, scratchDirName, entityMemoryDirName)
 	}
 	dir := sandbox.TrustedMemorySourcePath(conversationID)
 	cfg.memorySourcePath = dir
-	return dir, nil
+	return dir
 }
 
 // stagedEntityMemorySource returns conversationID's memory staging dir when one is still

@@ -247,9 +247,10 @@ func TestTerminalBlueprintFailures_MarkAndEndTheStep(t *testing.T) {
 }
 
 // TestStopCause_NotesNameTheLifecycleEvent: the note is the transcript's whole
-// explanation of why a run stopped, so the two causes split out of
-// "dispositioned" have to say what actually happened — the task is still open
-// in both, and it is the work that moved, not the task that went away.
+// explanation of why a run stopped — nothing resumes that conversation — so the
+// causes split out of "dispositioned" have to say what actually happened. The
+// task is still open in each, and it is the work that moved, not the task that
+// went away.
 func TestStopCause_NotesNameTheLifecycleEvent(t *testing.T) {
 	for _, tc := range []struct {
 		cause StopCause
@@ -257,6 +258,7 @@ func TestStopCause_NotesNameTheLifecycleEvent(t *testing.T) {
 	}{
 		{StopCauseTaskDelegated, "Run stopped: the task was handed to a new delegation."},
 		{StopCauseTaskTakenOver, "Run stopped: a person took the task over."},
+		{StopCauseTaskRequeued, "Run stopped: the task it was working on was returned to the queue."},
 	} {
 		if got := tc.cause.note(); got != tc.want {
 			t.Errorf("%s.note() = %q, want %q", tc.cause, got, tc.want)

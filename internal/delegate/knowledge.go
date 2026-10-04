@@ -13,7 +13,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -107,7 +106,7 @@ type stagedEntry struct {
 // The manifest is rendered from what this call actually wrote, never from the
 // listing — so it cannot name a document the agent will not find, and because
 // the tree is rebuilt it cannot omit one the agent can.
-func (s *Spawner) stageTeamKnowledge(ctx context.Context, orgID, teamID, cwd string, owned repoFiles) string {
+func (s *Spawner) stageTeamKnowledge(ctx context.Context, orgID, teamID, cwd string) string {
 	kb := s.TeamKB()
 	if kb == nil || teamID == "" {
 		return ""
@@ -115,16 +114,16 @@ func (s *Spawner) stageTeamKnowledge(ctx context.Context, orgID, teamID, cwd str
 	root := filepath.Join(cwd, scratchDirName, knowledgeDirName)
 	// A full rebuild, not an overlay. See clearStagedKnowledge for why the
 	// difference is load-bearing rather than tidiness.
-	clearStagedKnowledge(root, owned)
+	clearStagedKnowledge(root)
 
 	staged := stagedKnowledge{}
 	s.stageOneKnowledgeSet(ctx, kb, orgID, teamID, kbstore.Roots(), root,
-		knowledgeTeamDirName, "your team's knowledge base", &staged, owned)
+		knowledgeTeamDirName, "your team's knowledge base", &staged)
 
 	for _, other := range s.otherTeamsWithKnowledge(ctx, orgID, teamID) {
 		dir := path.Join(knowledgeOrgDirName, other.Slug)
 		s.stageOneKnowledgeSet(ctx, kb, orgID, other.ID, []kbstore.Root{kbstore.RootShared}, root,
-			dir, "published by "+other.Name, &staged, owned)
+			dir, "published by "+other.Name, &staged)
 	}
 
 	if staged.files == 0 {
@@ -159,50 +158,11 @@ func (s *Spawner) stageTeamKnowledge(ctx context.Context, orgID, teamID, cwd str
 // step whose tree already belongs to the sandbox identity never reaches here at
 // all (the caller skips staging entirely, and the first step's copy stands).
 //
-// Repo-owned paths are left alone, for the same reason nothing writes them: for
-// a GitHub PR run this tree IS the checkout, and removing a tracked file here
-// would ride the agent's next commit into its pull request. That is also why
-// this is a walk rather than one RemoveAll — the blunt form cannot make that
-// distinction, and a repo that tracks a file under our directory is exactly the
-// case the rest of this package already bends around.
-//
-// Best-effort: a path that cannot be removed is logged and left, which is the
+// Best-effort: a tree that cannot be removed is logged and left, which is the
 // state a launch that skipped this would have had anyway.
-func clearStagedKnowledge(root string, owned repoFiles) {
-	var dirs []string
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			dirs = append(dirs, p)
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, p)
-		if relErr != nil {
-			return relErr
-		}
-		if owned.owns(append([]string{knowledgeDirName}, strings.Split(filepath.ToSlash(rel), "/")...)...) {
-			return nil
-		}
-		if rmErr := os.Remove(p); rmErr != nil && !os.IsNotExist(rmErr) {
-			delegateLog.Warn("clear staged knowledge file failed; the agent may read a stale copy", "path", p, "error", rmErr)
-		}
-		return nil
-	})
-	if err != nil {
-		if !os.IsNotExist(err) {
-			delegateLog.Warn("clear staged knowledge failed; the agent may read stale copies", "path", root, "error", err)
-		}
-		return
-	}
-	// Deepest first, so a directory is only attempted once its children are
-	// gone. os.Remove refuses a non-empty one, which is precisely the signal to
-	// keep it — a directory holding a repo-owned file stays, and so does every
-	// directory above it.
-	sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
-	for _, dir := range dirs {
-		_ = os.Remove(dir)
+func clearStagedKnowledge(root string) {
+	if err := os.RemoveAll(root); err != nil {
+		delegateLog.Warn("clear staged knowledge failed; the agent may read stale copies", "path", root, "error", err)
 	}
 }
 
@@ -217,7 +177,6 @@ func (s *Spawner) stageOneKnowledgeSet(
 	roots []kbstore.Root,
 	knowledgeRoot, dir, label string,
 	staged *stagedKnowledge,
-	owned repoFiles,
 ) {
 	entries, err := kb.List(ctx, orgID, teamID, roots, "")
 	if err != nil {
@@ -236,12 +195,6 @@ func (s *Spawner) stageOneKnowledgeSet(
 		rel := e.Path
 		if len(roots) > 1 {
 			rel = path.Join(string(e.Root), e.Path)
-		}
-		// The repo owns anything git tracks under the scratch dir, and for a
-		// GitHub PR run this tree IS the checkout — a write there would ride
-		// the agent's next commit into its pull request.
-		if owned.owns(append([]string{knowledgeDirName}, strings.Split(path.Join(dir, rel), "/")...)...) {
-			continue
 		}
 		dst := filepath.Join(knowledgeRoot, filepath.FromSlash(dir), filepath.FromSlash(rel))
 		n, summary, err := s.copyKnowledgeFile(ctx, kb, orgID, teamID, e.Ref(), dst)

@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -369,7 +370,7 @@ func (s *Spawner) afterSettlement(ctx context.Context, settled []db.SettledStop)
 				"blueprint_run", st.BlueprintRunID, "error", gerr)
 			continue
 		}
-		s.cleanupCancelledBlueprintWorktree(bgCtx, st.OrgID, br.ID, br.TaskID, br.WorktreePath)
+		s.cleanupCancelledBlueprintWorktree(st.OrgID, br.ID, br.TaskID)
 	}
 	s.wakeFirings()
 }
@@ -734,7 +735,7 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		}
 		s.broadcastConversationUpdate(orgID, conv.ID, "open")
 		if br.Status == domain.BlueprintRunStatusRunning {
-			cfg := runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != "" && task.EntitySource == "github"}
+			cfg := runConfig{orgID: orgID, teamID: conv.TeamID}
 			s.terminateBlueprint(orgID, br.ID, task.ID, conv.TriggerType, conv.CreatorUserID, startTime, cfg,
 				domain.BlueprintRunStatusCancelled, "cancelled", conv.BlueprintStepIndex, false)
 		}
@@ -910,8 +911,6 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		s.reactToStepTerminal(ctx, orgID, br, parked, runConfig{
 			orgID:  orgID,
 			teamID: conv.TeamID,
-			wtPath: br.WorktreePath,
-			hasWT:  br.WorktreePath != "" && task.EntitySource == "github",
 		}, startTime)
 		return true
 	}
@@ -1027,9 +1026,8 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	//     failure every multi-step blueprint hit. Isolation is structural here:
 	//     the staging dir is keyed by this step's own conversation id and holds
 	//     exactly one skill.
-	//   - local: byte-identical to released behavior — write `.claude/skills`
-	//     inside the worktree, wiping any prior step's first. No jail, and the
-	//     orchestrator owns the tree, so nothing to change.
+	//   - local: write `.claude/skills` at the run root, wiping any prior step's
+	//     first. No jail, and the orchestrator owns the root.
 	slug := skills.SlugForBlueprintStep(stepIdx, stepPrompt.Name)
 	_, skillSpan := tracer.Start(ctx, "engagement.stage_skill")
 	skillErr := s.materializeStepSkill(&cfg, conv.ID, slug, stepPrompt, step.Brief)
@@ -1226,7 +1224,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 		return
 	}
 
-	owner, repo := ownerRepoForTask(*task)
+	owner, _ := ownerRepoForTask(*task)
 	var extraTools string
 	if conv.PromptID != "" {
 		if p, perr := s.prompts.GetSystem(ctx, orgID, conv.PromptID); perr == nil && p != nil {
@@ -1365,7 +1363,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// is dropped here rather than threaded on to nothing. No fresh-workspace
 	// builder either, for the same reason: that session file lived in the
 	// snapshot, so a tree built without one has nothing to reconnect to.
-	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.gitSeedFor(stepCtx, orgID, owner, repo, sidecar, localGit), nil)
+	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, sidecar, localGit), nil)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -1876,7 +1874,7 @@ func (s *Spawner) freshStepWorkspace(ctx context.Context, orgID string, br *doma
 	if err != nil {
 		return "", err
 	}
-	return cfg.wtPath, nil
+	return cfg.runRoot, nil
 }
 
 // buildStepConfig produces the runConfig for a claimed step. When the task has
@@ -1921,7 +1919,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// Whatever the source setup built, it built from nothing: this arm runs
 		// only when the task has no workspace to inherit.
 		cfg.workspace = domain.WorkspaceProvenanceFresh
-		s.stampRunWorktreePath(ctx, orgID, br, cfg.wtPath)
+		s.stampRunWorktreePath(ctx, orgID, br, cfg.runRoot)
 		return cfg, nil
 	}
 
@@ -1959,29 +1957,41 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
 		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
-		cfg.hasWT = true
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
 		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
-		// The rehydrate's git runs through this claim's own sidecar proxy — the
-		// sandbox is already up (dispatchClaimedConversation brings it up before calling
-		// here), so the proxy is live by the time the rebuild fetches.
-		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit),
-			func(ctx context.Context) (string, error) {
-				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
-			})
-		if err != nil {
-			return runConfig{}, err
-		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
+	case "jira":
+		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
+	case "slack":
+		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
+		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
+	default:
+		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
+	}
+	// One ladder for every source: the run root and every checkout beneath it
+	// come back together. The rehydrate's git runs through this claim's own
+	// credential path — the sandbox is already up (dispatchClaimedConversation
+	// brings it up before calling here), so the proxy is live by the time the
+	// rebuild fetches.
+	root, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.checkoutRestorerFor(orgID, sidecar, localGit),
+		func(ctx context.Context) (string, error) {
+			return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
+		})
+	if err != nil {
+		return runConfig{}, err
+	}
+	cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = root, prov, asOf
+	if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
+		cfg.prCheckout = filepath.Join(root, cfg.owner, cfg.repo, worktree.PRRefSlug(cfg.prNumber))
 		// This conversation gets its own conversation_worktrees row for the
-		// task's PR repo. Push authority is per conversation: the gate reads
+		// task's PR checkout. Push authority is per conversation: the gate reads
 		// the rows keyed to the one pushing and derives the ref from each
-		// recorded tree's live branch, so a conversation that shares a tree it
-		// did not itself materialize holds no row and is left read-only on the
-		// very repo its PR lives in. ref = pr-<N> is the materialization
-		// selector; the pushable branch comes from the tree.
+		// recorded checkout's live branch, so a conversation that shares a tree
+		// it did not itself materialize holds no row and is left read-only on
+		// the very repo its PR lives in. ref = pr-<N> is the materialization
+		// selector; the pushable branch comes from the checkout.
 		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
 		// nothing. Log-and-continue: both gates fall back to their task's-own-
 		// repo arm, which authorizes the repo but derives no pushable branch,
@@ -1992,54 +2002,28 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// bounded because WithoutCancel drops the parent's deadline along with
 		// it: this write sits inline on the path to starting the agent, so a
 		// store stuck on a lock costs a denied push, never the step's start.
-		if s.conversationWorktrees != nil && owner != "" && repo != "" && prNumber > 0 {
+		if s.conversationWorktrees != nil {
 			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
 			if _, _, werr := s.conversationWorktrees.InsertSystem(ledgerCtx, orgID, domain.ConversationWorktree{
 				ConversationID: conv.ID,
-				RepoID:         owner + "/" + repo,
-				Path:           wt,
-				Ref:            worktree.PRRefSlug(prNumber),
+				RepoID:         cfg.owner + "/" + cfg.repo,
+				Path:           cfg.prCheckout,
+				Ref:            worktree.PRRefSlug(cfg.prNumber),
 			}); werr != nil {
-				dispatchLog.Warn("record shared worktree in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
-					"path", wt,
-					"conversation", conv.ID, "repo", owner+"/"+repo, "error", werr)
+				dispatchLog.Warn("record the PR checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
+					"path", cfg.prCheckout,
+					"conversation", conv.ID, "repo", cfg.owner+"/"+cfg.repo, "error", werr)
 			}
 			cancelLedger()
 		}
-	case "jira":
-		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
-		cfg.hasWT = false
-		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
-			func(ctx context.Context) (string, error) {
-				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
-			})
-		if err != nil {
-			return runConfig{}, err
-		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
-	case "slack":
-		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
-		cfg.hasWT = false
-		wt, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, gitSeed{},
-			func(ctx context.Context) (string, error) {
-				return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
-			})
-		if err != nil {
-			return runConfig{}, err
-		}
-		cfg.wtPath, cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = wt, wt, prov, asOf
-	default:
-		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}
 	// The resolved path goes onto the STEP's own conversation row, not just the
 	// blueprint's. That row is where the SDK resume reads the cwd to re-invoke
 	// the session in — `claude --resume` keys its session storage by cwd — so a
 	// step whose row carries no path is refused a follow-up for a reason that
 	// has nothing to do with its state. The first-claim arm above gets this from
-	// the source setups; every arm here produces cfg.wtPath, so one write after
-	// the switch covers all three.
+	// the source setups; the ladder above produced cfg.runRoot for every source,
+	// so one write covers all three.
 	//
 	// Idempotent, and correct on both workspace paths: a re-claim resolves the
 	// same warm path, and a cold rehydrate onto a fresh one writes the tree the
@@ -2049,11 +2033,11 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// has whatever the successor put there. setWorktreePath logs the ownership
 	// loss itself; the consequence stated here would be a guess about a
 	// conversation this executor no longer has any standing to describe.
-	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, cfg.wtPath); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conv.ID, conv.ClaimID, cfg.runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		dispatchLog.Warn("set worktree_path for blueprint step failed; a follow-up to this conversation will be refused",
 			"conversation", conv.ID, "blueprint_run", br.ID, "error", err)
 	}
-	s.stampRunWorktreePath(ctx, orgID, br, cfg.wtPath)
+	s.stampRunWorktreePath(ctx, orgID, br, cfg.runRoot)
 	return cfg, nil
 }
 
@@ -2068,11 +2052,13 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 //     conversation, or the blueprint_run's, which its first claim stamped. The
 //     stat is what makes a path evidence: a recorded path whose directory is
 //     gone is the memory of a workspace, and nothing rebuilds a tree from a
-//     string.
-//   - the snapshot blob, keyed by the task. The durable copy: it outlives the
-//     tree, since a blueprint's terminal removes the directory and keeps the
-//     blob, and it outlives the run that wrote it, which is what a second
-//     delegation on the task rehydrates from.
+//     string. A tree an older binary laid out (its root a git checkout) is not
+//     one: the ladder removes it.
+//   - the snapshot blob, keyed by the task, of the layout this binary
+//     restores. The durable copy: it outlives the tree, since a blueprint's
+//     terminal removes the directory and keeps the blob, and it outlives the
+//     run that wrote it, which is what a second delegation on the task
+//     rehydrates from. A blob of an older layout is no snapshot.
 //   - a persist in flight. A park flips the conversation before it uploads, so
 //     "not there yet" and "not there at all" look identical from the blob
 //     store, and the lifecycle row is what separates them. Only `pending`
@@ -2095,12 +2081,19 @@ func (s *Spawner) taskHasWorkspace(ctx context.Context, orgID string, br *domain
 		if path == "" {
 			continue
 		}
-		if _, err := os.Stat(path); err == nil {
+		if _, err := os.Stat(path); err == nil && !worktree.IsGitWorktree(path) {
 			return true
 		}
 	}
 	keyID := workspaceKey(task.ID)
-	if s.snapshotBlobExists(ctx, orgID, keyID) {
+	switch presence, err := s.snapshotLayoutAt(ctx, orgID, keyID); {
+	case err != nil:
+		// Unreadable is not evidence of absence, for the reason the state read
+		// below gives.
+		dispatchLog.Warn("read the task's workspace snapshot failed; taking the rehydrate ladder rather than cloning over it",
+			"task", task.ID, "conversation", conv.ID, "error", err)
+		return true
+	case presence == snapshotRestorable:
 		return true
 	}
 	state, err := s.snapshotStateFor(ctx, orgID, keyID)
@@ -2143,8 +2136,9 @@ func parseGitHubTask(task domain.Task) (owner, repo string, prNumber int) {
 // The branch is the sandbox gate, not the run mode directly: a jailed agent
 // reads its skill from a read-only bind mount of an orchestrator-owned staging
 // dir (nothing TF writes ever touches the sandbox-owned run tree again after its
-// first launch), while an un-jailed one keeps the released behavior of a
-// `.claude/skills` directory inside the worktree.
+// first launch), while an un-jailed one gets a `.claude/skills` directory at the
+// run root — TF's own folder, and the SDK's working directory, so discovery
+// finds it there. Never inside a checkout, which is the customer's repo.
 //
 // conversationID is the step's own conversation id — the staging key, which is what makes
 // each launch's mount hold exactly that step's skill.
@@ -2153,10 +2147,10 @@ func (s *Spawner) materializeStepSkill(cfg *runConfig, conversationID, slug stri
 		// Wipe first so step N+1 doesn't inherit step N's SKILL.md from the shared
 		// worktree. Non-fatal, exactly as before: a stale sibling skill is a
 		// discovery nuisance, a failed blueprint is not.
-		if err := skills.WipeBlueprintSkills(cfg.wtPath); err != nil {
+		if err := skills.WipeBlueprintSkills(cfg.runRoot); err != nil {
 			dispatchLog.Warn("wipe skills failed", "conversation", conversationID, "error", err)
 		}
-		return skills.MaterializeStepSkill(cfg.wtPath, slug, stepPrompt, brief)
+		return skills.MaterializeStepSkill(cfg.runRoot, slug, stepPrompt, brief)
 	}
 	dir := sandbox.TrustedSkillsSourcePath(conversationID)
 	if err := skills.StageStepSkill(dir, slug, stepPrompt, brief); err != nil {
@@ -2390,7 +2384,7 @@ func (s *Spawner) disposeOfExhaustedConversation(orgID string, br *domain.Bluepr
 func (s *Spawner) failUnstartedStep(orgID string, br *domain.BlueprintRun, conv domain.Conversation, reason string) {
 	s.failClaimedConversation(orgID, &conv, reason)
 	s.terminateBlueprint(orgID, br.ID, conv.TaskID, conv.TriggerType, conv.CreatorUserID, time.Now(),
-		runConfig{orgID: orgID, teamID: conv.TeamID, wtPath: br.WorktreePath, hasWT: br.WorktreePath != ""},
+		runConfig{orgID: orgID, teamID: conv.TeamID},
 		domain.BlueprintRunStatusFailed, reason, conv.BlueprintStepIndex, false)
 }
 

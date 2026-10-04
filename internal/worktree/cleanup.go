@@ -212,22 +212,63 @@ func pruneAll(baseDir string) {
 // belongs to wtDir, if present. A cancelled/killed `git worktree add`
 // leaves <bare>/worktrees/<name> behind, locked with git's transient
 // "initializing" marker; plain `git worktree prune` skips locked entries
-// so the branch stays pinned. git names that admin dir after the
-// basename of the worktree path, and our worktree paths are
-// runDir(rootKey) (basename == rootKey, globally unique), so the entry is
-// deterministically worktrees/<basename(wtDir)>.
+// so the branch stays pinned.
 //
-// Targeting by path — rather than sweeping every locked=initializing
-// entry in the bare — is what makes this safe to call without the
-// per-repo lock: it can only ever touch this run's own dead add, never a
-// concurrent add against the same bare. os.RemoveAll is a no-op when the
-// entry was never created (add failed before mkdir).
+// git names that admin dir after the basename of the worktree path, which for
+// a checkout under a run root is its slug ("default", "pr-7") — shared by every
+// run that materialized the same slug, and disambiguated by git with a numeric
+// suffix. So the entry is found by the checkout path git recorded for it, and
+// the basename-named entry is taken only when it records no path at all (an add
+// killed before it wrote one) or records this one.
+//
+// Targeting by path — rather than sweeping every locked=initializing entry in
+// the bare — is what makes this safe to call without the per-repo lock: it can
+// only ever touch this run's own dead add, never a concurrent add against the
+// same bare. A no-op when nothing matches (add failed before mkdir).
 func removeWorktreeRegFor(bareDir, wtDir string) {
-	adminDir := filepath.Join(bareDir, "worktrees", filepath.Base(wtDir))
-	if err := os.RemoveAll(adminDir); err != nil {
-		worktreeLog.Warn("clear half-built worktree failed", "dir", adminDir, "error", err)
+	worktreesDir := filepath.Join(bareDir, "worktrees")
+	target := ""
+	if entries, err := os.ReadDir(worktreesDir); err == nil {
+		for _, e := range entries {
+			adminDir := filepath.Join(worktreesDir, e.Name())
+			if e.IsDir() && samePath(recordedWorktreePath(adminDir), wtDir) {
+				target = adminDir
+				break
+			}
+		}
+	}
+	if target == "" {
+		named := filepath.Join(worktreesDir, filepath.Base(wtDir))
+		if recorded := recordedWorktreePath(named); recorded != "" && !samePath(recorded, wtDir) {
+			return
+		}
+		target = named
+	}
+	if err := os.RemoveAll(target); err != nil {
+		worktreeLog.Warn("clear half-built worktree failed", "dir", target, "error", err)
 		return
 	}
+}
+
+// samePath reports whether a and b name one directory. git records a
+// worktree's path resolved, so a path built under a symlinked $TMPDIR spells it
+// differently; resolving the parent covers a checkout that is already gone.
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return resolvedPath(a) == resolvedPath(b)
+}
+
+func resolvedPath(p string) string {
+	p = filepath.Clean(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	if r, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(r, filepath.Base(p))
+	}
+	return p
 }
 
 // recordedWorktreePath returns the working-tree directory a bare admin
@@ -249,12 +290,29 @@ func recordedWorktreePath(adminDir string) string {
 }
 
 // isTFRunWorktreePath reports whether p is one of TF's own ephemeral run
-// worktrees — i.e. a child of the triagefactory-runs temp namespace
-// (runDir = <tmp>/triagefactory-runs/<rootKey>). Matched on the runsDir
-// path segment rather than the full os.TempDir() prefix because $TMPDIR
-// can differ between the run that created the worktree and the process
-// asking; the namespace itself is constant.
+// worktrees — a path inside the triagefactory-runs temp namespace, whether a
+// run root (runDir = <tmp>/triagefactory-runs/<rootKey>) or a checkout beneath
+// one (<root>/<owner>/<repo>/<slug>). Matched on the runsDir path segment
+// rather than the full os.TempDir() prefix because $TMPDIR can differ between
+// the run that created the worktree and the process asking; the namespace
+// itself is constant.
 func isTFRunWorktreePath(p string) bool {
+	if p == "" {
+		return false
+	}
+	for dir := filepath.Dir(filepath.Clean(p)); ; dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == runsDir {
+			return true
+		}
+		if parent := filepath.Dir(dir); parent == dir {
+			return false
+		}
+	}
+}
+
+// isTFRunRoot reports whether p is a run root itself: a direct child of the
+// triagefactory-runs namespace.
+func isTFRunRoot(p string) bool {
 	return p != "" && filepath.Base(filepath.Dir(p)) == runsDir
 }
 
@@ -276,7 +334,7 @@ func isTFRunWorktreePath(p string) bool {
 // pinning this process's os.TempDir() would reject a tree that really is the
 // key's.
 func IsRunTreeFor(p, rootKey string) bool {
-	return rootKey != "" && isTFRunWorktreePath(p) && filepath.Base(p) == rootKey
+	return rootKey != "" && isTFRunRoot(p) && filepath.Base(p) == rootKey
 }
 
 // clearStaleLockedWorktrees force-removes admin registrations under

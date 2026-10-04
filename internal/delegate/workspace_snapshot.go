@@ -38,7 +38,6 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -46,13 +45,18 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -60,20 +64,28 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// Snapshot tar member names. The blob is one compressed tar holding the
-// git delta, the ephemeral _tfac tree, the Claude session transcript, and a
-// manifest; rehydrate demuxes by these names.
+// Snapshot tar member names. The blob is one compressed tar holding a
+// manifest — always the first member — each checkout's git delta, the
+// ephemeral _tfac tree, and the Claude session transcript; rehydrate demuxes by
+// these names.
 const (
 	snapManifest = "manifest.json"
-	snapBundle   = "repo.bundle"
-	snapPatch    = "uncommitted.patch"
 	snapSession  = "session.jsonl"
 	// snapScratchPrefix names the scratch members INSIDE the blob, which is a
 	// storage format rather than a path: it is deliberately not derived from the
 	// on-disk directory name, so renaming that directory never strands the
 	// snapshot of a parked run written by an earlier build.
 	snapScratchPrefix = "scratch/"
+	// snapCheckoutsPrefix names a checkout's members:
+	// checkouts/<path relative to the root>/bundle and .../patch.
+	snapCheckoutsPrefix = "checkouts/"
 )
+
+// snapshotLayoutVersion is the run-tree layout this binary writes and the only
+// one it restores: a plain run root with every checkout beneath it. A blob
+// without it was written for a tree whose PR checkout sat at the root, and is
+// treated as no snapshot at all rather than converted.
+const snapshotLayoutVersion = 2
 
 // scratchExcludes are the top-level _tfac entries that come back by a route of
 // their own and so never ride in the snapshot: entity-memory rebuilds from
@@ -122,20 +134,22 @@ That writes <run_id>/ back into this directory exactly as it was, from
 whichever directory you run it in.
 `
 
-// restoreWorkspaceGit is the git half of a cold rehydrate. A package var, in the
-// same spirit as worktreePushTargetBranch: the credential a rehydrate hands git
-// is the thing that broke, and a test that only reads the rebuilt tree cannot
-// see it. Swapping this lets a test assert the git config the rebuild would run
-// under without standing up an authenticating remote.
-var restoreWorkspaceGit = worktree.RestoreWorkspaceGit
+// restoreCheckout is the git half of a cold rehydrate, once per checkout. A
+// package var, in the same spirit as worktreePushTargetBranch: the credential a
+// rehydrate hands git is the thing that broke, and a test that only reads the
+// rebuilt tree cannot see it. Swapping this lets a test assert what each
+// rebuild would run under without standing up an authenticating remote.
+var restoreCheckout = worktree.RestoreCheckout
 
 // snapshotManifest is the small header describing what a snapshot blob carries,
 // read first on rehydrate to decide how to reconstruct.
 type snapshotManifest struct {
-	Branch    string `json:"branch"`
-	Head      string `json:"head"`
-	SessionID string `json:"session_id"`
-	HasGit    bool   `json:"has_git"`
+	// LayoutVersion is snapshotLayoutVersion; a blob without it is refused.
+	LayoutVersion int `json:"layout_version,omitempty"`
+	// Checkouts are the checkouts under the root the blob carries, in path
+	// order.
+	Checkouts []manifestCheckout `json:"checkouts,omitempty"`
+	SessionID string             `json:"session_id"`
 	// CILogsOmitted says the captured workspace held extracted CI logs that
 	// this blob deliberately left out, which is what a rehydrate needs to know
 	// to explain the absence in the tree it rebuilds. Absent on a snapshot
@@ -164,6 +178,19 @@ type snapshotManifest struct {
 	// recorded for any other. A checkpoint records both; nothing else does.
 	Fingerprint   string `json:"fingerprint,omitempty"`
 	WriterClaimID string `json:"writer_claim_id,omitempty"`
+}
+
+// manifestCheckout is one checkout in a snapshot: which repo and slug it is,
+// where under the root it sits, the HEAD and branch it was on, and the names of
+// its delta's members ("" when the capture carried none).
+type manifestCheckout struct {
+	RepoID string `json:"repo_id"`
+	Slug   string `json:"slug"`
+	Path   string `json:"path"`
+	Head   string `json:"head"`
+	Branch string `json:"branch,omitempty"`
+	Bundle string `json:"bundle,omitempty"`
+	Patch  string `json:"patch,omitempty"`
 }
 
 // positionFor is the transcript position this manifest's tree reflects for
@@ -239,6 +266,79 @@ type snapshotWrite struct {
 	// fingerprint is the checkpoint's snapshotFingerprint of the capture, ""
 	// for an ending.
 	fingerprint string
+	// checkouts are the checkouts under wtPath this persist captures, resolved
+	// from the task's conversation_worktrees rows right before the capture
+	// (snapshotCheckouts).
+	checkouts []snapshotCheckout
+}
+
+// snapshotCheckout is one checkout a snapshot captures.
+type snapshotCheckout struct {
+	repoID, slug string
+	// rel is the checkout's path relative to the run root, slash-separated:
+	// <owner>/<repo>/<slug>.
+	rel string
+	// path is the checkout's absolute host path.
+	path string
+}
+
+// snapshotCheckouts resolves the checkouts a snapshot of root carries: the
+// conversation_worktrees rows of every conversation on the task, since a
+// blueprint's steps share one root. Deduplicated by path, keeping only those
+// that exist and sit at <root>/<owner>/<repo>/<slug> as their row names them,
+// in path order.
+//
+// A failed read is an error, not an empty set: a blob that silently lost every
+// checkout would overwrite one that had them.
+func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root string) ([]snapshotCheckout, error) {
+	if s.conversationWorktrees == nil || taskID == "" || root == "" {
+		return nil, nil
+	}
+	rows, err := s.conversationWorktrees.ListForTaskSystem(ctx, orgID, taskID)
+	if err != nil {
+		return nil, fmt.Errorf("list the task's checkouts: %w", err)
+	}
+	seen := map[string]bool{}
+	var out []snapshotCheckout
+	for _, w := range rows {
+		owner, repo := parseOwnerRepo(w.RepoID)
+		rel := path.Join(owner, repo, w.Ref)
+		if owner == "" || repo == "" || !validCheckoutRel(rel, w.RepoID, w.Ref) || filepath.Join(root, filepath.FromSlash(rel)) != filepath.Clean(w.Path) {
+			// Another root's row (a step that ran on another host) or one
+			// this layout never writes.
+			continue
+		}
+		if seen[rel] {
+			continue
+		}
+		fi, err := os.Lstat(w.Path)
+		if err != nil || !fi.IsDir() {
+			continue
+		}
+		seen[rel] = true
+		out = append(out, snapshotCheckout{repoID: w.RepoID, slug: w.Ref, rel: rel, path: w.Path})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
+	return out, nil
+}
+
+// validCheckoutRel reports whether rel is exactly <owner>/<repo>/<slug> for
+// repoID and slug, every segment a plain name — the one place a checkout may
+// sit under a root, and so the one shape a manifest entry may name.
+func validCheckoutRel(rel, repoID, slug string) bool {
+	owner, repo, ok := strings.Cut(repoID, "/")
+	if !ok {
+		return false
+	}
+	for _, seg := range []string{owner, repo, slug} {
+		if seg == "" || seg == "." || seg == ".." || strings.ContainsAny(seg, "/\\\x00") || strings.HasPrefix(seg, "-") {
+			return false
+		}
+	}
+	if _, _, ok := worktree.ParseCheckoutSlug(slug); !ok {
+		return false
+	}
+	return rel == owner+"/"+repo+"/"+slug
 }
 
 // snapshotWorkspace writes a finished engagement's non-recoverable workspace
@@ -337,6 +437,9 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 		}
 	}()
 
+	if w.checkouts, err = s.snapshotCheckouts(stateCtx, w.orgID, w.keyID, w.wtPath); err != nil {
+		return fmt.Errorf("snapshot: %w", err)
+	}
 	captured, err := captureSnapshot(ctx, w)
 	if err != nil {
 		return err
@@ -383,27 +486,42 @@ func (s *Spawner) startSnapshotSpan(ctx context.Context, w snapshotWrite) (conte
 	return s.startPunctual(ctx, w.conversationID, "workspace.snapshot", attrs...)
 }
 
-// capturedSnapshot is a tree read and not yet archived: the git delta and the
-// transcript the capture produced, staged on disk in multi mode, and when the
-// tree was read.
+// capturedSnapshot is a tree read and not yet archived: the run root's
+// transcript, each checkout's git delta, the members staged on disk in multi
+// mode, and when the tree was read.
 type capturedSnapshot struct {
-	state   worktree.CapturedState
-	at      time.Time
-	cleanup func()
+	// state is the run root's capture: the session and its transcript. The
+	// root has no git delta of its own.
+	state     worktree.CapturedState
+	checkouts []capturedCheckout
+	at        time.Time
+	cleanups  []func()
+}
+
+// capturedCheckout is one checkout's capture: its delta, with the members
+// either buffered on it or staged at its paths.
+type capturedCheckout struct {
+	snapshotCheckout
+	state worktree.CapturedState
 }
 
 // release removes the capture's staging. Idempotent, and safe on a capture
 // that staged nothing.
 func (c *capturedSnapshot) release() {
-	if c != nil && c.cleanup != nil {
-		c.cleanup()
-		c.cleanup = nil
+	if c == nil {
+		return
 	}
+	for _, cleanup := range c.cleanups {
+		if cleanup != nil {
+			cleanup()
+		}
+	}
+	c.cleanups = nil
 }
 
-// captureSnapshot reads the tree's non-recoverable state — the git delta (nil
-// for a non-git run-root, e.g. a Jira lazy run) AND the session transcript. In
-// multi mode both are read inside a dropped-privilege, network-isolated child
+// captureSnapshot reads the tree's non-recoverable state — the session
+// transcript at the root, and the git delta of every checkout w names. In multi
+// mode each read runs inside a dropped-privilege, network-isolated child
 // running as the sandbox uid: the git capture's filter-honoring commands never
 // execute agent-planted drivers as root, and the SDK's owner-only transcript
 // is readable there when it is not to the orchestrator (see
@@ -420,34 +538,57 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 		recordSpanError(capSpan, err)
 		capSpan.End()
 	}()
-	at := time.Now()
-	state, cleanup, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
-	if err != nil {
-		if cleanup != nil {
-			cleanup()
+	captured := &capturedSnapshot{at: time.Now()}
+	defer func() {
+		if err != nil {
+			captured.release()
 		}
+	}()
+
+	state, cleanup, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
+	captured.cleanups = append(captured.cleanups, cleanup)
+	if err != nil {
 		return nil, fmt.Errorf("snapshot: capture: %w", err)
 	}
-	captured := &capturedSnapshot{state: state, at: at, cleanup: cleanup}
-	bundleBytes, err := capturedMemberSize(state.Delta, state.BundlePath, true)
-	if err != nil {
-		captured.release()
-		return nil, fmt.Errorf("snapshot: capture bundle size: %w", err)
-	}
-	patchBytes, err := capturedMemberSize(state.Delta, state.PatchPath, false)
-	if err != nil {
-		captured.release()
-		return nil, fmt.Errorf("snapshot: capture patch size: %w", err)
+	// Only the transcript is the root's: it is a plain folder, and a delta
+	// read off one an older binary laid out is not this layout's to carry.
+	state.Delta, state.BundlePath, state.PatchPath = nil, "", ""
+	captured.state = state
+
+	var bundleBytes, patchBytes int64
+	for _, co := range w.checkouts {
+		coState, coCleanup, err := captureWorkspaceGit(capCtx, co.path, "")
+		captured.cleanups = append(captured.cleanups, coCleanup)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: capture checkout %s: %w", co.rel, err)
+		}
+		if coState.Delta == nil {
+			// A checkout whose .git is gone has no HEAD a restore could take
+			// it back to; the directory is all that is left of it.
+			delegateLog.Warn("snapshot: checkout is no longer a git worktree; it is not carried", "checkout", co.rel, "path", co.path)
+			continue
+		}
+		b, err := capturedMemberSize(coState.Delta, coState.BundlePath, true)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: capture %s bundle size: %w", co.rel, err)
+		}
+		p, err := capturedMemberSize(coState.Delta, coState.PatchPath, false)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: capture %s patch size: %w", co.rel, err)
+		}
+		bundleBytes += b
+		patchBytes += p
+		captured.checkouts = append(captured.checkouts, capturedCheckout{snapshotCheckout: co, state: coState})
 	}
 	transcriptBytes, err := capturedBytesSize(state.Transcript, state.TranscriptPath)
 	if err != nil {
-		captured.release()
 		return nil, fmt.Errorf("snapshot: capture transcript size: %w", err)
 	}
 	capSpan.SetAttributes(
 		telemetry.SnapshotBundleBytes(bundleBytes),
 		telemetry.SnapshotPatchBytes(patchBytes),
 		telemetry.SnapshotTranscriptBytes(transcriptBytes),
+		telemetry.Count(len(captured.checkouts)),
 	)
 	return captured, nil
 }
@@ -485,7 +626,7 @@ func archiveSnapshot(ctx context.Context, w snapshotWrite, captured *capturedSna
 		man.Fingerprint = w.fingerprint
 		man.WriterClaimID = w.claimID
 	}
-	f, rawBytes, compressedBytes, err := stageSnapshotArchive(ctx, captured.state, w.wtPath, man)
+	f, rawBytes, compressedBytes, err := stageSnapshotArchive(ctx, captured, w.wtPath, man)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: archive: %w", err)
 	}
@@ -723,7 +864,7 @@ func snapshotPhase(ctx context.Context, name, runtime string) (context.Context, 
 //
 // man is the manifest's identity half — when the tree was read and, for a
 // checkpoint, the position it covers; the rest is filled in from the capture.
-func stageSnapshotArchive(ctx context.Context, captured worktree.CapturedState, wtPath string, man snapshotManifest) (_ *os.File, rawBytes, compressedBytes int64, err error) {
+func stageSnapshotArchive(ctx context.Context, captured *capturedSnapshot, wtPath string, man snapshotManifest) (_ *os.File, rawBytes, compressedBytes int64, err error) {
 	f, err := os.CreateTemp("", "tf-snapshot-*.tar.zst")
 	if err != nil {
 		return nil, 0, 0, fmt.Errorf("tempfile: %w", err)
@@ -774,36 +915,53 @@ func (c *countingWriter) Write(p []byte) (int, error) {
 }
 
 // writeSnapshotTar streams the snapshot members into w as one tar: the
-// potentially unbounded git bundle + uncommitted patch,
-// the ephemeral _tfac tree (streamed file by file), the Claude session
-// transcript, and the manifest, built on man.
-func writeSnapshotTar(ctx context.Context, w io.Writer, captured worktree.CapturedState, wtPath string, man snapshotManifest) error {
+// manifest, built on man, first — so whether a blob is one this binary can
+// restore is answered by its first member (snapshotLayoutAt) — then every
+// checkout's potentially unbounded bundle + uncommitted patch, the ephemeral
+// _tfac tree (streamed file by file), and the Claude session transcript.
+func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapshot, wtPath string, man snapshotManifest) error {
 	tw := tar.NewWriter(w)
-	delta := captured.Delta
-	man.SessionID = captured.SessionID
-	if delta != nil {
-		man.HasGit = true
-		man.Branch = delta.Branch
-		man.Head = delta.Head
-		if len(delta.Bundle) > 0 || captured.BundlePath != "" {
-			if err := writeCapturedMember(tw, snapBundle, delta.Bundle, captured.BundlePath); err != nil {
-				return err
-			}
+	man.LayoutVersion = snapshotLayoutVersion
+	man.SessionID = captured.state.SessionID
+	// The scratch walk reports the same, and runs after the manifest is out;
+	// this is that walk's answer for the one directory it asks about.
+	man.CILogsOmitted = dirHasEntry(filepath.Join(wtPath, worktree.ScratchDir, worktree.CILogsDir))
+	type member struct {
+		name, path string
+		data       []byte
+	}
+	var members []member
+	for _, co := range captured.checkouts {
+		d := co.state.Delta
+		mc := manifestCheckout{RepoID: co.repoID, Slug: co.slug, Path: co.rel, Head: d.Head, Branch: d.Branch}
+		if len(d.Bundle) > 0 || co.state.BundlePath != "" {
+			mc.Bundle = snapCheckoutsPrefix + co.rel + "/bundle"
+			members = append(members, member{mc.Bundle, co.state.BundlePath, d.Bundle})
 		}
-		if len(delta.Patch) > 0 || captured.PatchPath != "" {
-			if err := writeCapturedMember(tw, snapPatch, delta.Patch, captured.PatchPath); err != nil {
-				return err
-			}
+		if len(d.Patch) > 0 || co.state.PatchPath != "" {
+			mc.Patch = snapCheckoutsPrefix + co.rel + "/patch"
+			members = append(members, member{mc.Patch, co.state.PatchPath, d.Patch})
+		}
+		man.Checkouts = append(man.Checkouts, mc)
+	}
+	manBytes, err := json.Marshal(man)
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := writeTarBytes(tw, snapManifest, manBytes); err != nil {
+		return err
+	}
+	for _, m := range members {
+		if err := writeCapturedMember(tw, m.name, m.data, m.path); err != nil {
+			return err
 		}
 	}
-	omittedCILogs, err := tarScratch(ctx, tw, wtPath)
-	if err != nil {
+	if _, err := tarScratch(ctx, tw, wtPath); err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
 	}
-	man.CILogsOmitted = omittedCILogs
-	if captured.SessionID != "" {
-		if len(captured.Transcript) > 0 || captured.TranscriptPath != "" {
-			if err := writeCapturedMember(tw, snapSession, captured.Transcript, captured.TranscriptPath); err != nil {
+	if captured.state.SessionID != "" {
+		if len(captured.state.Transcript) > 0 || captured.state.TranscriptPath != "" {
+			if err := writeCapturedMember(tw, snapSession, captured.state.Transcript, captured.state.TranscriptPath); err != nil {
 				return err
 			}
 		} else {
@@ -813,15 +971,8 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured worktree.Captur
 			// resume from it will hit the transcript-missing guard and fail.
 			// Surface it: this is otherwise silent, and it's exactly the shape that
 			// produced a resume-fails-with-no-reason report.
-			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", captured.SessionID, "worktree", wtPath)
+			delegateLog.Warn("snapshot omits session transcript; a resume of this conversation will not be able to continue where it left off", "session", captured.state.SessionID, "worktree", wtPath)
 		}
-	}
-	manBytes, err := json.Marshal(man)
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	if err := writeTarBytes(tw, snapManifest, manBytes); err != nil {
-		return err
 	}
 	return tw.Close()
 }
@@ -866,17 +1017,16 @@ func writeCapturedMember(tw *tar.Writer, name string, data []byte, path string) 
 	return writeTarFile(tw, name, path, size)
 }
 
-// gitSeed is everything a cold rehydrate's git rebuild needs about the repo it
-// replays the delta onto: where the bare lives (owner/repo), the upstream URL
-// that seeds one when this executor has none, and the credential that
-// authenticates the network git the rebuild does. The zero value is the non-git
-// run-root (a Jira/Slack lazy root), which has no bare and no delta.
+// gitSeed is everything a cold rehydrate's git rebuild needs about one repo it
+// replays a checkout's delta onto: where the bare lives (owner/repo), the
+// upstream URL that seeds one when this executor has none, and the credential
+// that authenticates the network git the rebuild does.
 //
-// auth covers TWO network hops, not one — see RestoreWorkspaceGit. Seeding a
-// missing bare is the obvious one; the load-bearing one is that the shared bare
-// is a blobless partial clone, so the rebuild's `git worktree add` checkout
-// triggers a lazy promisor fetch against origin even when the bare is already
-// there. A bare that exists is not a bare that is self-sufficient.
+// auth covers more than one network hop — see worktree.RestoreCheckout. Seeding
+// a missing bare is the obvious one; the load-bearing one is that the shared
+// bare is a blobless partial clone, so the rebuild's checkout triggers a lazy
+// promisor fetch against origin even when the bare is already there. A bare
+// that exists is not a bare that is self-sufficient.
 type gitSeed struct {
 	owner    string
 	repo     string
@@ -884,10 +1034,9 @@ type gitSeed struct {
 	auth     worktree.CloneAuth
 }
 
-// gitSeedFor resolves the seed for a GitHub-backed run's rehydrate. The clone
-// URL comes from the repository row (written in the org's configured protocol) —
-// no PR is fetched on a later step or a resume, so there is no per-run URL to
-// inherit.
+// gitSeedFor resolves the seed for one repo a rehydrate rebuilds a checkout
+// of. The clone URL comes from the repository row (written in the org's
+// configured protocol).
 //
 // The auth is the engagement's own git-proxy routing, matching setupGitHub's
 // first clone. Multi resolves it from the credential sidecar; local resolves it
@@ -949,6 +1098,51 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 	return base
 }
 
+// checkoutRestorer is what a cold rehydrate needs to rebuild the checkouts a
+// snapshot carries, resolved per repo: the bare seed, and for a pr-<N>
+// checkout the pull request, read fresh through this engagement's GitHub
+// client so its push settings are re-derived the way a fresh --pr checkout
+// derives them. The zero value rebuilds no checkout at all.
+type checkoutRestorer struct {
+	seed func(ctx context.Context, owner, repo string) gitSeed
+	pr   func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error)
+}
+
+// checkoutRestorerFor builds this engagement's restorer. Every network hop
+// rides the engagement's own credential path: the sidecar's git and REST
+// proxies on an executor, the loopback git channel and the resolver-built
+// client locally.
+func (s *Spawner) checkoutRestorerFor(orgID string, sidecar *runSidecar, localGit *localGitChannel) checkoutRestorer {
+	return checkoutRestorer{
+		seed: func(ctx context.Context, owner, repo string) gitSeed {
+			return s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit)
+		},
+		pr: func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error) {
+			client := prReadClient(orgID, nil, sidecar)
+			if client == nil {
+				var err error
+				if client, err = s.resolveGHClient(ctx, orgID, owner, repo); err != nil {
+					return nil, fmt.Errorf("resolve the GitHub client: %w", err)
+				}
+			}
+			if client == nil {
+				return nil, errNoGitHubClient
+			}
+			return client.GetPR(ctx, owner, repo, number, false)
+		},
+	}
+}
+
+// prHeadCloneURL is the PR's head repository URL in the protocol of the bare's
+// origin, so a push remote never mixes SSH and HTTPS; "" for a deleted head
+// repository.
+func prHeadCloneURL(originURL string, pr *ghclient.PRView) string {
+	if strings.HasPrefix(originURL, "https://") || originURL == "" {
+		return pr.CloneURL
+	}
+	return pr.SSHURL
+}
+
 // freshWorkspaceBuilder builds this conversation's run tree from nothing, the
 // way its very first claim built it. The caller supplies it because only the
 // caller knows the shape: this frame holds the snapshot seed, which can replay
@@ -964,9 +1158,9 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 //   - warm — the parked worktree survived on disk (the dormancy guards kept
 //     it). Returned as-is; nothing is rebuilt.
 //   - rehydrated — it is gone (host loss, /tmp wipe, a startup sweep) but the
-//     durable snapshot is there, so the tree is rebuilt from it. seed locates,
-//     seeds and authenticates the bare the git delta replays onto; its zero
-//     value is the non-git run-root.
+//     durable snapshot is there, so the tree is rebuilt from it, every checkout
+//     it carries through restorer. A blob of an older layout is no snapshot:
+//     the ladder falls through to the last rung exactly as with none.
 //   - waited, then rehydrated — the snapshot is not there YET. A park flips the
 //     conversation's status (a shutdown hand-back releases its claim) before
 //     writing the blob, so this is the ordinary reading of a healthy run for as
@@ -991,12 +1185,15 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // tree. Nil on every other rung, and for a blob an ending wrote, which covers
 // the whole transcript.
 //
-// conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path,
-// and that write is this engagement's to make only while it still holds the
-// conversation. Every caller is a claimed dispatch, so it is populated at both
-// — including the config the step builder synthesizes, which copies it across
-// for exactly this reason.
-func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, seed gitSeed, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
+// A warm tree an older binary laid out — its root a git checkout — is not
+// warm: it is removed and the ladder continues as though it were gone.
+//
+// conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path and
+// records the rebuilt checkouts' rows, and those writes are this engagement's
+// to make only while it still holds the conversation. Every caller is a claimed
+// dispatch, so it is populated at both — including the config the step builder
+// synthesizes, which copies it across for exactly this reason.
+func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, restorer checkoutRestorer, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
 	// The provenance IS the interesting part of this span — nothing downstream
 	// can tell the three rungs apart, since past here they are the same
 	// directory. Recorded from the named result so every exit below carries it
@@ -1024,7 +1221,16 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 
 	if conv.WorktreePath != "" {
 		if _, err := os.Stat(conv.WorktreePath); err == nil {
-			return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil, nil // warm: worktree still on disk
+			if !worktree.IsGitWorktree(conv.WorktreePath) {
+				return conv.WorktreePath, domain.WorkspaceProvenanceWarm, nil, nil // warm: worktree still on disk
+			}
+			delegateLog.Warn("the warm run tree was laid out by an older binary; removing it and treating the workspace as gone",
+				"conversation", conv.ID, "key_id", keyID, "path", conv.WorktreePath)
+			if worktree.IsRunTreeFor(conv.WorktreePath, keyID) {
+				if err := worktree.RemoveAt(conv.WorktreePath, keyID); err != nil {
+					return "", "", nil, fmt.Errorf("remove a run tree of an older layout: %w", err)
+				}
+			}
 		}
 	}
 
@@ -1094,12 +1300,20 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
-	wtDir := worktree.RunRoot(keyID)
-	man, rErr := s.rehydrateFromSnapshot(opCtx, wtDir, seed, rc)
+	man, restored, rErr := s.rehydrateFromSnapshot(opCtx, keyID, conv.ClaimID, restorer, rc)
+	if errors.Is(rErr, errSnapshotLayout) {
+		delegateLog.Warn("rehydrate: the snapshot was written for an older run-tree layout; treating it as no snapshot",
+			"conversation", conv.ID, "key_id", keyID)
+		endOp()
+		wt, prov, err := s.workspaceFromNothing(ctx, orgID, conv, keyID, fresh)
+		return wt, prov, nil, err
+	}
 	if rErr != nil {
 		return "", "", nil, rErr
 	}
+	wtDir := worktree.RunRoot(keyID)
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)
+	s.recordRestoredCheckouts(ctx, orgID, conv, restored)
 	asOf = man.positionFor(conv.ID, s.coveredStateFor(ctx, orgID, keyID, conv.ID, man))
 	delegateLog.Info("workspace rehydrated from snapshot", "conversation", conv.ID, "key_id", keyID,
 		"captured_at", man.CapturedAt, "checkpoint", asOf != nil)
@@ -1150,42 +1364,67 @@ func (s *Spawner) restampWorktreePath(ctx context.Context, orgID string, conv *d
 	}
 }
 
-// rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the worktree
-// at wtDir: rebuild the git worktree from the bare + delta (or just the
-// directory for a non-git run-root), restore the ephemeral _tfac tree, and
-// drop the Claude session transcript at the new cwd's encoding so
-// `claude --resume` reconnects.
+// errSnapshotLayout is a blob written for a run-tree layout this binary does
+// not restore. Never converted: the ladder treats it as no snapshot.
+var errSnapshotLayout = errors.New("rehydrate: snapshot is of an older run-tree layout")
+
+// restoredCheckout is a checkout a rehydrate rebuilt, with the row the
+// restoring conversation records for it.
+type restoredCheckout struct {
+	worktree.RestoredCheckout
+	repoID, slug string
+}
+
+// rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the run tree
+// at keyID's run root: a fresh root, every checkout the manifest names rebuilt
+// beneath it the way `workspace add` builds one (worktree.RestoreCheckout), the
+// ephemeral _tfac tree restored, and the Claude session transcript dropped at
+// the root's encoding so `claude --resume` reconnects.
 //
-// The bounded members (manifest, bundle, patch, session) are read into memory;
-// the _tfac tree — which can run to GBs — is streamed to a staging dir on
-// disk as it's read (the worktree it belongs in doesn't exist until
-// RestoreWorkspaceGit runs below), then moved into place with one rename. This
-// mirrors the snapshot side's temp-file staging so neither direction buffers a
-// large workspace whole.
+// The bounded members (manifest, session) are read into memory; the _tfac tree
+// and the checkouts' bundles and patches — any of which can run large — are
+// streamed to staging dirs on disk as they're read, the scratch one moved into
+// place with one rename. This mirrors the snapshot side's temp-file staging so
+// neither direction buffers a large workspace whole.
+//
+// All or nothing: checkouts of different repos rebuild in parallel (the
+// per-repo lock serializes two of one repo), and if any fails every checkout
+// already rebuilt is removed along with the root, so nothing is left for a
+// later claim to mistake for a warm tree. The error returned is the one that
+// says why — an unreachable upstream in preference to the rest, so the
+// hand-back spends the budget the cause belongs to.
 //
 // It returns the blob's manifest, which is what says how much of the
-// transcript the rebuilt tree reflects.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed gitSeed, r io.Reader) (_ snapshotManifest, err error) {
+// transcript the rebuilt tree reflects, and the checkouts it rebuilt.
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID string, restorer checkoutRestorer, r io.Reader) (_ snapshotManifest, _ []restoredCheckout, err error) {
 	var man snapshotManifest
-	var bundle, patch, session []byte
+	var session []byte
+	sawManifest := false
+	root := worktree.RunRoot(keyID)
 
-	if err := os.MkdirAll(filepath.Dir(wtDir), 0o755); err != nil {
-		return snapshotManifest{}, fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
 	}
-	// Sibling of wtDir → the post-restore move is an intra-filesystem rename.
-	scratchStaging, err := os.MkdirTemp(filepath.Dir(wtDir), ".scratch-rehydrate-*")
+	// Siblings of the root → the scratch move is an intra-filesystem rename.
+	scratchStaging, err := os.MkdirTemp(filepath.Dir(root), ".scratch-rehydrate-*")
 	if err != nil {
-		return snapshotManifest{}, fmt.Errorf("rehydrate: scratch staging: %w", err)
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: scratch staging: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
+	memberStaging, err := os.MkdirTemp(filepath.Dir(root), ".checkouts-rehydrate-*")
+	if err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: checkout staging: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(memberStaging) }()
+	staged := map[string]string{}
 	sawScratch := false
 
-	// New snapshots use zstd, but existing gzip blobs remain durable state and
-	// must stay readable across the format migration. Sniff the outer framing;
-	// the manifest that describes the tar is inside the compressed stream.
 	cr, codec, err := snapshotReader(r)
+	if errors.Is(err, errSnapshotLayout) {
+		return snapshotManifest{}, nil, err
+	}
 	if err != nil {
-		return snapshotManifest{}, fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
 	}
 	defer func() { _ = cr.Close() }()
 	tr := tar.NewReader(cr)
@@ -1195,83 +1434,85 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 			break
 		}
 		if err != nil {
-			return snapshotManifest{}, fmt.Errorf("rehydrate: read tar: %w", err)
+			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read tar: %w", err)
 		}
 		switch {
 		case hdr.Name == snapManifest:
 			data, err := io.ReadAll(tr)
 			if err != nil {
-				return snapshotManifest{}, fmt.Errorf("rehydrate: read manifest: %w", err)
+				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read manifest: %w", err)
 			}
 			if err := json.Unmarshal(data, &man); err != nil {
-				return snapshotManifest{}, fmt.Errorf("rehydrate: manifest: %w", err)
+				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: manifest: %w", err)
 			}
-		case hdr.Name == snapBundle:
-			if bundle, err = io.ReadAll(tr); err != nil {
-				return snapshotManifest{}, fmt.Errorf("rehydrate: read bundle: %w", err)
-			}
-		case hdr.Name == snapPatch:
-			if patch, err = io.ReadAll(tr); err != nil {
-				return snapshotManifest{}, fmt.Errorf("rehydrate: read patch: %w", err)
-			}
+			sawManifest = true
 		case hdr.Name == snapSession:
 			if session, err = io.ReadAll(tr); err != nil {
-				return snapshotManifest{}, fmt.Errorf("rehydrate: read session: %w", err)
+				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read session: %w", err)
 			}
+		case strings.HasPrefix(hdr.Name, snapCheckoutsPrefix):
+			// Staged under a name of our own choosing, never the member's: the
+			// manifest is what says which members belong to which checkout.
+			dest := filepath.Join(memberStaging, strconv.Itoa(len(staged)))
+			if err := stageScratchMember(memberStaging, filepath.Base(dest), tr); err != nil {
+				return snapshotManifest{}, nil, err
+			}
+			staged[hdr.Name] = dest
 		case strings.HasPrefix(hdr.Name, snapScratchPrefix):
 			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr); err != nil {
-				return snapshotManifest{}, err
+				return snapshotManifest{}, nil, err
 			}
 			sawScratch = true
 		}
 	}
 
-	// The codecs validate their checksum only when the stream is read to
-	// its footer, but the tar reader stops at the archive's end-of-archive
-	// marker — which precedes that footer — so member reads alone never trigger
-	// the check (and gzip.Reader.Close does not force it either). Drain the
+	// zstd validates its checksum only when the stream is read to its footer,
+	// but the tar reader stops at the archive's end-of-archive marker — which
+	// precedes that footer — so member reads alone never trigger the check. Drain the
 	// remainder (a few trailing bytes for our own writes) to validate the whole
 	// blob, and do it here, before any worktree mutation: a checksum mismatch
 	// means the snapshot is corrupt, so fail the rehydrate rather than rebuild
 	// onto untrustworthy state.
 	if _, err := io.Copy(io.Discard, cr); err != nil {
-		return snapshotManifest{}, fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
+	}
+	if !sawManifest || man.LayoutVersion != snapshotLayoutVersion {
+		return snapshotManifest{}, nil, errSnapshotLayout
+	}
+	for _, mc := range man.Checkouts {
+		if !validCheckoutRel(mc.Path, mc.RepoID, mc.Slug) {
+			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: manifest names checkout %q of %s at %q, which this layout never writes", mc.Slug, mc.RepoID, mc.Path)
+		}
+		for _, name := range []string{mc.Bundle, mc.Patch} {
+			if name != "" && staged[name] == "" {
+				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: checkout %s names member %q, which the blob does not carry", mc.Path, name)
+			}
+		}
 	}
 
-	if man.HasGit {
-		delta := &worktree.GitDelta{Branch: man.Branch, Head: man.Head, Bundle: bundle, Patch: patch}
-		// No credential is minted here and none ever should be: the seed's auth
-		// was resolved by the caller, which in multi mode routes it through the
-		// run's credential sidecar (the git proxy) rather than reading a token
-		// in-process. It authenticates both hops the rebuild can take — seeding
-		// a bare this executor lacks, and the lazy promisor fetch the
-		// worktree-add checkout triggers on the blobless bare even when the bare
-		// is already here. The second is the one that bites: it needs the
-		// network on every cold rehydrate of a private repo, not just a fresh
-		// host. Each mode therefore supplies its engagement's proxy route.
-		if err := restoreWorkspaceGit(ctx, seed.owner, seed.repo, wtDir, delta, seed.cloneURL, seed.auth); err != nil {
-			return snapshotManifest{}, fmt.Errorf("rehydrate: restore git: %w", err)
+	// A fresh root. Whatever is at the path is a tree this engagement is about
+	// to replace — a stale copy, or one an older binary laid out.
+	if err := worktree.RemoveAt(root, keyID); err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: clear the run root: %w", err)
+	}
+	if _, err := worktree.MakeRunRoot(keyID); err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: make run root: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			worktree.RemoveRunRoot(keyID)
 		}
-	} else {
-		// Non-git run-root (Jira lazy): just recreate the parent directory; the
-		// agent re-materializes per-repo worktrees via `workspace add`.
-		if err := os.MkdirAll(wtDir, 0o700); err != nil {
-			return snapshotManifest{}, fmt.Errorf("rehydrate: make run root: %w", err)
-		}
-		// The git path plants this inside RestoreWorkspaceGit; do the same here so
-		// a rehydrated Jira run root carries the jail's skills symlink too. The
-		// tree is orchestrator-owned at this instant and won't be again after the
-		// launch chown.
-		if err := worktree.EnsureSandboxSkillsLink(wtDir); err != nil {
-			delegateLog.Warn("plant sandbox skills symlink on rehydrated run root failed", "dir", wtDir, "error", err)
-		}
+	}()
+
+	restored, err := s.restoreCheckouts(ctx, root, keyID, claimID, restorer, man.Checkouts, staged)
+	if err != nil {
+		return snapshotManifest{}, nil, err
 	}
 
 	if sawScratch {
-		// The fresh worktree has no _tfac (git-excluded), so move the staged
-		// tree in wholesale.
-		if err := os.Rename(scratchStaging, filepath.Join(wtDir, worktree.ScratchDir)); err != nil {
-			return snapshotManifest{}, fmt.Errorf("rehydrate: install scratch: %w", err)
+		// The fresh root has no _tfac, so move the staged tree in wholesale.
+		if err := os.Rename(scratchStaging, filepath.Join(root, worktree.ScratchDir)); err != nil {
+			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
 	if man.CILogsOmitted {
@@ -1280,8 +1521,8 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 		// this notice's parent already exists. Best-effort — the notice
 		// explains an absence, and failing the resume over it would trade a
 		// missing explanation for a missing workspace.
-		if err := plantCILogsNotice(wtDir); err != nil {
-			delegateLog.Warn("plant ci-logs notice on rehydrated tree failed; an agent that read a log under _tfac/ci-logs before the rebuild will find no explanation for its absence", "dir", wtDir, "error", err)
+		if err := plantCILogsNotice(root); err != nil {
+			delegateLog.Warn("plant ci-logs notice on rehydrated tree failed; an agent that read a log under _tfac/ci-logs before the rebuild will find no explanation for its absence", "dir", root, "error", err)
 		}
 	}
 	// Plant the jail's memory symlink AFTER the scratch install, never before: the
@@ -1290,40 +1531,212 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, wtDir string, seed 
 	// moment — the run that resumes into it may find the tree already handed off,
 	// and the snapshot never carries the link (entity-memory is excluded from
 	// capture, and the walk skips non-regular files anyway).
-	if err := worktree.EnsureSandboxMemoryLink(ctx, wtDir); err != nil {
-		delegateLog.Warn("plant sandbox memory symlink on rehydrated tree failed", "dir", wtDir, "error", err)
+	if err := worktree.EnsureSandboxMemoryLink(root); err != nil {
+		delegateLog.Warn("plant sandbox memory symlink on rehydrated tree failed", "dir", root, "error", err)
 	}
 	if len(session) > 0 && man.SessionID != "" {
-		if err := restoreSessionTranscript(wtDir, man.SessionID, session); err != nil {
-			return snapshotManifest{}, err
+		if err := restoreSessionTranscript(root, man.SessionID, session); err != nil {
+			for _, c := range restored {
+				c.Discard()
+			}
+			return snapshotManifest{}, nil, err
 		}
 	}
-	return man, nil
+	return man, restored, nil
 }
+
+// restoreCheckouts rebuilds every checkout under root, all or nothing. Each
+// runs on its own goroutine; two of one repo serialize on the per-repo lock
+// inside worktree.RestoreCheckout. On any failure every checkout that came back
+// is discarded.
+func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, checkouts []manifestCheckout, staged map[string]string) ([]restoredCheckout, error) {
+	type result struct {
+		restored restoredCheckout
+		err      error
+	}
+	results := make([]result, len(checkouts))
+	var wg sync.WaitGroup
+	for i, mc := range checkouts {
+		wg.Add(1)
+		go func(i int, mc manifestCheckout) {
+			defer wg.Done()
+			c, err := s.restoreOneCheckout(ctx, root, keyID, claimID, restorer, mc, staged)
+			results[i] = result{restored: c, err: err}
+		}(i, mc)
+	}
+	wg.Wait()
+
+	var restored []restoredCheckout
+	var firstErr, upstreamErr error
+	for _, r := range results {
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			if upstreamErr == nil && upstreamSetupFailure(r.err) {
+				upstreamErr = r.err
+			}
+			continue
+		}
+		restored = append(restored, r.restored)
+	}
+	if firstErr == nil {
+		return restored, nil
+	}
+	for _, c := range restored {
+		c.Discard()
+	}
+	if upstreamErr != nil {
+		return nil, fmt.Errorf("rehydrate: %w", upstreamErr)
+	}
+	return nil, fmt.Errorf("rehydrate: %w", firstErr)
+}
+
+// restoreOneCheckout rebuilds one manifest checkout through restoreCheckout,
+// resolving its repo's seed and, for a pr-<N> checkout, its pull request.
+func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, mc manifestCheckout, staged map[string]string) (restoredCheckout, error) {
+	owner, repo := parseOwnerRepo(mc.RepoID)
+	var seed gitSeed
+	if restorer.seed != nil {
+		seed = restorer.seed(ctx, owner, repo)
+	}
+	r := worktree.CheckoutRestore{
+		Owner: owner, Repo: repo, CloneURL: seed.cloneURL, Auth: seed.auth,
+		Root: root, Slug: mc.Slug, RootKey: keyID,
+		Head: mc.Head, Branch: mc.Branch,
+		BundlePath: staged[mc.Bundle], PatchPath: staged[mc.Patch],
+	}
+	if _, prNumber, _ := worktree.ParseCheckoutSlug(mc.Slug); prNumber > 0 {
+		if restorer.pr == nil {
+			return restoredCheckout{}, fmt.Errorf("restore %s: no GitHub client to read PR #%d with", mc.Path, prNumber)
+		}
+		pr, err := restorer.pr(ctx, owner, repo, prNumber)
+		if err != nil {
+			return restoredCheckout{}, fmt.Errorf("restore %s: read PR #%d: %w", mc.Path, prNumber, err)
+		}
+		if pr == nil {
+			return restoredCheckout{}, fmt.Errorf("restore %s: PR #%d not found", mc.Path, prNumber)
+		}
+		r.PR = &worktree.PRCheckout{HeadRef: pr.HeadRef, HeadCloneURL: prHeadCloneURL(seed.cloneURL, pr), BaseRef: pr.BaseRef}
+	}
+	c, err := restoreCheckout(ctx, r)
+	if err != nil {
+		return restoredCheckout{}, err
+	}
+	return restoredCheckout{RestoredCheckout: c, repoID: mc.RepoID, slug: mc.Slug}, nil
+}
+
+// recordRestoredCheckouts records every rebuilt checkout as the restoring
+// conversation's, at the path it has now, through the claim fence: the push
+// gate and the next snapshot read these rows, and a conversation restoring a
+// tree it did not build — a later step, or a run whose rows a terminal left
+// pointing at a root that is gone — holds no row for them otherwise.
+//
+// Best-effort per row, like the PR checkout's own record at setup: a missing
+// row costs this conversation its push to that repo, never its start. A fence
+// refusal is the ownership loss setWorktreePath already reports.
+func (s *Spawner) recordRestoredCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, restored []restoredCheckout) {
+	if s.conversationWorktrees == nil || conv.ClaimID == "" {
+		return
+	}
+	for _, c := range restored {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
+		_, err := s.conversationWorktrees.RecordForClaimSystem(recordCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
+			ConversationID: conv.ID, RepoID: c.repoID, Path: c.Path, Ref: c.slug,
+		})
+		cancel()
+		if errors.Is(err, db.ErrClaimReleased) {
+			return
+		}
+		if err != nil {
+			delegateLog.Warn("record a restored checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
+				"conversation", conv.ID, "repo", c.repoID, "path", c.Path, "error", err)
+		}
+	}
+}
+
+// snapshotPresence is what a key's blob is to this binary.
+type snapshotPresence int
+
+const (
+	snapshotAbsent snapshotPresence = iota
+	// snapshotRestorable: a blob of the layout this binary restores.
+	snapshotRestorable
+	// snapshotUnsupported: a blob of an older layout, which is no snapshot.
+	snapshotUnsupported
+)
+
+// snapshotLayoutAt reads only as far as the key's blob's first member. A blob
+// this binary wrote opens with its manifest, so the answer costs one short read
+// rather than the download a restore makes; an older blob opens with something
+// else, which is the answer too. An error is a store or decode failure, which
+// the caller must not read as either.
+func (s *Spawner) snapshotLayoutAt(ctx context.Context, orgID, keyID string) (snapshotPresence, error) {
+	blobs := s.Storage()
+	if blobs == nil {
+		return snapshotAbsent, nil
+	}
+	rc, err := blobs.Get(ctx, snapshotKey(orgID, keyID))
+	if errors.Is(err, storage.ErrNotFound) {
+		return snapshotAbsent, nil
+	}
+	if err != nil {
+		return snapshotAbsent, err
+	}
+	defer func() { _ = rc.Close() }()
+	cr, _, err := snapshotReader(rc)
+	if errors.Is(err, errSnapshotLayout) {
+		return snapshotUnsupported, nil
+	}
+	if err != nil {
+		return snapshotAbsent, fmt.Errorf("open snapshot: %w", err)
+	}
+	defer func() { _ = cr.Close() }()
+	tr := tar.NewReader(cr)
+	hdr, err := tr.Next()
+	if err != nil {
+		return snapshotAbsent, fmt.Errorf("read snapshot: %w", err)
+	}
+	if hdr.Name != snapManifest {
+		return snapshotUnsupported, nil
+	}
+	data, err := io.ReadAll(io.LimitReader(tr, manifestReadLimit))
+	if err != nil {
+		return snapshotAbsent, fmt.Errorf("read snapshot manifest: %w", err)
+	}
+	var man snapshotManifest
+	if err := json.Unmarshal(data, &man); err != nil {
+		return snapshotAbsent, fmt.Errorf("decode snapshot manifest: %w", err)
+	}
+	if man.LayoutVersion != snapshotLayoutVersion {
+		return snapshotUnsupported, nil
+	}
+	return snapshotRestorable, nil
+}
+
+// manifestReadLimit bounds the layout probe's read of a manifest: a small JSON
+// header, whatever the size of the blob behind it.
+const manifestReadLimit = 1 << 20
 
 var zstdMagic = []byte{0x28, 0xb5, 0x2f, 0xfd}
 
-// snapshotReader chooses a decoder from the blob's outer magic bytes. Anything
-// other than zstd is handed to gzip so old snapshots retain gzip's useful,
-// specific header errors rather than acquiring an ambiguous format error.
+// snapshotReader opens a blob's zstd stream. Every blob this binary restores is
+// zstd; anything else (the gzip blobs an older binary wrote) is a blob of an
+// older layout, which is no snapshot.
 func snapshotReader(r io.Reader) (io.ReadCloser, string, error) {
 	br := bufio.NewReader(r)
 	magic, err := br.Peek(len(zstdMagic))
 	if err != nil {
 		return nil, "", err
 	}
-	if bytes.Equal(magic, zstdMagic) {
-		zr, err := zstd.NewReader(br)
-		if err != nil {
-			return nil, "", err
-		}
-		return zr.IOReadCloser(), "zstd", nil
+	if !bytes.Equal(magic, zstdMagic) {
+		return nil, "", errSnapshotLayout
 	}
-	gzr, err := gzip.NewReader(br)
+	zr, err := zstd.NewReader(br)
 	if err != nil {
 		return nil, "", err
 	}
-	return gzr, "gzip", nil
+	return zr.IOReadCloser(), "zstd", nil
 }
 
 // discardWorkspaceSnapshot deletes a parked workspace's snapshot blob once the

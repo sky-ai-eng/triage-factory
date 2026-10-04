@@ -2,7 +2,6 @@ package worktree
 
 import (
 	"context"
-	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -102,46 +101,6 @@ func TestCreateForCheckoutInRoot_Ref(t *testing.T) {
 	}
 	if b := CurrentBranch(wt); b != "" {
 		t.Errorf("CurrentBranch on a fresh --ref checkout = %q, want empty (detached)", b)
-	}
-}
-
-// TestCreateForPRInRoot_OwnRepoPR pins `workspace add --pr N` for an own-repo
-// PR: the worktree lands at {runRoot}/{owner}/{repo}/pr-<N> on the PR head (via
-// the upstream's refs/pull/<n>/head), checked out on the per-run branch so
-// CurrentBranch reports it (and the push gate authorizes it).
-func TestCreateForPRInRoot_OwnRepoPR(t *testing.T) {
-	withTestHome(t)
-	upstream := makeTestUpstream(t)
-
-	// Seed refs/pull/7/head on the upstream (GitHub's server-side mirror of the
-	// PR head). Own-repo PR: head clone URL == upstream.
-	work := t.TempDir()
-	coRun(t, "", "clone", upstream, work)
-	coRun(t, work, "config", "user.email", "t@example.com")
-	coRun(t, work, "config", "user.name", "T")
-	coRun(t, work, "checkout", "-b", "pr-head")
-	coRun(t, work, "commit", "--allow-empty", "-m", "pr commit")
-	prTip := coOut(t, work, "rev-parse", "HEAD")
-	coRun(t, work, "push", "origin", fmt.Sprintf("HEAD:refs/pull/%d/head", 7))
-
-	runRoot := t.TempDir()
-	wt, err := CreateForPRInRoot(context.Background(), "owner", "repo", upstream, upstream, "pr-head", 7, "run-3", runRoot)
-	if err != nil {
-		t.Fatalf("CreateForPRInRoot: %v", err)
-	}
-	t.Cleanup(func() { _ = RemoveAt(wt, "run-3") })
-
-	if want := filepath.Join(runRoot, "owner", "repo", "pr-7"); wt != want {
-		t.Errorf("path = %q, want %q", wt, want)
-	}
-	if got := coOut(t, wt, "rev-parse", "HEAD"); got != prTip {
-		t.Errorf("worktree HEAD = %q, want PR head %q", got, prTip)
-	}
-	// The PR checks out on the run-namespaced local branch → the push gate
-	// authorizes it (and it's per-run-unique so concurrent same-PR runs don't
-	// collide).
-	if b := CurrentBranch(wt); b != "triagefactory/run-3/pr-7" {
-		t.Errorf("CurrentBranch = %q, want triagefactory/run-3/pr-7", b)
 	}
 }
 

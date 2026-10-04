@@ -444,13 +444,18 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 
 	capCtx, cancelCapture := context.WithTimeout(ctx, checkpointCaptureTimeout)
 	defer cancelCapture()
+	// Resolved per checkpoint, not once per engagement: the agent adds
+	// checkouts as it goes, and each one belongs in the next blob.
+	if w.checkouts, err = s.snapshotCheckouts(capCtx, w.orgID, w.keyID, w.wtPath); err != nil {
+		return res
+	}
 	captured, err := checkpointCapture(capCtx, w)
 	if err != nil {
 		return res
 	}
 	defer captured.release()
 	res.capturedAt = captured.at
-	res.fingerprint, err = snapshotFingerprint(capCtx, captured.state, w.wtPath)
+	res.fingerprint, err = snapshotFingerprint(capCtx, captured, w.wtPath)
 	if err != nil {
 		return res
 	}
@@ -512,13 +517,14 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	return res
 }
 
-// snapshotFingerprint digests what a snapshot of this capture would carry: the
-// git delta's identity, the commits its bundle carries and the bytes of its
-// patch, the transcript, and a stat walk of the scratch the archive would
-// walk. Two captures with the same fingerprint carry the same workspace, so a
-// checkpoint that matches the last one written has nothing to store.
+// snapshotFingerprint digests what a snapshot of this capture would carry:
+// every checkout's identity, the commits its bundle carries and the bytes of
+// its patch, in path order, then the transcript, and a stat walk of the scratch
+// the archive would walk. Two captures with the same fingerprint carry the same
+// workspace, so a checkpoint that matches the last one written has nothing to
+// store.
 //
-// The bundle is read by its header, not its bytes: git does not pack the same
+// A bundle is read by its header, not its bytes: git does not pack the same
 // commits into the same bytes twice, and a fingerprint over them would take
 // every capture of a tree with unpushed commits for a changed one.
 //
@@ -527,26 +533,26 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 // which catch a rewrite that kept the old size and put the old modification
 // time back. It is the cheap half on purpose: the scratch is the unbounded
 // part of a workspace, and hashing it would cost what compressing it costs.
-func snapshotFingerprint(ctx context.Context, captured worktree.CapturedState, wtPath string) (string, error) {
+func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath string) (string, error) {
 	h := sha256.New()
 	field := func(parts ...string) {
 		for _, p := range parts {
 			fmt.Fprintf(h, "%d:%s;", len(p), p)
 		}
 	}
-	if d := captured.Delta; d != nil {
-		field("git", d.Branch, d.Head)
-		if err := hashBundle(h, d.Bundle, captured.BundlePath); err != nil {
-			return "", fmt.Errorf("fingerprint bundle: %w", err)
+	field("checkouts", strconv.Itoa(len(captured.checkouts)))
+	for _, co := range captured.checkouts {
+		d := co.state.Delta
+		field("checkout", co.rel, co.repoID, co.slug, d.Branch, d.Head)
+		if err := hashBundle(h, d.Bundle, co.state.BundlePath); err != nil {
+			return "", fmt.Errorf("fingerprint %s bundle: %w", co.rel, err)
 		}
-		if err := hashMember(h, d.Patch, captured.PatchPath); err != nil {
-			return "", fmt.Errorf("fingerprint patch: %w", err)
+		if err := hashMember(h, d.Patch, co.state.PatchPath); err != nil {
+			return "", fmt.Errorf("fingerprint %s patch: %w", co.rel, err)
 		}
-	} else {
-		field("no-git")
 	}
-	field("session", captured.SessionID)
-	if err := hashMember(h, captured.Transcript, captured.TranscriptPath); err != nil {
+	field("session", captured.state.SessionID)
+	if err := hashMember(h, captured.state.Transcript, captured.state.TranscriptPath); err != nil {
 		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
 	omittedCILogs, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {

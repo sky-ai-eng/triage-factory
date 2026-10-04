@@ -99,11 +99,16 @@ func (f *fakeTasks) GetSystem(context.Context, string, string) (*domain.Task, er
 
 type fakeConversationWorktrees struct {
 	db.ConversationWorktreeStore
-	rows []domain.ConversationWorktree
+	rows     []domain.ConversationWorktree
+	taskRows []domain.ConversationWorktree
 }
 
 func (f *fakeConversationWorktrees) ListSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
 	return f.rows, nil
+}
+
+func (f *fakeConversationWorktrees) ListForTaskSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
+	return f.taskRows, nil
 }
 
 // TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos is the
@@ -185,6 +190,35 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	}
 	if c := res.reposCalls[0]; c.owner != "acme" || len(c.repos) != 1 || c.repos[0] != "widgets" {
 		t.Errorf("gh-channel mint = owner %q repos %v, want acme [widgets]", c.owner, c.repos)
+	}
+}
+
+// TestManager_resolveGitHub_CoversTheTasksCheckouts: a conversation picking up
+// a task's tree can be the one that restores checkouts an earlier conversation
+// on the task materialized, and that restore's git runs through this bundle —
+// so a tracked repo in a sibling conversation's rows is minted for too.
+func TestManager_resolveGitHub_CoversTheTasksCheckouts(t *testing.T) {
+	res := &fakeScopedResolver{
+		base:    "https://ghe.example",
+		hasCred: true,
+		token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	m := &Manager{
+		stores: db.Stores{
+			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "acme/gears": true}},
+			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			ConversationWorktrees: &fakeConversationWorktrees{
+				taskRows: []domain.ConversationWorktree{{ConversationID: "conv-earlier", RepoID: "acme/gears"}},
+			},
+		},
+		ghResolver: res,
+	}
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+	if err != nil {
+		t.Fatalf("resolveGitHub: %v", err)
+	}
+	if _, ok := gh.RepoTokens["acme/gears"]; !ok {
+		t.Errorf("RepoTokens = %v, want the sibling conversation's checkout repo minted for", gh.RepoTokens)
 	}
 }
 

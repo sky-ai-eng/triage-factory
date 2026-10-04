@@ -60,7 +60,7 @@ func dirtyCaptureTree(t *testing.T, rootKey string) (wtDir, head string) {
 	t.Helper()
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
+	wtDir, err := createBranchCheckout(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
@@ -110,17 +110,17 @@ func assertNotRun(t *testing.T, sentinel string) {
 	}
 }
 
-// restoreAndAssertRoundTrip destroys wtDir and rebuilds it from the bare plus
-// delta, then asserts the agent's work came back byte-for-byte — the property a
-// patch produced through an external diff or a textconv would quietly break.
+// restoreAndAssertRoundTrip destroys wtDir and rebuilds the checkout from the
+// bare plus delta, then asserts the agent's work came back byte-for-byte — the
+// property a patch produced through an external diff or a textconv would
+// quietly break.
 func restoreAndAssertRoundTrip(t *testing.T, wtDir string, delta *GitDelta) {
 	t.Helper()
 	if err := os.RemoveAll(wtDir); err != nil {
 		t.Fatalf("rm worktree: %v", err)
 	}
-	if err := RestoreWorkspaceGit(context.Background(), "acme", "repo", wtDir, delta, "", CloneAuth{}); err != nil {
-		t.Fatalf("RestoreWorkspaceGit: %v", err)
-	}
+	root := filepath.Dir(filepath.Dir(wtDir))
+	wtDir = restoreDelta(t, root, filepath.Base(root), "acme", "repo", CheckoutRefSlug("main"), "", CloneAuth{}, delta, nil)
 	assertFileContent(t, filepath.Join(wtDir, "tracked.txt"), "v1\nv2\n")
 	assertFileContent(t, filepath.Join(wtDir, "untracked.txt"), "new work\n")
 	got, err := os.ReadFile(filepath.Join(wtDir, ".triagefactory", "triagefactory.db"))
@@ -165,7 +165,7 @@ func TestCaptureWorkspaceGit_DirtyTreeUnderCaptureChildEnv(t *testing.T) {
 	restoreAndAssertRoundTrip(t, wtDir, delta)
 }
 
-// TestCaptureWorkspaceGit_PlantedExternalDiffNeverRuns: the run root's own config
+// TestCaptureWorkspaceGit_PlantedExternalDiffNeverRuns: the checkout's own config
 // is agent-writable and IS read by the capture, so `diff.external` there is the
 // agent's to choose. The guarantee is --no-ext-diff at the invocation — which
 // outranks config — not the absence of a value, so the capture must produce a
@@ -229,7 +229,7 @@ func TestCaptureUncommitted_EveryDiffForbidsDriverExec(t *testing.T) {
 	}
 	found := 0
 	for _, line := range strings.Split(string(src), "\n") {
-		if !strings.Contains(line, `gitCapture(`) || !strings.Contains(line, `"diff"`) {
+		if !strings.Contains(line, `gitCapture`) || !strings.Contains(line, `"diff"`) {
 			continue
 		}
 		found++

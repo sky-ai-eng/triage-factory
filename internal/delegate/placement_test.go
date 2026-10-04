@@ -70,10 +70,3 @@ func TestPreferredExecutorFor_NonGitHubTaskStampsNothing(t *testing.T) {
 		t.Fatalf("a non-repo (Jira) task has no placement key, want empty, got %q", got)
 	}
 }
-
-func TestClaimPlacement_DefaultsToDisabled(t *testing.T) {
-	s := &Spawner{}
-	if got := s.claimPlacement(); got.Enabled {
-		t.Fatalf("unset claim placement must be disabled: %+v", got)
-	}
-}

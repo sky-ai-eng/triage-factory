@@ -43,7 +43,7 @@ type parkFleet struct {
 	gate          *gatedPutStorage
 	// wtPath is the run tree, keyed by the task id — one tree for every
 	// conversation on the task, and the snapshot key.
-	wtPath, owner, repo, keyID string
+	wtPath, keyID string
 	// goroutines counts what the fixture has running on a scenario's behalf.
 	// A scenario starts none of its own: go through spawn, or the thing you
 	// started outlives the test that started it.
@@ -67,12 +67,13 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	h.Reset(t)
 	fx := seedFleetFixture(t, h)
 
-	wtPath, owner, repo := setupTestWorktree(t, fx.taskID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, fx.taskID) })
-	// The agent's remembered work: an uncommitted edit (the patch member) and
-	// scratch under _tfac (the tar members). Both have to come back from the
-	// blob for a cold resume to be the same conversation.
-	writeFile(t, filepath.Join(wtPath, "README.md"), "hello\nuncommitted edit\n")
+	wtPath, err := worktree.MakeRunRoot(fx.taskID)
+	if err != nil {
+		t.Fatalf("MakeRunRoot: %v", err)
+	}
+	t.Cleanup(func() { worktree.RemoveRunRoot(fx.taskID) })
+	// The agent's remembered work: scratch under _tfac, which has to come back
+	// from the blob for a cold resume to be the same conversation.
 	writeFile(t, filepath.Join(wtPath, "_tfac", "notes.md"), "half-finished work")
 	pgtest.MustExec(t, h.AdminDB, `UPDATE blueprint_runs SET worktree_path = $2 WHERE id = $1`, fx.brID, wtPath)
 	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET worktree_path = $2 WHERE id = $1`, fx.conversationID, wtPath)
@@ -108,7 +109,7 @@ func seedParkFleet(t *testing.T) *parkFleet {
 	f := &parkFleet{
 		fleetFixture: fx, h: h, x: x, y: y, control: control,
 		blobs: blobs, gate: gate,
-		wtPath: wtPath, owner: owner, repo: repo, keyID: fx.taskID,
+		wtPath: wtPath, keyID: fx.taskID,
 	}
 	t.Cleanup(func() { waitOrFail(t, &f.goroutines, "the fixture's own goroutines") })
 	return f
@@ -402,7 +403,7 @@ func (f *parkFleet) ensureOn(t *testing.T, s *Spawner, conv *domain.Conversation
 		WorktreePath: f.storedWorktreePath(t),
 		TaskID:       f.keyID,
 		Runtime:      conv.Runtime,
-	}, gitSeed{owner: f.owner, repo: f.repo}, fresh)
+	}, checkoutRestorer{}, fresh)
 	return wt, prov, err
 }
 
@@ -661,7 +662,7 @@ func TestFleet_WarmResume_SameExecutorNeverWaitsOnItsOwnPersist(t *testing.T) {
 		t.Error("the predecessor's blob never landed")
 	}
 	assertFileContains(t, filepath.Join(f.wtPath, "_tfac", "successor.md"), "written by the second engagement")
-	assertFileContains(t, filepath.Join(f.wtPath, "README.md"), "uncommitted edit")
+	assertFileContains(t, filepath.Join(f.wtPath, "_tfac", "notes.md"), "half-finished work")
 
 	// The successor's park re-owns the key: its record, its blob.
 	f.parkIdle(t, f.x, next, f.wtPath)
@@ -689,7 +690,7 @@ func TestFleet_WarmResume_SameExecutorNeverWaitsOnItsOwnPersist(t *testing.T) {
 		t.Errorf("provenance after the sweep = %q, want rehydrated", prov)
 	}
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "successor.md"), "written by the second engagement")
-	assertFileContains(t, filepath.Join(cwd, "README.md"), "uncommitted edit")
+	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "half-finished work")
 
 	f.parkIdle(t, f.x, again, cwd)
 	f.assertInvariants(t)
@@ -738,7 +739,6 @@ func TestFleet_CrossExecutorResume_WaitsOutTheLiveWriter(t *testing.T) {
 	if cwd != worktree.RunRoot(f.keyID) {
 		t.Errorf("cwd on Y = %q, want the run root for %s", cwd, f.keyID)
 	}
-	assertFileContains(t, filepath.Join(cwd, "README.md"), "uncommitted edit")
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "half-finished work")
 	<-first.done
 	f.assertState(t, domain.WorkspaceSnapshotWritten, first.conv.ClaimID)
@@ -978,7 +978,6 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	if prov != domain.WorkspaceProvenanceRehydrated || cwd != f.wtPath {
 		t.Fatalf("workspace = (%q, %q), want %q rehydrated", cwd, prov, f.wtPath)
 	}
-	assertFileContains(t, filepath.Join(cwd, "README.md"), "uncommitted edit")
 	assertFileContains(t, filepath.Join(cwd, "_tfac", "notes.md"), "half-finished work")
 
 	f.parkIdle(t, f.x, next, cwd)

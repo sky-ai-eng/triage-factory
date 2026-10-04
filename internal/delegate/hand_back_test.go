@@ -13,7 +13,6 @@ import (
 
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // closedLoopbackAddr is a loopback address nothing listens on, so a
@@ -91,7 +90,7 @@ func TestUpstreamSetupFailure_AnUnreachableUpstreamCounts(t *testing.T) {
 	}
 
 	paths.SetForTest(t, t.TempDir())
-	_, cloneErr := worktree.CreateForPR(context.Background(), "o", "r",
+	_, cloneErr := createPRCheckoutForTest(context.Background(), "o", "r",
 		"http://"+closedLoopbackAddr(t)+"/o/r.git", "", "feature", 7, "task-1")
 	if cloneErr == nil {
 		t.Fatal("clone from a closed port succeeded")

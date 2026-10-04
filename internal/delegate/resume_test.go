@@ -490,8 +490,9 @@ func TestDispatchResumeClaim_DeliversRecordedInput(t *testing.T) {
 // resume-by-enqueue counterpart of the native path's launch-failure contract:
 // a rehydrate that will not complete is the resume's runtime failing to come
 // up, so the claim goes back on the queue rather than ending the conversation.
-// A snapshot is seeded (garbage content) so the enqueue-time recoverability
-// pre-flight passes but the actual rehydrate fails at claim — the realistic
+// A snapshot is seeded whose manifest reads but whose checksum is cut short, so
+// the enqueue-time recoverability pre-flight passes but the actual rehydrate
+// fails at claim — the realistic
 // enqueue-then-workspace-lost race, not an already-expired workspace (which
 // the follow-up path refuses up front — see the sibling test).
 //
@@ -504,7 +505,7 @@ func TestDispatchResumeClaim_WorkspaceFailureRetriesThenParks(t *testing.T) {
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "open-strand")
 	bpr := blueprintRunIDForConversation(t, database, conversationID)
 	wireBlobStore(t, s)
-	putTestSnapshot(t, s, taskID) // garbage blob: passes Exists, fails rehydrate
+	putUnrestorableSnapshot(t, s, taskID)
 	if _, err := database.Exec(`UPDATE conversations SET status='open', worktree_path='/tmp/does-not-exist-open-strand' WHERE id=?`, conversationID); err != nil {
 		t.Fatalf("park open: %v", err)
 	}

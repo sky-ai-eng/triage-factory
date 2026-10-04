@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -279,8 +281,9 @@ func resolveCLIPath(text, binaryPath string) string {
 // runContext renders what the framework prompt refers to but cannot contain:
 // the facts of this particular run. agentprompt.Build is byte-identical for a
 // fixed Spec so the fleet shares one cached prefix, which leaves anything that
-// differs between two runs — what this one is pointed at, where its tree is,
-// what the team calls its branches — to arrive here instead.
+// differs between two runs — what this one is pointed at, where its tree and
+// its PR checkout are, what the team calls its branches — to arrive here
+// instead.
 //
 // System-authored, so unlike the task context it carries no untrusted markers.
 // An absent fact renders no line: a deployment with no public URL says nothing
@@ -293,7 +296,7 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, runRoot, branchTemplate, runURL, knowledge string) string {
+func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -302,6 +305,10 @@ func runContext(scope, runRoot, branchTemplate, runURL, knowledge string) string
 		lines = append(lines, "Run root: "+runRoot+
 			" — every `_tfac/...` path in your instructions sits directly under this directory."+
 			" Reach it by the absolute path, so it resolves from whatever directory you have cd'd into.")
+	}
+	if prCheckout != "" {
+		lines = append(lines, "PR checkout: "+prCheckout+
+			" — the pull request's checkout, already on its branch. `cd` into it before reading or changing the code.")
 	}
 	if branchTemplate != "" {
 		lines = append(lines, "Branch naming convention for this team: "+branchTemplate)
@@ -549,4 +556,19 @@ func parseOwnerRepo(s string) (string, string) {
 		return "", ""
 	}
 	return parts[0], parts[1]
+}
+
+// agentVisibleCheckout translates a checkout's host path under hostRoot into
+// the path the agent sees, which differs under the sandbox: the run root is
+// mounted at agentproc.SandboxWorkRoot and the checkout sits at the same place
+// beneath it. "" for no checkout.
+func agentVisibleCheckout(hostRoot, checkout string) string {
+	if checkout == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(hostRoot, checkout)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return checkout
+	}
+	return filepath.Join(agentproc.AgentVisibleRoot(hostRoot), rel)
 }

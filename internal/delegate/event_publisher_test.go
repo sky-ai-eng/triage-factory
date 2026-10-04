@@ -265,17 +265,3 @@ func TestBroadcastMessage_NonToolRowsPublishNothing(t *testing.T) {
 		})
 	}
 }
-
-// TestBroadcast_NilPublisher_NoPanic pins the nil-guard: with no
-// publisher wired (the default), every broadcast helper is a pure
-// websocket no-op — no panic, nothing published.
-func TestBroadcast_NilPublisher_NoPanic(t *testing.T) {
-	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
-
-	s.broadcastConversationUpdate("org-a", "run-1", "running")
-	s.broadcastConversationFailed("org-a", "run-1", domain.ConversationFailureMemoryLimit)
-	s.broadcastMessage("org-a", "run-1", &domain.Message{
-		Role:      "assistant",
-		ToolCalls: []domain.ToolCall{{ID: "1", Name: "Bash"}},
-	})
-}

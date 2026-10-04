@@ -366,7 +366,6 @@ func TestRunNativeAgent_ToolHostLaunchFailureRecordsNothing(t *testing.T) {
 		teamID:         runmode.LocalDefaultTeamID,
 		claimID:        f.conv.ClaimID,
 		blueprintRunID: f.br.ID,
-		wtPath:         f.worktree,
 		runRoot:        f.worktree,
 	}, time.Now(), "claude-sonnet-4-6", "manual", runmode.LocalDefaultUserID)
 

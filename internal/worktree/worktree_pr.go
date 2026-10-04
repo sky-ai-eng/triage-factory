@@ -12,68 +12,44 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// CreateForPR sets up a worktree on the PR's head branch.
+// CreateForPRInRoot materializes pull request prNumber's head at
+// filepath.Join(runRoot, owner, repo, "pr-<n>"). It is the one PR checkout
+// builder: a GitHub PR run builds its own checkout through it at setup, and
+// `workspace add --pr` builds every other one, so both land as siblings under
+// the run root and two PRs in one repo coexist by their slug.
 //
-// Fetches the PR head via refs/pull/<n>/head (GitHub's server-side
-// mirror of every PR's head commit, available on the upstream) into
-// a local branch in the bare. This works uniformly for own-repo and
-// fork PRs: refs/pull/<n>/head exists on the upstream regardless of
-// whether the PR's actual branch lives in the upstream or in a fork.
-// Fetching refs/heads/<headBranch> directly from origin would fail
-// for fork PRs because that branch isn't on the upstream.
+// Fetches the PR head via refs/pull/<n>/head (GitHub's server-side mirror of
+// every PR's head commit, available on the upstream) into a local branch in the
+// bare. This works uniformly for own-repo and fork PRs: refs/pull/<n>/head
+// exists on the upstream regardless of whether the PR's actual branch lives in
+// the upstream or in a fork. Fetching refs/heads/<headBranch> directly from
+// origin would fail for fork PRs because that branch isn't on the upstream.
 //
-// upstreamCloneURL is the base.repo.clone_url from the PR — where
-// the bare's origin points and where refs/pull/*/head lives.
-// headCloneURL is the head.repo.clone_url — the fork's URL when the
-// PR is from a fork, equal to upstreamCloneURL otherwise.
+// upstreamCloneURL is the base.repo.clone_url from the PR — where the bare's
+// origin points and where refs/pull/*/head lives. headCloneURL is the
+// head.repo.clone_url — the fork's URL when the PR is from a fork, equal to
+// upstreamCloneURL otherwise, and "" for a deleted fork, which leaves the
+// checkout reviewable but read-only.
 //
 // The bare-local branch is run-namespaced for EVERY PR checkout —
 // triagefactory/<rootKey>/pr-<n> (prLocalBranch) — so two concurrent runs
-// reviewing the same PR off one shared bare never collide on a branch ref
-// (the fetch and `worktree add` would otherwise be refused). This is one
-// uniform scheme for fork AND own-repo PRs; only the push target differs.
-//
+// reviewing the same PR off one shared bare never collide on a branch ref.
 // Push tracking (configurePRPushTracking) wires a per-run remote
-// tfpush-<rootKey>-<n> -> headCloneURL with an explicit push refspec
-// (the run-namespaced local branch -> the real head branch), so `git
-// push` (no remote argument) lands on the fork's contributor branch
-// (fork PR) or the upstream head (own-repo PR). Agents must use `git
-// push` without a remote arg for this to work; the guardrails block has the
-// corresponding guidance. A deleted-fork PR (head.repo == null) skips
-// push tracking and stays read-only.
+// tfpush-<rootKey>-<n> -> headCloneURL with an explicit push refspec, so `git
+// push` (no remote argument) lands on the fork's contributor branch (fork PR)
+// or the upstream head (own-repo PR).
 //
-// CleanupPRConfig should be called after the run terminates (with the
-// SAME rootKey) to remove the per-run remote + branch config — they live
-// in the bare's shared config and would otherwise accumulate forever.
-func CreateForPR(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey string, opts ...CloneOption) (string, error) {
-	cfg := resolveCloneOptions(opts)
-	wtDir, err := makeWorktreeDir(rootKey)
-	if err != nil {
-		return "", err
-	}
-	// A sandboxed run needs a self-contained clone whose .git doesn't point
-	// back into the (masked, in local; unmounted, in multi) bare; an
-	// unsandboxed run reaches the bare on-host and keeps the zero-copy linked
-	// worktree.
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
-}
-
-// CreateForPRInRoot is the lazy-materialization variant of CreateForPR: the
-// PR-head worktree lands at filepath.Join(runRoot, owner, repo, "pr-<n>") so a
-// single run can host SEVERAL per-repo / per-PR worktrees as siblings under the
-// shared run-root (the `workspace add --pr` path) — the ref-slug subdir is what
-// lets two PRs in one repo coexist (TFAC-502). The eager one-repo GitHub PR
-// delegation uses the run-dir CreateForPR instead. Other than the path,
-// behavior is identical: same fork / own-repo / deleted-fork handling, same
-// per-run push-tracking config, same sandbox split (unsandboxed → zero-copy
-// linked worktree; sandboxed → self-contained clone, since a sandbox holding
-// the run root can't see the shared bare). The run-root must already exist
-// (created by MakeRunRoot in the spawner); the owner/repo subdirs are created
-// here.
+// An unsandboxed run gets a zero-copy linked worktree; a sandboxed one a
+// self-contained clone, since a sandbox holding the run root can't see the
+// shared bare. The run root must already exist (MakeRunRoot); the owner/repo
+// subdirs are created here. Nothing of TF's is written into the checkout: no
+// exclude block, no skills link — those belong to the run root.
 //
-// Since TFAC-546 this runs HOST-SIDE in both modes (the agenthost daemon calls
-// it on the sandbox's behalf in multi), so WithCloneAuth is honored exactly as
-// in CreateForPR.
+// CleanupPRConfig reclaims the per-run remote + branch config a linked
+// checkout leaves in the bare's shared config, keyed by the same rootKey.
+//
+// Runs HOST-SIDE in both modes (the agenthost daemon calls it on the sandbox's
+// behalf in multi), so WithCloneAuth is honored for the clone and fetch.
 func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
@@ -86,14 +62,12 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
 }
 
-// createPRWorktreeAt is the shared body of CreateForPR / CreateForPRInRoot —
-// bare-clone setup, refs/pull/<n>/head fetch, base-branch refresh, and the fork
-// / own-repo / deleted-fork push-tracking config. The run root is materialized
-// either as a linked `git worktree` (selfContained=false) or, for a sandboxed
-// run in either mode, as a self-contained clone (selfContained=true — see
-// finishSelfContainedPRClone). The public callers differ in where wtDir lives on
-// disk, whether a host clone credential is threaded, and that selfContained
-// choice; wtDir's parent is created by the caller.
+// createPRWorktreeAt is CreateForPRInRoot's body — bare-clone setup,
+// refs/pull/<n>/head fetch, base-branch refresh, and the fork / own-repo /
+// deleted-fork push-tracking config. The checkout is materialized either as a
+// linked `git worktree` (selfContained=false) or, for a sandboxed run in either
+// mode, as a self-contained clone (selfContained=true — see
+// finishSelfContainedPRClone). wtDir's parent is created by the caller.
 func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, rootKey, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
@@ -102,6 +76,12 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, upstreamCloneURL, auth)
 	if err != nil {
 		return "", err
+	}
+	// A linked checkout whose directory is gone still pins its branch until its
+	// registration is pruned, and the fetch below would refuse to move it.
+	// Pruning touches only registrations whose directories are missing.
+	if err := gitRunCtx(ctx, bareDir, "worktree", "prune"); err != nil {
+		return "", fmt.Errorf("prune worktrees: %w", err)
 	}
 
 	// GitHub can return head.repo = null for deleted-fork PRs, which leaves
@@ -223,38 +203,24 @@ func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, head
 		worktreeLog.Warn("PR head repository unavailable (deleted fork); worktree is read-only", "number", prNumber)
 	}
 
-	if err := writeLocalExcludes(wtDir); err != nil {
-		// Tracking + remote already configured for fork/own-repo;
-		// roll back both the worktree AND that shared-bare state.
-		// Using rollbackPRSetupLocked instead of addExcludesOrRollback
-		// here keeps the fork/own-repo cases consistent — earlier
-		// rollbacks already clean up shared config, so this one
-		// shouldn't be the odd path that leaves it behind.
-		rollbackPRSetupLocked(ctx, bareDir, wtDir, rootKey, prNumber)
-		return "", fmt.Errorf("write local git excludes: %w", err)
-	}
-
-	plantSandboxSkillsLink(wtDir)
-
 	worktreeLog.Info("PR worktree created", "dir", wtDir, "branch", localBranch, "head", headBranch, "fork", isFork)
 	return wtDir, nil
 }
 
-// finishSelfContainedPRClone materializes the PR run root as a STANDALONE clone
+// finishSelfContainedPRClone materializes the PR checkout as a STANDALONE clone
 // of the bare instead of a linked worktree. A sandboxed run sees the run root
 // and not the bare — multi bind-mounts one tree, local masks the state root the
 // bares live under — so a worktree's .git pointer (gitdir: <bare>/worktrees/...)
 // dangles inside and every git command fails. A standalone clone carries its
-// own .git, so the run root is fully self-contained once it is the only tree
-// there. Caller holds the per-repo lock and has already
-// fetched refs/heads/<localBranch> into the bare.
+// own .git, so the checkout is fully self-contained. Caller holds the per-repo
+// lock and has already fetched refs/heads/<localBranch> into the bare.
 //
 // Two things differ from the worktree path, both forced by self-containment:
 //   - the transient per-run branch is dropped from the shared bare once the
 //     clone has copied its objects (the worktree path keeps it — its live
 //     checkout needs it);
 //   - push tracking is written into the CLONE's config, not the bare's, so the
-//     `git push` wiring travels into the sandbox with the run root.
+//     `git push` wiring travels into the sandbox with the checkout.
 func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, headCloneURL, headBranch, rootKey string, prNumber int, hasHeadRepo, isFork bool, auth CloneAuth) (string, error) {
 	if err := materializeSelfContainedClone(ctx, bareDir, wtDir, localBranch, baseBranch, upstreamCloneURL, auth); err != nil {
 		_ = os.RemoveAll(wtDir)
@@ -269,7 +235,7 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 	case hasHeadRepo:
 		// Fork OR own-repo PR — identical wiring to the worktree path, only the
 		// git dir differs: the config lives in the CLONE (wtDir) so it ships into
-		// the sandbox with the run root.
+		// the sandbox with the checkout.
 		if err := configurePRPushTracking(ctx, wtDir, rootKey, prNumber, localBranch, headCloneURL, headBranch); err != nil {
 			_ = os.RemoveAll(wtDir)
 			return "", fmt.Errorf("configure PR push tracking: %w", err)
@@ -279,13 +245,6 @@ func finishSelfContainedPRClone(ctx context.Context, bareDir, wtDir, localBranch
 		// push remote, so `git push` fails loudly (read-only, by design).
 		worktreeLog.Warn("PR head repository unavailable (deleted fork); run clone is read-only", "number", prNumber)
 	}
-
-	if err := writeLocalExcludes(wtDir); err != nil {
-		_ = os.RemoveAll(wtDir)
-		return "", fmt.Errorf("write local git excludes: %w", err)
-	}
-
-	plantSandboxSkillsLink(wtDir)
 
 	worktreeLog.Info("PR run clone created (self-contained)", "dir", wtDir, "branch", localBranch, "head", headBranch, "fork", isFork)
 	return wtDir, nil
@@ -364,7 +323,7 @@ func dropBareRunRefs(ctx context.Context, bareDir, localBranch string) {
 // branch.triagefactory/<rootKey>/pr-<n>.* tracking, and the synthetic
 // local branch).
 //
-// Caller must hold the per-repo lock (CreateForPR's mu). Best-effort
+// Caller must hold the per-repo lock (createPRWorktreeAt's mu). Best-effort
 // — individual command failures are logged but don't propagate. The
 // caller still returns the original setup error.
 //
@@ -385,18 +344,16 @@ func rollbackPRSetupLocked(ctx context.Context, bareDir, wtDir, rootKey string, 
 }
 
 // prLocalBranch returns the bare-local branch name a PR checkout attaches in
-// the shared bare. Namespaced by rootKey — the same key the worktree dir is
-// named after, which is the task id for a delegated run (so a task's
-// conversations share the branch, as they share the tree) and the
-// conversation's own id for a run with no task. The namespace exists so
-// two concurrent runs reviewing the SAME PR (sharing one bare) never share a
+// the shared bare. Namespaced by rootKey — the id of the conversation that
+// materialized the checkout, whether its PR run's setup did or `workspace add
+// --pr` did. The namespace exists so two concurrent runs reviewing the SAME PR (sharing one bare) never share a
 // branch ref — git refuses to fetch into, or `worktree add`, a local branch
 // already checked out in another live worktree of the same bare, so a
 // per-PR-only name (the old triagefactory/pr-N) would make the second run's
 // materialization fail (TFAC-87/TFAC-502). One uniform scheme for fork AND
 // own-repo PRs (own-repo used to reuse the head branch name itself, which
 // collided the same way). The triagefactory/ prefix reserves the namespace from
-// any literal contributor branch. Centralized so CreateForPR, the push-tracking
+// any literal contributor branch. Centralized so CreateForPRInRoot, the push-tracking
 // config, and the cleanup paths can't drift on the convention.
 func prLocalBranch(rootKey string, prNumber int) string {
 	return fmt.Sprintf("triagefactory/%s/pr-%d", rootKey, prNumber)
@@ -692,6 +649,23 @@ func liveWorktreeBranches(ctx context.Context, bareDir string) map[string]bool {
 // (finishSelfContainedPRClone). The per-run namespacing of the remote/branch is
 // load-bearing only for the shared bare — harmless but redundant in a per-run clone.
 func configurePRPushTracking(ctx context.Context, gitDir, rootKey string, prNumber int, localBranch, pushURL, headBranch string) error {
+	// localBranch's tip in gitDir is the PR head the caller just fetched (via
+	// refs/pull/<n>/head) — reuse it as the tfpush remote's tracking ref
+	// instead of an actual fetch. See the doc comment above.
+	headSHA, err := gitOutputCtx(ctx, gitDir, "rev-parse", "refs/heads/"+localBranch)
+	if err != nil {
+		return fmt.Errorf("resolve PR head sha for %s: %w", localBranch, err)
+	}
+	return configurePRPushTrackingAt(ctx, gitDir, rootKey, prNumber, localBranch, pushURL, headBranch, strings.TrimSpace(headSHA))
+}
+
+// configurePRPushTrackingAt is configurePRPushTracking with the PR head named
+// rather than read off localBranch. A restore needs the split: its local branch
+// may carry commits the agent never pushed, and the tracking ref is the
+// statement "GitHub already has this", which the next snapshot's bundle bound
+// (--not --remotes) reads. Pointing it at an unpushed tip would drop those
+// commits from every later bundle.
+func configurePRPushTrackingAt(ctx context.Context, gitDir, rootKey string, prNumber int, localBranch, pushURL, headBranch, headSHA string) error {
 	remoteName := prPushRemoteName(rootKey, prNumber)
 
 	// Add or update the per-run push remote. `git remote add` errors when the
@@ -704,15 +678,8 @@ func configurePRPushTracking(ctx context.Context, gitDir, rootKey string, prNumb
 		}
 	}
 
-	// localBranch's tip in gitDir is the PR head the caller just fetched (via
-	// refs/pull/<n>/head) — reuse it as the tfpush remote's tracking ref
-	// instead of an actual fetch. See the doc comment above.
-	headSHA, err := gitOutputCtx(ctx, gitDir, "rev-parse", "refs/heads/"+localBranch)
-	if err != nil {
-		return fmt.Errorf("resolve PR head sha for %s: %w", localBranch, err)
-	}
 	trackingRef := fmt.Sprintf("refs/remotes/%s/%s", remoteName, headBranch)
-	if err := gitRunCtx(ctx, gitDir, "update-ref", trackingRef, strings.TrimSpace(headSHA)); err != nil {
+	if err := gitRunCtx(ctx, gitDir, "update-ref", trackingRef, headSHA); err != nil {
 		return fmt.Errorf("update-ref %s: %w", trackingRef, err)
 	}
 

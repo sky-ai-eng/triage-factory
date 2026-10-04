@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -198,7 +197,7 @@ func (s *Spawner) terminateBlueprint(
 	// the directory instead would mean a checked-out branch on disk belonging
 	// to a blueprint that has stopped, which the boot reconcile then orphans.
 	if !skipCleanup {
-		s.runBlueprintWorktreeCleanup(blueprintRunID, workspaceKey(taskID), cfg)
+		s.runBlueprintWorktreeCleanup(orgID, blueprintRunID, workspaceKey(taskID))
 	}
 
 	// Reclaim any staging dir still held for this blueprint — the step skill and
@@ -254,94 +253,99 @@ func (s *Spawner) reclaimBlueprintStepStaging(ctx context.Context, orgID, bluepr
 	}
 }
 
-// runBlueprintWorktreeCleanup performs the cleanup runAgent would have done
-// per-step, except now once for the whole blueprint.
+// runBlueprintWorktreeCleanup reclaims the task's run tree once, when a
+// blueprint ends. One path for every source: iterate the task's
+// conversation_worktrees rows to reclaim the PR push config a linked checkout
+// left in a shared bare, then remove the run root, which takes every checkout
+// beneath it along.
 //
-// Two ids, because two different things are named: blueprintRunID is the
-// blueprint whose step conversations are enumerated (and what the logs say),
-// while wsKey is the workspace key — the task's, shared by every conversation
-// that ever ran in the tree. They are not interchangeable: RemoveRunRoot
-// derives the directory from the key it is handed, so the blueprint's id there
-// would sweep a path nothing ever built.
-func (s *Spawner) runBlueprintWorktreeCleanup(blueprintRunID, wsKey string, cfg runConfig) {
-	if cfg.hasWT {
-		if err := worktree.RemoveAt(cfg.wtPath, wsKey); err != nil {
-			blueprintLog.Warn("worktree remove failed", "blueprint_run", blueprintRunID, "error", err)
-			return
-		}
-		if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
-			// The eager PR worktree's per-run branch is namespaced by the id
-			// CreateForPR ran under — the worktree-dir basename, which is the
-			// run-root's key. filepath.Base derives it from the path so this
-			// stays correct regardless of the key.
-			worktree.CleanupPRConfig(cfg.owner, cfg.repo, cfg.prNumber, filepath.Base(cfg.wtPath))
-		}
-	} else if cfg.runRoot != "" {
-		// Jira blueprints materialize worktrees lazily via `workspace add`,
-		// which records a conversation_worktrees row per *step* conversation
-		// (the agent's TRIAGE_FACTORY_CONVERSATION_ID) under the task's one
-		// run root. Iterate every step conversation so we find and remove the
-		// checkouts each of them made; the root itself comes off below, once.
-		stepConversations, err := s.blueprints.ConversationsForBlueprintSystem(context.Background(), cfg.orgID, blueprintRunID)
-		if err != nil {
-			blueprintLog.Warn("list step conversations for cleanup failed", "blueprint_run", blueprintRunID, "error", err)
-		}
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		for _, sr := range stepConversations {
-			rows, err := s.conversationWorktrees.ListSystem(context.Background(), cfg.orgID, sr.ID)
-			if err != nil {
-				blueprintLog.Warn("list conversation_worktrees for step failed", "blueprint_run", blueprintRunID, "step_conversation", sr.ID, "error", err)
-				// Log but continue to attempt DB row deletion below.
-				rows = nil
-			}
-			for _, w := range rows {
-				if err := worktree.RemoveAt(w.Path, sr.ID); err != nil && !errors.Is(err, os.ErrNotExist) {
-					blueprintLog.Warn("remove worktree failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
-					// Still attempt the DB row deletion even if the worktree remove failed.
-				} else {
-					// Worktree gone — reclaim its per-run PR branch + push remote
-					// inline (Decision D), so the bootstrap sweep stays a pure
-					// crash backstop. w.ConversationID == sr.ID (created the worktree).
-					reclaimWorkspaceAddPRConfig(w)
-				}
-				if err := s.conversationWorktrees.DeleteByPathSystem(cleanupCtx, cfg.orgID, sr.ID, w.Path); err != nil {
-					blueprintLog.Warn("delete conversation_worktrees row failed", "blueprint_run", blueprintRunID, "path", w.Path, "error", err)
-				}
-			}
-		}
-		// Clean the agent's ghost ~/.claude/projects entry (keyed on the session
-		// cwd = cfg.wtPath, the blueprint run-root) BEFORE removing the run-root
-		// dir — RemoveClaudeProjectDir resolves the cwd via EvalSymlinks and
-		// silently no-ops once the dir is gone.
-		worktree.RemoveClaudeProjectDir(cfg.wtPath)
-		// The run-root is keyed by the task (setup and the cold rehydrate both
-		// build it there), and every `workspace add` checkout nests under it, so
-		// one removal reclaims the whole tree — the per-step
-		// conversation_worktrees rows and their PR config were already reclaimed above.
-		worktree.RemoveRunRoot(wsKey)
+// Two ids, because two different things are named: blueprintRunID is only what
+// the logs say, while wsKey is the workspace key — the task's, shared by every
+// conversation that ever ran in the tree. RemoveRunRoot derives the directory
+// from the key it is handed, so the blueprint's id there would sweep a path
+// nothing ever built.
+//
+// The rows stay. They record what each conversation materialized and are what
+// the next engagement's credentials and a resumed conversation's push gate are
+// derived from; a path they name that is gone is a checkout the next restore
+// re-records.
+func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey string) {
+	if wsKey == "" {
 		return
 	}
-	worktree.RemoveClaudeProjectDir(cfg.wtPath)
+	root := worktree.RunRoot(wsKey)
+	var reclaims []prConfigReclaim
+	if s.conversationWorktrees != nil {
+		listCtx, cancel := context.WithTimeout(context.Background(), ledgerWriteTimeout)
+		rows, err := s.conversationWorktrees.ListForTaskSystem(listCtx, orgID, wsKey)
+		cancel()
+		if err != nil {
+			blueprintLog.Warn("list the task's conversation_worktrees for cleanup failed; a linked PR checkout's push config is left to the startup sweep",
+				"blueprint_run", blueprintRunID, "error", err)
+		}
+		for _, w := range rows {
+			// Read before the tree goes: the checkout's branch is what names the
+			// push config's namespace when the conversation recording the row
+			// is not the one that materialized it.
+			if insideRoot(root, w.Path) {
+				reclaims = append(reclaims, prConfigReclaimFor(w))
+			}
+		}
+	}
+	// Clean the agent's ghost ~/.claude/projects entry (keyed on the session cwd,
+	// the run root) BEFORE removing the root — RemoveClaudeProjectDir resolves
+	// the cwd via EvalSymlinks and silently no-ops once the dir is gone.
+	worktree.RemoveClaudeProjectDir(root)
+	// RemoveAt prunes every bare once the tree is gone, so the PR branches below
+	// are no longer checked out anywhere when they are deleted.
+	if err := worktree.RemoveAt(root, wsKey); err != nil {
+		blueprintLog.Warn("run root remove failed", "blueprint_run", blueprintRunID, "error", err)
+		return
+	}
+	for _, r := range reclaims {
+		r.run()
+	}
 }
 
-// reclaimWorkspaceAddPRConfig reclaims the per-run PR branch + push remote a
-// `workspace add --pr N` worktree left in the shared bare, keyed off the
-// conversation_worktrees row's ref (pr-<N>) and conversation_id (the conversation that created it, so the
-// per-run branch namespace matches). A no-op for non-PR refs (default, branch
-// slugs) — those leave detached checkouts with no per-PR config. The blueprint
-// teardown above is its only caller: reclaiming inline there is what keeps the
-// bootstrap sweep a pure crash backstop rather than the ordinary path.
-func reclaimWorkspaceAddPRConfig(w domain.ConversationWorktree) {
+// prConfigReclaim is the per-run PR push config one checkout row may have left
+// in a shared bare, by every namespace it can be under.
+type prConfigReclaim struct {
+	owner, repo string
+	prNumber    int
+	keys        []string
+}
+
+// prConfigReclaimFor reads a row's reclaim off its ref and its checkout. A
+// pr-<N> checkout's config is namespaced by the conversation that materialized
+// it — the row's conversation for a fresh one, and whatever its branch names
+// for one a restore rebuilt — so both are reclaimed. A no-op for any other ref:
+// a detached default/--ref checkout leaves no per-PR config.
+func prConfigReclaimFor(w domain.ConversationWorktree) prConfigReclaim {
 	prNum, ok := prNumberFromRef(w.Ref)
 	if !ok {
-		return
+		return prConfigReclaim{}
 	}
 	owner, repo := parseOwnerRepo(w.RepoID)
 	if owner == "" || repo == "" {
-		return
+		return prConfigReclaim{}
 	}
-	worktree.CleanupPRConfig(owner, repo, prNum, w.ConversationID)
+	keys := []string{w.ConversationID}
+	if key, ok := worktree.PRBranchKey(worktree.CurrentBranch(w.Path), prNum); ok && key != w.ConversationID {
+		keys = append(keys, key)
+	}
+	return prConfigReclaim{owner: owner, repo: repo, prNumber: prNum, keys: keys}
+}
+
+func (r prConfigReclaim) run() {
+	for _, key := range r.keys {
+		worktree.CleanupPRConfig(r.owner, r.repo, r.prNumber, key)
+	}
+}
+
+// insideRoot reports whether p lies strictly inside root.
+func insideRoot(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
 // prNumberFromRef extracts N from a "pr-<N>" conversation_worktrees ref. ok=false for any
@@ -502,21 +506,15 @@ func (s *Spawner) CancelBlueprintRun(orgID, blueprintRunID, userID string) error
 // one; nil when the run had no step to name.
 func (s *Spawner) finalizeCancelledBlueprintRun(ctx context.Context, orgID string, cr *domain.BlueprintRun, abortedAtStep *int) {
 	_, _ = s.blueprints.MarkRunStatusSystem(ctx, orgID, cr.ID, domain.BlueprintRunStatusCancelled, "system_cancelled", abortedAtStep)
-	s.cleanupCancelledBlueprintWorktree(ctx, orgID, cr.ID, cr.TaskID, cr.WorktreePath)
+	s.cleanupCancelledBlueprintWorktree(orgID, cr.ID, cr.TaskID)
 }
 
-// cleanupCancelledBlueprintWorktree reclaims a cancelled run's shared
-// worktree. The cfg is reconstructed rather than carried, because
-// owner/repo/prNumber aren't persisted on blueprint_runs — so CleanupPRConfig
-// is skipped and only the worktree is reclaimed. The snapshot survives: it is
-// the parked workspace the cancel retained, and the retention TTL collects it.
+// cleanupCancelledBlueprintWorktree reclaims a cancelled run's shared run
+// tree, the same way every terminal does. The snapshot survives: it is the
+// parked workspace the cancel retained, and the retention TTL collects it.
 // Best-effort; a pod that never held the tree finds nothing to remove.
-func (s *Spawner) cleanupCancelledBlueprintWorktree(ctx context.Context, orgID, blueprintRunID, taskID, worktreePath string) {
-	cfg := runConfig{orgID: orgID, wtPath: worktreePath}
-	if task, _ := s.tasks.GetSystem(ctx, orgID, taskID); task != nil && task.EntitySource == "github" {
-		cfg.hasWT = true
-	}
-	s.runBlueprintWorktreeCleanup(blueprintRunID, workspaceKey(taskID), cfg)
+func (s *Spawner) cleanupCancelledBlueprintWorktree(orgID, blueprintRunID, taskID string) {
+	s.runBlueprintWorktreeCleanup(orgID, blueprintRunID, workspaceKey(taskID))
 }
 
 // markBlueprintRunStatusAsUser writes a blueprint_run status transition under
@@ -586,10 +584,7 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 		_, _ = s.markBlueprintRunStatusAsUser(context.Background(), orgID, userID, cr.ID, domain.BlueprintRunStatusFailed, "resume_task_load_failed", stepIdx)
 		return
 	}
-	cfg := runConfig{orgID: orgID, wtPath: cr.WorktreePath}
-	if task.EntitySource == "github" {
-		cfg.hasWT = true
-	}
+	cfg := runConfig{orgID: orgID}
 
 	// A cancel raised against this blueprint decides its terminal regardless of
 	// how the resumed step ended — including the `open` park a cancelled resume

@@ -13,35 +13,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// CreateForBranch sets up a worktree on a new feature branch based off
-// a given base, at the run's default location runDir(rootKey). If
-// baseBranch is empty, the repo's default branch is detected from
-// origin/HEAD. Used by the eager GitHub PR delegation path where the
-// run has exactly one repo.
-func CreateForBranch(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey string, opts ...CloneOption) (string, error) {
-	wtDir, err := makeWorktreeDir(rootKey)
-	if err != nil {
-		return "", err
-	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, resolveCloneOptions(opts).auth)
-}
-
-// CreateForBranchInRoot is the lazy-Jira-delegation variant: the worktree
-// lands at filepath.Join(runRoot, owner, repo) so a single run can host
-// multiple per-repo worktrees as siblings under a shared run-root. The
-// run-root must already exist (created by MakeRunRoot in the spawner);
-// the owner-level subdir is created here.
-//
-// Other than the path, behavior matches CreateForBranch — same per-repo
-// lock, same bare-clone reuse, same branch-exists reattach, same excludes
-// rollback.
+// CreateForBranchInRoot checks out a prescribed feature branch off baseBranch
+// at filepath.Join(runRoot, owner, repo), so a single run can host multiple
+// per-repo worktrees as siblings under a shared run-root. The run-root must
+// already exist (MakeRunRoot); the owner-level subdir is created here. Per-repo
+// lock, bare-clone reuse, and an existing branch is reattached.
 //
 // No live production caller: `workspace add` routes to CreateForCheckoutInRoot
 // (the detached default/--ref path, TFAC-498), not here. Retained as the
 // prescribed-feature-branch variant for a future caller that needs a named
 // branch checked out up front rather than a detached checkout the agent
 // branches from itself.
-func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, runRoot string) (string, error) {
+func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
 	}
@@ -54,7 +37,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	// concern, not the host-side clone path. The shared body is already
 	// auth-capable, so a credential can be threaded through when it wires
 	// the in-sandbox path.
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir, CloneAuth{})
+	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, wtDir, CloneAuth{})
 }
 
 // CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
@@ -144,7 +127,7 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ro
 	if selfContainedRunTrees() {
 		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
 	}
-	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
+	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, wtDir, auth)
 }
 
 // checkoutRefPattern restricts a checkout ref to a conservative refname
@@ -189,10 +172,10 @@ func ValidateCheckoutRef(ref string) error {
 
 // createCheckoutWorktreeAt fetches ref fresh from origin and adds a detached
 // worktree at its tip. Empty ref → the repo's default branch. Shares the
-// per-repo lock, bare-clone reuse, and exclude-or-rollback with the other
-// Create* helpers; differs in that it never creates or reattaches a local
-// branch — the checkout is detached.
-func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
+// per-repo lock and bare-clone reuse with the other Create* helpers; differs in
+// that it never creates or reattaches a local branch — the checkout is
+// detached.
+func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -227,10 +210,6 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, r
 		_ = os.RemoveAll(wtDir)
 		removeWorktreeRegFor(bareDir, wtDir)
 		return "", fmt.Errorf("worktree add (detached %s): %w", ref, err)
-	}
-
-	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
-		return "", err
 	}
 
 	worktreeLog.Debug("checkout worktree at", "dir", wtDir, "ref", ref, "detached", true)
@@ -312,13 +291,6 @@ func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, root
 		_ = os.RemoveAll(wtDir)
 		return "", fmt.Errorf("repoint clone fetch refspec: %w", err)
 	}
-
-	if err := writeLocalExcludes(wtDir); err != nil {
-		_ = os.RemoveAll(wtDir)
-		return "", fmt.Errorf("write local git excludes: %w", err)
-	}
-
-	plantSandboxSkillsLink(wtDir)
 
 	worktreeLog.Info("checkout run clone created (self-contained)", "dir", wtDir, "ref", ref, "detached", true)
 	return wtDir, nil
@@ -546,11 +518,9 @@ func gitConfigReadEnv() []string {
 	return out
 }
 
-// createBranchWorktreeAt is the shared body of the two CreateForBranch
-// variants — bare-clone setup, base-branch fetch, `git worktree add`
-// (with branchExists reattach), and exclude-or-rollback. The two
-// public callers differ only in where wtDir lives on disk.
-func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, rootKey, wtDir string, auth CloneAuth) (string, error) {
+// createBranchWorktreeAt is CreateForBranchInRoot's body — bare-clone setup,
+// base-branch fetch, and `git worktree add` (with branchExists reattach).
+func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, wtDir string, auth CloneAuth) (string, error) {
 	mu := lockRepo(owner, repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -595,42 +565,16 @@ func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBran
 		}
 	}
 
-	if err := addExcludesOrRollback(rootKey, wtDir); err != nil {
-		return "", err
-	}
-	plantSandboxSkillsLink(wtDir)
-
 	worktreeLog.Debug("branch worktree at", "dir", wtDir, "branch", featureBranch, "base", baseBranch)
 	return wtDir, nil
 }
 
-// addExcludesOrRollback wraps writeLocalExcludes with the rollback both
-// Create* functions need: if the exclude write fails, the worktree is
-// already registered with the bare repo and on disk, so we must remove
-// it before returning. Without rollback the caller sees an error but
-// has no handle to clean up with, leaking a half-configured worktree
-// and its bare-repo registration.
-func addExcludesOrRollback(rootKey, wtDir string) error {
-	if err := writeLocalExcludes(wtDir); err != nil {
-		if rmErr := RemoveAt(wtDir, rootKey); rmErr != nil {
-			worktreeLog.Warn("rollback after exclude-write failure", "error", rmErr)
-		}
-		return fmt.Errorf("write local git excludes: %w", err)
-	}
-	return nil
-}
-
-// ScratchDir is the one directory TF claims inside a run tree: CI log archives,
+// ScratchDir is the one directory TF claims inside a run root: CI log archives,
 // ephemeral downloads, the agent's own memory.md, the entity-memory subdir
 // the spawner populates, and whatever intermediates the agent writes. Every
 // producer of a path under it — spawner, exec verbs, prompts — names it
-// through this constant.
-//
-// The name is deliberately ours rather than descriptive. For a GitHub PR run
-// the run tree IS the repo checkout, so this directory lands in someone else's
-// source tree: a plausible generic name is a name a repo might already use, and
-// a collision there means TF writing over, or deleting, tracked content that
-// then rides the agent's next commit.
+// through this constant. It lives at the run root and never inside a checkout,
+// which is the customer's repo.
 const ScratchDir = "_tfac"
 
 // CILogsDir is the subdirectory of ScratchDir that `exec gh actions
@@ -641,232 +585,6 @@ const ScratchDir = "_tfac"
 // archive in the blob. A rename that reached only one of them would silently
 // put GBs of logs back in every snapshot.
 const CILogsDir = "ci-logs"
-
-// legacyScratchDir is what ScratchDir was called before. It survives in two
-// places on purpose: the managed exclude list, so a tree built by an older
-// binary can't leak its leftovers into a commit, and AdoptLegacyScratchDir.
-const legacyScratchDir = "_scratch"
-
-// managedExcludePatterns are the gitignore patterns writeLocalExcludes
-// ensures are present in .git/info/exclude for every delegated worktree.
-// One prefix covers everything under it.
-var managedExcludePatterns = []string{ScratchDir + "/", legacyScratchDir + "/"}
-
-// Markers delimiting the managed section of .git/info/exclude. writeLocalExcludes
-// rewrites the content between these markers in place when both are present,
-// and appends a fresh marker block otherwise. Using explicit markers means
-// the managed section remains a self-contained complete manifest of our
-// patterns regardless of how managedExcludePatterns evolves — growing the
-// list reuses the existing section instead of appending a second header.
-const (
-	managedExcludeBegin = "# triagefactory: begin managed exclude block (do not edit)"
-	managedExcludeEnd   = "# triagefactory: end managed exclude block"
-)
-
-// writeLocalExcludes ensures the worktree's .git/info/exclude file contains
-// every pattern in managedExcludePatterns so agents can't accidentally
-// commit our infrastructure directories.
-//
-// Content outside our marked section is never touched: user patterns,
-// tool-managed lines from other tools, and git's stock comment header
-// are all preserved verbatim. Only the lines between managedExcludeBegin
-// and managedExcludeEnd get rewritten, and only if the rewritten content
-// differs from what's already there. On a file that doesn't yet have the
-// markers, the managed section is appended at EOF in a single pass. On
-// subsequent runs the markers exist, so we replace in place — which means
-// growing managedExcludePatterns expands the section rather than tacking
-// a duplicate header at the end of the file.
-//
-// Uses .git/info/exclude rather than a committed .gitignore because these
-// paths are infrastructure concerns, not something the tracked repo should
-// know or care about.
-//
-// Fails closed: if any step fails we return the error and the caller is
-// responsible for rolling back the partially-created worktree. A worktree
-// without the excludes is a footgun (agents could commit hundreds of log
-// files), so rolling back the worktree on error is the safer behavior
-// than silently proceeding.
-//
-// Worktrees in git use a per-worktree info directory — for a linked
-// worktree, `.git` is a file containing `gitdir: <path>`, and
-// `info/exclude` lives under that gitdir. For a plain checkout `.git` is
-// a directory. Both layouts are handled.
-func writeLocalExcludes(wtDir string) error {
-	excludePath, err := resolveExcludePath(wtDir)
-	if err != nil {
-		return err
-	}
-
-	existing, err := os.ReadFile(excludePath)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read exclude file: %w", err)
-	}
-	existingStr := string(existing)
-
-	// Build the canonical managed block from the current pattern list.
-	// Always written as a complete manifest — never a delta — so a
-	// growing managedExcludePatterns just expands this same block rather
-	// than accumulating multiple header sections over time.
-	var block strings.Builder
-	block.WriteString(managedExcludeBegin)
-	block.WriteString("\n")
-	for _, p := range managedExcludePatterns {
-		block.WriteString(p)
-		block.WriteString("\n")
-	}
-	block.WriteString(managedExcludeEnd)
-	block.WriteString("\n")
-	managedBlock := block.String()
-
-	newContent, changed := mergeManagedBlock(existingStr, managedBlock)
-	if !changed {
-		return nil // file already contains exactly this managed block; no-op
-	}
-
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
-		return fmt.Errorf("mkdir info dir: %w", err)
-	}
-	if err := os.WriteFile(excludePath, []byte(newContent), 0644); err != nil {
-		return fmt.Errorf("write exclude file: %w", err)
-	}
-	return nil
-}
-
-// mergeManagedBlock returns the updated file contents with managedBlock
-// installed, and a bool indicating whether the content actually changed
-// (used for idempotency — we skip the rewrite if the file is already
-// what we want).
-//
-// Marker search is direction-aware in two ways:
-//
-//  1. We find the begin marker via LastIndex, not Index. If the file has
-//     an earlier stray or orphaned begin marker (a truncated block whose
-//     end was hand-deleted, a quoted reference in a user comment, stale
-//     content from a broken previous run), matching the *first* begin
-//     would pair it with the real end marker later in the file and
-//     clobber every line in between — violating the "content outside our
-//     marked section is never touched" guarantee. LastIndex locks onto
-//     the most recent begin, leaving any stray earlier markers and the
-//     user content around them untouched.
-//
-//  2. We find the end marker via Index on the slice *after* the begin
-//     position. Searching the whole file for end would pick up the first
-//     occurrence, which could sit before begin in unrelated content. The
-//     earlier-end + later-begin pair would look malformed, causing us to
-//     append a duplicate managed block every run.
-//
-// If a valid begin...end pair is found, the bytes between them (plus the
-// trailing newline after end) are replaced with managedBlock. Everything
-// outside the markers is preserved byte-for-byte. If no valid pair
-// exists, managedBlock is appended at EOF with a blank-line separator.
-//
-// Known limitation: a file with a genuinely duplicate valid managed
-// block (two complete begin...end pairs) has only its last pair rewritten
-// on each run. Earlier blocks remain as orphaned duplicates, which git
-// dedupes internally for gitignore purposes but looks ugly to a human
-// reader. We don't expect to produce this state ourselves — only hand
-// editing could cause it, and the cleanup is a manual edit.
-func mergeManagedBlock(existing, managedBlock string) (string, bool) {
-	beginIdx := strings.LastIndex(existing, managedExcludeBegin)
-	if beginIdx >= 0 {
-		searchFrom := beginIdx + len(managedExcludeBegin)
-		if relEnd := strings.Index(existing[searchFrom:], managedExcludeEnd); relEnd >= 0 {
-			endIdx := searchFrom + relEnd
-			// Consume up to and including the newline that follows the
-			// end marker so the final structure is
-			// [before][managedBlock][after] without introducing or losing
-			// blank lines at the seams.
-			afterEnd := endIdx + len(managedExcludeEnd)
-			if afterEnd < len(existing) && existing[afterEnd] == '\n' {
-				afterEnd++
-			}
-			candidate := existing[:beginIdx] + managedBlock + existing[afterEnd:]
-			if candidate == existing {
-				return existing, false
-			}
-			return candidate, true
-		}
-	}
-
-	// No valid marker pair found. Append the managed block at EOF,
-	// ensuring the pre-existing content is newline-terminated and
-	// separated from our block by a blank line for readability.
-	var suffix strings.Builder
-	if existing != "" {
-		if !strings.HasSuffix(existing, "\n") {
-			suffix.WriteString("\n")
-		}
-		suffix.WriteString("\n")
-	}
-	suffix.WriteString(managedBlock)
-	return existing + suffix.String(), true
-}
-
-// resolveExcludePath returns the filesystem path of .git/info/exclude for
-// a worktree, handling both the linked-worktree case (where .git is a
-// pointer file) and the plain-checkout case (where .git is a directory).
-//
-// The linked-worktree branch parses only the first line of the pointer
-// file (git's canonical format is exactly `gitdir: <path>\n`, but some
-// third-party tools append extra config to the same file — we ignore
-// anything past the first newline). It then validates:
-//
-//  1. The first line starts with "gitdir:". Without this check a
-//     corrupted or non-pointer file would have its content interpreted
-//     as a literal path and we'd write to an arbitrary disk location.
-//  2. The parsed gitdir already exists as a directory. An otherwise-
-//     valid-looking pointer referencing a missing or file-shaped
-//     target would silently get its parent created by MkdirAll on the
-//     write path — rejecting here prevents that.
-func resolveExcludePath(wtDir string) (string, error) {
-	gitFile := filepath.Join(wtDir, ".git")
-	info, err := os.Stat(gitFile)
-	if err != nil {
-		return "", fmt.Errorf("stat .git: %w", err)
-	}
-	if info.IsDir() {
-		// Plain checkout
-		return filepath.Join(gitFile, "info", "exclude"), nil
-	}
-	// Linked worktree: .git is a pointer file like "gitdir: /path/to/worktrees/<name>"
-	data, err := os.ReadFile(gitFile)
-	if err != nil {
-		return "", fmt.Errorf("read .git pointer: %w", err)
-	}
-	// Only the first line is part of the gitdir pointer. Anything past
-	// the first newline is unrelated content (extra config some tools
-	// write) and we ignore it.
-	firstLine := string(data)
-	if nl := strings.IndexByte(firstLine, '\n'); nl >= 0 {
-		firstLine = firstLine[:nl]
-	}
-	firstLine = strings.TrimSpace(firstLine)
-	const prefix = "gitdir:"
-	if !strings.HasPrefix(firstLine, prefix) {
-		return "", fmt.Errorf(".git file is not a valid worktree pointer (missing %q prefix): %q", prefix, firstLine)
-	}
-	gitdir := strings.TrimSpace(strings.TrimPrefix(firstLine, prefix))
-	if gitdir == "" {
-		return "", fmt.Errorf(".git pointer has empty gitdir path")
-	}
-	if !filepath.IsAbs(gitdir) {
-		gitdir = filepath.Join(wtDir, gitdir)
-	}
-	// Validate the referenced gitdir actually exists as a directory
-	// before we return a path inside it. Without this, a pointer file
-	// with a bogus (but prefix-valid) target would pass the textual
-	// checks above and silently get its info/ parent created via
-	// MkdirAll on the write path — writing to an arbitrary location
-	// under that target.
-	gitdirInfo, err := os.Stat(gitdir)
-	if err != nil {
-		return "", fmt.Errorf(".git pointer references missing gitdir %q: %w", gitdir, err)
-	}
-	if !gitdirInfo.IsDir() {
-		return "", fmt.Errorf(".git pointer references %q which is not a directory", gitdir)
-	}
-	return filepath.Join(gitdir, "info", "exclude"), nil
-}
 
 // branchExists checks whether a branch ref exists in the bare repo.
 func branchExists(bareDir, branch string) bool {

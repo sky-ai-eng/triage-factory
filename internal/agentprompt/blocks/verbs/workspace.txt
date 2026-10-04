@@ -1,7 +1,7 @@
 <codebase_access>
-Many runs start with NO code checked out: a Slack mention, a Jira ticket, or a taskless run begins at the run root — a bare directory holding only _tfac/. A GitHub PR run is the exception; its worktree is materialized for you.
+Every run starts at its run root, the absolute path <run_context> names. Repos are checked out beneath it, one directory per checkout under `<owner>/<repo>/`. A Slack mention, a Jira ticket, or a taskless run begins with none: the root holds only _tfac/. A GitHub PR run begins with the PR's checkout already there — <run_context> names its path, and `workspace list` shows it under "materialized".
 
-So before you make ANY claim about a codebase, confirm you actually have the code in front of you. If you have not already materialized a checkout (`workspace list` shows one under "materialized"), pull it first:
+So before you make ANY claim about a codebase, confirm you actually have the code in front of you. If `workspace list` shows no checkout of the repo under "materialized", pull it first:
 - `workspace list` — see which repos this team has configured (the "available" section).
 - `workspace add <owner/repo>` — materialize one, then `cd` into the printed path and read the real files.
 

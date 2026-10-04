@@ -258,3 +258,71 @@ func (s *conversationWorktreeStore) DeleteByPathSystem(ctx context.Context, orgI
 	`, orgID, conversationID, path)
 	return err
 }
+
+func (s *conversationWorktreeStore) ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.ConversationWorktree, error) {
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		FROM conversation_worktrees w
+		JOIN repositories r ON r.id = w.repository_id
+		JOIN conversations c ON c.org_id = w.org_id AND c.id = w.conversation_id
+		WHERE w.org_id = $1 AND c.task_id = $2
+		ORDER BY w.created_at ASC, w.conversation_id ASC, r.owner ASC, r.repo ASC, w.ref ASC
+	`, orgID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []domain.ConversationWorktree{}
+	for rows.Next() {
+		var w domain.ConversationWorktree
+		if err := rows.Scan(&w.ConversationID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// RecordForClaimSystem upserts the row behind the claim fence. A row that is
+// new to the conversation's repo set rings the same credential doorbell Insert
+// rings, for the same reason: the conversation's sealed bundle predates it.
+func (s *conversationWorktreeStore) RecordForClaimSystem(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) (domain.ConversationWorktree, error) {
+	var stored domain.ConversationWorktree
+	err := inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, w.ConversationID, claimID); err != nil {
+			return err
+		}
+		repositoryID, err := resolveWorktreeRepositoryID(ctx, q, orgID, w.RepoID)
+		if err != nil {
+			return fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
+		}
+		var priorRows int
+		if err := q.QueryRowContext(ctx, `
+			WITH prior AS (
+				SELECT 1 FROM conversation_worktrees
+				WHERE org_id = $2 AND conversation_id = $1 AND repository_id = $3
+				LIMIT 1
+			), up AS (
+				INSERT INTO conversation_worktrees (conversation_id, org_id, repository_id, path, ref)
+				VALUES ($1, $2, $3, $4, $5)
+				ON CONFLICT (conversation_id, repository_id, ref) DO UPDATE SET path = EXCLUDED.path
+				RETURNING conversation_id, repository_id, path, ref, created_at
+			)
+			SELECT up.conversation_id, r.owner || '/' || r.repo, up.path, up.ref, up.created_at,
+			       (SELECT count(*) FROM prior)
+			FROM up JOIN repositories r ON r.id = up.repository_id
+		`, w.ConversationID, orgID, repositoryID, w.Path, w.Ref).Scan(&stored.ConversationID, &stored.RepoID, &stored.Path, &stored.Ref, &stored.CreatedAt, &priorRows); err != nil {
+			return fmt.Errorf("record conversation_worktree: %w", err)
+		}
+		if priorRows == 0 {
+			// On q, inside the transaction, so it is delivered at commit — see
+			// insertConversationWorktree.
+			_ = ctlbus.Publish(ctx, q, ctlbus.Message{Kind: "cred_request", OrgID: orgID, ConversationID: w.ConversationID})
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.ConversationWorktree{}, err
+	}
+	return stored, nil
+}

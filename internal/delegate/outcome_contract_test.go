@@ -236,19 +236,6 @@ func TestProcessCompletion_InvalidEnvelopeFails(t *testing.T) {
 	}
 }
 
-// TestProcessCompletion_FinishReturnsNotParked: a terminal finish returns
-// parked=false so runAgent's cleanup defers tear the worktree down. A completed
-// run does not park; a turn that ends without a conclusion parks `open`,
-// covered elsewhere.
-func TestProcessCompletion_FinishReturnsNotParked(t *testing.T) {
-	s, _, conversationID, taskID := setupAdvanceFixture(t, "pc-finish")
-	if parked, _ := s.processCompletion(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", holderClaimFor(t, s, runmode.LocalDefaultOrgID, conversationID),
-		loadTask(t, s, taskID), res(`{"outcome":"finish","summary":"done"}`),
-		t.TempDir(), nil, "", "event", ""); parked {
-		t.Error("processCompletion(finish) = true; want false (terminal, not parked)")
-	}
-}
-
 // TestTerminateBlueprint_CompletedClosesTask pins the orchestrator-owned close:
 // finalizing a blueprint_run as completed closes its task (done +
 // close_reason=run_completed).

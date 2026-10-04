@@ -126,8 +126,8 @@ func TestBuildStepConfig_RedelegationStartsInThePriorRunsTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildStepConfig for run B step 0: %v", err)
 	}
-	if cfg.wtPath != wt {
-		t.Errorf("run B step 0 resolved wtPath = %q, want run A's tree %q", cfg.wtPath, wt)
+	if cfg.runRoot != wt {
+		t.Errorf("run B step 0 resolved runRoot = %q, want run A's tree %q", cfg.runRoot, wt)
 	}
 	if cfg.workspace != domain.WorkspaceProvenanceWarm {
 		t.Errorf("workspace provenance = %q, want warm — a tree still on disk is reused, not rebuilt", cfg.workspace)
@@ -184,10 +184,10 @@ func TestBuildStepConfig_RedelegationRehydratesRatherThanCloning(t *testing.T) {
 	if cfg.workspace != domain.WorkspaceProvenanceRehydrated {
 		t.Fatalf("workspace provenance = %q, want rehydrated — a re-delegation must not clone over the task's snapshot", cfg.workspace)
 	}
-	if cfg.wtPath != rebuilt {
-		t.Errorf("rehydrated cwd = %q, want the task's run root %q", cfg.wtPath, rebuilt)
+	if cfg.runRoot != rebuilt {
+		t.Errorf("rehydrated cwd = %q, want the task's run root %q", cfg.runRoot, rebuilt)
 	}
-	assertFileContains(t, filepath.Join(cfg.wtPath, "_tfac", "notes.txt"), "run A got this far")
+	assertFileContains(t, filepath.Join(cfg.runRoot, "_tfac", "notes.txt"), "run A got this far")
 }
 
 // TestBuildStepConfig_FirstEverConversationOnATaskBuildsFresh is the negative
@@ -211,8 +211,8 @@ func TestBuildStepConfig_FirstEverConversationOnATaskBuildsFresh(t *testing.T) {
 	if cfg.workspace != domain.WorkspaceProvenanceFresh {
 		t.Errorf("workspace provenance = %q, want fresh — a task with no workspace anywhere has one built", cfg.workspace)
 	}
-	if cfg.wtPath != worktree.RunRoot(f.task.ID) {
-		t.Errorf("fresh wtPath = %q, want the task's run root %q", cfg.wtPath, worktree.RunRoot(f.task.ID))
+	if cfg.runRoot != worktree.RunRoot(f.task.ID) {
+		t.Errorf("fresh runRoot = %q, want the task's run root %q", cfg.runRoot, worktree.RunRoot(f.task.ID))
 	}
 }
 
@@ -252,8 +252,8 @@ func TestBuildStepConfig_RedelegationAfterAFailedRunWithNoBlobBuildsFresh(t *tes
 	if cfg.workspace != domain.WorkspaceProvenanceFresh {
 		t.Errorf("workspace provenance = %q, want fresh", cfg.workspace)
 	}
-	if cfg.wtPath != worktree.RunRoot(f.task.ID) {
-		t.Errorf("fresh wtPath = %q, want the task's run root %q", cfg.wtPath, worktree.RunRoot(f.task.ID))
+	if cfg.runRoot != worktree.RunRoot(f.task.ID) {
+		t.Errorf("fresh runRoot = %q, want the task's run root %q", cfg.runRoot, worktree.RunRoot(f.task.ID))
 	}
 }
 

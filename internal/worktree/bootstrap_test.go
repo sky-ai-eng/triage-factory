@@ -181,7 +181,7 @@ func TestCreateForPR_ForkPR(t *testing.T) {
 		t.Fatalf("test setup: upstream unexpectedly has refs/heads/feature-branch: %s", out)
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-fork-test", "repo-fork-test", upstream, fork, "feature-branch", 42, "fork-pr-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-fork-test", "repo-fork-test", upstream, fork, "feature-branch", 42, "fork-pr-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR for fork PR: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-cleanup-test", "repo-cleanup-test", upstream, fork, "feature", 99, "cleanup-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-cleanup-test", "repo-cleanup-test", upstream, fork, "feature", 99, "cleanup-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestCreateForPR_DeletedFork_NoTrackingConfigured(t *testing.T) {
 
 	// Empty headCloneURL — the spawner passes pr.CloneURL which is
 	// empty when GitHub returned head.repo = null.
-	wtPath, err := CreateForPR(context.Background(), "owner-deleted-test", "repo-deleted-test", upstream, "", "feature", 55, "deleted-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-deleted-test", "repo-deleted-test", upstream, "", "feature", 55, "deleted-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR for deleted-fork PR: %v", err)
 	}
@@ -446,14 +446,14 @@ func TestCreateForPR_DeletedFork_PushFailsAfterPriorOwnRepoPR(t *testing.T) {
 		}
 	}
 
-	ownWtPath, err := CreateForPR(context.Background(), "owner-cross-test", "repo-cross-test", upstream, upstream, "real-feature", 100, "own-cross-run")
+	ownWtPath, err := createPRCheckout(context.Background(), "owner-cross-test", "repo-cross-test", upstream, upstream, "real-feature", 100, "own-cross-run")
 	if err != nil {
 		t.Fatalf("CreateForPR own-repo: %v", err)
 	}
 	t.Cleanup(func() { _ = RemoveAt(ownWtPath, "own-cross-run") })
 
 	// Now stand up a deleted-fork PR (head URL empty) on the SAME bare.
-	deletedWtPath, err := CreateForPR(context.Background(), "owner-cross-test", "repo-cross-test", upstream, "", "deleted-feature", 200, "deleted-cross-run")
+	deletedWtPath, err := createPRCheckout(context.Background(), "owner-cross-test", "repo-cross-test", upstream, "", "deleted-feature", 200, "deleted-cross-run")
 	if err != nil {
 		t.Fatalf("CreateForPR deleted-fork: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-takeover-test", "repo-takeover-test", upstream, upstream, "stale-feature", 300, "takeover-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-takeover-test", "repo-takeover-test", upstream, upstream, "stale-feature", 300, "takeover-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -580,7 +580,7 @@ func TestCreateForPR_DeletedFork_PerRunBranchCleanedUp(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-stale-test", "repo-stale-test", upstream, "", "feature/SKY-X", 400, "stale-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-stale-test", "repo-stale-test", upstream, "", "feature/SKY-X", 400, "stale-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-live-test", "repo-live-test", upstream, fork, "feature", 77, "live-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-live-test", "repo-live-test", upstream, fork, "feature", 77, "live-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -809,7 +809,7 @@ func TestCleanupPRConfig_RunsAfterContextCancellation(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-cancel-test", "repo-cancel-test", upstream, fork, "feature", 123, "cancel-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-cancel-test", "repo-cancel-test", upstream, fork, "feature", 123, "cancel-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -868,11 +868,14 @@ func TestCreateForPR_OwnRepoPR_FetchesViaPullRef(t *testing.T) {
 	// PR's head.repo and base.repo are the same repo. CreateForPR uses the
 	// same per-run branch + push-tracking scheme as fork PRs; only the push
 	// remote's URL (origin's, here) differs.
-	wtPath, err := CreateForPR(context.Background(), "owner-own-test", "repo-own-test", upstream, upstream, "my-feature", 7, "own-pr-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-own-test", "repo-own-test", upstream, upstream, "my-feature", 7, "own-pr-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR for own-repo PR: %v", err)
 	}
 	t.Cleanup(func() { _ = RemoveAt(wtPath, "own-pr-test-run") })
+	if want := filepath.Join(RunRoot("own-pr-test-run"), "owner-own-test", "repo-own-test", "pr-7"); wtPath != want {
+		t.Errorf("checkout at %q, want %q", wtPath, want)
+	}
 
 	out, err = exec.Command("git", "-C", wtPath, "rev-parse", "HEAD").Output()
 	if err != nil {
@@ -943,7 +946,7 @@ func TestCreateForPR_TrackingRefMaterialized(t *testing.T) {
 		}
 	}
 
-	wtPath, err := CreateForPR(context.Background(), "owner-tracking-test", "repo-tracking-test", upstream, upstream, "my-feature", 9, "tracking-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-tracking-test", "repo-tracking-test", upstream, upstream, "my-feature", 9, "tracking-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -1014,12 +1017,12 @@ func TestCreateForPR_ConcurrentSamePR_OwnRepo(t *testing.T) {
 	}
 
 	// Two runs on the same PR, sharing one bare (same owner/repo).
-	wtA, err := CreateForPR(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-A")
+	wtA, err := createPRCheckout(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-A")
 	if err != nil {
 		t.Fatalf("CreateForPR run A: %v", err)
 	}
 	t.Cleanup(func() { _ = RemoveAt(wtA, "run-A") })
-	wtB, err := CreateForPR(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-B")
+	wtB, err := createPRCheckout(context.Background(), "owner-conc-own", "repo-conc-own", upstream, upstream, "shared-feature", 8, "run-B")
 	if err != nil {
 		t.Fatalf("CreateForPR run B (concurrent same-PR materialization must succeed): %v", err)
 	}
@@ -1099,12 +1102,12 @@ func TestCreateForPR_ConcurrentSamePR_Fork(t *testing.T) {
 	}
 	originalForkTip := coOut(t, fork, "rev-parse", "refs/heads/contrib")
 
-	wtA, err := CreateForPR(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-A")
+	wtA, err := createPRCheckout(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-A")
 	if err != nil {
 		t.Fatalf("CreateForPR run A: %v", err)
 	}
 	t.Cleanup(func() { _ = RemoveAt(wtA, "run-A") })
-	wtB, err := CreateForPR(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-B")
+	wtB, err := createPRCheckout(context.Background(), "owner-conc-fork", "repo-conc-fork", upstream, fork, "contrib", 9, "run-B")
 	if err != nil {
 		t.Fatalf("CreateForPR run B (concurrent same fork-PR must succeed): %v", err)
 	}
@@ -1369,7 +1372,7 @@ func TestCreateForPR_SnapshotBundleIsBounded(t *testing.T) {
 	}
 	prTip := strings.TrimSpace(string(out))
 
-	wtPath, err := CreateForPR(context.Background(), "owner-bundle-test", "repo-bundle-test", upstream, upstream, "bundle-feature", 9, "bundle-test-run")
+	wtPath, err := createPRCheckout(context.Background(), "owner-bundle-test", "repo-bundle-test", upstream, upstream, "bundle-feature", 9, "bundle-test-run")
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
@@ -1460,7 +1463,7 @@ func TestCreateForPR_RefreshesBaseBranchRef(t *testing.T) {
 	wantBaseTip := git("-C", upstream, "rev-parse", "main") // B
 
 	// CreateForPR reuses the stale bare; WithBaseBranch must re-fetch main → B.
-	wtPath, err := CreateForPR(context.Background(), "owner-base", "repo-base", upstream, upstream, "feature", 21, "base-refresh-run", WithBaseBranch("main"))
+	wtPath, err := createPRCheckout(context.Background(), "owner-base", "repo-base", upstream, upstream, "feature", 21, "base-refresh-run", WithBaseBranch("main"))
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}

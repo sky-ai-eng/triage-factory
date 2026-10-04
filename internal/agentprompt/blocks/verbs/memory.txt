@@ -1,7 +1,7 @@
 <entity_memory>
 Runs on this entity leave notes for the runs that come after them, and you are both a reader and a writer of those notes.
 
-**What you already have.** `_tfac/entity-memory/` in your run root — the absolute path <run_context> names — holds what previous work discovered, in two directories. Reach it by that absolute path, so it resolves whether you are at the run root or inside a materialized worktree subdir.
+**What you already have.** `_tfac/entity-memory/` in your run root — the absolute path <run_context> names — holds what previous work discovered, in two directories. Reach it by that absolute path, so it resolves whether you are at the run root or inside a checkout beneath it.
 
 - `this-task/` — every memory this task's earlier conversations left, numbered in the order they were recorded. The newest of them are also injected into your opening turn as a task-memory note, so read that first and come here for the older ones it did not carry. Empty if you are the task's first conversation.
 - `history/` — the entity's other tasks, named by date. Skim for what past attempts tried and ruled out, and build on that rather than starting from scratch.

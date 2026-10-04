@@ -361,7 +361,7 @@ func TestEnsureWorkspace_WaitsOutAnInFlightPersist(t *testing.T) {
 		ID: conversationID, TaskID: namespace, Runtime: domain.ConversationRuntimeNative,
 		WorktreePath: filepath.Join(t.TempDir(), "swept-away"),
 	}
-	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, failingFreshBuilder(t))
+	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, failingFreshBuilder(t))
 	if err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestEnsureWorkspace_AnInFlightPersistOutranksAnEarlierBlob(t *testing.T) {
 		ID: conversationID, TaskID: namespace, Runtime: domain.ConversationRuntimeNative,
 		WorktreePath: filepath.Join(t.TempDir(), "on-the-executor-that-left"),
 	}
-	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, failingFreshBuilder(t))
+	got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, failingFreshBuilder(t))
 	if err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)
 	}
@@ -472,7 +472,7 @@ func TestEnsureWorkspace_FallsBackWhenTheWriterIsGone(t *testing.T) {
 			fresh := func(context.Context) (string, error) { built++; return freshDir, nil }
 
 			started := time.Now()
-			got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{}, fresh)
+			got, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{}, fresh)
 			if elapsed := time.Since(started); elapsed > 2*time.Second {
 				t.Errorf("waited %s on a dead writer; the liveness read is supposed to end the wait long before the bound", elapsed)
 			}
@@ -532,7 +532,7 @@ func TestEnsureWorkspace_HonorsTheWaitCap(t *testing.T) {
 	}
 	freshDir := t.TempDir()
 	started := time.Now()
-	_, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, gitSeed{},
+	_, prov, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, checkoutRestorer{},
 		func(context.Context) (string, error) { return freshDir, nil })
 	if err != nil {
 		t.Fatalf("ensureWorkspace: %v", err)

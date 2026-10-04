@@ -11,7 +11,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -146,124 +145,70 @@ func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 	}
 }
 
-// TestGitSeedFor_NonGitRunRootIsZero: a Jira/Slack lazy run-root names no repo,
-// so nothing is read and nothing is injected.
-func TestGitSeedFor_NonGitRunRootIsZero(t *testing.T) {
-	repos := &seedRepositoryStore{profile: &domain.Repository{CloneURL: "https://github.com/acme/widgets.git"}}
-	s := NewSpawner(nil, db.Stores{Repos: repos}, nil, nil, "")
-
-	if seed := s.gitSeedFor(context.Background(), "org-1", "", "", proxySandbox("http://10.42.0.1:4100", "ph")); seed != (gitSeed{}) {
-		t.Errorf("seed for a non-git run root = %+v, want the zero value", seed)
-	}
-	if len(repos.gotNames) != 0 {
-		t.Errorf("repository was read for a non-git run root: %v", repos.gotNames)
-	}
-}
-
 // TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential is the end of the
-// wire: a cold rehydrate — the designed resume path for a concluded blueprint,
-// whose worktree is deliberately torn down — must reach git with the run's
-// proxy routing AND the upstream URL. Pre-fix it reached git with neither, and
-// `git worktree add` died fetching anonymously.
+// wire: each checkout a cold rehydrate rebuilds reaches git with the run's proxy
+// routing AND the upstream URL from the repository row. Without both, the
+// rebuild fetches anonymously and dies.
 func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
+	f := newSnapshotFixture(t, "task-proxy-auth")
+	f.addCheckout(t, "acme/widgets", "default")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
 
 	const cloneURL = "https://github.com/acme/widgets.git"
-	repos := &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}
-	s := newStorageSpawner(t)
-	s.repos = repos
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}
 
-	const conversationID = "wt-proxy-auth"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-	writeSession(t, wtPath, "sess-proxy", `{"type":"summary"}`)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "sess-proxy", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
+	// Recorded, not run: the proxy address routes nowhere in a test, and the
+	// arguments are the whole assertion.
+	var got []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(_ context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		got = append(got, r)
+		return worktree.RestoredCheckout{Owner: r.Owner, Repo: r.Repo, Path: filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)}, nil
 	}
-	// The concluded blueprint's worktree is gone — cold rehydrate.
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
-	}
-
-	var (
-		gotURL  string
-		gotAuth worktree.CloneAuth
-		called  bool
-	)
-	restore := restoreWorkspaceGit
-	restoreWorkspaceGit = func(ctx context.Context, o, r, wtDir string, d *worktree.GitDelta, url string, auth worktree.CloneAuth) error {
-		called, gotURL, gotAuth = true, url, auth
-		return restore(ctx, o, r, wtDir, d, url, auth)
-	}
-	t.Cleanup(func() { restoreWorkspaceGit = restore })
+	t.Cleanup(func() { restoreCheckout = restore })
 
 	sandbox := proxySandbox("http://10.42.0.3:4100", "run-placeholder")
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, sandbox)
-	if _, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed, nil); err != nil {
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, sandbox, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
-
-	if !called {
-		t.Fatal("cold rehydrate never reached the git restore")
+	if len(got) != 1 {
+		t.Fatalf("cold rehydrate rebuilt %d checkouts, want 1", len(got))
 	}
-	if gotURL != cloneURL {
-		t.Errorf("restore clone URL = %q, want %q", gotURL, cloneURL)
+	if got[0].CloneURL != cloneURL {
+		t.Errorf("restore clone URL = %q, want %q", got[0].CloneURL, cloneURL)
 	}
-	assertEntries(t, gotAuth.GitConfigEntries(),
+	assertEntries(t, got[0].Auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.3:4100", "https://github.com", "run-placeholder"))
 }
 
-// TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare covers the other half the
-// wire un-strands: an executor that never ran this repo has no bare at all.
-// With the clone URL threaded through, the rebuild seeds one and completes;
-// before, it stopped at "bare missing and no clone URL to seed it".
-//
-// The upstream here is a local bare (so the seed needs no credential and no
-// network); the credential half of the same call is pinned by the test above
-// and, end to end against an authenticating remote, by
-// worktree.TestRestoreWorkspaceGit_BloblessPrivateRepo.
+// TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare: an executor that never
+// ran this repo has no bare at all. With the clone URL threaded through from the
+// repository row, the rebuild seeds one and completes.
 func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
-	setupGitTestEnv(t)
+	f := newSnapshotFixture(t, "task-seed-bare")
+	co := f.addCheckout(t, "acme/widgets", "default")
+	dirtyCheckout(t, co)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
 
-	const conversationID = "wt-seed-bare"
-	wtPath, owner, repo := setupTestWorktree(t, conversationID)
-	t.Cleanup(func() { _ = worktree.RemoveAt(wtPath, conversationID) })
-
-	writeFile(t, filepath.Join(wtPath, "agent.txt"), "committed by agent")
-	gitT(t, wtPath, "add", "agent.txt")
-	gitT(t, wtPath, "commit", "-m", "agent work")
-
-	s := newStorageSpawner(t)
-	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, conversationID, "", wtPath, "", domain.ConversationRuntimeSDK); err != nil {
-		t.Fatalf("snapshotWorkspace: %v", err)
-	}
-
-	// The origin the bare was cloned from is the URL the profile would carry.
-	bareDir, err := worktree.RepoDir(owner, repo)
+	// Fresh executor: no run root, and no bare either.
+	f.loseRoot(t)
+	bareDir, err := worktree.RepoDir("acme", "widgets")
 	if err != nil {
 		t.Fatalf("RepoDir: %v", err)
 	}
 	upstream := gitOriginURL(t, bareDir)
-
-	// Fresh executor: no worktree, and no bare either.
-	if err := os.RemoveAll(wtPath); err != nil {
-		t.Fatalf("rm worktree: %v", err)
-	}
 	if err := os.RemoveAll(bareDir); err != nil {
 		t.Fatalf("rm bare: %v", err)
 	}
-	s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: upstream}}
+	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: upstream}}
 
-	conv := &domain.Conversation{ID: conversationID, WorktreePath: wtPath, TaskID: conversationID}
-	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, owner, repo, nil)
-	got, _, _, err := s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, seed, nil)
-	if err != nil {
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, nil, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}
-	assertFileContains(t, filepath.Join(got, "agent.txt"), "committed by agent")
+	assertFileContains(t, filepath.Join(co, "committed.txt"), "unpushed commit")
 }
 
 // gitOriginURL reads a bare's origin remote — the upstream a fresh executor

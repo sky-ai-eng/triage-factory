@@ -32,7 +32,7 @@ func captureWorktree(t *testing.T, rootKey string) string {
 	t.Helper()
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	wtDir, err := CreateForBranch(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
+	wtDir, err := createBranchCheckout(context.Background(), "acme", "repo", upstream, "main", "aa/feature", rootKey)
 	if err != nil {
 		t.Fatalf("CreateForBranch: %v", err)
 	}
@@ -62,9 +62,9 @@ func captureWorktree(t *testing.T, rootKey string) string {
 }
 
 // referenceUncommittedPatch reproduces the pre-scoping capture sequence — a
-// throwaway HEAD-seeded index, the full `git add -A`, the _tfac and
-// .claude/skills drops, one binary diff — so the scoped implementation is
-// asserted against the semantics of record rather than against itself.
+// throwaway HEAD-seeded index, the full `git add -A`, one binary diff — so the
+// scoped implementation is asserted against the semantics of record rather
+// than against itself.
 func referenceUncommittedPatch(t *testing.T, wtPath string) []byte {
 	t.Helper()
 	idx, err := os.CreateTemp("", "tf-ref-index-*")
@@ -85,10 +85,6 @@ func referenceUncommittedPatch(t *testing.T, wtPath string) []byte {
 	}
 	mustGit("read-tree", "HEAD")
 	mustGit("add", "-A")
-	mustGit("reset", "-q", "--", ScratchDir)
-	if changed := mustGit("diff", "--no-ext-diff", "--no-textconv", "--cached", "--name-only", "HEAD", "--", ".claude/skills"); len(bytes.TrimSpace(changed)) > 0 {
-		mustGit("reset", "-q", "--", ".claude/skills")
-	}
 	patch := mustGit("diff", "--no-ext-diff", "--no-textconv", "--cached", "--binary", "HEAD")
 	if len(bytes.TrimSpace(patch)) == 0 {
 		return nil
@@ -177,10 +173,9 @@ func TestCaptureUncommitted_ScopedMatchesFullStage(t *testing.T) {
 			}
 		}},
 		{"untracked .claude with skills and a sibling", func(t *testing.T, wt string) {
-			// The collapsed `?? .claude/` status entry: the scoped stage must
-			// keep skills out via its :(exclude) pathspec while still
-			// capturing the sibling — matching the full stage's
-			// add-everything-then-reset-skills result.
+			// The collapsed `?? .claude/` status entry: a checkout is the
+			// customer's repo, so its .claude is captured whole, skills
+			// included, exactly as the full stage would.
 			skill := filepath.Join(wt, ".claude", "skills", "step-0", "SKILL.md")
 			if err := os.MkdirAll(filepath.Dir(skill), 0o755); err != nil {
 				t.Fatal(err)
@@ -193,10 +188,9 @@ func TestCaptureUncommitted_ScopedMatchesFullStage(t *testing.T) {
 			}
 		}},
 		{"tracked _tfac file modified", func(t *testing.T, wt string) {
-			// A repo that legitimately TRACKS files under the scratch dir: the
-			// full stage restores HEAD's entry via reset, the scoped stage
-			// never stages it — both must keep the change out of the patch
-			// without recording a deletion.
+			// A repo that tracks files under a directory named like TF's
+			// scratch dir: in a checkout that name is the repo's, and its
+			// changes are the agent's work like any other.
 			p := filepath.Join(wt, ScratchDir, "pinned.txt")
 			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 				t.Fatal(err)

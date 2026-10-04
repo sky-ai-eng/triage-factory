@@ -40,7 +40,7 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 	const prNumber = 7
 	// Own-repo PR: head URL == upstream URL. WithBaseBranch exercises the
 	// clone-side base fetch (diff framing) too.
-	wtPath, err := CreateForPR(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", prNumber, rootKey,
+	wtPath, err := createPRCheckout(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", prNumber, rootKey,
 		WithCloneAuth(CloneAuthFor(cloneURL, token)), WithBaseBranch("main"))
 	if err != nil {
 		t.Fatalf("CreateForPR (multi mode, self-contained): %v", err)

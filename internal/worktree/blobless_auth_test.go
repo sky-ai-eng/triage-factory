@@ -238,7 +238,7 @@ func TestCreateForBranch_BloblessPrivateRepo(t *testing.T) {
 	_, content := seedBloblessUpstream(t, reposRoot, "repo")
 	cloneURL := startAuthedGitServer(t, reposRoot, "x-access-token", token) + "/repo.git"
 
-	wtPath, err := CreateForBranch(context.Background(), "acme", "repo", cloneURL, "main", "aa/feature", "branch-run",
+	wtPath, err := createBranchCheckout(context.Background(), "acme", "repo", cloneURL, "main", "aa/feature", "branch-run",
 		WithCloneAuth(CloneAuthFor(cloneURL, token)))
 	if err != nil {
 		t.Fatalf("CreateForBranch on a private blobless repo: %v", err)
@@ -268,7 +268,7 @@ func TestCreateForPR_BloblessPrivateRepo(t *testing.T) {
 	cloneURL := startAuthedGitServer(t, reposRoot, "x-access-token", token) + "/repo.git"
 
 	// Own-repo PR: head URL == upstream URL.
-	wtPath, err := CreateForPR(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", 7, "pr-run",
+	wtPath, err := createPRCheckout(context.Background(), "acme", "repo", cloneURL, cloneURL, "feature-branch", 7, "pr-run",
 		WithCloneAuth(CloneAuthFor(cloneURL, token)))
 	if err != nil {
 		t.Fatalf("CreateForPR on a private blobless repo: %v", err)
@@ -284,12 +284,12 @@ func TestCreateForPR_BloblessPrivateRepo(t *testing.T) {
 	}
 }
 
-// TestRestoreWorkspaceGit_BloblessPrivateRepo is the resume-path acceptance
-// test for a fresh executor: the bare is absent, so RestoreWorkspaceGit must
-// (1) re-clone it authed via EnsureBareClone — the unauth seed was the Part-3
-// bug — and (2) `git worktree add` authed so the blobless checkout's lazy
-// promisor fetch succeeds. Asserts the rebuilt worktree carries the file.
-func TestRestoreWorkspaceGit_BloblessPrivateRepo(t *testing.T) {
+// TestRestoreCheckout_BloblessPrivateRepo is the resume-path acceptance test
+// for a fresh executor: the bare is absent, so RestoreCheckout must (1)
+// re-clone it authed via the bare seed and (2) check out authed so the blobless
+// checkout's lazy promisor fetch succeeds. Asserts the rebuilt checkout carries
+// the file.
+func TestRestoreCheckout_BloblessPrivateRepo(t *testing.T) {
 	withTestHome(t)
 	t.Setenv("GIT_SSL_NO_VERIFY", "true")
 
@@ -304,19 +304,23 @@ func TestRestoreWorkspaceGit_BloblessPrivateRepo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rev-parse upstream main: %v", err)
 	}
-	delta := &GitDelta{Branch: "main", Head: strings.TrimSpace(string(tipOut))}
 
-	wtDir := runDir("restore-run")
-	if err := RestoreWorkspaceGit(context.Background(), "acme", "repo", wtDir, delta, cloneURL, CloneAuthFor(cloneURL, token)); err != nil {
-		t.Fatalf("RestoreWorkspaceGit on a private blobless repo (fresh executor): %v", err)
-	}
-	t.Cleanup(func() { _ = RemoveAt(wtDir, "restore-run") })
-
-	got, err := os.ReadFile(filepath.Join(wtDir, "canary.txt"))
+	root := mustRunRoot(t, "restore-run")
+	t.Cleanup(func() { RemoveRunRoot("restore-run") })
+	got, err := RestoreCheckout(context.Background(), CheckoutRestore{
+		Owner: "acme", Repo: "repo", CloneURL: cloneURL, Auth: CloneAuthFor(cloneURL, token),
+		Root: root, Slug: CheckoutRefSlug("main"), RootKey: "restore-run",
+		Head: strings.TrimSpace(string(tipOut)), Branch: "main",
+	})
 	if err != nil {
-		t.Fatalf("read canary from restored worktree: %v", err)
+		t.Fatalf("RestoreCheckout on a private blobless repo (fresh executor): %v", err)
 	}
-	if string(got) != content {
-		t.Errorf("canary.txt = %q, want %q", got, content)
+
+	data, err := os.ReadFile(filepath.Join(got.Path, "canary.txt"))
+	if err != nil {
+		t.Fatalf("read canary from restored checkout: %v", err)
+	}
+	if string(data) != content {
+		t.Errorf("canary.txt = %q, want %q", data, content)
 	}
 }

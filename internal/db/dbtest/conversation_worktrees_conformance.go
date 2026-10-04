@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -30,6 +31,22 @@ type ConversationWorktreeSeeder struct {
 	// DeleteConversation removes the conversation row so the cascade-on-delete
 	// subtest can verify the FK ON DELETE CASCADE.
 	DeleteConversation func(t *testing.T, conversationID string)
+
+	// SiblingConversation inserts a second conversation on the same task as
+	// conversationID and returns its id. Nil skips the task-wide cases.
+	SiblingConversation func(t *testing.T, conversationID string) (siblingID string)
+
+	// UnrelatedConversation inserts a conversation on a different task. Nil
+	// skips the task-wide cases.
+	UnrelatedConversation func(t *testing.T, suffix string) (conversationID string)
+
+	// TaskOf returns the task conversationID belongs to.
+	TaskOf func(t *testing.T, conversationID string) (taskID string)
+
+	// Claim mints a live claim on conversationID and returns its id; Release
+	// releases it. Nil skips the fenced-write cases.
+	Claim   func(t *testing.T, conversationID string) (claimID string)
+	Release func(t *testing.T, claimID string)
 
 	// Repo ensures a registry row exists for an "owner/repo" slug.
 	// conversation_worktrees references the repository by that row's id, and
@@ -245,6 +262,90 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 		if len(rows) != 1 || rows[0].Path != "/p2" {
 			t.Errorf("after delete: %+v, want exactly [/p2]", rows)
+		}
+	})
+
+	t.Run("ListForTaskSystem_spans_the_tasks_conversations_only", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		if seed.SiblingConversation == nil || seed.UnrelatedConversation == nil || seed.TaskOf == nil {
+			t.Skip("backend seeds no sibling conversations")
+		}
+		first := seed.Conversation(t, "task-a")
+		second := seed.SiblingConversation(t, first)
+		other := seed.UnrelatedConversation(t, "task-b")
+		for _, w := range []domain.ConversationWorktree{
+			{ConversationID: first, RepoID: "owner/a", Path: "/root/owner/a/pr-1", Ref: "pr-1"},
+			{ConversationID: second, RepoID: "owner/b", Path: "/root/owner/b/default", Ref: "default"},
+			{ConversationID: other, RepoID: "owner/c", Path: "/other/owner/c/default", Ref: "default"},
+		} {
+			if _, _, err := insertWorktree(t, store, seed, orgID, w); err != nil {
+				t.Fatalf("insert %s: %v", w.Path, err)
+			}
+		}
+		rows, err := store.ListForTaskSystem(ctx, orgID, seed.TaskOf(t, first))
+		if err != nil {
+			t.Fatalf("ListForTaskSystem: %v", err)
+		}
+		got := map[string]string{}
+		for _, r := range rows {
+			got[r.Path] = r.ConversationID
+		}
+		if len(got) != 2 || got["/root/owner/a/pr-1"] != first || got["/root/owner/b/default"] != second {
+			t.Errorf("ListForTaskSystem = %+v, want the two rows of the task's own conversations", rows)
+		}
+	})
+
+	t.Run("RecordForClaimSystem_inserts_then_moves_the_path", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		if seed.Claim == nil {
+			t.Skip("backend seeds no claims")
+		}
+		conversationID := seed.Conversation(t, "record")
+		claimID := seed.Claim(t, conversationID)
+		seed.Repo(t, "owner/repo")
+		row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "owner/repo", Path: "/old/owner/repo/ref-main", Ref: "ref-main"}
+		stored, err := store.RecordForClaimSystem(ctx, orgID, claimID, row)
+		if err != nil {
+			t.Fatalf("RecordForClaimSystem (insert): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordForClaimSystem (insert)", stored, func() (*domain.ConversationWorktree, error) {
+			return store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "ref-main")
+		})
+
+		row.Path = "/new/owner/repo/ref-main"
+		stored, err = store.RecordForClaimSystem(ctx, orgID, claimID, row)
+		if err != nil {
+			t.Fatalf("RecordForClaimSystem (move): %v", err)
+		}
+		if stored.Path != row.Path {
+			t.Errorf("recorded path = %q, want %q", stored.Path, row.Path)
+		}
+		AssertWriteReturnedStoredRow(t, "RecordForClaimSystem (move)", stored, func() (*domain.ConversationWorktree, error) {
+			return store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "ref-main")
+		})
+		rows, err := store.List(ctx, orgID, conversationID)
+		if err != nil || len(rows) != 1 {
+			t.Errorf("List after a move = %+v (err=%v), want the one row", rows, err)
+		}
+	})
+
+	t.Run("RecordForClaimSystem_refused_once_the_claim_is_released", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		if seed.Claim == nil || seed.Release == nil {
+			t.Skip("backend seeds no claims")
+		}
+		conversationID := seed.Conversation(t, "record-fenced")
+		claimID := seed.Claim(t, conversationID)
+		seed.Release(t, claimID)
+		seed.Repo(t, "owner/repo")
+		_, err := store.RecordForClaimSystem(ctx, orgID, claimID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepoID: "owner/repo", Path: "/p", Ref: "default",
+		})
+		if !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("RecordForClaimSystem on a released claim = %v, want ErrClaimReleased", err)
+		}
+		if rows, _ := store.List(ctx, orgID, conversationID); len(rows) != 0 {
+			t.Errorf("a refused record wrote %+v", rows)
 		}
 	})
 
