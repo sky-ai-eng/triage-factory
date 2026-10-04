@@ -778,11 +778,42 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// A setup builds from nothing, so a checkout already at the path is what an
 	// earlier attempt that failed after its clone left behind, and the clone
 	// would refuse to land on it.
-	if stale := filepath.Join(runRoot, owner, repo, worktree.PRRefSlug(prNumber)); dirExists(stale) {
-		if err := worktree.RemoveAt(stale, rootKey); err != nil {
+	checkoutPath := filepath.Join(runRoot, owner, repo, worktree.PRRefSlug(prNumber))
+	if dirExists(checkoutPath) {
+		if err := worktree.RemoveAt(checkoutPath, rootKey); err != nil {
 			return runConfig{}, fmt.Errorf("clear a stale PR checkout: %w", err)
 		}
 	}
+	// Record the PR checkout in conversation_worktrees so the least-privilege
+	// gates (git proxy + exec gh) treat the task repo uniformly with
+	// workspace-add'd repos: a run may touch a repo only if its team tracks it
+	// AND it appears in this ledger. ref = pr-<N> is the materialization selector
+	// (the push gate reads the checkout's live current branch, not this row).
+	// Durable, so a resume re-derives authority with no head-ref threading, and
+	// it is what the multi-PR review anchor (add-review-comment) resolves the
+	// PR's HEAD through.
+	//
+	// The row is also the only way a workspace snapshot finds the checkout, so
+	// a setup that cannot write it fails rather than start an agent whose work
+	// no snapshot would carry. Written before the clone, as `workspace add`
+	// writes its own: the path is fixed, and a failure here leaves no checkout
+	// and no stamped worktree_path for the next claim to take for a warm tree.
+	// Behind the claim fence, and bounded: the write sits inline on the path to
+	// starting the agent.
+	if s.conversationWorktrees != nil {
+		recordCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+		err := s.recordCheckout(recordCtx, orgID, claimID, domain.ConversationWorktree{
+			ConversationID: conversationID,
+			RepoID:         owner + "/" + repo,
+			Path:           checkoutPath,
+			Ref:            worktree.PRRefSlug(prNumber),
+		})
+		cancel()
+		if err != nil {
+			return runConfig{}, fmt.Errorf("record the PR checkout in conversation_worktrees: %w", err)
+		}
+	}
+
 	cloneCtx, cloneSpan := tracer.Start(ctx, "engagement.clone")
 	// A clone that cannot finish in its bound is a setup failure, and the
 	// timeout surfaces as the error it is for the bring-up ladder to requeue.
@@ -804,27 +835,6 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// subject is a write that failed on a row this engagement still owns.
 	if err := s.setWorktreePath(context.WithoutCancel(ctx), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
 		delegateLog.Warn("update worktree path for conversation failed", "conversation", conversationID, "error", err)
-	}
-
-	// Record the PR checkout in conversation_worktrees so the least-privilege
-	// gates (git proxy + exec gh) treat the task repo uniformly with
-	// workspace-add'd repos: a run may touch a repo only if its team tracks it
-	// AND it appears in this ledger. ref = pr-<N> is the materialization selector
-	// (the push gate reads the checkout's live current branch, not this row).
-	// Durable, so a resume re-derives authority with no head-ref threading, the
-	// snapshot captures the checkout through it, and it is what the multi-PR
-	// review anchor (add-review-comment) resolves the PR's HEAD through.
-	// Log-and-continue like the worktree_path write above: a failure degrades to
-	// denied pushes (a clear 403), never a crash.
-	if s.conversationWorktrees != nil {
-		if _, _, werr := s.conversationWorktrees.InsertSystem(context.Background(), orgID, domain.ConversationWorktree{
-			ConversationID: conversationID,
-			RepoID:         owner + "/" + repo,
-			Path:           prCheckout,
-			Ref:            worktree.PRRefSlug(prNumber),
-		}); werr != nil {
-			delegateLog.Warn("record the PR checkout in conversation_worktrees failed; pushes to this repo will be denied until retried", "conversation", conversationID, "repo", owner+"/"+repo, "error", werr)
-		}
 	}
 
 	return runConfig{

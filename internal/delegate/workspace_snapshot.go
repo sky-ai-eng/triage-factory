@@ -44,13 +44,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -62,6 +62,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sync/errgroup"
 )
 
 // Snapshot tar member names. The blob is one compressed tar holding a
@@ -284,9 +285,11 @@ type snapshotCheckout struct {
 
 // snapshotCheckouts resolves the checkouts a snapshot of root carries: the
 // conversation_worktrees rows of every conversation on the task, since a
-// blueprint's steps share one root. Deduplicated by path, keeping only those
-// that exist and sit at <root>/<owner>/<repo>/<slug> as their row names them,
-// in path order.
+// blueprint's steps share one root. A row names a checkout by repo and slug;
+// the checkout is the one at <root>/<owner>/<repo>/<slug>, whatever path the
+// row recorded, because a row written on another host — or before a restore
+// rebuilt the root there — names the same checkout under a different root.
+// Deduplicated, keeping those that exist, in path order.
 //
 // A failed read is an error, not an empty set, and so is a checkout that cannot
 // be statted for any reason but its absence: a blob that silently lost a
@@ -304,15 +307,11 @@ func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root str
 	for _, w := range rows {
 		owner, repo := parseOwnerRepo(w.RepoID)
 		rel := path.Join(owner, repo, w.Ref)
-		if owner == "" || repo == "" || !validCheckoutRel(rel, w.RepoID, w.Ref) || filepath.Join(root, filepath.FromSlash(rel)) != filepath.Clean(w.Path) {
-			// Another root's row (a step that ran on another host) or one
-			// this layout never writes.
+		if owner == "" || repo == "" || !validCheckoutRel(rel, w.RepoID, w.Ref) || seen[rel] {
 			continue
 		}
-		if seen[rel] {
-			continue
-		}
-		fi, err := os.Lstat(w.Path)
+		at := filepath.Join(root, filepath.FromSlash(rel))
+		fi, err := os.Lstat(at)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
@@ -320,11 +319,11 @@ func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root str
 			return nil, fmt.Errorf("stat checkout %s: %w", rel, err)
 		}
 		if !fi.IsDir() {
-			delegateLog.Warn("snapshot: a checkout's path is not a directory; it is not carried", "checkout", rel, "path", w.Path)
+			delegateLog.Warn("snapshot: a checkout's path is not a directory; it is not carried", "checkout", rel, "path", at)
 			continue
 		}
 		seen[rel] = true
-		out = append(out, snapshotCheckout{repoID: w.RepoID, slug: w.Ref, rel: rel, path: w.Path})
+		out = append(out, snapshotCheckout{repoID: w.RepoID, slug: w.Ref, rel: rel, path: at})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
 	return out, nil
@@ -1510,16 +1509,19 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: make run root: %w", err)
 	}
 	defer func() {
-		if err != nil {
-			worktree.RemoveRunRoot(keyID)
+		if err == nil {
+			return
+		}
+		// A root left standing would read as warm to the next claim on this
+		// host, so a removal that fails is part of the error, not a log line.
+		if rmErr := worktree.RemoveAt(root, keyID); rmErr != nil {
+			err = errors.Join(err, fmt.Errorf("rehydrate: remove the partial run root: %w", rmErr))
 		}
 	}()
 
-	restored, err := s.restoreCheckouts(ctx, root, keyID, claimID, restorer, man.Checkouts, staged)
-	if err != nil {
-		return snapshotManifest{}, nil, err
-	}
-
+	// The root's own state goes in before any checkout is rebuilt: these steps
+	// are local and cheap, and one that fails then leaves nothing in a shared
+	// bare to take back out.
 	if sawScratch {
 		// The fresh root has no _tfac, so move the staged tree in wholesale.
 		if err := os.Rename(scratchStaging, filepath.Join(root, worktree.ScratchDir)); err != nil {
@@ -1545,51 +1547,70 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	if err := worktree.EnsureSandboxMemoryLink(root); err != nil {
 		delegateLog.Warn("plant sandbox memory symlink on rehydrated tree failed", "dir", root, "error", err)
 	}
-	if len(session) > 0 && man.SessionID != "" {
-		if err := restoreSessionTranscript(root, man.SessionID, session); err != nil {
+
+	restored, err := s.restoreCheckouts(ctx, root, keyID, claimID, restorer, man.Checkouts, staged)
+	if err != nil {
+		return snapshotManifest{}, nil, err
+	}
+	// Every failure from here takes the rebuilt checkouts back out of the
+	// shared bares too, which removing the root alone does not.
+	defer func() {
+		if err != nil {
 			for _, c := range restored {
 				c.Discard()
 			}
+		}
+	}()
+
+	if len(session) > 0 && man.SessionID != "" {
+		if err := restoreSessionTranscript(root, man.SessionID, session); err != nil {
 			return snapshotManifest{}, nil, err
 		}
 	}
 	return man, restored, nil
 }
 
-// restoreCheckouts rebuilds every checkout under root, all or nothing. Each
-// runs on its own goroutine; two of one repo serialize on the per-repo lock
-// inside worktree.RestoreCheckout. On any failure every checkout that came back
-// is discarded.
+// restoreParallelism caps how many checkouts one rehydrate rebuilds at once.
+// Each is a fetch from its git host and a clone or checkout on local disk.
+const restoreParallelism = 4
+
+// restoreCheckouts rebuilds every checkout under root, all or nothing, up to
+// restoreParallelism at a time; two of one repo serialize on the per-repo lock
+// inside worktree.RestoreCheckout. The first failure cancels the rest, since
+// the set is all or nothing, and every checkout that did come back is
+// discarded.
 func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, checkouts []manifestCheckout, staged map[string]string) ([]restoredCheckout, error) {
 	type result struct {
 		restored restoredCheckout
 		err      error
 	}
 	results := make([]result, len(checkouts))
-	var wg sync.WaitGroup
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(restoreParallelism)
 	for i, mc := range checkouts {
-		wg.Add(1)
-		go func(i int, mc manifestCheckout) {
-			defer wg.Done()
-			c, err := s.restoreOneCheckout(ctx, root, keyID, claimID, restorer, mc, staged)
+		g.Go(func() error {
+			if gctx.Err() != nil {
+				return nil // a sibling failed; this one never started
+			}
+			c, err := s.restoreOneCheckout(gctx, root, keyID, claimID, restorer, mc, staged)
 			results[i] = result{restored: c, err: err}
-		}(i, mc)
+			return err
+		})
 	}
-	wg.Wait()
+	firstErr := g.Wait()
 
 	var restored []restoredCheckout
-	var firstErr, upstreamErr error
+	var upstreamErr error
 	for _, r := range results {
 		if r.err != nil {
-			if firstErr == nil {
-				firstErr = r.err
-			}
 			if upstreamErr == nil && upstreamSetupFailure(r.err) {
 				upstreamErr = r.err
 			}
 			continue
 		}
-		restored = append(restored, r.restored)
+		if r.restored.Path != "" {
+			restored = append(restored, r.restored)
+		}
 	}
 	if firstErr == nil {
 		return restored, nil
@@ -1622,13 +1643,21 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 			return restoredCheckout{}, fmt.Errorf("restore %s: no GitHub client to read PR #%d with", mc.Path, prNumber)
 		}
 		pr, err := restorer.pr(ctx, owner, repo, prNumber)
-		if err != nil {
+		switch {
+		case err == nil && pr != nil:
+			r.PR = &worktree.PRCheckout{HeadRef: pr.HeadRef, HeadCloneURL: prHeadCloneURL(seed.cloneURL, pr), BaseRef: pr.BaseRef}
+		case err == nil || prReadRefused(err):
+			// GitHub answered that this credential cannot see the PR. Only push
+			// tracking needs it; the checkout itself comes from git. Rebuilt
+			// read-only, the way a deleted head repository leaves a fresh one,
+			// rather than holding every other checkout's restore hostage to a
+			// PR every retry would be refused again.
+			delegateLog.Warn("restore: GitHub refused the pull request read; rebuilding its checkout without push tracking",
+				"checkout", mc.Path, "number", prNumber, "error", err)
+			r.PR = &worktree.PRCheckout{}
+		default:
 			return restoredCheckout{}, fmt.Errorf("restore %s: read PR #%d: %w", mc.Path, prNumber, err)
 		}
-		if pr == nil {
-			return restoredCheckout{}, fmt.Errorf("restore %s: PR #%d not found", mc.Path, prNumber)
-		}
-		r.PR = &worktree.PRCheckout{HeadRef: pr.HeadRef, HeadCloneURL: prHeadCloneURL(seed.cloneURL, pr), BaseRef: pr.BaseRef}
 	}
 	c, err := restoreCheckout(ctx, r)
 	if err != nil {
@@ -1637,15 +1666,27 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 	return restoredCheckout{RestoredCheckout: c, repoID: mc.RepoID, slug: mc.Slug}, nil
 }
 
+// prReadRefused reports whether err is GitHub answering a PR read with a 403
+// or 404 that is not a rate limit: an answer about the PR, which a retry would
+// get again.
+func prReadRefused(err error) bool {
+	var he *ghclient.HTTPError
+	if !errors.As(err, &he) || markedUpstreamOutage(err) {
+		return false
+	}
+	return he.StatusCode == http.StatusForbidden || he.StatusCode == http.StatusNotFound
+}
+
 // recordRestoredCheckouts records every rebuilt checkout as the restoring
 // conversation's, at the path it has now, through the claim fence: the push
-// gate and the next snapshot read these rows, and a conversation restoring a
-// tree it did not build — a later step, or a run whose rows a terminal left
-// pointing at a root that is gone — holds no row for them otherwise.
+// gate reads these rows, and a conversation restoring a tree it did not build
+// — a later step, or a run whose rows a terminal left pointing at a root that
+// is gone — holds no row for them otherwise.
 //
-// Best-effort per row, like the PR checkout's own record at setup: a missing
-// row costs this conversation its push to that repo, never its start. A fence
-// refusal is the ownership loss setWorktreePath already reports.
+// Best-effort per row: a missing row costs this conversation its push to that
+// repo, never its start, and never the checkout's place in the next snapshot,
+// which the rows it was restored from already give it. A fence refusal is the
+// ownership loss setWorktreePath already reports.
 func (s *Spawner) recordRestoredCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, restored []restoredCheckout) {
 	if s.conversationWorktrees == nil || conv.ClaimID == "" {
 		return

@@ -113,10 +113,12 @@ var commitSHAPattern = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
 //     fresh --pr checkout gets, a ref-*/default one the origin fetch refspec a
 //     fresh checkout leaves.
 //
-// Nothing of TF's is written into the checkout. On any failure the checkout and
-// everything it put in the bare are removed, and the error is returned wrapped
-// so a git host that could not be reached still reads as one
-// (IsTransientGitError).
+// Nothing of TF's is written into the checkout. On any failure the checkout,
+// its registration in the bare and the per-run refs and push config it wrote
+// there are removed, and the error is returned wrapped so a git host that could
+// not be reached still reads as one (IsTransientGitError). A captured branch a
+// linked restore positioned in the bare stays where it was put: at the commit
+// the snapshot recorded for it, which the bundle also holds.
 func RestoreCheckout(ctx context.Context, r CheckoutRestore) (RestoredCheckout, error) {
 	ref, prNumber, ok := ParseCheckoutSlug(r.Slug)
 	switch {
@@ -193,7 +195,7 @@ func (c RestoredCheckout) Discard() {
 // restoreCheckoutLocked is RestoreCheckout's git work under the per-repo lock.
 // It fills res as it writes into the bare, so a failure part-way leaves res
 // naming exactly what Discard has to take back out.
-func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, prNumber int, wtDir string, res *RestoredCheckout) error {
+func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, prNumber int, wtDir string, res *RestoredCheckout) (err error) {
 	mu := lockRepo(r.Owner, r.Repo)
 	mu.Lock()
 	defer mu.Unlock()
@@ -223,9 +225,16 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 		}
 		prLocal = prLocalBranch(prKey, prNumber)
 		mirror := "refs/remotes/origin/" + prLocal
-		// Recorded before the fetch so a failure from here on reclaims the
-		// mirror ref with the rest of the per-run PR state.
-		res.PRNumber, res.PRKey = prNumber, prKey
+		// The mirror ref is this restore's from the fetch on, and a failure
+		// drops it again, on a context of its own since the deadline is one of
+		// the failures. The run's PR branch is restoreLinkedLocked's to claim.
+		defer func() {
+			if err != nil {
+				dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+				defer cancel()
+				_ = gitRunCtx(dropCtx, bareDir, "update-ref", "-d", mirror)
+			}
+		}()
 		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "fetch", "origin", fmt.Sprintf("+refs/pull/%d/head:%s", prNumber, mirror)); err != nil {
 			return fmt.Errorf("fetch PR #%d head: %w", prNumber, err)
 		}
@@ -248,21 +257,20 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "fetch", "origin", fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", ref, ref)); err != nil {
 			// A branch deleted upstream since the checkout was made is not a
 			// reason to lose the checkout: its commits may all be in the bundle
-			// and the bare. An unreachable host is a reason to stop, and stays
-			// readable as one.
-			if IsTransientGitError(err) {
+			// and the bare. Any other failure — an unreachable host, a refused
+			// credential, the deadline — is, and stays readable as what it is.
+			if !isMissingRemoteRef(err) {
 				return fmt.Errorf("fetch %s: %w", ref, err)
 			}
-			worktreeLog.Warn("refresh checkout branch during restore failed; restoring from what the bare and bundle hold", "ref", ref, "error", err)
+			worktreeLog.Warn("the checkout's branch is gone upstream; restoring from what the bare and bundle hold", "ref", ref)
 		}
 	}
 	if r.Branch != "" && r.Branch != prLocal && r.Branch != trackBranch {
 		// The agent's own branch, if it pushed it, holds the commits the
-		// bundle stops at. Best-effort: a branch never pushed is not upstream.
-		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "fetch", "origin", fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", r.Branch, r.Branch)); err != nil {
-			if IsTransientGitError(err) {
-				return fmt.Errorf("fetch %s: %w", r.Branch, err)
-			}
+		// bundle stops at. A branch it never pushed is not upstream, which is
+		// the one answer the restore goes on without.
+		if err := gitRunCtxAuth(ctx, bareDir, r.Auth, "fetch", "origin", fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", r.Branch, r.Branch)); err != nil && !isMissingRemoteRef(err) {
+			return fmt.Errorf("fetch %s: %w", r.Branch, err)
 		}
 	}
 
@@ -282,24 +290,29 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 
 	// 3. The checkout.
 	if selfContainedRunTrees() {
-		return restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead, res)
+		return restoreSelfContainedLocked(ctx, r, bareDir, wtDir, trackBranch, prNumber, prKey, prLocal, prHead)
 	}
-	return restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead)
+	return restoreLinkedLocked(ctx, r, bareDir, wtDir, prNumber, prKey, prLocal, prHead, res)
 }
 
 // restoreSelfContainedLocked builds the checkout as a standalone clone of the
 // bare at HEAD, staged through a transient run-scoped branch the way
 // createCheckoutCloneAt stages a fresh one, then re-derives its origin and push
 // settings inside the clone. Caller holds the per-repo lock.
-func restoreSelfContainedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir, trackBranch string, prNumber int, prKey, prLocal, prHead string, res *RestoredCheckout) error {
+func restoreSelfContainedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir, trackBranch string, prNumber int, prKey, prLocal, prHead string) error {
 	// Push config lives in the clone, so the bare holds nothing a discard has
-	// to reclaim once the per-run refs below are dropped.
+	// to reclaim once the per-run refs are dropped. The drop runs on a context
+	// of its own: a restore its deadline cut short is the one most likely to
+	// have left them there.
+	tmp := fmt.Sprintf("triagefactory/%s/restore", r.RootKey)
 	defer func() {
+		dropCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		dropBareRunRefs(dropCtx, bareDir, tmp)
 		if prLocal != "" {
-			dropBareRunRefs(ctx, bareDir, prLocal)
+			dropBareRunRefs(dropCtx, bareDir, prLocal)
 		}
 	}()
-	res.PRKey = ""
 
 	upstream := r.CloneURL
 	if upstream == "" {
@@ -310,11 +323,9 @@ func restoreSelfContainedLocked(ctx context.Context, r CheckoutRestore, bareDir,
 		upstream = strings.TrimSpace(out)
 	}
 
-	tmp := fmt.Sprintf("triagefactory/%s/restore", r.RootKey)
 	if err := gitRunCtx(ctx, bareDir, "branch", "-f", tmp, r.Head); err != nil {
 		return fmt.Errorf("stage restore branch: %w", err)
 	}
-	defer dropBareRunRefs(ctx, bareDir, tmp)
 	if err := materializeSelfContainedClone(ctx, bareDir, wtDir, tmp, trackBranch, upstream, r.Auth); err != nil {
 		return err
 	}
@@ -359,8 +370,15 @@ func restoreSelfContainedLocked(ctx context.Context, r CheckoutRestore, bareDir,
 // bare at HEAD — on the captured branch, forced to HEAD, or detached — and
 // re-derives a PR checkout's push config in the bare. Caller holds the
 // per-repo lock and has left the PR head on the bare's mirror ref.
-func restoreLinkedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir string, prNumber int, prKey, prLocal, prHead string) error {
+//
+// res names the run's PR branch and push config for Discard from the first
+// write to either, not before: until then the branch in the bare is one an
+// earlier checkout of this run left, and a failed restore leaves it alone.
+func restoreLinkedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir string, prNumber int, prKey, prLocal, prHead string, res *RestoredCheckout) error {
 	if r.Branch != "" {
+		if prNumber > 0 && r.Branch == prLocal {
+			res.PRNumber, res.PRKey = prNumber, prKey
+		}
 		if err := gitRunCtx(ctx, bareDir, "branch", "-f", r.Branch, r.Head); err != nil {
 			return fmt.Errorf("position branch %s: %w", r.Branch, err)
 		}
@@ -379,6 +397,7 @@ func restoreLinkedLocked(ctx context.Context, r CheckoutRestore, bareDir, wtDir 
 	if prNumber == 0 {
 		return nil
 	}
+	res.PRNumber, res.PRKey = prNumber, prKey
 	return restorePRPushLocked(ctx, r, bareDir, prNumber, prKey, prLocal, prHead)
 }
 
@@ -394,7 +413,7 @@ func restorePRPushLocked(ctx context.Context, r CheckoutRestore, gitDir string, 
 		}
 	}
 	if r.PR.HeadCloneURL == "" {
-		worktreeLog.Warn("PR head repository unavailable (deleted fork); restored checkout is read-only", "number", prNumber)
+		worktreeLog.Warn("no PR head repository to push to; restored checkout is read-only", "number", prNumber)
 		return nil
 	}
 	if err := configurePRPushTrackingAt(ctx, gitDir, prKey, prNumber, prLocal, r.PR.HeadCloneURL, r.PR.HeadRef, prHead); err != nil {

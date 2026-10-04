@@ -667,6 +667,15 @@ func configurePRPushTracking(ctx context.Context, gitDir, rootKey string, prNumb
 // (--not --remotes) reads. Pointing it at an unpushed tip would drop those
 // commits from every later bundle.
 func configurePRPushTrackingAt(ctx context.Context, gitDir, rootKey string, prNumber int, localBranch, pushURL, headBranch, headSHA string) error {
+	// Both come from GitHub's answer for the PR, and both are spelled into git
+	// arguments below: a URL with a leading dash would be read as an option,
+	// and the head branch becomes a ref name and a refspec.
+	if pushURL == "" || strings.HasPrefix(pushURL, "-") {
+		return fmt.Errorf("invalid PR head repository URL %q", pushURL)
+	}
+	if err := validateBranchName(ctx, headBranch); err != nil {
+		return fmt.Errorf("PR head: %w", err)
+	}
 	remoteName := prPushRemoteName(rootKey, prNumber)
 
 	// Add or update the per-run push remote. `git remote add` errors when the

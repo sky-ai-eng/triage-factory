@@ -1992,10 +1992,13 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// it did not itself materialize holds no row and is left read-only on
 		// the very repo its PR lives in. ref = pr-<N> is the materialization
 		// selector; the pushable branch comes from the checkout.
-		// Idempotent on (conversation_id, repo_id, ref), so a re-claim writes
-		// nothing. Log-and-continue: both gates fall back to their task's-own-
-		// repo arm, which authorizes the repo but derives no pushable branch,
-		// so a failure costs this conversation its push and nothing else.
+		// Idempotent on (conversation_id, repo_id, ref), so a re-claim rewrites
+		// the same row, and behind the claim fence, so an engagement that has
+		// lost the conversation writes nothing. Log-and-continue: both gates
+		// fall back to their task's-own-repo arm, which authorizes the repo but
+		// derives no pushable branch, so a failure costs this conversation its
+		// push and nothing else — the snapshot already finds the checkout
+		// through the row of the conversation that built it.
 		//
 		// Detached from the step's cancellation so a shutdown mid-claim still
 		// leaves the row a resumed engagement's pushes resolve through, and
@@ -2004,12 +2007,12 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// store stuck on a lock costs a denied push, never the step's start.
 		if s.conversationWorktrees != nil {
 			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-			if _, _, werr := s.conversationWorktrees.InsertSystem(ledgerCtx, orgID, domain.ConversationWorktree{
+			if werr := s.recordCheckout(ledgerCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
 				ConversationID: conv.ID,
 				RepoID:         cfg.owner + "/" + cfg.repo,
 				Path:           cfg.prCheckout,
 				Ref:            worktree.PRRefSlug(cfg.prNumber),
-			}); werr != nil {
+			}); werr != nil && !errors.Is(werr, db.ErrClaimReleased) {
 				dispatchLog.Warn("record the PR checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
 					"path", cfg.prCheckout,
 					"conversation", conv.ID, "repo", cfg.owner+"/"+cfg.repo, "error", werr)

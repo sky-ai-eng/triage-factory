@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +24,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/storage"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -153,9 +156,10 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 }
 
 // TestEnsureWorkspace_FailedCheckoutLeavesNothing: one checkout that cannot be
-// rebuilt fails the whole restore, and nothing of the attempt is left behind —
-// no root, no checkout, no recorded row — for a later claim to take for a warm
-// tree.
+// rebuilt — here because GitHub could not be reached to read its PR — fails the
+// whole restore with that outage as the error, so the hand-back spends the
+// upstream budget, and nothing of the attempt is left behind — no root, no
+// checkout, no recorded row — for a later claim to take for a warm tree.
 func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
 	f := newSnapshotFixture(t, "task-fail")
 	f.addCheckout(t, "acme/lib", "default")
@@ -165,16 +169,86 @@ func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
 
 	restorer := f.restorer()
 	restorer.pr = func(context.Context, string, string, int) (*ghclient.PRView, error) {
-		return nil, errors.New("pull request read refused")
+		return nil, &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}
 	}
-	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t)); err == nil {
+	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
+	if err == nil {
 		t.Fatal("ensureWorkspace succeeded with a checkout that could not be rebuilt")
+	}
+	if !upstreamSetupFailure(err) {
+		t.Errorf("ensureWorkspace error = %v, want the upstream outage that stopped it", err)
 	}
 	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
 		t.Errorf("the run root survived a failed restore (stat err %v)", err)
 	}
 	if rows := f.ledger.recordedRows(); len(rows) != 0 {
 		t.Errorf("a failed restore recorded %v", rows)
+	}
+}
+
+// TestEnsureWorkspace_UnreadablePRRestoresReadOnly: a PR GitHub refuses to show
+// this credential, rather than one it could not be reached for, does not cost
+// the workspace. Only push tracking needs the PR, so its checkout comes back
+// with all its work and no push remote, the way a deleted head repository
+// leaves a fresh one.
+func TestEnsureWorkspace_UnreadablePRRestoresReadOnly(t *testing.T) {
+	f := newSnapshotFixture(t, "task-unreadable-pr")
+	runmode.SetLocalSandboxForTest(t, true)
+	pr := f.addCheckout(t, "acme/app", "pr-7")
+	dirtyCheckout(t, pr)
+	head := strings.TrimSpace(gitOut(t, pr, "rev-parse", "HEAD"))
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restorer := f.restorer()
+	restorer.pr = func(context.Context, string, string, int) (*ghclient.PRView, error) {
+		return nil, ghclient.NewHTTPError(http.StatusNotFound, `{"message":"Not Found"}`, "GET /repos/acme/app/pulls/7 returned 404")
+	}
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	assertFileContains(t, filepath.Join(pr, "committed.txt"), "unpushed commit")
+	assertFileContains(t, filepath.Join(pr, "README.md"), "uncommitted edit")
+	if got := strings.TrimSpace(gitOut(t, pr, "rev-parse", "HEAD")); got != head {
+		t.Errorf("PR checkout HEAD = %s, want %s", got, head)
+	}
+	if remotes := strings.TrimSpace(gitOut(t, pr, "remote")); remotes != "origin" {
+		t.Errorf("remotes = %q, want origin alone — no push tracking without the PR", remotes)
+	}
+}
+
+// TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack: a rehydrate that
+// fails after every checkout is rebuilt — here writing the session transcript
+// — removes the root and takes each checkout's push config back out of the
+// shared bare, which removing the root alone does not.
+func TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack(t *testing.T) {
+	f := newSnapshotFixture(t, "task-late-failure")
+	runmode.SetLocalSandboxForTest(t, false)
+	f.addCheckout(t, "acme/app", "pr-7")
+	const sessionID = "sess-late"
+	sessPath := writeSession(t, f.root, sessionID, `{"type":"summary"}`)
+	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
+	f.loseRoot(t)
+	bare, err := worktree.RepoDir("acme", "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the transcript goes, so writing it fails.
+	if err := os.Remove(sessPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sessPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(sessionID), f.restorer(), nil); err == nil {
+		t.Fatal("ensureWorkspace succeeded with a transcript it could not write")
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root survived a failed restore (stat err %v)", err)
+	}
+	if remotes := gitOut(t, bare, "remote"); strings.Contains(remotes, "tfpush-") {
+		t.Errorf("the failed restore left its push remote in the bare:\n%s", remotes)
 	}
 }
 
@@ -240,6 +314,85 @@ func TestEnsureWorkspace_RefusedState(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout: a row names
+// a checkout by repo and slug. One recorded under another root — on another
+// host, or before a restore rebuilt the root here — still carries the checkout
+// that sits at that place under this root.
+func TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout(t *testing.T) {
+	f := newSnapshotFixture(t, "task-row-elsewhere")
+	lib := f.addCheckout(t, "acme/lib", "default")
+	dirtyCheckout(t, lib)
+	f.ledger.mu.Lock()
+	f.ledger.rows[0].Path = filepath.Join("/elsewhere", "triagefactory-runs", f.key, "acme", "lib", "default")
+	f.ledger.mu.Unlock()
+
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	members := snapshotMembers(t, f.s.Storage(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
+	if !members[snapCheckoutsPrefix+"acme/lib/default/bundle"] {
+		t.Errorf("the snapshot dropped a checkout whose row names another root (members: %v)", members)
+	}
+}
+
+// TestSetupGitHub_FailsWithoutItsCheckoutRow: the PR checkout's row is how
+// every later snapshot finds the checkout, so a setup that cannot write it
+// fails instead of starting an agent whose work no snapshot would carry — and
+// fails before the clone and the worktree_path stamp, so the next claim finds
+// no tree to take for a warm one and runs the setup again.
+func TestSetupGitHub_FailsWithoutItsCheckoutRow(t *testing.T) {
+	f := newSnapshotFixture(t, "task-setup-row")
+	origin := f.upstream(t, "acme/app")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/acme/app/pulls/7" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": origin}},
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": origin}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	conversations := &setupConversations{}
+	f.s.conversations = conversations
+	f.s.conversationWorktrees = refusingLedger{}
+
+	task := domain.Task{ID: f.key, EntitySource: "github", EntitySourceID: "acme/app#7"}
+	_, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "conversation_worktrees") {
+		t.Fatalf("setupGitHub = %v, want the failed row write", err)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "acme", "app", "pr-7")); !os.IsNotExist(err) {
+		t.Errorf("the failed setup cloned its checkout anyway (stat err %v)", err)
+	}
+	if conversations.stamped != 0 {
+		t.Errorf("the failed setup stamped worktree_path %d times; the next claim would take the root for a warm tree", conversations.stamped)
+	}
+}
+
+// setupConversations accepts the phase and worktree_path writes a setup makes,
+// counting the stamps.
+type setupConversations struct {
+	db.ConversationStore
+	stamped int
+}
+
+func (*setupConversations) SetClaimPhaseSystem(context.Context, string, string, string, string) (*domain.ExecutorClaim, error) {
+	return nil, nil
+}
+
+func (c *setupConversations) SetWorktreePathForClaimSystem(context.Context, string, string, string, string) (*domain.Conversation, error) {
+	c.stamped++
+	return nil, nil
+}
+
+// refusingLedger fails every conversation_worktrees write.
+type refusingLedger struct{ db.ConversationWorktreeStore }
+
+func (refusingLedger) RecordForClaimSystem(context.Context, string, string, domain.ConversationWorktree) (domain.ConversationWorktree, error) {
+	return domain.ConversationWorktree{}, errors.New("database is locked")
 }
 
 // TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist: a checkout the
