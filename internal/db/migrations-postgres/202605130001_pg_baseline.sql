@@ -3409,7 +3409,15 @@ CREATE TABLE public.org_github_apps (
     -- best-effort at registration. NOT the App id. NULL = unknown, giving a plain
     -- "<slug>[bot]@..." email; set, it gives the numeric-id noreply form so bot
     -- commits link on github.com.
-    bot_user_id bigint
+    bot_user_id bigint,
+    -- Whether GitHub still accepts this App, as the installation reconcile last
+    -- established it (GET /app with the App's JWT, asked when the installation
+    -- listing is refused). NULL while it does; 'missing' when GitHub reports no
+    -- App with this id, 'key_rejected' when it refuses the stored key.
+    -- unusable_since is when the current reason was first observed, NULL
+    -- whenever the reason is. App-validated, like the other vocabulary columns.
+    unusable_reason text,
+    unusable_since timestamp with time zone
 );
 
 ALTER TABLE ONLY public.org_github_apps

@@ -184,6 +184,13 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 	// at least one — cutting over to an App installed nowhere would dark the
 	// org. The backfill works for a staged App (its active gate was removed).
 	if err := s.githubApps.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+		// GitHub answering that the App is gone is a verdict on this cutover,
+		// not an outage to retry through.
+		var unusable *db.GitHubAppUnusableError
+		if errors.As(err, &unusable) {
+			httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubAppUnusableMessage(unusable.Reason) + " It can't be switched to; discard it instead."})
+			return
+		}
 		// The detail (which can carry vault/keychain topology) goes to the log,
 		// not the response body — even though this is org-admin-only.
 		githubAppLog.Error("cutover: backfill installations failed", "org", orgID, "error", err)

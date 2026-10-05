@@ -33,6 +33,7 @@ type ghAccessStub struct {
 	userRepos    []string            // /api/v3/user/repos
 	appInstalls  []stubInstall       // /api/v3/app/installations
 	installRepos map[string][]string // /api/v3/installation/repositories, keyed by installation id
+	appDeleted   bool                // every App-JWT read answers 404, as GitHub does for a deleted App
 }
 
 type stubInstall struct {
@@ -66,7 +67,19 @@ func newGitHubAccessStub(t *testing.T, cfg ghAccessStub) *httptest.Server {
 		_ = json.NewEncoder(w).Encode(repos)
 	})
 
+	mux.HandleFunc("/api/v3/app", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.appDeleted {
+			http.Error(w, `{"message":"Integration not found"}`, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1, "slug": "tf-test"})
+	})
+
 	mux.HandleFunc("/api/v3/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		if cfg.appDeleted {
+			http.Error(w, `{"message":"Integration not found"}`, http.StatusNotFound)
+			return
+		}
 		out := make([]map[string]any, 0, len(cfg.appInstalls))
 		for _, in := range cfg.appInstalls {
 			out = append(out, map[string]any{
@@ -690,6 +703,34 @@ func TestGitHubAppCutover_NoInstallations409(t *testing.T) {
 	}
 	if app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID); app == nil || app.Active {
 		t.Errorf("app should still be staged after a 409 cutover, got %+v", app)
+	}
+}
+
+// TestGitHubAppCutover_DeletedApp422: a staged App deleted on GitHub cannot be
+// cut over to, and the refusal says why — 422 naming the deleted App, with the
+// reason recorded on the registration — rather than a 502 that reads as a
+// GitHub outage worth retrying.
+func TestGitHubAppCutover_DeletedApp422(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	stub := newGitHubAccessStub(t, ghAccessStub{appDeleted: true})
+	setOrgGitHubBase(t, s, stub.URL)
+	seedLocalApp(t, s, false)
+
+	rec := doJSON(t, s, http.MethodPost, "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/cutover", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("cutover of a deleted app = %d, want 422; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "no longer exists on GitHub") {
+		t.Errorf("body=%s; want the deleted App named", rec.Body.String())
+	}
+	app, _ := s.githubApps.GetForOrgSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if app == nil || app.Active {
+		t.Fatalf("app should still be staged after a refused cutover, got %+v", app)
+	}
+	if app.UnusableReason != domain.GitHubAppMissing {
+		t.Errorf("unusable_reason = %q, want %q recorded by the backfill", app.UnusableReason, domain.GitHubAppMissing)
 	}
 }
 

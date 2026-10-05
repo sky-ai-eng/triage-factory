@@ -95,11 +95,13 @@ two are different intents with different consequences, and each refuses the
 other's case with a 409: a request that meant one can never do the other,
 whichever way a concurrent cutover moves the row. As with every teardown here,
 nothing is uninstalled on GitHub — the App stays registered there, and the
-response carries the link to its settings. The Settings panel never offers the
-verb bare: a workspace with no GitHub credential is one whose setup is
-unfinished, and the app shell routes its admins to the setup wizard, so the
-panel's only use of it is the switch to the deployment App, which follows the
-teardown with Connect in the same gesture.
+response carries the link to its settings. The Settings panel offers the verb
+bare in one case only, an App GitHub no longer accepts (below), where the
+workspace already has no working GitHub access and the registration is all
+that is left to remove. Otherwise a workspace with no GitHub credential is one
+whose setup is unfinished, and the app shell routes its admins to the setup
+wizard, so the panel's other use of it is the switch to the deployment App,
+which follows the teardown with Connect in the same gesture.
 
 What the rule forbids is exactly one thing: TF *guessing* — attributing an
 installation from the shared listing to a workspace whose admin never proved
@@ -115,6 +117,19 @@ it. Everything after the proof updates freely, as the next section enumerates.
 | Rename the account | Installation field (`account_login`) | Reconcile, every poll cycle; on-demand refresh | Reconcile, every poll cycle; on-demand refresh |
 | Install the App on a **new** account | New installation | Reconcile discovers it, every poll cycle; on-demand refresh | Connect button — one bind ceremony per account, additive |
 | Uninstall from an account | Installation removed | Reconcile soft-removes; webhook; on-demand refresh | Reconcile soft-removes, every poll cycle; webhook; on-demand refresh |
+| Delete the App | The App is gone | Reconcile records `unusable_reason = missing`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the workspace's |
+| Delete or regenerate the App's private key | GitHub refuses the stored key | Reconcile records `unusable_reason = key_rejected`, every poll cycle; on-demand refresh | Not covered: the shared App is the operator's, not the workspace's |
+
+The last two rows have no webhook at all, and from inside a poll cycle they
+look like any other refused request. The reconcile settles them by asking: when
+`GET /app/installations` is refused with a 404 or 401, it asks `GET /app` under
+the same key, and only that answer is recorded — 404 as `missing`, 401 as
+`key_rejected`, on `org_github_apps.unusable_reason` with the time it was first
+seen in `unusable_since`. Any other answer records nothing, and the next
+successful listing clears the reason. While one is recorded on the live App, the
+poll cycle stops after the reconcile and logs the change once, credential
+resolution refuses to mint (`github.ErrGitHubAppUnusable`) instead of sending
+requests GitHub will refuse, and the Settings panel says what happened.
 
 Two things in that table are on demand rather than on a timer, and both work
 for both classes. **On-demand refresh** is
@@ -213,7 +228,14 @@ reports, and the affordances are per class:
   starts the ceremony for that account, so the workspace holds no credential
   for the length of the trip to GitHub, and an admin who leaves GitHub
   without finishing is routed to the setup wizard) and the switch to a token.
-  Never a bare disconnect.
+  Never a bare disconnect while the App works. An App GitHub no longer accepts
+  (`app.unusable_reason` on the status read) replaces the installations and
+  findings, which describe an App that is gone, with what happened and when,
+  and adds **Remove this App** — the disconnect verb, bare — beside the two
+  switches: the access is already gone, and removing the registration is what
+  opens every way back in, including the same App with a new key through
+  import. An App installed on no account says that nothing is polled and links
+  to the install page.
 - **A workspace on the deployment's App** (`using_deployment_default: true`)
   shows no App of its own — there is no row, and there never will be — and is
   never offered registration or import. What it shows is the accounts it has

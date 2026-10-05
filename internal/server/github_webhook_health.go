@@ -120,11 +120,15 @@ type githubAppWebhookHealth struct {
 // blocks on GitHub and never fails: nil means "nothing known yet", which the
 // panel renders as nothing at all.
 //
-// Returns nil without probing when there is no App (nothing to ask about) or no
+// Returns nil without probing when there is no App (nothing to ask about), no
 // deployment identity (no receiver URL to compare against — see
-// ProbeWebhookHealth's refusal to guess).
+// ProbeWebhookHealth's refusal to guess), or an App GitHub no longer accepts.
 func (s *Server) webhookHealthDTO(ctx context.Context, orgID string, app *domain.OrgGitHubApp) *githubAppWebhookHealth {
-	if app == nil || s.deployCfg == nil {
+	// An App GitHub no longer accepts has no webhook to diagnose, and the hook
+	// endpoints answer it with the 404s the probe reads as "this host does not
+	// serve them" — a statement about the GitHub host the panel would then
+	// show beside an App that does not exist.
+	if app == nil || s.deployCfg == nil || app.Unusable() {
 		return nil
 	}
 	expectedURL := s.webhookReceiverURL(orgID)

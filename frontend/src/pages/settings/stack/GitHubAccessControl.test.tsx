@@ -62,13 +62,16 @@ vi.mock('../../../lib/apiClient', async (importOriginal) => {
 // the default; the webhook-health cases below set one. Stateful, because the
 // component folds a post-disconnect re-read into the hook and re-renders off
 // it.
-const installMocks = vi.hoisted(() => ({ status: null as GitHubAppStatus | null }))
+const installMocks = vi.hoisted(() => ({
+  status: null as GitHubAppStatus | null,
+  installUrl: '',
+}))
 vi.mock('../../../hooks/useGitHubAppInstall', async () => {
   const { useState } = await import('react')
   return {
     useGitHubAppInstall: () => {
       const [status, setStatus] = useState<GitHubAppStatus | null>(installMocks.status)
-      return { status, setStatus, installUrl: '' }
+      return { status, setStatus, installUrl: installMocks.installUrl }
     },
   }
 })
@@ -77,6 +80,7 @@ import GitHubAccessControl from './GitHubAccessControl'
 import {
   reachWithoutPurposeListPath,
   scopeDriftListPath,
+  type GitHubAppInfo,
   type GitHubAppInstallation,
   type GitHubAppStatus,
   type GitHubAppWebhookHealth,
@@ -152,6 +156,7 @@ beforeEach(() => {
   ghMocks.getGitHubAppStatus.mockReset()
   credMocks.connectGitHubPAT.mockReset()
   installMocks.status = null
+  installMocks.installUrl = ''
   listMocks.pages = {}
   listMocks.calls = []
   vi.spyOn(window, 'confirm').mockReturnValue(true)
@@ -947,5 +952,114 @@ describe('GitHubAccessControl · grant findings', () => {
     expect(acme?.textContent).toMatch(/refuses every token/)
     expect(beta).not.toHaveAttribute('data-suspended')
     expect(beta?.textContent).not.toMatch(/Suspended/)
+  })
+})
+
+// An App GitHub stopped accepting outside Triage Factory — deleted there, or
+// its key deleted there. The panel's job is to say so instead of describing
+// installations of an App that is gone, and to open the ways out.
+describe('GitHubAccessControl · an App GitHub no longer accepts', () => {
+  const liveApp = {
+    githubAppRegistered: true,
+    githubAppStaged: false,
+    githubAppSlug: 'acme-bot',
+    hasGitHubPat: false,
+    githubPatLogin: '',
+  }
+  const appInfo = (over: Partial<GitHubAppInfo>): GitHubAppInfo => ({
+    app_id: '123',
+    slug: 'acme-bot',
+    owner_type: 'org',
+    registered_at: '2026-01-02T03:04:05Z',
+    registered_by_display_name: '',
+    active: true,
+    unusable_reason: null,
+    unusable_since: '',
+    ...over,
+  })
+  const deleted = () => {
+    installMocks.status = statusOf({
+      app: appInfo({ unusable_reason: 'missing', unusable_since: '2026-09-10T21:13:19Z' }),
+      installations: [installation({})],
+    })
+  }
+
+  it('says the App was deleted on GitHub, and hides the installations it no longer has', () => {
+    deleted()
+    renderControl(liveApp)
+    expect(screen.getByText('The acme-bot App no longer exists on GitHub.')).toBeInTheDocument()
+    expect(screen.queryByText(/polling under its own bot identity/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Installed on' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove this App…' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Switch to a personal access token…' }),
+    ).toBeInTheDocument()
+  })
+
+  it('names a rejected key as its own cause, with the way back for the same App', () => {
+    installMocks.status = statusOf({
+      app: appInfo({ unusable_reason: 'key_rejected', unusable_since: '2026-09-10T21:13:19Z' }),
+    })
+    renderControl(liveApp)
+    expect(
+      screen.getByText('GitHub no longer accepts the acme-bot App’s private key.'),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Connect an existing App/)).toBeInTheDocument()
+  })
+
+  it('removes the App and leaves the draft on the empty state', async () => {
+    deleted()
+    ghMocks.disconnectOwnApp.mockResolvedValue({
+      status: 'disconnected',
+      github_app_deleted_locally: true,
+      github_app_settings_url: 'https://github.com/settings/apps',
+    })
+    ghMocks.getGitHubAppStatus.mockResolvedValue(statusOf({}))
+    const { patch, reload } = renderControl(liveApp)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove this App…' }))
+    await waitFor(() => expect(reload).toHaveBeenCalled())
+    expect(ghMocks.disconnectOwnApp).toHaveBeenCalledWith('org-1')
+    expect(window.confirm).toHaveBeenCalledWith(
+      expect.stringContaining('no longer exists on GitHub'),
+    )
+    expect(patch).toHaveBeenCalledWith(
+      expect.objectContaining({ githubAppRegistered: false, githubAppSlug: '' }),
+    )
+  })
+
+  it('removes nothing when the confirm is declined', () => {
+    deleted()
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    renderControl(liveApp)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove this App…' }))
+    expect(ghMocks.disconnectOwnApp).not.toHaveBeenCalled()
+  })
+
+  it('offers a staged App GitHub no longer accepts only the discard', () => {
+    installMocks.status = statusOf({
+      app: appInfo({
+        active: false,
+        unusable_reason: 'missing',
+        unusable_since: '2026-09-10T21:13:19Z',
+      }),
+    })
+    renderControl({ ...liveApp, githubAppStaged: true, hasGitHubPat: true })
+    expect(screen.getByText(/deleted on GitHub/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Finish switching' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Discard' })).toBeInTheDocument()
+  })
+
+  it('says an App installed on no account polls nothing, and links to the install page', () => {
+    installMocks.status = statusOf({ app: appInfo({}), installations: [] })
+    installMocks.installUrl = 'https://github.com/apps/acme-bot/installations/new'
+    renderControl(liveApp)
+    expect(
+      screen.getByText('The acme-bot App isn’t installed on any GitHub account.'),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Install it on GitHub/ })).toHaveAttribute(
+      'href',
+      'https://github.com/apps/acme-bot/installations/new',
+    )
   })
 })

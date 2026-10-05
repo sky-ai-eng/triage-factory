@@ -165,10 +165,11 @@ func TestRefreshWebhookHealth_LateProbeForAReplacedAppIsDropped(t *testing.T) {
 	waitForWebhookProbeIdle(t, s, runmode.LocalDefaultOrgID)
 }
 
-// TestWebhookHealthDTO_NothingToProbe pins the two cases that produce no probe
-// at all: an org with no App (nothing to ask about) and a deployment with no
+// TestWebhookHealthDTO_NothingToProbe pins the cases that produce no probe
+// at all: an org with no App (nothing to ask about), a deployment with no
 // public identity (no receiver URL to compare a hook against, so any answer
-// would be invented).
+// would be invented), and an App GitHub no longer accepts (no webhook left to
+// diagnose).
 func TestWebhookHealthDTO_NothingToProbe(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	ctx := context.Background()
@@ -201,6 +202,24 @@ func TestWebhookHealthDTO_NothingToProbe(t *testing.T) {
 		}
 		if probed {
 			t.Error("probed without a receiver URL to compare against")
+		}
+	})
+
+	t.Run("app github no longer accepts", func(t *testing.T) {
+		s := newTestServer(t)
+		s.SetDeployConfig("https://tf.example.org", [32]byte{})
+		probed := false
+		s.hookProbe = func(context.Context, string, *domain.OrgGitHubApp, string) (githubapp.WebhookHealth, error) {
+			probed = true
+			return githubapp.WebhookHealth{}, nil
+		}
+		gone := *testApp
+		gone.UnusableReason = domain.GitHubAppMissing
+		if dto := s.webhookHealthDTO(ctx, runmode.LocalDefaultOrgID, &gone); dto != nil {
+			t.Errorf("webhook_health=%+v for a deleted App, want null", dto)
+		}
+		if probed {
+			t.Error("probed the webhook of an App that no longer exists")
 		}
 	})
 }

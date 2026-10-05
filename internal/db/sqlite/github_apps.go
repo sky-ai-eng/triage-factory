@@ -35,23 +35,31 @@ var _ db.GitHubAppsStore = (*gitHubAppsStore)(nil)
 // the read shape.
 const sqliteGitHubAppColumns = `org_id, app_id, slug, client_id,
 	       client_secret_ref, pem_ref, webhook_secret_ref,
-	       owner_type, registered_at, registered_by_user_id, active, bot_user_id`
+	       owner_type, registered_at, registered_by_user_id, active, bot_user_id,
+	       unusable_reason, unusable_since`
 
 func scanSQLiteGitHubApp(scan func(...any) error) (domain.OrgGitHubApp, error) {
 	var (
-		a         domain.OrgGitHubApp
-		regBy     sql.NullString
-		botUserID sql.NullInt64
+		a              domain.OrgGitHubApp
+		regBy          sql.NullString
+		botUserID      sql.NullInt64
+		unusableReason sql.NullString
+		unusableSince  sql.NullTime
 	)
 	if err := scan(
 		&a.OrgID, &a.AppID, &a.Slug, &a.ClientID,
 		&a.ClientSecretRef, &a.PEMRef, &a.WebhookSecretRef,
 		&a.OwnerType, &a.RegisteredAt, &regBy, &a.Active, &botUserID,
+		&unusableReason, &unusableSince,
 	); err != nil {
 		return a, err
 	}
 	a.RegisteredByUserID = regBy.String
 	a.BotUserID = botUserID.Int64 // NULL → 0 (bot user id unknown)
+	a.UnusableReason = domain.GitHubAppUnusableReason(unusableReason.String)
+	if unusableSince.Valid {
+		a.UnusableSince = unusableSince.Time.UTC()
+	}
 	return a, nil
 }
 
@@ -422,7 +430,17 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	}
 
 	insts, err := db.DiscoverAppInstallations(ctx, s.secrets, orgID, appID, pemRef, baseURL)
+	var unusable *db.GitHubAppUnusableError
+	if errors.As(err, &unusable) {
+		if serr := s.markAppUnusable(ctx, orgID, appID, unusable.Reason); serr != nil {
+			return errors.Join(err, serr)
+		}
+		return err
+	}
 	if err != nil {
+		return err
+	}
+	if err := s.clearAppUnusable(ctx, orgID, appID); err != nil {
 		return err
 	}
 	active, err := s.activeInstallationIDs(ctx, orgID)
@@ -433,6 +451,41 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
 	)
+}
+
+// markAppUnusable records why GitHub no longer accepts the org's App. The
+// since-stamp holds while the reason repeats and restarts when it changes, so
+// it reads as "when this condition began" across every cycle that re-observes
+// it. Keyed by app_id as well as org_id: the probe that produced reason ran
+// against the App this backfill read, and a registration swapped in while it
+// was in flight is not the App it diagnosed.
+func (s *gitHubAppsStore) markAppUnusable(ctx context.Context, orgID, appID string, reason domain.GitHubAppUnusableReason) error {
+	if !reason.Known() {
+		return fmt.Errorf("record github app unusable: unknown reason %q", reason)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		UPDATE org_github_apps
+		   SET unusable_since = CASE WHEN unusable_reason = ? THEN unusable_since ELSE CURRENT_TIMESTAMP END,
+		       unusable_reason = ?
+		 WHERE org_id = ? AND app_id = ?
+	`, string(reason), string(reason), orgID, appID); err != nil {
+		return fmt.Errorf("record github app unusable: %w", err)
+	}
+	return nil
+}
+
+// clearAppUnusable forgets a recorded reason once a listing has succeeded —
+// the App demonstrably exists and accepts the key. Writes only when a reason
+// is stored, so the healthy reconcile every cycle performs costs no write.
+func (s *gitHubAppsStore) clearAppUnusable(ctx context.Context, orgID, appID string) error {
+	if _, err := s.q.ExecContext(ctx, `
+		UPDATE org_github_apps
+		   SET unusable_reason = NULL, unusable_since = NULL
+		 WHERE org_id = ? AND app_id = ? AND unusable_reason IS NOT NULL
+	`, orgID, appID); err != nil {
+		return fmt.Errorf("clear github app unusable: %w", err)
+	}
+	return nil
 }
 
 // RefreshManagedInstallations reconciles a workspace that rides the DEPLOYMENT

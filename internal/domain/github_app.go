@@ -36,7 +36,42 @@ type OrgGitHubApp struct {
 	// links a bot's commits to its account on GitHub's contribution graph
 	// (TFAC-474). Mirrors org_github_apps.bot_user_id (nullable → 0).
 	BotUserID int64
+	// UnusableReason is why GitHub has stopped accepting this App, as the
+	// installation reconcile last established it: "" while GitHub accepts it
+	// (or nothing has said otherwise), else one of the GitHubAppUnusable
+	// values. Both causes happen on GitHub and never through TF, which is why
+	// a reconcile has to discover them.
+	UnusableReason GitHubAppUnusableReason
+	// UnusableSince is when the reconcile first observed UnusableReason; zero
+	// while the App is usable. It holds across reconciles that see the same
+	// reason, and restarts when the reason changes.
+	UnusableSince time.Time
 }
+
+// GitHubAppUnusableReason is the closed vocabulary of
+// org_github_apps.unusable_reason.
+type GitHubAppUnusableReason string
+
+const (
+	// GitHubAppMissing — GitHub reports that no App with this id exists: it
+	// was deleted on GitHub. Nothing in TF can bring it back; the workspace
+	// needs another credential.
+	GitHubAppMissing GitHubAppUnusableReason = "missing"
+	// GitHubAppKeyRejected — the App exists but GitHub refuses the JWT signed
+	// with the stored private key, which is what deleting or regenerating the
+	// key on GitHub produces.
+	GitHubAppKeyRejected GitHubAppUnusableReason = "key_rejected"
+)
+
+// Known reports whether r is a reason this build can store and render.
+func (r GitHubAppUnusableReason) Known() bool {
+	return r == GitHubAppMissing || r == GitHubAppKeyRejected
+}
+
+// Unusable reports whether the reconcile has established that GitHub no longer
+// accepts this App. The reason is the state; every reader asks this rather than
+// comparing it to "".
+func (a OrgGitHubApp) Unusable() bool { return a.UnusableReason != "" }
 
 // NormalizedOwnerType returns the App's owner_type, folding an unset value
 // to "user" so the store never writes an empty string into the NOT NULL
