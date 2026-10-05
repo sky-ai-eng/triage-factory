@@ -146,10 +146,13 @@ func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbo
 // where a chown to the sandbox uid would fail and a group grant would widen
 // access to no one who needs it.
 //
-// Everything downstream of the socket is identical to the jail's: the agent's
-// exec verbs dial it as a pure RPC client, hold no database handle and no
+// Downstream of the socket the agent's exec verbs work as they do in the
+// jail: they dial it as a pure RPC client, hold no database handle and no
 // credential, and resolve their identity from the daemon's own
-// LookupConversation.
+// LookupConversation. Two answers differ (see Server.sharesNamespace): the
+// agent sees the run root at its host path rather than /work, and a
+// `workspace add` checkout is already the agent's, so it is not handed to the
+// sandbox uid.
 //
 // The caller supplies the path (from internal/paths) rather than this package
 // deriving it, so the ".triagefactory" literal stays where the lint guard
@@ -164,7 +167,9 @@ func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*Host
 	if err := ensureOwnerOnlyDir(filepath.Dir(sockPath)); err != nil {
 		return nil, err
 	}
-	return listenAndServe(NewServer(stores, info, nil), sockPath, grantSocketToOwnerOnly)
+	srv := NewServer(stores, info, nil)
+	srv.sharesNamespace = true
+	return listenAndServe(srv, sockPath, grantSocketToOwnerOnly)
 }
 
 // ensureOwnerOnlyDir pins the LOCAL socket root to 0700, creating it if it is

@@ -123,9 +123,11 @@ func (c *LocalClient) CreateWorkspaceCheckout(ctx context.Context, owner, repo, 
 // materializeWorkspaceCheckout is the full host-side `workspace add`: resolve the
 // run root once, build the checkout under it, and hand the tree to the sandbox
 // uid. It writes the shared bare cache and the run-root, so it runs ONLY where
-// those are owned — an all/local process, or the orchestrator serving a sidecar's
-// relayed op. The capless credential sidecar owns neither (its uid can't write
-// either), so its dispatch relays here instead of calling this.
+// those are owned — the orchestrator serving a sidecar's relayed op, or a
+// jail's daemon built by Start. The capless credential sidecar owns neither
+// (its uid can't write either), so its dispatch relays here instead of calling
+// this. A local run's daemon has no sandbox uid to hand to and calls
+// CreateWorkspaceCheckout.
 func (c *LocalClient) materializeWorkspaceCheckout(ctx context.Context, owner, repo, ref string, prNumber int) (string, error) {
 	// One WorkspaceRoots read serves the create AND the post-create chown/cleanup
 	// containment gate, so both judge against the same root.
