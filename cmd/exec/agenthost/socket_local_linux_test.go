@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // TestStartWithServer_KeepsTheJailSocketPath is the drift guard for the
@@ -136,5 +138,66 @@ func TestStartLocal_RejectsAnIncompleteRequest(t *testing.T) {
 		t.Error("StartLocal accepted an empty socket path")
 	} else if !strings.Contains(err.Error(), "socket path") {
 		t.Errorf("error %q does not name the missing socket path", err)
+	}
+}
+
+// TestStartLocal_AnswersForTheAgentsOwnNamespace pins the two answers a local
+// run's daemon gives differently from a jail's. The local namespace binds the
+// run root back at its host path, so WorkspaceRoots gives the agent that path
+// and not /work. The agent also runs as this uid, so a `workspace add`
+// checkout comes back still owned by this process. A jail's daemon would hand
+// it to the sandbox uid, which an unprivileged process cannot do.
+func TestStartLocal_AnswersForTheAgentsOwnNamespace(t *testing.T) {
+	ctx := context.Background()
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-local-ws", runmode.LocalDefaultUserID, "manual")
+	runRoot := filepath.Join(t.TempDir(), "triagefactory-runs", "task-local")
+	if _, err := stores.Conversations.SetWorktreePathSystem(ctx, runmode.LocalDefaultOrgID, "conv-local-ws", runRoot); err != nil {
+		t.Fatalf("SetWorktreePathSystem: %v", err)
+	}
+	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
+	checkout := filepath.Join(runRoot, "sky", "core", "main")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "README.md"), []byte("core\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stubWorkspaceCreates(t, &createRecorder{path: checkout})
+
+	hd, err := StartLocal(stores, workspaceInfo("conv-local-ws"), filepath.Join(t.TempDir(), "agenthost", "conv-local-ws.sock"))
+	if err != nil {
+		t.Fatalf("StartLocal: %v", err)
+	}
+	defer func() { _ = hd.Close() }()
+	client, err := dialSandbox(ctx, hd.SocketPath())
+	if err != nil {
+		t.Fatalf("dialSandbox: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	host, agent, err := client.WorkspaceRoots(ctx)
+	if err != nil {
+		t.Fatalf("WorkspaceRoots: %v", err)
+	}
+	if host != runRoot || agent != runRoot {
+		t.Errorf("roots = (%q, %q), want the host run root for both", host, agent)
+	}
+
+	path, err := client.CreateWorkspaceCheckout(ctx, "sky", "core", "main", 0)
+	if err != nil {
+		t.Fatalf("workspace add over the local socket: %v", err)
+	}
+	if path != checkout {
+		t.Errorf("path = %q, want %q", path, checkout)
+	}
+	for _, p := range []string{filepath.Join(runRoot, "sky"), checkout, filepath.Join(checkout, "README.md")} {
+		fi, err := os.Lstat(p)
+		if err != nil {
+			t.Fatalf("lstat %s: %v", p, err)
+		}
+		if uid := fi.Sys().(*syscall.Stat_t).Uid; int(uid) != os.Getuid() {
+			t.Errorf("%s is owned by uid %d, want this process's uid %d", p, uid, os.Getuid())
+		}
 	}
 }

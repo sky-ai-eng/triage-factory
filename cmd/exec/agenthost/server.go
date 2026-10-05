@@ -36,9 +36,9 @@ func strictlyWithin(root, path string) bool {
 
 // sandboxAgentRoot is the sandbox's view of the run root — the bind-mount
 // destination agentproc's sandbox spec puts the run's Cwd at. Mirrors
-// agentproc's sandboxAgentRoot (which itself mirrors sandbox/spec.go). The
-// daemon only ever serves sandboxed callers, so this is unconditionally the
-// agent view its WorkspaceRoots dispatch reports.
+// agentproc's sandboxAgentRoot (which itself mirrors sandbox/spec.go). It is
+// the agent view the WorkspaceRoots dispatch reports to every caller but a
+// local run's (Server.sharesNamespace).
 const sandboxAgentRoot = "/work"
 
 // Server is the daemon-side counterpart to IPCClient. One Server per
@@ -69,6 +69,13 @@ type Server struct {
 	// gateWired reports whether the exec-gh repo authz gate can run — true on the
 	// sidecar and a fully-wired all/local Server, false for a partial fixture.
 	gateWired bool
+
+	// sharesNamespace is set on a local run's daemon (StartLocal). Its caller
+	// is a bubblewrap namespace running as this uid, with the run root bound
+	// back at its host path, so the caller sees the root where this process
+	// does and can write what this process creates. The jail's /work view
+	// and its ownership hand-off are both wrong for it.
+	sharesNamespace bool
 
 	// ghResolver is the GitHub credential resolver the host-routed gh
 	// methods build their client from (App installation token → org PAT).
@@ -550,13 +557,16 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		return emptyResult{}, client.DeleteConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
 
 	case methodWorkspaceRoots:
-		// The transport IS the namespace boundary: an RPC arriving here came
-		// from inside the sandbox, whose view of the host run root is always
-		// the /work bind mount — so the daemon substitutes that as the agent
-		// view rather than the LocalClient's same-namespace answer.
+		// A jailed caller sees the host run root only through the /work bind
+		// mount, so the daemon substitutes that as the agent view rather than
+		// the LocalClient's same-namespace answer. A local caller binds the
+		// root back at its host path and takes that answer as it is.
 		host, _, err := client.WorkspaceRoots(ctx)
 		if err != nil {
 			return nil, err
+		}
+		if s.sharesNamespace {
+			return workspaceRootsResult{Host: host, Agent: host}, nil
 		}
 		return workspaceRootsResult{Host: host, Agent: sandboxAgentRoot}, nil
 
@@ -569,16 +579,25 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		// shared bare cache nor the run-root — both belong to the orchestrator /
 		// jail — so its uid can't materialize a checkout. Relay the whole create
 		// to the orchestrator, which owns them and clones through the run's git
-		// proxy exactly like the eager-PR path. all/local (proxyCreds nil) owns
-		// the FS and materializes in-process. The orchestrator serves the relayed
-		// op via RelayServer, never through this method, so proxyCreds here
-		// unambiguously means "this is the sidecar."
+		// proxy exactly like the eager-PR path. Any other daemon (proxyCreds
+		// nil) owns the FS and materializes in-process. The orchestrator serves
+		// the relayed op via RelayServer, never through this method, so
+		// proxyCreds here unambiguously means "this is the sidecar."
 		if client.proxyCreds != nil {
 			var res createWorkspaceCheckoutResult
 			if err := client.rt.Relay(ctx, agentproc.RelayNamespaceCore, opCreateWorkspaceCheckout, a, &res); err != nil {
 				return nil, err
 			}
 			return res, nil
+		}
+		if s.sharesNamespace {
+			// The local agent runs as this uid, so the checkout is already
+			// its own, and a chown to the sandbox uid fails with EPERM.
+			path, err := client.CreateWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
+			if err != nil {
+				return nil, err
+			}
+			return createWorkspaceCheckoutResult{Path: path}, nil
 		}
 		path, err := client.materializeWorkspaceCheckout(ctx, a.Owner, a.Repo, a.Ref, a.PR)
 		if err != nil {
