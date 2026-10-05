@@ -393,7 +393,11 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	// registration, and the status read beside this route reports it.
 	var unusable *db.GitHubAppUnusableError
 	if errors.As(rerr, &unusable) {
-		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubAppUnusableMessage(unusable.Reason) + " Remove it from this workspace and connect GitHub again."})
+		action := " Remove it from this workspace and connect GitHub again."
+		if app != nil && !app.Active {
+			action = " Discard it; your personal access token stays the live credential."
+		}
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubAppUnusableMessage(unusable.Reason) + action})
 		return
 	}
 	if rerr != nil {
@@ -404,7 +408,21 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 
 	// Re-read the freshly-reconciled mirror so the caller gets current
 	// installation state in one round trip, in the same shape the status GET
-	// serves.
+	// serves. The registration is re-read too: the reconcile writes it (a
+	// successful listing clears a recorded unusable reason), so the row read
+	// above can describe an App that has since recovered — and the webhook
+	// probe below is skipped for an App that row still calls unusable.
+	if class == domain.GitHubCredentialClassBYOApp {
+		app, err = s.githubApps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			internalError(w, "github-app", err)
+			return
+		}
+		if app == nil {
+			notFound(w, "github app")
+			return
+		}
+	}
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)

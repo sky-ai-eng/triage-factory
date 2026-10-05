@@ -91,6 +91,28 @@ func diagnoseRefusedListing(ctx context.Context, minter *githubapp.Minter, listE
 	return listErr
 }
 
+// RecordAppDiagnosis hands a failed discovery to the backend's recorder when
+// it is a diagnosis (*GitHubAppUnusableError), and decides what the backfill
+// returns. Shared by both store backends so the rule lives in one place; each
+// supplies the write.
+//
+// A diagnosis is returned as one only once it is stored. Callers read a
+// *GitHubAppUnusableError as "the registration now says so": the poller logs
+// the change and skips the cycle off the stored row, and the refresh and
+// cutover routes answer 422 naming the reason. A diagnosis the write failed to
+// store would claim all of that falsely, so it comes back as the write's
+// failure instead, with the diagnosis kept only as text.
+func RecordAppDiagnosis(discoverErr error, record func(domain.GitHubAppUnusableReason) error) error {
+	var unusable *GitHubAppUnusableError
+	if !errors.As(discoverErr, &unusable) {
+		return discoverErr
+	}
+	if err := record(unusable.Reason); err != nil {
+		return fmt.Errorf("%v; recording it failed: %w", discoverErr, err)
+	}
+	return discoverErr
+}
+
 // appRefusal maps an App-JWT request's failure to the reason it would mean if
 // GET /app agreed with it, or "" for an error that says nothing about the App.
 func appRefusal(err error) domain.GitHubAppUnusableReason {

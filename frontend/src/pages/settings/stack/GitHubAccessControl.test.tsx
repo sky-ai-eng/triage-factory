@@ -1050,6 +1050,35 @@ describe('GitHubAccessControl · an App GitHub no longer accepts', () => {
     expect(screen.getByRole('button', { name: 'Discard' })).toBeInTheDocument()
   })
 
+  it('stops offering Finish when Finish is what finds the staged App gone', async () => {
+    // The panel loaded before any reconcile noticed: the App looks fine.
+    installMocks.status = statusOf({
+      app: appInfo({ active: false }),
+      installations: [installation({})],
+    })
+    const gone =
+      'The GitHub App no longer exists on GitHub. Discard it; your personal access token stays the live credential.'
+    ghMocks.refreshGitHubAppInstallations.mockRejectedValue(new Error(gone))
+    ghMocks.getGitHubAppStatus.mockResolvedValue(
+      statusOf({
+        app: appInfo({
+          active: false,
+          unusable_reason: 'missing',
+          unusable_since: '2026-09-10T21:13:19Z',
+        }),
+        installations: [installation({})],
+      }),
+    )
+    renderControl({ ...liveApp, githubAppStaged: true, hasGitHubPat: true })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Finish switching' }))
+    expect(await screen.findByText(gone)).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: 'Finish switching' })).not.toBeInTheDocument()
+    })
+    expect(screen.getByText(/deleted on GitHub/)).toBeInTheDocument()
+  })
+
   it('says an App installed on no account polls nothing, and links to the install page', () => {
     installMocks.status = statusOf({ app: appInfo({}), installations: [] })
     installMocks.installUrl = 'https://github.com/apps/acme-bot/installations/new'

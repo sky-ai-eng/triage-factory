@@ -183,6 +183,19 @@ export default function GitHubAccessControl({
     setError(null)
   }
 
+  // rereadStatus folds a fresh status read into the install hook, which
+  // otherwise refetches only on mount and focus. Called after a request that
+  // may itself have changed what the status says — a reconcile that found the
+  // App gone records that on the registration — so the panel renders from the
+  // new answer rather than the one it loaded with. Best-effort: on failure the
+  // panel keeps what it had, as the hook does.
+  const rereadStatus = () => {
+    if (!orgId) return
+    getGitHubAppStatus(orgId)
+      .then(setInstallStatus)
+      .catch(() => {})
+  }
+
   // ── Discard a staged switch ──
   const discard = async () => {
     if (!orgId || busy) return
@@ -220,6 +233,7 @@ export default function GitHubAccessControl({
       // Reconcile first so "installed?" reflects GitHub now (local mode never
       // gets the webhook); a zero count means nothing's installed yet.
       const fresh = await refreshGitHubAppInstallations(orgId)
+      setInstallStatus(fresh)
       if (fresh.installations.length === 0) {
         setError(
           "We can't see the App installed on any account yet — install it on GitHub, then try again.",
@@ -233,6 +247,9 @@ export default function GitHubAccessControl({
     } catch (e) {
       setError((e as Error).message)
       setBusy(false)
+      // The refresh that failed may be the one that found the App gone; the
+      // banner has to learn that to stop offering Finish.
+      rereadStatus()
     }
   }
 
@@ -252,6 +269,9 @@ export default function GitHubAccessControl({
     } catch (e) {
       setError((e as Error).message)
       setBusy(false)
+      // The cutover reconciles before it switches, so a refusal can be the
+      // App found gone since the preview.
+      rereadStatus()
     }
   }
 
@@ -407,11 +427,9 @@ export default function GitHubAccessControl({
         githubAppSlug: '',
       })
       toast.success('GitHub App removed')
-      // Best-effort: the removal has landed, and the empty state renders from
-      // the draft patched above whether or not this read answers.
-      getGitHubAppStatus(orgId)
-        .then(setInstallStatus)
-        .catch(() => {})
+      // The empty state renders from the draft patched above whether or not
+      // this read answers.
+      rereadStatus()
       setBusy(false)
       reload()
     } catch (e) {

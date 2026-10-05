@@ -517,15 +517,10 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	}
 
 	insts, err := db.DiscoverAppInstallations(ctx, s.secrets, orgID, appID, pemRef, baseURL)
-	var unusable *db.GitHubAppUnusableError
-	if errors.As(err, &unusable) {
-		if serr := s.markAppUnusable(ctx, orgID, appID, unusable.Reason); serr != nil {
-			return errors.Join(err, serr)
-		}
-		return err
-	}
 	if err != nil {
-		return err
+		return db.RecordAppDiagnosis(err, func(reason domain.GitHubAppUnusableReason) error {
+			return s.markAppUnusable(ctx, orgID, appID, reason)
+		})
 	}
 	if err := s.clearAppUnusable(ctx, orgID, appID); err != nil {
 		return err

@@ -268,8 +268,10 @@ type GitHubAppsStore interface {
 	// *GitHubAppUnusableError wrapping the listing's failure. Any other answer
 	// to GET /app — success, an outage, a status that means neither — records
 	// nothing and returns the listing's error as it was, since only those two
-	// statuses say anything about the App. A listing that succeeds clears
-	// whatever reason was stored. The writes are keyed by app_id as well as
+	// statuses say anything about the App. A diagnosis is returned as a
+	// *GitHubAppUnusableError only once it is stored; if the write fails, the
+	// write's failure is returned in its place (RecordAppDiagnosis). A listing
+	// that succeeds clears whatever reason was stored. The writes are keyed by app_id as well as
 	// org_id, so a probe still in flight when the org swaps its App cannot mark
 	// the new one. The installation mirror is left exactly as it was on every
 	// failure arm, the diagnosed ones included.
