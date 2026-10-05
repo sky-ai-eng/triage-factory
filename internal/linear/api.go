@@ -157,8 +157,11 @@ func (c *Client) GetIssue(ctx context.Context, idOrIdentifier string) (*Issue, e
 	if data.Issue == nil {
 		return nil, fmt.Errorf("%w: issue %s", ErrNotFound, idOrIdentifier)
 	}
-	issue := data.Issue.toIssue()
-	return &issue, nil
+	issues, err := c.issues(ctx, []issueNode{*data.Issue})
+	if err != nil {
+		return nil, err
+	}
+	return &issues[0], nil
 }
 
 // GetIssues returns the issues with the given UUIDs, archived ones included.
@@ -179,7 +182,7 @@ func (c *Client) GetIssues(ctx context.Context, ids []string) ([]Issue, error) {
 	if err := c.query(ctx, issuesByIDQuery, map[string]any{"ids": ids, "first": maxPageSize}, &data); err != nil {
 		return nil, err
 	}
-	return toIssues(data.Issues.Nodes), nil
+	return c.issues(ctx, data.Issues.Nodes)
 }
 
 // IssueFilter is the whole vocabulary SearchIssues accepts. Each set field
@@ -246,8 +249,12 @@ func (c *Client) SearchIssues(ctx context.Context, f IssueFilter, after string) 
 	if err := c.query(ctx, searchIssuesQuery, vars, &data); err != nil {
 		return IssuePage{}, err
 	}
+	items, err := c.issues(ctx, data.Issues.Nodes)
+	if err != nil {
+		return IssuePage{}, err
+	}
 	return IssuePage{
-		Items:       toIssues(data.Issues.Nodes),
+		Items:       items,
 		EndCursor:   data.Issues.PageInfo.EndCursor,
 		HasNextPage: data.Issues.PageInfo.HasNextPage,
 	}, nil
@@ -267,14 +274,12 @@ func (c *Client) AssignIssue(ctx context.Context, id, assigneeID string) error {
 	if err := requireID("assignee id", assigneeID); err != nil {
 		return err
 	}
-	_, err := c.updateIssue(ctx, id, map[string]any{"assigneeId": assigneeID})
-	return err
+	return c.updateIssue(ctx, id, map[string]any{"assigneeId": assigneeID})
 }
 
 // UnassignIssue clears an issue's assignee.
 func (c *Client) UnassignIssue(ctx context.Context, id string) error {
-	_, err := c.updateIssue(ctx, id, map[string]any{"assigneeId": nil})
-	return err
+	return c.updateIssue(ctx, id, map[string]any{"assigneeId": nil})
 }
 
 // TransitionIssue moves an issue to a workflow state of its team.
@@ -282,8 +287,7 @@ func (c *Client) TransitionIssue(ctx context.Context, id, stateID string) error 
 	if err := requireID("state id", stateID); err != nil {
 		return err
 	}
-	_, err := c.updateIssue(ctx, id, map[string]any{"stateId": stateID})
-	return err
+	return c.updateIssue(ctx, id, map[string]any{"stateId": stateID})
 }
 
 // SetPriority sets an issue's priority, 0 (none) through 4 (low).
@@ -291,14 +295,12 @@ func (c *Client) SetPriority(ctx context.Context, id string, priority int) error
 	if err := validatePriority(priority); err != nil {
 		return err
 	}
-	_, err := c.updateIssue(ctx, id, map[string]any{"priority": priority})
-	return err
+	return c.updateIssue(ctx, id, map[string]any{"priority": priority})
 }
 
 // SetParent makes parentID the issue's parent; an empty parentID clears it.
 func (c *Client) SetParent(ctx context.Context, id, parentID string) error {
-	_, err := c.updateIssue(ctx, id, map[string]any{"parentId": nullable(parentID)})
-	return err
+	return c.updateIssue(ctx, id, map[string]any{"parentId": nullable(parentID)})
 }
 
 // UpdateIssueFields is the set of changes UpdateIssue makes. A nil field is
@@ -346,14 +348,14 @@ func (c *Client) UpdateIssue(ctx context.Context, id string, f UpdateIssueFields
 	if len(f.RemoveLabelIDs) > 0 {
 		input["removedLabelIds"] = f.RemoveLabelIDs
 	}
-	_, err := c.updateIssue(ctx, id, input)
-	return err
+	return c.updateIssue(ctx, id, input)
 }
 
-// updateIssue sends one issueUpdate and returns the issue it answers with.
-func (c *Client) updateIssue(ctx context.Context, id string, input map[string]any) (*Issue, error) {
+// updateIssue sends one issueUpdate and checks that Linear reports it done
+// and answers with the issue.
+func (c *Client) updateIssue(ctx context.Context, id string, input map[string]any) error {
 	if err := requireID("issue id", id); err != nil {
-		return nil, err
+		return err
 	}
 	var data struct {
 		IssueUpdate struct {
@@ -362,9 +364,10 @@ func (c *Client) updateIssue(ctx context.Context, id string, input map[string]an
 		} `json:"issueUpdate"`
 	}
 	if err := c.mutate(ctx, issueUpdateMutation, map[string]any{"id": id, "input": input}, &data); err != nil {
-		return nil, err
+		return err
 	}
-	return payloadIssue("issueUpdate", data.IssueUpdate.Success, data.IssueUpdate.Issue)
+	_, err := payloadIssue("issueUpdate", data.IssueUpdate.Success, data.IssueUpdate.Issue)
+	return err
 }
 
 // AddComment comments on an issue and returns the comment's id. The comment
@@ -441,20 +444,97 @@ func (c *Client) CreateIssue(ctx context.Context, in CreateIssueInput) (*Issue, 
 	if err := c.mutate(ctx, issueCreateMutation, map[string]any{"input": input}, &data); err != nil {
 		return nil, err
 	}
-	return payloadIssue("issueCreate", data.IssueCreate.Success, data.IssueCreate.Issue)
+	n, err := payloadIssue("issueCreate", data.IssueCreate.Success, data.IssueCreate.Issue)
+	if err != nil {
+		return nil, err
+	}
+	issues, err := c.issues(ctx, []issueNode{*n})
+	if err != nil {
+		return nil, err
+	}
+	return &issues[0], nil
 }
 
 // payloadIssue checks an issue mutation's payload. Linear can answer
 // success=false with no errors entry, which is still a failed write.
-func payloadIssue(mutation string, success bool, n *issueNode) (*Issue, error) {
+func payloadIssue(mutation string, success bool, n *issueNode) (*issueNode, error) {
 	if !success {
 		return nil, fmt.Errorf("linear: %s returned success=false", mutation)
 	}
 	if n == nil {
 		return nil, fmt.Errorf("linear: %s returned no issue", mutation)
 	}
-	issue := n.toIssue()
-	return &issue, nil
+	return n, nil
+}
+
+// issues converts fragment results to Issues. An issue whose labels or
+// sub-issues ran past the fragment's first page has the whole list fetched,
+// so no caller sees a truncated one.
+func (c *Client) issues(ctx context.Context, nodes []issueNode) ([]Issue, error) {
+	out := make([]Issue, len(nodes))
+	for i := range nodes {
+		n := &nodes[i]
+		if n.Labels.PageInfo.HasNextPage {
+			labels, err := c.issueLabels(ctx, n.ID)
+			if err != nil {
+				return nil, fmt.Errorf("linear: labels of issue %s: %w", n.Identifier, err)
+			}
+			n.Labels.Nodes = labels
+		}
+		if n.Children.PageInfo.HasNextPage {
+			children, err := c.issueChildren(ctx, n.ID)
+			if err != nil {
+				return nil, fmt.Errorf("linear: sub-issues of issue %s: %w", n.Identifier, err)
+			}
+			n.Children.Nodes = children
+		}
+		out[i] = n.toIssue()
+	}
+	return out, nil
+}
+
+// issueLabels walks every label of one issue.
+func (c *Client) issueLabels(ctx context.Context, id string) ([]labelName, error) {
+	return collect(func(after string) ([]labelName, pageInfo, error) {
+		var data struct {
+			Issue *struct {
+				Labels struct {
+					Nodes    []labelName `json:"nodes"`
+					PageInfo pageInfo    `json:"pageInfo"`
+				} `json:"labels"`
+			} `json:"issue"`
+		}
+		vars := map[string]any{"id": id, "first": listPageSize, "after": nullable(after)}
+		if err := c.query(ctx, issueLabelsQuery, vars, &data); err != nil {
+			return nil, pageInfo{}, err
+		}
+		if data.Issue == nil {
+			return nil, pageInfo{}, ErrNotFound
+		}
+		return data.Issue.Labels.Nodes, data.Issue.Labels.PageInfo, nil
+	})
+}
+
+// issueChildren walks every sub-issue of one issue.
+func (c *Client) issueChildren(ctx context.Context, id string) ([]ChildIssue, error) {
+	return collect(func(after string) ([]ChildIssue, pageInfo, error) {
+		var data struct {
+			Issue *struct {
+				Children struct {
+					Nodes    []ChildIssue `json:"nodes"`
+					PageInfo pageInfo     `json:"pageInfo"`
+				} `json:"children"`
+			} `json:"issue"`
+		}
+		vars := map[string]any{"id": id, "first": listPageSize, "after": nullable(after)}
+		if err := c.query(ctx, issueChildrenQuery, vars, &data); err != nil {
+			return nil, pageInfo{}, err
+		}
+		if data.Issue == nil {
+			return nil, pageInfo{}, ErrNotFound
+		}
+		return data.Issue.Children.Nodes, data.Issue.Children.PageInfo, nil
+	})
 }
 
 // collect walks a listing to its end, one page at a time.

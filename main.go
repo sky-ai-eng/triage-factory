@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/app"
 	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/procname"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -53,6 +54,8 @@ func main() {
 // boots the server — returning an error instead of calling log.Fatal so
 // deferred cleanup runs and the boot path is testable.
 func run(ctx context.Context, args []string) error {
+	linear.SetVersion(Version)
+
 	// What is this process? Answer that first, from argv plus the sandbox
 	// marker, and branch on the answer — rather than letting each layer below
 	// infer it from whichever ambient signal it happens to read (see

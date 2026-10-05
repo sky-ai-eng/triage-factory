@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -103,16 +102,15 @@ var (
 	backoffCap       = 30 * time.Second
 )
 
-// userAgent names TF and its version on every request. The version is the
-// main module's, which the go command stamps from the tag a release is built
-// at.
-var userAgent = "triagefactory/" + buildVersion()
+// userAgent names TF and its release on every request. It reads "dev" until
+// SetVersion is called, which is what an unreleased build reports too.
+var userAgent = "triagefactory/dev"
 
-func buildVersion() string {
-	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
-		return info.Main.Version
-	}
-	return "dev"
+// SetVersion sets the release the User-Agent names: main.Version, which the
+// release build stamps with the tag. main calls it once at boot, before any
+// request is made.
+func SetVersion(version string) {
+	userAgent = "triagefactory/" + version
 }
 
 // Client sends GraphQL requests to Linear with one Config's credential.
@@ -234,12 +232,22 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 		}
 		_ = resp.Body.Close()
 		if err != nil {
-			if class, counted := upstream.ClassifyTransport(ctx, err); counted {
-				upstream.Record(ctx, upstream.Linear, c.orgID, class)
+			// The response broke off mid-body: a transport failure like one
+			// from Do, retried on the same terms. Linear did answer, so it
+			// counts toward unreachable but never toward silent.
+			class, counted := upstream.ClassifyTransport(ctx, err)
+			if !counted {
+				return err
+			}
+			upstream.Record(ctx, upstream.Linear, c.orgID, class)
+			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
 				upstream.MarkUnreachable(ctx, host)
 				return &upstream.TransportError{Err: err}
 			}
-			return err
+			if err := c.wait(ctx, class, backoff(attempt)); err != nil {
+				return err
+			}
+			continue
 		}
 
 		var env gqlResponse
@@ -316,26 +324,30 @@ func isAuthCode(code string) bool {
 }
 
 // responseError is the error a final response stands for, or nil for a
-// success: the first GraphQL error when there is one, else the HTTP status.
+// success: the first GraphQL error when there is one, else the HTTP status. A
+// rate limit is a *RateLimitError in either shape, so a 429 from in front of
+// Linear matches ErrRateLimited as Linear's own RATELIMITED does.
 func responseError(status int, h http.Header, body []byte, errs []gqlError, class upstream.Class) error {
-	if len(errs) > 0 {
+	var err error
+	switch {
+	case len(errs) > 0:
 		e := errs[0]
-		gerr := &GraphQLError{
+		err = &GraphQLError{
 			Code:    e.Extensions.Code,
 			Message: e.Message,
 			Path:    pathStrings(e.Path),
 			Status:  status,
 			class:   class,
 		}
-		if class == upstream.RateLimited {
-			return &RateLimitError{Reset: rateLimitReset(h), Err: gerr}
-		}
-		return gerr
+	case status >= 300:
+		err = &StatusError{Status: status, Body: string(body), Class: class}
+	default:
+		return nil
 	}
-	if status >= 300 {
-		return &StatusError{Status: status, Body: string(body), Class: class}
+	if class == upstream.RateLimited {
+		return &RateLimitError{Reset: rateLimitReset(h), Err: err}
 	}
-	return nil
+	return err
 }
 
 // pathStrings renders a GraphQL error path, whose elements are field names
@@ -351,9 +363,10 @@ func pathStrings(path []any) []string {
 	return out
 }
 
-// rateLimitReset is when Linear's limit lifts: the later of the request and
-// complexity windows' resets, each sent as UTC epoch milliseconds. Zero when
-// neither header is present.
+// rateLimitReset is when the limit lifts: the later of Linear's request and
+// complexity windows' resets, each sent as UTC epoch milliseconds. Linear sends
+// no Retry-After, but a 429 from something in front of it may, so that is the
+// fallback. Zero when none of the headers is present.
 func rateLimitReset(h http.Header) time.Time {
 	var reset time.Time
 	for _, name := range []string{"X-RateLimit-Requests-Reset", "X-RateLimit-Complexity-Reset"} {
@@ -363,6 +376,11 @@ func rateLimitReset(h http.Header) time.Time {
 		}
 		if t := time.UnixMilli(ms); t.After(reset) {
 			reset = t
+		}
+	}
+	if reset.IsZero() {
+		if d, ok := upstream.RetryAfter(h); ok {
+			reset = time.Now().Add(d)
 		}
 	}
 	return reset

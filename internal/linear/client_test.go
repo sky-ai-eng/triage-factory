@@ -653,3 +653,194 @@ func assertJSON(t *testing.T, name string, got json.RawMessage, want string) {
 		t.Errorf("%s = %s, want %s", name, got, want)
 	}
 }
+
+func TestSetVersion_NamesTheReleaseInTheUserAgent(t *testing.T) {
+	prev := userAgent
+	t.Cleanup(func() { userAgent = prev })
+	SetVersion("v1.16.0")
+	s := newStub(t, scripted(reply{body: viewerOK}))
+
+	if _, err := s.client().Viewer(context.Background()); err != nil {
+		t.Fatalf("Viewer: %v", err)
+	}
+	if got := s.requests()[0].UserAgent; got != "triagefactory/v1.16.0" {
+		t.Errorf("User-Agent = %q, want triagefactory/v1.16.0", got)
+	}
+}
+
+// truncated answers with a 200 whose body breaks off before its declared
+// length, so the client's read of it fails after Linear answered.
+func truncated(w http.ResponseWriter) {
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"data":{"vie`))
+	w.(http.Flusher).Flush()
+	panic(http.ErrAbortHandler)
+}
+
+func TestTruncatedBody_RetriedLikeATransportFailure(t *testing.T) {
+	shortWaits(t)
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			truncated(w)
+		}
+		_, _ = w.Write([]byte(viewerOK))
+	}))
+	t.Cleanup(srv.Close)
+	cfg := APIKey("k")
+	cfg.Endpoint = srv.URL
+	ctx, tally := upstream.WithTally(context.Background())
+
+	u, err := NewClient(cfg).Viewer(ctx)
+	if err != nil {
+		t.Fatalf("Viewer: %v", err)
+	}
+	if u.ID != "u1" || calls != 2 {
+		t.Errorf("viewer = %q after %d attempts, want u1 after 2", u.ID, calls)
+	}
+	if tally.Count(upstream.Transient) != 1 || tally.Count(upstream.OK) != 1 {
+		t.Errorf("tally: %d transient, %d ok; want 1, 1", tally.Count(upstream.Transient), tally.Count(upstream.OK))
+	}
+}
+
+func TestTruncatedBody_MutationNotRetried(t *testing.T) {
+	shortWaits(t)
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		truncated(w)
+	}))
+	t.Cleanup(srv.Close)
+	cfg := APIKey("k")
+	cfg.Endpoint = srv.URL
+
+	err := NewClient(cfg).TransitionIssue(context.Background(), "ENG-1", "s1")
+	var te *upstream.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("err = %v, want a *upstream.TransportError", err)
+	}
+	if calls != 1 {
+		t.Errorf("attempts = %d, want 1: the write may have applied", calls)
+	}
+}
+
+func TestHTTP429_IsARateLimitError(t *testing.T) {
+	shortWaits(t)
+	reset := time.Now().Add(5 * time.Millisecond).Truncate(time.Millisecond)
+	s := newStub(t, scripted(reply{
+		status: http.StatusTooManyRequests,
+		header: map[string]string{"X-RateLimit-Requests-Reset": strconv.FormatInt(reset.UnixMilli(), 10)},
+		body:   "<html>slow down</html>",
+	}))
+
+	_, err := s.client().Viewer(context.Background())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+	var rle *RateLimitError
+	if !errors.As(err, &rle) || !rle.Reset.Equal(reset) {
+		t.Fatalf("err = %#v, want a *RateLimitError carrying reset %v", err, reset)
+	}
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusTooManyRequests {
+		t.Errorf("err = %v, want it to wrap the 429 *StatusError", err)
+	}
+	if n := len(s.requests()); n != maxAttempts {
+		t.Errorf("attempts = %d, want %d", n, maxAttempts)
+	}
+}
+
+func TestRateLimitReset_FallsBackToRetryAfter(t *testing.T) {
+	h := http.Header{}
+	h.Set("Retry-After", "30")
+	got := rateLimitReset(h)
+	if wait := time.Until(got); wait < 25*time.Second || wait > 30*time.Second {
+		t.Errorf("reset is %v away, want about 30s from Retry-After", wait)
+	}
+	h.Set("X-RateLimit-Requests-Reset", "1900000000000")
+	if got := rateLimitReset(h); !got.Equal(time.UnixMilli(1_900_000_000_000)) {
+		t.Errorf("reset = %v, want Linear's own header over Retry-After", got)
+	}
+}
+
+// TestGetIssue_CompletesTruncatedConnections: an issue whose labels or
+// sub-issues run past the fragment's first page has each list fetched whole,
+// by the issue's UUID, rather than handed back cut short.
+func TestGetIssue_CompletesTruncatedConnections(t *testing.T) {
+	const truncatedIssue = `{"data":{"issue":{"id":"uuid-1","identifier":"ENG-1","title":"Epic",
+		"state":{"id":"s1","name":"Todo","type":"unstarted","position":1},
+		"team":{"id":"t1","key":"ENG","name":"Eng"},
+		"labels":{"nodes":[{"name":"b"}],"pageInfo":{"hasNextPage":true}},
+		"comments":{"nodes":[]},
+		"children":{"nodes":[{"id":"c1","identifier":"ENG-2","state":{"id":"s1"}}],"pageInfo":{"hasNextPage":true}}}}}`
+	s := newStub(t, func(n int, req recordedRequest) reply {
+		after := string(req.Variables["after"])
+		switch {
+		case strings.Contains(req.Query, "query Issue("):
+			return reply{body: truncatedIssue}
+		case strings.Contains(req.Query, "query IssueLabels"):
+			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"name":"c"},{"name":"a"},{"name":"b"}],"pageInfo":{"hasNextPage":false,"endCursor":"l1"}}}}}`}
+		case strings.Contains(req.Query, "query IssueChildren") && after == "null":
+			return reply{body: `{"data":{"issue":{"children":{"nodes":[{"id":"c1","identifier":"ENG-2","state":{"id":"s1"}}],"pageInfo":{"hasNextPage":true,"endCursor":"k1"}}}}}`}
+		case strings.Contains(req.Query, "query IssueChildren") && after == `"k1"`:
+			return reply{body: `{"data":{"issue":{"children":{"nodes":[{"id":"c2","identifier":"ENG-3","state":{"id":"s2"}}],"pageInfo":{"hasNextPage":false,"endCursor":"k2"}}}}}`}
+		}
+		t.Errorf("unexpected request %d: %s", n, req.Query)
+		return reply{status: http.StatusBadRequest, body: `{}`}
+	})
+
+	issue, err := s.client().GetIssue(context.Background(), "ENG-1")
+	if err != nil {
+		t.Fatalf("GetIssue: %v", err)
+	}
+	if !reflect.DeepEqual(issue.Labels, []string{"a", "b", "c"}) {
+		t.Errorf("labels = %v, want every label, sorted", issue.Labels)
+	}
+	var children []string
+	for _, c := range issue.Children {
+		children = append(children, c.Identifier)
+	}
+	if !reflect.DeepEqual(children, []string{"ENG-2", "ENG-3"}) {
+		t.Errorf("children = %v, want both pages", children)
+	}
+	for _, req := range s.requests()[1:] {
+		if string(req.Variables["id"]) != `"uuid-1"` || string(req.Variables["first"]) != "100" {
+			t.Errorf("completion variables = %v, want the UUID and a page of 100", req.Variables)
+		}
+	}
+	if n := len(s.requests()); n != 4 {
+		t.Errorf("requests = %d, want the issue, one label page and two sub-issue pages", n)
+	}
+}
+
+func TestSearchIssues_CompletesOnlyTruncatedIssues(t *testing.T) {
+	s := newStub(t, func(_ int, req recordedRequest) reply {
+		if strings.Contains(req.Query, "query IssueLabels") {
+			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"name":"x"},{"name":"y"}],"pageInfo":{"hasNextPage":false}}}}}`}
+		}
+		return reply{body: `{"data":{"issues":{"nodes":[
+			{"id":"u1","identifier":"ENG-1","labels":{"nodes":[{"name":"x"}],"pageInfo":{"hasNextPage":true}}},
+			{"id":"u2","identifier":"ENG-2","labels":{"nodes":[{"name":"z"}],"pageInfo":{"hasNextPage":false}}}
+		],"pageInfo":{"hasNextPage":false}}}}`}
+	})
+
+	page, err := s.client().SearchIssues(context.Background(), IssueFilter{TeamID: "t1"}, "")
+	if err != nil {
+		t.Fatalf("SearchIssues: %v", err)
+	}
+	if !reflect.DeepEqual(page.Items[0].Labels, []string{"x", "y"}) || !reflect.DeepEqual(page.Items[1].Labels, []string{"z"}) {
+		t.Errorf("labels = %v / %v", page.Items[0].Labels, page.Items[1].Labels)
+	}
+	if n := len(s.requests()); n != 2 {
+		t.Errorf("requests = %d, want the search plus one completion", n)
+	}
+}

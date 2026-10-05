@@ -91,11 +91,13 @@ func (e *StatusError) Is(target error) bool {
 	return target == ErrUnauthorized && e.Class == upstream.Auth
 }
 
-// RateLimitError is a request Linear was still rate limiting after the last
-// attempt. Reset is when the limit lifts, zero when Linear did not say.
+// RateLimitError is a request still rate limited after the last attempt.
+// Reset is when the limit lifts, zero when the response did not say. Err is
+// the response itself: a *GraphQLError for Linear's RATELIMITED, a
+// *StatusError for a 429.
 type RateLimitError struct {
 	Reset time.Time
-	Err   *GraphQLError
+	Err   error
 }
 
 func (e *RateLimitError) Error() string {

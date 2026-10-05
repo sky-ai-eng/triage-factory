@@ -5,6 +5,13 @@ package linear
 //
 // Linear has no comment count on an issue; the newest comment
 // (comments(last: 1)) is the comment signal.
+//
+// The labels and sub-issues come as a first page of 25 with hasNextPage. Linear
+// prices a query by its connections' page sizes and refuses one over its
+// complexity ceiling, and a 50-issue search spreading this fragment with
+// Linear's default page of 50 for both would sit right at that ceiling. An
+// issue with more than 25 of either is completed by issueLabelsQuery or
+// issueChildrenQuery, so nothing is cut short.
 const issueFieldsFragment = `
 fragment IssueFields on Issue {
   id identifier title description url priority priorityLabel
@@ -14,9 +21,12 @@ fragment IssueFields on Issue {
   creator { id name displayName email }
   parent { id identifier }
   team { id key name private }
-  labels { nodes { name } }
+  labels(first: 25) { nodes { name } pageInfo { hasNextPage } }
   comments(last: 1) { nodes { id createdAt } }
-  children { nodes { id identifier state { id name type position } } }
+  children(first: 25) {
+    nodes { id identifier state { id name type position } }
+    pageInfo { hasNextPage }
+  }
 }`
 
 const pageInfoFields = `pageInfo { hasNextPage endCursor }`
@@ -57,6 +67,26 @@ const issueQuery = `
 query Issue($id: String!) {
   issue(id: $id) { ...IssueFields }
 }` + issueFieldsFragment
+
+const issueLabelsQuery = `
+query IssueLabels($id: String!, $first: Int!, $after: String) {
+  issue(id: $id) {
+    labels(first: $first, after: $after) {
+      nodes { name }
+      ` + pageInfoFields + `
+    }
+  }
+}`
+
+const issueChildrenQuery = `
+query IssueChildren($id: String!, $first: Int!, $after: String) {
+  issue(id: $id) {
+    children(first: $first, after: $after) {
+      nodes { id identifier state { id name type position } }
+      ` + pageInfoFields + `
+    }
+  }
+}`
 
 const issuesByIDQuery = `
 query IssuesByID($ids: [ID!]!, $first: Int!) {

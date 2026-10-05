@@ -139,16 +139,20 @@ type issueNode struct {
 	Parent        *IssueRef     `json:"parent"`
 	Team          Team          `json:"team"`
 	Labels        struct {
-		Nodes []struct {
-			Name string `json:"name"`
-		} `json:"nodes"`
+		Nodes    []labelName `json:"nodes"`
+		PageInfo pageInfo    `json:"pageInfo"`
 	} `json:"labels"`
 	Comments struct {
 		Nodes []CommentRef `json:"nodes"`
 	} `json:"comments"`
 	Children struct {
-		Nodes []ChildIssue `json:"nodes"`
+		Nodes    []ChildIssue `json:"nodes"`
+		PageInfo pageInfo     `json:"pageInfo"`
 	} `json:"children"`
+}
+
+type labelName struct {
+	Name string `json:"name"`
 }
 
 func (n issueNode) toIssue() Issue {
@@ -185,12 +189,4 @@ func (n issueNode) toIssue() Issue {
 		LastComment:   last,
 		Children:      n.Children.Nodes,
 	}
-}
-
-func toIssues(nodes []issueNode) []Issue {
-	out := make([]Issue, len(nodes))
-	for i, n := range nodes {
-		out[i] = n.toIssue()
-	}
-	return out
 }
