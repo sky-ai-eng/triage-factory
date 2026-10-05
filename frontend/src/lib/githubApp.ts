@@ -60,7 +60,18 @@ export interface GitHubAppInfo {
   // paint the "switch pending" mode-card state, and show the staged-switch
   // banner. true once a cutover activates it.
   active: boolean
+  // Why GitHub no longer accepts this App, as the backend's installation
+  // reconcile last established it — 'missing' when the App was deleted on
+  // GitHub, 'key_rejected' when its private key was deleted or regenerated
+  // there — or null while GitHub accepts it. Both happen outside Triage
+  // Factory, so this is the only way the panel learns of them.
+  // unusable_since is RFC3339 when the reason was first observed, '' alongside
+  // a null reason.
+  unusable_reason: GitHubAppUnusableReason | null
+  unusable_since: string
 }
+
+export type GitHubAppUnusableReason = 'missing' | 'key_rejected'
 
 // GitHubAppWebhookState is the backend's answer to "is GitHub actually
 // delivering this App's webhooks here?", probed against the App's own webhook

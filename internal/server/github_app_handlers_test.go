@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // fakeGitHubAppsStore stands in for the real store so the refresh handler's
@@ -33,9 +34,12 @@ type fakeGitHubAppsStore struct {
 	listErr       error
 	backfillErr   error
 	backfillCalls int
-	managedErr    error
-	managedCalls  int
-	managedApp    githubapp.DeploymentApp
+	// onBackfill stands in for what the real reconcile writes, for a test
+	// that needs the registration to change under the handler.
+	onBackfill   func(f *fakeGitHubAppsStore)
+	managedErr   error
+	managedCalls int
+	managedApp   githubapp.DeploymentApp
 }
 
 func (f *fakeGitHubAppsStore) GetForOrgSystem(context.Context, string) (*domain.OrgGitHubApp, error) {
@@ -44,6 +48,9 @@ func (f *fakeGitHubAppsStore) GetForOrgSystem(context.Context, string) (*domain.
 
 func (f *fakeGitHubAppsStore) BackfillInstallationsFromAPI(context.Context, string) error {
 	f.backfillCalls++
+	if f.onBackfill != nil {
+		f.onBackfill(f)
+	}
 	return f.backfillErr
 }
 
@@ -612,5 +619,99 @@ func seedPGBYOAppCredentialClass(t *testing.T, rig *authRig, orgID string) {
 		ON CONFLICT (org_id) DO UPDATE SET github_credential_class = 'byo_app'
 	`, orgID); err != nil {
 		t.Fatalf("seed org_settings credential class: %v", err)
+	}
+}
+
+// TestNewGitHubAppStatusResponse_CarriesUnusable: the registration's unusable
+// state reaches the panel as a nullable reason plus its since-stamp, and a
+// usable App reports null and "" rather than a zero instant.
+func TestNewGitHubAppStatusResponse_CarriesUnusable(t *testing.T) {
+	app := &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true}
+	resp := newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
+	if resp.App.UnusableReason != nil || resp.App.UnusableSince != "" {
+		t.Errorf("usable App reports reason=%v since=%q; want null and \"\"", resp.App.UnusableReason, resp.App.UnusableSince)
+	}
+
+	app.UnusableReason = domain.GitHubAppMissing
+	app.UnusableSince = time.Date(2026, 9, 10, 21, 13, 19, 0, time.UTC)
+	resp = newGitHubAppStatusResponse(domain.GitHubCredentialClassBYOApp, app, nil, "", "", nil)
+	if resp.App.UnusableReason == nil || *resp.App.UnusableReason != "missing" {
+		t.Errorf("unusable_reason=%v, want \"missing\"", resp.App.UnusableReason)
+	}
+	if resp.App.UnusableSince != "2026-09-10T21:13:19Z" {
+		t.Errorf("unusable_since=%q, want 2026-09-10T21:13:19Z", resp.App.UnusableSince)
+	}
+}
+
+// TestGitHubAppInstallationsRefresh_UnusableApp: a refusal the reconcile
+// diagnosed is GitHub's answer about the App, so the route says what it is —
+// 422 UPSTREAM_REJECTED naming the reason — rather than the 502 that reads as
+// GitHub not answering.
+func TestGitHubAppInstallationsRefresh_UnusableApp(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	fake := &fakeGitHubAppsStore{
+		app: &domain.OrgGitHubApp{OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true},
+		backfillErr: &db.GitHubAppUnusableError{
+			Reason: domain.GitHubAppMissing,
+			Err:    errors.New("githubapp: list installations: status 404"),
+		},
+	}
+	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
+
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status=%d body=%s, want 422", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, httpx.ReasonUpstreamRejected) || !strings.Contains(body, "no longer exists on GitHub") {
+		t.Errorf("body=%s; want UPSTREAM_REJECTED naming the deleted App", body)
+	}
+	if !strings.Contains(body, "Remove it") {
+		t.Errorf("body=%s; want a live App told to remove it", body)
+	}
+
+	// A staged App is discarded, not removed: the token beside it is still
+	// the live credential.
+	fake.app.Active = false
+	rec = doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "Discard it") {
+		t.Errorf("staged: status=%d body=%s; want 422 telling the admin to discard it", rec.Code, rec.Body.String())
+	}
+}
+
+// TestGitHubAppInstallationsRefresh_RecoveredAppAnswersFresh: the reconcile
+// writes the registration — a successful listing clears a recorded unusable
+// reason — so the response describes the row as it stands after the
+// reconcile, not the one read before it.
+func TestGitHubAppInstallationsRefresh_RecoveredAppAnswersFresh(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	fake := &fakeGitHubAppsStore{
+		app: &domain.OrgGitHubApp{
+			OrgID: runmode.LocalDefaultOrgID, AppID: "123", Slug: "acme-bot", Active: true,
+			UnusableReason: domain.GitHubAppMissing,
+			UnusableSince:  time.Date(2026, 9, 10, 21, 13, 19, 0, time.UTC),
+		},
+		onBackfill: func(f *fakeGitHubAppsStore) {
+			recovered := *f.app
+			recovered.UnusableReason, recovered.UnusableSince = "", time.Time{}
+			f.app = &recovered
+		},
+	}
+	s.githubApps = fake
+	seedBYOAppCredentialClass(t, s, runmode.LocalDefaultOrgID)
+
+	rec := doJSON(t, s, "POST", "/api/orgs/"+runmode.LocalDefaultOrgID+"/github/app/installations/refresh", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var out githubAppStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.App == nil || out.App.UnusableReason != nil || out.App.UnusableSince != "" {
+		t.Errorf("app=%+v; want the recovered registration, with no unusable reason", out.App)
 	}
 }

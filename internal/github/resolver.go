@@ -46,6 +46,53 @@ var ErrAmbiguousInstallation = errors.New("github: app has multiple installation
 // watches. An error surfaces at the call site instead.
 var ErrUnknownCredentialClass = errors.New("github: unknown credential class for org")
 
+// ErrGitHubAppUnusable is returned when the org's own App is one the
+// installation reconcile has found GitHub no longer accepts — deleted on
+// GitHub, or its private key deleted there (OrgGitHubApp.UnusableReason). No
+// token is minted for it: GitHub would refuse every one, and the reason is
+// already known, so the error names it rather than surfacing another 404.
+//
+// It deliberately does NOT wrap ErrNoGitHubCredentials. Callers read that
+// sentinel as "GitHub isn't set up here" and skip quietly or tell the user to
+// finish setup; this org did set GitHub up, and the thing to do is replace the
+// App, which only an error that says so leads anyone to.
+var ErrGitHubAppUnusable = errors.New("github: the org's GitHub App is no longer accepted by GitHub")
+
+// appUnusableError is ErrGitHubAppUnusable with the org and the reason. It
+// classes as Auth — a credential GitHub refuses — so a background pass that
+// logs through upstream.LogLevel reports it at Debug: the poller logs the App
+// becoming unusable once, when the reconcile records it, rather than every
+// pass that resolves a client logging it again.
+type appUnusableError struct {
+	orgID  string
+	reason domain.GitHubAppUnusableReason
+}
+
+func (e *appUnusableError) Error() string {
+	switch e.reason {
+	case domain.GitHubAppMissing:
+		return fmt.Sprintf("%s: org=%s: the App no longer exists on GitHub", ErrGitHubAppUnusable, e.orgID)
+	case domain.GitHubAppKeyRejected:
+		return fmt.Sprintf("%s: org=%s: GitHub rejects the App's private key", ErrGitHubAppUnusable, e.orgID)
+	}
+	return fmt.Sprintf("%s: org=%s: %s", ErrGitHubAppUnusable, e.orgID, e.reason)
+}
+
+func (e *appUnusableError) Is(target error) bool { return target == ErrGitHubAppUnusable }
+
+// UpstreamClass implements upstream.Classified.
+func (e *appUnusableError) UpstreamClass() upstream.Class { return upstream.Auth }
+
+// usable refuses an App the reconcile has recorded as unusable. Only the BYO
+// arm can carry the record — the deployment App has no per-org row and is
+// established by its own preflight.
+func (a resolvedApp) usable(orgID string) error {
+	if a.org != nil && a.org.Unusable() {
+		return &appUnusableError{orgID: orgID, reason: a.org.UnusableReason}
+	}
+	return nil
+}
+
 // Identity classifies which credential tier a resolver call selected: a GitHub
 // App installation token (a bot / service-account identity acting as itself)
 // or a borrowed PAT (a real user's personal access token, lent to the org).
@@ -1180,6 +1227,13 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 // GitHub answers for its own suspension, and the moment it is lifted the next
 // mint succeeds with nothing stale in the way.
 func (r *resolver) installationToken(ctx context.Context, orgID string, app resolvedApp, inst domain.OrgGitHubAppInstallation, base string) (githubapp.Token, error) {
+	// Before the cache, for the reason a suspension invalidates it below: a
+	// token cached before GitHub stopped accepting the App is one that has
+	// already stopped working.
+	if err := app.usable(orgID); err != nil {
+		r.cache.Invalidate(orgID, inst.InstallationID)
+		return githubapp.Token{}, err
+	}
 	if inst.Suspended() {
 		r.cache.Invalidate(orgID, inst.InstallationID)
 	} else if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
@@ -1224,6 +1278,9 @@ func (r *resolver) minterFor(ctx context.Context, orgID string, app resolvedApp,
 		// returns an App or an error. Explicit so a future arm that forgets to
 		// fill either half fails here rather than nil-dereferencing.
 		return nil, fmt.Errorf("%w: org=%s: no app to mint from", ErrNoGitHubCredentials, orgID)
+	}
+	if err := app.usable(orgID); err != nil {
+		return nil, err
 	}
 	pem, err := r.secrets.GetSystem(ctx, orgID, app.org.PEMRef)
 	if err != nil {

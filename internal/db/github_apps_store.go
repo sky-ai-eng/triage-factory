@@ -258,6 +258,24 @@ type GitHubAppsStore interface {
 	// only invokes this for active Apps (its own gate), so widening here
 	// doesn't make a staged App poll.
 	//
+	// It is also the one writer of the registration's unusable_reason /
+	// unusable_since, because it is the one call every reconcile goes through
+	// (poller cycle, Settings refresh, cutover preflight) and the listing is the
+	// first App-JWT request each of them makes. A listing GitHub refuses with a
+	// 404 or 401 is followed by GET /app, which answers whether the App itself
+	// still exists and still accepts the stored key: a 404 records
+	// GitHubAppMissing, a 401 GitHubAppKeyRejected, and the method returns a
+	// *GitHubAppUnusableError wrapping the listing's failure. Any other answer
+	// to GET /app — success, an outage, a status that means neither — records
+	// nothing and returns the listing's error as it was, since only those two
+	// statuses say anything about the App. A diagnosis is returned as a
+	// *GitHubAppUnusableError only once it is stored; if the write fails, the
+	// write's failure is returned in its place (RecordAppDiagnosis). A listing
+	// that succeeds clears whatever reason was stored. The writes are keyed by app_id as well as
+	// org_id, so a probe still in flight when the org swaps its App cannot mark
+	// the new one. The installation mirror is left exactly as it was on every
+	// failure arm, the diagnosed ones included.
+	//
 	// Exempt from the returned-row rule: it reconciles a whole installation
 	// set from a provider enumeration, so there is no single row a return
 	// value could name.
@@ -341,3 +359,25 @@ type ErrGitHubAppExists struct{ OrgID string }
 func (e *ErrGitHubAppExists) Error() string {
 	return "org " + e.OrgID + " already has a GitHub App registered"
 }
+
+// GitHubAppUnusableError is returned by BackfillInstallationsFromAPI when
+// GitHub has stopped accepting the org's App — it was deleted on GitHub, or the
+// stored private key was. Reason is what was recorded on the registration; Err
+// is the installation listing's own failure, kept so its upstream class still
+// reaches the caller's connection accounting.
+type GitHubAppUnusableError struct {
+	Reason domain.GitHubAppUnusableReason
+	Err    error
+}
+
+func (e *GitHubAppUnusableError) Error() string {
+	switch e.Reason {
+	case domain.GitHubAppMissing:
+		return "the GitHub App no longer exists on GitHub: " + e.Err.Error()
+	case domain.GitHubAppKeyRejected:
+		return "GitHub no longer accepts the GitHub App's private key: " + e.Err.Error()
+	}
+	return "the GitHub App is unusable (" + string(e.Reason) + "): " + e.Err.Error()
+}
+
+func (e *GitHubAppUnusableError) Unwrap() error { return e.Err }

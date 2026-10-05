@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -29,6 +30,10 @@ import (
 // Shared by both store backends so the JWT-mint + HTTP-list + secret-read
 // logic lives in one place; each backend supplies the DB read of
 // (appID, pemRef, baseURL) and the upsert.
+//
+// A listing GitHub refuses is diagnosed before it is returned: see
+// diagnoseRefusedListing. A diagnosed refusal comes back as a
+// *GitHubAppUnusableError, which the backend records on the registration.
 func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, appID, pemRef, baseURL string) ([]domain.OrgGitHubAppInstallation, error) {
 	pem, err := secrets.GetSystem(ctx, orgID, pemRef)
 	if err != nil {
@@ -55,7 +60,73 @@ func DiscoverAppInstallations(ctx context.Context, secrets SecretStore, orgID, a
 	if err != nil {
 		return nil, err
 	}
-	return listInstallations(ctx, minter, orgID, baseURL)
+	insts, err := listInstallations(ctx, minter, orgID, baseURL)
+	if err != nil {
+		return nil, diagnoseRefusedListing(ctx, minter, err)
+	}
+	return insts, nil
+}
+
+// diagnoseRefusedListing decides whether a failed installation listing means
+// GitHub has stopped accepting the App itself, which happens on GitHub and is
+// never announced to TF: the App deleted there, or its private key deleted or
+// regenerated there.
+//
+// The listing's refusal is a reason to ask, not the answer. GitHub refuses a
+// deleted App's listing with a 404 and a rejected key's with a 401, but the
+// listing is a question about installations; GET /app, signed with the same
+// key, is the question about the App itself. Its 404 is GitHub saying it has
+// no App with this id, its 401 that the key does not sign for one, and its
+// status is the verdict. Anything else — GET /app succeeding, failing in
+// transit, or answering some other status — leaves listErr as it was, because
+// none of those says the App is gone.
+func diagnoseRefusedListing(ctx context.Context, minter *githubapp.Minter, listErr error) error {
+	if appRefusal(listErr) == "" {
+		return listErr
+	}
+	_, appErr := minter.GetApp(ctx)
+	if reason := appRefusal(appErr); reason != "" {
+		return &GitHubAppUnusableError{Reason: reason, Err: listErr}
+	}
+	return listErr
+}
+
+// RecordAppDiagnosis hands a failed discovery to the backend's recorder when
+// it is a diagnosis (*GitHubAppUnusableError), and decides what the backfill
+// returns. Shared by both store backends so the rule lives in one place; each
+// supplies the write.
+//
+// A diagnosis is returned as one only once it is stored. Callers read a
+// *GitHubAppUnusableError as "the registration now says so": the poller logs
+// the change and skips the cycle off the stored row, and the refresh and
+// cutover routes answer 422 naming the reason. A diagnosis the write failed to
+// store would claim all of that falsely, so it comes back as the write's
+// failure instead, with the diagnosis kept only as text.
+func RecordAppDiagnosis(discoverErr error, record func(domain.GitHubAppUnusableReason) error) error {
+	var unusable *GitHubAppUnusableError
+	if !errors.As(discoverErr, &unusable) {
+		return discoverErr
+	}
+	if err := record(unusable.Reason); err != nil {
+		return fmt.Errorf("%v; recording it failed: %w", discoverErr, err)
+	}
+	return discoverErr
+}
+
+// appRefusal maps an App-JWT request's failure to the reason it would mean if
+// GET /app agreed with it, or "" for an error that says nothing about the App.
+func appRefusal(err error) domain.GitHubAppUnusableReason {
+	var status *githubapp.APIStatusError
+	if !errors.As(err, &status) {
+		return ""
+	}
+	switch status.StatusCode {
+	case http.StatusNotFound:
+		return domain.GitHubAppMissing
+	case http.StatusUnauthorized:
+		return domain.GitHubAppKeyRejected
+	}
+	return ""
 }
 
 // RefreshBoundInstallations lists the DEPLOYMENT App's installations and keeps

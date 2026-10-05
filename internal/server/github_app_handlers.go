@@ -61,6 +61,14 @@ type githubAppInfo struct {
 	// staged-switch banner; without it a staged-app-plus-PAT org is
 	// indistinguishable from a live App. true once a cutover activates it.
 	Active bool `json:"active"`
+	// UnusableReason is why GitHub no longer accepts this App, as the
+	// installation reconcile last established it: "missing" when the App was
+	// deleted on GitHub, "key_rejected" when its private key was deleted or
+	// regenerated there, null while GitHub accepts it. Both happen outside TF,
+	// so this is the only place the panel can learn of them. UnusableSince is
+	// RFC3339 when the reason was first observed, "" alongside a null reason.
+	UnusableReason *string `json:"unusable_reason"`
+	UnusableSince  string  `json:"unusable_since"`
 }
 
 type githubAppInstallation struct {
@@ -165,6 +173,11 @@ func newGitHubAppStatusResponse(class domain.GitHubCredentialClass, app *domain.
 			RegisteredAt:            app.RegisteredAt.UTC().Format(time.RFC3339),
 			RegisteredByDisplayName: registeredByName,
 			Active:                  app.Active,
+		}
+		if app.Unusable() {
+			reason := string(app.UnusableReason)
+			resp.App.UnusableReason = &reason
+			resp.App.UnusableSince = app.UnusableSince.UTC().Format(time.RFC3339)
 		}
 	}
 	for _, inst := range insts {
@@ -375,6 +388,18 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 	} else {
 		rerr = s.githubApps.BackfillInstallationsFromAPI(ctx, orgID)
 	}
+	// A refusal the reconcile diagnosed is GitHub's answer about the App, not a
+	// GitHub that failed to answer: the reason is now recorded on the
+	// registration, and the status read beside this route reports it.
+	var unusable *db.GitHubAppUnusableError
+	if errors.As(rerr, &unusable) {
+		action := " Remove it from this workspace and connect GitHub again."
+		if app != nil && !app.Active {
+			action = " Discard it; your personal access token stays the live credential."
+		}
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: githubAppUnusableMessage(unusable.Reason) + action})
+		return
+	}
 	if rerr != nil {
 		githubAppLog.Error("refresh installations failed", "org", orgID, "class", class, "error", rerr)
 		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to refresh GitHub App installations" + localDetail(rerr)})
@@ -383,13 +408,40 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 
 	// Re-read the freshly-reconciled mirror so the caller gets current
 	// installation state in one round trip, in the same shape the status GET
-	// serves.
+	// serves. The registration is re-read too: the reconcile writes it (a
+	// successful listing clears a recorded unusable reason), so the row read
+	// above can describe an App that has since recovered — and the webhook
+	// probe below is skipped for an App that row still calls unusable.
+	if class == domain.GitHubCredentialClassBYOApp {
+		app, err = s.githubApps.GetForOrgSystem(ctx, orgID)
+		if err != nil {
+			internalError(w, "github-app", err)
+			return
+		}
+		if app == nil {
+			notFound(w, "github app")
+			return
+		}
+	}
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.githubAppStatus(ctx, orgID, userID, class, app, insts, s.webhookHealthDTO(ctx, orgID, app)))
+}
+
+// githubAppUnusableMessage says what GitHub's refusal of the App means. Each
+// route that meets it appends what to do from there, which differs between a
+// live App (remove it) and a staged one (discard it).
+func githubAppUnusableMessage(reason domain.GitHubAppUnusableReason) string {
+	switch reason {
+	case domain.GitHubAppMissing:
+		return "The GitHub App no longer exists on GitHub."
+	case domain.GitHubAppKeyRejected:
+		return "GitHub no longer accepts the GitHub App's private key."
+	}
+	return "GitHub no longer accepts the GitHub App."
 }
 
 // handleGitHubAppInstallURL returns the GitHub deep-link the panel's

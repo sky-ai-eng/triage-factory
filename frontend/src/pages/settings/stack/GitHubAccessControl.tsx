@@ -34,7 +34,9 @@
 //
 //   - A workspace with its OWN App: its slug, its installations (with
 //     suspension and grant width), both grant findings, and the switch to a
-//     token.
+//     token. An App GitHub no longer accepts — deleted there, or its key
+//     deleted there — replaces all of that with what happened and the ways
+//     out, since installations and findings describe an App that is gone.
 //   - A workspace on the DEPLOYMENT's App (multi mode): no App of its own to
 //     show and none to register or import — the same treatment the Atlassian
 //     card gives "using the deployment app". What it has is the accounts it
@@ -48,9 +50,10 @@
 //     only option), register, import, or a token.
 
 import { useState } from 'react'
-import { ExternalLink } from 'lucide-react'
+import { AlertTriangle, ExternalLink } from 'lucide-react'
 import { toast } from '../../../components/Toast/toastStore'
 import { isHttpUrl } from '../../../lib/reachability'
+import { timeAgo } from '../../../lib/relativeTime'
 import { GitHubAccountTypeStep, GitHubAppSourcePicker, GitHubAppStep } from '../../setup/GitHubStep'
 import GitHubAppImportForm from '../GitHubAppImportForm'
 import ConnectGitHubAccount from '../ConnectGitHubAccount'
@@ -73,6 +76,7 @@ import {
   switchToPat,
   type AccessDiff,
   type GitHubAppInstallation,
+  type GitHubAppUnusableReason,
 } from '../../../lib/githubApp'
 import { connectGitHubPAT } from '../orgCredentials'
 import type { StepContext } from '../../setup/types'
@@ -160,6 +164,11 @@ export default function GitHubAccessControl({
   // fact about the deployment, and until the status read answers, the empty
   // state offers the three paths every deployment has.
   const deploymentAppAvailable = installStatus?.deployment_app_available ?? false
+  // Whether GitHub still accepts the workspace's own App, as the backend's
+  // installation reconcile last found. Only the status read carries it, so
+  // until that read answers the App renders as it otherwise would.
+  const unusableReason = installStatus?.app?.unusable_reason ?? null
+  const unusableSince = installStatus?.app?.unusable_since ?? ''
   // The grant findings, for the two App classes only. Keyed on the bound set
   // so a disconnect reloads them against the grant that remains.
   const findings = useGrantFindings(
@@ -172,6 +181,19 @@ export default function GitHubAccessControl({
     setPhase({ kind: 'idle' })
     setBusy(false)
     setError(null)
+  }
+
+  // rereadStatus folds a fresh status read into the install hook, which
+  // otherwise refetches only on mount and focus. Called after a request that
+  // may itself have changed what the status says — a reconcile that found the
+  // App gone records that on the registration — so the panel renders from the
+  // new answer rather than the one it loaded with. Best-effort: on failure the
+  // panel keeps what it had, as the hook does.
+  const rereadStatus = () => {
+    if (!orgId) return
+    getGitHubAppStatus(orgId)
+      .then(setInstallStatus)
+      .catch(() => {})
   }
 
   // ── Discard a staged switch ──
@@ -211,6 +233,7 @@ export default function GitHubAccessControl({
       // Reconcile first so "installed?" reflects GitHub now (local mode never
       // gets the webhook); a zero count means nothing's installed yet.
       const fresh = await refreshGitHubAppInstallations(orgId)
+      setInstallStatus(fresh)
       if (fresh.installations.length === 0) {
         setError(
           "We can't see the App installed on any account yet — install it on GitHub, then try again.",
@@ -224,6 +247,9 @@ export default function GitHubAccessControl({
     } catch (e) {
       setError((e as Error).message)
       setBusy(false)
+      // The refresh that failed may be the one that found the App gone; the
+      // banner has to learn that to stop offering Finish.
+      rereadStatus()
     }
   }
 
@@ -243,6 +269,9 @@ export default function GitHubAccessControl({
     } catch (e) {
       setError((e as Error).message)
       setBusy(false)
+      // The cutover reconciles before it switches, so a refusal can be the
+      // App found gone since the preview.
+      rereadStatus()
     }
   }
 
@@ -366,6 +395,49 @@ export default function GitHubAccessControl({
     }
   }
 
+  // ── Own App that GitHub no longer accepts: remove it ──
+  // The one bare teardown this panel offers, and only here. Anywhere else a
+  // teardown with nothing in its place is a way to lose access for no reason
+  // (see disconnectOwnAppFor below); here the access is already gone, the
+  // registration is a record of an App GitHub refuses, and removing it is what
+  // opens every way back in — a new App, the same App with a new key, a token,
+  // or the deployment's App.
+  const removeUnusableApp = async () => {
+    if (!orgId || busy) return
+    const app = slug ? `the ${slug} App` : 'this GitHub App'
+    const onGitHub =
+      unusableReason === 'key_rejected'
+        ? 'It still exists on GitHub, and you can connect it again with a new private key.'
+        : 'It no longer exists on GitHub, so nothing changes there.'
+    if (
+      !confirm(
+        `Remove ${app} from this workspace? ${onGitHub} Until GitHub is connected again, this workspace has no GitHub access.`,
+      )
+    )
+      return
+    setBusy(true)
+    setError(null)
+    try {
+      await disconnectOwnApp(orgId)
+      ctx.patch({
+        githubAppRegistered: false,
+        githubAppStaged: false,
+        githubAppInstalled: false,
+        githubAppInstallCount: 0,
+        githubAppSlug: '',
+      })
+      toast.success('GitHub App removed')
+      // The empty state renders from the draft patched above whether or not
+      // this read answers.
+      rereadStatus()
+      setBusy(false)
+      reload()
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
   // ── Own App: switch to the deployment's ──
   // The account is asked for first, then the teardown verb, then the
   // ceremony for that account — one gesture. The workspace holds no
@@ -379,7 +451,7 @@ export default function GitHubAccessControl({
     if (!orgId) return false
     if (
       !confirm(
-        `Switch this workspace to the deployment’s GitHub App, connecting ${account}? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first (it stays registered on GitHub), then you confirm on GitHub. If you leave GitHub without finishing, this workspace has no GitHub access and you’ll be taken back to setup.`,
+        `Switch this workspace to the deployment’s GitHub App, connecting ${account}? ${slug ? `The ${slug} App` : 'Your App'} is disconnected first${unusableReason === 'missing' ? '' : ' (it stays registered on GitHub)'}, then you confirm on GitHub. If you leave GitHub without finishing, this workspace has no GitHub access and you’ll be taken back to setup.`,
       )
     )
       return false
@@ -600,26 +672,29 @@ export default function GitHubAccessControl({
         <div className="rounded-xl border border-line-1 bg-tint-2 px-4 py-3">
           <p className="text-body font-medium text-ink-2">Switched to a personal access token</p>
         </div>
-        <p className="text-body leading-relaxed text-ink-2">
-          The GitHub App still exists on GitHub — delete it there if you no longer need it:
-          {phase.settingsUrl ? (
-            <>
-              {' '}
-              <a
-                href={phase.settingsUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1 text-warm hover:underline"
-              >
-                App settings on GitHub
-                <ExternalLink size={12} />
-              </a>
-              .
-            </>
-          ) : (
-            ' open your GitHub App’s settings page.'
-          )}
-        </p>
+        {/* An App deleted on GitHub has nothing left there to clean up. */}
+        {unusableReason !== 'missing' && (
+          <p className="text-body leading-relaxed text-ink-2">
+            The GitHub App still exists on GitHub — delete it there if you no longer need it:
+            {phase.settingsUrl ? (
+              <>
+                {' '}
+                <a
+                  href={phase.settingsUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-warm hover:underline"
+                >
+                  App settings on GitHub
+                  <ExternalLink size={12} />
+                </a>
+                .
+              </>
+            ) : (
+              ' open your GitHub App’s settings page.'
+            )}
+          </p>
+        )}
         <p className="text-body leading-relaxed text-ink-3">
           Team members who need to (re)connect their GitHub identity will be asked for a personal
           token instead of one-click OAuth.
@@ -657,6 +732,7 @@ export default function GitHubAccessControl({
       {staged ? (
         <StagedBanner
           slug={slug}
+          unusableReason={unusableReason}
           busy={busy}
           error={error}
           onFinish={() =>
@@ -666,14 +742,73 @@ export default function GitHubAccessControl({
           }
           onDiscard={() => void discard()}
         />
+      ) : liveApp && unusableReason ? (
+        // GitHub no longer accepts the App. The installations, the findings and
+        // the webhook health all describe an App that is gone, so none of them
+        // render; what does is what happened and every way out.
+        <>
+          <GitHubAppUnusableNotice reason={unusableReason} since={unusableSince} slug={slug} />
+          {error && <p className="text-ui text-alarm">{error}</p>}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void removeUnusableApp()}
+              className="rounded-xl border border-alarm/40 px-4 py-2 text-body font-medium text-alarm transition-colors hover:bg-alarm/[0.06] disabled:opacity-40"
+            >
+              Remove this App…
+            </button>
+            {deploymentAppAvailable && orgId && (
+              <ConnectGitHubAccount
+                orgId={orgId}
+                label="Switch to the deployment’s App…"
+                disabled={busy}
+                beforeStart={disconnectOwnAppFor}
+              />
+            )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setPhase({ kind: 'to-pat-token' })}
+              className="rounded-xl border border-line-1 px-4 py-2 text-body font-medium text-ink-2 transition-colors hover:border-warm/40 hover:text-ink-1 disabled:opacity-40"
+            >
+              Switch to a personal access token…
+            </button>
+          </div>
+        </>
       ) : liveApp ? (
         <>
-          <p className="text-body leading-relaxed text-ink-3">
-            Triage Factory connects to GitHub through your registered App
-            {slug ? ` (${slug})` : ''}, polling under its own bot identity across {installCount}{' '}
-            installation
-            {installCount === 1 ? '' : 's'}.
-          </p>
+          {installCount === 0 ? (
+            // Installed nowhere: GitHub reports no account the App can act on,
+            // so there is nothing to poll. Uninstalled from GitHub's side, most
+            // likely — the reconcile drops an installation GitHub stops
+            // reporting — and the way back is the install page.
+            <PanelNotice
+              headline={`${slug ? `The ${slug} App` : 'Your GitHub App'} isn’t installed on any GitHub account.`}
+            >
+              Nothing is being polled until it is.{' '}
+              {installUrl ? (
+                <a
+                  href={installUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-warm hover:underline"
+                >
+                  Install it on GitHub
+                  <ExternalLink size={12} />
+                </a>
+              ) : (
+                'Install it from the App’s page on GitHub.'
+              )}
+            </PanelNotice>
+          ) : (
+            <p className="text-body leading-relaxed text-ink-3">
+              Triage Factory connects to GitHub through your registered App
+              {slug ? ` (${slug})` : ''}, polling under its own bot identity across {installCount}{' '}
+              installation
+              {installCount === 1 ? '' : 's'}.
+            </p>
+          )}
           {/* Whether GitHub is actually delivering this App's webhooks here.
               Renders nothing until the backend's probe has an answer — the
               installation mirror is what a hookless App silently costs, and
@@ -905,15 +1040,73 @@ function Frame({
   )
 }
 
+// PanelNotice is the alarm-toned callout for a GitHub connection that has
+// stopped working: a headline saying what is wrong and a detail saying what it
+// costs and where to go.
+function PanelNotice({ headline, children }: { headline: string; children: React.ReactNode }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2.5 rounded-xl border border-alarm/25 bg-alarm/[0.06] px-3.5 py-3"
+    >
+      <AlertTriangle size={14} className="mt-0.5 shrink-0 text-alarm" />
+      <div className="space-y-1">
+        <p className="text-[13px] font-medium text-ink-2">{headline}</p>
+        <p className="text-[12px] leading-relaxed text-ink-3">{children}</p>
+      </div>
+    </div>
+  )
+}
+
+// GitHubAppUnusableNotice says that GitHub no longer accepts the workspace's
+// own App, which reason, and since when. Both reasons happen on GitHub, never
+// through Triage Factory, so the copy says so — otherwise the first question
+// is what someone here broke.
+function GitHubAppUnusableNotice({
+  reason,
+  since,
+  slug,
+}: {
+  reason: GitHubAppUnusableReason
+  since: string
+  slug: string
+}) {
+  const app = slug ? `The ${slug} App` : 'This workspace’s GitHub App'
+  const detected = since ? ` Detected ${timeAgo(since)}.` : ''
+  if (reason === 'key_rejected') {
+    return (
+      <PanelNotice
+        headline={`GitHub no longer accepts ${slug ? `the ${slug} App’s` : 'this App’s'} private key.`}
+      >
+        The key was deleted or regenerated on GitHub, outside Triage Factory, so nothing is being
+        polled and agents can&rsquo;t reach GitHub.{detected} Remove the App here and connect it
+        again with a new private key through &ldquo;Connect an existing App&rdquo;, or connect
+        GitHub another way.
+      </PanelNotice>
+    )
+  }
+  return (
+    <PanelNotice headline={`${app} no longer exists on GitHub.`}>
+      It was deleted on GitHub, outside Triage Factory, so nothing is being polled and agents
+      can&rsquo;t reach GitHub.{detected} Remove it here, then connect GitHub again with a new App,
+      an existing one, or a personal access token.
+    </PanelNotice>
+  )
+}
+
 // StagedBanner is the "registered but not yet active" notice with the two exits.
+// A staged App GitHub no longer accepts can't be switched to, so it loses
+// Finish and keeps Discard; the token it would have replaced is unaffected.
 function StagedBanner({
   slug,
+  unusableReason,
   busy,
   error,
   onFinish,
   onDiscard,
 }: {
   slug: string
+  unusableReason: GitHubAppUnusableReason | null
   busy: boolean
   error: string | null
   onFinish: () => void
@@ -922,19 +1115,34 @@ function StagedBanner({
   return (
     <div className="space-y-3 rounded-xl border border-warm/20 bg-warm/[0.08] px-4 py-3">
       <p className="text-body leading-relaxed text-warm dark:text-warm">
-        GitHub App{slug ? ` (${slug})` : ''} registered but not yet active — finish switching or
-        discard. Your personal access token stays the live credential until you switch over.
+        {unusableReason ? (
+          <>
+            GitHub App{slug ? ` (${slug})` : ''} registered but{' '}
+            {unusableReason === 'missing'
+              ? 'deleted on GitHub'
+              : 'its private key is no longer accepted by GitHub'}
+            , so it can&rsquo;t be switched to — discard it. Your personal access token stays the
+            live credential.
+          </>
+        ) : (
+          <>
+            GitHub App{slug ? ` (${slug})` : ''} registered but not yet active — finish switching or
+            discard. Your personal access token stays the live credential until you switch over.
+          </>
+        )}
       </p>
       {error && <p className="text-ui text-alarm">{error}</p>}
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onFinish}
-          disabled={busy}
-          className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
-        >
-          {busy ? 'Working…' : 'Finish switching'}
-        </button>
+        {!unusableReason && (
+          <button
+            type="button"
+            onClick={onFinish}
+            disabled={busy}
+            className="rounded-full bg-warm px-5 py-2 text-body font-medium text-warm-ink transition-colors hover:bg-warm/90 disabled:opacity-40"
+          >
+            {busy ? 'Working…' : 'Finish switching'}
+          </button>
+        )}
         <button
           type="button"
           onClick={onDiscard}
