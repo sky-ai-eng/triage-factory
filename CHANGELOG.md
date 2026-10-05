@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.15.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.2...v1.15.0) (2026-10-05)
+
+
+### Features
+
+* **claims:** give every claim a lease its holder renews (TFAC-1033) ([#1127](https://github.com/sky-ai-eng/triage-factory/issues/1127)) ([76f5527](https://github.com/sky-ai-eng/triage-factory/commit/76f5527882358a970d83084beefc4b589a739fb2))
+* **claims:** lease takeover replaces the reaper, with separate setup and loss budgets (TFAC-1035) ([#1130](https://github.com/sky-ai-eng/triage-factory/issues/1130)) ([684ac41](https://github.com/sky-ai-eng/triage-factory/commit/684ac41bb1e8c1f3596d15269e9356b03531af17))
+* **claims:** recover a claim whose lease lapsed across a system suspend (TFAC-1037) ([#1134](https://github.com/sky-ai-eng/triage-factory/issues/1134)) ([a5bf16d](https://github.com/sky-ai-eng/triage-factory/commit/a5bf16da1a6eaf373ccc1a4de8c1645bd3b6b6c8))
+* **db:** add the shared work-item contract and its conformance suite (TFAC-1015) ([#1114](https://github.com/sky-ai-eng/triage-factory/issues/1114)) ([0df273e](https://github.com/sky-ai-eng/triage-factory/commit/0df273eee2a0217a9752770f53b0ef7535acffe3))
+* **delegate:** a native run whose provider stays unavailable hands its claim back and retries on a backoff (TFAC-1044) ([#1143](https://github.com/sky-ai-eng/triage-factory/issues/1143)) ([aa51631](https://github.com/sky-ai-eng/triage-factory/commit/aa51631493a46e77fd87072412a085e336de26f9))
+* **delegate:** checkpoint a live native engagement's workspace at tool-batch boundaries (TFAC-1038) ([#1135](https://github.com/sky-ai-eng/triage-factory/issues/1135)) ([1d9892a](https://github.com/sky-ai-eng/triage-factory/commit/1d9892a1f3e6a11e3313caa9c8dfbd1812708ff7))
+* **delegate:** hand back SDK API errors, a silent provider stream, and upstream failures during setup (TFAC-1045) ([#1147](https://github.com/sky-ai-eng/triage-factory/issues/1147)) ([077f946](https://github.com/sky-ai-eng/triage-factory/commit/077f94688c7f8f39e3d7aeaf6fa8dd98b0700a7f))
+* **delegate:** stalled engagements park themselves (TFAC-1036) ([#1131](https://github.com/sky-ai-eng/triage-factory/issues/1131)) ([ac578fb](https://github.com/sky-ai-eng/triage-factory/commit/ac578fbbfd9d82ead32f4ed963769ace7750ebb9))
+* **delegate:** stop is a request the holder or dispatcher settles (TFAC-1034) ([#1128](https://github.com/sky-ai-eng/triage-factory/issues/1128)) ([ec44f7c](https://github.com/sky-ai-eng/triage-factory/commit/ec44f7c689d7c445d99853e7096df5e32ecdd50b))
+* **inference:** one LLM error classifier for the native loop, systemllm and modelprobe (TFAC-1042) ([#1141](https://github.com/sky-ai-eng/triage-factory/issues/1141)) ([79672f8](https://github.com/sky-ai-eng/triage-factory/commit/79672f825ccdcc7a8d251e30a96ba55481ba6848))
+* **modelcatalog:** offer Sonnet 5.5, Opus 5.5 and Fable 5.1 in multi mode ([#1152](https://github.com/sky-ai-eng/triage-factory/issues/1152)) ([f2abd4e](https://github.com/sky-ai-eng/triage-factory/commit/f2abd4e76a1f08a231fbb5aa11ce307388a73533))
+* **poller:** per-org connection status for GitHub and Jira, logged once on loss and restore, exported as tf_upstream_up (TFAC-1043) ([#1142](https://github.com/sky-ai-eng/triage-factory/issues/1142)) ([009f2ce](https://github.com/sky-ai-eng/triage-factory/commit/009f2cecdfe319932cfa7427208ce058327f5a89))
+* **routing:** event queue adopts the work-item contract (TFAC-1029) ([#1120](https://github.com/sky-ai-eng/triage-factory/issues/1120)) ([a442d61](https://github.com/sky-ai-eng/triage-factory/commit/a442d61d73fe5cde7d632125c4610c085eabc3b1))
+* **routing:** pending firings adopt the work-item contract (TFAC-1031) ([#1124](https://github.com/sky-ai-eng/triage-factory/issues/1124)) ([b33ee0a](https://github.com/sky-ai-eng/triage-factory/commit/b33ee0a526d1d36eb723b7b15934680c2473084f))
+* **routing:** score re-evaluation becomes a work kind (TFAC-1032) ([#1125](https://github.com/sky-ai-eng/triage-factory/issues/1125)) ([9ad1881](https://github.com/sky-ai-eng/triage-factory/commit/9ad18811ce82a6b83be841f6e4a03da2edbd3821))
+* **sidecar:** credential proxies name why a lookup failed, log it once, and answer a missing credential with a JSON 403 (TFAC-1047) ([#1146](https://github.com/sky-ai-eng/triage-factory/issues/1146)) ([6ece843](https://github.com/sky-ai-eng/triage-factory/commit/6ece8430ab541a925c93103ab9870c3836bfc572))
+* **suspendclock:** on wake from a system suspend, drop idle HTTP connections and poll every org at once (TFAC-1046) ([#1145](https://github.com/sky-ai-eng/triage-factory/issues/1145)) ([a141938](https://github.com/sky-ai-eng/triage-factory/commit/a141938b57cf2b86e4685051d0e52f6f5929fb1c))
+* **tracker:** emit body update events for GitHub and Jira (TFAC-1014) ([#1112](https://github.com/sky-ai-eng/triage-factory/issues/1112)) ([274b31a](https://github.com/sky-ai-eng/triage-factory/commit/274b31ac8611e497ff9472621a8053664f36c155))
+* **upstream:** one failure classification, backoff, bounded error bodies and request metrics for GitHub, Jira and Slack (TFAC-1041) ([#1140](https://github.com/sky-ai-eng/triage-factory/issues/1140)) ([f127c58](https://github.com/sky-ai-eng/triage-factory/commit/f127c585f9e4997acb912559ee9f43f261a1203e))
+* **workitem:** work-item metrics, objectives, and one parked-work surface across kinds (TFAC-1030) ([#1122](https://github.com/sky-ai-eng/triage-factory/issues/1122)) ([bc6911f](https://github.com/sky-ai-eng/triage-factory/commit/bc6911f46b68347289d7dabf58590d63c1b950c5))
+
+
+### Bug Fixes
+
+* **ci:** fail the pricing refresh when the script refuses, and unblock it ([#1133](https://github.com/sky-ai-eng/triage-factory/issues/1133)) ([557ff1c](https://github.com/sky-ai-eng/triage-factory/commit/557ff1cd752672aebf4033364fdaf557d93090ed))
+* **compose:** restart the backing services on the same policy as the TF pods ([#1132](https://github.com/sky-ai-eng/triage-factory/issues/1132)) ([5f1feef](https://github.com/sky-ai-eng/triage-factory/commit/5f1feef76d87d00e331111c7915dca4a02c0c9af))
+* **db:** begin local SQLite transactions IMMEDIATE, with an enforced read-only door (TFAC-1027) ([#1116](https://github.com/sky-ai-eng/triage-factory/issues/1116)) ([4c179d0](https://github.com/sky-ai-eng/triage-factory/commit/4c179d0e4356c956eac7f47e8538b84d3f71a677))
+* **db:** track through ReplaceForTeam in the read-door tests ([#1119](https://github.com/sky-ai-eng/triage-factory/issues/1119)) ([01b1d99](https://github.com/sky-ai-eng/triage-factory/commit/01b1d99f1b6df7ca2233b890db6ba1cf51584895))
+* **delegate:** one workspace layout for every run, with every checkout snapshotted and restored (TFAC-1049) ([#1150](https://github.com/sky-ai-eng/triage-factory/issues/1150)) ([01d5398](https://github.com/sky-ai-eng/triage-factory/commit/01d5398012d0a34d105f5477b1be1de9d34b26cf))
+* **delegate:** recover on a saturated executor, scope stall stops and requeues to the claim, and close the hand-back and connection gaps ([#1148](https://github.com/sky-ai-eng/triage-factory/issues/1148)) ([cd70589](https://github.com/sky-ai-eng/triage-factory/commit/cd7058964c8187dbbbca859b5e77d6c7cb78e8ea))
+* **delegate:** release a fenced engagement's claim, settle paused and bring-up blueprint cancels, and keep fenced engagements silent ([#1129](https://github.com/sky-ai-eng/triage-factory/issues/1129)) ([c49c8fc](https://github.com/sky-ai-eng/triage-factory/commit/c49c8fcc6e943a95d9982bd95b64421c4e4bc4d6))
+* **deps:** clear open dependency advisories and bump the Agent SDK to 0.3.287 ([#1138](https://github.com/sky-ai-eng/triage-factory/issues/1138)) ([3669a85](https://github.com/sky-ai-eng/triage-factory/commit/3669a8512c935db80977465c989064ed595a641b))
+* **durability:** commit internal handoffs with the work they imply (TFAC-1016) ([#1115](https://github.com/sky-ai-eng/triage-factory/issues/1115)) ([3b19e90](https://github.com/sky-ai-eng/triage-factory/commit/3b19e90460d92a32c39dc9d88cc01e6e42d4169c))
+* **exec:** workspace add and checkout paths in local sandboxed runs, and tell SDK agents to cd on its own ([#1151](https://github.com/sky-ai-eng/triage-factory/issues/1151)) ([7ba9b5a](https://github.com/sky-ai-eng/triage-factory/commit/7ba9b5ad6727d9b574531d208653e21a7b292213))
+* **exec:** write gh scratch output only under the run root and take the repo from the agent's checkout (TFAC-1048) ([#1149](https://github.com/sky-ai-eng/triage-factory/issues/1149)) ([d95b366](https://github.com/sky-ai-eng/triage-factory/commit/d95b366b32dfa9e60686b127f2d68d2bd8204482))
+* **inference:** map litellm's new prism and sail providers as unsupported ([#1137](https://github.com/sky-ai-eng/triage-factory/issues/1137)) ([9b4ea88](https://github.com/sky-ai-eng/triage-factory/commit/9b4ea88a8971742dc78418f0c63ba34b7217ee66))
+* **permissions:** report a prompt's remaining time from the wait that owns it (TFAC-1039) ([#1139](https://github.com/sky-ai-eng/triage-factory/issues/1139)) ([3a067c2](https://github.com/sky-ai-eng/triage-factory/commit/3a067c27cc528d27ddfeb85efefd554a5d1d6a36))
+* **routing:** hold a queued firing while its task's run is still running, and drop scores that name no task ([#1126](https://github.com/sky-ai-eng/triage-factory/issues/1126)) ([78b7388](https://github.com/sky-ai-eng/triage-factory/commit/78b7388311fa6e6c0e927ea8268706f0e25d049b))
+* **tracker:** mirror the PR body into entities.description so the scorer sees it (TFAC-1013) ([#1110](https://github.com/sky-ai-eng/triage-factory/issues/1110)) ([4b06ef5](https://github.com/sky-ai-eng/triage-factory/commit/4b06ef506fb643ceabe8c63821561d001d549ad5))
+* **workitem:** make the depth-age conformance deterministic on SQLite, and tidy the review nits ([#1123](https://github.com/sky-ai-eng/triage-factory/issues/1123)) ([880895c](https://github.com/sky-ai-eng/triage-factory/commit/880895c4a641babc9e2f0ab0db001f29026892be))
+
 ## [1.14.2](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.1...v1.14.2) (2026-09-14)
 
 
