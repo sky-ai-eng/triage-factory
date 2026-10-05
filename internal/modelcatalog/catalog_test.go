@@ -47,39 +47,69 @@ func TestCatalog_PinnedAgainstCommittedSnapshot(t *testing.T) {
 			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 0,
 		},
 		{
-			Key: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", Provider: "anthropic",
+			Key: "claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5", Provider: "anthropic",
 			Prices:        PricesPerMTok{Input: 2, Output: 10, CacheRead: 0.2, CacheWrite: 2.5},
 			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 1,
 		},
 		{
+			Key: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", Provider: "anthropic",
+			Prices:        PricesPerMTok{Input: 4, Output: 20, CacheRead: 0.2, CacheWrite: 5},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 2,
+		},
+		{
+			Key: "claude-fable-5-1", DisplayName: "Claude Fable 5.1", Provider: "anthropic",
+			Prices:        PricesPerMTok{Input: 10, Output: 50, CacheRead: 0.25, CacheWrite: 12.5},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 3,
+		},
+		{
+			Key: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", Provider: "anthropic",
+			Prices:        PricesPerMTok{Input: 2, Output: 10, CacheRead: 0.2, CacheWrite: 2.5},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 4,
+		},
+		{
 			Key: "claude-opus-5", DisplayName: "Claude Opus 5", Provider: "anthropic",
 			Prices:        PricesPerMTok{Input: 5, Output: 25, CacheRead: 0.5, CacheWrite: 6.25},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 2,
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 5,
 		},
 		{
 			Key: "claude-fable-5", DisplayName: "Claude Fable 5", Provider: "anthropic",
 			Prices:        PricesPerMTok{Input: 10, Output: 50, CacheRead: 1, CacheWrite: 12.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 3,
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 6,
 		},
 		{
 			Key: "us.anthropic.claude-haiku-4-5-20251001-v1:0", DisplayName: "Claude Haiku 4.5 (Bedrock, US)", Provider: "bedrock",
 			Prices:        PricesPerMTok{Input: 1.1, Output: 5.5, CacheRead: 0.11, CacheWrite: 1.375},
-			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 4,
+			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 7,
+		},
+		{
+			Key: "us.anthropic.claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 2.2, Output: 11, CacheRead: 0.22, CacheWrite: 2.75},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 8,
+		},
+		{
+			Key: "us.anthropic.claude-opus-5-5", DisplayName: "Claude Opus 5.5 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 4.4, Output: 22, CacheRead: 0.22, CacheWrite: 5.5},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 9,
+		},
+		{
+			Key: "us.anthropic.claude-fable-5-1", DisplayName: "Claude Fable 5.1 (Bedrock, US)", Provider: "bedrock",
+			Prices:        PricesPerMTok{Input: 11, Output: 55, CacheRead: 0.275, CacheWrite: 13.75},
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 10,
 		},
 		{
 			Key: "us.anthropic.claude-sonnet-5", DisplayName: "Claude Sonnet 5 (Bedrock, US)", Provider: "bedrock",
 			Prices:        PricesPerMTok{Input: 2.2, Output: 11, CacheRead: 0.22, CacheWrite: 2.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 5,
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 11,
 		},
 		{
 			Key: "us.anthropic.claude-opus-5", DisplayName: "Claude Opus 5 (Bedrock, US)", Provider: "bedrock",
 			Prices:        PricesPerMTok{Input: 5.5, Output: 27.5, CacheRead: 0.55, CacheWrite: 6.875},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 6,
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 12,
 		},
 		{
 			Key: "us.anthropic.claude-fable-5", DisplayName: "Claude Fable 5 (Bedrock, US)", Provider: "bedrock",
 			Prices:        PricesPerMTok{Input: 11, Output: 55, CacheRead: 1.1, CacheWrite: 13.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 7,
+			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 13,
 		},
 	}
 
