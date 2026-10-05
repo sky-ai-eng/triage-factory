@@ -254,6 +254,15 @@ type OrgSettings struct {
 	JiraBaseURL      string
 	JiraPollInterval time.Duration
 
+	// LinearWorkspaceID is the Linear workspace the org's Linear credential
+	// belongs to, learned from the credential rather than typed. A user's own
+	// Linear credential is keyed under it.
+	//
+	// TODO(TFAC-1019): no org_settings column backs this yet, so the stores
+	// leave it empty and every user resolves as having no Linear credential
+	// until the column lands.
+	LinearWorkspaceID string
+
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
 	// EnabledModels is the org's enable-set: the model keys its teams may pick

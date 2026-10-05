@@ -13,6 +13,8 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
@@ -271,6 +273,58 @@ func ValidateJira(ctx context.Context, cfg jira.Config) (*JiraUser, error) {
 	}
 
 	return &user, nil
+}
+
+// ErrLinearUnreachable wraps a validation that could not get an answer from
+// Linear: the request never reached it, or Linear failed with a 5xx. It is
+// distinct from linear.ErrUnauthorized, which is Linear refusing the
+// credential.
+var ErrLinearUnreachable = errors.New("linear unreachable")
+
+// linearAppEmailSuffix is the email domain Linear gives the app user an app
+// install acts as.
+const linearAppEmailSuffix = "@oauthapp.linear.app"
+
+// LinearUser is the Linear user a credential acts as. IsApp is true for an
+// app install's app user rather than a person.
+type LinearUser struct {
+	ID          string
+	Name        string
+	DisplayName string
+	Email       string
+	IsApp       bool
+}
+
+// LinearOrganization is the Linear workspace a credential belongs to.
+type LinearOrganization struct {
+	ID     string
+	Name   string
+	URLKey string
+}
+
+// ValidateLinear checks a Linear credential with one request and returns who
+// it acts as and which workspace it belongs to. A credential Linear refuses
+// is an error matching linear.ErrUnauthorized; one Linear could not be asked
+// about matches ErrLinearUnreachable.
+func ValidateLinear(ctx context.Context, cfg linear.Config) (*LinearUser, *LinearOrganization, error) {
+	viewer, org, err := linear.NewClient(cfg).Whoami(ctx)
+	if err != nil {
+		if class, ok := upstream.ClassOf(err); ok && class == upstream.Transient {
+			return nil, nil, fmt.Errorf("%w: %v", ErrLinearUnreachable, err)
+		}
+		return nil, nil, err
+	}
+	if viewer.ID == "" || org.ID == "" {
+		return nil, nil, errors.New("linear returned no viewer or organization")
+	}
+	user := &LinearUser{
+		ID:          viewer.ID,
+		Name:        viewer.Name,
+		DisplayName: viewer.DisplayName,
+		Email:       viewer.Email,
+		IsApp:       strings.HasSuffix(strings.ToLower(viewer.Email), linearAppEmailSuffix),
+	}
+	return user, &LinearOrganization{ID: org.ID, Name: org.Name, URLKey: org.URLKey}, nil
 }
 
 // ValidateAnthropicAPIKey checks an Anthropic API key against the live API and

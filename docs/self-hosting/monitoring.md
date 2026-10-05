@@ -393,7 +393,7 @@ sum(increase(tf_slack_retry_deliveries_total[15m])) > 0
 
 ### Source connections
 
-Every HTTP request TF makes to GitHub, Jira, or Slack's Web API, and every
+Every HTTP request TF makes to GitHub, Jira, Linear, or Slack's Web API, and every
 model call TF makes to an LLM provider, is classified by how it ended and
 counted against the org it was made for. Two counters, both per process, so
 `sum` across pods:
@@ -403,16 +403,16 @@ counted against the org it was made for. Two counters, both per process, so
 | `tf_upstream_requests_total` | `upstream`, `outcome`, `org_id` | HTTP attempts. A retried call counts once per attempt, so a call that succeeds on its third attempt adds two failed attempts and one `ok`. |
 | `tf_upstream_retries_total` | `upstream`, `outcome`, `org_id` | Decisions to retry. `outcome` is the class of the attempt that caused the retry. |
 
-`upstream` is `github`, `jira`, `slack`, `anthropic`, or `bedrock`. `outcome` is
+`upstream` is `github`, `jira`, `linear`, `slack`, `anthropic`, or `bedrock`. `outcome` is
 one of:
 
 | `outcome` | Meaning |
 | --- | --- |
-| `ok` | A response with a status below 400. |
-| `rate_limited` | The upstream asked TF to wait: a 429, or one of GitHub's rate-limit 403s. |
+| `ok` | A response with a status below 400 (for Linear, one that carries no GraphQL errors). |
+| `rate_limited` | The upstream asked TF to wait: a 429, one of GitHub's rate-limit 403s, or a Linear response whose GraphQL error is `RATELIMITED`. |
 | `transient` | A 5xx, a 408, a transport failure, or a 403 whose body is not a JSON object. A 403 like that comes from something in front of the upstream rather than the upstream itself (a VPN-dependent proxy in front of a GitHub Enterprise Server, for example), so it says nothing about the credential and is expected to clear. |
-| `auth` | A 401, or a 403 whose body is a JSON object and that is not a rate limit: the upstream refused the credential, or the credential may not do this. |
-| `rejected` | Any other 4xx. The request itself is wrong, and sending it again will not help. |
+| `auth` | A 401, a 403 whose body is a JSON object and that is not a rate limit, or a Linear GraphQL error coded `AUTHENTICATION_ERROR` or `FORBIDDEN`: the upstream refused the credential, or the credential may not do this. |
+| `rejected` | Any other 4xx, or a Linear response that succeeded at the HTTP level but carries GraphQL errors. The request itself is wrong, and sending it again will not help. |
 
 A request abandoned because its caller gave up (a shutdown, a deadline) is not
 an outcome and is not counted.
