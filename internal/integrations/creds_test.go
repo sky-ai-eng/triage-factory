@@ -549,9 +549,10 @@ func TestSlackWorkspaceKeysFor_Format(t *testing.T) {
 }
 
 // TestLinearSystemConfig pins the marker × key-presence matrix of the two
-// Linear helpers: a client config exists only for an api_key marker with a key,
-// while an app_install marker counts as configured whatever the bundle holds,
-// because its credential is an envelope the resolver reads.
+// Linear helpers: a client config exists only for a key under an api_key
+// marker or no marker, while an app_install marker counts as configured
+// whatever the bundle holds, because its credential is an envelope the
+// resolver reads.
 func TestLinearSystemConfig(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -563,7 +564,7 @@ func TestLinearSystemConfig(t *testing.T) {
 		{"api_key without key", "api_key", "", false, false},
 		{"app_install without key", "app_install", "", false, true},
 		{"app_install with a stale key", "app_install", "lin_api_org", false, true},
-		{"no marker with key", "", "lin_api_org", false, false},
+		{"no marker with key", "", "lin_api_org", true, true},
 		{"no marker, no key", "", "", false, false},
 		{"unknown marker", "saml_v9", "lin_api_org", false, false},
 	}
@@ -683,5 +684,33 @@ func TestAllKeys_IncludesLinear(t *testing.T) {
 		if !slices.Contains(integrations.AllKeys(), k) {
 			t.Errorf("AllKeys missing %q", k)
 		}
+	}
+}
+
+// TestLinearEnvKeyAlone_Resolves is the env-only local setup end to end: the
+// key comes from TRIAGE_FACTORY_LINEAR_API_KEY, nothing is stored, and both
+// the bundle helpers and the resolver treat it as a configured api_key org.
+func TestLinearEnvKeyAlone_Resolves(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "lin_api_env")
+
+	creds, err := integrations.LoadSystem(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("LoadSystem: %v", err)
+	}
+	if !integrations.LinearSystemConfigured(creds) {
+		t.Error("LinearSystemConfigured = false with the key in the environment")
+	}
+	if cfg, ok := integrations.LinearSystemConfig(creds); !ok || cfg != linear.APIKey("lin_api_env") {
+		t.Errorf("LinearSystemConfig = (%+v, %v), want APIKey(lin_api_env)", cfg, ok)
+	}
+	cred, err := linear.NewResolver(stores.Secrets, stores.Orgs).ResolveSystemCredential(ctx, org)
+	if err != nil {
+		t.Fatalf("ResolveSystemCredential: %v", err)
+	}
+	if cred.Method != linear.AuthMethodAPIKey || cred.APIKey != "lin_api_env" {
+		t.Errorf("credential = %+v, want the env key as api_key", cred)
 	}
 }

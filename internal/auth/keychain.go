@@ -63,9 +63,11 @@ type Credentials struct {
 	JiraAuthMethod string
 
 	// Linear service credential. LinearAuthMethod is the linear.AuthMethod
-	// marker ("api_key" | "app_install"); LinearAPIKey is the personal key the
-	// api_key shape stores. An app install's credential is an envelope this
-	// bundle does not carry: the resolver reads it.
+	// marker ("api_key" | "app_install"); an empty marker with a key is the
+	// api_key shape, which is what the env overlay alone produces.
+	// LinearAPIKey is the personal key that shape stores. An app install's
+	// credential is an envelope this bundle does not carry: the resolver reads
+	// it.
 	LinearAPIKey     string
 	LinearAuthMethod string
 }

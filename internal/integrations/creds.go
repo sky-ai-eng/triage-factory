@@ -52,9 +52,10 @@ const (
 // Linear service-credential keys. KeyLinearAuthMethod is the linear.AuthMethod
 // marker naming the shape the org's credential takes: an API key stored under
 // KeyLinearAPIKey, or an app install whose refresh-token envelope is stored
-// under KeyLinearAppInstall. internal/linear's resolver keeps its own copies of
-// the keys it reads (it cannot import this package); its keys_drift_test pins
-// the agreement.
+// under KeyLinearAppInstall. An absent marker reads as the API key shape, which
+// is the only one the TRIAGE_FACTORY_LINEAR_API_KEY overlay can supply.
+// internal/linear's resolver keeps its own copies of the keys it reads (it
+// cannot import this package); its keys_drift_test pins the agreement.
 const (
 	KeyLinearAPIKey     = "linear_api_key"
 	KeyLinearAuthMethod = "linear_auth_method"
@@ -382,23 +383,27 @@ func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
 
 // LinearSystemConfig builds the linear.Config for an org's stored Linear
 // service credential from an already-loaded Credentials bundle, for handlers
-// that hold one. ok is true only for the api_key shape with a key: an app
-// install's credential is an access token the resolver mints, which the bundle
-// does not carry, so those callers go through linear.Resolver.ForSystem.
+// that hold one. ok is true only for the api_key shape (or no marker) with a
+// key: an app install's credential is an access token the resolver mints,
+// which the bundle does not carry, so those callers go through
+// linear.Resolver.ForSystem.
 func LinearSystemConfig(c auth.Credentials) (linear.Config, bool) {
-	if linear.AuthMethod(c.LinearAuthMethod) != linear.AuthMethodAPIKey || c.LinearAPIKey == "" {
-		return linear.Config{}, false
+	switch linear.AuthMethod(c.LinearAuthMethod) {
+	case linear.AuthMethodAPIKey, "":
+		if c.LinearAPIKey != "" {
+			return linear.APIKey(c.LinearAPIKey), true
+		}
 	}
-	return linear.APIKey(c.LinearAPIKey), true
+	return linear.Config{}, false
 }
 
 // LinearSystemConfigured reports whether the org has a Linear service
-// credential: an api_key marker with a key, or an app_install marker. Whether
-// an install's envelope is present and still mints is the resolver's to
-// answer, so a configured org can still fail to resolve.
+// credential: a key under an api_key marker or no marker, or an app_install
+// marker. Whether an install's envelope is present and still mints is the
+// resolver's to answer, so a configured org can still fail to resolve.
 func LinearSystemConfigured(c auth.Credentials) bool {
 	switch linear.AuthMethod(c.LinearAuthMethod) {
-	case linear.AuthMethodAPIKey:
+	case linear.AuthMethodAPIKey, "":
 		return c.LinearAPIKey != ""
 	case linear.AuthMethodAppInstall:
 		return true

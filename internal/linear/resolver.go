@@ -129,16 +129,19 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 }
 
 // ResolveSystemCredential reads the org's service credential, dispatched on
-// the stored auth-method marker. An absent marker, or an api_key marker with
-// no key, is ErrNoLinearSystemCredential; a marker this build does not know is
-// an error of its own, because rebinding is not what fixes it.
+// the stored auth-method marker. An absent marker reads as api_key: the marker
+// only tells the two shapes apart, and a key with no marker is the shape the
+// TRIAGE_FACTORY_LINEAR_API_KEY overlay supplies, since an app install cannot
+// come from an env var. No key under api_key is ErrNoLinearSystemCredential; a
+// marker this build does not know is an error of its own, because rebinding is
+// not what fixes it.
 func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {
 	method, err := r.secrets.GetSystem(ctx, orgID, keyLinearAuthMethod)
 	if err != nil {
 		return SystemCredential{}, fmt.Errorf("resolve linear auth method for org %s: %w", orgID, err)
 	}
 	switch AuthMethod(method) {
-	case AuthMethodAPIKey:
+	case AuthMethodAPIKey, "":
 		key, err := r.secrets.GetSystem(ctx, orgID, keyLinearAPIKey)
 		if err != nil {
 			return SystemCredential{}, fmt.Errorf("resolve linear api key for org %s: %w", orgID, err)
@@ -152,8 +155,6 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 		// envelope stored under linear_app_install. Until then an installed org
 		// resolves as unconfigured.
 		return SystemCredential{}, fmt.Errorf("%w: org=%s (app_install not supported yet)", ErrNoLinearSystemCredential, orgID)
-	case "":
-		return SystemCredential{}, fmt.Errorf("%w: org=%s", ErrNoLinearSystemCredential, orgID)
 	default:
 		return SystemCredential{}, fmt.Errorf("resolve linear credential for org %s: unknown auth method %q", orgID, method)
 	}

@@ -108,7 +108,6 @@ func TestForSystem_MissingCredential(t *testing.T) {
 	cases := map[string]map[string]string{
 		"nothing stored":   {},
 		"marker, no key":   {keyLinearAuthMethod: string(AuthMethodAPIKey)},
-		"key, no marker":   {keyLinearAPIKey: "lin_api_org"},
 		"marker empty key": {keyLinearAuthMethod: string(AuthMethodAPIKey), keyLinearAPIKey: ""},
 	}
 	for name, sys := range cases {
@@ -118,6 +117,29 @@ func TestForSystem_MissingCredential(t *testing.T) {
 				t.Errorf("ForSystem err = %v, want ErrNoLinearSystemCredential", err)
 			}
 		})
+	}
+}
+
+// TestForSystem_KeyWithoutMarkerIsAPIKey pins the env-only setup: the
+// TRIAGE_FACTORY_LINEAR_API_KEY overlay supplies a key and nothing writes a
+// marker, and an app install cannot come from an env var, so the key alone is
+// the api_key shape.
+func TestForSystem_KeyWithoutMarkerIsAPIKey(t *testing.T) {
+	r := NewResolver(&fakeSecrets{sys: map[string]string{keyLinearAPIKey: "lin_api_env"}}, &fakeOrgs{})
+
+	cred, err := r.ResolveSystemCredential(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ResolveSystemCredential: %v", err)
+	}
+	if want := (SystemCredential{Method: AuthMethodAPIKey, APIKey: "lin_api_env"}); cred != want {
+		t.Errorf("credential = %+v, want %+v", cred, want)
+	}
+	c, err := r.ForSystem(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ForSystem: %v", err)
+	}
+	if got := authorizationOf(t, c); got != "lin_api_env" {
+		t.Errorf("Authorization = %q, want the key", got)
 	}
 }
 
