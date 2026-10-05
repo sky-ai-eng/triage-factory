@@ -4,6 +4,18 @@
     "display_name": "Claude Haiku 4.5"
   },
   {
+    "key": "claude-sonnet-5-5",
+    "display_name": "Claude Sonnet 5.5"
+  },
+  {
+    "key": "claude-opus-5-5",
+    "display_name": "Claude Opus 5.5"
+  },
+  {
+    "key": "claude-fable-5-1",
+    "display_name": "Claude Fable 5.1"
+  },
+  {
     "key": "claude-sonnet-5",
     "display_name": "Claude Sonnet 5"
   },
@@ -18,6 +30,18 @@
   {
     "key": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     "display_name": "Claude Haiku 4.5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-sonnet-5-5",
+    "display_name": "Claude Sonnet 5.5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-opus-5-5",
+    "display_name": "Claude Opus 5.5 (Bedrock, US)"
+  },
+  {
+    "key": "us.anthropic.claude-fable-5-1",
+    "display_name": "Claude Fable 5.1 (Bedrock, US)"
   },
   {
     "key": "us.anthropic.claude-sonnet-5",
