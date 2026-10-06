@@ -21,7 +21,7 @@ func newOrgMembershipsStore() db.OrgMembershipsStore {
 
 var _ db.OrgMembershipsStore = (*orgMembershipsStore)(nil)
 
-func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _ string, _ db.ListOpts) ([]domain.OrgMember, int, error) {
+func (*orgMembershipsStore) ListWithIdentity(_ context.Context, _, _, _, _ string, _ db.ListOpts) ([]domain.OrgMember, int, error) {
 	return nil, 0, db.ErrNotApplicableInLocal
 }
 

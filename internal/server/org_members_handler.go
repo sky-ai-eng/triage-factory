@@ -64,8 +64,9 @@ type orgMembersHandler struct {
 }
 
 // orgMemberRow is one roster row. github_username / jira_account_id are null
-// when the member holds no host-scoped identity binding on the org's host
-// (the frontend renders that as a "Not connected" readiness badge).
+// when the member holds no host-scoped identity binding on the org's host, and
+// linear_user_id when they hold none in the org's Linear workspace (the
+// frontend renders that as a "Not connected" readiness badge).
 // is_current_user lets the frontend swap the Remove control for Leave on the
 // caller's own row.
 type orgMemberRow struct {
@@ -73,6 +74,7 @@ type orgMemberRow struct {
 	DisplayName    string  `json:"display_name"`
 	GitHubUsername *string `json:"github_username"`
 	JiraAccountID  *string `json:"jira_account_id"`
+	LinearUserID   *string `json:"linear_user_id"`
 	Role           string  `json:"role"`
 	IsCurrentUser  bool    `json:"is_current_user"`
 }
@@ -121,15 +123,16 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 		total   int
 	)
 	if err := h.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// Identity is host-scoped: resolve the org's GitHub/Jira hosts from
-		// org_settings, then look up each member's login on those hosts —
-		// the same keys the per-user readers and PAT writers use.
+		// Identity is scoped per provider: resolve the org's GitHub/Jira hosts
+		// and Linear workspace from org_settings, then look up each member's
+		// binding under those keys — the same keys the per-user readers and
+		// capture writers use.
 		orgSet, e := tx.Orgs.GetSettings(r.Context(), orgID)
 		if e != nil {
 			return e
 		}
 		members, total, e = tx.OrgMemberships.ListWithIdentity(r.Context(), orgID,
-			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
+			orgSet.GitHubBaseURL, orgSet.JiraBaseURL, orgSet.LinearWorkspaceID, db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 		return e
 	}); err != nil {
 		internalError(w, "org-members", err)
@@ -143,6 +146,7 @@ func (h *orgMembersHandler) handleOrgMembersList(w http.ResponseWriter, r *http.
 			DisplayName:    m.DisplayName,
 			GitHubUsername: m.GitHubUsername,
 			JiraAccountID:  m.JiraAccountID,
+			LinearUserID:   m.LinearUserID,
 			Role:           m.Role,
 			IsCurrentUser:  m.UserID == userID,
 		}

@@ -65,10 +65,13 @@ type OrgMembershipsStore interface {
 	// (EffectiveGitHubHost: an unset github_base_url resolves to the deployment default,
 	// where most identities live; Jira has no default host, so an unset one
 	// matches nothing, which is correct). A member's GitHubUsername /
-	// JiraAccountID is nil when they hold no binding on that host. The roster
-	// reads under the app pool (org_memberships_select RLS); the identity
-	// enrichment reads under the admin pool (see the type doc).
-	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string, opts ListOpts) ([]domain.OrgMember, int, error)
+	// JiraAccountID is nil when they hold no binding on that host.
+	// linearWorkspaceID is the org's Linear workspace, matched verbatim ("" —
+	// no Linear — matches nothing); a member's LinearUserID is nil when they
+	// hold no binding in it. The roster reads under the app pool
+	// (org_memberships_select RLS); the identity enrichment reads under the
+	// admin pool (see the type doc).
+	ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts ListOpts) ([]domain.OrgMember, int, error)
 
 	// RoleFor returns userID's org_role in orgID ("owner" | "admin" |
 	// "member"), or "" when they hold no membership row. App pool: the

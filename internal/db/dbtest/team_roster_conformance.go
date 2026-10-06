@@ -47,8 +47,9 @@ type TeamRosterFactory func(t *testing.T) (TeamRosterStores, TeamRosterSeeder)
 // RunTeamRosterConformance is the shared assertion suite for
 // TeamsStore.ListMembers. It pins:
 //
-//   - the row shape: user id, display name, team role, and the host-scoped
-//     GitHub / Jira readiness pointers (nil when unbound).
+//   - the row shape: user id, display name, team role, the host-scoped
+//     GitHub / Jira readiness pointers and the workspace-scoped Linear one
+//     (nil when unbound).
 //   - the ordering: display name, then user id. The tiebreaker is the half
 //     that matters under paging, so the paging case gives every member the
 //     SAME display name — without the id tiebreaker those pages drop and
@@ -57,7 +58,8 @@ type TeamRosterFactory func(t *testing.T) (TeamRosterStores, TeamRosterSeeder)
 //     page and an offset past the end is an empty page rather than an error.
 //   - host scoping: an unset github_base_url resolves to the deployment default (that is
 //     where the capture paths bind), an unset jira_base_url matches nothing,
-//     and a binding on another host never leaks into this roster.
+//     and a binding on another host — or in another Linear workspace — never
+//     leaks into this roster.
 //   - the N=1 shape local mode runs on: one member, role admin, identities
 //     populated — the answer the assignee picker and the predicate editor
 //     read there, from the same query the multi-team roster uses.
@@ -70,6 +72,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 
 	const ghHost = "https://github.com"
 	const jiraHost = "https://acme.atlassian.net"
+	const linearWorkspace = "8f6c1f0e-9d1c-4a8e-b0b2-3f7a5c9e2d41"
 
 	// team stages an org with a team and returns both, plus the stores.
 	team := func(t *testing.T) (TeamRosterStores, TeamRosterSeeder, string) {
@@ -98,7 +101,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		seed.Membership(t, alice, teamID, "admin")
 		seed.Membership(t, bob, teamID, "member")
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -119,8 +122,8 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			if m.Role != roles[id] {
 				t.Errorf("role for %s = %q, want %q", id, m.Role, roles[id])
 			}
-			if m.GitHubUsername != nil || m.JiraAccountID != nil {
-				t.Errorf("member %s has an identity binding, want nil/nil (nothing bound)", id)
+			if m.GitHubUsername != nil || m.JiraAccountID != nil || m.LinearUserID != nil {
+				t.Errorf("member %s has an identity binding, want nil/nil/nil (nothing bound)", id)
 			}
 		}
 	})
@@ -138,7 +141,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 
 		seen := map[string]bool{}
 		for offset := 0; offset < 6; offset += 2 {
-			page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "",
+			page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "",
 				db.ListOpts{Limit: 2, Offset: offset})
 			if err != nil {
 				t.Fatalf("ListMembers(offset=%d): %v", offset, err)
@@ -169,7 +172,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		u := seed.User(t, "Only")
 		seed.Membership(t, u, teamID, "admin")
 
-		page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "",
+		page, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "",
 			db.ListOpts{Limit: 10, Offset: 10})
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
@@ -184,7 +187,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 
 	t.Run("ListMembers_EmptyTeam", func(t *testing.T) {
 		stores, _, teamID := team(t)
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -205,11 +208,14 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if err := stores.Users.UpsertJiraIdentity(ctx, bound, jiraHost, "acct-1", "Bound", "pat"); err != nil {
 			t.Fatalf("UpsertJiraIdentity: %v", err)
 		}
+		if err := stores.Users.UpsertLinearIdentity(ctx, bound, linearWorkspace, "lin-user-1", "Bound", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
 
 		// githubBaseURL is passed UNSET, as an org on the deployment's default
 		// GitHub has it: the impl must resolve that to the default, which is
 		// where the binding above landed.
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, linearWorkspace, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -220,9 +226,12 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if got := rows[bound].JiraAccountID; got == nil || *got != "acct-1" {
 			t.Errorf("bound jira_account_id = %v, want acct-1", got)
 		}
-		if rows[unbound].GitHubUsername != nil || rows[unbound].JiraAccountID != nil {
-			t.Errorf("unbound member reads %v / %v, want nil / nil (Not connected)",
-				rows[unbound].GitHubUsername, rows[unbound].JiraAccountID)
+		if got := rows[bound].LinearUserID; got == nil || *got != "lin-user-1" {
+			t.Errorf("bound linear_user_id = %v, want lin-user-1", got)
+		}
+		if rows[unbound].GitHubUsername != nil || rows[unbound].JiraAccountID != nil || rows[unbound].LinearUserID != nil {
+			t.Errorf("unbound member reads %v / %v / %v, want nil / nil / nil (Not connected)",
+				rows[unbound].GitHubUsername, rows[unbound].JiraAccountID, rows[unbound].LinearUserID)
 		}
 	})
 
@@ -237,8 +246,12 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if err := stores.Users.UpsertJiraIdentity(ctx, u, "https://other.atlassian.net", "acct-other", "Enterprise", "pat"); err != nil {
 			t.Fatalf("UpsertJiraIdentity: %v", err)
 		}
+		// And in a Linear workspace other than the org's.
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, "other-workspace", "lin-other", "Enterprise", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
 
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", "", db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", "", linearWorkspace, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -251,6 +264,9 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if members[0].JiraAccountID != nil {
 			t.Errorf("jira_account_id = %v, want nil (unset jira host matches nothing)", *members[0].JiraAccountID)
 		}
+		if members[0].LinearUserID != nil {
+			t.Errorf("linear_user_id = %v, want nil (bound in another workspace)", *members[0].LinearUserID)
+		}
 	})
 
 	t.Run("ListMembers_ExcludesOtherTeams", func(t *testing.T) {
@@ -261,7 +277,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		other := seed.Team(t, seed.Org(t, theirs))
 		seed.Membership(t, theirs, other, "admin")
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", db.Unwindowed)
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", "", "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -284,8 +300,11 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		if err := stores.Users.UpsertJiraIdentity(ctx, you, jiraHost, "acct-solo", "You", "pat"); err != nil {
 			t.Fatalf("UpsertJiraIdentity: %v", err)
 		}
+		if err := stores.Users.UpsertLinearIdentity(ctx, you, linearWorkspace, "lin-solo", "You", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost,
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, linearWorkspace,
 			db.ListOpts{Limit: 200, Offset: 0})
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
@@ -308,6 +327,9 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 		}
 		if m.JiraAccountID == nil || *m.JiraAccountID != "acct-solo" {
 			t.Errorf("jira_account_id = %v, want acct-solo", m.JiraAccountID)
+		}
+		if m.LinearUserID == nil || *m.LinearUserID != "lin-solo" {
+			t.Errorf("linear_user_id = %v, want lin-solo", m.LinearUserID)
 		}
 	})
 	t.Run("MemberIDsSystem_EveryRole_OrgScoped", func(t *testing.T) {

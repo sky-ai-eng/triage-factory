@@ -260,7 +260,7 @@ type OrgSettings struct {
 	//
 	// TODO(TFAC-1019): no org_settings column backs this yet, so the stores
 	// leave it empty and every user resolves as having no Linear credential
-	// until the column lands.
+	// and no Linear identity until the column lands.
 	LinearWorkspaceID string
 
 	AnthropicAPIKeyRef    string

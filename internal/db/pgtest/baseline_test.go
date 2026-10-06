@@ -22,7 +22,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	h.Reset(t)
 
 	expectedTables := []string{
-		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions", "user_api_tokens",
+		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "user_linear_identities", "memberships", "org_memberships", "sessions", "user_api_tokens",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",
@@ -2841,6 +2841,103 @@ func TestRLS_UserJiraIdentitySelfAccess(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("otherUser Jira identity rows = %d, want 0", n)
+	}
+}
+
+// TestRLS_UserLinearIdentitySelfAccess pins the self-only contract for
+// user_linear_identities, the Linear sibling of the two tests above: the
+// policies (user_linear_identities_modify / _select) gate purely on
+// (user_id = tf.current_user_id()) with no org leg. Self insert+read succeeds
+// under an empty org claim; a cross-user read filters to zero rows; a
+// cross-user insert is refused by the WITH CHECK; and a second workspace for
+// the same user is a distinct row.
+func TestRLS_UserLinearIdentitySelfAccess(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+
+	userID := SeedUser(t, h, "linear-ident-self")
+	otherUser := SeedUser(t, h, "linear-ident-other")
+
+	const workspace = "ws-acme"
+
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_linear_identities
+				(user_id, workspace_id, linear_user_id, display_name, source, verified_at)
+			VALUES ($1, $2, $3, $4, 'api_key', now())
+		`, userID, workspace, "lin-self", "Self Linear")
+		return e
+	}); err != nil {
+		t.Fatalf("self identity write under empty org claim should succeed; got: %v", err)
+	}
+
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		var linearUserID string
+		if e := tx.QueryRowContext(context.Background(),
+			`SELECT linear_user_id FROM public.user_linear_identities WHERE user_id = $1 AND workspace_id = $2`,
+			userID, workspace,
+		).Scan(&linearUserID); e != nil {
+			return e
+		}
+		if linearUserID != "lin-self" {
+			t.Errorf("self identity read = %q, want %q", linearUserID, "lin-self")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("self identity read under empty org claim should succeed; got: %v", err)
+	}
+
+	// A SELECT denial is a 0-row result, not a 42501.
+	if err := h.WithUser(t, otherUser, "", func(tx *sql.Tx) error {
+		var linearUserID string
+		e := tx.QueryRowContext(context.Background(),
+			`SELECT linear_user_id FROM public.user_linear_identities WHERE user_id = $1 AND workspace_id = $2`,
+			userID, workspace,
+		).Scan(&linearUserID)
+		if e == nil {
+			t.Errorf("cross-user identity read returned %q; want no rows (RLS USING filter)", linearUserID)
+			return nil
+		}
+		if !errors.Is(e, sql.ErrNoRows) {
+			return e
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("cross-user read should filter to zero rows, not error: %v", err)
+	}
+
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_linear_identities
+				(user_id, workspace_id, linear_user_id, display_name, source, verified_at)
+			VALUES ($1, 'ws-other', 'lin-self-elsewhere', 'Self Elsewhere', 'connect_oauth', now())
+		`, userID)
+		return e
+	}); err != nil {
+		t.Fatalf("second-workspace identity write should succeed (distinct workspace); got: %v", err)
+	}
+
+	if err := h.WithUser(t, userID, "", func(tx *sql.Tx) error {
+		_, e := tx.ExecContext(context.Background(), `
+			INSERT INTO public.user_linear_identities
+				(user_id, workspace_id, linear_user_id, display_name, source, verified_at)
+			VALUES ($1, $2, $3, $4, 'api_key', now())
+		`, otherUser, workspace, "lin-spoof", "Spoofed")
+		return e
+	}); err == nil {
+		t.Fatal("cross-user identity insert should violate WITH CHECK, but succeeded")
+	} else {
+		assertPgCode(t, err, "42501", "cross-user Linear identity insert")
+	}
+
+	var n int
+	if err := h.AdminDB.QueryRow(
+		`SELECT count(*) FROM public.user_linear_identities WHERE user_id = $1`, otherUser,
+	).Scan(&n); err != nil {
+		t.Fatalf("read-back count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("otherUser Linear identity rows = %d, want 0", n)
 	}
 }
 
