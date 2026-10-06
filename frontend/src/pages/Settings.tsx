@@ -71,7 +71,7 @@ export default function Settings() {
 
           <section aria-labelledby="settings-section-team">
             <SectionDivider id="settings-section-team" title="Team" />
-            <TeamSettings isLocal={isLocal} teamId="default" />
+            <TeamSettings isLocal={isLocal} orgId={LOCAL_DEFAULT_ORG_ID} teamId="default" />
           </section>
 
           <section aria-labelledby="settings-section-user">

@@ -378,6 +378,35 @@ describe('the sources panel', () => {
   })
 })
 
+describe('linear', () => {
+  it('stays a coming-soon card, and no link opens it, while the source is in the works', async () => {
+    sources.state = { linear: 'wip' }
+    render(
+      <MemoryRouter initialEntries={['/?source=linear']}>
+        <TeamSettings />
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+    expect(document.querySelector('.sp[data-source="linear"]')).toBeNull()
+
+    fireEvent.click(bandHead()!)
+    const card = screen.getByText('Linear').closest('.tf-src')
+    expect(card).not.toBeNull()
+    expect(within(card as HTMLElement).getByText('coming soon')).toBeInTheDocument()
+    expect(screen.getByText(/3 sources connected/)).toBeInTheDocument()
+  })
+
+  it('opens like any other source once the deployment serves it', async () => {
+    sources.state = { linear: 'available' }
+    renderPage()
+    await waitFor(() => expect(bandHead()).not.toBeNull())
+
+    fireEvent.click(screen.getByText('Linear'))
+    await waitFor(() => expect(document.querySelector('.sp[data-source="linear"]')).not.toBeNull())
+    expect(screen.getByText('event source · platform')).toBeInTheDocument()
+  })
+})
+
 describe('the figures', () => {
   const figureValue = (label: string) => {
     const l = Array.from(document.querySelectorAll('.ts-fig-l')).find(

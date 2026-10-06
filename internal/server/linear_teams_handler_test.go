@@ -8,11 +8,24 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-const linearTeamsListPath = "/api/linear/teams/list"
+func linearOrgPath(orgID string) string { return "/api/orgs/" + orgID + "/linear" }
 
-func linearStatesPath(query string) string { return "/api/linear/states" + query }
+var (
+	linearTeamsListPath = linearOrgPath(runmode.LocalDefaultOrgID) + "/teams/list"
+)
+
+func linearTeamPath(teamID string) string {
+	return linearOrgPath(runmode.LocalDefaultOrgID) + "/teams/" + teamID
+}
+
+func linearStatesListPath(teamID string) string { return linearTeamPath(teamID) + "/states/list" }
+
+func linearStatePath(teamID, stateID string) string {
+	return linearTeamPath(teamID) + "/states/" + stateID
+}
 
 func linearTeamKeysOf(items []linearTeamJSON) string {
 	keys := make([]string, 0, len(items))
@@ -38,7 +51,7 @@ func assertLinearFault(t *testing.T, rec *httptest.ResponseRecorder, status int,
 	}
 }
 
-// TestLinearTeamsList_ProxyPagingRoundTrip walks the picker list the way a
+// TestLinearTeamsList_ProxyPagingRoundTrip walks the team list the way a
 // client does, first page then the token it was handed, and pins the proxy
 // contract: the rows page through Linear's own cursor, and total_count is null.
 func TestLinearTeamsList_ProxyPagingRoundTrip(t *testing.T) {
@@ -126,83 +139,193 @@ func TestLinearTeamsList_RefusedBodies(t *testing.T) {
 	}
 }
 
-// TestLinearTeamsList_NotConnected: no service credential is a 409 naming the
-// fix, not an empty list.
-func TestLinearTeamsList_NotConnected(t *testing.T) {
+// TestLinearCatalog_NotConnected: with no service credential every read is a
+// 409 naming the fix, never an empty list or a 404 for a team that may exist.
+func TestLinearCatalog_NotConnected(t *testing.T) {
 	s, _ := newServerWithUnconnectedLinear(t, linearFixtureEng)
-	rec := doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{})
-	assertLinearFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
-}
-
-// TestLinearTeamsList_UpstreamFailure is a 502, never an empty page.
-func TestLinearTeamsList_UpstreamFailure(t *testing.T) {
-	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
-	fake.SetFailing(true)
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{}),
-		http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
-}
-
-// TestLinearStates_SortedByPosition: one team's states, in board order, each
-// with the type the picker pre-arms from.
-func TestLinearStates_SortedByPosition(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
-
-	rec := doJSON(t, s, http.MethodGet, linearStatesPath("?team="+linearTeamEng), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET states = %d; body=%s", rec.Code, rec.Body.String())
-	}
-	var got []linearStateJSON
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	var names []string
-	for _, st := range got {
-		names = append(names, st.Name)
-	}
-	if strings.Join(names, ",") != "Triage,Backlog,Todo,In Progress,In Review,Done,Canceled" {
-		t.Errorf("states = %v, want board order", names)
-	}
-	if got[0] != (linearStateJSON{ID: linearStateTriage, Name: "Triage", Type: "triage", Position: 0}) {
-		t.Errorf("first state = %+v", got[0])
-	}
-}
-
-// TestLinearStates_TeamParamIsStrict: the team is required, a Linear id, and
-// named exactly once, and the read takes nothing else.
-func TestLinearStates_TeamParamIsStrict(t *testing.T) {
-	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
-	for name, query := range map[string]string{
-		"missing":          "",
-		"empty":            "?team=",
-		"not a uuid":       "?team=ENG",
-		"upper-case uuid":  "?team=" + strings.ToUpper(linearTeamEng),
-		"two teams":        "?team=" + linearTeamEng + "&team=" + linearTeamOps,
-		"unknown param":    "?team=" + linearTeamEng + "&project=ENG",
-		"only the unknown": "?project=ENG",
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"teams list":  doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{}),
+		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
+		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
+		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			rec := doJSON(t, s, http.MethodGet, linearStatesPath(query), nil)
-			if rec.Code != http.StatusBadRequest {
-				t.Fatalf("GET %q = %d, want 400; body=%s", query, rec.Code, rec.Body.String())
-			}
-			for _, item := range decodeErrorItems(t, rec) {
-				if item.Reason != "INVALID_PARAM" {
-					t.Errorf("reason = %q, want INVALID_PARAM", item.Reason)
-				}
-				if item.Field != "team" && item.Field != "project" {
-					t.Errorf("field = %q, want the parameter named", item.Field)
-				}
-			}
+			assertLinearFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
+		})
+	}
+}
+
+// TestLinearCatalog_UpstreamFailure: a failed Linear call is a 502 on every
+// read, never an empty page or a 404.
+func TestLinearCatalog_UpstreamFailure(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
+	fake.SetFailing(true)
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"teams list":  doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{}),
+		"team":        doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamEng), nil),
+		"states list": doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{}),
+		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertLinearFault(t, rec, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
+		})
+	}
+}
+
+// TestLinearCatalog_MalformedOrgIsNotFound: an org id that is not one is a 404
+// that never reaches Linear. Membership itself is N=1 in local mode; the
+// Postgres test covers a caller outside the org.
+func TestLinearCatalog_MalformedOrgIsNotFound(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
+	org := linearOrgPath("not-an-org")
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"teams list":  doJSON(t, s, http.MethodPost, org+"/teams/list", map[string]any{}),
+		"team":        doJSON(t, s, http.MethodGet, org+"/teams/"+linearTeamEng, nil),
+		"states list": doJSON(t, s, http.MethodPost, org+"/teams/"+linearTeamEng+"/states/list", map[string]any{}),
+		"state":       doJSON(t, s, http.MethodGet, org+"/teams/"+linearTeamEng+"/states/"+linearStateDone, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertLinearFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")
 		})
 	}
 	if fake.Calls() != 0 {
-		t.Errorf("a refused read reached Linear %d times", fake.Calls())
+		t.Errorf("a malformed org reached Linear %d times", fake.Calls())
 	}
 }
 
-// TestLinearStates_NotConnected mirrors the list's 409.
-func TestLinearStates_NotConnected(t *testing.T) {
-	s, _ := newServerWithUnconnectedLinear(t, linearFixtureEng)
-	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatesPath("?team="+linearTeamEng), nil),
-		http.StatusConflict, "NOT_CONFIGURED", "")
+// TestLinearTeamGet: one team by id; one Linear cannot show this credential,
+// and an id that is not a Linear id at all, are both a 404.
+func TestLinearTeamGet(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+
+	rec := doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamOps), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET team = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var got linearTeamJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := (linearTeamJSON{ID: linearTeamOps, Key: "OPS", Name: "Operations", Private: true}); got != want {
+		t.Errorf("team = %+v, want %+v", got, want)
+	}
+
+	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamGhost), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+	before := fake.Calls()
+	for _, id := range []string{"ENG", strings.ToUpper(linearTeamEng)} {
+		assertLinearFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(id), nil),
+			http.StatusNotFound, "NOT_FOUND", "")
+	}
+	if fake.Calls() != before {
+		t.Error("a path id that is not a Linear id reached Linear")
+	}
+}
+
+// TestLinearStatesList_PagesTheTeamsWorkflow walks a team's states a page at
+// a time. The pages together are the whole workflow, in Linear's order with
+// each state's position alongside, and total_count is null.
+func TestLinearStatesList_PagesTheTeamsWorkflow(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
+
+	var got []linearStateJSON
+	token := ""
+	for pages := 0; ; pages++ {
+		if pages > len(linearFixtureStates) {
+			t.Fatal("the states list never stopped minting tokens")
+		}
+		body := map[string]any{"page_size": 3}
+		if token != "" {
+			body["page_token"] = token
+		}
+		page := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), body))
+		if len(page.Items) > 3 {
+			t.Fatalf("page of %d, want at most 3", len(page.Items))
+		}
+		if page.TotalCount != nil {
+			t.Errorf("total_count = %d, want null", *page.TotalCount)
+		}
+		got = append(got, page.Items...)
+		if token = page.NextPageToken; token == "" {
+			break
+		}
+	}
+	want := make([]linearStateJSON, 0, len(linearFixtureStates))
+	for _, st := range linearFixtureStates {
+		want = append(want, toLinearStateJSON(st))
+	}
+	if len(got) != len(want) {
+		t.Fatalf("states = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("state %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// TestLinearStatesList_TokenIsBoundToTheTeam: a token wraps a cursor into one
+// team's workflow, so it cannot page another team's.
+func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	first := decodeList[linearStateJSON](t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng),
+		map[string]any{"page_size": 2}))
+	if first.NextPageToken == "" {
+		t.Fatal("page 1 carried no next_page_token")
+	}
+	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamOps),
+		map[string]any{"page_size": 2, "page_token": first.NextPageToken}),
+		http.StatusBadRequest, "INVALID_PARAM", "page_token")
+}
+
+// TestLinearStatesList_Refusals: a team Linear cannot show is a 404, as is a
+// path id that is not a Linear id; the body is strict and count-only has no
+// answer.
+func TestLinearStatesList_Refusals(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
+
+	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamGhost), map[string]any{}),
+		http.StatusNotFound, "NOT_FOUND", "")
+
+	before := fake.Calls()
+	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath("ENG"), map[string]any{}),
+		http.StatusNotFound, "NOT_FOUND", "")
+	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"page_size": 0}),
+		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
+	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"q": "done"}),
+		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
+	if fake.Calls() != before {
+		t.Errorf("a refused request reached Linear %d times", fake.Calls()-before)
+	}
+}
+
+// TestLinearStateGet: one state through the team that owns it. A state of
+// another team's workflow is a 404 at this team's address, as is one Linear
+// does not know.
+func TestLinearStateGet(t *testing.T) {
+	s, fake := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	opsOnly := linear.WorkflowState{ID: fixtureUUID("linear-state-ops-only"), Name: "Queued", Type: "unstarted", Position: 1}
+	fake.SetStates(linearTeamOps, opsOnly)
+
+	rec := doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDoing), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET state = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var got linearStateJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := (linearStateJSON{ID: linearStateDoing, Name: "In Progress", Type: "started", Position: 3}); got != want {
+		t.Errorf("state = %+v, want %+v", got, want)
+	}
+
+	if rec := doJSON(t, s, http.MethodGet, linearStatePath(linearTeamOps, opsOnly.ID), nil); rec.Code != http.StatusOK {
+		t.Errorf("GET the state at its own team = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, opsOnly.ID), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateUnknown), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, "Done"), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
 }

@@ -1172,11 +1172,14 @@ func (s *Server) routes() {
 	// why the two differ.
 	s.apiMutating("POST /api/jira/projects/list", s.handleJiraProjectsList)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
-	// The Linear team picker's candidates and one team's workflow states —
-	// the siblings of the two Jira reads above, both proxied live under the
-	// org's Linear service credential.
-	s.apiMutating("POST /api/linear/teams/list", s.handleLinearTeamsList)
-	s.api("GET /api/linear/states", s.handleLinearStates)
+	// The org's Linear catalog — its teams, and each team's workflow states —
+	// proxied live under the org's Linear service credential and addressed at
+	// the org, so a caller in several orgs reads each without moving their
+	// active org. Member-gated; see the handler file.
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/list", s.handleLinearTeamsList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}", s.handleLinearTeamGet)
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list", s.handleLinearStatesList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}", s.handleLinearStateGet)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two
 	// partitions of the same set — not a row list a client walks. It reads the

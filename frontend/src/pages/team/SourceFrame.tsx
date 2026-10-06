@@ -17,7 +17,7 @@ import './source-pages.css'
 // is a Ticker rather than a printed number, and the same figure appears again
 // in the left column where a page has one.
 
-export type SourceKind = 'github' | 'jira' | 'slack'
+export type SourceKind = 'github' | 'jira' | 'slack' | 'linear'
 
 /** What every source body is handed. The team is already resolved. */
 export type SourceBodyProps = {

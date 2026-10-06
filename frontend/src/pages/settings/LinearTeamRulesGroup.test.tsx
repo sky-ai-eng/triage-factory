@@ -34,17 +34,23 @@ const NO_STARTED = [
   { id: 'o-done', name: 'Done', type: 'completed', position: 2 },
 ]
 
+const ORG = 'org-1'
+const LINEAR = `/api/orgs/${ORG}/linear`
+const statesPath = (team: string) => `${LINEAR}/teams/${team}/states/list`
+
 function stubFetch() {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
-    if (url.startsWith('/api/linear/teams/list')) {
+    if (url === `${LINEAR}/teams/list`) {
       return { ok: true, status: 200, ...jsonBody({ items: CATALOG, next_page_token: '' }) }
     }
-    if (url === '/api/linear/states?team=team-eng') {
-      return { ok: true, status: 200, ...jsonBody(WORKFLOW) }
+    // Served out of board order, so a list that forgot to sort shows it.
+    if (url === statesPath('team-eng')) {
+      const items = [...WORKFLOW].reverse()
+      return { ok: true, status: 200, ...jsonBody({ items, next_page_token: '' }) }
     }
-    if (url === '/api/linear/states?team=team-ops') {
-      return { ok: true, status: 200, ...jsonBody(NO_STARTED) }
+    if (url === statesPath('team-ops')) {
+      return { ok: true, status: 200, ...jsonBody({ items: NO_STARTED, next_page_token: '' }) }
     }
     throw new Error(`unexpected fetch: ${url || '(no url)'}`)
   })
@@ -52,11 +58,18 @@ function stubFetch() {
   return fetchMock
 }
 
-function Harness({ seed = [] as LinearTeamConfig[] }) {
+function Harness({ seed = [] as LinearTeamConfig[], readOnly = false }) {
   const [value, setValue] = useState<LinearTeamConfig[]>(seed)
   return (
     <>
-      <LinearTeamRulesGroup value={value} onChange={setValue} connected bare />
+      <LinearTeamRulesGroup
+        orgId={ORG}
+        value={value}
+        onChange={setValue}
+        connected
+        readOnly={readOnly}
+        bare
+      />
       <output data-testid="watched">{value.map((t) => t.key).join(',')}</output>
       <output data-testid="armed">
         {value
@@ -105,7 +118,7 @@ describe('LinearTeamRulesGroup · watching', () => {
     await user.click(within(rowFor('Operations')).getByRole('button', { name: 'Watch' }))
 
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith('/api/linear/states?team=team-ops', expect.anything()),
+      expect(fetchMock).toHaveBeenCalledWith(statesPath('team-ops'), expect.anything()),
     )
     expect(screen.getByTestId('watched')).toHaveTextContent('OPS')
     expect(screen.getByTestId('armed')).toHaveTextContent('')
@@ -174,5 +187,36 @@ describe('LinearTeamRulesGroup · mapping', () => {
     expect(screen.getByTestId('valid')).toHaveTextContent('no')
     expect(screen.getByText('Partly mapped')).toBeInTheDocument()
     expect(screen.getByText(/or clear all three to keep ENG watched/)).toBeInTheDocument()
+  })
+})
+
+describe('LinearTeamRulesGroup · read-only', () => {
+  const mapped: LinearTeamConfig = {
+    ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
+    pickup: { members: [{ id: 's-todo', name: 'Todo', type: 'unstarted' }] },
+    in_progress: {
+      members: [{ id: 's-doing', name: 'In Progress', type: 'started' }],
+      canonical: { id: 's-doing', name: 'In Progress', type: 'started' },
+    },
+    done: {
+      members: [{ id: 's-done', name: 'Done', type: 'completed' }],
+      canonical: { id: 's-done', name: 'Done', type: 'completed' },
+    },
+  }
+
+  it('shows the mapping with no verbs and no catalog', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubFetch()
+    render(<Harness seed={[mapped]} readOnly />)
+
+    await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
+    expect(await screen.findByText('3 states available')).toBeInTheDocument()
+    expect(screen.getByText('In Progress ★')).toBeInTheDocument()
+    expect(screen.getByText('Done ★')).toBeInTheDocument()
+
+    expect(screen.queryByRole('button', { name: 'Stop watching ENG' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Watch' })).toBeNull()
+    expect(screen.queryByRole('searchbox', { name: 'Search Linear teams' })).toBeNull()
+    expect(fetchMock).not.toHaveBeenCalledWith(`${LINEAR}/teams/list`, expect.anything())
   })
 })

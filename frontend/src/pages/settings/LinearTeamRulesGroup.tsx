@@ -17,6 +17,7 @@ import {
   listLinearStates,
   listLinearTeams,
   type LinearStateOption,
+  type LinearStateRef,
   type LinearTeamCandidate,
 } from '../../lib/linearTeams'
 
@@ -54,17 +55,25 @@ interface WatchRow {
  *
  * A controlled component: the container owns the teams (`value`) and the PUT
  * /api/teams/{id}/linear-teams. Org-level Linear access lives elsewhere; this
- * is suppressed until Linear is connected.
+ * is suppressed until Linear is connected. `orgId` addresses the org's Linear
+ * catalog, which the picker and the states reads come from.
+ *
+ * `readOnly` is a team member's view: what is watched and how it is mapped,
+ * with every verb absent rather than disabled and no catalog to pick from.
  */
 export default function LinearTeamRulesGroup({
+  orgId,
   value,
   onChange,
   connected,
+  readOnly = false,
   bare = false,
 }: {
+  orgId: string
   value: LinearTeamConfig[]
   onChange: (next: LinearTeamConfig[]) => void
   connected: boolean
+  readOnly?: boolean
   bare?: boolean
 }) {
   const [statesByTeam, setStatesByTeam] = useState<Record<string, LinearStateOption[]>>({})
@@ -99,32 +108,36 @@ export default function LinearTeamRulesGroup({
     }
   }, [])
 
-  const fetchCandidates = useCallback(async (q: string) => {
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-    setCatalogLoading(true)
-    try {
-      const page = await listLinearTeams(q, { signal: controller.signal })
-      if (!mountedRef.current || controller.signal.aborted) return
-      setCandidates(page.items)
-      setCatalogTruncated(page.hasMore)
-      setCatalogError('')
-    } catch (e) {
-      if (controller.signal.aborted || !mountedRef.current) return
-      setCandidates([])
-      setCatalogTruncated(false)
-      setCatalogError(httpErrorMessage(e, 'Could not read the Linear team list.'))
-    } finally {
-      if (mountedRef.current && !controller.signal.aborted) setCatalogLoading(false)
-    }
-  }, [])
+  const fetchCandidates = useCallback(
+    async (q: string) => {
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+      setCatalogLoading(true)
+      try {
+        const page = await listLinearTeams(orgId, q, { signal: controller.signal })
+        if (!mountedRef.current || controller.signal.aborted) return
+        setCandidates(page.items)
+        setCatalogTruncated(page.hasMore)
+        setCatalogError('')
+      } catch (e) {
+        if (controller.signal.aborted || !mountedRef.current) return
+        setCandidates([])
+        setCatalogTruncated(false)
+        setCatalogError(httpErrorMessage(e, 'Could not read the Linear team list.'))
+      } finally {
+        if (mountedRef.current && !controller.signal.aborted) setCatalogLoading(false)
+      }
+    },
+    [orgId],
+  )
 
+  // A read-only view has no picker, so it has no catalog to read.
   useEffect(() => {
-    if (!connected) return
+    if (!connected || readOnly) return
     const timer = setTimeout(() => void fetchCandidates(search), search ? SEARCH_DEBOUNCE_MS : 0)
     return () => clearTimeout(timer)
-  }, [connected, search, fetchCandidates])
+  }, [connected, readOnly, search, fetchCandidates])
 
   // The watch table: watched teams first, always present — including one the
   // catalog no longer offers — then the catalog's other candidates, which the
@@ -164,7 +177,7 @@ export default function LinearTeamRulesGroup({
   const fetchStates = async (teamId: string, prefill = false) => {
     setLoadingIds((prev) => new Set([...prev, teamId]))
     try {
-      const states = await listLinearStates(teamId)
+      const states = await listLinearStates(orgId, teamId)
       if (!mountedRef.current) return
       setStatesByTeam((current) => ({ ...current, [teamId]: states }))
       setStateErrors((current) => {
@@ -274,14 +287,16 @@ export default function LinearTeamRulesGroup({
                       ? 'Ready'
                       : 'States not mapped'}
               </button>
-              <button
-                type="button"
-                onClick={() => unwatch(team.id)}
-                className="text-ink-3 hover:text-alarm"
-                aria-label={`Stop watching ${team.key}`}
-              >
-                <Trash2 size={14} />
-              </button>
+              {!readOnly && (
+                <button
+                  type="button"
+                  onClick={() => unwatch(team.id)}
+                  className="text-ink-3 hover:text-alarm"
+                  aria-label={`Stop watching ${team.key}`}
+                >
+                  <Trash2 size={14} />
+                </button>
+              )}
             </div>
 
             {isOpen && (
@@ -289,7 +304,9 @@ export default function LinearTeamRulesGroup({
                 {!armed && !halfMapped && (
                   <p className="text-reported text-ink-3">
                     {team.key} is watched but not mapped, so nothing from it reaches the board yet.
-                    Map its states below to arm it.
+                    {readOnly
+                      ? ' A team admin maps its states.'
+                      : ' Map its states below to arm it.'}
                   </p>
                 )}
                 {halfMapped && (
@@ -309,7 +326,7 @@ export default function LinearTeamRulesGroup({
                           : 'No states loaded'}
                   </p>
                   <div className="flex shrink-0 items-center gap-2">
-                    {prefill && (
+                    {prefill && !readOnly && (
                       <button
                         type="button"
                         onClick={() => updateTeam(team.id, prefill)}
@@ -329,7 +346,7 @@ export default function LinearTeamRulesGroup({
                   </div>
                 </div>
 
-                {missing.length > 0 && (
+                {missing.length > 0 && !readOnly && (
                   <div className="rounded-xl border border-alarm/30 bg-alarm/5 px-3 py-2.5 space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertTriangle size={13} className="mt-0.5 shrink-0 text-alarm" />
@@ -359,7 +376,15 @@ export default function LinearTeamRulesGroup({
                   </div>
                 )}
 
-                {states.length > 0 && (
+                {readOnly && (
+                  <dl className="space-y-2 pt-1">
+                    <ReadOnlyRule label="Pickup" rule={team.pickup} />
+                    <ReadOnlyRule label="In progress" rule={team.in_progress} />
+                    <ReadOnlyRule label="Done" rule={team.done} />
+                  </dl>
+                )}
+
+                {states.length > 0 && !readOnly && (
                   <div className="space-y-4 pt-1">
                     <JiraStatusRule
                       label="Pickup"
@@ -484,11 +509,33 @@ export default function LinearTeamRulesGroup({
       ) : (
         <>
           {board}
-          {picker}
+          {!readOnly && picker}
         </>
       )}
     </>
   )
 
   return bare ? inner : <Section>{inner}</Section>
+}
+
+/** One rule as a member sees it: its states, with the write target marked. */
+function ReadOnlyRule({
+  label,
+  rule,
+}: {
+  label: string
+  rule: { members: LinearStateRef[]; canonical?: LinearStateRef | null }
+}) {
+  return (
+    <div className="flex gap-3">
+      <dt className="w-24 shrink-0 text-reported text-ink-3">{label}</dt>
+      <dd className="text-reported text-ink-2">
+        {rule.members.length === 0
+          ? '—'
+          : rule.members
+              .map((m) => (m.id === rule.canonical?.id ? `${m.name || m.id} ★` : m.name || m.id))
+              .join(', ')}
+      </dd>
+    </div>
+  )
 }

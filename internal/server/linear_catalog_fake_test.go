@@ -48,10 +48,11 @@ var linearFixtureStates = []linear.WorkflowState{
 }
 
 // linearCatalogFake stands in for Linear's GraphQL endpoint, answering the
-// three documents the picker routes and the write gate send — Teams (filtered
-// and cursor-paged), Team, and WorkflowStates — from one in-memory workspace,
-// so a paging, filtering or resolution bug shows up as wrong rows rather than
-// as a stub running out of scripted replies.
+// documents the catalog routes and the write gate send — Teams (filtered and
+// cursor-paged), Team, TeamStates (cursor-paged) and WorkflowState — from one
+// in-memory workspace, so a paging, filtering or resolution bug shows up as
+// wrong rows rather than as a stub running out of scripted replies. A team
+// with no states of its own set has linearFixtureStates.
 type linearCatalogFake struct {
 	URL string
 
@@ -87,7 +88,16 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 	f.calls++
 	failing := f.failing || (op == "Team" && f.teamFailing[stringVar(body.Variables, "id")])
 	teams := append([]linear.Team(nil), f.teams...)
-	states, custom := f.states[stringVar(body.Variables, "teamID")]
+	statesOf := func(teamID string) []linear.WorkflowState {
+		if st, custom := f.states[teamID]; custom {
+			return st
+		}
+		return linearFixtureStates
+	}
+	workflows := make(map[string][]linear.WorkflowState, len(teams))
+	for _, t := range teams {
+		workflows[t.ID] = statesOf(t.ID)
+	}
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -109,20 +119,7 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 				matched = append(matched, t)
 			}
 		}
-		start, _ := strconv.Atoi(stringVar(body.Variables, "after"))
-		first := int(body.Variables["first"].(float64))
-		end := min(start+first, len(matched))
-		if start > len(matched) {
-			start = end
-		}
-		page := matched[start:end]
-		if page == nil {
-			page = []linear.Team{}
-		}
-		writeGraphQLData(w, map[string]any{"teams": map[string]any{
-			"nodes":    page,
-			"pageInfo": map[string]any{"hasNextPage": end < len(matched), "endCursor": strconv.Itoa(end)},
-		}})
+		writeGraphQLData(w, map[string]any{"teams": fakeConnection(matched, body.Variables)})
 	case "Team":
 		id := stringVar(body.Variables, "id")
 		for _, t := range teams {
@@ -133,17 +130,48 @@ func (f *linearCatalogFake) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`)
-	case "WorkflowStates":
-		if !custom {
-			states = linearFixtureStates
+	case "TeamStates":
+		states, known := workflows[stringVar(body.Variables, "id")]
+		if !known {
+			writeGraphQLData(w, map[string]any{"team": nil})
+			return
 		}
-		writeGraphQLData(w, map[string]any{"workflowStates": map[string]any{
-			"nodes":    states,
-			"pageInfo": map[string]any{"hasNextPage": false, "endCursor": ""},
-		}})
+		writeGraphQLData(w, map[string]any{"team": map[string]any{"states": fakeConnection(states, body.Variables)}})
+	case "WorkflowState":
+		id := stringVar(body.Variables, "id")
+		for _, t := range teams {
+			for _, st := range workflows[t.ID] {
+				if st.ID == id {
+					writeGraphQLData(w, map[string]any{"workflowState": map[string]any{
+						"id": st.ID, "name": st.Name, "type": st.Type, "position": st.Position,
+						"team": map[string]any{"id": t.ID},
+					}})
+					return
+				}
+			}
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"errors":[{"message":"Entity not found: WorkflowState","extensions":{"code":"INVALID_INPUT"}}]}`)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"errors":[{"message":"unexpected document `+op+`"}]}`)
+	}
+}
+
+// fakeConnection is one page of items as a GraphQL connection, paged by the
+// request's first and after, with the cursor an offset.
+func fakeConnection[T any](items []T, vars map[string]any) map[string]any {
+	start, _ := strconv.Atoi(stringVar(vars, "after"))
+	first := int(vars["first"].(float64))
+	start = min(start, len(items))
+	end := min(start+first, len(items))
+	page := items[start:end]
+	if page == nil {
+		page = []T{}
+	}
+	return map[string]any{
+		"nodes":    page,
+		"pageInfo": map[string]any{"hasNextPage": end < len(items), "endCursor": strconv.Itoa(end)},
 	}
 }
 

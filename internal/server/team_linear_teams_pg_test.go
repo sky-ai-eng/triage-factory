@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -89,5 +90,55 @@ func TestLinearTeamsPut_Postgres_RoundTrips(t *testing.T) {
 	}
 	if got := decodeLinearTeamsResponse(t, rig.requestWithSid(http.MethodGet, teamPath+"/settings", sid)); len(got) != 2 {
 		t.Errorf("a refused PUT changed the set: %+v", got)
+	}
+}
+
+// TestLinearCatalog_Postgres_AddressedAndGatedByOrg: the catalog routes answer
+// for the org in the path, so a caller in two orgs reads the second without
+// moving their active org; and the gate is live membership, so a member removed
+// from the org gets a 404 from every route, with their session still carrying
+// the org, and Linear is never asked.
+func TestLinearCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
+	rig := newAuthRig(t)
+	alice := rig.seedUser()
+	org, team := rig.seedOrg(alice, "linear-a-"+uuid.NewString()[:8])
+	other, _ := rig.seedOrg(alice, "linear-b-"+uuid.NewString()[:8])
+	fake := newLinearCatalogFake(t, linearFixtureEng)
+	rig.srv.linearResolver = fixedLinearResolver{Resolver: rig.srv.linearResolver, endpoint: fake.URL}
+
+	sid := rig.signIn(alice)
+	resp := rig.postJSONWithSid(http.MethodPost, "/api/orgs/"+other.String()+"/linear/teams/list", sid, map[string]any{})
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"key":"ENG"`) {
+		t.Fatalf("a second org's teams = %d %s, want 200 listing ENG", resp.StatusCode, raw)
+	}
+
+	bob := rig.seedUser()
+	pgtest.AddOrgMember(t, rig.h, bob.String(), org.String(), team.String(), "member", "member")
+	bobSid := rig.signIn(bob)
+	base := "/api/orgs/" + org.String() + "/linear/teams"
+	resp = rig.postJSONWithSid(http.MethodPost, base+"/list", bobSid, map[string]any{})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("a member's read = %d, want 200", resp.StatusCode)
+	}
+
+	pgtest.MustExec(t, rig.h.AdminDB, `DELETE FROM memberships WHERE user_id = $1`, bob)
+	pgtest.MustExec(t, rig.h.AdminDB, `DELETE FROM org_memberships WHERE user_id = $1`, bob)
+	before := fake.Calls()
+	for name, resp := range map[string]*http.Response{
+		"teams list":  rig.postJSONWithSid(http.MethodPost, base+"/list", bobSid, map[string]any{}),
+		"team":        rig.requestWithSid(http.MethodGet, base+"/"+linearTeamEng, bobSid),
+		"states list": rig.postJSONWithSid(http.MethodPost, base+"/"+linearTeamEng+"/states/list", bobSid, map[string]any{}),
+		"state":       rig.requestWithSid(http.MethodGet, base+"/"+linearTeamEng+"/states/"+linearStateDone, bobSid),
+	} {
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("%s after removal = %d, want 404", name, resp.StatusCode)
+		}
+	}
+	if got := fake.Calls() - before; got != 0 {
+		t.Errorf("a removed member's reads reached Linear %d times", got)
 	}
 }

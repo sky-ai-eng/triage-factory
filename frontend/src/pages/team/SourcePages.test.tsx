@@ -3,8 +3,9 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
+import LinearSource from './LinearSource'
 
-// The three source pages, each mounted against a stubbed API.
+// The source pages, each mounted against a stubbed API.
 //
 // What is worth pinning is the honesty rule, because it is the thing a
 // screenshot cannot check and the thing most likely to be "fixed" later by
@@ -29,6 +30,11 @@ vi.mock('../../hooks/useEventSources', () => ({
     canProduce: (kind: string) => sources.state[kind] === undefined,
   }),
 }))
+
+vi.mock('../../contexts/OrgContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../contexts/OrgContext')>()
+  return { ...actual, useActiveOrgId: () => 'org-1' }
+})
 
 const BODY = {
   teamId: 't1',
@@ -569,5 +575,99 @@ describe('Slack source page', () => {
     // Ours, nobody's — and no mark at all on the channel this team does not
     // watch.
     expect(tones).toEqual(['ours', 'none'])
+  })
+})
+
+describe('LinearSource', () => {
+  const ENG_ID = 'team-eng'
+  const LINEAR = '/api/orgs/org-1/linear/teams'
+  const PAYLOADS = {
+    '/api/teams/t1/settings': { linear_teams: [] },
+    [`${LINEAR}/list`]: [{ id: ENG_ID, key: 'ENG', name: 'Engineering', private: false }],
+    [`${LINEAR}/${ENG_ID}/states/list`]: [
+      { id: 's-done', name: 'Done', type: 'completed', position: 3 },
+      { id: 's-todo', name: 'Todo', type: 'unstarted', position: 1 },
+      { id: 's-doing', name: 'In Progress', type: 'started', position: 2 },
+    ],
+  }
+  const calledWith = (fetchMock: ReturnType<typeof stub>, path: string, method: string) =>
+    fetchMock.mock.calls.find(
+      ([url, init]) => String(url) === path && (init as RequestInit | undefined)?.method === method,
+    )
+
+  beforeEach(() => {
+    sources.state = { linear: 'available' }
+  })
+
+  it('lets a team admin watch a team, mapped from its state types, and save it', async () => {
+    const fetchMock = stub(PAYLOADS)
+    render(<LinearSource {...BODY} />)
+
+    // The catalog is read at the org the page belongs to.
+    await waitFor(() => expect(screen.getByText('Engineering')).toBeInTheDocument())
+    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeDefined()
+    const save = screen.getByRole('button', { name: 'Save' })
+    expect(save).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Watch' }))
+    await waitFor(() => expect(screen.getByText('Ready')).toBeInTheDocument())
+    expect(calledWith(fetchMock, `${LINEAR}/${ENG_ID}/states/list`, 'POST')).toBeDefined()
+
+    fireEvent.click(save)
+    await waitFor(() =>
+      expect(calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')).toBeDefined(),
+    )
+    const [, init] = calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')!
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      linear_teams: [
+        {
+          id: ENG_ID,
+          pickup: { member_ids: ['s-todo'] },
+          in_progress: { member_ids: ['s-doing'], canonical_id: 's-doing' },
+          done: { member_ids: ['s-done'], canonical_id: 's-done' },
+        },
+      ],
+    })
+  })
+
+  it('shows a member the mapping with no verbs and no catalog read', async () => {
+    const fetchMock = stub({
+      ...PAYLOADS,
+      '/api/teams/t1/settings': {
+        linear_teams: [
+          {
+            id: ENG_ID,
+            key: 'ENG',
+            name: 'Engineering',
+            armed: false,
+            pickup: { members: [] },
+            in_progress: { members: [], canonical: null },
+            done: { members: [], canonical: null },
+          },
+        ],
+      },
+    })
+    render(<LinearSource {...BODY} isAdmin={false} />)
+
+    await waitFor(() => expect(screen.getByText('ENG')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop watching ENG' })).toBeNull()
+    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeUndefined()
+  })
+
+  it('says Linear needs connecting rather than offering an empty catalog', async () => {
+    sources.state = { linear: 'unconfigured' }
+    const fetchMock = stub(PAYLOADS)
+    render(<LinearSource {...BODY} />)
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          'Connect Linear under Workspace settings before configuring tracked teams.',
+        ),
+      ).toBeInTheDocument(),
+    )
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeUndefined()
   })
 })

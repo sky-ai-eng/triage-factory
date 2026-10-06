@@ -51,6 +51,14 @@ type WorkflowState struct {
 	Position float64 `json:"position"`
 }
 
+// WorkflowStatePage is one page of a team's workflow states, in Linear's
+// order. EndCursor resumes the listing while HasNextPage is true.
+type WorkflowStatePage struct {
+	Items       []WorkflowState
+	EndCursor   string
+	HasNextPage bool
+}
+
 // IssueRef names an issue by both of its ids.
 type IssueRef struct {
 	ID         string `json:"id"`
