@@ -37,12 +37,11 @@ const (
 	rateLimitBackoffBase = 1 * time.Second
 
 	// transientBackoffMax caps the wait before retrying a transient failure,
-	// and is the longest wait a transient failure's headers may ask for and
-	// still be waited out — a 5xx's Retry-After, or the Retry-After or
-	// primary reset on a response whose body broke off. A longer one returns
-	// the failure instead of retrying before the server asked. A transient
-	// failure is expected to clear on its own rather than at a reset time,
-	// so the cap is the poll-cycle scale, not the rate-limit one.
+	// and is the longest Retry-After on a 5xx, or on a response whose body
+	// broke off, that is waited out; a longer one returns the failure instead
+	// of retrying before the server asked. A transient failure carries no
+	// reset time of its own (a spent budget's reset is awaitBudget's to wait
+	// out), so the cap is the poll-cycle scale, not the rate-limit one.
 	transientBackoffMax = 30 * time.Second
 )
 
@@ -228,13 +227,13 @@ func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder
 //     triggered it, else exponential backoff;
 //   - a transient failure — a dropped connection, a response body that breaks
 //     off partway, a 5xx or a 408 — after the response's Retry-After when it
-//     has one, else transient backoff. A body that breaks off waits out what
-//     its headers asked for, which arrived intact: a Retry-After, or an
-//     exhausted primary budget's reset. A transient failure that another
-//     attempt would only repeat is returned at once: a 403 whose body is not
-//     JSON (a proxy in front of GHES), a TLS failure, a timeout
-//     (upstream.RetryableResponse, upstream.RetryableTransport), or one whose
-//     headers ask for a wait beyond transientBackoffMax.
+//     has one, else transient backoff. A body that breaks off is retried
+//     only once the budget its headers report has room again (awaitBudget),
+//     since a retry against a spent budget would be refused. A transient
+//     failure that another attempt would only repeat is returned at once: a
+//     403 whose body is not JSON (a proxy in front of GHES), a TLS failure, a
+//     timeout (upstream.RetryableResponse, upstream.RetryableTransport), or
+//     one whose Retry-After is beyond transientBackoffMax.
 //
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
@@ -245,7 +244,10 @@ func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder
 // that host gets one attempt the same way a mutation does. A request that
 // timed out counts toward its host's silence, and a later request to a silent
 // host is not sent (upstream.Silent). A body that breaks off counts toward
-// unreachable only: the host answered.
+// unreachable only: the host answered. A response that fails marks the host
+// that served it, which after a redirect (an artifact's signed storage URL)
+// is not the host the request was sent to, so a storage host's failure does
+// not cost later API requests their retries.
 //
 // Any response that isn't retried is returned to the caller along with its
 // body, already read — whole for a success, capped at upstream.MaxErrorBody
@@ -302,9 +304,14 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 		}
 		upstream.MarkAnswered(ctx, host)
 		c.recordRateLimit(resp.Header)
+		// The response came from the last hop of any redirect.
+		servedBy := host
+		if resp.Request != nil {
+			servedBy = resp.Request.URL.Host
+		}
 
 		if stream && resp.StatusCode < 400 {
-			resp.Body = &streamedBody{ReadCloser: resp.Body, ctx: ctx, orgID: c.orgID, host: host}
+			resp.Body = &streamedBody{ReadCloser: resp.Body, ctx: ctx, orgID: c.orgID, host: servedBy}
 			return resp, nil, nil
 		}
 
@@ -319,22 +326,28 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 		resp.Body = http.NoBody
 		if readErr != nil {
 			// The response broke off mid-body: a transport failure like one
-			// from Do, retried on the same terms once the wait its headers
-			// asked for has passed. GitHub did answer, so it counts toward
-			// unreachable but never toward silent.
+			// from Do, retried on the same terms, after the Retry-After its
+			// headers carry, since those arrived intact. GitHub did answer, so
+			// it counts toward unreachable but never toward silent.
 			class, counted := upstream.ClassifyTransport(ctx, readErr)
 			if !counted {
 				return nil, nil, readErr
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-			wait, asked := headerWait(resp.Header)
-			if !asked {
+			wait, hasRetryAfter := upstream.RetryAfter(resp.Header)
+			if !hasRetryAfter {
 				wait = transientBackoff(attempt)
 			}
 			if !upstream.RetryableTransport(readErr, idempotent) || attempt >= maxAttempts ||
 				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
-				upstream.MarkUnreachable(ctx, host)
+				upstream.MarkUnreachable(ctx, servedBy)
 				return nil, nil, &upstream.TransportError{Err: readErr}
+			}
+			// Headers that report a spent primary budget mean the retry would
+			// be refused until it resets, so it waits as the next request
+			// would, or stops with ErrRateLimited.
+			if err := c.awaitBudget(ctx); err != nil {
+				return nil, nil, err
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
 				return nil, nil, err
@@ -348,7 +361,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 		}
 
 		retryAfter, hasRetryAfter := upstream.RetryAfter(resp.Header)
-		_, primaryExhausted := primaryBudgetExhausted(resp.Header)
+		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
 		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
 		if resp.StatusCode == http.StatusForbidden && (hasRetryAfter || primaryExhausted || isSecondaryRateLimitBody(data)) {
 			class = upstream.RateLimited
@@ -357,8 +370,15 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 
 		switch class {
 		case upstream.RateLimited:
-			wait, asked := headerWait(resp.Header)
-			if !asked {
+			wait := retryAfter
+			switch {
+			case hasRetryAfter:
+				// wait already set.
+			case primaryExhausted && !primaryReset.IsZero() && time.Until(primaryReset) > 0:
+				// GitHub told us exactly when the primary budget resets — use it
+				// instead of a blind guess.
+				wait = time.Until(primaryReset)
+			default:
 				wait = upstream.Backoff(attempt, rateLimitBackoffBase, maxRateLimitWait)
 			}
 
@@ -375,7 +395,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			}
 			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts ||
 				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
-				upstream.MarkUnreachable(ctx, host)
+				upstream.MarkUnreachable(ctx, servedBy)
 				return resp, data, nil
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
@@ -422,22 +442,6 @@ func primaryBudgetExhausted(h http.Header) (reset time.Time, exhausted bool) {
 func isSecondaryRateLimitBody(body []byte) bool {
 	b := bytes.ToLower(body)
 	return bytes.Contains(b, []byte("secondary rate limit")) || bytes.Contains(b, []byte("abuse detection mechanism"))
-}
-
-// headerWait is the wait a response's headers ask for before the next
-// request: its Retry-After, else the time until the primary budget resets
-// when x-ratelimit-remaining is 0 — GitHub said exactly when, so it beats a
-// blind backoff. asked is false when the headers ask for no wait.
-func headerWait(h http.Header) (wait time.Duration, asked bool) {
-	if wait, ok := upstream.RetryAfter(h); ok {
-		return wait, true
-	}
-	if reset, exhausted := primaryBudgetExhausted(h); exhausted && !reset.IsZero() {
-		if wait := time.Until(reset); wait > 0 {
-			return wait, true
-		}
-	}
-	return 0, false
 }
 
 // streamedBody is the body of a success doWithRetry returns unread, and it

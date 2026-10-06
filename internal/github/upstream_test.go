@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -442,45 +443,111 @@ func TestTruncatedBody_WaitsOutRetryAfter(t *testing.T) {
 	}
 }
 
-// TestTruncatedBody_WaitBeyondCapIsNotRetried: a response whose body broke
-// off, and whose headers ask for a wait longer than transientBackoffMax, is
+// TestTruncatedBody_RetryAfterBeyondCapIsNotRetried: a response whose body
+// broke off, and whose Retry-After is longer than transientBackoffMax, is
 // returned after one attempt instead of being retried early, as the intact
 // response would be.
-func TestTruncatedBody_WaitBeyondCapIsNotRetried(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		status int
-		header map[string]string
-	}{
-		{name: "Retry-After", status: http.StatusServiceUnavailable, header: map[string]string{"Retry-After": "120"}},
-		{name: "primary reset", status: http.StatusOK, header: map[string]string{
-			"X-RateLimit-Remaining": "0",
-			"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var calls atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				calls.Add(1)
-				for k, v := range tc.header {
-					w.Header().Set(k, v)
-				}
-				truncated(w, tc.status)
-			}))
-			t.Cleanup(srv.Close)
+func TestTruncatedBody_RetryAfterBeyondCapIsNotRetried(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "120")
+		truncated(w, http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
 
-			start := time.Now()
-			_, err := clientAgainst(srv.URL).Get(context.Background(), "/x")
-			var te *upstream.TransportError
-			if !errors.As(err, &te) {
-				t.Fatalf("err = %v, want a *upstream.TransportError", err)
-			}
-			if got := calls.Load(); got != 1 {
-				t.Errorf("upstream requests = %d, want 1", got)
-			}
-			if time.Since(start) > 5*time.Second {
-				t.Error("the call waited instead of returning")
-			}
-		})
+	start := time.Now()
+	_, err := clientAgainst(srv.URL).Get(context.Background(), "/x")
+	var te *upstream.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("err = %v, want a *upstream.TransportError", err)
 	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("upstream requests = %d, want 1", got)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("the call waited instead of returning")
+	}
+}
+
+// spentBudget sets the headers of a response that spent the primary budget,
+// which resets at reset.
+func spentBudget(w http.ResponseWriter, reset time.Time) {
+	w.Header().Set("X-RateLimit-Remaining", "0")
+	w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+}
+
+// TestTruncatedBody_SpentBudget: a response whose body broke off, and whose
+// headers say the primary budget is spent, is retried once the budget resets,
+// the wait the next request would make anyway, so a poll cycle neither loses
+// the request nor marks GitHub unreachable. A reset beyond maxRateLimitWait
+// stops the call with ErrRateLimited, as it would stop the next request.
+func TestTruncatedBody_SpentBudget(t *testing.T) {
+	t.Run("reset within seconds", func(t *testing.T) {
+		var calls atomic.Int32
+		reset := time.Now().Add(2 * time.Second)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			if calls.Add(1) == 1 {
+				spentBudget(w, reset)
+				truncated(w, http.StatusOK)
+			}
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		t.Cleanup(srv.Close)
+
+		ctx := upstream.WithFailFast(context.Background())
+		if _, err := clientAgainst(srv.URL).Get(ctx, "/x"); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got := calls.Load(); got != 2 {
+			t.Errorf("upstream requests = %d, want 2", got)
+		}
+		if time.Now().Before(time.Unix(reset.Unix(), 0)) {
+			t.Error("retried before the budget reset")
+		}
+		if u, _ := url.Parse(srv.URL); upstream.Unreachable(ctx, u.Host) {
+			t.Error("a request that succeeded on its retry marked the host unreachable")
+		}
+	})
+
+	t.Run("reset past transientBackoffMax", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			spentBudget(w, time.Now().Add(time.Minute))
+			truncated(w, http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+
+		// The deadline ends the wait; what matters is that the call was
+		// waiting for the reset rather than giving up on the request.
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := clientAgainst(srv.URL).Get(ctx, "/x")
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want the wait for the reset cut off by the deadline", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("upstream requests = %d, want 1", got)
+		}
+	})
+
+	t.Run("reset beyond maxRateLimitWait", func(t *testing.T) {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			calls.Add(1)
+			spentBudget(w, time.Now().Add(time.Hour))
+			truncated(w, http.StatusOK)
+		}))
+		t.Cleanup(srv.Close)
+
+		_, err := clientAgainst(srv.URL).Get(context.Background(), "/x")
+		var rl *ErrRateLimited
+		if !errors.As(err, &rl) {
+			t.Fatalf("err = %v, want *ErrRateLimited", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("upstream requests = %d, want 1", got)
+		}
+	})
 }

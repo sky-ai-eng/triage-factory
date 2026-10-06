@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
@@ -263,5 +264,43 @@ func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
 	_, _ = c.Get(context.Background(), "/x")
 	if got := served.Load() - before; got != 1+maxRateLimitRetries {
 		t.Errorf("a GET outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
+	}
+}
+
+// TestFailFastScope_RedirectedFailureMarksTheServingHost: a download is
+// redirected from the API host to a storage host. When the storage host's
+// response fails, by breaking off mid-body or by answering 503, the storage
+// host is marked unreachable and the API host is not, so later API requests
+// in the scope keep their retries.
+func TestFailFastScope_RedirectedFailureMarksTheServingHost(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		serve func(http.ResponseWriter)
+	}{
+		{name: "truncated body", serve: func(w http.ResponseWriter) { truncated(w, http.StatusOK) }},
+		{name: "503", serve: func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { tc.serve(w) }))
+			t.Cleanup(storage.Close)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, storage.URL+"/blob", http.StatusFound)
+			}))
+			t.Cleanup(api.Close)
+			ctx := upstream.WithFailFast(context.Background())
+
+			var dst bytes.Buffer
+			if _, err := clientAgainst(api.URL).DownloadArtifact(ctx, "/logs", &dst, 1<<20); err == nil {
+				t.Fatal("a failed download succeeded")
+			}
+			apiURL, _ := url.Parse(api.URL)
+			storageURL, _ := url.Parse(storage.URL)
+			if upstream.Unreachable(ctx, apiURL.Host) {
+				t.Error("the storage host's failure marked the API host unreachable")
+			}
+			if !upstream.Unreachable(ctx, storageURL.Host) {
+				t.Error("the storage host that failed was not marked unreachable")
+			}
+		})
 	}
 }
