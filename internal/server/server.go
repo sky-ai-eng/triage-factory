@@ -1964,6 +1964,16 @@ func (s *Server) MarkJiraRestarted(ctx context.Context, orgID string) {
 	}
 }
 
+// MarkLinearRestarted is MarkJiraRestarted for Linear: it clears orgID's
+// Linear readiness until the poller's next completion, which is what the
+// team activity page's last-poll time and the "config took effect" toast
+// read. Best-effort for the same reasons.
+func (s *Server) MarkLinearRestarted(ctx context.Context, orgID string) {
+	if err := s.allStores.PollReadiness.MarkRestarted(ctx, orgID, "linear"); err != nil {
+		serverLog.Warn("mark linear poll restarted failed", "org", orgID, "error", err)
+	}
+}
+
 // jiraPollReady returns true when orgID's Jira poller has completed at
 // least one cycle since its last restart. Used by /api/jira/stock to gate
 // the list response. Reads through the admin pool (same posture as the

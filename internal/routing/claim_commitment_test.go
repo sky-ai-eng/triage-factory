@@ -84,7 +84,7 @@ func setupClaimScenario(t *testing.T, suffix string) claimScenario {
 	stub := &stubDelegator{db: database}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities,
-		stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+		stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	return claimScenario{db: database, router: router, stub: stub, task: task, trigger: trigger, entity: entity.ID, event: eventID}
 }

@@ -1030,6 +1030,12 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		jiraDone := seedSnap("PROJ-tc-done", "jira", `{"key":"PROJ-tc-done","status":"Done"}`)
 		jiraRenamed := seedSnap("PROJ-tc-renamed", "jira", `{"key":"PROJ-tc-renamed","status":"Complete","status_id":"10001"}`)
 		jiraLive := seedSnap("PROJ-tc-live", "jira", `{"key":"PROJ-tc-live","status":"In Progress","status_id":"10003"}`)
+		// The Linear arm, one shape per half: a done state reached by its id
+		// (renamed since the rule captured it), one reached by its name (the
+		// rule's ref carries no id), and a live state that matches neither.
+		linearByID := seedSnap("ENG-tc-id", "linear", `{"identifier":"ENG-tc-id","state":{"id":"ls-done","name":"Shipped","type":"completed"}}`)
+		linearByName := seedSnap("ENG-tc-name", "linear", `{"identifier":"ENG-tc-name","state":{"id":"ls-wontfix","name":"Won't Fix","type":"canceled"}}`)
+		linearLive := seedSnap("ENG-tc-live", "linear", `{"identifier":"ENG-tc-live","state":{"id":"ls-live","name":"In Progress","type":"started"}}`)
 		alreadyClosed := seedSnap("owner/repo#tc-gone", "github", `{"state":"MERGED","merged":true}`)
 		if _, err := s.MarkClosed(ctx, orgID, alreadyClosed); err != nil {
 			t.Fatalf("close: %v", err)
@@ -1056,13 +1062,14 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// Every row but the freshly polled one was last polled an hour ago,
 		// well past a fifteen-minute grace.
-		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
+		for _, id := range []string{merged, closedState, open, noSnapshot, jiraDone, jiraRenamed, jiraLive, linearByID, linearByName, linearLive, alreadyClosed, closeReady, owedLeased, closeParked, closeDone, closeCancelled} {
 			seed.BackdatePoll(t, id, time.Hour)
 		}
 		const grace = 15 * time.Minute
 
 		doneRefs := []domain.JiraStatusRef{{ID: "10001", Name: "Done"}, {Name: "Won't Do"}}
-		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, grace, 0)
+		linearDoneRefs := []domain.LinearStateRef{{ID: "ls-done", Name: "Done"}, {Name: "Won't Fix"}}
+		got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, linearDoneRefs, grace, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem: %v", err)
 		}
@@ -1077,6 +1084,8 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{closedState, "a CLOSED PR"},
 			{jiraDone, "a Jira issue in a done status, matched by name because its snapshot predates status ids"},
 			{jiraRenamed, "a Jira issue whose done status was renamed, matched by id"},
+			{linearByID, "a Linear issue whose done state was renamed, matched by id"},
+			{linearByName, "a Linear issue in a done state named by a ref with no id, matched by name"},
 			{closeDone, "an entity whose close row is done — the close it carried did not land"},
 			{closeCancelled, "an entity whose only close row is cancelled — it holds no key"},
 		} {
@@ -1090,6 +1099,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{open, "an open PR"},
 			{noSnapshot, "an entity with no stored snapshot"},
 			{jiraLive, "a Jira issue in a live status"},
+			{linearLive, "a Linear issue in a live state"},
 			{alreadyClosed, "an entity already closed"},
 			{closeReady, "an entity with a terminating transition ready"},
 			{owedLeased, "an entity with a close obligation leased"},
@@ -1104,7 +1114,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// Once the grace elapses, the freshly polled row counts too: the
 		// grace is a lag allowance, not an exemption.
 		seed.BackdatePoll(t, freshlyPolled, time.Hour)
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, grace, 0)
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, doneRefs, linearDoneRefs, grace, 0)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem (after grace): %v", err)
 		}
@@ -1118,16 +1128,33 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Error("an entity polled past the grace did not surface")
 		}
 
-		// No configured done statuses means no Jira row can be terminal —
-		// and must not become a syntax error on the way to saying so.
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, grace, 0)
+		// No configured done statuses means no Jira or Linear row can be
+		// terminal — and must not become a syntax error on the way to saying
+		// so.
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, nil, grace, 0)
 		if err != nil {
-			t.Fatalf("ListActiveTerminalCandidatesSystem(no jira statuses): %v", err)
+			t.Fatalf("ListActiveTerminalCandidatesSystem(no done statuses): %v", err)
 		}
 		for _, e := range got {
-			if e.Source == "jira" {
-				t.Errorf("jira entity %s surfaced with no configured done statuses", e.ID)
+			if e.Source == "jira" || e.Source == "linear" {
+				t.Errorf("%s entity %s surfaced with no configured done statuses", e.Source, e.ID)
 			}
+		}
+		// Each source's set narrows only that source: Linear's done states do
+		// not reach a Jira row, and the reverse.
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, nil, linearDoneRefs, grace, 0)
+		if err != nil {
+			t.Fatalf("ListActiveTerminalCandidatesSystem(linear only): %v", err)
+		}
+		linearOnly := map[string]bool{}
+		for _, e := range got {
+			linearOnly[e.ID] = true
+			if e.Source == "jira" {
+				t.Errorf("jira entity %s surfaced from a Linear-only done set", e.ID)
+			}
+		}
+		if !linearOnly[linearByID] || !linearOnly[linearByName] {
+			t.Error("a Linear-only done set did not reach the Linear rows it names")
 		}
 
 		// A ref set with only ids emits no name arm, and one with only names
@@ -1141,7 +1168,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			{"ids only", []domain.JiraStatusRef{{ID: "10001"}}, jiraRenamed},
 			{"names only", []domain.JiraStatusRef{{Name: "Done"}}, jiraDone},
 		} {
-			got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, half.refs, grace, 0)
+			got, err := s.ListActiveTerminalCandidatesSystem(ctx, orgID, half.refs, nil, grace, 0)
 			if err != nil {
 				t.Fatalf("ListActiveTerminalCandidatesSystem(%s): %v", half.name, err)
 			}
@@ -1157,7 +1184,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		// The limit bounds the batch.
-		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []domain.JiraStatusRef{{Name: "Done"}}, grace, 1)
+		got, err = s.ListActiveTerminalCandidatesSystem(ctx, orgID, []domain.JiraStatusRef{{Name: "Done"}}, nil, grace, 1)
 		if err != nil {
 			t.Fatalf("ListActiveTerminalCandidatesSystem(limit): %v", err)
 		}

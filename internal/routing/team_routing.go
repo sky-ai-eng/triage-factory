@@ -17,9 +17,9 @@ import (
 
 // handlerScopeMatchesEvent reports whether handler h's team is allowed
 // to act on evt given the team's tracking scope — the team↔repo gate
-// (GitHub) and team↔project gate (Jira). It is the
-// security teeth that keeps a team's handlers from firing on entities the
-// team doesn't track once polling goes org-wide.
+// (GitHub), team↔project gate (Jira) and team↔Linear-team gate (Linear). It
+// is the security teeth that keeps a team's handlers from firing on entities
+// the team doesn't track once polling goes org-wide.
 //
 // Escape hatches return true (no drop):
 //   - System/org-union handlers (NULL team_id) — they're scoped to the
@@ -30,7 +30,8 @@ import (
 //     gate / tests that don't exercise it; degrades to the pre-ticket
 //     behavior where every team implicitly tracked every org-global
 //     entity. Handled per-source in teamTracksEventScope.
-//   - Any source other than github:/jira: — ungated (no tracking concept).
+//   - Any source other than github:/jira:/linear: — ungated (no tracking
+//     concept).
 //
 // The per-event result is memoized in cache, keyed by team id. A single
 // event has one source/entity, so the repo and project lookups for a
@@ -59,8 +60,9 @@ func (r *Router) teamTracksEventScopeCached(ctx context.Context, evt domain.Even
 }
 
 // teamTracksEventScope dispatches the tracking lookup on the event's
-// source: github: → team↔repo, jira: → team↔project, a
-// registered event source (e.g. ee/slack) → its TracksScope hook. Each
+// source: github: → team↔repo, jira: → team↔project, linear: →
+// team↔Linear-team, a registered event source (e.g. ee/slack) → its
+// TracksScope hook. Each
 // branch fails open when its store is unwired so the gate degrades to "no
 // drop" in pre-ticket / test wiring; any other source is ungated.
 func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, teamID string) bool {
@@ -75,6 +77,11 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 			return true
 		}
 		return r.teamTracksEventProject(ctx, evt, teamID)
+	case strings.HasPrefix(evt.EventType, "linear:"):
+		if r.linearRules == nil {
+			return true
+		}
+		return r.teamTracksEventLinearTeam(ctx, evt, teamID)
 	default:
 		if hooks, ok := sourceHooksFor(evt.EventType); ok {
 			return hooks.TracksScope(ctx, evt, teamID)
@@ -137,6 +144,27 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 	tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, m.Project)
 	if err != nil {
 		routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
+		return true
+	}
+	return tracks
+}
+
+// teamTracksEventLinearTeam reads the Linear team id off an event's metadata
+// and asks the store whether teamID tracks it. Every Linear issue event
+// carries linear_team_id (events.LinearIssueIdentity). The gate keys on the
+// UUID rather than the team key, because a key can be renamed in Linear and
+// the id cannot. Fail-open on a missing / malformed id or a store error, the
+// posture teamTracksEventRepo documents.
+func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) bool {
+	var m struct {
+		LinearTeamID string `json:"linear_team_id"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.LinearTeamID == "" {
+		return true
+	}
+	tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, m.LinearTeamID)
+	if err != nil {
+		routerLog.Warn("team-linear-team gate lookup failed, allowing", "team_id", teamID, "linear_team_id", m.LinearTeamID, "error", err)
 		return true
 	}
 	return tracks
@@ -448,10 +476,11 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 	return sortedKeys(set), nil
 }
 
-// assigneeCentricJiraOwner runs the owning-team ladder for an assignee-centric
-// jira event (first hit wins) — the Jira twin of authorCentricOwner. It returns
-// the single owning team plus the set of teams the ladder produced, with the
-// same NULL-owner semantics:
+// assigneeCentricOwner runs the owning-team ladder for an assignee-centric
+// jira or linear event (first hit wins) — the twin of authorCentricOwner.
+// ownedTypes is the source's assignee-centric type set, which tier 2 anchors
+// on. It returns the single owning team plus the set of teams the ladder
+// produced, with the same NULL-owner semantics:
 //
 //	owner == team, ownerSet == {team}   — a structural owner (tier 1
 //	                                       owning_team_id override), a prior
@@ -471,11 +500,11 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 // ungated (already project-relevant, forward-only).
 //
 // Tiers 1 and 2 are provider-agnostic and shared with authorCentricOwner; only
-// the identity tier (3) differs — the Jira assignee account id instead of the
+// the identity tier (3) differs — the issue assignee's account instead of the
 // PR author login. OwningTeamForEntitySystem (tier 1) resolves only the
-// owning_team_id override; Jira projects are multi-team-tracked via
-// jira_project_status_rules, so a project confers no single owner and the
-// assignee identity is the owner signal instead.
+// owning_team_id override; Jira projects and Linear teams are multi-team-
+// tracked, so neither confers a single owner and the assignee identity is the
+// owner signal instead.
 //
 // A non-nil error means the ladder could not find out, exactly as in
 // authorCentricOwner — see there for why a degraded read is worse than a
@@ -483,7 +512,7 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 //
 // Claims-free ...System lookups throughout: the router runs on the eventbus
 // goroutine with no JWT context.
-func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, scopeCache map[string]bool) (owner string, ownerSet []string, err error) {
+func (r *Router) assigneeCentricOwner(ctx context.Context, orgID string, evt domain.Event, entityID string, ownedTypes map[string]bool, scopeCache map[string]bool) (owner string, ownerSet []string, err error) {
 	// Tier 1 — structural owner (owning_team_id override). One store query.
 	if r.entities != nil {
 		t, err := r.entities.OwningTeamForEntitySystem(ctx, orgID, entityID)
@@ -508,7 +537,7 @@ func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt
 	// consistency GitHub gets without re-attaching to retired ownership. NULL-
 	// owned active tasks are skipped (an unresolved owner can't anchor).
 	if r.tasks != nil {
-		t, err := r.latestActiveOwnedTaskTeam(ctx, orgID, entityID, assigneeCentricJiraEventSet)
+		t, err := r.latestActiveOwnedTaskTeam(ctx, orgID, entityID, ownedTypes)
 		if err != nil {
 			return "", nil, fmt.Errorf("prior-task owner for entity %s: %w", entityID, err)
 		}
@@ -537,17 +566,74 @@ func (r *Router) assigneeCentricJiraOwner(ctx context.Context, orgID string, evt
 	}
 }
 
-// assigneeTeams resolves a jira event's assignee account id to the union of
-// teams over every TF user the account maps to, on the org's Jira host. The
-// Jira twin of authorTeams (the set-valued reverse lookup is the regression
-// guard for one account bound to two users). Returns an empty slice when the
-// issue is unassigned, the assignee isn't a TF user (external collaborator), or
-// the identity stores are unwired — all resolved data states. A store failure
-// returns an error instead, for the reason authorTeams documents.
+// assigneeTeams resolves an issue event's assignee to the union of teams over
+// every TF user the assignee maps to — a Jira account on the org's Jira host,
+// or a Linear user in the org's Linear workspace. The twin of authorTeams (the
+// set-valued reverse lookup is the regression guard for one account bound to
+// two users). Returns an empty slice when the issue is unassigned, the
+// assignee isn't a TF user (external collaborator), or the identity stores are
+// unwired — all resolved data states. A store failure returns an error
+// instead, for the reason authorTeams documents.
 func (r *Router) assigneeTeams(ctx context.Context, orgID string, evt domain.Event) ([]string, error) {
 	if r.users == nil || r.teams == nil || r.orgs == nil {
 		return nil, nil
 	}
+	var userIDs []string
+	var err error
+	if eventSourcePrefix(evt.EventType) == "linear" {
+		userIDs, err = r.linearAssigneeUsers(ctx, orgID, evt)
+	} else {
+		userIDs, err = r.jiraAssigneeUsers(ctx, orgID, evt)
+	}
+	if err != nil || len(userIDs) == 0 {
+		return nil, err
+	}
+	set := map[string]struct{}{}
+	var errs []error
+	for _, uid := range userIDs {
+		tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
+		if terr != nil {
+			routerLog.Error("assignee-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
+			errs = append(errs, fmt.Errorf("teams for user %s: %w", uid, terr))
+			continue
+		}
+		for _, t := range tids {
+			set[t] = struct{}{}
+		}
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
+	}
+	return sortedKeys(set), nil
+}
+
+// linearAssigneeUsers resolves a linear event's assignee_user_id to the TF
+// users bound to it in the org's Linear workspace. The workspace is the
+// org's, learned from its Linear credential; with none bound there is no
+// member identity to resolve, so nobody is returned.
+func (r *Router) linearAssigneeUsers(ctx context.Context, orgID string, evt domain.Event) ([]string, error) {
+	var m struct {
+		AssigneeUserID string `json:"assignee_user_id"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.AssigneeUserID == "" {
+		return nil, nil
+	}
+	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		routerLog.Error("assignee-centric owner: read org settings for linear workspace failed", "error", err)
+		return nil, fmt.Errorf("read org settings for linear workspace: %w", err)
+	}
+	userIDs, err := r.users.UserIDsForLinearAccountSystem(ctx, orgSet.LinearWorkspaceID, m.AssigneeUserID)
+	if err != nil {
+		routerLog.Error("assignee-centric owner: reverse linear account lookup failed", "assignee_user_id", m.AssigneeUserID, "error", err)
+		return nil, fmt.Errorf("reverse linear account lookup for %s: %w", m.AssigneeUserID, err)
+	}
+	return userIDs, nil
+}
+
+// jiraAssigneeUsers resolves a jira event's assignee_account_id to the TF
+// users bound to it on the org's Jira host.
+func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain.Event) ([]string, error) {
 	// Every assignee-centric jira metadata struct carries assignee_account_id
 	// (the Atlassian stable identifier) — a minimal unmarshal is enough.
 	var m struct {
@@ -579,28 +665,12 @@ func (r *Router) assigneeTeams(ctx context.Context, orgID string, evt domain.Eve
 		routerLog.Error("assignee-centric owner: reverse account lookup failed", "assignee_account_id", m.AssigneeAccountID, "error", err)
 		return nil, fmt.Errorf("reverse jira account lookup for %s: %w", m.AssigneeAccountID, err)
 	}
-	set := map[string]struct{}{}
-	var errs []error
-	for _, uid := range userIDs {
-		tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
-		if terr != nil {
-			routerLog.Error("assignee-centric owner: teams for user lookup failed", "user_id", uid, "error", terr)
-			errs = append(errs, fmt.Errorf("teams for user %s: %w", uid, terr))
-			continue
-		}
-		for _, t := range tids {
-			set[t] = struct{}{}
-		}
-	}
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
-	return sortedKeys(set), nil
+	return userIDs, nil
 }
 
 // ownerLadderRouting computes the visibility set, owner, firing order, and seed
 // priority for an owning-team-ladder event (author-centric GitHub or
-// assignee-centric Jira) from the ladder's (owner, ownerSet) result and the
+// assignee-centric Jira / Linear) from the ladder's (owner, ownerSet) result and the
 // matched rules. Both provider branches share it so the NULL-owner and
 // visibility-union semantics stay identical:
 //

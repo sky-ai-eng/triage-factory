@@ -1,6 +1,6 @@
 # Tracked Events
 
-Triage Factory monitors GitHub PRs and Jira issues for state changes and emits typed events when transitions are detected. Events power the triage queue, AI scoring, delegation triggers, and the dashboard.
+Triage Factory monitors GitHub PRs, Jira issues and Linear issues for state changes and emits typed events when transitions are detected. Events power the triage queue, AI scoring, delegation triggers, and the dashboard.
 
 ## How it works
 
@@ -8,7 +8,7 @@ The tracker runs on a configurable poll interval (default: 5 minutes). Each cycl
 
 1. **Discover** — search queries find new items to track
 2. **Register** — new items are stored in `tracked_items` with an initial snapshot
-3. **Refresh** — all tracked items are batch-fetched (GitHub via GraphQL `nodes(ids:[...])`, Jira via `key IN (...)` JQL)
+3. **Refresh** — all tracked items are batch-fetched (GitHub via GraphQL `nodes(ids:[...])`, Jira via `key IN (...)` JQL, Linear via GraphQL `issues` filtered by id, 50 at a time)
 4. **Diff** — current snapshot is compared against the previous snapshot
 5. **Emit** — typed events are recorded in the `events` table and published to the event bus
 
@@ -121,6 +121,84 @@ Metadata is the entity's last-known state (assignee, project, issue type, last
 status, summary), since the source has nothing left to read. There is no
 `dedup_key` — a key can only stop resolving once.
 
+## Linear Events
+
+A Linear team is the tracked-set unit, the way a Jira project is. Each armed
+team gets two discovery queries per cycle: unassigned issues in its pickup
+states, and issues assigned to the credential's own user outside its done
+states. Under an app install the credential's user is the app user, which
+nothing is assigned to, so the second query returns nothing.
+
+### Actionable
+
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Issue Assigned** | `linear:issue:assigned` | The assignee changes to someone, or an issue is first seen through the assigned-to-credential query | — |
+| **Issue Available** | `linear:issue:available` | The assignee is cleared | — |
+| **Priority Changed** | `linear:issue:priority_changed` | `priority` changes | new priority label |
+| **New Comment** | `linear:issue:commented` | The newest comment's id changes to a different comment (fires once per cycle regardless of how many comments were added; Linear exposes no comment count) | — |
+| **Issue Became Atomic** | `linear:issue:became_atomic` | The last open sub-issue closes, on an issue not itself done | — |
+
+### Informational
+
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id | new state name |
+| **Issue Completed** | `linear:issue:completed` | The state enters one of the team's done states (fires beside `status_changed`) | — |
+| **Issue Body Updated** | `linear:issue:body_updated` | The description changes, including clearing it | — |
+| **Parent Changed** | `linear:issue:parent_changed` | The issue moves under another parent, or loses its parent | new parent identifier, or `none` |
+| **Issue Unreachable** | `linear:issue:unreachable` | Linear will no longer give TF a tracked issue — see below | — |
+
+An issue first seen through the pickup query is seeded quietly, as a Jira
+issue is: discovery records it without an event, and later changes are diffed
+against that seed. One first seen through the assigned-to-credential query
+emits `assigned` with its seed, because being found by that query is itself
+the assignment. An issue first seen already in a done state is closed without
+an event.
+
+An issue with open sub-issues is a container, not a unit of work: assignment
+and unassignment emit no `assigned`/`available` while any sub-issue is open,
+and `became_atomic` is the event that surfaces it once the last one closes.
+A sub-issue is open when its state is not a done state of any armed team; a
+sub-issue in a team nobody tracks therefore counts as open.
+
+Every Linear event's metadata carries the issue's identity block —
+`issue_identifier`, `issue_id`, `linear_team_id`, `linear_team_key`,
+`assignee`, `assignee_user_id`, `title` — plus the fields its event adds
+(`old_status`/`new_status`, `old_priority`/`new_priority`,
+`previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
+`last_status`, `comment_id`). `linear_team_id` is what the router's team gate
+reads, and `assignee_user_id` is what assignee-centric routing joins against a
+member's bound Linear identity.
+
+#### Issue Unreachable
+
+Like Jira's, this event closes the entity and every task on it, and it is
+never inferred from an issue's absence. An issue missing from a batch read is
+asked about directly, by id, and only these answers retire it:
+
+- Linear answers not-found for the issue.
+- The issue is in the trash.
+- The issue answers under another identifier. Moving an issue to another
+  Linear team gives it a new identifier, and the entity is keyed by the
+  identifier, so the issue becomes a new entity when discovery finds it in its
+  new team and the old entity retires.
+- The issue is archived in a state outside its team's done states. Archived in
+  a done state is the ordinary terminal path.
+
+Any other failure to read the issue is not evidence either way, and it is
+asked about again on a later cycle. At most 20 issues are asked about one at a
+time per cycle; the rest wait for the next.
+
+#### Rate limits
+
+A request still rate limited after the client's 30 seconds of waiting ends the
+org's cycle where it lands. Nothing further is sent to Linear that cycle, the
+writes already made stand, and the poll-complete sentinel is not emitted. When
+Linear said when the window resets, the org's next cycle is scheduled for then
+instead of at its poll interval. A rate-limited request says nothing about the
+issues it asked for, so it never leads to `unreachable`.
+
 ## Slack Events
 
 Slack support is an Enterprise, multi-mode-only feature, configured per-org from **Settings → Slack** (operator setup: [self-hosting/slack.md](../self-hosting/slack.md)). Unlike GitHub and Jira, Slack events don't come from the snapshot-diff poller — they arrive over the app's Events API webhook or Socket Mode connection and are ingested as they happen.
@@ -189,6 +267,20 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `status`, `assignee`, `priority`
 - `labels[]`, `issue_type`, `parent_key`
 - `comment_count`
+
+### Linear Issue Snapshot
+
+- `id` (UUID), `identifier` (the entity's `source_id`), `title`, `url`
+- `body_hash` — fingerprint of the raw markdown description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
+- `state` — `{id, name, type}`; compared by id
+- `assignee` (display name), `assignee_user_id`
+- `priority` (0 = none, 1 = urgent … 4 = low), `priority_label`
+- `labels[]`
+- `team_id`, `team_key`
+- `parent_id`, `parent_identifier`
+- `last_comment_id`, `last_comment_at`
+- `open_child_count` — sub-issues not in an armed team's done states
+- `created_at`, `updated_at`, `archived`, `trashed`
 
 ## Event lifecycle
 

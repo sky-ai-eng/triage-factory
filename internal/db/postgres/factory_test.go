@@ -403,6 +403,69 @@ func TestFactoryReadStore_Postgres_JiraScopedToTrackedProject(t *testing.T) {
 	}
 }
 
+// TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam is the Linear
+// mirror: a Linear entity rides the belt when its snapshot's team_id is a
+// Linear team one of the org's teams tracks (a linear_team_rules row, watched
+// or armed), and not otherwise — nor before its first snapshot says which team
+// it belongs to. The per-team narrowing reads the same arm.
+func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+
+	if _, err := h.AdminDB.Exec(`
+		INSERT INTO linear_team_rules (team_id, linear_team_id, linear_team_key, linear_team_name)
+		VALUES ($1, 'lt-eng', 'ENG', 'Engineering')
+	`, teamID); err != nil {
+		t.Fatalf("seed linear team rule: %v", err)
+	}
+	seed := func(identifier, snapshot string) string {
+		t.Helper()
+		id := uuid.New().String()
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
+			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5)
+		`, id, orgID, identifier, snapshot, time.Now().UTC()); err != nil {
+			t.Fatalf("seed linear entity %s: %v", identifier, err)
+		}
+		return id
+	}
+	tracked := seed("ENG-1", `{"identifier":"ENG-1","team_id":"lt-eng"}`)
+	untracked := seed("OPS-1", `{"identifier":"OPS-1","team_id":"lt-ops"}`)
+	unseeded := seed("ENG-2", `{}`)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	read := func(teamIDs []string) map[string]bool {
+		t.Helper()
+		rows, err := stores.Factory.Entities(context.Background(), orgID, 100, teamIDs)
+		if err != nil {
+			t.Fatalf("Entities: %v", err)
+		}
+		got := map[string]bool{}
+		for _, r := range rows {
+			got[r.Entity.ID] = true
+		}
+		return got
+	}
+	got := read(nil)
+	if !got[tracked] {
+		t.Error("Linear entity on a tracked Linear team is missing")
+	}
+	if got[untracked] {
+		t.Error("Linear entity on an untracked Linear team leaked through")
+	}
+	if got[unseeded] {
+		t.Error("Linear entity with no snapshot rode the belt before any team could claim it")
+	}
+	if !read([]string{teamID})[tracked] {
+		t.Error("the per-team filter dropped a Linear entity its team tracks")
+	}
+	if read([]string{uuid.New().String()})[tracked] {
+		t.Error("the per-team filter kept a Linear entity for a team that does not track it")
+	}
+}
+
 // TestFactoryReadStore_Postgres_CrossTeamIsolation_RLS proves the per-team
 // narrowing the production app pool gets for free: driven through tf_app
 // with real JWT claims, a viewer only sees belt entities in their own

@@ -350,6 +350,37 @@ func TestLinearTeamsPut_RepollsOnlyWhenTheMappedSetMoves(t *testing.T) {
 	}
 }
 
+// TestLinearTeamsPut_RestartsPollReadiness: a write that re-dues the Linear
+// poll also clears the org's Linear readiness, so the last-poll time and the
+// "config took effect" toast wait for a poll of the new configuration. One
+// that changes nothing the poller asks leaves it alone.
+func TestLinearTeamsPut_RestartsPollReadiness(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	linearKicks(t, s)
+	ctx := t.Context()
+	org := runmode.LocalDefaultOrgID
+	ready := func() bool {
+		t.Helper()
+		ok, err := s.allStores.PollReadiness.Ready(ctx, org, "linear")
+		if err != nil {
+			t.Fatalf("Ready: %v", err)
+		}
+		return ok
+	}
+	if err := s.allStores.PollReadiness.MarkPollComplete(ctx, org, "linear", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	mustPutLinearTeams(t, s, map[string]any{"id": linearTeamOps})
+	if !ready() {
+		t.Error("watching an unmapped team cleared Linear readiness")
+	}
+	mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))
+	if ready() {
+		t.Error("arming a team left Linear readiness standing")
+	}
+}
+
 // TestLinearTeamsPut_DisarmIsThreeEmptyRules: clearing every rule unarms the
 // team without untracking it, without asking Linear, and re-dues polling
 // because what the poller asks changed.

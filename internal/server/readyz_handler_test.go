@@ -20,8 +20,8 @@ import (
 func newTestPollerManager(t *testing.T, s *Server) *poller.Manager {
 	t.Helper()
 	return poller.NewManager(s.db, nil, s.allStores.Users, s.allStores.Tasks, s.allStores.Entities,
-		s.allStores.Repos, s.allStores.EventQueue, s.allStores.Orgs, s.allStores.JiraStatusRules,
-		s.allStores.TeamGitHubGroups, s.allStores.Secrets, s.allStores.GitHubApps, s.allStores.PollReadiness, nil)
+		s.allStores.Repos, s.allStores.EventQueue, s.allStores.Orgs, s.allStores.JiraStatusRules, s.allStores.LinearTeamRules,
+		s.allStores.TeamGitHubGroups, s.allStores.Secrets, s.allStores.GitHubApps, s.allStores.PollReadiness, nil, nil)
 }
 
 // TestHandleReadyz_Healthy is the happy path (acceptance criterion 1):
@@ -36,6 +36,7 @@ func TestHandleReadyz_Healthy(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	s.SetPollerManager(pm.Health)
 
 	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
@@ -55,7 +56,7 @@ func TestHandleReadyz_Healthy(t *testing.T) {
 	if resp.CheckedAt == 0 {
 		t.Error("checked_at: expected non-zero unix timestamp")
 	}
-	for _, check := range []string{"db", "migrations", "poller_github", "poller_jira"} {
+	for _, check := range []string{"db", "migrations", "poller_github", "poller_jira", "poller_linear"} {
 		if got := resp.Checks[check]; got != "ok" {
 			t.Errorf("checks[%s]: got %q want %q", check, got, "ok")
 		}
@@ -77,6 +78,7 @@ func TestHandleReadyz_DBDown(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	s.SetPollerManager(pm.Health)
 
 	if err := s.db.Close(); err != nil {
@@ -110,6 +112,7 @@ func TestHandleReadyz_PollerHeartbeatStale(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now.Add(-10 * time.Minute)) // well past 90s
 	pm.SetJiraHeartbeatForTest(now)                          // stays alive
+	pm.SetLinearHeartbeatForTest(now)                        // stays alive
 	s.SetPollerManager(pm.Health)
 
 	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
@@ -131,6 +134,36 @@ func TestHandleReadyz_PollerHeartbeatStale(t *testing.T) {
 	}
 }
 
+// TestHandleReadyz_LinearHeartbeatStale: the Linear loop is a hard check on
+// the holder like the other two — a dead Linear loop is a 503 even while
+// GitHub and Jira poll.
+func TestHandleReadyz_LinearHeartbeatStale(t *testing.T) {
+	s := newTestServer(t)
+	s.SetMigrationsOK(true)
+
+	pm := newTestPollerManager(t, s)
+	now := time.Now()
+	pm.SetGitHubHeartbeatForTest(now)
+	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now.Add(-10 * time.Minute))
+	s.SetPollerManager(pm.Health)
+
+	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp readyzResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	want := map[string]string{"poller_github": "ok", "poller_jira": "ok", "poller_linear": "failed"}
+	for check, w := range want {
+		if got := resp.Checks[check]; got != w {
+			t.Errorf("checks[%s]: got %q want %q", check, got, w)
+		}
+	}
+}
+
 // TestHandleReadyz_StaleLastSuccessIsDegradedNot503 covers acceptance
 // criterion 4: a stale last_successful_poll is a soft signal — still 200,
 // age reported, top-level status "degraded".
@@ -145,6 +178,7 @@ func TestHandleReadyz_StaleLastSuccessIsDegradedNot503(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	// Default GitHubPollInterval is 5m (domain.DefaultOrgSettings); 1h ago
 	// is well past readyzDegradedFactor(3) x 5m = 15m.
 	pm.SetGitHubSuccessForTest(runmode.LocalDefaultOrgID, now.Add(-1*time.Hour))
@@ -185,6 +219,7 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	s.SetPollerManager(pm.Health)
 
 	// origin='interactive' (anything other than 'blueprint') sidesteps the
@@ -261,6 +296,7 @@ func TestHandleReadyz_RateLimitSurfaced(t *testing.T) {
 		return poller.HealthSnapshot{
 			GitHub: poller.SourceHealth{Alive: true, LastTick: now, Orgs: map[string]poller.OrgPollHealth{}},
 			Jira:   poller.SourceHealth{Alive: true, LastTick: now, Orgs: map[string]poller.OrgPollHealth{}},
+			Linear: poller.SourceHealth{Alive: true, LastTick: now, Orgs: map[string]poller.OrgPollHealth{}},
 			GitHubRateLimit: map[string]ghclient.RateLimitState{
 				runmode.LocalDefaultOrgID: {Remaining: 123, Reset: resetAt, Used: 4877},
 			},
@@ -305,6 +341,7 @@ func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	s.SetPollerManager(pm.Health)
 	s.SetLeaseStatus(func() (string, string, int64, bool) {
 		return "background-brain", "pod-a", 7, true
@@ -324,7 +361,7 @@ func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
 	if resp.Lease.Name != "background-brain" || resp.Lease.HolderID != "pod-a" || resp.Lease.Term != 7 || !resp.Lease.IsHolder {
 		t.Errorf("lease: got %+v, want {background-brain pod-a true 7}", resp.Lease)
 	}
-	for _, check := range []string{"poller_github", "poller_jira"} {
+	for _, check := range []string{"poller_github", "poller_jira", "poller_linear"} {
 		if got := resp.Checks[check]; got != "ok" {
 			t.Errorf("checks[%s]: got %q want %q (holder must hard-check exactly like today)", check, got, "ok")
 		}
@@ -333,7 +370,7 @@ func TestHandleReadyz_HolderLeaseFieldPresent(t *testing.T) {
 
 // TestHandleReadyz_StandbyIsAlwaysReady pins the standby contract (TFAC-573
 // shipped, TFAC-583 conditionality): a standby control pod hard-checks only
-// db + migrations, reports poller_github/poller_jira as the literal string
+// db + migrations, reports poller_github/poller_jira/poller_linear as the literal string
 // "standby" (not ok/failed), and MUST return 200 even though it runs no
 // pollers at all (SetPollerManager is never even called here) — an LB must
 // keep every standby in rotation.
@@ -361,13 +398,13 @@ func TestHandleReadyz_StandbyIsAlwaysReady(t *testing.T) {
 	if resp.Lease.HolderID != "pod-b" {
 		t.Errorf("lease.holder_id: got %q want %q", resp.Lease.HolderID, "pod-b")
 	}
-	for _, check := range []string{"poller_github", "poller_jira"} {
+	for _, check := range []string{"poller_github", "poller_jira", "poller_linear"} {
 		if got := resp.Checks[check]; got != "standby" {
 			t.Errorf("checks[%s]: got %q want %q", check, got, "standby")
 		}
 	}
-	if len(resp.Sources.GitHub) != 0 || len(resp.Sources.Jira) != 0 {
-		t.Errorf("sources: expected empty maps on a standby, got github=%v jira=%v", resp.Sources.GitHub, resp.Sources.Jira)
+	if len(resp.Sources.GitHub) != 0 || len(resp.Sources.Jira) != 0 || len(resp.Sources.Linear) != 0 {
+		t.Errorf("sources: expected empty maps on a standby, got github=%v jira=%v linear=%v", resp.Sources.GitHub, resp.Sources.Jira, resp.Sources.Linear)
 	}
 }
 
@@ -402,6 +439,7 @@ func TestHandleReadyz_NoAuthRequired(t *testing.T) {
 	now := time.Now()
 	pm.SetGitHubHeartbeatForTest(now)
 	pm.SetJiraHeartbeatForTest(now)
+	pm.SetLinearHeartbeatForTest(now)
 	s.SetPollerManager(pm.Health)
 
 	rec := doJSON(t, s, http.MethodGet, "/readyz", nil)

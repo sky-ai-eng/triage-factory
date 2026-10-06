@@ -11,7 +11,7 @@ import (
 // `event_handlers` rows now; EventType is purely the catalog entry.
 type EventType struct {
 	ID          string `json:"id"`       // e.g. "github:pr:review_requested"
-	Source      string `json:"source"`   // "github", "jira", "system"
+	Source      string `json:"source"`   // "github", "jira", "linear", "slack", "system"
 	Category    string `json:"category"` // "pr", "issue", "scoring", "delegation"
 	Label       string `json:"label"`    // Human-readable: "Review Requested"
 	Description string `json:"description"`
@@ -109,6 +109,22 @@ const (
 	EventJiraIssueBodyUpdated     = "jira:issue:body_updated"
 )
 
+// Linear events. The Jira set's shape, plus parent_changed: a Linear issue's
+// parent is an ordinary field anyone can reassign, where Jira's is fixed by
+// the issue type.
+const (
+	EventLinearIssueAssigned        = "linear:issue:assigned"
+	EventLinearIssueAvailable       = "linear:issue:available"
+	EventLinearIssueStatusChanged   = "linear:issue:status_changed"
+	EventLinearIssuePriorityChanged = "linear:issue:priority_changed"
+	EventLinearIssueCommented       = "linear:issue:commented"
+	EventLinearIssueCompleted       = "linear:issue:completed"
+	EventLinearIssueBodyUpdated     = "linear:issue:body_updated"
+	EventLinearIssueParentChanged   = "linear:issue:parent_changed"
+	EventLinearIssueBecameAtomic    = "linear:issue:became_atomic"
+	EventLinearIssueUnreachable     = "linear:issue:unreachable"
+)
+
 // Slack events. Registered from ee/slack (an out-of-core source; see
 // internal/domain/events.NewSchema) — the ID constant and catalog entry
 // still live here, universal-seed like every other event type (TFAC-524's
@@ -181,7 +197,7 @@ const (
 
 // EntityTerminatingEventTypes is the set of source transitions that
 // terminate an entity: a merged or closed pull request, a completed or
-// unreachable Jira issue. The routing package derives the same set from its
+// unreachable Jira or Linear issue. The routing package derives the same set from its
 // close relations; a routing test asserts the two agree, so the store layer
 // can read it without importing the router.
 func EntityTerminatingEventTypes() []string {
@@ -190,6 +206,8 @@ func EntityTerminatingEventTypes() []string {
 		EventGitHubPRClosed,
 		EventJiraIssueCompleted,
 		EventJiraIssueUnreachable,
+		EventLinearIssueCompleted,
+		EventLinearIssueUnreachable,
 	}
 }
 
@@ -272,6 +290,18 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
 		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Jira — deleted, or no longer visible to the configured credential (Jira answers both the same way). Confirmed by asking about the issue directly, not inferred from its absence in a search"},
 
+		// --- Linear ---
+		{ID: EventLinearIssueAssigned, Source: "linear", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned, or first seen already assigned"},
+		{ID: EventLinearIssueAvailable, Source: "linear", Category: "issue", Label: "Issue Available", Description: "Unassigned issue in a pickup state"},
+		{ID: EventLinearIssueStatusChanged, Source: "linear", Category: "issue", Label: "Status Changed", Description: "Issue workflow state changed (uses dedup_key=new state name)"},
+		{ID: EventLinearIssuePriorityChanged, Source: "linear", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority label)"},
+		{ID: EventLinearIssueCommented, Source: "linear", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
+		{ID: EventLinearIssueBodyUpdated, Source: "linear", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
+		{ID: EventLinearIssueParentChanged, Source: "linear", Category: "issue", Label: "Parent Changed", Description: "Issue was moved under another parent, or its parent was removed (uses dedup_key=new parent identifier, or none)"},
+		{ID: EventLinearIssueCompleted, Source: "linear", Category: "issue", Label: "Issue Completed", Description: "Issue entered one of its team's done states"},
+		{ID: EventLinearIssueBecameAtomic, Source: "linear", Category: "issue", Label: "Issue Became Atomic", Description: "Last open sub-issue closed — parent is now an atomic work unit"},
+		{ID: EventLinearIssueUnreachable, Source: "linear", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Linear — deleted, moved to the trash, archived outside a done state, or no longer visible to the configured credential. Confirmed by asking about the issue directly, not inferred from its absence in a batch read"},
+
 		// --- Slack (schema + ownership registered by ee/slack) ---
 		{ID: EventSlackMessage, Source: "slack", Category: "message", Label: "Message to bot", Description: "A human addressed the TF bot in a Slack channel"},
 
@@ -291,7 +321,7 @@ func AllEventTypes() []EventType {
 }
 
 // EventSources returns the catalog's distinct source vocabulary ("github",
-// "jira", "slack", "system"), sorted. It is the validation set for the
+// "jira", "linear", "slack", "system"), sorted. It is the validation set for the
 // source filters on list reads — derived from AllEventTypes so a new source
 // joins it by existing in the catalog rather than by a parallel list.
 func EventSources() []string {

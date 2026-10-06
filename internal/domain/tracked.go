@@ -364,6 +364,30 @@ func ContainsState(refs []LinearStateRef, s LinearStateRef) bool {
 	return slices.ContainsFunc(refs, func(r LinearStateRef) bool { return r.SameState(s) })
 }
 
+// LinearStateIDs renders refs as their state ids, skipping any that carry
+// none.
+func LinearStateIDs(refs []LinearStateRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.ID != "" {
+			out = append(out, r.ID)
+		}
+	}
+	return out
+}
+
+// LinearStateNames renders refs as their display names, skipping any that
+// carry none.
+func LinearStateNames(refs []LinearStateRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, r := range refs {
+		if r.Name != "" {
+			out = append(out, r.Name)
+		}
+	}
+	return out
+}
+
 // MarshalLinearStateRefs renders a rule's members for storage. A nil slice
 // renders as [] rather than null, so the stored value is always a JSON array.
 func MarshalLinearStateRefs(refs []LinearStateRef) (string, error) {

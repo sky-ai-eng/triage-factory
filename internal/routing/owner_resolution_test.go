@@ -136,7 +136,7 @@ func identityQueueRouter(database *sql.DB, spawner Delegator) *Router {
 	st := sqlitestore.New(database)
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.Conversations, st.Entities,
-		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, spawner,
+		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, spawner,
 		noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
 	r.SetExecutorID(testExecutorID, 1)
@@ -589,7 +589,7 @@ func TestAuthorTeams_UnwiredStores_StillDegrade(t *testing.T) {
 	// No Users/Teams/Orgs wired — the constructor's documented degrade.
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		nil, nil, nil, testTaskStore(database), nil, sqlitestore.New(database).Entities, nil,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, nil, nil, nil, nil, nil,
+		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, nil, nil, nil, nil, nil, nil,
 		noopScorer{}, websocket.NewHub())
 	r.users, r.teams, r.orgs = nil, nil, nil
 

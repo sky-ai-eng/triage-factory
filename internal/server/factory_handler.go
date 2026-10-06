@@ -413,6 +413,15 @@ func (fh *factoryHandler) handleFactorySnapshot(w http.ResponseWriter, r *http.R
 			// Jira display name lives in user_jira_identities (read via
 			// UsersStore.GetJiraIdentity for the org's host); keep this empty
 			// for v1 and let the UI fall back to the other tint.
+		case "linear":
+			var snap domain.LinearSnapshot
+			if row.Entity.SnapshotJSON != "" {
+				if err := json.Unmarshal([]byte(row.Entity.SnapshotJSON), &snap); err == nil {
+					ej.Status = snap.State.Name
+					ej.Priority = snap.PriorityLabel
+					ej.Assignee = snap.Assignee
+				}
+			}
 		}
 		entities = append(entities, ej)
 	}

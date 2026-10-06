@@ -811,7 +811,7 @@ function entityMeta(entity: FactoryEntity): { k: string; v: string }[] {
       const del = entity.deletions ?? 0
       meta.push({ k: 'diff', v: `+${add} −${del}` })
     }
-  } else if (entity.source === 'jira') {
+  } else if (entity.source === 'jira' || entity.source === 'linear') {
     if (entity.source_id) meta.push({ k: 'key', v: entity.source_id })
     if (entity.status) meta.push({ k: 'status', v: entity.status })
     if (entity.priority) meta.push({ k: 'priority', v: entity.priority })

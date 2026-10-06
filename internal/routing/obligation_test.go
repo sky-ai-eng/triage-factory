@@ -461,7 +461,7 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 	stub := outageDelegator{fenceStubDelegator: &fenceStubDelegator{db: database}, o: &outage{remaining: 1}}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		stores.Agents, stores.TeamAgents, nil, testTaskStore(database), stores.Conversations, stores.Entities,
-		stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+		stores.PendingFirings, stores.Events, stores.Orgs, stores.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 
 	err = router.HandleEvent(context.Background(), domain.Event{
 		EventType:    domain.EventJiraIssueAvailable,

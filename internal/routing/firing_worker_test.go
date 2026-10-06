@@ -236,7 +236,7 @@ func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityI
 // store and delegator, and an executor identity so the claim has an owner.
 func drainRouter(database *sql.DB, firings dbpkg.PendingFiringsStore, spawner Delegator) *Router {
 	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, firings, st.Events, st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, firings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 	r.SetExecutorID("firing-worker-test", 1)
 	return r
 }

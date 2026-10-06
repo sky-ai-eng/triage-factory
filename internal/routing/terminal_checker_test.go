@@ -30,7 +30,7 @@ func newCheckerRouter(t *testing.T, database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		nil, nil, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, st.JiraStatusRules, nil, nil, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, nil, st.JiraStatusRules, nil, nil, nil, noopScorer{}, websocket.NewHub())
 }
 
 // seedDivergentEntity is the state the checker counts: an entity whose
@@ -44,7 +44,7 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	ctx := t.Context()
 	st := sqlitestore.New(database)
 	kind := "pr"
-	if source == "jira" {
+	if source == "jira" || source == "linear" {
 		kind = "issue"
 	}
 	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, sourceID, kind, sourceID, "")

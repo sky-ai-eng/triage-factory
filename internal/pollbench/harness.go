@@ -211,8 +211,8 @@ func Run(cfg RunConfig) (*Result, error) {
 	}
 	mgr := poller.NewManager(database, pub,
 		stores.Users, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, stores.Orgs,
-		stores.JiraStatusRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
-		resolver)
+		stores.JiraStatusRules, stores.LinearTeamRules, stores.TeamGitHubGroups, stores.Secrets, stores.GitHubApps, stores.PollReadiness,
+		resolver, nil)
 
 	// Poll-cycle errors surfaced via OnError are classified at capture: an
 	// ErrRateLimited on a run that configured a rate limit is the expected

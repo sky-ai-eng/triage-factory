@@ -79,6 +79,19 @@ var assigneeCentricJiraEventSet = func() map[string]bool {
 	return m
 }()
 
+// assigneeCentricLinearEventTypes is the Linear twin of
+// assigneeCentricJiraEventTypes: every linear:issue:* type registered
+// OwnershipOwned, which is every one but linear:issue:available.
+var assigneeCentricLinearEventTypes = events.TypesWithOwnership(events.OwnershipOwned, "linear:issue:")
+
+var assigneeCentricLinearEventSet = func() map[string]bool {
+	m := make(map[string]bool, len(assigneeCentricLinearEventTypes))
+	for _, et := range assigneeCentricLinearEventTypes {
+		m[et] = true
+	}
+	return m
+}()
+
 // ownershipModelForEvent classifies an event type into its ownership model —
 // a lookup, not a decision. Every event type declares its model at
 // registration (internal/domain/events.EventSchema.Ownership): core types at

@@ -572,8 +572,8 @@ func resolvePoolRouting(matchedRules, matchedTriggers []domain.EventHandler) eve
 // A registered event source resolves its own owner first — if hooks exist
 // for evt's source, hooks.ResolveOwner supplies (owner, ownerSet, err) in place
 // of the built-in provider branch. Built-in providers differ by provider
-// (author login for github, assignee account for jira); the shared tail —
-// visibility = ownerSet ∪ watchers, firing = members-then-watchers with the
+// (author login for github, assignee account for jira and linear); the shared
+// tail — visibility = ownerSet ∪ watchers, firing = members-then-watchers with the
 // no-steal invariant — lives in ownerLadderRouting, and registered sources
 // inherit all of it unchanged (do NOT reimplement it here). ok=false →
 // external identity, no watching handler → no task.
@@ -593,8 +593,10 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 		owner, ownerSet, err = resolveSourceOwner(ctx, hooks, eventSourcePrefix(evt.EventType), orgID, evt, entityID)
 	} else if isAuthorCentricGitHubEvent(evt.EventType) {
 		owner, ownerSet, err = r.authorCentricOwner(ctx, orgID, evt, entityID, scopeCache)
+	} else if eventSourcePrefix(evt.EventType) == "linear" {
+		owner, ownerSet, err = r.assigneeCentricOwner(ctx, orgID, evt, entityID, assigneeCentricLinearEventSet, scopeCache)
 	} else {
-		owner, ownerSet, err = r.assigneeCentricJiraOwner(ctx, orgID, evt, entityID, scopeCache)
+		owner, ownerSet, err = r.assigneeCentricOwner(ctx, orgID, evt, entityID, assigneeCentricJiraEventSet, scopeCache)
 	}
 	if err != nil {
 		return eventRouting{}, false, err
@@ -671,7 +673,7 @@ func (r *Router) upsertTaskForEvent(ctx context.Context, orgID string, evt domai
 		createdAt = evt.OccurredAt.UTC()
 	}
 
-	if evt.EventType == domain.EventJiraIssueBecameAtomic {
+	if evt.EventType == domain.EventJiraIssueBecameAtomic || evt.EventType == domain.EventLinearIssueBecameAtomic {
 		// became_atomic is the belated-discovery path for parents whose
 		// subtasks just closed. Suppress the new card if any active task
 		// already exists on the entity — otherwise an atomic ticket that

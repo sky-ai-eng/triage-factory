@@ -134,6 +134,13 @@ var closeRelations = []closeRelation{
 	// A Jira issue was (re)assigned → retire the stale assigned/available
 	// tasks that no longer reflect the assignment, so the new assignment mints
 	// a fresh task owned by the new assignee's team.
+	//
+	// TODO(TFAC-1020): Linear has no reassignment close. A reassigned Linear
+	// issue keeps its earlier assigned/available tasks open, so the new
+	// assignment bumps the earlier owner's task rather than minting one for
+	// the new assignee's team; the ticket's deferral ledger leaves
+	// close_relations.go's Jira semantics beyond the terminating closes and
+	// became_atomic for later.
 	{
 		onEvents: []string{domain.EventJiraIssueAssigned},
 		closes:   []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable},
@@ -167,9 +174,24 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// A Linear issue completed → the Jira completion close, for Linear.
+	{
+		onEvents:         []string{domain.EventLinearIssueCompleted},
+		closes:           linearCloseTypesExcept(domain.EventLinearIssueCompleted),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
+	// Linear stopped giving TF a tracked issue → the Jira unreachable close,
+	// for Linear.
+	{
+		onEvents:         []string{domain.EventLinearIssueUnreachable},
+		closes:           linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
 	// The poll observed a terminal snapshot on an entity still active with
 	// no close in flight → the close that was lost, performed now. An
-	// entity has one source, so the union of the three terminal sets is
+	// entity has one source, so the union of the terminal sets is
 	// safe: the types of another source have no open task to match. The
 	// terminating events' own types stay excluded, as in the sets above, so
 	// a lifecycle task riding an auto-run survives here too.
@@ -243,13 +265,13 @@ func jiraIssueUnreachableCloseTypes() []string {
 }
 
 // closeOwedCloseTypes is what the poll's close obligation cleans up: the
-// union of the GitHub terminal set, the Jira completed set and the Jira
-// unreachable set, deduplicated, minus every terminating event's own type.
-// An entity has one source, so the types of the other source are no-ops.
-// The subtraction is explicit rather than inherited, because the two Jira
-// sets each spare only their own terminator: the obligation does not know
-// which transition was lost, so it spares them all — a task of one of those
-// types may be a lifecycle task riding the run its transition started.
+// union of the GitHub terminal set and the Jira and Linear completed and
+// unreachable sets, deduplicated, minus every terminating event's own type.
+// An entity has one source, so the types of the other sources are no-ops.
+// The subtraction is explicit rather than inherited, because each issue
+// source's two sets spare only their own terminator: the obligation does not
+// know which transition was lost, so it spares them all — a task of one of
+// those types may be a lifecycle task riding the run its transition started.
 func closeOwedCloseTypes() []string {
 	spared := map[string]bool{}
 	for _, et := range domain.EntityTerminatingEventTypes() {
@@ -257,7 +279,12 @@ func closeOwedCloseTypes() []string {
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, set := range [][]string{githubPRTerminalCloseTypes(), jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes()} {
+	sets := [][]string{
+		githubPRTerminalCloseTypes(),
+		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
+		linearCloseTypesExcept(domain.EventLinearIssueCompleted), linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
+	}
+	for _, set := range sets {
 		for _, et := range set {
 			if !seen[et] && !spared[et] {
 				seen[et] = true
@@ -281,6 +308,20 @@ func jiraCloseTypesExcept(terminator string) []string {
 		out = append(out, et)
 	}
 	return append(out, domain.EventJiraIssueAvailable)
+}
+
+// linearCloseTypesExcept is jiraCloseTypesExcept for Linear: every
+// assignee-centric Linear type plus the unassigned pool task, minus the
+// terminating event's own type.
+func linearCloseTypesExcept(terminator string) []string {
+	out := make([]string, 0, len(assigneeCentricLinearEventTypes)+1)
+	for _, et := range assigneeCentricLinearEventTypes {
+		if et == terminator {
+			continue
+		}
+		out = append(out, et)
+	}
+	return append(out, domain.EventLinearIssueAvailable)
 }
 
 // runCloses applies every typed (non-terminating) close relation matching

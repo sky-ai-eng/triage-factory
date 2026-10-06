@@ -280,22 +280,23 @@ const pgFactoryEntitySelectColumns = `
 // The multi-mode factory belt sources entity visibility from each team's
 // *tracked set*, not from task existence. An entity belongs on a team's
 // factory iff it sits in that team's tracked set — a GitHub entity whose
-// owner/name is one of the team's tracked repos (team_github_repos), or a
+// owner/name is one of the team's tracked repos (team_github_repos), a
 // Jira entity whose project key is attached to the team
-// (jira_project_status_rules). This decouples the belt from task
+// (jira_project_status_rules), or a Linear entity whose Linear team the team
+// tracks (linear_team_rules). This decouples the belt from task
 // creation: an untasked PR on a tracked repo now appears, where the prior
 // task-existence semi-join hid it until a rule minted a task. SQLite/
 // local is N=1 and stays unscoped (sqlite/factory.go).
 //
 // The team scoping is free under the app pool (tf_app, RLS active): the
-// team_github_repos_select and jira_rules_select policies already
-// constrain visible rows to the viewer's team memberships, so each EXISTS
+// team_github_repos_select, jira_rules_select and linear_rules_select
+// policies already constrain visible rows to the viewer's team memberships, so each EXISTS
 // auto-scopes to the viewer's teams with no explicit team_id — the same
 // RLS-does-the-scoping pattern ListActiveJiraTeamScoped uses
 // for the Jira discovery deck. The teams join binds org (via e.org_id) as
 // defense-in-depth so the filter still holds on the admin pool where RLS
-// is bypassed: team_github_repos and jira_project_status_rules carry no
-// org_id column, so org scope rides the teams FK.
+// is bypassed: team_github_repos, jira_project_status_rules and
+// linear_team_rules carry no org_id column, so org scope rides the teams FK.
 //
 // GitHub source_id is "owner/repo#N" (tracker.ghSourceID): split_part on
 // '/' yields the owner, split_part on '/' then '#' yields the repo.
@@ -331,18 +332,33 @@ const factoryJiraProjectTrackedExists = `EXISTS (
 	  AND jr.project_key = split_part(e.source_id, '-', 1)
 )`
 
+// factoryLinearTeamTrackedExists scopes a linear entities row (alias e) to
+// the Linear teams attached to the viewer's teams. The entity's Linear team
+// is its snapshot's team_id, the UUID linear_team_rules is keyed by and the
+// router's team gate reads — not the identifier's key prefix, which a team
+// key rename in Linear changes. A row with no snapshot yet matches nothing
+// until its first refresh seeds one.
+const factoryLinearTeamTrackedExists = `EXISTS (
+	SELECT 1 FROM linear_team_rules lr
+	JOIN teams tm ON tm.id = lr.team_id
+	WHERE tm.org_id = e.org_id
+	  AND lr.linear_team_id = e.snapshot_json->>'team_id'
+)`
+
 // factoryEntityTrackedExists is the combined tracked-set membership
 // predicate correlated against an entities row (alias e): a github entity
-// in a tracked repo, or a jira entity in a tracked project. Entities of
-// any other source (slack, linear) have no tracked-set notion and never
-// match — they are off the factory belt by construction.
+// in a tracked repo, a jira entity in a tracked project, or a linear entity
+// in a tracked Linear team. Entities of any other source (slack) have no
+// tracked-set notion and never match — they are off the factory belt by
+// construction.
 const factoryEntityTrackedExists = `(
 	(e.source = 'github' AND ` + factoryGitHubRepoTrackedExists + `)
 	OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedExists + `)
+	OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedExists + `)
 )`
 
-// factoryGitHubRepoTrackedForTeams / factoryJiraProjectTrackedForTeams
-// are the team-narrowed variants used by the per-page read filter: the
+// factoryGitHubRepoTrackedForTeams / factoryJiraProjectTrackedForTeams /
+// factoryLinearTeamTrackedForTeams are the team-narrowed variants used by the per-page read filter: the
 // correlated tracked-set row must additionally belong to one of the teams
 // in placeholders (the comma-joined "$3, $4" list bound to team ids).
 // Each branch stays RLS-scoped to the viewer under tf_app (a forged team
@@ -371,10 +387,21 @@ func factoryJiraProjectTrackedForTeams(placeholders string) string {
 	)`
 }
 
+func factoryLinearTeamTrackedForTeams(placeholders string) string {
+	return `EXISTS (
+		SELECT 1 FROM linear_team_rules lr
+		JOIN teams tm ON tm.id = lr.team_id
+		WHERE tm.org_id = e.org_id
+		  AND lr.team_id IN (` + placeholders + `)
+		  AND lr.linear_team_id = e.snapshot_json->>'team_id'
+	)`
+}
+
 func factoryEntityTrackedForTeams(placeholders string) string {
 	return `(
 		(e.source = 'github' AND ` + factoryGitHubRepoTrackedForTeams(placeholders) + `)
 		OR (e.source = 'jira' AND ` + factoryJiraProjectTrackedForTeams(placeholders) + `)
+		OR (e.source = 'linear' AND ` + factoryLinearTeamTrackedForTeams(placeholders) + `)
 	)`
 }
 

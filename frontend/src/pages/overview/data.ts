@@ -46,21 +46,22 @@ export function utcMidnightISO(now: number = Date.now()): string {
 export function sourceOf(conv: Conversation, task: Task | undefined): RunSource {
   if (isFailedStatus(conv.Status)) return 'alert'
   if (task?.source === 'github') return 'pull'
-  if (task?.source === 'jira') return 'ticket'
+  if (task?.source === 'jira' || task?.source === 'linear') return 'ticket'
   return 'manual'
 }
 
 /** The source's own reference, written the source's way. GitHub's source_id is
  *  `owner/repo#N`; the owner goes — the rail already names the org, and the
- *  repo half is what a reader recognizes. Jira keys are already short. A
- *  source with no compact spelling gets none: the activity carries the row. */
+ *  repo half is what a reader recognizes. Jira keys and Linear identifiers are
+ *  already short. A source with no compact spelling gets none: the activity
+ *  carries the row. */
 export function refOf(task: Task | undefined): string | null {
   if (!task) return null
   if (task.source === 'github') {
     const slash = task.source_id.indexOf('/')
     return slash >= 0 ? task.source_id.slice(slash + 1) : task.source_id
   }
-  if (task.source === 'jira') return task.source_id
+  if (task.source === 'jira' || task.source === 'linear') return task.source_id
   return null
 }
 

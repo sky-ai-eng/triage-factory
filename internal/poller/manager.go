@@ -16,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -45,10 +46,14 @@ type Manager struct {
 	repos        db.RepositoryStore       // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
+	linearRules  db.LinearTeamRulesStore  // per-team Linear team rules; discovery polls the org-wide union, merged per Linear team
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
 	apps         db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
 	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+	// linearResolver builds each org's Linear service client. The cycle reads
+	// only its ForSystem half: polling is attributed to the org's identity.
+	linearResolver linear.Resolver
 
 	// ReconcileGrant refreshes the org's App-installation mirror — which
 	// installations exist, how wide each grant is, and which repositories each
@@ -93,8 +98,8 @@ type Manager struct {
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
 
-	// OnError fires when a poll cycle returns an error. Source is "github"
-	// or "jira"; orgID identifies the tenant whose cycle errored (empty
+	// OnError fires when a poll cycle returns an error. Source is "github",
+	// "jira" or "linear"; orgID identifies the tenant whose cycle errored (empty
 	// when the failure is upstream of the per-org loop, e.g. listing
 	// active orgs itself). nil-safe. Production leaves it unset: a
 	// connection failure reaches people as the connection state below, not
@@ -108,9 +113,10 @@ type Manager struct {
 	// Manager directly).
 	connections db.PollReadinessStore
 
-	mu       sync.Mutex
-	ghStop   chan struct{}
-	jiraStop chan struct{}
+	mu         sync.Mutex
+	ghStop     chan struct{}
+	jiraStop   chan struct{}
+	linearStop chan struct{}
 
 	// dueMu guards nextPoll, the scheduler clock. Each source runs ONE
 	// base-tick loop (every basePollInterval) that polls an org only once
@@ -150,6 +156,7 @@ type Manager struct {
 	heartbeatMu    sync.Mutex
 	lastGithubTick time.Time
 	lastJiraTick   time.Time
+	lastLinearTick time.Time
 
 	// pollSuccessMu guards lastGithubSuccess/lastJiraSuccess — per-org
 	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
@@ -159,24 +166,27 @@ type Manager struct {
 	pollSuccessMu     sync.Mutex
 	lastGithubSuccess map[string]time.Time
 	lastJiraSuccess   map[string]time.Time
+	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
-		database:     database,
-		pub:          pub,
-		tasks:        tasks,
-		entities:     entities,
-		eventQueue:   eventQueue,
-		users:        users,
-		repos:        repos,
-		orgs:         orgs,
-		jiraRules:    jiraRules,
-		githubGroups: githubGroups,
-		secrets:      secrets,
-		apps:         apps,
-		connections:  connections,
-		resolver:     resolver,
+		database:       database,
+		pub:            pub,
+		tasks:          tasks,
+		entities:       entities,
+		eventQueue:     eventQueue,
+		users:          users,
+		repos:          repos,
+		orgs:           orgs,
+		jiraRules:      jiraRules,
+		linearRules:    linearRules,
+		githubGroups:   githubGroups,
+		secrets:        secrets,
+		apps:           apps,
+		connections:    connections,
+		resolver:       resolver,
+		linearResolver: linearResolver,
 	}
 }
 
@@ -272,6 +282,7 @@ func (m *Manager) RestartAll() {
 	m.stopAll()
 	m.startGitHub()
 	m.startJira()
+	m.startLinear()
 }
 
 // RestartJira stops and restarts only the Jira polling loop. Runs in both
@@ -466,6 +477,11 @@ func (m *Manager) stopAll() {
 		close(m.jiraStop)
 		m.jiraStop = nil
 		jiraLog.Info("tracker stopped")
+	}
+	if m.linearStop != nil {
+		close(m.linearStop)
+		m.linearStop = nil
+		linearLog.Info("tracker stopped")
 	}
 }
 

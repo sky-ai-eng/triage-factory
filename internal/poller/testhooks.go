@@ -23,6 +23,13 @@ func (m *Manager) SetJiraHeartbeatForTest(at time.Time) {
 	m.heartbeatMu.Unlock()
 }
 
+// SetLinearHeartbeatForTest is SetGitHubHeartbeatForTest's Linear twin.
+func (m *Manager) SetLinearHeartbeatForTest(at time.Time) {
+	m.heartbeatMu.Lock()
+	m.lastLinearTick = at
+	m.heartbeatMu.Unlock()
+}
+
 // SetGitHubSuccessForTest backdates orgID's last-successful-GitHub-poll
 // timestamp — the /readyz seam for exercising the soft "stale
 // last_successful_poll" signal (top-level status "degraded") without
@@ -34,6 +41,11 @@ func (m *Manager) SetGitHubSuccessForTest(orgID string, at time.Time) {
 // SetJiraSuccessForTest is SetGitHubSuccessForTest's Jira twin.
 func (m *Manager) SetJiraSuccessForTest(orgID string, at time.Time) {
 	m.stampSuccessForTest(&m.lastJiraSuccess, orgID, at)
+}
+
+// SetLinearSuccessForTest is SetGitHubSuccessForTest's Linear twin.
+func (m *Manager) SetLinearSuccessForTest(orgID string, at time.Time) {
+	m.stampSuccessForTest(&m.lastLinearSuccess, orgID, at)
 }
 
 func (m *Manager) stampSuccessForTest(dst *map[string]time.Time, orgID string, at time.Time) {
