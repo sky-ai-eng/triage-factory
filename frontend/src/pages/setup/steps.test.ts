@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { initialWizardState, persistOrgFields, bedrockFormError, WIZARD_STEPS } from './steps'
+import {
+  initialWizardState,
+  persistOrgFields,
+  bedrockFormError,
+  linearActive,
+  loadOrg,
+  WIZARD_STEPS,
+} from './steps'
+import { isStepVisible, resumeIndex } from './resume'
+import { jsonBody } from '../../test/apiResponse'
 import type { WizardState } from './types'
 
 // The org save is FIELD-SCOPED: a step's persist names exactly the fields its
@@ -291,5 +300,187 @@ describe('setup — credentials before the model picks, and both picks mandatory
     const chosen = { ...base, team: { ...base.team, default_model: 'claude-sonnet-5' } }
     expect(step.isComplete(chosen)).toBe(true)
     expect(step.validate?.(chosen)).toBeNull()
+  })
+})
+
+// The Linear tracker's steps: which appear for which pick, how a returning
+// org resumes, and what the access step's Continue sends.
+describe('setup — the Linear tracker', () => {
+  beforeEach(() => vi.restoreAllMocks())
+
+  const stepFor = (id: string) => {
+    const step = WIZARD_STEPS.find((s) => s.id === id)
+    if (!step) throw new Error(`${id} is missing from WIZARD_STEPS`)
+    return step
+  }
+  const visibleIds = (state: WizardState) =>
+    WIZARD_STEPS.filter((s) => isStepVisible(s, state)).map((s) => s.id)
+  const linearIds = ['org-linear-access', 'org-linear-poller', 'team-linear-teams']
+  const jiraIds = ['org-jira-url', 'org-jira-mode', 'org-jira-access']
+
+  it('shows no Linear step unless Linear is the pick', () => {
+    for (const tracker of ['none', 'jira'] as const) {
+      const ids = visibleIds({ ...initialWizardState(), tracker, linearConnected: true })
+      for (const id of linearIds) expect(ids).not.toContain(id)
+    }
+  })
+
+  it('shows the access step alone until the key is bound, then the cadence and team steps', () => {
+    const picked = { ...initialWizardState(), tracker: 'linear' as const }
+    let ids = visibleIds(picked)
+    expect(ids).toContain('org-linear-access')
+    expect(ids).not.toContain('org-linear-poller')
+    expect(ids).not.toContain('team-linear-teams')
+    for (const id of jiraIds) expect(ids).not.toContain(id)
+
+    ids = visibleIds({ ...picked, linearConnected: true })
+    expect(ids).toEqual(expect.arrayContaining(linearIds))
+    expect(linearActive({ ...picked, linearConnected: true })).toBe(true)
+  })
+
+  it('resumes a fresh Linear pick on its access step, and blocks without a key', () => {
+    const state = {
+      ...initialWizardState(),
+      tracker: 'linear' as const,
+      githubReady: true,
+      githubAccessTab: 'pat' as const,
+    }
+    expect(WIZARD_STEPS[resumeIndex(WIZARD_STEPS, state)].id).toBe('org-linear-access')
+    const access = stepFor('org-linear-access')
+    expect(access.validate?.(state)).toMatch(/Linear API key/)
+    const typed = { ...state, org: { ...state.org, linear_api_key: 'lin_api_x' } }
+    expect(access.validate?.(typed)).toBeNull()
+    expect(access.isComplete({ ...state, linearConnected: true })).toBe(true)
+  })
+
+  it('blocks the team step on a half-mapped Linear team only', () => {
+    const base = { ...initialWizardState(), tracker: 'linear' as const, linearConnected: true }
+    const step = stepFor('team-linear-teams')
+    expect(step.isComplete(base)).toBe(true)
+    const half = {
+      ...base,
+      team: {
+        ...base.team,
+        linear_teams: [
+          {
+            id: 'lt-1',
+            key: 'ENG',
+            name: 'Engineering',
+            pickup: { members: [{ id: 's1', name: 'Todo', type: 'unstarted' }] },
+            in_progress: { members: [] },
+            done: { members: [] },
+          },
+        ],
+      },
+    }
+    expect(step.isComplete(half)).toBe(false)
+    expect(step.validate?.(half)).toMatch(/half-mapped Linear team/)
+  })
+
+  it('names the workspace in the collapsed access bar', () => {
+    const access = stepFor('org-linear-access')
+    const s = initialWizardState()
+    expect(access.collapsedSummary(s)).toBe('Not connected')
+    expect(
+      access.collapsedSummary({ ...s, linearConnected: true, linearWorkspaceUrlKey: 'acme' }),
+    ).toBe('Connected · linear.app/acme')
+    expect(stepFor('org-trackers').collapsedSummary({ ...s, tracker: 'linear' })).toBe('Linear')
+  })
+
+  // Continue performs the bind, then picks up the settings row's new token —
+  // the bind wrote the workspace onto it, so the poll step's save right after
+  // would otherwise conflict with this connect.
+  it('binds the typed key, then folds in the workspace and the fresh version', async () => {
+    const calls: { url: string; method: string; body: unknown }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const method = init?.method ?? 'GET'
+        calls.push({ url, method, body: init?.body ? JSON.parse(String(init.body)) : undefined })
+        if (url.endsWith('/linear/access/credential')) {
+          return {
+            ok: true,
+            status: 200,
+            ...jsonBody({
+              connected: true,
+              auth_method: 'api_key',
+              workspace_url_key: 'acme',
+              bound_as: { name: 'ada', display_name: 'Ada' },
+              connect_available: false,
+              using_deployment_default: false,
+            }),
+          }
+        }
+        return { ok: true, status: 200, ...jsonBody({ version: 12 }) }
+      }),
+    )
+    const base = initialWizardState()
+    const state: WizardState = {
+      ...base,
+      orgLoaded: true,
+      tracker: 'linear',
+      org: { ...base.org, version: 11, linear_api_key: '  lin_api_x  ' },
+    }
+    const patched: Partial<WizardState>[] = []
+    await stepFor('org-linear-access').persist({
+      ...orgCtx(state, (p) => patched.push(p)),
+      teamId: 'default',
+      isLocal: true,
+    })
+
+    expect(calls[0]).toMatchObject({
+      url: `/api/orgs/${ORG_ID}/linear/access/credential`,
+      method: 'PUT',
+      body: { api_key: 'lin_api_x' },
+    })
+    expect(patched.at(-1)).toMatchObject({
+      linearConnected: true,
+      linearWorkspaceUrlKey: 'acme',
+      linearBoundAs: 'Ada',
+      org: { linear_api_key: '', version: 12 },
+    })
+  })
+
+  it('saves only the Linear cadence from its poll step', async () => {
+    const bodies = captureSaveBodies()
+    await stepFor('org-linear-poller').persist({
+      ...orgCtx(loadedStateWithStalePat()),
+      teamId: 'default',
+      isLocal: true,
+    })
+    expect(Object.keys(bodies()[0]).sort()).toEqual(['linear_poll_interval', 'version'])
+  })
+
+  // A returning org resumes on the tracker it connected; Linear wins when both
+  // are, since the wizard sets up one and the other lives on in Settings.
+  it('seeds the tracker pick from the connections on load', async () => {
+    const answer = (linear: boolean, jira: boolean) =>
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string) => {
+          if (url.endsWith('/linear/access')) {
+            return {
+              ok: true,
+              status: 200,
+              ...jsonBody({ connected: linear, workspace_url_key: linear ? 'acme' : '' }),
+            }
+          }
+          if (url === '/api/integrations/status') {
+            return {
+              ok: true,
+              status: 200,
+              ...jsonBody({ jira, jira_url: jira ? 'https://jira.example.com' : '' }),
+            }
+          }
+          return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
+        }),
+      )
+    const ctx = { orgId: ORG_ID, teamId: 'default', isLocal: true }
+    answer(true, true)
+    expect(await loadOrg(ctx)).toMatchObject({ tracker: 'linear', linearConnected: true })
+    answer(false, true)
+    expect(await loadOrg(ctx)).toMatchObject({ tracker: 'jira', linearConnected: false })
+    answer(false, false)
+    expect((await loadOrg(ctx)).tracker).toBe('none')
   })
 })

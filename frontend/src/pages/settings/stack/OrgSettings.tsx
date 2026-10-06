@@ -20,10 +20,10 @@
 // unsaved edits, and never carries a value its user wasn't looking at.
 // Selector/panel sections (the GitHub access control, the App register panel)
 // carry no Save footer, and Jira disconnect commits inline on its own button.
-// The Jira *credential* is the exception that proves the rule it used to
-// break: its Save footer ("Connect" / "Replace credential") drives
-// PUT /api/orgs/{org}/jira/access/credential rather than the org POST, but
-// it's a footer all the same.
+// The Jira and Linear *credentials* are the exception that proves the rule
+// they used to break: their Save footers ("Connect" / "Replace …") drive
+// PUT /api/orgs/{org}/{jira,linear}/access/credential rather than the org
+// PATCH, but they're footers all the same.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import TeamPicker from '../../../components/TeamPicker'
@@ -55,6 +55,7 @@ import type { StepContext, WizardState } from '../../setup/types'
 import PollerTimingGroup from '../PollerTimingGroup'
 import { inputClass } from '../primitives'
 import JiraAccessGroup from '../JiraAccessGroup'
+import LinearAccessGroup from '../LinearAccessGroup'
 import EventSourcesGroup from '../EventSourcesGroup'
 import ApiTokenPolicyGroup from '../ApiTokenPolicyGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
@@ -71,6 +72,7 @@ import {
   type OrgSettingsPatch,
 } from '../orgConfig'
 import { connectJira, JIRA_DEPLOYMENT_OPTIONS } from '../jiraConnect'
+import { boundAsName, connectLinear } from '../linearConnect'
 import { disconnectGitHubPAT, disconnectJira } from '../orgCredentials'
 import { connectAnthropic, disconnectLLM, CLAUDE_SOURCE_OPTIONS } from '../anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../bedrockConnect'
@@ -103,6 +105,9 @@ export default function OrgSettings({
   // intent ("I want to retype this"), and it has to survive the fields being
   // blank, which is the state it starts in.
   const [jiraRebinding, setJiraRebinding] = useState(false)
+  // The Linear sibling: the connected section re-opened to bind a replacement
+  // key in place.
+  const [linearRebinding, setLinearRebinding] = useState(false)
 
   // Parked event_queue rows. Fetched at this level, not inside the panel,
   // because the collapsed section's badge has to show the count before the
@@ -639,6 +644,101 @@ export default function OrgSettings({
         </SettingsSection>
       )}
 
+      {/* ── Linear connection ── The Jira section's shape: unconnected (or
+          rebinding), a form whose Save performs the bind; connected, a status
+          line carrying the inline Disconnect and "Replace key", which re-opens
+          the form against the still-connected org so a rotation never starts
+          with a disconnect. */}
+      {draft.linearConnected && !linearRebinding ? (
+        <SettingsSection
+          title="Linear connection"
+          summary={
+            baseline.linearWorkspaceUrlKey
+              ? `Connected · linear.app/${baseline.linearWorkspaceUrlKey}`
+              : 'Connected'
+          }
+        >
+          <LinearAccessGroup
+            value={{ linear_api_key: draft.org.linear_api_key }}
+            onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+            connected
+            boundAs={draft.linearBoundAs}
+            workspaceUrlKey={draft.linearWorkspaceUrlKey}
+            orgId={orgId}
+            onReplace={() => setLinearRebinding(true)}
+            envProvided={draft.linearCredentialEnvProvided}
+            onDisconnected={() => {
+              const cleared = {
+                linearConnected: false,
+                linearWorkspaceUrlKey: '',
+                linearBoundAs: '',
+              }
+              setDraft((d) => ({ ...d, ...cleared, org: { ...d.org, linear_api_key: '' } }))
+              setBaseline((b) => ({ ...b, ...cleared }))
+              // The disconnect also cleared the workspace on the settings row.
+              void refreshOrgVersion()
+            }}
+            bare
+          />
+        </SettingsSection>
+      ) : (
+        <SettingsSection
+          title="Linear connection"
+          summary={
+            linearRebinding
+              ? `Connected · linear.app/${baseline.linearWorkspaceUrlKey}`
+              : 'Not connected'
+          }
+          saveLabel={linearRebinding ? 'Replace key' : 'Connect'}
+          dirty={draft.org.linear_api_key.trim() !== ''}
+          saveDisabled={draft.org.linear_api_key.trim() === ''}
+          saving={isSaving('linear-connect')}
+          onSave={async () => {
+            if (!orgId) {
+              toast.error('No organization context — reload and try again.')
+              return false
+            }
+            setSavingKey('linear-connect', true)
+            try {
+              // Same call for a first bind and a replacement: the key is
+              // validated against Linear before anything is stored, so a bad
+              // one 422s with the org still on the key it had.
+              const result = await connectLinear(orgId, draft.org.linear_api_key)
+              if (!result.ok) {
+                toast.error(result.error)
+                return false
+              }
+              // The bind also wrote the workspace onto the settings row.
+              await refreshOrgVersion()
+              const connected = {
+                linearConnected: true,
+                linearWorkspaceUrlKey: result.access.workspace_url_key,
+                linearBoundAs: boundAsName(result.access),
+              }
+              setDraft((d) => ({ ...d, ...connected, org: { ...d.org, linear_api_key: '' } }))
+              setBaseline((b) => ({ ...b, ...connected }))
+              toast.success(linearRebinding ? 'Linear key replaced' : 'Linear connected')
+              setLinearRebinding(false)
+              return true
+            } finally {
+              setSavingKey('linear-connect', false)
+            }
+          }}
+          onCancel={() => {
+            revertOrg(['linear_api_key'])
+            setLinearRebinding(false)
+          }}
+        >
+          <LinearAccessGroup
+            value={{ linear_api_key: draft.org.linear_api_key }}
+            onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+            connected={false}
+            orgId={orgId}
+            bare
+          />
+        </SettingsSection>
+      )}
+
       {/* ── Slack (TFAC-529) ── EE, multi-mode only: every /api/slack/* seam
           404s an unlicensed org, so the FE hides the surface rather than
           presenting a dead flow — same gating shape as SSO below. An action
@@ -691,6 +791,47 @@ export default function OrgSettings({
               }}
               onChange={(p) => patch({ org: { ...draft.org, ...p } })}
               showGitHub={false}
+              bare
+            />
+          </div>
+        </SettingsSection>
+      )}
+
+      {/* ── Linear polling (only once connected) ── */}
+      {draft.linearConnected && (
+        <SettingsSection
+          title="Linear polling"
+          summary={`Every ${intervalLabel(baseline.org.linear_poll_interval)}`}
+          dirty={draft.org.linear_poll_interval !== baseline.org.linear_poll_interval}
+          saving={isSaving('linear-poll')}
+          onSave={() =>
+            commitOrgSlice(
+              'linear-poll',
+              { linear_poll_interval: draft.org.linear_poll_interval },
+              'Linear polling',
+            )
+          }
+          onCancel={() => revertOrg(['linear_poll_interval'])}
+        >
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
+                How often should we poll Linear?
+              </h2>
+              <p className="text-body leading-relaxed text-ink-3">
+                The cadence for the Linear tracker — independent of the GitHub poll interval.
+              </p>
+            </div>
+            <PollerTimingGroup
+              value={{
+                github_poll_interval: draft.org.github_poll_interval,
+                jira_poll_interval: draft.org.jira_poll_interval,
+                linear_poll_interval: draft.org.linear_poll_interval,
+              }}
+              onChange={(p) => patch({ org: { ...draft.org, ...p } })}
+              showGitHub={false}
+              showJira={false}
+              showLinear
               bare
             />
           </div>

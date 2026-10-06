@@ -1,16 +1,14 @@
-// The Trackers step body (optional) — now just the org-level tracker picker:
-// None, Jira, or Linear, one at a time. Trackers are the issue/work
-// integrations, distinct from GitHub (the backbone). Linear is a disabled
-// "coming soon" placeholder (no poller, no credentials, no ingestion — out of
-// scope), so it can be looked at but never selected.
+// The Trackers step body (optional) — just the org-level tracker picker: None,
+// Jira, or Linear, one at a time. Trackers are the issue/work integrations,
+// distinct from GitHub (the backbone). Picking one only decides which steps
+// follow; the other can still be connected later in Settings.
 //
-// When Jira is chosen it expands into its own atomic steps — a Jira URL step
-// and a Jira access step (JiraStep.tsx), gated visible on tracker === 'jira' —
-// rather than hosting the URL + connect inline here, so every step is one
-// action (the same shape as GitHub's URL/access split).
+// Each choice expands into its own atomic steps rather than hosting a connect
+// inline here, so every step is one action: Jira into URL → deployment →
+// access (JiraStep.tsx), Linear into access (LinearStep.tsx), each gated
+// visible on the tracker.
 
 import { useRef } from 'react'
-import { Clock } from 'lucide-react'
 import { nextRadioIndex } from '../../lib/rovingRadio'
 import type { StepContext, TrackerKind } from './types'
 
@@ -18,13 +16,12 @@ interface TrackerCard {
   kind: TrackerKind
   title: string
   blurb: string
-  disabled?: boolean
 }
 
 const CARDS: TrackerCard[] = [
   { kind: 'none', title: 'None', blurb: 'GitHub only — add a tracker later in Settings.' },
   { kind: 'jira', title: 'Jira', blurb: 'Track Jira issues alongside your PRs.' },
-  { kind: 'linear', title: 'Linear', blurb: 'Coming soon.', disabled: true },
+  { kind: 'linear', title: 'Linear', blurb: 'Track Linear issues alongside your PRs.' },
 ]
 
 export default function TrackersStep({ state, patch }: StepContext) {
@@ -32,14 +29,12 @@ export default function TrackersStep({ state, patch }: StepContext) {
   const selectedIndex = CARDS.findIndex((c) => c.kind === state.tracker)
 
   const select = (kind: TrackerKind) => {
-    if (kind === 'linear') return
     patch({ tracker: kind })
   }
 
-  // Arrow keys move selection across the enabled cards, skipping the disabled
-  // "coming soon" Linear card.
+  // Arrow keys move selection across the cards.
   const onKeyDown = (e: React.KeyboardEvent) => {
-    const next = nextRadioIndex(e.key, selectedIndex, CARDS.length, (i) => !CARDS[i].disabled)
+    const next = nextRadioIndex(e.key, selectedIndex, CARDS.length)
     if (next === null) return
     e.preventDefault()
     select(CARDS[next].kind)
@@ -73,28 +68,16 @@ export default function TrackersStep({ state, patch }: StepContext) {
               type="button"
               role="radio"
               aria-checked={selected}
-              aria-disabled={card.disabled}
-              disabled={card.disabled}
               tabIndex={i === tabbable ? 0 : -1}
               onClick={() => select(card.kind)}
               className={`flex flex-col items-start gap-1 rounded-xl border px-3.5 py-3 text-left transition-colors ${
-                card.disabled
-                  ? 'cursor-default border-line-1 bg-tint-2 opacity-55'
-                  : selected
-                    ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
-                    : 'border-line-1 bg-raised hover:border-warm/30 hover:bg-sunk'
+                selected
+                  ? 'border-warm/50 bg-warm/[0.06] shadow-float shadow-black/[0.03]'
+                  : 'border-line-1 bg-raised hover:border-warm/30 hover:bg-sunk'
               }`}
             >
-              <span className="flex items-center gap-1.5">
-                <span className={`text-body font-medium ${selected ? 'text-warm' : 'text-ink-1'}`}>
-                  {card.title}
-                </span>
-                {card.disabled && (
-                  <span className="inline-flex items-center gap-0.5 rounded-full bg-tint-3 px-1.5 py-0.5 text-label-sm font-medium uppercase tracking-wide text-ink-3">
-                    <Clock size={9} aria-hidden />
-                    Soon
-                  </span>
-                )}
+              <span className={`text-body font-medium ${selected ? 'text-warm' : 'text-ink-1'}`}>
+                {card.title}
               </span>
               <span className="text-reported leading-snug text-ink-3">{card.blurb}</span>
             </button>

@@ -15,6 +15,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
 )
@@ -362,5 +363,42 @@ func TestTerminalChecker_LinearDoneIsPerTeam(t *testing.T) {
 
 	if a, _, _ := r.checkOrgTerminalInvariant(context.Background(), runmode.LocalDefaultOrgID); a != 1 {
 		t.Errorf("count = %d, want 1 — only the ENG issue is in its own team's done state", a)
+	}
+}
+
+// TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask is the router's half
+// of Linear's off switch, the same contract Jira's pins: the event is recorded
+// and no task is minted while an org admin has the source paused.
+func TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask(t *testing.T) {
+	database := newGateDB(t)
+	ctx := context.Background()
+	team := runmode.LocalDefaultTeamID
+	armLinearTeam(t, database, team, "lt-eng", "Done")
+	seedMatchAllLinearRule(t, database, team, domain.EventLinearIssueAssigned)
+	setLinearWorkspace(t, database)
+	seedLinearUserOnTeam(t, database, team, "lu-alice")
+	turnOffSource(t, database, eventsource.KindLinear)
+
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ENG-off", "issue", "An issue", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := linearRouter(database)
+	router.SetEventSourceGate(sqlitestore.New(database).OrgEventSources)
+	router.HandleEvent(ctx, linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-alice"))
+
+	active, err := testTaskStore(database).FindActiveByEntity(ctx, runmode.LocalDefaultOrgID, entity.ID)
+	if err != nil {
+		t.Fatalf("list active tasks: %v", err)
+	}
+	if len(active) != 0 {
+		t.Fatalf("turned-off linear: got %d active tasks, want 0", len(active))
+	}
+	var recorded int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM events WHERE entity_id = ?`, entity.ID).Scan(&recorded); err != nil {
+		t.Fatalf("count events: %v", err)
+	}
+	if recorded != 1 {
+		t.Fatalf("events recorded = %d, want 1 — a turned-off source's events are still logged", recorded)
 	}
 }

@@ -1,8 +1,8 @@
 # Secret storage (local mode)
 
-All credentials Triage Factory uses (GitHub PAT, Jira PAT, the Anthropic key,
-GitHub App private keys) are stored outside the database. The secret backend is
-selected automatically:
+All credentials Triage Factory uses (GitHub PAT, Jira PAT, the Linear API key,
+the Anthropic key, GitHub App private keys) are stored outside the database. The
+secret backend is selected automatically:
 
 - **Desktop / keychain present** (macOS, or Linux with a working Secret Service):
   the OS keychain. No extra configuration.
@@ -27,3 +27,25 @@ your per-user Jira token) persist across restarts on a headless box.
 > The same `TF_SECRET_ENCRYPTION_KEY` also governs multi-mode deployments, where
 > it encrypts `public.org_secrets` in Postgres instead of `secrets.enc` — see
 > [self-hosting install](../self-hosting/install.md).
+
+## Linear
+
+The org's Linear connection lives under these keys:
+
+- `linear_api_key` — the personal API key the workspace connected with.
+- `linear_auth_method` — which shape the connection takes. `api_key` is the
+  only one Settings binds today.
+- `linear_app_install` — reserved for connecting Linear by installing an app
+  instead of pasting a key. Nothing writes it yet.
+- `linear_bound_as` — who the key belonged to and its workspace's name, recorded
+  when it was connected so Settings can show them. Not a secret; it is stored
+  here so it is written and removed with the key.
+
+Disconnecting Linear in Settings removes all four.
+
+`TRIAGE_FACTORY_LINEAR_API_KEY` supplies the key from the environment instead,
+like the other `TRIAGE_FACTORY_*` overlays: it takes precedence over the stored
+key on every read, so Settings reports the connection but won't replace it, and
+disconnecting leaves it in effect until the variable is unset. A key supplied
+this way was never validated by a connect, so Settings can't show who it belongs
+to or which workspace it is in.

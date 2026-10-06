@@ -139,6 +139,16 @@ func TestAccessChangeLabel(t *testing.T) {
 			want:   "removed the Atlassian OAuth app abc123",
 		},
 		{
+			name:   "credential_set linear org credential names the workspace",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialSet, DetailJSON: `{"kind":"linear_org","name":"acme"}`},
+			want:   "set the Linear credential acme",
+		},
+		{
+			name:   "credential_removed linear org credential",
+			change: domain.AccessChange{Action: domain.AccessActionCredentialRemoved, DetailJSON: `{"kind":"linear_org"}`},
+			want:   "removed the Linear credential",
+		},
+		{
 			name:   "invite_created names the address + granted role",
 			change: domain.AccessChange{Action: domain.AccessActionInviteCreated, DetailJSON: `{"invite_id":"i1","email":"bob@example.com","role":"admin"}`},
 			want:   "invited bob@example.com as admin",

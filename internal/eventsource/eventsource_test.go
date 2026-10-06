@@ -64,6 +64,24 @@ func (r *rig) saveCreds(t *testing.T, creds auth.Credentials) {
 	}
 }
 
+// bindLinear stores a Linear service credential the way its bind route does:
+// the key under the api_key marker. integrations.Save leaves Linear alone, so
+// this writes the keys directly.
+func (r *rig) bindLinear(t *testing.T, method, key string) {
+	t.Helper()
+	for k, v := range map[string]string{
+		integrations.KeyLinearAuthMethod: method,
+		integrations.KeyLinearAPIKey:     key,
+	} {
+		if v == "" {
+			continue
+		}
+		if err := r.stores.Secrets.Put(t.Context(), runmode.LocalDefaultOrgID, k, v, ""); err != nil {
+			t.Fatalf("store %s: %v", k, err)
+		}
+	}
+}
+
 // registerApp binds the org to a GitHub App of the given activation, the
 // credential class included — the class is what decides whether an App counts
 // at all, so a test that only wrote the row would be testing nothing.
@@ -126,9 +144,29 @@ func TestResolve_StatePerSource(t *testing.T) {
 			want: map[string]eventsource.State{
 				eventsource.KindGitHub:   eventsource.StateUnconfigured,
 				eventsource.KindJira:     eventsource.StateUnconfigured,
-				eventsource.KindLinear:   eventsource.StateWIP,
+				eventsource.KindLinear:   eventsource.StateUnconfigured,
 				eventsource.KindSchedule: eventsource.StateWIP,
 			},
+		},
+		"linear api key bound": {
+			setup: func(t *testing.T, r *rig) { r.bindLinear(t, "api_key", "lin_api_x") },
+			want: map[string]eventsource.State{
+				eventsource.KindLinear: eventsource.StateAvailable,
+				eventsource.KindJira:   eventsource.StateUnconfigured,
+			},
+		},
+		// No marker is the env overlay's shape: a key with nothing naming it.
+		"linear key with no marker": {
+			setup: func(t *testing.T, r *rig) { r.bindLinear(t, "", "lin_api_x") },
+			want:  map[string]eventsource.State{eventsource.KindLinear: eventsource.StateAvailable},
+		},
+		"linear marker with no key": {
+			setup: func(t *testing.T, r *rig) { r.bindLinear(t, "api_key", "") },
+			want:  map[string]eventsource.State{eventsource.KindLinear: eventsource.StateUnconfigured},
+		},
+		"linear marker this build does not know": {
+			setup: func(t *testing.T, r *rig) { r.bindLinear(t, "carrier_pigeon", "lin_api_x") },
+			want:  map[string]eventsource.State{eventsource.KindLinear: eventsource.StateUnconfigured},
 		},
 		"github pat bound": {
 			setup: func(t *testing.T, r *rig) {
@@ -202,7 +240,7 @@ func TestResolve_Order(t *testing.T) {
 	})
 
 	got := kinds(r.resolve(t))
-	want := []string{eventsource.KindGitHub, eventsource.KindJira, "zulu", eventsource.KindLinear, eventsource.KindSchedule}
+	want := []string{eventsource.KindGitHub, eventsource.KindJira, eventsource.KindLinear, "zulu", eventsource.KindSchedule}
 	if len(got) != len(want) {
 		t.Fatalf("kinds = %v, want %v", got, want)
 	}
@@ -249,14 +287,14 @@ func TestCanProduce_UnknownKindMakesNoClaim(t *testing.T) {
 	a := eventsource.Availability{
 		{Kind: eventsource.KindGitHub, State: eventsource.StateAvailable},
 		{Kind: eventsource.KindJira, State: eventsource.StateUnconfigured},
-		{Kind: eventsource.KindLinear, State: eventsource.StateWIP},
+		{Kind: eventsource.KindSchedule, State: eventsource.StateWIP},
 	}
 	for kind, want := range map[string]bool{
-		eventsource.KindGitHub: true,
-		eventsource.KindJira:   false,
-		eventsource.KindLinear: false,
-		"system":               true,
-		"slack":                true,
+		eventsource.KindGitHub:   true,
+		eventsource.KindJira:     false,
+		eventsource.KindSchedule: false,
+		"system":                 true,
+		"slack":                  true,
 	} {
 		if got := a.CanProduce(kind); got != want {
 			t.Errorf("CanProduce(%q) = %v, want %v", kind, got, want)
@@ -345,6 +383,7 @@ func TestHasHostAndPolled(t *testing.T) {
 	}{
 		{eventsource.KindGitHub, true, true},
 		{eventsource.KindJira, true, true},
+		{eventsource.KindLinear, false, true},
 		{eventsource.KindSchedule, false, false},
 		{"chat", false, true},
 		{"not-a-real-source", false, false},
@@ -440,9 +479,22 @@ func TestResolve_DisabledPrecedence(t *testing.T) {
 			want: eventsource.StateUnlicensed,
 		},
 		"wip beats disabled": {
+			setup: func(t *testing.T, r *rig) { r.pause(t, eventsource.KindSchedule) },
+			kind:  eventsource.KindSchedule,
+			want:  eventsource.StateWIP,
+		},
+		"linear disabled beats available": {
+			setup: func(t *testing.T, r *rig) {
+				r.bindLinear(t, "api_key", "lin_api_x")
+				r.pause(t, eventsource.KindLinear)
+			},
+			kind: eventsource.KindLinear,
+			want: eventsource.StateDisabled,
+		},
+		"linear disabled beats unconfigured": {
 			setup: func(t *testing.T, r *rig) { r.pause(t, eventsource.KindLinear) },
 			kind:  eventsource.KindLinear,
-			want:  eventsource.StateWIP,
+			want:  eventsource.StateDisabled,
 		},
 	}
 

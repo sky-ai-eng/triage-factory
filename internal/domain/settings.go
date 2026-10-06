@@ -261,13 +261,11 @@ type OrgSettings struct {
 	// key is what an issue link is built from. "" means no Linear credential is
 	// bound.
 	//
-	// Owned by the credential bind and unbind, not by the settings PATCH, which
-	// has no field for either. UpdateSettings writes them as part of the whole
-	// row, so a read-modify-write carries them through unchanged.
-	//
-	// TODO(TFAC-1021): no route writes them yet; the credential bind sets both
-	// from the key's organization and the unbind clears them. Until then an
-	// org has no workspace, so no user resolves a Linear credential or identity.
+	// Owned by the credential bind (PUT /api/orgs/{org_id}/linear/access/
+	// credential), which sets both from the key's organization, and the unbind,
+	// which clears them — not by the settings PATCH, which has no field for
+	// either. UpdateSettings writes them as part of the whole row, so a
+	// read-modify-write carries them through unchanged.
 	LinearWorkspaceID     string
 	LinearWorkspaceURLKey string
 	// LinearPollInterval is the Linear poll cadence. Stored on

@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/promptseed"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -126,6 +127,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 			"github":         false,
 			"github_ready":   false,
 			"jira":           false,
+			"linear":         false,
 			"github_repos":   0,
 			"env_provided":   auth.EnvProvided(),
 			"setup_complete": false,
@@ -146,12 +148,16 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		githubReady bool
 		orgModel    bool
 		teamModel   bool
+		orgSet      domain.OrgSettings
 	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
 		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID)
 		if e != nil {
+			return e
+		}
+		if orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID); e != nil {
 			return e
 		}
 		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
@@ -217,6 +223,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		"github":         creds.GitHubPAT != "",
 		"github_ready":   githubReady,
 		"jira":           jiraConnected,
+		"linear":         integrations.LinearSystemConfigured(creds),
 		"github_repos":   repoCount,
 		"env_provided":   auth.EnvProvided(),
 		"setup_complete": setupComplete,
@@ -231,6 +238,11 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 	if jiraConnected {
 		result["jira_deployment"] = string(jiraCfg.Deployment)
+	}
+	// Linear has no host to report; the workspace its credential belongs to is
+	// what the client shows instead, learned by the credential bind.
+	if orgSet.LinearWorkspaceURLKey != "" {
+		result["linear_workspace_url_key"] = orgSet.LinearWorkspaceURLKey
 	}
 
 	writeJSON(w, http.StatusOK, result)

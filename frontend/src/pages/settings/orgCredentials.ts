@@ -57,12 +57,13 @@ export async function disconnectJira(orgId: string): Promise<CredentialResult> {
   return credentialRequest(`/api/orgs/${orgId}/jira/access/credential`, 'DELETE')
 }
 
-// credentialRequest is the shared call shape for the credential resources:
+// credentialRequest is the shared call shape for the credential resources
+// (linearConnect.ts drives Linear's unbind through it too):
 // a discriminated result, and the backend's optional `warning` (today: the
 // local-mode env-overlay caveat, where a delete succeeds but TRIAGE_FACTORY_*
 // vars keep supplying the value) and `login` (the GitHub bind's resolved
 // identity) passed through rather than swallowed.
-async function credentialRequest(
+export async function credentialRequest(
   url: string,
   method: 'PUT' | 'DELETE',
   body?: unknown,

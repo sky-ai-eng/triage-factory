@@ -40,10 +40,10 @@ export const WIZARD_SECTIONS: WizardSection[] = [
 // repos, …) rather than inventing parallel shapes, so the wizard keeps
 // round-tripping the identical org_settings / team_settings forms the
 // Settings page and the create-time pages already use.
-// The tracker a workspace opts into at the org level — one at a time. "none"
-// is a legitimate end state (GitHub-only); "linear" is a disabled
-// "coming soon" placeholder (no poller, no credentials) so the value can be
-// selected for display but never persists a connection.
+// The tracker a workspace sets up in the wizard — one at a time. "none" is a
+// legitimate end state (GitHub-only). The pick only decides which tracker's
+// steps the wizard shows: an org may connect both, the other one from
+// Settings.
 export type TrackerKind = 'none' | 'jira' | 'linear'
 
 // The GitHub access method an org connects with — its own picker step, gating
@@ -169,9 +169,21 @@ export interface WizardState {
   // returning connected org from its stored host shape. Cloud authenticates
   // with an Atlassian API token (email + token), Data Center with a PAT.
   jiraDeployment: JiraDeployment | null
-  // Which tracker the user selected in the Trackers step. Seeded from
-  // jiraConnected on load (a connected org resumes on "Jira").
+  // Which tracker the user selected in the Trackers step. Seeded from the
+  // connections on load: a connected Linear org resumes on "Linear", else a
+  // connected Jira org on "Jira".
   tracker: TrackerKind
+  // Whether the org has a Linear service credential — the Linear sibling of
+  // jiraConnected. Gates the Linear poll step and the team Linear-teams step.
+  linearConnected: boolean
+  // The workspace the credential belongs to (linear.app/<key>) and who the
+  // key validated as, both learned by the bind — for the connected line and
+  // the collapsed summary. Empty for a key the local environment supplies.
+  linearWorkspaceUrlKey: string
+  linearBoundAs: string
+  // TRIAGE_FACTORY_LINEAR_API_KEY supplies the key (local mode only) — the
+  // Linear half of jiraCredentialEnvProvided.
+  linearCredentialEnvProvided: boolean
 
   // ── Org Claude credentials ──
   // How the org's delegated runs (and the scorer) authenticate with Claude —
@@ -279,6 +291,9 @@ export interface WizardState {
   // The Jira sibling: reuse the org Jira PAT as the operator's own STORED Jira
   // access credential. Same local-only reuse, same default.
   duplicateJiraToUser: boolean
+  // The Linear sibling: reuse the org Linear API key as the operator's own
+  // Linear credential. Seeded like the other two; nothing reads it yet.
+  duplicateLinearToUser: boolean
 }
 
 // Identity the host resolves once and threads to every step. The org/team

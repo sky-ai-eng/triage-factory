@@ -2,12 +2,12 @@
 // ORGANIZATION steps (GitHub URL → GitHub access method → [App: account type →
 // register | PAT: token → clone protocol (local only)] → GitHub poll interval →
 // Trackers → [Jira URL → Jira access → Jira poll interval, shown only when Jira
-// is the chosen/connected tracker] → org max model tier → Claude credentials
+// is the chosen/connected tracker | Linear access → Linear poll interval, the
+// same for Linear] → org max model tier → Claude credentials
 // [source (local only) → Anthropic key (multi always; local when BYOK)]) and
-// the four TEAM steps for
-// the first team (Repositories, GitHub teams, Jira projects, team default
-// model), composing the existing shared field groups into the same step
-// contract with no new host plumbing.
+// the TEAM steps for the first team (Repositories, GitHub teams, Jira projects
+// or Linear teams, team default model), composing the existing shared field
+// groups into the same step contract with no new host plumbing.
 //
 // The split is deliberate: each integration's URL, access, and cadence are
 // separate entries (a URL step's Continue runs the reachability probe; an
@@ -20,9 +20,9 @@
 //
 // Reuse rule: every step composes a shared group (GitHubAccessGroup /
 // GitHubAppPanel via the GitHub bodies, JiraAccessGroup via the Jira bodies,
-// PollerTimingGroup, ModelGroup, the RepoPickerModal, GitHubTeamGroup,
-// JiraProjectRulesGroup, and the shared ModelPicker) — no parallel field
-// UIs. Org persistence rides the single PATCH /api/orgs/{org}/settings; team
+// LinearAccessGroup via the Linear body, PollerTimingGroup, ModelGroup, the
+// RepoPickerModal, GitHubTeamGroup, JiraProjectRulesGroup,
+// LinearTeamRulesGroup, and the shared ModelPicker) — no parallel field UIs. Org persistence rides the single PATCH /api/orgs/{org}/settings; team
 // persistence rides the existing per-team repos / github-groups / jira-projects
 // PUTs and the team-settings PATCH — no wizard-only persistence path to drift. The URL
 // steps persist on Continue (reachability probe + base-URL save); the access
@@ -43,6 +43,7 @@ import {
 } from './GitHubStep'
 import TrackersStep from './TrackersStep'
 import { JiraUrlStep, JiraModeStep, JiraAccessStep } from './JiraStep'
+import { LinearAccessStep } from './LinearStep'
 import {
   hostOf,
   isHttpUrl,
@@ -73,6 +74,7 @@ import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
+import LinearTeamRulesGroup from '../settings/LinearTeamRulesGroup'
 import {
   emptyOrgConfig,
   fetchOrgSettings,
@@ -82,6 +84,12 @@ import {
   type OrgSettingsPatch,
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
+import {
+  boundAsName,
+  connectLinear,
+  disconnectedLinearAccess,
+  fetchLinearAccess,
+} from '../settings/linearConnect'
 import { connectGitHubPAT } from '../settings/orgCredentials'
 import { connectAnthropic, disconnectLLM } from '../settings/anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
@@ -92,9 +100,11 @@ import {
   saveTeamGitHubGroups,
   saveTeamRepos,
   saveTeamJiraProjects,
+  saveTeamLinearTeams,
   saveTeamSettings,
   teamConfigFromSettings,
   teamProjectsBlocked,
+  linearTeamsBlocked,
 } from '../settings/teamConfig'
 import type { LoadContext, WizardState, WizardStep } from './types'
 
@@ -125,6 +135,10 @@ export const initialWizardState = (): WizardState => ({
   jiraUrlConfirmed: false,
   jiraDeployment: null,
   tracker: 'none',
+  linearConnected: false,
+  linearWorkspaceUrlKey: '',
+  linearBoundAs: '',
+  linearCredentialEnvProvided: false,
   anthropicKeySource: null,
   anthropicConnected: false,
   claudeProvider: 'anthropic',
@@ -146,6 +160,7 @@ export const initialWizardState = (): WizardState => ({
   jiraUserApiToken: '',
   duplicateGitHubToUser: false,
   duplicateJiraToUser: false,
+  duplicateLinearToUser: false,
 })
 
 // intervalLabel renders a Go duration like "5m0s" / "30s" compactly: trim the
@@ -165,17 +180,25 @@ async function fetchIntegrationsState(): Promise<{
   githubReady: boolean
   jiraConnected: boolean
   jiraDeployment: JiraDeployment | null
+  linearEnvProvided: boolean
 }> {
-  const empty = { githubReady: false, jiraConnected: false, jiraDeployment: null }
+  const empty = {
+    githubReady: false,
+    jiraConnected: false,
+    jiraDeployment: null,
+    linearEnvProvided: false,
+  }
   try {
     const data = await apiJSON<{
       github_ready?: boolean
       jira?: boolean
       jira_url?: string
       jira_deployment?: string
+      env_provided?: string[]
     }>('/api/integrations/status')
     return {
       githubReady: !!data.github_ready,
+      linearEnvProvided: (data.env_provided ?? []).includes('linear'),
       jiraConnected: !!data.jira && !!data.jira_url,
       // The backend's authoritative deployment (from the auth-method marker);
       // null when not connected or an unexpected value.
@@ -209,9 +232,12 @@ async function fetchIntegrationsState(): Promise<{
 // access tab defaults to PAT for an org with a stored token, else App.
 export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   if (!ctx.orgId) throw new Error('Could not load organization settings')
-  const [org, integrations] = await Promise.all([
+  const [org, integrations, linear] = await Promise.all([
     fetchOrgSettings(ctx.orgId),
     fetchIntegrationsState(),
+    // Best-effort like the integrations read: a failure reads as "not
+    // connected" rather than blocking the load.
+    fetchLinearAccess(ctx.orgId).catch(() => disconnectedLinearAccess),
   ])
   if (!org) throw new Error('Could not load organization settings')
   const orgForm = orgConfigFromSettings(org)
@@ -227,6 +253,7 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // multi, where they never render anyway.
     duplicateGitHubToUser: ctx.isLocal,
     duplicateJiraToUser: ctx.isLocal,
+    duplicateLinearToUser: ctx.isLocal,
     hasGitHubPat: org.has_github_pat,
     githubPatLogin: org.github_pat_login ?? '',
     githubPatEnvProvided: org.github_pat_env_provided ?? false,
@@ -251,7 +278,13 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     // only labels the picker; the credential the org authenticates with is the
     // stored one.
     jiraDeployment: integrations.jiraConnected ? integrations.jiraDeployment : null,
-    tracker: integrations.jiraConnected ? 'jira' : 'none',
+    // Linear first: the wizard sets up one tracker, and an org with both has
+    // the Jira steps to resume from in Settings either way.
+    tracker: linear.connected ? 'linear' : integrations.jiraConnected ? 'jira' : 'none',
+    linearConnected: linear.connected,
+    linearWorkspaceUrlKey: linear.workspace_url_key,
+    linearBoundAs: boundAsName(linear),
+    linearCredentialEnvProvided: integrations.linearEnvProvided,
     // Claude credentials: the source resumes from the org's STORED selection,
     // not from whether a credential happens to be bound — an org that chose to
     // bring its own key and has not bound one yet is a different state from one
@@ -875,17 +908,18 @@ const githubPollerStep: WizardStep = {
   ),
 }
 
-// Step · Trackers (optional). None / Jira / Linear (Linear "coming soon") — just
-// the picker. When Jira is chosen, the Jira URL + access steps below own the
-// connection, so any selection is a valid end state here; a Jira picked but not
-// connected is blocked downstream by the Jira access step, not here.
+// Step · Trackers (optional). None / Jira / Linear — just the picker. The chosen
+// tracker's own steps below own the connection, so any selection is a valid
+// end state here; a tracker picked but not connected is blocked downstream by
+// its access step, not here.
 const trackersStep: WizardStep = {
   id: 'org-trackers',
   section: 'org',
   title: 'Trackers',
   isComplete: () => true,
   persist: async () => {},
-  collapsedSummary: (s) => (s.tracker === 'jira' ? 'Jira' : 'No tracker'),
+  collapsedSummary: (s) =>
+    s.tracker === 'jira' ? 'Jira' : s.tracker === 'linear' ? 'Linear' : 'No tracker',
   render: (ctx) => <TrackersStep {...ctx} />,
 }
 
@@ -1083,6 +1117,90 @@ const jiraPollerStep: WizardStep = {
         }}
         onChange={(p) => patch({ org: { ...state.org, ...p } })}
         showGitHub={false}
+        bare
+      />
+    </div>
+  ),
+}
+
+// linearActive: Linear is the chosen tracker AND connected — the Linear
+// sibling of jiraActive. Gates the Linear poll step and the team's Linear-teams
+// step.
+export const linearActive = (s: WizardState) => s.tracker === 'linear' && s.linearConnected
+
+// Step · Linear access (visible only when Linear is the chosen tracker). The
+// whole of Linear's org connection in one step: no URL to probe (Linear has
+// one host) and no deployment to pick (one key shape). Continue performs the
+// bind via connectLinear, which validates the key against Linear before it
+// stores anything; the disconnect stays inside LinearAccessGroup. Mandatory
+// while Linear is selected, invisible (and so non-blocking) otherwise.
+const linearAccessStep: WizardStep = {
+  id: 'org-linear-access',
+  section: 'org',
+  title: 'Linear access',
+  advanceOnEnter: true,
+  visible: (s) => s.tracker === 'linear',
+  isComplete: (s) => s.linearConnected,
+  validate: (s) =>
+    s.linearConnected || s.org.linear_api_key.trim() !== ''
+      ? null
+      : 'Paste a Linear API key to connect.',
+  persist: async ({ state, orgId, patch }) => {
+    if (state.linearConnected) return
+    if (!orgId) throw new Error('No organization context.')
+    const result = await connectLinear(orgId, state.org.linear_api_key)
+    if (!result.ok) throw new Error(result.error)
+    // The bind wrote the workspace onto the settings row, so the concurrency
+    // token moved — pick up the fresh one, or the Linear poll interval's save
+    // right after conflicts with this connect.
+    const version = await freshOrgVersion(orgId, state.org.version)
+    patch({
+      linearConnected: true,
+      linearWorkspaceUrlKey: result.access.workspace_url_key,
+      linearBoundAs: boundAsName(result.access),
+      org: { ...state.org, linear_api_key: '', version },
+    })
+  },
+  collapsedSummary: (s) =>
+    !s.linearConnected
+      ? 'Not connected'
+      : s.linearWorkspaceUrlKey
+        ? `Connected · linear.app/${s.linearWorkspaceUrlKey}`
+        : 'Connected',
+  render: (ctx) => <LinearAccessStep {...ctx} />,
+}
+
+// Step · Linear poll interval (visible only when Linear is connected). The
+// Jira poll step's sibling; renders the Linear control alone.
+const linearPollerStep: WizardStep = {
+  id: 'org-linear-poller',
+  section: 'org',
+  title: 'Linear poll interval',
+  visible: (s) => linearActive(s),
+  isComplete: () => true,
+  persist: persistOrgFields('linear_poll_interval'),
+  collapsedSummary: (s) => `Linear every ${intervalLabel(s.org.linear_poll_interval)}`,
+  render: ({ state, patch }) => (
+    <div className="space-y-5">
+      <div className="space-y-1.5">
+        <h2 className="text-[19px] font-medium tracking-tight text-ink-1">
+          How often should we poll Linear?
+        </h2>
+        <p className="text-body leading-relaxed text-ink-3">
+          The cadence for the Linear tracker — independent of the GitHub poll interval. A personal
+          API key shares Linear&rsquo;s hourly request budget with its owner&rsquo;s other keys.
+        </p>
+      </div>
+      <PollerTimingGroup
+        value={{
+          github_poll_interval: state.org.github_poll_interval,
+          jira_poll_interval: state.org.jira_poll_interval,
+          linear_poll_interval: state.org.linear_poll_interval,
+        }}
+        onChange={(p) => patch({ org: { ...state.org, ...p } })}
+        showGitHub={false}
+        showJira={false}
+        showLinear
         bare
       />
     </div>
@@ -1410,6 +1528,48 @@ const jiraProjectsStep: WizardStep = {
   ),
 }
 
+// Step · Linear teams. The shared LinearTeamRulesGroup — which Linear teams
+// this team watches, and per watched team its pickup / in-progress / done
+// states, pre-filled from the workflow's state types as a team is watched.
+// Gated on a connected Linear tracker. No load of its own — the teams came in
+// with the team load. Optional: zero watched teams is valid, and so is a team
+// watched but unmapped; only a half-mapped team, which the server refuses,
+// blocks.
+const linearTeamsStep: WizardStep = {
+  id: 'team-linear-teams',
+  section: 'team',
+  title: 'Linear teams',
+  visible: (s) => linearActive(s),
+  isComplete: (s) => !linearTeamsBlocked(s.team.linear_teams),
+  validate: (s) =>
+    linearTeamsBlocked(s.team.linear_teams)
+      ? 'Finish or clear the half-mapped Linear team before continuing.'
+      : null,
+  persist: async ({ state, teamId, patch }) => {
+    if (!state.teamLoaded) {
+      throw new Error(
+        'Team settings didn’t load — reopen the Repositories step and retry before saving.',
+      )
+    }
+    const result = await saveTeamLinearTeams(teamId, state.team.linear_teams)
+    if (!result.ok) throw new Error(result.error)
+    // Adopt the set as stored: the server resolves each team's key and name
+    // and each state's name and type from Linear on the way in.
+    patch({ team: { ...state.team, linear_teams: result.teams } })
+  },
+  collapsedSummary: (s) => `Tracked Linear teams: ${s.team.linear_teams.length}`,
+  render: ({ state, patch, orgId }) =>
+    orgId ? (
+      <LinearTeamRulesGroup
+        orgId={orgId}
+        value={state.team.linear_teams}
+        onChange={(linear_teams) => patch({ team: { ...state.team, linear_teams } })}
+        connected={state.linearConnected}
+        bare
+      />
+    ) : null,
+}
+
 // Step · Team default model. The shared ModelPicker, team-scoped — the model
 // this team delegates with by default. No load of its own — reads the repos
 // step's seeded team form; persistTeamSettings guards against saving when that
@@ -1608,6 +1768,8 @@ export const WIZARD_STEPS: WizardStep[] = [
   jiraModeStep,
   jiraAccessStep,
   jiraPollerStep,
+  linearAccessStep,
+  linearPollerStep,
   // The credential steps come BEFORE the model picks, and that order is the
   // point: a picker asked first can only offer models the org may turn out to
   // have no way of running, and its availability badges have no credential to
@@ -1619,6 +1781,7 @@ export const WIZARD_STEPS: WizardStep[] = [
   reposStep,
   githubTeamsStep,
   jiraProjectsStep,
+  linearTeamsStep,
   teamModelStep,
   userIdentityStep,
   jiraUserAccessStep,

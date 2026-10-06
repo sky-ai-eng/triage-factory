@@ -14,6 +14,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -151,6 +152,10 @@ type Server struct {
 	// Linear picker reads and the team-rules write gate. Built in New, never
 	// nil; tests swap it to point the client at a fake GraphQL endpoint.
 	linearResolver linear.Resolver
+	// validateLinear checks a Linear credential live and reports who it acts
+	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
+	// endpoint.
+	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve
@@ -559,6 +564,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// read the org's catalog through ForSystem, whichever shape the org's
 	// service credential takes.
 	s.linearResolver = linear.NewResolver(stores.Secrets, stores.Orgs)
+	s.validateLinear = auth.ValidateLinear
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
 	}
@@ -1540,6 +1546,12 @@ func (s *Server) routes() {
 	// pair whose rationale sits with the GitHub PAT routes above.
 	s.apiMutating("PUT /api/orgs/{org_id}/jira/access/credential", se.handleJiraConnect)
 	s.apiMutating("DELETE /api/orgs/{org_id}/jira/access/credential", s.handleJiraCredentialDelete)
+
+	// The org's Linear credential, the same pair again (linear_access.go),
+	// plus the status read its settings card and the setup wizard render.
+	s.api("GET /api/orgs/{org_id}/linear/access", s.handleLinearAccessGet)
+	s.apiMutating("PUT /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialPut)
+	s.apiMutating("DELETE /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialDelete)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential

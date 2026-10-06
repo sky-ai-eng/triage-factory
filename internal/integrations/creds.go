@@ -58,10 +58,15 @@ const (
 // is the only one the TRIAGE_FACTORY_LINEAR_API_KEY overlay can supply.
 // internal/linear's resolver keeps its own copies of the keys it reads (it
 // cannot import this package); its keys_drift_test pins the agreement.
+//
+// KeyLinearBoundAs is not a credential: it holds who the bound credential
+// validated as, which the access status read displays. It is stored as a
+// secret so it is written and cleared with the credential it describes.
 const (
 	KeyLinearAPIKey     = "linear_api_key"
 	KeyLinearAuthMethod = "linear_auth_method"
 	KeyLinearAppInstall = "linear_app_install"
+	KeyLinearBoundAs    = "linear_bound_as"
 )
 
 // legacyJiraDisplayName is the legacy key that held the Jira display
@@ -159,7 +164,7 @@ func AllKeys() []string {
 	return []string{
 		KeyGitHubURL, KeyGitHubPAT,
 		KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
-		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall,
+		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs,
 		legacyJiraDisplayName, legacyGitHubUsername,
 	}
 }
@@ -550,10 +555,26 @@ func ClearJiraOtherScheme(ctx context.Context, secrets db.SecretStore, orgID str
 	}
 }
 
-// ClearLinear removes the org's Linear service credential: both shapes and
-// the marker naming which one is in use.
+// ClearLinear removes the org's Linear service credential: both shapes, the
+// marker naming which one is in use, and the record of who it validated as.
 func ClearLinear(ctx context.Context, secrets db.SecretStore, orgID string) error {
-	return clearKeys(ctx, secrets, orgID, KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall)
+	return clearKeys(ctx, secrets, orgID, KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs)
+}
+
+// ClearLinearOtherScheme deletes the stored credential for the Linear shape
+// NOT in use, so an org moving between an API key and an app install never
+// keeps the other shape's secret beside the marker. Pass the shape now in use.
+// The marker and the bound-as record are shared and left intact. A no-op for a
+// shape this build does not know.
+func ClearLinearOtherScheme(ctx context.Context, secrets db.SecretStore, orgID string, inUse linear.AuthMethod) error {
+	switch inUse {
+	case linear.AuthMethodAPIKey:
+		return clearKeys(ctx, secrets, orgID, KeyLinearAppInstall)
+	case linear.AuthMethodAppInstall:
+		return clearKeys(ctx, secrets, orgID, KeyLinearAPIKey)
+	default:
+		return nil
+	}
 }
 
 func clearKeys(ctx context.Context, secrets db.SecretStore, orgID string, keys ...string) error {
