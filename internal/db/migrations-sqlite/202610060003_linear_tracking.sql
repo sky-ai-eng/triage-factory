@@ -30,6 +30,10 @@ ALTER TABLE team_settings ADD COLUMN linear_teams TEXT NOT NULL DEFAULT '[]';
 -- identity and survives a rename; the name and type are a snapshot from the
 -- last save. There is no in_review rule.
 --
+-- Every members column is a JSON array and every canonical a JSON object or
+-- NULL; json_array_length reads a non-array as 0, so without the shape checks
+-- a '{}' or 'null' would pass for an empty rule.
+--
 -- A row is either watched-but-unarmed (every rule empty) or armed (pickup
 -- members, and members plus a canonical for in_progress and done). Half a
 -- mapping is refused: a rule set that can discover tickets but has nowhere to
@@ -50,17 +54,24 @@ CREATE TABLE linear_team_rules (
     PRIMARY KEY (team_id, linear_team_id),
     CONSTRAINT ltr_linear_team_id_populated CHECK (linear_team_id <> ''),
     CONSTRAINT ltr_linear_team_key_populated CHECK (linear_team_key <> ''),
+    CONSTRAINT ltr_members_are_arrays CHECK (
+        json_valid(pickup_members) AND json_type(pickup_members) = 'array'
+        AND json_valid(in_progress_members) AND json_type(in_progress_members) = 'array'
+        AND json_valid(done_members) AND json_type(done_members) = 'array'
+    ),
+    CONSTRAINT ltr_canonicals_are_objects CHECK (
+        (in_progress_canonical IS NULL
+            OR (json_valid(in_progress_canonical) AND json_type(in_progress_canonical) = 'object'))
+        AND (done_canonical IS NULL
+            OR (json_valid(done_canonical) AND json_type(done_canonical) = 'object'))
+    ),
     CONSTRAINT ltr_armed_or_unarmed CHECK (
-        (pickup_members IN ('', '[]')
-            AND in_progress_members IN ('', '[]')
-            AND (in_progress_canonical IS NULL OR in_progress_canonical = '')
-            AND done_members IN ('', '[]')
-            AND (done_canonical IS NULL OR done_canonical = ''))
-        OR (pickup_members NOT IN ('', '[]')
-            AND in_progress_members NOT IN ('', '[]')
-            AND in_progress_canonical IS NOT NULL AND in_progress_canonical <> ''
-            AND done_members NOT IN ('', '[]')
-            AND done_canonical IS NOT NULL AND done_canonical <> '')
+        (json_array_length(pickup_members) = 0
+            AND json_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL
+            AND json_array_length(done_members) = 0 AND done_canonical IS NULL)
+        OR (json_array_length(pickup_members) > 0
+            AND json_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL
+            AND json_array_length(done_members) > 0 AND done_canonical IS NOT NULL)
     )
 );
 

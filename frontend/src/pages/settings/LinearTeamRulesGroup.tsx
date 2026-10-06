@@ -60,6 +60,8 @@ interface WatchRow {
  *
  * `readOnly` is a team member's view: what is watched and how it is mapped,
  * with every verb absent rather than disabled and no catalog to pick from.
+ * Without a connection the same summary is shown to everyone, since there is
+ * no workflow to map against; an admin can still stop watching a team.
  */
 export default function LinearTeamRulesGroup({
   orgId,
@@ -231,16 +233,20 @@ export default function LinearTeamRulesGroup({
   const toggleExpanded = (id: string) => {
     const opening = !expanded[id]
     setExpanded((m) => ({ ...m, [id]: opening }))
-    if (opening && !statesByTeam[id] && !loadingIds.has(id)) {
+    if (connected && opening && !statesByTeam[id] && !loadingIds.has(id)) {
       void fetchStates(id)
     }
   }
+
+  // The stored mapping as text, rather than the editors: for a member, and for
+  // anyone while there is no connection to read the workflow through.
+  const summaryOnly = readOnly || !connected
 
   const board = (
     <div className="space-y-2">
       {value.length === 0 && (
         <p className="text-ui text-ink-3 italic">
-          No Linear teams watched yet. Pick one below to start.
+          No Linear teams watched yet.{summaryOnly ? '' : ' Pick one below to start.'}
         </p>
       )}
       {value.map((team) => {
@@ -306,7 +312,9 @@ export default function LinearTeamRulesGroup({
                     {team.key} is watched but not mapped, so nothing from it reaches the board yet.
                     {readOnly
                       ? ' A team admin maps its states.'
-                      : ' Map its states below to arm it.'}
+                      : !connected
+                        ? ' Connect Linear to map its states.'
+                        : ' Map its states below to arm it.'}
                   </p>
                 )}
                 {halfMapped && (
@@ -315,38 +323,40 @@ export default function LinearTeamRulesGroup({
                     target — or clear all three to keep {team.key} watched without mapping it.
                   </p>
                 )}
-                <div className="flex items-center justify-between gap-3">
-                  <p className="text-reported text-ink-3">
-                    {loadingIds.has(team.id)
-                      ? 'Loading states…'
-                      : stateErrors[team.id]
-                        ? stateErrors[team.id]
-                        : states.length > 0
-                          ? `${states.length} states available`
-                          : 'No states loaded'}
-                  </p>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {prefill && !readOnly && (
+                {connected && (
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-reported text-ink-3">
+                      {loadingIds.has(team.id)
+                        ? 'Loading states…'
+                        : stateErrors[team.id]
+                          ? stateErrors[team.id]
+                          : states.length > 0
+                            ? `${states.length} states available`
+                            : 'No states loaded'}
+                    </p>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {prefill && !summaryOnly && (
+                        <button
+                          type="button"
+                          onClick={() => updateTeam(team.id, prefill)}
+                          className="text-reported text-warm hover:text-warm/80 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
+                        >
+                          Map from state types
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => updateTeam(team.id, prefill)}
-                        className="text-reported text-warm hover:text-warm/80 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
+                        onClick={() => void fetchStates(team.id)}
+                        disabled={loadingIds.has(team.id)}
+                        className="text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
                       >
-                        Map from state types
+                        {loadingIds.has(team.id) ? 'Loading...' : 'Reload states'}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => void fetchStates(team.id)}
-                      disabled={loadingIds.has(team.id)}
-                      className="text-reported text-warm hover:text-warm/80 disabled:opacity-40 border border-warm/20 rounded-xl px-3 py-1 transition-colors"
-                    >
-                      {loadingIds.has(team.id) ? 'Loading...' : 'Reload states'}
-                    </button>
+                    </div>
                   </div>
-                </div>
+                )}
 
-                {missing.length > 0 && !readOnly && (
+                {missing.length > 0 && !summaryOnly && (
                   <div className="rounded-xl border border-alarm/30 bg-alarm/5 px-3 py-2.5 space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertTriangle size={13} className="mt-0.5 shrink-0 text-alarm" />
@@ -376,7 +386,7 @@ export default function LinearTeamRulesGroup({
                   </div>
                 )}
 
-                {readOnly && (
+                {summaryOnly && (
                   <dl className="space-y-2 pt-1">
                     <ReadOnlyRule label="Pickup" rule={team.pickup} />
                     <ReadOnlyRule label="In progress" rule={team.in_progress} />
@@ -384,7 +394,7 @@ export default function LinearTeamRulesGroup({
                   </dl>
                 )}
 
-                {states.length > 0 && !readOnly && (
+                {states.length > 0 && !summaryOnly && (
                   <div className="space-y-4 pt-1">
                     <JiraStatusRule
                       label="Pickup"
@@ -502,16 +512,13 @@ export default function LinearTeamRulesGroup({
       ) : (
         <h2 className="mb-4 text-body font-medium text-ink-2">Linear teams</h2>
       )}
-      {!connected ? (
-        <p className="text-ui text-ink-3 italic">
+      {!connected && (
+        <p className="mb-4 text-ui text-ink-3 italic">
           Connect Linear under Workspace settings before configuring tracked teams.
         </p>
-      ) : (
-        <>
-          {board}
-          {!readOnly && picker}
-        </>
       )}
+      {board}
+      {connected && !readOnly && picker}
     </>
   )
 

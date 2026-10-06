@@ -8,7 +8,9 @@ import {
   linearTeamFromWire,
   linearTeamIsArmed,
   linearTeamRulesValid,
+  linearDraftAfterSave,
   linearTeamsBlocked,
+  linearTeamsEqual,
   prefillLinearRules,
   saveTeamLinearTeams,
   unmappedLinearTeam,
@@ -142,6 +144,62 @@ describe('linearTeamFromWire', () => {
   it('keeps only what the form edits', () => {
     const wire = { ...mapped(), armed: true }
     expect(linearTeamFromWire(wire)).toEqual(mapped())
+  })
+})
+
+describe('linearTeamsEqual', () => {
+  // A stored team as the wire renders it: refs carry id, name and type only.
+  const stored: LinearTeamConfig = {
+    ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
+    ...prefillLinearRules(WORKFLOW)!,
+  }
+
+  it('ignores what an edit adds to a ref and the order a rule was picked in', () => {
+    // What the editor hands back after a state is toggled off and on again:
+    // the live options, with their positions, in a different order.
+    const edited: LinearTeamConfig = {
+      ...stored,
+      pickup: { members: [...stored.pickup.members].reverse().map((m) => ({ ...m, position: 9 })) },
+      done: {
+        members: stored.done.members,
+        canonical: { ...stored.done.canonical!, position: 6 } as LinearStateOption,
+      },
+    }
+    expect(linearTeamsEqual([edited], [stored])).toBe(true)
+  })
+
+  it('sees a member, a write target, or the team order change', () => {
+    const other = unmappedLinearTeam('team-ops', 'OPS', 'Operations')
+    expect(
+      linearTeamsEqual(
+        [{ ...stored, pickup: { members: stored.pickup.members.slice(1) } }],
+        [stored],
+      ),
+    ).toBe(false)
+    expect(
+      linearTeamsEqual(
+        [{ ...stored, done: { members: stored.done.members, canonical: stored.done.members[1] } }],
+        [stored],
+      ),
+    ).toBe(false)
+    expect(linearTeamsEqual([other, stored], [stored, other])).toBe(false)
+    expect(linearTeamsEqual([stored], [stored, other])).toBe(false)
+  })
+})
+
+describe('linearDraftAfterSave', () => {
+  const eng = unmappedLinearTeam('team-eng', 'ENG', '')
+  const ops = unmappedLinearTeam('team-ops', 'OPS', '')
+  // What the server stored for `eng`: the same team, with the name it resolved.
+  const stored = [{ ...eng, name: 'Engineering' }]
+
+  it('takes the stored set when nothing changed while the save was out', () => {
+    expect(linearDraftAfterSave([eng], [eng], stored)).toBe(stored)
+  })
+
+  it('keeps an edit made while the save was out', () => {
+    const current = [eng, ops]
+    expect(linearDraftAfterSave(current, [eng], stored)).toBe(current)
   })
 })
 

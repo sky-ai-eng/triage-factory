@@ -172,14 +172,19 @@ func readSourceOverrides(ctx context.Context, q queryer, orgID string) (db.Sourc
 // SetDisabled owns, and a fresh row relies on disabled's schema
 // DEFAULT the same way SetGitHubCredentialClass's partial insert already
 // relies on org_settings' other defaults.
-func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind, baseURL string, pollInterval time.Duration) error {
+// An override with no interval stores NULL, which reads back as the default.
+func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind string, ov db.SourceOverride) error {
+	var pollInterval any
+	if ov.HasInterval {
+		pollInterval = ov.Interval.String()
+	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO org_event_sources (org_id, kind, base_url, poll_interval)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT (org_id, kind) DO UPDATE SET
 			base_url      = excluded.base_url,
 			poll_interval = excluded.poll_interval`,
-		orgID, kind, nullStringValue(baseURL), pollInterval.String())
+		orgID, kind, nullStringValue(ov.BaseURL), pollInterval)
 	return err
 }
 
@@ -378,9 +383,9 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 // updateSettingsAtVersion: given the org_settings statement's own result, it
 // either propagates a failed/no-match write untouched (a version conflict or
 // a losing create must write NOTHING, org_event_sources included, so this
-// returns before touching it) or, on success, upserts the
-// github/jira org_event_sources rows from u and merges those four fields into
-// the row it hands back. Both writes land in the same transaction as the
+// returns before touching it) or, on success, upserts the github, jira and
+// linear org_event_sources rows from u (db.SourceOverridesOf) and resolves
+// them into the row it hands back exactly as a read would. Both writes land in the same transaction as the
 // org_settings statement (the shared s.q), so a rollback after this point
 // undoes both halves together — ordinary transaction atomicity is what gives
 // the guarded caller its "nothing written on conflict" contract; there is no
@@ -390,21 +395,18 @@ func (s *orgsStore) finishSettingsWrite(ctx context.Context, orgID string, u dom
 	if err != nil {
 		return domain.OrgSettings{}, err
 	}
-	if err := upsertSourceOverride(ctx, s.q, orgID, "github", u.GitHubBaseURL, u.GitHubPollInterval); err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("upsert github source config: %w", err)
+	// The returned row resolves the overrides the way a read does, so a
+	// cadence the caller left unset comes back as the default it reads as.
+	ov := db.SourceOverridesOf(u)
+	for _, src := range []struct {
+		kind string
+		ov   db.SourceOverride
+	}{{"github", ov.GitHub}, {"jira", ov.Jira}, {"linear", ov.Linear}} {
+		if err := upsertSourceOverride(ctx, s.q, orgID, src.kind, src.ov); err != nil {
+			return domain.OrgSettings{}, fmt.Errorf("upsert %s source config: %w", src.kind, err)
+		}
 	}
-	if err := upsertSourceOverride(ctx, s.q, orgID, "jira", u.JiraBaseURL, u.JiraPollInterval); err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("upsert jira source config: %w", err)
-	}
-	// Linear is SaaS-only: no base URL, only a cadence.
-	if err := upsertSourceOverride(ctx, s.q, orgID, "linear", "", u.LinearPollInterval); err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("upsert linear source config: %w", err)
-	}
-	stored.GitHubBaseURL = u.GitHubBaseURL
-	stored.GitHubPollInterval = u.GitHubPollInterval
-	stored.JiraBaseURL = u.JiraBaseURL
-	stored.JiraPollInterval = u.JiraPollInterval
-	stored.LinearPollInterval = u.LinearPollInterval
+	db.ApplyOrgSourceOverrides(&stored, ov)
 	return stored, nil
 }
 

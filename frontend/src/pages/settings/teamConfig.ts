@@ -270,8 +270,9 @@ export interface LinearTeamWire extends LinearTeamConfig {
 }
 
 /** linearTeamFromWire is the form's copy of a stored team: exactly the fields
- *  the form edits, so an edited-then-reverted team compares equal to the one
- *  that was loaded. */
+ *  the form edits. Whether an edited team still matches the loaded one is
+ *  linearTeamsEqual's question, not a structural one: an edit hands back the
+ *  live state options, which carry more than a stored ref. */
 export const linearTeamFromWire = (t: LinearTeamWire): LinearTeamConfig => ({
   id: t.id,
   key: t.key,
@@ -324,6 +325,45 @@ export const linearTeamRulesValid = (t: LinearTeamConfig): boolean => {
  *  by the save. Watching a team without mapping it never blocks. */
 export const linearTeamsBlocked = (teams: LinearTeamConfig[]): boolean =>
   teams.some((t) => !linearTeamRulesValid(t))
+
+/** linearDraftAfterSave is the form's set once a save of `sent` lands with
+ *  `stored`. The editor stays live while the request is out, so `current` may
+ *  hold edits made since — a rule changed, a team watched, a pre-fill that
+ *  landed. With none, the form takes the stored set, which carries the names
+ *  Linear resolved on the way in; with some, they are kept and stay unsaved
+ *  against the new baseline rather than being overwritten by an older set. */
+export const linearDraftAfterSave = (
+  current: LinearTeamConfig[],
+  sent: LinearTeamConfig[],
+  stored: LinearTeamConfig[],
+): LinearTeamConfig[] => (linearTeamsEqual(current, sent) ? stored : current)
+
+/** linearTeamsEqual reports whether two sets would save as the same thing:
+ *  the same teams in the same order, and per team the same state ids in each
+ *  rule and the same write targets. A rule is a set — the order its members
+ *  were picked in is not saved as meaning anything — and a state's name and
+ *  type are refreshed from Linear on save, so neither makes a set dirty. */
+export function linearTeamsEqual(a: LinearTeamConfig[], b: LinearTeamConfig[]): boolean {
+  const ids = (refs: LinearStateRef[]) =>
+    refs
+      .map((r) => r.id)
+      .sort()
+      .join(',')
+  const sameRule = (
+    x: JiraStatusRuleValue<LinearStateRef>,
+    y: JiraStatusRuleValue<LinearStateRef>,
+  ) => ids(x.members) === ids(y.members) && (x.canonical?.id ?? '') === (y.canonical?.id ?? '')
+  return (
+    a.length === b.length &&
+    a.every(
+      (t, i) =>
+        t.id === b[i].id &&
+        sameRule(t.pickup, b[i].pickup) &&
+        sameRule(t.in_progress, b[i].in_progress) &&
+        sameRule(t.done, b[i].done),
+    )
+  )
+}
 
 // The state types each rule is pre-filled from.
 const PICKUP_TYPES = new Set(['triage', 'backlog', 'unstarted'])

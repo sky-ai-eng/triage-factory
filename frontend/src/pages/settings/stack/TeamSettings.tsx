@@ -44,7 +44,9 @@ import {
   fetchTeamGitHubGroups,
   fetchTeamSettings,
   linearTeamFromWire,
+  linearDraftAfterSave,
   linearTeamsBlocked,
+  linearTeamsEqual,
   saveTeamGitHubGroups,
   saveTeamRepos,
   saveTeamJiraProjects,
@@ -378,20 +380,23 @@ export default function TeamSettings({
   }
 
   // ── Linear teams (their own replace-set PUT) ──
-  const linearDirty = JSON.stringify(linearTeams) !== JSON.stringify(linearBaseline)
+  const linearDirty = !linearTeamsEqual(linearTeams, linearBaseline)
   const linearBlocked = linearTeamsBlocked(linearTeams)
   const saveLinear = async (): Promise<boolean> => {
+    const sent = linearTeams
     setSavingLinear(true)
     try {
-      const res = await saveTeamLinearTeams(endpointTeamId, linearTeams)
+      const res = await saveTeamLinearTeams(endpointTeamId, sent)
       if (!res.ok) {
         toast.error(res.error)
         return false
       }
       // Render what was STORED: the server resolved every team's key and name
-      // and every state's name and type from Linear on the way in.
+      // and every state's name and type from Linear on the way in — unless the
+      // form moved on while the request was out, in which case those edits
+      // stay, unsaved.
       setLinearBaseline(res.teams)
-      setLinearTeams(res.teams)
+      setLinearTeams((current) => linearDraftAfterSave(current, sent, res.teams))
       toast.success('Linear teams saved')
       return true
     } finally {

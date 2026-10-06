@@ -486,6 +486,55 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	t.Run("OrgSettings_UnsetPollIntervals_ReadAsTheDefault", func(t *testing.T) {
+		// A caller that builds OrgSettings without a cadence — a credential
+		// transition writing the fields it owns — leaves every interval at
+		// zero. That is no override: the write and every read after it resolve
+		// the default, never a zero cadence. An explicit cadence still
+		// overrides it, and a zero afterwards goes back to the default.
+		stores, ids := factory(t)
+		read := func() (*domain.OrgSettings, error) {
+			set, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			return &set, nil
+		}
+		def := domain.DefaultOrgSettings()
+		intervals := func(s domain.OrgSettings) [3]time.Duration {
+			return [3]time.Duration{s.GitHubPollInterval, s.JiraPollInterval, s.LinearPollInterval}
+		}
+		want := intervals(def)
+
+		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"})
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if got := intervals(saved); got != want {
+			t.Errorf("returned intervals (github, jira, linear) = %v, want the defaults %v", got, want)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (no cadence)", saved, read)
+
+		set := saved
+		set.LinearPollInterval = 15 * time.Minute
+		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (15m): %v", err)
+		}
+		if saved.LinearPollInterval != 15*time.Minute {
+			t.Errorf("LinearPollInterval = %v, want 15m", saved.LinearPollInterval)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (15m)", saved, read)
+
+		set.LinearPollInterval = 0
+		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (back to zero): %v", err)
+		}
+		if saved.LinearPollInterval != def.LinearPollInterval {
+			t.Errorf("LinearPollInterval after a zero = %v, want the default %v", saved.LinearPollInterval, def.LinearPollInterval)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (back to zero)", saved, read)
+	})
+
 	// Two settings columns default to a MODEL, and each dialect spells its
 	// default in the vocabulary its own runtime dispatches: Postgres carries the
 	// native wire id the in-process loop sends, SQLite the Claude Code alias its
@@ -809,6 +858,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubPollInterval:  5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
+			LinearPollInterval:  5 * time.Minute,
 			EnabledModels:       []string{domain.ModelHaiku},
 			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,

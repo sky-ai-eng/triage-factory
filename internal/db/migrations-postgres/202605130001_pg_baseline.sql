@@ -610,6 +610,15 @@ CREATE TABLE public.linear_team_rules (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT ltr_linear_team_id_populated CHECK (linear_team_id <> ''),
     CONSTRAINT ltr_linear_team_key_populated CHECK (linear_team_key <> ''),
+    CONSTRAINT ltr_members_are_arrays CHECK (
+        jsonb_typeof(pickup_members) = 'array'
+        AND jsonb_typeof(in_progress_members) = 'array'
+        AND jsonb_typeof(done_members) = 'array'
+    ),
+    CONSTRAINT ltr_canonicals_are_objects CHECK (
+        (in_progress_canonical IS NULL OR jsonb_typeof(in_progress_canonical) = 'object')
+        AND (done_canonical IS NULL OR jsonb_typeof(done_canonical) = 'object')
+    ),
     CONSTRAINT ltr_armed_or_unarmed CHECK (
         (jsonb_array_length(pickup_members) = 0
             AND jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL

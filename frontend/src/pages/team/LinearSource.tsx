@@ -4,8 +4,10 @@ import type { SourceBodyProps } from './SourceFrame'
 import LinearTeamRulesGroup from '../settings/LinearTeamRulesGroup'
 import {
   fetchTeamSettings,
+  linearDraftAfterSave,
   linearTeamFromWire,
   linearTeamsBlocked,
+  linearTeamsEqual,
   saveTeamLinearTeams,
 } from '../settings/teamConfig'
 import type { LinearTeamConfig } from '../settings/teamConfig'
@@ -24,24 +26,39 @@ import { toast } from '../../components/Toast/toastStore'
 // mapping is built a rule at a time, so the edits are held until Save.
 //
 // A member sees what is watched and how it is mapped, with the verbs absent.
+//
+// What is loaded and what is edited are each tagged with the team they belong
+// to, and read only while that is still the page's team. The write is a
+// replace-set, so a set held over a team switch would overwrite the new
+// team's with the old one's.
 
 const PROSE =
   'Watched Linear teams send events this team can automate, like issues being assigned to team ' +
   'members or moving between states. Map each team’s workflow states to pickup, in progress and ' +
   'done so Triage Factory knows where an issue stands. Changes do not apply to runs already in-flight.'
 
+/** A set of Linear teams, and the team it belongs to. */
+type TeamSet = { teamId: string; teams: LinearTeamConfig[] }
+
 export default function LinearSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
   const orgId = useActiveOrgId()
-  const [baseline, setBaseline] = useState<LinearTeamConfig[] | null>(null)
-  const [draft, setDraft] = useState<LinearTeamConfig[]>([])
-  const [error, setError] = useState('')
+  const [loaded, setLoaded] = useState<TeamSet | null>(null)
+  const [edited, setEdited] = useState<TeamSet | null>(null)
+  const [failedFor, setFailedFor] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+
+  const baseline = loaded?.teamId === teamId ? loaded.teams : null
+  const draft = edited?.teamId === teamId ? edited.teams : (baseline ?? [])
+  const setDraft = (teams: LinearTeamConfig[]) => setEdited({ teamId, teams })
+  const error = failedFor === teamId ? 'Could not read this team’s Linear configuration.' : ''
 
   const flow = activitySource(useTeamActivity(teamId, 7), 'linear')
 
   // Why Linear cannot reach this org right now, or null. A paused source keeps
-  // its credential, so its catalog still reads and its mapping stays editable;
-  // an unconnected one has nothing to read, which the editor says itself.
+  // its credential, so its catalog still reads and its mapping stays editable.
+  // An unconnected one has no catalog or workflow to read: the editor shows
+  // what is stored and says so, and a team can still be unwatched, which
+  // never asks Linear anything.
   const { stateOf } = useEventSources()
   const state = stateOf('linear')
   const offReason = sourceUnavailableReason('linear', state)
@@ -53,33 +70,41 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
     void fetchTeamSettings(teamId).then((data) => {
       if (!live) return
       if (!data) {
-        setError('Could not read this team’s Linear configuration.')
+        setFailedFor(teamId)
         return
       }
-      const teams = (data.linear_teams ?? []).map(linearTeamFromWire)
-      setBaseline(teams)
-      setDraft(teams)
+      setLoaded({ teamId, teams: (data.linear_teams ?? []).map(linearTeamFromWire) })
     })
     return () => {
       live = false
     }
   }, [teamId])
 
-  const dirty = baseline !== null && JSON.stringify(draft) !== JSON.stringify(baseline)
+  const dirty = baseline !== null && !linearTeamsEqual(draft, baseline)
   const blocked = linearTeamsBlocked(draft)
 
   const save = async () => {
+    if (baseline === null) return
+    const savedFor = teamId
+    const sent = draft
     setSaving(true)
     try {
-      const res = await saveTeamLinearTeams(teamId, draft)
+      const res = await saveTeamLinearTeams(savedFor, sent)
       if (!res.ok) {
         toast.error(res.error)
         return
       }
       // The stored set, with each team's key and name and each state's name
-      // and type as Linear gave them on the way in.
-      setBaseline(res.teams)
-      setDraft(res.teams)
+      // and type as Linear gave them on the way in — unless the editor moved
+      // on while the request was out, in which case those edits stay, unsaved.
+      // A page that has since moved to another team is left alone.
+      const forSaved = (cur: TeamSet | null) => !cur || cur.teamId === savedFor
+      setLoaded((cur) => (forSaved(cur) ? { teamId: savedFor, teams: res.teams } : cur))
+      setEdited((cur) =>
+        forSaved(cur)
+          ? { teamId: savedFor, teams: linearDraftAfterSave(cur?.teams ?? sent, sent, res.teams) }
+          : cur,
+      )
       toast.success('Linear teams saved')
     } finally {
       setSaving(false)
@@ -90,8 +115,6 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
     if (dirty && !window.confirm('Discard your unsaved Linear changes?')) return
     onBack()
   }, [dirty, onBack])
-
-  const editable = isAdmin && connected
 
   return (
     <SourceFrame
@@ -122,10 +145,10 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                 value={draft}
                 onChange={setDraft}
                 connected={connected}
-                readOnly={!editable}
+                readOnly={!isAdmin}
                 bare
               />
-              {editable && (
+              {isAdmin && (
                 <div className="mt-4 flex items-center justify-end gap-2">
                   {blocked && (
                     <span className="mr-auto text-reported text-alarm">
@@ -134,7 +157,7 @@ export default function LinearSource({ teamId, teamName, isAdmin, onBack }: Sour
                   )}
                   <button
                     type="button"
-                    onClick={() => setDraft(baseline)}
+                    onClick={() => setEdited(null)}
                     disabled={!dirty || saving}
                     className="text-reported text-ink-2 hover:text-ink-1 disabled:opacity-40 rounded-xl px-3 py-1 transition-colors"
                   >

@@ -208,6 +208,24 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		}
 	})
 
+	t.Run("ReplaceForTeam_RefusesARepeatedID", func(t *testing.T) {
+		f := factory(t)
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		twice := []domain.LinearTeamRules{armedLinearRules("lt-b", "BBB"), armedLinearRules("lt-b", "BB2")}
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, twice); err == nil {
+			t.Fatal("ReplaceForTeam accepted one Linear team twice")
+		}
+		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID)
+		if err != nil {
+			t.Fatalf("ListForTeamSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].LinearTeamID != "lt-a" {
+			t.Errorf("a refused write changed the stored set: %#v", got)
+		}
+	})
+
 	t.Run("ReplaceForTeam_RefusesHalfAMapping", func(t *testing.T) {
 		// The armed-or-unarmed CHECK, in both dialects: pickup with nothing
 		// to move an issue into, or the reverse, never lands.

@@ -315,6 +315,41 @@ func TestLinearTeamsPut_AbsentRuleKeepsStored(t *testing.T) {
 	}
 }
 
+// TestLinearTeamsPut_RepollsOnlyWhenTheMappedSetMoves walks one team through
+// the writes that change what is stored without changing what the poller
+// would ask — reordering, watching or dropping an unmapped team, resending —
+// and the ones that do: changing a write target, and dropping a mapped team.
+func TestLinearTeamsPut_RepollsOnlyWhenTheMappedSetMoves(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	kicked := linearKicks(t, s)
+	mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))
+	if !kicked() {
+		t.Fatal("arming ENG did not re-due Linear polling")
+	}
+
+	watchOps := map[string]any{"id": linearTeamOps}
+	movedTarget := armedLinearTeam(linearTeamEng)
+	movedTarget["done"] = map[string]any{"member_ids": []string{linearStateDone, linearStateCanceled}, "canonical_id": linearStateCanceled}
+
+	for _, step := range []struct {
+		name  string
+		body  []map[string]any
+		kicks bool
+	}{
+		{"watch an unmapped team beside it, first", []map[string]any{watchOps, armedLinearTeam(linearTeamEng)}, false},
+		{"reorder", []map[string]any{armedLinearTeam(linearTeamEng), watchOps}, false},
+		{"resend unchanged", []map[string]any{armedLinearTeam(linearTeamEng), watchOps}, false},
+		{"drop the unmapped team", []map[string]any{armedLinearTeam(linearTeamEng)}, false},
+		{"move a write target", []map[string]any{movedTarget}, true},
+		{"drop the mapped team", nil, true},
+	} {
+		mustPutLinearTeams(t, s, step.body...)
+		if got := kicked(); got != step.kicks {
+			t.Errorf("%s: re-dued Linear polling = %v, want %v", step.name, got, step.kicks)
+		}
+	}
+}
+
 // TestLinearTeamsPut_DisarmIsThreeEmptyRules: clearing every rule unarms the
 // team without untracking it, without asking Linear, and re-dues polling
 // because what the poller asks changed.

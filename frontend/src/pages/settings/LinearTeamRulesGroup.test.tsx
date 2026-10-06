@@ -12,6 +12,7 @@ import LinearTeamRulesGroup from './LinearTeamRulesGroup'
 import {
   linearTeamIsArmed,
   linearTeamRulesValid,
+  linearTeamsEqual,
   unmappedLinearTeam,
   type LinearTeamConfig,
 } from './teamConfig'
@@ -58,7 +59,7 @@ function stubFetch() {
   return fetchMock
 }
 
-function Harness({ seed = [] as LinearTeamConfig[], readOnly = false }) {
+function Harness({ seed = [] as LinearTeamConfig[], readOnly = false, connected = true }) {
   const [value, setValue] = useState<LinearTeamConfig[]>(seed)
   return (
     <>
@@ -66,10 +67,11 @@ function Harness({ seed = [] as LinearTeamConfig[], readOnly = false }) {
         orgId={ORG}
         value={value}
         onChange={setValue}
-        connected
+        connected={connected}
         readOnly={readOnly}
         bare
       />
+      <output data-testid="dirty">{linearTeamsEqual(value, seed) ? 'no' : 'yes'}</output>
       <output data-testid="watched">{value.map((t) => t.key).join(',')}</output>
       <output data-testid="armed">
         {value
@@ -190,24 +192,25 @@ describe('LinearTeamRulesGroup · mapping', () => {
   })
 })
 
-describe('LinearTeamRulesGroup · read-only', () => {
-  const mapped: LinearTeamConfig = {
-    ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
-    pickup: { members: [{ id: 's-todo', name: 'Todo', type: 'unstarted' }] },
-    in_progress: {
-      members: [{ id: 's-doing', name: 'In Progress', type: 'started' }],
-      canonical: { id: 's-doing', name: 'In Progress', type: 'started' },
-    },
-    done: {
-      members: [{ id: 's-done', name: 'Done', type: 'completed' }],
-      canonical: { id: 's-done', name: 'Done', type: 'completed' },
-    },
-  }
+// ENG mapped as its state types would map it, refs as the server renders them.
+const MAPPED: LinearTeamConfig = {
+  ...unmappedLinearTeam('team-eng', 'ENG', 'Engineering'),
+  pickup: { members: [{ id: 's-todo', name: 'Todo', type: 'unstarted' }] },
+  in_progress: {
+    members: [{ id: 's-doing', name: 'In Progress', type: 'started' }],
+    canonical: { id: 's-doing', name: 'In Progress', type: 'started' },
+  },
+  done: {
+    members: [{ id: 's-done', name: 'Done', type: 'completed' }],
+    canonical: { id: 's-done', name: 'Done', type: 'completed' },
+  },
+}
 
+describe('LinearTeamRulesGroup · read-only', () => {
   it('shows the mapping with no verbs and no catalog', async () => {
     const user = userEvent.setup()
     const fetchMock = stubFetch()
-    render(<Harness seed={[mapped]} readOnly />)
+    render(<Harness seed={[MAPPED]} readOnly />)
 
     await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
     expect(await screen.findByText('3 states available')).toBeInTheDocument()
@@ -218,5 +221,43 @@ describe('LinearTeamRulesGroup · read-only', () => {
     expect(screen.queryByRole('button', { name: 'Watch' })).toBeNull()
     expect(screen.queryByRole('searchbox', { name: 'Search Linear teams' })).toBeNull()
     expect(fetchMock).not.toHaveBeenCalledWith(`${LINEAR}/teams/list`, expect.anything())
+  })
+})
+
+describe('LinearTeamRulesGroup · unsaved changes', () => {
+  it('is clean again once a toggled state is toggled back', async () => {
+    const user = userEvent.setup()
+    render(<Harness seed={[MAPPED]} />)
+    await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
+    await screen.findByText('3 states available')
+
+    const pickup = screen
+      .getByText(/Poll for unassigned issues/)
+      .closest('div.space-y-2') as HTMLElement
+    await user.click(within(pickup).getByRole('button', { name: 'Todo' }))
+    expect(screen.getByTestId('dirty')).toHaveTextContent('yes')
+
+    await user.click(within(pickup).getByRole('button', { name: 'Todo' }))
+    expect(screen.getByTestId('dirty')).toHaveTextContent('no')
+  })
+})
+
+describe('LinearTeamRulesGroup · not connected', () => {
+  it('still shows what is stored, asks Linear nothing, and can stop watching', async () => {
+    const user = userEvent.setup()
+    const fetchMock = stubFetch()
+    render(<Harness seed={[MAPPED]} connected={false} />)
+
+    expect(
+      screen.getByText('Connect Linear under Workspace settings before configuring tracked teams.'),
+    ).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Expand ENG' }))
+    expect(screen.getByText('In Progress ★')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Reload states' })).toBeNull()
+    expect(screen.queryByRole('searchbox', { name: 'Search Linear teams' })).toBeNull()
+
+    await user.click(screen.getByRole('button', { name: 'Stop watching ENG' }))
+    expect(screen.getByTestId('watched')).toHaveTextContent('')
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
 import SlackSource from './SlackSource'
@@ -667,7 +667,92 @@ describe('LinearSource', () => {
         ),
       ).toBeInTheDocument(),
     )
-    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    // An admin keeps the save bar — stopping watching a team asks Linear
+    // nothing — but there is no catalog to read.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(calledWith(fetchMock, `${LINEAR}/list`, 'POST')).toBeUndefined()
+  })
+
+  it('keeps an edit made while a save is out, unsaved', async () => {
+    const fetchMock = stub({
+      ...PAYLOADS,
+      [`${LINEAR}/list`]: [
+        { id: ENG_ID, key: 'ENG', name: 'Engineering', private: false },
+        { id: 'team-ops', key: 'OPS', name: 'Operations', private: false },
+      ],
+      '/api/teams/t1/settings': {
+        linear_teams: [
+          {
+            id: ENG_ID,
+            key: 'ENG',
+            name: 'Engineering',
+            armed: false,
+            pickup: { members: [] },
+            in_progress: { members: [], canonical: null },
+            done: { members: [], canonical: null },
+          },
+        ],
+      },
+    })
+    // The PUT is held open until the test answers it.
+    let answerPut: (body: unknown) => void = () => {}
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) => {
+      if (String(input) !== '/api/teams/t1/linear-teams') return answer(input, init)
+      return new Promise((resolve) => {
+        answerPut = (body) =>
+          resolve({ ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) })
+      })
+    })
+    render(<LinearSource {...BODY} />)
+    await waitFor(() => expect(screen.getByText('Operations')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop watching ENG' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(calledWith(fetchMock, '/api/teams/t1/linear-teams', 'PUT')).toBeDefined(),
+    )
+
+    // While the save is out: watch OPS.
+    const opsRow = screen.getByText('Operations').closest('div')!.parentElement!
+    fireEvent.click(within(opsRow).getByRole('button', { name: 'Watch' }))
+    expect(screen.getByRole('button', { name: 'Expand OPS' })).toBeInTheDocument()
+
+    answerPut({ linear_teams: [] })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled())
+    expect(screen.getByRole('button', { name: 'Expand OPS' })).toBeInTheDocument()
+  })
+
+  it('never carries one team’s set into another team’s page', async () => {
+    const fetchMock = stub({
+      ...PAYLOADS,
+      '/api/teams/t1/settings': {
+        linear_teams: [
+          {
+            id: ENG_ID,
+            key: 'ENG',
+            name: 'Engineering',
+            armed: false,
+            pickup: { members: [] },
+            in_progress: { members: [], canonical: null },
+            done: { members: [], canonical: null },
+          },
+        ],
+      },
+    })
+    // The next team's read is still in flight.
+    const answer = fetchMock.getMockImplementation()!
+    fetchMock.mockImplementation((input: unknown, init?: RequestInit) =>
+      String(input) === '/api/teams/t2/settings' ? new Promise(() => {}) : answer(input, init),
+    )
+    const { rerender } = render(<LinearSource {...BODY} />)
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Expand ENG' })).toBeInTheDocument(),
+    )
+
+    rerender(<LinearSource {...BODY} teamId="t2" />)
+    expect(screen.queryAllByText('ENG')).toHaveLength(0)
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(screen.getByText('Loading…')).toBeInTheDocument()
   })
 })

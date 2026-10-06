@@ -475,11 +475,14 @@ export default function TeamSettings() {
   }
 
   if (source) {
+    // Keyed by team: each page holds the set it read and writes it back as a
+    // replace-set, so a team switch must start it over rather than carry one
+    // team's set into the other's save.
     const body = { teamId, teamName: team.name, isAdmin, onBack: closeSource }
-    if (source === 'github') return <GitHubSource {...body} />
-    if (source === 'jira') return <JiraSource {...body} />
-    if (source === 'linear') return <LinearSource {...body} />
-    return <SlackSource {...body} />
+    if (source === 'github') return <GitHubSource key={teamId} {...body} />
+    if (source === 'jira') return <JiraSource key={teamId} {...body} />
+    if (source === 'linear') return <LinearSource key={teamId} {...body} />
+    return <SlackSource key={teamId} {...body} />
   }
 
   return (

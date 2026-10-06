@@ -142,3 +142,70 @@ func TestLinearCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 		t.Errorf("a removed member's reads reached Linear %d times", got)
 	}
 }
+
+// TestLinearTeamsPut_Postgres_GatesOnTheTeam: the write is refused before it
+// asks Linear anything when the caller is outside the team's org (404, it is
+// not theirs to see) and when the team is archived (403).
+func TestLinearTeamsPut_Postgres_GatesOnTheTeam(t *testing.T) {
+	rig := newAuthRig(t)
+	alice := rig.seedUser()
+	_, team := rig.seedOrg(alice, "linear-gate-"+uuid.NewString()[:8])
+	carol := rig.seedUser()
+	rig.seedOrg(carol, "linear-other-"+uuid.NewString()[:8])
+	fake := newLinearCatalogFake(t, linearFixtureEng)
+	rig.srv.linearResolver = fixedLinearResolver{Resolver: rig.srv.linearResolver, endpoint: fake.URL}
+	path := "/api/teams/" + team.String() + "/linear-teams"
+	body := map[string]any{"linear_teams": []map[string]any{armedLinearTeam(linearTeamEng)}}
+
+	resp := rig.postJSONWithSid(http.MethodPut, path, rig.signIn(carol), body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("a PUT from outside the org = %d, want 404", resp.StatusCode)
+	}
+
+	pgtest.MustExec(t, rig.h.AdminDB, `UPDATE teams SET deleted_at = now() WHERE id = $1`, team)
+	resp = rig.postJSONWithSid(http.MethodPut, path, rig.signIn(alice), body)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(raw), "TEAM_ARCHIVED") {
+		t.Errorf("a PUT on an archived team = %d %s, want 403 TEAM_ARCHIVED", resp.StatusCode, raw)
+	}
+	if n := fake.Calls(); n != 0 {
+		t.Errorf("refused writes asked Linear %d times", n)
+	}
+}
+
+// TestOrgSettingsPatch_Postgres_PollIntervalFloor: the cadence floor holds in
+// multi mode, through a real session on the Postgres stores, for every source.
+func TestOrgSettingsPatch_Postgres_PollIntervalFloor(t *testing.T) {
+	rig := newAuthRig(t)
+	alice := rig.seedUser()
+	org, _ := rig.seedOrg(alice, "linear-floor-"+uuid.NewString()[:8])
+	sid := rig.signIn(alice)
+	path := "/api/orgs/" + org.String() + "/settings"
+	version := func() any {
+		t.Helper()
+		resp := rig.requestWithSid(http.MethodGet, path, sid)
+		defer resp.Body.Close()
+		var got map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil || resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET settings = %d, %v", resp.StatusCode, err)
+		}
+		return got["version"]
+	}
+
+	for _, field := range []string{"github_poll_interval", "jira_poll_interval", "linear_poll_interval"} {
+		resp := rig.postJSONWithSid(http.MethodPatch, path, sid, map[string]any{"version": version(), field: "29s"})
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusUnprocessableEntity || !strings.Contains(string(raw), `"OUT_OF_RANGE"`) {
+			t.Errorf("%s = 29s: %d %s, want 422 OUT_OF_RANGE", field, resp.StatusCode, raw)
+		}
+		resp = rig.postJSONWithSid(http.MethodPatch, path, sid, map[string]any{"version": version(), field: "30s"})
+		raw, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"`+field+`":"30s"`) {
+			t.Errorf("%s = 30s: %d %s, want 200 storing 30s", field, resp.StatusCode, raw)
+		}
+	}
+}

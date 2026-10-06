@@ -100,11 +100,14 @@ func ScanLinearTeamRulesRows(rows *sql.Rows, err error) ([]domain.LinearTeamRule
 	return out, nil
 }
 
-// ValidateLinearTeamRulesInput refuses an entry with no LinearTeamID or no
-// LinearTeamKey before ReplaceForTeam writes anything. Dropping such an entry
-// would also drop its id from the prune list, so an input of only malformed
-// entries would clear the team instead of failing.
+// ValidateLinearTeamRulesInput refuses, before ReplaceForTeam writes
+// anything, an entry with no LinearTeamID or no LinearTeamKey, and a
+// LinearTeamID named twice. Dropping a malformed entry would also drop its id
+// from the prune list, so an input of only malformed entries would clear the
+// team instead of failing; and of two entries for one Linear team, the upsert
+// would keep whichever came last without saying so.
 func ValidateLinearTeamRulesInput(rules []domain.LinearTeamRules) error {
+	seen := make(map[string]int, len(rules))
 	for i, r := range rules {
 		if r.LinearTeamID == "" {
 			return fmt.Errorf("ReplaceForTeam: rules[%d] has empty LinearTeamID", i)
@@ -112,6 +115,10 @@ func ValidateLinearTeamRulesInput(rules []domain.LinearTeamRules) error {
 		if r.LinearTeamKey == "" {
 			return fmt.Errorf("ReplaceForTeam: rules[%d] (%s) has empty LinearTeamKey", i, r.LinearTeamID)
 		}
+		if first, dup := seen[r.LinearTeamID]; dup {
+			return fmt.Errorf("ReplaceForTeam: rules[%d] repeats LinearTeamID %s from rules[%d]", i, r.LinearTeamID, first)
+		}
+		seen[r.LinearTeamID] = i
 	}
 	return nil
 }

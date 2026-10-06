@@ -42,6 +42,23 @@ func (o *SourceOverrides) Set(kind string, ov SourceOverride) {
 	}
 }
 
+// SourceOverridesOf is what a settings write stores on org_event_sources for
+// u. A zero or negative poll interval is no override rather than a stored
+// cadence: it is what a caller that never set the field passes, and the
+// settings PATCH, the one door that takes a cadence from outside, refuses
+// anything below the scheduler's tick. Stored, it would read back as a zero
+// interval instead of the default.
+func SourceOverridesOf(u domain.OrgSettings) SourceOverrides {
+	override := func(baseURL string, d time.Duration) SourceOverride {
+		return SourceOverride{BaseURL: baseURL, Interval: d, HasInterval: d > 0}
+	}
+	return SourceOverrides{
+		GitHub: override(u.GitHubBaseURL, u.GitHubPollInterval),
+		Jira:   override(u.JiraBaseURL, u.JiraPollInterval),
+		Linear: override("", u.LinearPollInterval),
+	}
+}
+
 // ApplyOrgSourceOverrides fills set's org_event_sources-backed fields. A
 // missing poll-interval override resolves to DefaultOrgSettings()'s 5-minute
 // cadence — the same fallback the org_settings NOT NULL DEFAULT columns used

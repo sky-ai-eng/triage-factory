@@ -193,11 +193,14 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	// Re-due the org's Linear poll only when what the poller would ask moved:
 	// watching a team without mapping it contributes nothing to a poll, and
 	// resending an identical set changes nothing at all.
-	if !sameArmedLinearTeams(prev, next) {
-		s.MarkLinearRestarted(r.Context(), orgID)
-		if s.onLinearChanged != nil {
-			go s.onLinearChanged(orgID)
-		}
+	//
+	// TODO(TFAC-1020): mark Linear's poll readiness restarted here, as the
+	// Jira projects write does, once the Linear poller records completions.
+	// Marked before then, the row would wait for a poller that does not exist
+	// and the first poll it ever completes would announce a change made long
+	// before.
+	if !sameArmedLinearTeams(prev, next) && s.onLinearChanged != nil {
+		go s.onLinearChanged(orgID)
 	}
 
 	writeJSON(w, http.StatusOK, teamLinearTeamsResponse{
