@@ -12,19 +12,23 @@ export interface JiraStatusRef {
   name: string
 }
 
-export interface JiraStatusRuleValue {
-  members: JiraStatusRef[]
+/** JiraStatusRuleValue is one rule: its members and, for a write-target rule,
+ *  its canonical. Generic over the ref so the Linear rules board, whose states
+ *  also carry a type, edits its rules with the same control and gets its own
+ *  ref type back. */
+export interface JiraStatusRuleValue<T extends JiraStatusRef = JiraStatusRef> {
+  members: T[]
   /** The status TF transitions a ticket INTO. Always one of `members`. Null on
    *  a rule nobody has mapped yet, which is a valid saved state. */
-  canonical?: JiraStatusRef | null
+  canonical?: T | null
 }
 
-interface Props {
+interface Props<T extends JiraStatusRef> {
   label: string
   description: string
-  allStatuses: JiraStatusRef[]
-  value: JiraStatusRuleValue
-  onChange: (next: JiraStatusRuleValue) => void
+  allStatuses: T[]
+  value: JiraStatusRuleValue<T>
+  onChange: (next: JiraStatusRuleValue<T>) => void
   requireCanonical: boolean
   canonicalPrompt?: string
 }
@@ -35,7 +39,7 @@ interface Props {
 const sameStatus = (a: JiraStatusRef, b: JiraStatusRef): boolean =>
   a.id && b.id ? a.id === b.id : !!a.name && a.name === b.name
 
-export default function JiraStatusRule({
+export default function JiraStatusRule<T extends JiraStatusRef>({
   label,
   description,
   allStatuses,
@@ -43,8 +47,8 @@ export default function JiraStatusRule({
   onChange,
   requireCanonical,
   canonicalPrompt,
-}: Props) {
-  const isMember = (status: JiraStatusRef) => value.members.some((m) => sameStatus(m, status))
+}: Props<T>) {
+  const isMember = (status: T) => value.members.some((m) => sameStatus(m, status))
 
   /** identify re-points a stored ref at the freshly-fetched status it names, so
    *  a member carried over from a rule written before statuses had ids gains
@@ -57,13 +61,12 @@ export default function JiraStatusRule({
    *  whole rule back and reverted the edit on the next load. A ref the list
    *  cannot resolve is left exactly as it is: the board flags it as missing
    *  from the workflow, which is a thing to be told, not to be quietly fixed. */
-  const identify = (ref: JiraStatusRef): JiraStatusRef =>
-    allStatuses.find((s) => sameStatus(s, ref)) ?? ref
+  const identify = (ref: T): T => allStatuses.find((s) => sameStatus(s, ref)) ?? ref
 
-  const emit = (members: JiraStatusRef[], canonical: JiraStatusRef | null | undefined) =>
+  const emit = (members: T[], canonical: T | null | undefined) =>
     onChange({ members: members.map(identify), canonical: canonical && identify(canonical) })
 
-  const toggle = (status: JiraStatusRef) => {
+  const toggle = (status: T) => {
     if (isMember(status)) {
       const nextMembers = value.members.filter((m) => !sameStatus(m, status))
       const nextCanonical =

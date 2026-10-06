@@ -207,14 +207,15 @@ const (
 )
 
 // OrgSettings is the org-scope settings row — composed from org_settings and,
-// for the four fields below, org_event_sources.
+// for the five fields below, org_event_sources.
 //
-// GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval are
-// stored on org_event_sources (org_id, kind) as base_url / poll_interval,
-// not on org_settings — they are the uniform per-source settings
-// consolidated off the org_settings singleton, keyed by kind ("github" /
-// "jira") instead of by a column-name prefix. GetSettings composes them into
-// this struct so every existing reader keeps working unchanged, and
+// GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval /
+// LinearPollInterval are stored on org_event_sources (org_id, kind) as
+// base_url / poll_interval, not on org_settings — they are the uniform
+// per-source settings consolidated off the org_settings singleton, keyed by
+// kind ("github" / "jira" / "linear") instead of by a column-name prefix.
+// GetSettings composes them into this struct so every existing reader keeps
+// working unchanged, and
 // UpdateSettings / UpdateSettingsVersioned keep accepting and writing them —
 // they are ordinary read-write fields on this struct, exactly as before;
 // only their storage moved. NULL on org_event_sources means "no override
@@ -224,10 +225,10 @@ const (
 // for free, made explicit at the read.
 //
 // Field nullability:
-//   - GitHubPollInterval / JiraPollInterval / GitHubCloneProtocol always
-//     come back populated — the first two via the org_event_sources
-//     NULL-to-default resolution above, GitHubCloneProtocol as a genuine
-//     NOT NULL org_settings column.
+//   - GitHubPollInterval / JiraPollInterval / LinearPollInterval /
+//     GitHubCloneProtocol always come back populated — the intervals via the
+//     org_event_sources NULL-to-default resolution above,
+//     GitHubCloneProtocol as a genuine NOT NULL org_settings column.
 //   - GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
 //     BedrockCredentialsRef round-trip "" for "not configured yet" (base
 //     URLs) / "use deployment default" (vault refs). Callers never need a
@@ -254,14 +255,26 @@ type OrgSettings struct {
 	JiraBaseURL      string
 	JiraPollInterval time.Duration
 
-	// LinearWorkspaceID is the Linear workspace the org's Linear credential
-	// belongs to, learned from the credential rather than typed. A user's own
-	// Linear credential is keyed under it.
+	// LinearWorkspaceID and LinearWorkspaceURLKey are the Linear workspace the
+	// org's Linear credential belongs to, learned from the credential rather
+	// than typed. A user's own Linear credential is keyed under the id; the url
+	// key is what an issue link is built from. "" means no Linear credential is
+	// bound.
 	//
-	// TODO(TFAC-1019): no org_settings column backs this yet, so the stores
-	// leave it empty and every user resolves as having no Linear credential
-	// and no Linear identity until the column lands.
-	LinearWorkspaceID string
+	// Owned by the credential bind and unbind, not by the settings PATCH, which
+	// has no field for either. UpdateSettings writes them as part of the whole
+	// row, so a read-modify-write carries them through unchanged.
+	//
+	// TODO(TFAC-1021): no route writes them yet; the credential bind sets both
+	// from the key's organization and the unbind clears them. Until then an
+	// org has no workspace, so no user resolves a Linear credential or identity.
+	LinearWorkspaceID     string
+	LinearWorkspaceURLKey string
+	// LinearPollInterval is the Linear poll cadence. Stored on
+	// org_event_sources under kind "linear" with GitHub's and Jira's, and
+	// resolved to DefaultOrgSettings()'s 5 minutes when no override is
+	// recorded. Linear is SaaS-only, so it has no base URL to go with it.
+	LinearPollInterval time.Duration
 
 	AnthropicAPIKeyRef    string
 	BedrockCredentialsRef string
@@ -550,6 +563,7 @@ func DefaultOrgSettings() OrgSettings {
 		// which is not a thing to land on by default.
 		GitHubCloneProtocol: "https",
 		JiraPollInterval:    5 * time.Minute,
+		LinearPollInterval:  5 * time.Minute,
 		// Matches the column's NOT NULL DEFAULT 'pat'. An org with no
 		// settings row has bound no credential at all, and "the PAT system,
 		// with nothing in it yet" is the state a fresh org is in.
@@ -595,7 +609,12 @@ func EffectiveCloneProtocol(stored string, multiMode bool) string {
 // DefaultModel + AutoDelegateEnabled moved off user_settings:
 // the team owns the AI behavior policy, users do not override in v1.
 type TeamSettings struct {
-	JiraProjects               []string
+	JiraProjects []string
+	// LinearTeams is the display order of the Linear teams (by UUID) this team
+	// tracks. Like JiraProjects it is an order, not the membership:
+	// linear_team_rules, owned by LinearTeamRulesStore, is the source of truth
+	// for which Linear teams are tracked.
+	LinearTeams                []string
 	AIReprioritizeThreshold    int
 	AIPreferenceUpdateInterval int
 	DefaultModel               string // a model catalog key; "" inherits
@@ -927,6 +946,54 @@ type JiraProjectStatusRules struct {
 	InReviewCanonical   JiraStatusRef
 	DoneMembers         []JiraStatusRef
 	DoneCanonical       JiraStatusRef
+}
+
+// LinearTeamRules is one row of linear_team_rules: a team's tracking rules for
+// one Linear team, the Linear sibling of JiraProjectStatusRules. A Linear team
+// is keyed by its UUID; its key ("ENG") and name are display values captured
+// at the last save.
+//
+// A row is the team's commitment to WATCH the Linear team. It is either
+// unarmed — every rule empty, the state a team lands in when it is picked and
+// before its workflow states are mapped — or armed (see Armed). Half a mapping
+// is never stored: the linear_team_rules CHECK refuses it.
+//
+// There is no in_review rule. Nothing writes the in-review status for Jira
+// either (see JiraProjectStatusRules.InReviewMembers), so a Linear one would be
+// stored configuration that nothing reads.
+type LinearTeamRules struct {
+	// TeamID is the owning TF team. The List* store methods populate it;
+	// ReplaceForTeam ignores it (the team is a parameter).
+	TeamID         string
+	LinearTeamID   string
+	LinearTeamKey  string
+	LinearTeamName string
+	// PickupMembers are the states an unassigned issue waits in to be picked
+	// up. InProgress and Done carry the states that count as each, plus the
+	// canonical one TF moves an issue into; a canonical is always one of its
+	// rule's members.
+	PickupMembers       []LinearStateRef
+	InProgressMembers   []LinearStateRef
+	InProgressCanonical LinearStateRef
+	DoneMembers         []LinearStateRef
+	DoneCanonical       LinearStateRef
+}
+
+// Armed reports whether every rule is mapped: pickup members to discover
+// issues with, and members plus a canonical on in_progress and done to move
+// them through.
+func (r LinearTeamRules) Armed() bool {
+	return len(r.PickupMembers) > 0 &&
+		len(r.InProgressMembers) > 0 && !r.InProgressCanonical.IsZero() &&
+		len(r.DoneMembers) > 0 && !r.DoneCanonical.IsZero()
+}
+
+// Unarmed reports whether every rule is empty: the Linear team is watched and
+// nothing is mapped yet.
+func (r LinearTeamRules) Unarmed() bool {
+	return len(r.PickupMembers) == 0 &&
+		len(r.InProgressMembers) == 0 && r.InProgressCanonical.IsZero() &&
+		len(r.DoneMembers) == 0 && r.DoneCanonical.IsZero()
 }
 
 // TeamGitHubGroup is one row of team_github_groups — a fully-qualified

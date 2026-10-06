@@ -1,8 +1,8 @@
 // TODO(TFAC-892): the new /team surface supersedes this stack; delete it once
 // every group here is covered there, including the local-mode mount below.
 //
-// The team-scoped config sections — repos, GitHub teams, Jira projects, team
-// defaults/model/auto-delegate, and unattended prompts. Relocated from the
+// The team-scoped config sections — repos, GitHub teams, Jira projects, Linear
+// teams, team defaults/model/auto-delegate, and unattended prompts. Relocated from the
 // global Settings page into the /team page's Settings tab (TFAC-445): this
 // component now renders for ONE explicit team (the page-level switcher owns
 // team selection), so it no longer carries its own selector. The global
@@ -14,8 +14,8 @@
 // JiraProjectRulesGroup, ModelPicker) — no carded field groups.
 //
 // Two couplings to honour:
-//   • Team-defaults ride PATCH /api/teams/{id}/settings and Jira-projects their
-//     own PUT /api/teams/{id}/jira-projects, so
+//   • Team-defaults ride PATCH /api/teams/{id}/settings, Jira-projects their
+//     own PUT /api/teams/{id}/jira-projects and Linear-teams theirs, so
 //     each saves {...baseline, ...ownSlice} (the org-group pattern).
 //   • The GitHub-teams candidate list is built live from the team's tracked
 //     repo owners with no server cache, so saving the Repos section bumps a
@@ -33,6 +33,8 @@ import { useTeams } from '../../../hooks/useTeams'
 import RepoPickerModal from '../../../components/RepoPickerModal'
 import GitHubTeamGroup from '../GitHubTeamGroup'
 import JiraProjectRulesGroup from '../JiraProjectRulesGroup'
+import LinearTeamRulesGroup from '../LinearTeamRulesGroup'
+import { useEventSources } from '../../../hooks/useEventSources'
 import { TeamModelStep } from '../../setup/ModelStep'
 import { initialWizardState } from '../../setup/steps'
 import type { StepContext } from '../../setup/types'
@@ -41,14 +43,20 @@ import {
   fetchTeamRepos,
   fetchTeamGitHubGroups,
   fetchTeamSettings,
+  linearTeamFromWire,
+  linearDraftAfterSave,
+  linearTeamsBlocked,
+  linearTeamsEqual,
   saveTeamGitHubGroups,
   saveTeamRepos,
   saveTeamJiraProjects,
+  saveTeamLinearTeams,
   saveTeamSettings,
   teamConfigFromSettings,
   teamProjectsBlocked,
   type GitHubGroup,
   type JiraProjectConfig,
+  type LinearTeamConfig,
   type TeamConfigForm,
 } from '../teamConfig'
 import { apiJSON } from '../../../lib/apiClient'
@@ -149,12 +157,16 @@ const sameGroups = (a: GitHubGroup[], b: GitHubGroup[]): boolean => {
 
 export default function TeamSettings({
   isLocal,
+  orgId,
   teamId,
   onDirtyChange,
   orgIsAdmin = false,
   teamName = '',
 }: {
   isLocal: boolean
+  // The org the team belongs to, which addresses org-scoped reads such as the
+  // Linear catalog.
+  orgId: string
   // The team these sections configure. The page-level switcher resolves it and
   // remounts this component (key={teamId}) on a switch, so it's stable for the
   // component's lifetime. Local mode ignores it (the endpoint alias is fixed).
@@ -193,6 +205,8 @@ export default function TeamSettings({
   const [groups, setGroups] = useState<GitHubGroup[]>([])
   const [groupsBaseline, setGroupsBaseline] = useState<GitHubGroup[]>([])
   const [projects, setProjects] = useState<JiraProjectConfig[]>([])
+  const [linearTeams, setLinearTeams] = useState<LinearTeamConfig[]>([])
+  const [linearBaseline, setLinearBaseline] = useState<LinearTeamConfig[]>([])
   const [defaultModel, setDefaultModel] = useState('')
   const [autoDelegate, setAutoDelegate] = useState(true)
   const [autoMode, setAutoMode] = useState(true)
@@ -212,6 +226,16 @@ export default function TeamSettings({
 
   const [savingRepos, setSavingRepos] = useState(false)
   const [savingProjects, setSavingProjects] = useState(false)
+  const [savingLinear, setSavingLinear] = useState(false)
+
+  // Linear's section shows once Linear is a source this deployment serves —
+  // hidden while the source reads `wip`, rather than offering a team picker
+  // nothing behind it can poll. Connected is a bound credential, paused or
+  // not, the way Jira's is.
+  const { stateOf } = useEventSources()
+  const linearState = stateOf('linear')
+  const linearShown = linearState !== undefined && linearState !== 'wip'
+  const linearConnected = linearState === 'available' || linearState === 'disabled'
   const [savingDefaults, setSavingDefaults] = useState(false)
   const [savingGroups, setSavingGroups] = useState(false)
   const [savingPrompts, setSavingPrompts] = useState(false)
@@ -257,6 +281,9 @@ export default function TeamSettings({
           repos: teamRepos ?? undefined,
         })
         setProjects(form.jira_projects)
+        const linear = (settings.linear_teams ?? []).map(linearTeamFromWire)
+        setLinearTeams(linear)
+        setLinearBaseline(linear)
         setDefaultModel(form.default_model)
         setAutoDelegate(form.auto_delegate_enabled)
         setAutoMode(form.auto_mode_enabled)
@@ -349,6 +376,31 @@ export default function TeamSettings({
       return true
     } finally {
       setSavingProjects(false)
+    }
+  }
+
+  // ── Linear teams (their own replace-set PUT) ──
+  const linearDirty = !linearTeamsEqual(linearTeams, linearBaseline)
+  const linearBlocked = linearTeamsBlocked(linearTeams)
+  const saveLinear = async (): Promise<boolean> => {
+    const sent = linearTeams
+    setSavingLinear(true)
+    try {
+      const res = await saveTeamLinearTeams(endpointTeamId, sent)
+      if (!res.ok) {
+        toast.error(res.error)
+        return false
+      }
+      // Render what was STORED: the server resolved every team's key and name
+      // and every state's name and type from Linear on the way in — unless the
+      // form moved on while the request was out, in which case those edits
+      // stay, unsaved.
+      setLinearBaseline(res.teams)
+      setLinearTeams((current) => linearDraftAfterSave(current, sent, res.teams))
+      toast.success('Linear teams saved')
+      return true
+    } finally {
+      setSavingLinear(false)
     }
   }
 
@@ -454,7 +506,8 @@ export default function TeamSettings({
   // confirm-before-discard on a team switch (the switch fires outside this
   // component now). Reset to false on unmount so a stale "dirty" can't block a
   // switch after the user navigates off the Settings tab.
-  const anyDirty = reposDirty || groupsDirty || projectsDirty || defaultsDirty || promptsDirty
+  const anyDirty =
+    reposDirty || groupsDirty || projectsDirty || linearDirty || defaultsDirty || promptsDirty
   useEffect(() => {
     onDirtyChange?.(anyDirty)
   }, [anyDirty, onDirtyChange])
@@ -551,6 +604,26 @@ export default function TeamSettings({
           bare
         />
       </SettingsSection>
+
+      {linearShown && (
+        <SettingsSection
+          title="Linear teams"
+          summary={`${linearBaseline.length} tracked`}
+          dirty={linearDirty}
+          saving={savingLinear}
+          saveDisabled={linearBlocked}
+          onSave={saveLinear}
+          onCancel={() => setLinearTeams(linearBaseline)}
+        >
+          <LinearTeamRulesGroup
+            orgId={orgId}
+            value={linearTeams}
+            onChange={setLinearTeams}
+            connected={linearConnected}
+            bare
+          />
+        </SettingsSection>
+      )}
 
       <SettingsSection
         title="Team defaults"

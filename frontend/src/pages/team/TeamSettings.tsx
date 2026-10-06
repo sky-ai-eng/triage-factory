@@ -7,6 +7,7 @@ import Dialog from '../../ui/dialog/Dialog'
 import type { DialogConsequence } from '../../ui/dialog/Dialog'
 import GitHubSource from './GitHubSource'
 import JiraSource from './JiraSource'
+import LinearSource from './LinearSource'
 import SlackSource from './SlackSource'
 import type { SourceKind } from './SourceFrame'
 import { usePageHeader } from '../../contexts/ChromeContext'
@@ -69,11 +70,13 @@ const SOURCES_BY_KEY: Record<string, SourceKind> = {
   github: 'github',
   jira: 'jira',
   slack: 'slack',
+  linear: 'linear',
 }
 const SOURCE_NAMES: Record<SourceKind, string> = {
   github: 'GitHub',
   jira: 'Jira',
   slack: 'Slack',
+  linear: 'Linear',
 }
 
 type MemberApiRow = {
@@ -92,7 +95,9 @@ const ROLE_LABELS: Record<string, string> = {
   viewer: 'Viewer — read only',
 }
 
-/** The three live sources, in the order the band and the card grid list them. */
+/** The sources that are always live, in the order the band and the card grid
+ *  list them. Linear joins them once this deployment serves it; see
+ *  `linearLive`. */
 const SOURCES: SourceKind[] = ['github', 'jira', 'slack']
 
 /** A headline figure. `null` reads as a dash — the question has not been answered. */
@@ -147,9 +152,18 @@ export default function TeamSettings() {
     (kind: string) => sourceUnavailableReason(kind, stateOf(kind)),
     [stateOf],
   )
+  // Linear is a source once this deployment serves it: until then it is a
+  // "coming soon" card, and a `?source=linear` link opens nothing.
+  const linearState = stateOf('linear')
+  const linearLive = linearState !== undefined && linearState !== 'wip'
+  const sources = useMemo<SourceKind[]>(
+    () => (linearLive ? [...SOURCES, 'linear'] : SOURCES),
+    [linearLive],
+  )
   const [filter, setFilter] = useState('')
   const [params, setParams] = useSearchParams()
-  const source = SOURCES_BY_KEY[params.get('source') ?? ''] ?? null
+  const requested = SOURCES_BY_KEY[params.get('source') ?? ''] ?? null
+  const source = requested === 'linear' && !linearLive ? null : requested
 
   const openSource = useCallback(
     (key: SourceKind) => {
@@ -461,10 +475,14 @@ export default function TeamSettings() {
   }
 
   if (source) {
+    // Keyed by team: each page holds the set it read and writes it back as a
+    // replace-set, so a team switch must start it over rather than carry one
+    // team's set into the other's save.
     const body = { teamId, teamName: team.name, isAdmin, onBack: closeSource }
-    if (source === 'github') return <GitHubSource {...body} />
-    if (source === 'jira') return <JiraSource {...body} />
-    return <SlackSource {...body} />
+    if (source === 'github') return <GitHubSource key={teamId} {...body} />
+    if (source === 'jira') return <JiraSource key={teamId} {...body} />
+    if (source === 'linear') return <LinearSource key={teamId} {...body} />
+    return <SlackSource key={teamId} {...body} />
   }
 
   return (
@@ -571,12 +589,12 @@ export default function TeamSettings() {
             <div className="ts-flow">
               <div className="ts-flow-list">
                 {/* Naming a source is how you get to it: the band works as
-                    navigation between the three, not only as a way into the
+                    navigation between the sources, not only as a way into the
                     panel that lists them. A source the org cannot reach is
                     the exception — its row is not a control, so the click
                     falls through to the cell, which opens the panel where
                     the card says why the source is off. */}
-                {SOURCES.map((s) => {
+                {sources.map((s) => {
                   // A null count is undefined for the source (Slack has no
                   // tracked set), so its row keeps the dash and draws no
                   // share — a zero would claim a quiet week.
@@ -777,7 +795,7 @@ export default function TeamSettings() {
               </button>
               <span className="ts-lead-flex" />
               <span className="ts-panelview-n">
-                {SOURCES.length} sources · {flowEvents ?? '—'} events in 7 days
+                {sources.length} sources · {flowEvents ?? '—'} events in 7 days
               </span>
             </div>
 
@@ -845,18 +863,33 @@ export default function TeamSettings() {
                   scope="coming soon"
                   note="Runs the factory on a cadence you set, with no event to trigger it."
                 />
-                <SourceCard
-                  name="Linear"
-                  state="soon"
-                  scope="coming soon"
-                  note="Issues and cycles, for teams that track work in Linear instead of Jira."
-                />
+                {linearLive ? (
+                  <SourceCard
+                    name="Linear"
+                    source="linear"
+                    state={sourceOff('linear') ? 'unavailable' : 'configured'}
+                    scope="teams this team watches"
+                    stats={[
+                      ['events · 7d', activitySource(activity, 'linear')?.events ?? '—'],
+                      ['became tasks', activitySource(activity, 'linear')?.tasks ?? '—'],
+                    ]}
+                    note={sourceOff('linear')}
+                    onClick={() => openSource('linear')}
+                  />
+                ) : (
+                  <SourceCard
+                    name="Linear"
+                    state="soon"
+                    scope="coming soon"
+                    note="Issues and cycles, for teams that track work in Linear instead of Jira."
+                  />
+                )}
               </div>
             </div>
 
             <div className="ts-panelview-foot">
               <span>
-                {SOURCES.filter((k) => !sourceOff(k)).length} sources connected · last event —
+                {sources.filter((k) => !sourceOff(k)).length} sources connected · last event —
               </span>
             </div>
           </div>

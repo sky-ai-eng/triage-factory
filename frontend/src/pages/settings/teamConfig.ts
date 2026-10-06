@@ -15,6 +15,7 @@
 import { apiFetch, apiJSON, httpErrorMessage } from '../../lib/apiClient'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
 import type { GitHubTeamCandidate } from '../../lib/githubTeams'
+import type { LinearStateOption, LinearStateRef } from '../../lib/linearTeams'
 import type { SlackChannelsResponse } from '../../types'
 
 // JiraProjectConfig mirrors the backend per-project rule wire shape (key +
@@ -30,6 +31,18 @@ export interface JiraProjectConfig {
   // a write target only and an empty rule is a complete configuration.
   in_review: JiraStatusRuleValue
   done: JiraStatusRuleValue
+}
+
+// LinearTeamConfig is one tracked Linear team: its id, the key and name Linear
+// gave for it at the last save, and its three workflow-state rules. There is
+// no in_review rule for Linear.
+export interface LinearTeamConfig {
+  id: string
+  key: string
+  name: string
+  pickup: { members: LinearStateRef[] }
+  in_progress: JiraStatusRuleValue<LinearStateRef>
+  done: JiraStatusRuleValue<LinearStateRef>
 }
 
 // GitHubGroup is one stored GitHub-team → TF-team mapping row, the PUT
@@ -104,6 +117,10 @@ export interface TeamSettingsData {
     PermissionAbsentAutodenyEnabled: boolean
   }
   jira_projects: JiraProjectConfig[]
+  // The tracked Linear teams in display order, as PUT
+  // /api/teams/{id}/linear-teams answers with them. Optional for an older
+  // server that does not send it.
+  linear_teams?: LinearTeamWire[]
   member_count: number
   role: string
   // Honored bounds of the unattended-prompt grace window (whole seconds),
@@ -242,6 +259,180 @@ export function dropStatus(p: JiraProjectConfig, status: JiraStatusRef): JiraPro
     in_progress: strip(p.in_progress),
     in_review: strip(p.in_review),
     done: strip(p.done),
+  }
+}
+
+// LinearTeamWire is a tracked Linear team as the server renders it. `armed` is
+// the server's verdict at the last save; the form recomputes it from the rules
+// as they are edited, so linearTeamFromWire leaves it behind.
+export interface LinearTeamWire extends LinearTeamConfig {
+  armed: boolean
+}
+
+/** linearTeamFromWire is the form's copy of a stored team: exactly the fields
+ *  the form edits. Whether an edited team still matches the loaded one is
+ *  linearTeamsEqual's question, not a structural one: an edit hands back the
+ *  live state options, which carry more than a stored ref. */
+export const linearTeamFromWire = (t: LinearTeamWire): LinearTeamConfig => ({
+  id: t.id,
+  key: t.key,
+  name: t.name,
+  pickup: { members: t.pickup.members },
+  in_progress: { members: t.in_progress.members, canonical: t.in_progress.canonical ?? null },
+  done: { members: t.done.members, canonical: t.done.canonical ?? null },
+})
+
+/** unmappedLinearTeam is a team that has just been watched: nothing mapped. */
+export const unmappedLinearTeam = (id: string, key: string, name: string): LinearTeamConfig => ({
+  id,
+  key,
+  name,
+  pickup: { members: [] },
+  in_progress: { members: [], canonical: null },
+  done: { members: [], canonical: null },
+})
+
+/** linearTeamIsArmed reports whether every rule is mapped — pickup members,
+ *  and members plus a canonical on in_progress and done. Mirrors the backend's
+ *  LinearTeamRules.Armed. */
+export const linearTeamIsArmed = (t: LinearTeamConfig): boolean =>
+  t.pickup.members.length > 0 &&
+  t.in_progress.members.length > 0 &&
+  !!t.in_progress.canonical &&
+  t.done.members.length > 0 &&
+  !!t.done.canonical
+
+/** linearTeamIsUnmapped reports whether every rule is empty: watched, and
+ *  nothing mapped yet. */
+export const linearTeamIsUnmapped = (t: LinearTeamConfig): boolean =>
+  t.pickup.members.length === 0 &&
+  t.in_progress.members.length === 0 &&
+  !t.in_progress.canonical &&
+  t.done.members.length === 0 &&
+  !t.done.canonical
+
+/** linearTeamRulesValid mirrors what the server stores: a Linear team is
+ *  either watched with every rule empty or mapped with all three, and a
+ *  write-target rule's canonical is one of its members. Half a mapping is
+ *  refused there, so it blocks the save here. */
+export const linearTeamRulesValid = (t: LinearTeamConfig): boolean => {
+  if (linearTeamIsUnmapped(t)) return true
+  if (!linearTeamIsArmed(t)) return false
+  return [t.in_progress, t.done].every((r) => r.members.some((m) => m.id === r.canonical?.id))
+}
+
+/** linearTeamsBlocked reports whether the team's Linear rules would be refused
+ *  by the save. Watching a team without mapping it never blocks. */
+export const linearTeamsBlocked = (teams: LinearTeamConfig[]): boolean =>
+  teams.some((t) => !linearTeamRulesValid(t))
+
+/** linearDraftAfterSave is the form's set once a save of `sent` lands with
+ *  `stored`. The editor stays live while the request is out, so `current` may
+ *  hold edits made since — a rule changed, a team watched, a pre-fill that
+ *  landed. With none, the form takes the stored set, which carries the names
+ *  Linear resolved on the way in; with some, they are kept and stay unsaved
+ *  against the new baseline rather than being overwritten by an older set. */
+export const linearDraftAfterSave = (
+  current: LinearTeamConfig[],
+  sent: LinearTeamConfig[],
+  stored: LinearTeamConfig[],
+): LinearTeamConfig[] => (linearTeamsEqual(current, sent) ? stored : current)
+
+/** linearTeamsEqual reports whether two sets would save as the same thing:
+ *  the same teams in the same order, and per team the same state ids in each
+ *  rule and the same write targets. A rule is a set — the order its members
+ *  were picked in is not saved as meaning anything — and a state's name and
+ *  type are refreshed from Linear on save, so neither makes a set dirty. */
+export function linearTeamsEqual(a: LinearTeamConfig[], b: LinearTeamConfig[]): boolean {
+  const ids = (refs: LinearStateRef[]) =>
+    refs
+      .map((r) => r.id)
+      .sort()
+      .join(',')
+  const sameRule = (
+    x: JiraStatusRuleValue<LinearStateRef>,
+    y: JiraStatusRuleValue<LinearStateRef>,
+  ) => ids(x.members) === ids(y.members) && (x.canonical?.id ?? '') === (y.canonical?.id ?? '')
+  return (
+    a.length === b.length &&
+    a.every(
+      (t, i) =>
+        t.id === b[i].id &&
+        sameRule(t.pickup, b[i].pickup) &&
+        sameRule(t.in_progress, b[i].in_progress) &&
+        sameRule(t.done, b[i].done),
+    )
+  )
+}
+
+// The state types each rule is pre-filled from.
+const PICKUP_TYPES = new Set(['triage', 'backlog', 'unstarted'])
+const DONE_TYPES = new Set(['completed', 'canceled'])
+
+/** prefillLinearRules maps a team's rules from its workflow states' types, the
+ *  thing a Linear workflow carries that a Jira one does not:
+ *
+ *    pickup      ← every triage, backlog and unstarted state
+ *    in_progress ← every started state; canonical the lowest-positioned one
+ *    done        ← every completed and canceled state; canonical the
+ *                  lowest-positioned completed one
+ *
+ *  It is a starting point offered in the editor and nothing more: the saved
+ *  rules are whatever ids the user saves. A workflow missing a state of the
+ *  kind a rule needs — no started state, no completed state, nothing to pick
+ *  up from — returns null, and the team is left for the user to map. */
+export function prefillLinearRules(
+  states: LinearStateOption[],
+): Pick<LinearTeamConfig, 'pickup' | 'in_progress' | 'done'> | null {
+  const byPosition = [...states].sort((a, b) => a.position - b.position)
+  const ref = (s: LinearStateOption): LinearStateRef => ({ id: s.id, name: s.name, type: s.type })
+  const pickup = byPosition.filter((s) => PICKUP_TYPES.has(s.type)).map(ref)
+  const started = byPosition.filter((s) => s.type === 'started').map(ref)
+  const done = byPosition.filter((s) => DONE_TYPES.has(s.type)).map(ref)
+  const completed = done.find((s) => s.type === 'completed')
+  if (pickup.length === 0 || started.length === 0 || !completed) return null
+  return {
+    pickup: { members: pickup },
+    in_progress: { members: started, canonical: started[0] },
+    done: { members: done, canonical: completed },
+  }
+}
+
+/** unresolvableLinearStates returns the states a team's rules name that its
+ *  live workflow no longer has. As with Jira, nothing repairs them silently:
+ *  they are shown and removed by hand. Empty when the workflow has not been
+ *  fetched, which is no evidence that anything is gone. */
+export function unresolvableLinearStates(
+  t: LinearTeamConfig,
+  states: LinearStateRef[],
+): LinearStateRef[] {
+  if (states.length === 0) return []
+  const known = new Set(states.map((s) => s.id))
+  const out: LinearStateRef[] = []
+  const seen = new Set<string>()
+  const rules: JiraStatusRuleValue<LinearStateRef>[] = [t.pickup, t.in_progress, t.done]
+  for (const rule of rules) {
+    for (const ref of [...rule.members, ...(rule.canonical ? [rule.canonical] : [])]) {
+      if (seen.has(ref.id) || known.has(ref.id)) continue
+      seen.add(ref.id)
+      out.push(ref)
+    }
+  }
+  return out
+}
+
+/** dropLinearState removes one state from every rule of a team, clearing a
+ *  canonical that pointed at it. */
+export function dropLinearState(t: LinearTeamConfig, state: LinearStateRef): LinearTeamConfig {
+  const strip = (r: JiraStatusRuleValue<LinearStateRef>): JiraStatusRuleValue<LinearStateRef> => ({
+    members: r.members.filter((m) => m.id !== state.id),
+    canonical: r.canonical && r.canonical.id === state.id ? null : r.canonical,
+  })
+  return {
+    ...t,
+    pickup: { members: t.pickup.members.filter((m) => m.id !== state.id) },
+    in_progress: strip(t.in_progress),
+    done: strip(t.done),
   }
 }
 
@@ -435,6 +626,46 @@ export async function saveTeamJiraProjects(
     return { ok: true, projects: body.jira_projects ?? [] }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not save the Jira projects.') }
+  }
+}
+
+export type LinearTeamsSaveResult =
+  | { ok: true; teams: LinearTeamConfig[] }
+  | { ok: false; error: string }
+
+// saveTeamLinearTeams persists the tracked Linear teams and their rules via
+// PUT /api/teams/{id}/linear-teams — a full replace-set, in display order.
+// Every rule is sent: the form always holds a team's whole rule set by id, so
+// there is no rule it cannot express, and an empty rule is a real request to
+// clear it.
+export async function saveTeamLinearTeams(
+  teamId: string,
+  teams: LinearTeamConfig[],
+): Promise<LinearTeamsSaveResult> {
+  const ids = (refs: LinearStateRef[]) => refs.map((r) => r.id)
+  const linear_teams = teams.map((t) => ({
+    id: t.id,
+    pickup: { member_ids: ids(t.pickup.members) },
+    in_progress: {
+      member_ids: ids(t.in_progress.members),
+      canonical_id: t.in_progress.canonical?.id ?? '',
+    },
+    done: { member_ids: ids(t.done.members), canonical_id: t.done.canonical?.id ?? '' },
+  }))
+  try {
+    // Adopt the set AS STORED: the server resolves each team's key and name
+    // and each state's name and type from Linear on the way in.
+    const body = await apiJSON<{ linear_teams?: LinearTeamWire[] }>(
+      `${teamPath(teamId)}/linear-teams`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ linear_teams }),
+      },
+    )
+    return { ok: true, teams: (body.linear_teams ?? []).map(linearTeamFromWire) }
+  } catch (e) {
+    return { ok: false, error: httpErrorMessage(e, 'Could not save the Linear teams.') }
   }
 }
 

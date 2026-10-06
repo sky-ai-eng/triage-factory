@@ -345,6 +345,15 @@
   text-wrap: pretty;
 }
 
+/* Linear's editor: the watched teams and the picker below them, one column
+   that scrolls inside the page rather than pushing the band off it. */
+.sp-linear-right {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: 24px;
+}
+
 /* The one sentence for a source that cannot reach the org — an availability
    state, not an error. */
 .sp-offnote {

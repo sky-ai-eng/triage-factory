@@ -314,6 +314,11 @@ func (m *Manager) loadOrgSettings(ctx context.Context, orgID string) domain.OrgS
 // re-listed each wake, so this is also the minimum org-roster refresh.
 const basePollInterval = 30 * time.Second
 
+// MinPollInterval is the shortest per-org poll interval the scheduler can
+// honor, for callers that validate one before it is stored: anything shorter
+// would be polled at basePollInterval regardless.
+const MinPollInterval = basePollInterval
+
 // clampPollInterval floors a configured interval at basePollInterval: a
 // cadence finer than the base tick can't be honored (the loop never wakes
 // that often), and a zero value (unset / read error) must not collapse to

@@ -55,12 +55,27 @@ query Teams($filter: TeamFilter, $first: Int!, $after: String) {
   }
 }`
 
-const workflowStatesQuery = `
-query WorkflowStates($teamID: ID!, $first: Int!, $after: String) {
-  workflowStates(filter: { team: { id: { eq: $teamID } } }, first: $first, after: $after) {
-    nodes { id name type position }
-    ` + pageInfoFields + `
+const teamQuery = `
+query Team($id: String!) {
+  team(id: $id) { id key name private }
+}`
+
+// teamStatesQuery reads a team's states through the team rather than as a
+// filtered workflowStates listing, so a team the credential cannot see comes
+// back as a missing team instead of an empty list.
+const teamStatesQuery = `
+query TeamStates($id: String!, $first: Int!, $after: String) {
+  team(id: $id) {
+    states(first: $first, after: $after) {
+      nodes { id name type position }
+      ` + pageInfoFields + `
+    }
   }
+}`
+
+const workflowStateQuery = `
+query WorkflowState($id: String!) {
+  workflowState(id: $id) { id name type position team { id } }
 }`
 
 const issueQuery = `

@@ -249,6 +249,13 @@ type Stores struct {
 	// replace semantics on ReplaceForTeam match config.Save() today.
 	JiraStatusRules JiraStatusRulesStore
 
+	// LinearTeamRules owns the linear_team_rules table — one row per
+	// (team_id, linear_team_id), the Linear sibling of JiraStatusRules.
+	// App pool in Postgres for the request handlers (RLS gates by team
+	// membership / team admin); admin pool for the ...System reads the
+	// poller and router make. Replace-set semantics on ReplaceForTeam.
+	LinearTeamRules LinearTeamRulesStore
+
 	// TeamGitHubGroups owns the team_github_groups table — the GitHub
 	// twin of jira_project_status_rules, mapping fully-qualified GitHub
 	// teams (org login + team slug) to TF teams for review-request
@@ -543,6 +550,7 @@ type TxStores struct {
 	OrgMemberships           OrgMembershipsStore
 	Teams                    TeamsStore
 	JiraStatusRules          JiraStatusRulesStore
+	LinearTeamRules          LinearTeamRulesStore
 	TeamGitHubGroups         TeamGitHubGroupsStore
 	TeamGitHubRepos          TeamGitHubReposStore
 	GitHubApps               GitHubAppsStore

@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -257,16 +258,20 @@ func resolveUserSettingsPatch(w http.ResponseWriter, req userSettingsFields) (ap
 // segment takes the one team grammar (a uuid, or the literal "default" in
 // local mode) through authz.TeamIDFromPath, like every other {team_id} route.
 //
-// The Jira project rules are NOT part of the PATCH body. They're a child
-// collection with their own replace-set write (PUT
-// /api/teams/{team_id}/jira-projects), matching the tracked-repo and
-// github-group siblings; they still ride the composite GET, which is a
-// deliberate convenience for the settings page rather than an oversight.
+// The Jira project rules and the Linear team rules are NOT part of the PATCH
+// body. Each is a child collection with its own replace-set write (PUT
+// /api/teams/{team_id}/jira-projects, PUT /api/teams/{team_id}/linear-teams),
+// matching the tracked-repo and github-group siblings; they still ride the
+// composite GET, which is a deliberate convenience for the settings page
+// rather than an oversight.
 // --------------------------------------------------------------------
 
 type teamSettingsResponse struct {
 	TeamSettings domain.TeamSettings   `json:"team_settings"`
 	JiraProjects []jiraProjectSettings `json:"jira_projects"`
+	// LinearTeams is the team's tracked Linear teams in display order, the
+	// shape PUT /api/teams/{team_id}/linear-teams answers with.
+	LinearTeams []linearTeamSettings `json:"linear_teams"`
 	// Warning is advisory prose about a save that SUCCEEDED — today, that the
 	// org's model cap clamps the default the team just picked. Only the PATCH
 	// response ever carries it; the GET leaves it empty and omitempty drops it,
@@ -339,6 +344,12 @@ func (s *Server) readTeamSettings(w http.ResponseWriter, r *http.Request, orgID,
 		}
 		projects := rulesToProjectConfigsOrdered(rules, settings.JiraProjects)
 		resp.JiraProjects = toJiraProjectSettings(projects)
+
+		linearRules, err := tx.LinearTeamRules.ListForTeam(r.Context(), teamID)
+		if err != nil {
+			return fmt.Errorf("linear rules: %w", err)
+		}
+		resp.LinearTeams = toLinearTeamSettings(orderLinearTeamRules(linearRules, settings.LinearTeams))
 		return nil
 	}); err != nil {
 		internalError(w, "settings/team", err)
@@ -767,6 +778,9 @@ type orgSettingsResponse struct {
 	GitHubPATEnvProvided bool   `json:"github_pat_env_provided,omitempty"`
 	JiraBaseURL          string `json:"jira_base_url"`
 	JiraPollInterval     string `json:"jira_poll_interval"`
+	// LinearPollInterval is the Linear poll cadence. Linear is SaaS-only, so
+	// unlike its siblings it has no base URL beside it.
+	LinearPollInterval string `json:"linear_poll_interval"`
 	// HasJiraCredential reports whether a usable Jira service credential is
 	// stored for the org's auth-method marker — a Data Center PAT or a Cloud
 	// email + API token — rather than the presence of a specific key, so a
@@ -855,7 +869,8 @@ type orgSettingsResponse struct {
 	// omitempty.
 	//
 	// It does NOT cover github_base_url / github_poll_interval / jira_base_url
-	// / jira_poll_interval: those live on org_event_sources now, and this
+	// / jira_poll_interval / linear_poll_interval: those live on
+	// org_event_sources, and this
 	// route writes them in the same transaction as the guarded org_settings
 	// update — a stale token still refuses the whole save with nothing
 	// written, by ordinary transaction atomicity, with no second token
@@ -993,6 +1008,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		GitHubPATEnvProvided:      ghPATEnv,
 		JiraBaseURL:               jiraBaseURL,
 		JiraPollInterval:          orgSet.JiraPollInterval.String(),
+		LinearPollInterval:        orgSet.LinearPollInterval.String(),
 		HasJiraCredential:         hasJiraCred,
 		JiraCredentialEnvProvided: jiraCredEnv,
 		EnabledModels:             orgSet.EnabledModels,
@@ -1033,6 +1049,7 @@ type orgSettingsPatch struct {
 	GitHubCloneProtocol json.RawMessage `json:"github_clone_protocol"`
 	JiraBaseURL         json.RawMessage `json:"jira_base_url"`
 	JiraPollInterval    json.RawMessage `json:"jira_poll_interval"`
+	LinearPollInterval  json.RawMessage `json:"linear_poll_interval"`
 	EnabledModels       json.RawMessage `json:"enabled_models"`
 	BackgroundJobsModel json.RawMessage `json:"background_jobs_model"`
 	LLMAuthMethod       json.RawMessage `json:"llm_auth_method"`
@@ -1160,6 +1177,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		orgSet.GitHubCloneProtocol != prevOrgSet.GitHubCloneProtocol
 	jiraChanged := orgSet.JiraBaseURL != prevOrgSet.JiraBaseURL ||
 		orgSet.JiraPollInterval != prevOrgSet.JiraPollInterval
+	linearChanged := orgSet.LinearPollInterval != prevOrgSet.LinearPollInterval
 
 	if ghChanged && s.onGitHubChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
@@ -1167,6 +1185,13 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 	} else if jiraChanged && s.onJiraChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
+	}
+	// TODO(TFAC-1020): mark Linear's poll readiness restarted here, as Jira's
+	// is above, once the Linear poller records completions. Marked before then,
+	// the row would wait for a poller that does not exist and the first poll
+	// it ever completes would announce a change made long before.
+	if linearChanged && s.onLinearChanged != nil {
+		go s.onLinearChanged(orgID)
 	}
 
 	// A background-jobs model this org did not have is the setting every
@@ -1207,7 +1232,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request, orgID string, req orgSettingsPatch) (apply func(*domain.OrgSettings), ok bool) {
 	if !httpx.PatchNamed(
 		req.GitHubBaseURL, req.GitHubPollInterval, req.GitHubCloneProtocol,
-		req.JiraBaseURL, req.JiraPollInterval, req.EnabledModels,
+		req.JiraBaseURL, req.JiraPollInterval, req.LinearPollInterval, req.EnabledModels,
 		req.BackgroundJobsModel, req.LLMAuthMethod, req.MaxDailyCostUSD, req.MaxConcurrentRuns,
 		req.APITokenMaxAgeDays,
 	) {
@@ -1282,9 +1307,9 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// parse-and-drop behavior meant a typo'd interval reported "saved" while
 	// keeping the previous value. null resets to that poller's shipped
 	// default. Gated on eventsource.Polled per kind for the same reason the
-	// base_url loop above is gated on HasHost: github/jira are both polled
-	// today, so the check always passes, but it is the registry — not this
-	// route's two hardcoded fields — that decides.
+	// base_url loop above is gated on HasHost: github, jira and linear are all
+	// polled today, so the check always passes, but it is the registry — not
+	// this route's hardcoded fields — that decides.
 	for _, f := range []struct {
 		raw   json.RawMessage
 		field string
@@ -1296,6 +1321,8 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 			func(o *domain.OrgSettings, d time.Duration) { o.GitHubPollInterval = d }},
 		{req.JiraPollInterval, "jira_poll_interval", eventsource.KindJira, defaults.JiraPollInterval,
 			func(o *domain.OrgSettings, d time.Duration) { o.JiraPollInterval = d }},
+		{req.LinearPollInterval, "linear_poll_interval", eventsource.KindLinear, defaults.LinearPollInterval,
+			func(o *domain.OrgSettings, d time.Duration) { o.LinearPollInterval = d }},
 	} {
 		v, st := httpx.PatchString(&shape, f.raw, f.field)
 		if st == httpx.PatchAbsent {
@@ -1307,11 +1334,11 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		}
 		next := f.def
 		if st == httpx.PatchSet {
-			d, err := parseMinDuration(v, orgPollIntervalMinMinutes)
+			d, err := parseMinDuration(v, poller.MinPollInterval)
 			if err != nil {
 				ranges.OutOfRange(f.field, fmt.Sprintf(
-					"%s must be a duration of at least %dm (e.g. \"15m\"), or null for the default",
-					f.field, orgPollIntervalMinMinutes))
+					"%s must be a duration of at least %s (e.g. \"5m\"), or null for the default",
+					f.field, poller.MinPollInterval))
 			}
 			next = d
 		}
@@ -1578,10 +1605,6 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
-// orgPollIntervalMinMinutes is the floor for an org poll interval. Anything
-// tighter risks GitHub/Jira rate limits across a fleet of orgs.
-const orgPollIntervalMinMinutes = 10
-
 // modelsRemovedBySave lists the models this save took OUT of the org's
 // effective set — resolved on both sides, so clearing a stored set (which
 // widens to the deployment's whole universe) removes nothing and setting one for the first
@@ -1661,13 +1684,13 @@ func (s *Server) disabledModelsWarning(ctx context.Context, orgID, userID string
 // rendering live in the authz package)
 // --------------------------------------------------------------------
 
-func parseMinDuration(s string, minSeconds int) (time.Duration, error) {
+func parseMinDuration(s string, floor time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, err
 	}
-	if d < time.Duration(minSeconds)*time.Second {
-		return 0, fmt.Errorf("duration %s below minimum %ds", s, minSeconds)
+	if d < floor {
+		return 0, fmt.Errorf("duration %s below minimum %s", s, floor)
 	}
 	return d, nil
 }

@@ -309,6 +309,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol:   "https",
 			JiraBaseURL:           "https://acme.atlassian.net",
 			JiraPollInterval:      3 * time.Minute,
+			LinearWorkspaceID:     "linear-workspace-uuid",
+			LinearWorkspaceURLKey: "acme",
+			LinearPollInterval:    11 * time.Minute,
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			EnabledModels:         []string{domain.ModelSonnet, domain.ModelHaiku},
@@ -481,6 +484,55 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("GetSettingsSystem on empty row = %+v; want %+v", got, want)
 		}
+	})
+
+	t.Run("OrgSettings_UnsetPollIntervals_ReadAsTheDefault", func(t *testing.T) {
+		// A caller that builds OrgSettings without a cadence — a credential
+		// transition writing the fields it owns — leaves every interval at
+		// zero. That is no override: the write and every read after it resolve
+		// the default, never a zero cadence. An explicit cadence still
+		// overrides it, and a zero afterwards goes back to the default.
+		stores, ids := factory(t)
+		read := func() (*domain.OrgSettings, error) {
+			set, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+			if err != nil {
+				return nil, err
+			}
+			return &set, nil
+		}
+		def := domain.DefaultOrgSettings()
+		intervals := func(s domain.OrgSettings) [3]time.Duration {
+			return [3]time.Duration{s.GitHubPollInterval, s.JiraPollInterval, s.LinearPollInterval}
+		}
+		want := intervals(def)
+
+		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"})
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if got := intervals(saved); got != want {
+			t.Errorf("returned intervals (github, jira, linear) = %v, want the defaults %v", got, want)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (no cadence)", saved, read)
+
+		set := saved
+		set.LinearPollInterval = 15 * time.Minute
+		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (15m): %v", err)
+		}
+		if saved.LinearPollInterval != 15*time.Minute {
+			t.Errorf("LinearPollInterval = %v, want 15m", saved.LinearPollInterval)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (15m)", saved, read)
+
+		set.LinearPollInterval = 0
+		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
+			t.Fatalf("UpdateSettings (back to zero): %v", err)
+		}
+		if saved.LinearPollInterval != def.LinearPollInterval {
+			t.Errorf("LinearPollInterval after a zero = %v, want the default %v", saved.LinearPollInterval, def.LinearPollInterval)
+		}
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (back to zero)", saved, read)
 	})
 
 	// Two settings columns default to a MODEL, and each dialect spells its
@@ -806,6 +858,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubPollInterval:  5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			JiraPollInterval:    5 * time.Minute,
+			LinearPollInterval:  5 * time.Minute,
 			EnabledModels:       []string{domain.ModelHaiku},
 			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,
@@ -1000,6 +1053,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		stores, ids := factory(t)
 		want := domain.TeamSettings{
 			JiraProjects:                    []string{"SKY", "ENG", "OPS"},
+			LinearTeams:                     []string{"linear-team-b", "linear-team-a"},
 			AIReprioritizeThreshold:         7,
 			AIPreferenceUpdateInterval:      30,
 			DefaultModel:                    domain.ModelOpus,
@@ -1050,6 +1104,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// and nil is the answer, which is exactly what a fresh row must hand
 		// back.
 		want.JiraProjects = []string{}
+		want.LinearTeams = []string{}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after SetDailyCostCapSystem on a fresh team\n got: %+v\nwant: %+v (defaults + cap)", got, want)
 		}
@@ -1180,6 +1235,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if len(got.JiraProjects) != 0 {
 			t.Errorf("JiraProjects=%v; want empty slice", got.JiraProjects)
+		}
+		if got.LinearTeams == nil || len(got.LinearTeams) != 0 {
+			t.Errorf("LinearTeams=%#v; want an empty non-nil slice", got.LinearTeams)
 		}
 	})
 

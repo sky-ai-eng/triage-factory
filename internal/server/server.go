@@ -25,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -50,6 +51,7 @@ type Server struct {
 	teams            db.TeamsStore           // resolves the request org's default team for handlers that synthesize team-scoped rows (tasks, prompts)
 	orgs             db.OrgsStore            // per-org settings: GitHub/Jira base URLs, poll intervals, clone protocol
 	jiraRules        db.JiraStatusRulesStore // per-team Jira status rules
+	linearRules      db.LinearTeamRulesStore // per-team Linear tracking rules
 	githubApps       db.GitHubAppsStore      // per-org GitHub App registrations (manifest flow)
 	reachableRepos   db.ReachableReposStore  // the reachable-repo mirror the picker lists from and the team-repos write gate validates against
 	githubDeliveries db.GitHubDeliveryStore  // applied webhook deliveries, so a redelivery is dropped before the mirror write and the bus publish
@@ -145,6 +147,10 @@ type Server struct {
 	// write is attributed to the user, not the service account. Built in New
 	// from the stores, so it's never nil — handlers don't guard.
 	jiraResolver jira.Resolver
+	// linearResolver resolves the org's Linear service credential for the
+	// Linear picker reads and the team-rules write gate. Built in New, never
+	// nil; tests swap it to point the client at a fake GraphQL endpoint.
+	linearResolver linear.Resolver
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve
@@ -175,6 +181,7 @@ type Server struct {
 	// can't fire one org's poller restart with another org's PAT.
 	onGitHubChanged func(orgID string) // GitHub creds/access changed — evict the reachable-repo cache + re-due the org's GitHub poll (profiling is driven by the system:poll "profiler" subscriber, not here)
 	onJiraChanged   func(orgID string) // Jira config changed — restart Jira poller only
+	onLinearChanged func(orgID string) // a team's armed Linear rules changed — re-due the org's Linear poll
 	// onSourcesChanged fires after an org admin pauses or resumes one event
 	// source. It carries the kind because both reactions are per-source: the
 	// router's disabled-source gate is invalidated for this org (in process
@@ -479,6 +486,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 		teams:              stores.Teams,
 		orgs:               stores.Orgs,
 		jiraRules:          stores.JiraStatusRules,
+		linearRules:        stores.LinearTeamRules,
 		githubApps:         stores.GitHubApps,
 		reachableRepos:     stores.ReachableRepos,
 		githubDeliveries:   stores.GitHubDeliveries,
@@ -547,6 +555,10 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// user's cred, incl. the Cloud OAuth mint path). Constructed here like
 	// ghResolver so a Server is always usable without external wiring.
 	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
+	// Linear credential resolver. The picker and the team-rules write gate
+	// read the org's catalog through ForSystem, whichever shape the org's
+	// service credential takes.
+	s.linearResolver = linear.NewResolver(stores.Secrets, stores.Orgs)
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
 	}
@@ -838,6 +850,9 @@ func (s *Server) routes() {
 	s.api("GET /api/teams/{team_id}/settings", s.handleTeamSettingsGet)
 	s.apiMutating("PATCH /api/teams/{team_id}/settings", s.handleTeamSettingsPatch)
 	s.apiMutating("PUT /api/teams/{team_id}/jira-projects", s.handleTeamJiraProjectsPut)
+	// The Linear sibling: the Linear teams this team tracks and the workflow
+	// state rules for each.
+	s.apiMutating("PUT /api/teams/{team_id}/linear-teams", s.handleTeamLinearTeamsPut)
 	// The other two child collections, siblings of jira-projects: the team's
 	// tracked GitHub repos and its GitHub-team mappings, both replace-set
 	// PUTs. github-repos, not repos — it reads as the sibling it is and does
@@ -1157,6 +1172,14 @@ func (s *Server) routes() {
 	// why the two differ.
 	s.apiMutating("POST /api/jira/projects/list", s.handleJiraProjectsList)
 	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
+	// The org's Linear catalog — its teams, and each team's workflow states —
+	// proxied live under the org's Linear service credential and addressed at
+	// the org, so a caller in several orgs reads each without moving their
+	// active org. Member-gated; see the handler file.
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/list", s.handleLinearTeamsList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}", s.handleLinearTeamGet)
+	s.apiMutating("POST /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/list", s.handleLinearStatesList)
+	s.api("GET /api/orgs/{org_id}/linear/teams/{linear_team_id}/states/{state_id}", s.handleLinearStateGet)
 	// **Declared exception** to the list-envelope rule. The stock deck is a
 	// composite the discovery UI deals from — a readiness status plus two
 	// partitions of the same set — not a row list a client walks. It reads the
@@ -1730,6 +1753,12 @@ func (s *Server) kickMemoryOwed(orgID, conversationID string) {
 // only the Jira poller. See SetOnGitHubChanged for orgID semantics.
 func (s *Server) SetOnJiraChanged(fn func(orgID string)) {
 	s.onJiraChanged = fn
+}
+
+// SetOnLinearChanged registers the callback for a change to an org's armed
+// Linear configuration. See the field.
+func (s *Server) SetOnLinearChanged(fn func(orgID string)) {
+	s.onLinearChanged = fn
 }
 
 // SetScorerTrigger registers a callback to kick the AI scorer. Used by

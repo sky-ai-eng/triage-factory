@@ -97,6 +97,8 @@ func New(conn *sql.DB) db.Stores {
 		// to the one connection. Bulk-replace semantics match the
 		// existing config.Save() flow.
 		JiraStatusRules: newJiraStatusRulesStore(conn, conn),
+		// LinearTeamRules: same shape as JiraStatusRules.
+		LinearTeamRules: newLinearTeamRulesStore(conn, conn),
 		// TeamGitHubGroups is dual-pool in Postgres; SQLite collapses
 		// to the one connection. Replace-set semantics on SetForTeam;
 		// the `...System` variants forward to the non-System bodies.

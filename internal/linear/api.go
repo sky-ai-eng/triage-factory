@@ -87,30 +87,112 @@ func (c *Client) ListTeams(ctx context.Context, q, after string, first int) (Tea
 	}, nil
 }
 
-// ListWorkflowStates returns every workflow state of a team, ordered by
-// position.
-func (c *Client) ListWorkflowStates(ctx context.Context, teamID string) ([]WorkflowState, error) {
-	if err := requireID("team id", teamID); err != nil {
-		return nil, err
+// GetTeam returns one team by its UUID. A team that does not exist, or that
+// the credential cannot see, is an error matching ErrNotFound: Linear answers
+// both the same way.
+func (c *Client) GetTeam(ctx context.Context, id string) (Team, error) {
+	if err := requireID("team id", id); err != nil {
+		return Team{}, err
 	}
-	states, err := collect(func(after string) ([]WorkflowState, pageInfo, error) {
-		var data struct {
-			WorkflowStates struct {
-				Nodes    []WorkflowState `json:"nodes"`
-				PageInfo pageInfo        `json:"pageInfo"`
-			} `json:"workflowStates"`
+	var data struct {
+		Team *Team `json:"team"`
+	}
+	if err := c.query(ctx, teamQuery, map[string]any{"id": id}, &data); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Team{}, fmt.Errorf("linear: team %s: %w", id, err)
 		}
-		vars := map[string]any{"teamID": teamID, "first": listPageSize, "after": nullable(after)}
-		if err := c.query(ctx, workflowStatesQuery, vars, &data); err != nil {
+		return Team{}, err
+	}
+	if data.Team == nil {
+		return Team{}, fmt.Errorf("%w: team %s", ErrNotFound, id)
+	}
+	return *data.Team, nil
+}
+
+// ListTeamStates returns one page of a team's workflow states, at most first
+// of them; after is the previous page's EndCursor, or "" for the first page.
+// The page is in Linear's order, not the board's: Position orders the states,
+// and only a caller holding all of them can sort by it. A team that does not
+// exist, or that the credential cannot see, is an error matching ErrNotFound.
+func (c *Client) ListTeamStates(ctx context.Context, teamID, after string, first int) (WorkflowStatePage, error) {
+	if first < 1 || first > maxPageSize {
+		return WorkflowStatePage{}, fmt.Errorf("linear: state page size %d out of range 1-%d", first, maxPageSize)
+	}
+	return c.teamStatesPage(ctx, teamID, after, first)
+}
+
+// ListWorkflowStates returns every workflow state of a team, ordered by
+// position. A team the credential cannot see is an error matching
+// ErrNotFound, as it is for ListTeamStates.
+func (c *Client) ListWorkflowStates(ctx context.Context, teamID string) ([]WorkflowState, error) {
+	states, err := collect(func(after string) ([]WorkflowState, pageInfo, error) {
+		page, err := c.teamStatesPage(ctx, teamID, after, listPageSize)
+		if err != nil {
 			return nil, pageInfo{}, err
 		}
-		return data.WorkflowStates.Nodes, data.WorkflowStates.PageInfo, nil
+		return page.Items, pageInfo{HasNextPage: page.HasNextPage, EndCursor: page.EndCursor}, nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	sort.SliceStable(states, func(i, j int) bool { return states[i].Position < states[j].Position })
 	return states, nil
+}
+
+func (c *Client) teamStatesPage(ctx context.Context, teamID, after string, first int) (WorkflowStatePage, error) {
+	if err := requireID("team id", teamID); err != nil {
+		return WorkflowStatePage{}, err
+	}
+	var data struct {
+		Team *struct {
+			States struct {
+				Nodes    []WorkflowState `json:"nodes"`
+				PageInfo pageInfo        `json:"pageInfo"`
+			} `json:"states"`
+		} `json:"team"`
+	}
+	vars := map[string]any{"id": teamID, "first": first, "after": nullable(after)}
+	if err := c.query(ctx, teamStatesQuery, vars, &data); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return WorkflowStatePage{}, fmt.Errorf("linear: team %s: %w", teamID, err)
+		}
+		return WorkflowStatePage{}, err
+	}
+	if data.Team == nil {
+		return WorkflowStatePage{}, fmt.Errorf("%w: team %s", ErrNotFound, teamID)
+	}
+	return WorkflowStatePage{
+		Items:       data.Team.States.Nodes,
+		EndCursor:   data.Team.States.PageInfo.EndCursor,
+		HasNextPage: data.Team.States.PageInfo.HasNextPage,
+	}, nil
+}
+
+// GetWorkflowState returns one workflow state by its UUID, with the id of the
+// team whose workflow it belongs to. A state that does not exist, or that the
+// credential cannot see, is an error matching ErrNotFound.
+func (c *Client) GetWorkflowState(ctx context.Context, id string) (state WorkflowState, teamID string, err error) {
+	if err := requireID("state id", id); err != nil {
+		return WorkflowState{}, "", err
+	}
+	var data struct {
+		WorkflowState *struct {
+			WorkflowState
+			Team struct {
+				ID string `json:"id"`
+			} `json:"team"`
+		} `json:"workflowState"`
+	}
+	if err := c.query(ctx, workflowStateQuery, map[string]any{"id": id}, &data); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return WorkflowState{}, "", fmt.Errorf("linear: workflow state %s: %w", id, err)
+		}
+		return WorkflowState{}, "", err
+	}
+	if data.WorkflowState == nil {
+		return WorkflowState{}, "", fmt.Errorf("%w: workflow state %s", ErrNotFound, id)
+	}
+	return data.WorkflowState.WorkflowState, data.WorkflowState.Team.ID, nil
 }
 
 // ListLabels returns the labels an issue in a team can carry: the team's own

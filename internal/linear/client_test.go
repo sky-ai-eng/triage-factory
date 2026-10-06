@@ -376,6 +376,35 @@ func TestGetIssue_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetTeam(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"team":{"id":"team-1","key":"TFAC","name":"Triage Factory","private":true}}}`}))
+	got, err := s.client().GetTeam(context.Background(), "team-1")
+	if err != nil {
+		t.Fatalf("GetTeam: %v", err)
+	}
+	if want := (Team{ID: "team-1", Key: "TFAC", Name: "Triage Factory", Private: true}); got != want {
+		t.Errorf("GetTeam = %+v, want %+v", got, want)
+	}
+	if v := string(s.requests()[0].Variables["id"]); v != `"team-1"` {
+		t.Errorf("id variable = %s, want \"team-1\"", v)
+	}
+}
+
+func TestGetTeam_NotFound(t *testing.T) {
+	cases := map[string]reply{
+		"entity not found text": {status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`},
+		"null team":             {body: `{"data":{"team":null}}`},
+	}
+	for name, rep := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, scripted(rep))
+			if _, err := s.client().GetTeam(context.Background(), "team-x"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 const issueJSON = `{
   "id": "uuid-1", "identifier": "TFAC-86", "title": "Linear", "description": "body",
   "url": "https://linear.app/sky/issue/TFAC-86", "priority": 2, "priorityLabel": "High",
@@ -427,9 +456,9 @@ func TestListWorkflowStates_FollowsCursorToTheEnd(t *testing.T) {
 	s := newStub(t, func(n int, req recordedRequest) reply {
 		switch string(req.Variables["after"]) {
 		case "null":
-			return reply{body: `{"data":{"workflowStates":{"nodes":[{"id":"s3","name":"Done","type":"completed","position":3},{"id":"s1","name":"Todo","type":"unstarted","position":1}],"pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}`}
+			return reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s3","name":"Done","type":"completed","position":3},{"id":"s1","name":"Todo","type":"unstarted","position":1}],"pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}}`}
 		case `"c1"`:
-			return reply{body: `{"data":{"workflowStates":{"nodes":[{"id":"s2","name":"Doing","type":"started","position":2}],"pageInfo":{"hasNextPage":false,"endCursor":"c2"}}}}`}
+			return reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s2","name":"Doing","type":"started","position":2}],"pageInfo":{"hasNextPage":false,"endCursor":"c2"}}}}}`}
 		}
 		t.Errorf("request %d with unexpected cursor %s", n, req.Variables["after"])
 		return reply{status: http.StatusBadRequest, body: `{}`}
@@ -450,8 +479,87 @@ func TestListWorkflowStates_FollowsCursorToTheEnd(t *testing.T) {
 	if len(reqs) != 2 {
 		t.Fatalf("requests = %d, want 2", len(reqs))
 	}
-	if string(reqs[0].Variables["teamID"]) != `"team-1"` || string(reqs[0].Variables["first"]) != "100" {
+	if string(reqs[0].Variables["id"]) != `"team-1"` || string(reqs[0].Variables["first"]) != "100" {
 		t.Errorf("variables = %v", reqs[0].Variables)
+	}
+}
+
+func TestListTeamStates_OnePageInLinearsOrder(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"team":{"states":{"nodes":[{"id":"s3","name":"Done","type":"completed","position":3},{"id":"s1","name":"Todo","type":"unstarted","position":1}],"pageInfo":{"hasNextPage":true,"endCursor":"c1"}}}}}`}))
+
+	got, err := s.client().ListTeamStates(context.Background(), "team-1", "c0", 2)
+	if err != nil {
+		t.Fatalf("ListTeamStates: %v", err)
+	}
+	want := WorkflowStatePage{
+		Items: []WorkflowState{
+			{ID: "s3", Name: "Done", Type: "completed", Position: 3},
+			{ID: "s1", Name: "Todo", Type: "unstarted", Position: 1},
+		},
+		EndCursor: "c1", HasNextPage: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("page = %+v, want %+v (one upstream page, unsorted)", got, want)
+	}
+	req := s.requests()[0]
+	if string(req.Variables["id"]) != `"team-1"` || string(req.Variables["after"]) != `"c0"` || string(req.Variables["first"]) != "2" {
+		t.Errorf("variables = %v", req.Variables)
+	}
+}
+
+func TestListTeamStates_PageSizeBounds(t *testing.T) {
+	s := newStub(t, scripted())
+	for _, first := range []int{0, maxPageSize + 1} {
+		if _, err := s.client().ListTeamStates(context.Background(), "team-1", "", first); err == nil {
+			t.Errorf("first=%d: want an error", first)
+		}
+	}
+	if n := len(s.requests()); n != 0 {
+		t.Errorf("requests = %d, want none for an out-of-range page", n)
+	}
+}
+
+func TestListTeamStates_InvisibleTeamIsNotFound(t *testing.T) {
+	cases := map[string]reply{
+		"entity not found text": {status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`},
+		"null team":             {body: `{"data":{"team":null}}`},
+	}
+	for name, rep := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, scripted(rep))
+			if _, err := s.client().ListTeamStates(context.Background(), "team-x", "", 10); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestGetWorkflowState(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"workflowState":{"id":"s2","name":"Doing","type":"started","position":2,"team":{"id":"team-1"}}}}`}))
+	state, teamID, err := s.client().GetWorkflowState(context.Background(), "s2")
+	if err != nil {
+		t.Fatalf("GetWorkflowState: %v", err)
+	}
+	if want := (WorkflowState{ID: "s2", Name: "Doing", Type: "started", Position: 2}); state != want || teamID != "team-1" {
+		t.Errorf("GetWorkflowState = %+v in %q, want %+v in team-1", state, teamID, want)
+	}
+	if v := string(s.requests()[0].Variables["id"]); v != `"s2"` {
+		t.Errorf("id variable = %s, want \"s2\"", v)
+	}
+}
+
+func TestGetWorkflowState_NotFound(t *testing.T) {
+	cases := map[string]reply{
+		"entity not found text": {status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: WorkflowState","extensions":{"code":"INVALID_INPUT"}}]}`},
+		"null state":            {body: `{"data":{"workflowState":null}}`},
+	}
+	for name, rep := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, scripted(rep))
+			if _, _, err := s.client().GetWorkflowState(context.Background(), "s-x"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+		})
 	}
 }
 

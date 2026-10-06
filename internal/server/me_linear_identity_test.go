@@ -1,29 +1,13 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
-	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
-
-// linearWorkspaceOrgs reports a fixed Linear workspace on every settings read,
-// so a test can put the org in a Linear workspace without storing one.
-type linearWorkspaceOrgs struct {
-	db.OrgsStore
-	workspaceID string
-}
-
-func (o linearWorkspaceOrgs) GetSettings(ctx context.Context, orgID string) (domain.OrgSettings, error) {
-	set, err := o.OrgsStore.GetSettings(ctx, orgID)
-	set.LinearWorkspaceID = o.workspaceID
-	return set, err
-}
 
 type meLinearBody struct {
 	LinearUserID      *string `json:"linear_user_id"`
@@ -63,7 +47,14 @@ func TestHandleMe_LocalMode_LinearIdentityFromOrgWorkspace(t *testing.T) {
 		t.Errorf("no workspace: linear_user_id=%v linear_display_name=%v, want both absent", got.LinearUserID, got.LinearDisplayName)
 	}
 
-	s.orgs = linearWorkspaceOrgs{OrgsStore: s.orgs, workspaceID: "ws-org"}
+	set, err := s.orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	set.LinearWorkspaceID = "ws-org"
+	if _, err := s.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
 
 	// The org is in a workspace the user has not bound.
 	if got := getMeLinear(t, s); got.LinearUserID != nil || got.LinearDisplayName != nil {
