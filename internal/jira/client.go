@@ -1332,7 +1332,7 @@ func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string
 // behind get/put/postJSON/post, each of which turns a failure status into a
 // *StatusError. A success body is read whole; an error body is read capped at
 // upstream.MaxErrorBody. A failure with no response — request build,
-// authorize, transport (after retries), body read, or a ctx cancellation
+// authorize, transport or body read (after retries), or a ctx cancellation
 // during backoff — is returned as-is and picks up that one helper's wrapping
 // prefix (request %s / PUT %s / POST %s).
 //
@@ -1402,12 +1402,22 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body []byte,
 		}
 		_ = resp.Body.Close()
 		if rerr != nil {
-			if class, counted := upstream.ClassifyTransport(ctx, rerr); counted {
-				upstream.Record(ctx, upstream.Jira, c.orgID, class)
+			// The response broke off mid-body: a transport failure like one
+			// from Do, retried on the same terms. Jira did answer, so it
+			// counts toward unreachable but never toward silent.
+			class, counted := upstream.ClassifyTransport(ctx, rerr)
+			if !counted {
+				return 0, nil, rerr
+			}
+			upstream.Record(ctx, upstream.Jira, c.orgID, class)
+			if !upstream.RetryableTransport(rerr, idempotent) || attempt > maxRateLimitRetries || upstream.Unreachable(ctx, host) {
 				upstream.MarkUnreachable(ctx, host)
 				return 0, nil, &upstream.TransportError{Err: rerr}
 			}
-			return 0, nil, rerr
+			if serr := c.retryAfter(ctx, attempt, class, backoff(attempt), "transport_error"); serr != nil {
+				return 0, nil, serr
+			}
+			continue
 		}
 
 		class := upstream.ClassifyResponse(resp.StatusCode, resp.Header, data)
