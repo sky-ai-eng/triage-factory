@@ -264,6 +264,10 @@ type OrgSettings struct {
 	// Owned by the credential bind and unbind, not by the settings PATCH, which
 	// has no field for either. UpdateSettings writes them as part of the whole
 	// row, so a read-modify-write carries them through unchanged.
+	//
+	// TODO(TFAC-1021): no route writes them yet; the credential bind sets both
+	// from the key's organization and the unbind clears them. Until then an
+	// org has no workspace, so no user resolves a Linear credential or identity.
 	LinearWorkspaceID     string
 	LinearWorkspaceURLKey string
 	// LinearPollInterval is the Linear poll cadence. Stored on

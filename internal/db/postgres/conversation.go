@@ -90,6 +90,9 @@ func releaseActiveClaim(ctx context.Context, q queryer, orgID, conversationID, o
 // claims and messages, and they only agree with a follow-up Get if those
 // tables already hold this call's writes.
 func (s *conversationStore) CompleteForClaimSystem(ctx context.Context, orgID, conversationID, claimID, status string, costUSD float64, durationMs, numTurns int, resultSummary, outcome, outcomeReason, failureKind string) (*domain.Conversation, error) {
+	if err := db.ValidateConversationEnding(status); err != nil {
+		return nil, err
+	}
 	var result *domain.Conversation
 	err := inTx(ctx, s.admin, func(q queryer) error {
 		if err := assertClaimActiveForConversationWrite(ctx, q, orgID, conversationID, claimID); err != nil {
@@ -240,11 +243,16 @@ func completeConversationFlip(ctx context.Context, q queryer, orgID, conversatio
 	// accumulates or doubles.
 	//
 	// A pending stop is cleared rather than honored: the run concluded before
-	// the stop reached it, and the terminal is the truer record.
+	// the stop reached it, and the ending is the truer record.
+	//
+	// A verdict (status 'open') records no park reason, since nothing stopped
+	// the conversation; completed_at is its stamp, and what the idle sweeps
+	// age it from. A failure leaves the reason as it was.
 	return writeConversationReturning(ctx, q, `
 		UPDATE conversations
 		SET status = $1,
 		    completed_at = $2,
+		    park_reason = CASE WHEN $1 = 'open' THEN NULL ELSE park_reason END,
 		    result_summary = $3,
 		    outcome = NULLIF($4, ''),
 		    outcome_reason = NULLIF($5, ''),
@@ -304,10 +312,10 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 // parkOpen is the one row-write behind every park — see
 // ConversationStore.ParkOpenForClaimSystem for what `park` decides.
 //
-// The exclusion list is the settled set, and the guard is an exclusion — so a
-// status missing from it doesn't refuse, it readmits. An `open` row with
-// undelivered input is claimable, so a park that "succeeded" on a finished run
-// would hand it back to the dispatcher.
+// The guard excludes the settled set (db.UnsettledConversationSQL), and it is an
+// exclusion — so a case missing from it doesn't refuse, it readmits. A park
+// that "succeeded" on a finished run would overwrite its ending with a stop it
+// never received.
 //
 // COALESCE on park_reason / result_summary rather than a bare assignment: a
 // park that carries neither must not blank what an earlier one recorded.
@@ -319,8 +327,8 @@ func (s *conversationStore) SettleClaimCostSystem(ctx context.Context, orgID, co
 // further kind of stop is one more arm.
 func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
-	// not. Spelled as an extra excluded status rather than two queries.
-	reparkGuard := `, 'open'`
+	// not. Spelled as an extra clause rather than two queries.
+	reparkGuard := ` AND (status IS NULL OR status <> 'open')`
 	if park.Deliberate {
 		reparkGuard = ``
 	}
@@ -338,8 +346,7 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 		    stop_requested_by = NULL,
 		    stop_requested_reason = NULL
 		WHERE org_id = $4 AND id = $5
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+reparkGuard+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
 	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, orgID, conversationID)
 	if err != nil {
 		return false, err
@@ -348,20 +355,20 @@ func parkOpen(ctx context.Context, q queryer, orgID, conversationID string, park
 	return n > 0, err
 }
 
-// MarkQueuedForResume is resume-by-enqueue's un-terminal write: the ONE
-// path that puts an outcome-bearing conversation back into the mid-flight
-// (status NULL) state the needs-driving predicate claims from. Its guard is
-// what keeps a terminal conversation un-claimable by anything else, whatever
-// rows it holds — see the interface doc for the two exclusions and why the
-// blueprint check is in this statement rather than in the caller.
+// MarkQueuedForResume is resume-by-enqueue's wake: the ONE path that puts a
+// parked conversation, concluded ones included, back into the mid-flight
+// (status NULL) state the needs-driving predicate claims a concluded row from.
+// Its guard is what keeps a concluded conversation un-claimable by anything
+// else, whatever rows it holds — see the interface doc for the two exclusions
+// and why the blueprint check is in this statement rather than in the caller.
 //
 // It goes through tf.blueprint_run_is_running rather than a correlated
 // subquery because this statement runs on the app pool: blueprint_runs is
 // creator-scoped for manual runs, so a non-creator teammate's subquery would
 // find nothing and the guard would fail OPEN on exactly the rows it protects.
 //
-// The `open` arm's guard, that the conversation's run was not called off,
-// cannot take that route: no definer function answers it, so the run is read
+// The other guard, that the conversation's run was not called off, cannot
+// take that route: no definer function answers it, so the run is read
 // on the admin pool instead. That read sits between two statements of one
 // transaction so that it cannot race the cancel it guards against. The first
 // locks the conversation, so a settlement cannot park it or cancel its run through it
@@ -436,10 +443,10 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			                    LIMIT 1)
 			WHERE org_id = $1 AND id = $2
 			  AND ended_at IS NULL
-			  AND ((status = 'open' AND NOT $3::boolean)
-			       OR (status = 'completed'
-			           AND NOT tf.blueprint_run_is_running(
-			                     conversations.blueprint_run_id, conversations.org_id)))
+			  AND status = 'open' AND NOT $3::boolean
+			  AND (completed_at IS NULL
+			       OR NOT tf.blueprint_run_is_running(
+			                conversations.blueprint_run_id, conversations.org_id))
 		`, orgID, conversationID, calledOff)
 		if err != nil {
 			return err
@@ -1042,17 +1049,17 @@ func (s *conversationStore) MarkFailedIfActiveForClaimSystem(ctx context.Context
 }
 
 func markFailedIfActive(ctx context.Context, q queryer, orgID, conversationID, failureKind string) (bool, error) {
-	// 'open' is deliberately failable here — see
+	// 'open' without a verdict is deliberately failable here — see
 	// ConversationStore.MarkFailedIfActiveForClaimSystem: a warm 'open'
 	// conversation has no durable snapshot yet, so an infra error reaching
-	// failConversation must terminate it.
+	// failConversation must terminate it. A concluded row is settled and
+	// keeps its verdict.
 	res, err := q.ExecContext(ctx, `
 		UPDATE conversations SET status = 'failed', completed_at = COALESCE(completed_at, $1),
 		    failure_kind = NULLIF($2, ''),
 		    stop_requested_at = NULL, stop_requested_by = NULL, stop_requested_reason = NULL
 		WHERE org_id = $3 AND id = $4
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, time.Now().UTC(), failureKind, orgID, conversationID)
 	if err != nil {
 		return false, err
@@ -1085,13 +1092,14 @@ func (s *conversationStore) EndTerminalConversationsForTaskSystem(ctx context.Co
 		return nil, nil
 	}
 	// The stored column, not the display ladder: `queued` and `running` are
-	// derived from the active claim and never written here, so a row whose
-	// status reads terminal in SQL is one no engagement is driving.
+	// derived from the active claim and never written here, so a row that
+	// reads settled in SQL (failed, or concluded) is one no engagement is
+	// driving.
 	return writeConversationsReturning(ctx, s.admin, `
 		UPDATE conversations SET ended_at = $1, ended_reason = $2
 		WHERE org_id = $3 AND task_id = $4
 		  AND ended_at IS NULL AND parent_conversation_id IS NULL
-		  AND status IN (`+conversationTerminalStatusesSQL+`)
+		  AND `+db.SettledConversationSQL("conversations")+`
 		RETURNING *
 	`, time.Now().UTC(), string(reason), orgID, taskID)
 }
@@ -1202,9 +1210,9 @@ const pgConversationColumns = `
 // is no longer stored. A LIVE claim's setup sub-state wins
 // (fetching/cloning/agent_starting/awaiting_credentials); then the mere
 // existence of a live claim is 'running'; then a conversation matching
-// the needs-driving predicate — mid-flight and unclaimed, or parked and
-// woken by input — is 'queued'; and finally the stored column carries the
-// deliberate park and the terminals.
+// the needs-driving predicate — mid-flight and unclaimed, or parked without
+// a verdict and woken by input — is 'queued'; and finally the stored column
+// carries the park (with or without a verdict) and the terminal.
 //
 // Live means the lease too, not just released_at: a conversation whose
 // executor died renders 'queued' from the moment its lease lapses, because
@@ -1227,7 +1235,7 @@ const pgDisplayStatusSQL = `COALESCE(
 		   AND cl_d.lease_expires_at > statement_timestamp()),
 		CASE WHEN ` + liveClaimExistsSQL + ` THEN 'running' END,
 		CASE WHEN r.status IS NULL
-		       OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `)
+		       OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `)
 		     THEN 'queued' END,
 		r.status,
 		'')`
@@ -1525,7 +1533,7 @@ func writeStopIntent(ctx context.Context, q queryer, orgID, conversationID, by s
 		    stop_requested_reason = CASE WHEN stop_requested_at IS NULL
 		                                 THEN NULLIF($4, '') ELSE stop_requested_reason END
 		WHERE org_id = $2 AND id = $3
-		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 		RETURNING id
 	`, by, orgID, conversationID, string(reason)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1719,7 +1727,7 @@ func pgConversationListWhere(orgID string, filter db.ConversationListFilter) (st
 func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query db.PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error) {
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT r.id::text, COALESCE(r.task_id::text, ''), COALESCE(r.status, ''),
-		       COALESCE(r.outcome, ''),
+		       COALESCE(`+db.ConcludedConversationSQL("r")+`, false), COALESCE(r.outcome, ''),
 		       EXISTS (SELECT 1 FROM claims cl WHERE cl.org_id = $1 AND cl.conversation_id = r.id AND cl.released_at IS NULL)
 		FROM conversations r
 		LEFT JOIN tasks t ON t.org_id = $1 AND t.id = r.task_id
@@ -1759,7 +1767,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 	var out []domain.PRCoherenceTarget
 	for rows.Next() {
 		var target domain.PRCoherenceTarget
-		if err := rows.Scan(&target.ConversationID, &target.TaskID, &target.Status, &target.Outcome, &target.Active); err != nil {
+		if err := rows.Scan(&target.ConversationID, &target.TaskID, &target.Status, &target.Concluded, &target.Outcome, &target.Active); err != nil {
 			return nil, err
 		}
 		out = append(out, target)
@@ -1794,8 +1802,7 @@ func liveTopLevelConversationSQL(alias string) string {
 // base plus the status clause. See liveTopLevelConversationSQL for the three
 // questions and why each carries the clauses it does.
 var liveConversationForTaskSQL = `(` + liveTopLevelConversationSQL("r") + `
-		       AND (r.status IS NULL
-		            OR r.status NOT IN (` + conversationTerminalStatusesSQL + `)))`
+		       AND ` + db.UnsettledConversationSQL("r") + `)`
 
 // HasLiveConversationForTask: does the task hold a live conversation, of any
 // trigger type?
@@ -1852,8 +1859,7 @@ func activeConversationIDsForTask(ctx context.Context, q queryer, orgID, taskID 
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, orgID, taskID)
 	if err != nil {
 		return nil, err
@@ -1874,8 +1880,7 @@ func (s *conversationStore) ActiveIDsForTeamSystem(ctx context.Context, orgID, t
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND team_id = $2
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, orgID, teamID)
 	if err != nil {
 		return nil, err
@@ -1930,7 +1935,7 @@ func (s *conversationStore) ListResumableWorktreePathsSystem(ctx context.Context
 		SELECT r.worktree_path FROM conversations r
 		LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 		WHERE r.org_id = $1
-		  AND (r.status = 'open' OR r.status IS NULL)
+		  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL))
 		  AND COALESCE(r.worktree_path, '') != ''
 		  AND (br.id IS NULL OR br.status = 'running')
 	`, orgID)
@@ -1959,7 +1964,7 @@ func (s *conversationStore) EntitiesWithOpenConversations(ctx context.Context, o
 		FROM conversations r
 		JOIN tasks t ON t.id = r.task_id AND t.org_id = r.org_id
 		WHERE r.org_id = $1
-		  AND r.status = 'open'
+		  AND r.status = 'open' AND r.completed_at IS NULL
 		  AND t.entity_id = ANY($2)
 	`, orgID, entityIDs)
 	if err != nil {

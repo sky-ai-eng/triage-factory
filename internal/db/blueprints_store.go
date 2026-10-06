@@ -284,6 +284,14 @@ type BlueprintRunListFilter struct {
 	Statuses []string
 }
 
+// RunProgress is one blueprint run as a conversation's projection reads it:
+// the length of its frozen plan, which places a step in its chain, and its
+// status, which says whether the work the step belongs to is done.
+type RunProgress struct {
+	StepCount int
+	Status    domain.BlueprintRunStatus
+}
+
 // # Every single-row write returns the row it persisted
 //
 // Create, Rename, ReplaceSteps and SetRunWorktreePathSystem hand back the
@@ -683,16 +691,28 @@ type BlueprintStore interface {
 	MarkRunStatus(ctx context.Context, orgID string, id string, status domain.BlueprintRunStatus, abortReason string, abortedAtStep *int) (changed bool, err error)
 
 	// ReopenRunForResume flips an `aborted` blueprint_run back to `running` (a
-	// compare-and-swap guarded on status='aborted'), clearing its abort metadata,
-	// so a resume of the run's completed+abort step can re-run and re-finalize
-	// through the normal post-resume disposition. The blueprint terminated when
-	// the step aborted, so without this the resumed step's new conclusion would
-	// find a terminal blueprint and never advance/close it. Returns (true, nil)
-	// when it re-opened the row, (false, nil) when the blueprint was not aborted
-	// (already running for an `open` resume, or finalized by a racing
-	// path). Runs inside the same tx as ConversationStore.MarkQueuedForResume
-	// so the run flip and the blueprint re-open commit atomically.
-	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
+	// compare-and-swap guarded on status='aborted' and on its task still being
+	// open), clearing its abort metadata, so a resume of the run's aborting step
+	// can re-run and re-finalize through the normal post-resume disposition.
+	// The blueprint terminated when the step aborted, so without this the
+	// resumed step's new verdict would find a terminal blueprint and never
+	// advance/close it. A follow-up can change the blueprint only while its
+	// task is open, so a task a person has since closed leaves the run aborted.
+	//
+	// The re-open also withdraws the verdict stepConversationID recorded
+	// (outcome, outcome_reason and the conclusion stamp): a running blueprint
+	// whose current step still carried one would read as a step that had
+	// already given its answer, and the reactor would act on it again. It
+	// re-opens only when stepConversationID is that run's conversation at its
+	// current step, so the run and the withdrawal land together or not at all,
+	// and no other conversation's verdict is touched.
+	// Returns (true, nil) when it re-opened the row, (false, nil) when the
+	// blueprint was not aborted (already running for an `open` resume,
+	// finished, or finalized by a racing path), its task is closed, or the
+	// conversation is not its current step. Runs inside the same tx as
+	// ConversationStore.MarkQueuedForResume so the run flip and the blueprint
+	// re-open commit atomically.
+	ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (reopened bool, err error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim
@@ -715,11 +735,15 @@ type BlueprintStore interface {
 	// settle it.
 	ActiveStepConversationIDs(ctx context.Context, orgID string, blueprintRunID string) ([]string, error)
 
-	// StepPlanLengths returns how many steps each named blueprint run's frozen
-	// plan holds, keyed by blueprint_run id. A run whose row is absent — not
-	// found, or hidden from the caller (manual runs are creator-scoped under
-	// RLS) — is simply missing from the map rather than reported as 0, so a
-	// caller can tell "no such plan visible" from a plan of no steps.
+	// RunProgress returns, for each named blueprint run, how many steps its
+	// frozen plan holds and the run's status, keyed by blueprint_run id. A run
+	// whose row is absent — not found, or hidden from the caller (manual runs
+	// are creator-scoped under RLS) — is simply missing from the map rather
+	// than reported with zero values, so a caller can tell "no such run
+	// visible" from a plan of no steps.
+	//
+	// The status is what a conversation's projection reads to say whether its
+	// work is done: a conversation never concludes, its blueprint run does.
 	//
 	// It counts in SQL rather than returning the plan: step_plan holds every
 	// step's snapshotted prompt body, and the caller wants a length. Batched
@@ -728,7 +752,7 @@ type BlueprintStore interface {
 	//
 	// App pool: the only callers are request handlers projecting runs the same
 	// request already read under RLS.
-	StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error)
+	RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]RunProgress, error)
 
 	// --- Admin-pool variants (`...System`) ------------------------------
 	//

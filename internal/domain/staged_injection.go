@@ -70,12 +70,14 @@ func NoteMetadata(producer string, prov NoteProvenance) map[string]any {
 
 // PRCoherenceTarget is one delegation conversation that is working on a PR
 // entity or has materialized that PR's checkout/head branch. Active is derived
-// from an unreleased claim; Status and Outcome are the stored conversation
-// lifecycle fields used to decide whether a non-live note can ever flush.
+// from an unreleased claim; Status, Concluded and Outcome are the stored
+// conversation lifecycle fields used to decide whether a non-live note can ever
+// flush. Concluded is Conversation.Concluded read off the stored row.
 type PRCoherenceTarget struct {
 	ConversationID string
 	TaskID         string
 	Status         string
+	Concluded      bool
 	Outcome        string
 	Active         bool
 }

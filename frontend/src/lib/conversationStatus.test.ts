@@ -13,6 +13,7 @@ import {
   completionKind,
   isActiveStatus,
   isClaimPhase,
+  isConcluded,
   isFailedStatus,
   isPermissionTerminalStatus,
   isResumableConversation,
@@ -31,6 +32,10 @@ const base = (over: Partial<Conversation>): Conversation =>
     StartedAt: '2026-07-16T10:00:00Z',
     ...over,
   }) as Conversation
+
+// A conversation parked with its step's verdict: `open`, conclusion stamped.
+const concluded = (over: Partial<Conversation>): Conversation =>
+  base({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', ...over })
 
 const T = (iso: string) => new Date(iso).getTime()
 
@@ -67,9 +72,8 @@ describe('status classification', () => {
     },
   )
 
-  it('treats every terminal but completed as a failure for styling', () => {
-    expect(isFailedStatus('completed')).toBe(false)
-    for (const status of TERMINAL_CONVERSATION_STATUSES.filter((s) => s !== 'completed')) {
+  it('treats every terminal as a failure for styling — a conversation never concludes', () => {
+    for (const status of TERMINAL_CONVERSATION_STATUSES) {
       expect(isFailedStatus(status), `${status} should style as failed`).toBe(true)
     }
     for (const status of ['queued', 'running', 'open', ...CLAIM_PHASES]) {
@@ -87,7 +91,7 @@ describe('status classification', () => {
   })
 })
 
-// A completed conversation is three different endings wearing one status, and
+// A concluded conversation is three different endings wearing one state, and
 // the discriminator is POSITION, not outcome: `continue` is what an ordinary
 // completion records under the native loop (every step, last one included),
 // while the SDK's terminal step reports `finish`. Branching on the outcome
@@ -115,10 +119,23 @@ describe('activeProse', () => {
   })
 })
 
+describe('isConcluded', () => {
+  it('is an open conversation with the conclusion stamped, and nothing else', () => {
+    expect(isConcluded(concluded({}))).toBe(true)
+    expect(isConcluded(base({ Status: 'open' }))).toBe(false)
+    expect(isConcluded(base({ Status: 'open', CompletedAt: null }))).toBe(false)
+    // A failed conversation carries the stamp too; it is terminal, not concluded.
+    expect(isConcluded(base({ Status: 'failed', CompletedAt: '2026-07-16T11:00:00Z' }))).toBe(false)
+    // A follow-up on concluded work runs with the stamp in place.
+    expect(isConcluded(base({ Status: 'running', CompletedAt: '2026-07-16T11:00:00Z' }))).toBe(
+      false,
+    )
+  })
+})
+
 describe('chain position and completion', () => {
   const step = (index: number, total: number, over: Partial<Conversation> = {}) =>
-    base({
-      Status: 'completed',
+    concluded({
       blueprint_run_id: 'br1',
       blueprint_step_index: index,
       blueprint_step_count: total,
@@ -134,7 +151,7 @@ describe('chain position and completion', () => {
     // 0 is what the server sends when it could not read the blueprint row
     // (a teammate's manual blueprint run under RLS); absent is a client predating it.
     expect(chainPosition(step(0, 0))).toBeNull()
-    expect(chainPosition(base({ Status: 'completed', blueprint_step_index: 0 }))).toBeNull()
+    expect(chainPosition(concluded({ blueprint_step_index: 0 }))).toBeNull()
     expect(completionKind(step(0, 0, { Outcome: 'continue' }))).toBe('done')
   })
 
@@ -208,13 +225,13 @@ describe('chain position and completion', () => {
   it('separates an abort from a success wherever it lands in the chain', () => {
     expect(completionKind(step(1, 4, { Outcome: 'abort' }))).toBe('stopped')
     expect(completionKind(step(3, 4, { Outcome: 'abort' }))).toBe('stopped')
-    expect(completionKind(base({ Status: 'completed', Outcome: 'abort' }))).toBe('stopped')
-    expect(completionGloss(base({ Status: 'completed', Outcome: 'abort' }))).toBe(
+    expect(completionKind(concluded({ Outcome: 'abort' }))).toBe('stopped')
+    expect(completionGloss(concluded({ Outcome: 'abort' }))).toBe(
       'stopped without finishing — the task stays open for a human',
     )
   })
 
-  it('answers for completed conversations only', () => {
+  it('answers for concluded conversations only', () => {
     for (const status of ['queued', 'running', 'open', 'failed', ...CLAIM_PHASES]) {
       expect(completionKind(base({ Status: status })), status).toBeNull()
       expect(completionGloss(base({ Status: status })), status).toBe('')
@@ -222,13 +239,65 @@ describe('chain position and completion', () => {
   })
 })
 
+// The blueprint run's status, where the server could read it, says whether
+// the work is done; the step's own verdict is the fallback.
+describe('completion read off the blueprint run', () => {
+  const finalStep = (over: Partial<Conversation>) =>
+    concluded({
+      blueprint_run_id: 'br1',
+      blueprint_step_index: 1,
+      blueprint_step_count: 2,
+      ...over,
+    })
+
+  it('keeps a finished run done when a later follow-up on its last step reported an abort', () => {
+    const c = finalStep({ blueprint_run_status: 'completed', Outcome: 'abort' })
+    expect(completionKind(c)).toBe('done')
+    expect(completionGloss(c)).toBe('work complete — a later follow-up’s abort reopened nothing')
+  })
+
+  it('stops on an aborted, failed or cancelled run whatever the step said', () => {
+    for (const status of ['aborted', 'failed', 'cancelled'] as const) {
+      expect(
+        completionKind(finalStep({ blueprint_run_status: status, Outcome: 'finish' })),
+        status,
+      ).toBe('stopped')
+    }
+    expect(
+      completionGloss(finalStep({ blueprint_run_status: 'cancelled', Outcome: 'finish' })),
+    ).toBe('workflow cancelled — the task stays open for a human')
+    expect(
+      completionGloss(finalStep({ blueprint_run_status: 'failed', Outcome: 'continue' })),
+    ).toBe('the workflow failed — the task stays open for a human')
+  })
+
+  it('still calls a step that handed off a hand-off, whatever became of the run after it', () => {
+    const earlier = concluded({
+      blueprint_run_id: 'br1',
+      blueprint_step_index: 0,
+      blueprint_step_count: 2,
+      Outcome: 'continue',
+    })
+    expect(completionKind({ ...earlier, blueprint_run_status: 'aborted' })).toBe('handoff')
+    expect(completionKind({ ...earlier, blueprint_run_status: 'completed' })).toBe('handoff')
+  })
+
+  it('falls back to the verdict while the run is still acting on it', () => {
+    expect(completionKind(finalStep({ blueprint_run_status: 'running', Outcome: 'abort' }))).toBe(
+      'stopped',
+    )
+    expect(completionKind(finalStep({ blueprint_run_status: 'running', Outcome: 'finish' }))).toBe(
+      'done',
+    )
+  })
+})
+
 describe('isResumableConversation', () => {
-  it('wakes a parked conversation and any conclusion, mirroring the backend resumableState', () => {
+  it('wakes a parked conversation, concluded or not, mirroring the backend resumableState', () => {
     expect(isResumableConversation(base({ Status: 'open' }))).toBe(true)
-    expect(isResumableConversation(base({ Status: 'completed', Outcome: 'abort' }))).toBe(true)
-    // Finished work is followed up on — outcome stopped discriminating when
-    // every completed terminal started snapshotting its workspace.
-    expect(isResumableConversation(base({ Status: 'completed', Outcome: 'finish' }))).toBe(true)
+    expect(isResumableConversation(concluded({ Outcome: 'abort' }))).toBe(true)
+    // Finished work is followed up on — every verdict snapshots its workspace.
+    expect(isResumableConversation(concluded({ Outcome: 'finish' }))).toBe(true)
   })
 
   it('excludes the failed terminal and anything still in flight', () => {

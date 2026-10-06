@@ -55,8 +55,8 @@ func RunTeamActivityConformance(t *testing.T, mk TeamActivityStoreFactory) {
 		failedOut := seed.Conversation(t, taskID, domain.StatusFailed)
 		seed.FinishConversation(t, failedOut, domain.StatusFailed, now.Add(-80*time.Hour))
 		// A run that concluded is not a failure, however recently it ended.
-		completed := seed.Conversation(t, taskID, domain.StatusCompleted)
-		seed.FinishConversation(t, completed, domain.StatusCompleted, now.Add(-30*time.Minute))
+		concluded := seed.Conversation(t, taskID, SeedConcluded)
+		seed.FinishConversation(t, concluded, domain.StatusOpen, now.Add(-30*time.Minute))
 
 		got, err := s.TeamActivity(ctx, orgID, teamID, since, until)
 		if err != nil {

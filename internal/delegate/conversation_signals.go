@@ -490,7 +490,7 @@ func (s *Spawner) StageOrDeliverAdditiveEvent(ctx context.Context, orgID, conver
 		return InjectNotDelivered
 	}
 	conv, err := s.conversations.GetSystem(ctx, orgID, conversationID)
-	if err != nil || conv == nil || !injectionWillFlush(conv.Status, conv.Outcome) {
+	if err != nil || conv == nil || !injectionWillFlush(conv.Status, conv.Concluded(), conv.Outcome) {
 		// The row staged above is now orphaned: the caller falls through to
 		// the normal deferral (enqueueBusyFiring), and a staged row nothing
 		// will ever flush is a permanent leak — worse, a double-delivery

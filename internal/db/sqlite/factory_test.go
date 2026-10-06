@@ -119,14 +119,19 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 			// "running" is an engagement, not a stored value — mint the
 			// claim the real claim path would and leave the column NULL.
-			stored := any(status)
+			resolved, concluded := dbtest.SeedStatus(status)
+			stored := any(resolved)
 			if status == "running" {
 				stored = nil
 			}
+			var completedAt any
+			if concluded {
+				completedAt = time.Now().UTC()
+			}
 			if _, err := conn.Exec(`
-				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id)
-				VALUES (?, ?, ?, ?, 'manual', ?)
-			`, id, taskID, factoryTestPromptID, stored, blueprintRunID); err != nil {
+				INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, completed_at)
+				VALUES (?, ?, ?, ?, 'manual', ?, ?)
+			`, id, taskID, factoryTestPromptID, stored, blueprintRunID, completedAt); err != nil {
 				t.Fatalf("seed conversation: %v", err)
 			}
 			if status == "running" {

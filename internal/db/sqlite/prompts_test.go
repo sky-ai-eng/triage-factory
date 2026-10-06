@@ -90,10 +90,15 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 	for i, status := range statusByOffset {
 		conversationID := uuid.New().String()
 		startedAt := now.AddDate(0, 0, -i)
+		resolved, concluded := dbtest.SeedStatus(status)
+		var completedAt any
+		if concluded {
+			completedAt = startedAt
+		}
 		if _, err := conn.Exec(`
-			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id)
-			VALUES (?, ?, ?, ?, ?, ?)
-		`, conversationID, taskID, promptID, status, startedAt, blueprintRunID); err != nil {
+			INSERT INTO conversations (id, task_id, prompt_id, status, started_at, blueprint_run_id, completed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, conversationID, taskID, promptID, resolved, startedAt, blueprintRunID, completedAt); err != nil {
 			t.Fatalf("seed conversation %d: %v", i, err)
 		}
 		// The accounting the stats read derives from: one cost-stamped

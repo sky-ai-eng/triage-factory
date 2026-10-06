@@ -192,7 +192,7 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 			continue
 		}
 		live := target.Active || s.getProc(target.ConversationID) != nil
-		if !live && !injectionWillFlush(target.Status, target.Outcome) {
+		if !live && !injectionWillFlush(target.Status, target.Concluded, target.Outcome) {
 			continue
 		}
 		s.StageOrDeliverInformationalEvent(ctx, evt.OrgID, target.ConversationID, domain.StagedInjectionProducerPRCoherence, body,

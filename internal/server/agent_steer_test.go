@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -41,8 +42,26 @@ func seedSteerConversation(t *testing.T, database *sql.DB, suffix, status string
 	execSQL(t, database, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES (?, 'P', 'b', ?, ?)`, p, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, database, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id) VALUES (?, ?, ?, ?)`, tk, e, eventType, ev)
 	brID := seedBlueprintRunSQLite(t, database, tk)
-	execSQL(t, database, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, ?, 'manual', ?, 0)`, rn, tk, p, status, brID)
+	stored, concluded := dbtest.SeedStatus(status)
+	var completedAt any
+	if concluded {
+		completedAt = time.Now().UTC()
+	}
+	execSQL(t, database, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at) VALUES (?, ?, ?, ?, 'manual', ?, 0, ?)`, rn, tk, p, stored, brID, completedAt)
 	return rn
+}
+
+// storedConcluded reports whether a conversation is parked with its step's
+// verdict recorded: stored `open` with completed_at stamped.
+func storedConcluded(t *testing.T, database *sql.DB, conversationID string) bool {
+	t.Helper()
+	var concluded bool
+	if err := database.QueryRow(
+		`SELECT status = 'open' AND completed_at IS NOT NULL FROM conversations WHERE id = ?`, conversationID,
+	).Scan(&concluded); err != nil {
+		t.Fatalf("read conclusion for %s: %v", conversationID, err)
+	}
+	return concluded
 }
 
 // messageRowCount counts the transcript rows a conversation holds.
@@ -62,9 +81,9 @@ func messageRowCount(t *testing.T, database *sql.DB, conversationID string) int 
 // refuse it, so the sender saw an error toast while their words scrolled onto
 // every watcher's transcript as the conversation's latest activity.
 //
-// `failed` rather than `completed` because that is what "terminal" means to
-// the steering gate now: a conversation that concluded takes a follow-up, and
-// only one whose infrastructure died has nothing left to say a message to.
+// `failed` because that is what "terminal" means to the steering gate: a
+// conversation that concluded takes a follow-up, and only one whose
+// infrastructure died has nothing left to say a message to.
 func TestHandleMessage_TerminalConflictRecordsNothing(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
@@ -213,7 +232,7 @@ func TestHandleAgentStop_RecordsTheRequestAndLeavesBlueprintRunning(t *testing.T
 func TestHandleAgentStop_TerminalConflicts(t *testing.T) {
 	s := newTestServer(t)
 	s.SetSpawner(delegate.NewSpawner(s.db, sqlitestore.New(s.db), nil, s.ws, "claude-sonnet-4-6"))
-	conversationID := seedSteerConversation(t, s.db, "stop-done", "completed")
+	conversationID := seedSteerConversation(t, s.db, "stop-done", dbtest.SeedConcluded)
 
 	rec := doJSON(t, s, "POST", "/api/agent/conversations/"+conversationID+"/stop", nil)
 	if rec.Code != http.StatusConflict {

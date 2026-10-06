@@ -25,11 +25,11 @@ func TestHandleConversations_Batched(t *testing.T) {
 	s := newTestServer(t)
 
 	// Task A: a primary (newest) conversation plus an older one on the same task.
-	primaryA := seedSteerConversation(t, s.db, "ba", "completed") // conversation r_ba on task t_ba, started_at≈now
+	primaryA := seedSteerConversation(t, s.db, "ba", dbtest.SeedConcluded) // conversation r_ba on task t_ba, started_at≈now
 	taskA := fixtureUUID("t_ba")
 	olderA := fixtureUUID("r_ba_old")
 	brOld := seedBlueprintRunSQLite(t, s.db, taskA)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at) VALUES (?, ?, ?, 'completed', 'manual', ?, 0, '2020-01-01 00:00:00')`, olderA, taskA, fixtureUUID("p_ba"), brOld)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, started_at, completed_at) VALUES (?, ?, ?, 'open', 'manual', ?, 0, '2020-01-01 00:00:00', '2020-01-01 00:00:00')`, olderA, taskA, fixtureUUID("p_ba"), brOld)
 
 	// Task B: a single conversation.
 	primaryB := seedSteerConversation(t, s.db, "bb", "running") // run r_bb on task t_bb
@@ -111,7 +111,7 @@ func TestHandleConversations_Batched(t *testing.T) {
 // corrupt filter must never widen the result set by falling back.
 func TestHandleConversations_TaskIDsOptional(t *testing.T) {
 	s := newTestServer(t)
-	convA := seedSteerConversation(t, s.db, "opt-a", "completed")
+	convA := seedSteerConversation(t, s.db, "opt-a", dbtest.SeedConcluded)
 	convB := seedSteerConversation(t, s.db, "opt-b", "running")
 
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{})
@@ -152,7 +152,7 @@ func TestHandleConversations_TaskIDsOptional(t *testing.T) {
 func TestHandleConversations_StatusFilter(t *testing.T) {
 	s := newTestServer(t)
 	running := seedSteerConversation(t, s.db, "stf-run", "running")
-	_ = seedSteerConversation(t, s.db, "stf-done", "completed")
+	_ = seedSteerConversation(t, s.db, "stf-done", dbtest.SeedConcluded)
 	// `running` is DERIVED from an unreleased claim, never stored, so the
 	// display ladder only reads it once the row has one.
 	execSQL(t, s.db, `INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, lease_expires_at) VALUES (?, ?, 'exec-1', 1, strftime('%Y-%m-%d %H:%M:%f','now','+300.000 seconds'))`,
@@ -182,22 +182,27 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 	// The stored column is not what gets filtered: the seeded row says
 	// 'running' in the column too, but a row whose claim was never minted
 	// reads as queued and must not be counted twice over.
+	// A concluded conversation displays `open`: its verdict is not a status.
 	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list", map[string]any{
-		"statuses": []string{domain.StatusCompleted}, "page_size": 0,
+		"statuses": []string{domain.StatusOpen}, "page_size": 0,
 	})
 	if err := json.Unmarshal(rec.Body.Bytes(), &count); err != nil {
 		t.Fatalf("decode: %v; body=%s", err, rec.Body.String())
 	}
 	if count.TotalCount != 1 {
-		t.Errorf("completed total_count = %d, want 1", count.TotalCount)
+		t.Errorf("open total_count = %d, want 1", count.TotalCount)
 	}
 
-	rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
-		map[string]any{"statuses": []string{"nonsense"}})
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("unknown status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	// `completed` is not a conversation status (a verdict parks the row
+	// `open`), so it is refused like any other name outside the vocabulary.
+	for _, unknown := range []string{"nonsense", "completed"} {
+		rec = doJSON(t, s, http.MethodPost, "/api/agent/conversations/list",
+			map[string]any{"statuses": []string{unknown}})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status %q = %d, want 400; body=%s", unknown, rec.Code, rec.Body.String())
+		}
+		assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
 	}
-	assertFirstError(t, rec, httpx.ReasonInvalidField, "statuses")
 }
 
 // TestHandleConversations_TeamFilter pins the Overview's scope: the counts a
@@ -208,8 +213,8 @@ func TestHandleConversations_StatusFilter(t *testing.T) {
 // shell rail reads, which is the same page one field apart.
 func TestHandleConversations_TeamFilter(t *testing.T) {
 	s := newTestServer(t)
-	homeA := seedSteerConversation(t, s.db, "team-home-a", "completed")
-	homeB := seedSteerConversation(t, s.db, "team-home-b", "completed")
+	homeA := seedSteerConversation(t, s.db, "team-home-a", dbtest.SeedConcluded)
+	homeB := seedSteerConversation(t, s.db, "team-home-b", dbtest.SeedConcluded)
 	away := seedSteerConversation(t, s.db, "team-away", "failed")
 	otherTeam := uuid.New().String()
 	execSQL(t, s.db, `INSERT INTO teams (id, org_id, slug, name) VALUES (?, ?, 'other', 'Other')`,
@@ -334,8 +339,8 @@ func TestHandleConversations_TeamFilter(t *testing.T) {
 // attention, and a conversation holding nothing unresolved is none.
 func TestHandleConversations_AttentionFilter(t *testing.T) {
 	s := newTestServer(t)
-	drafted := seedSteerConversation(t, s.db, "att-draft", "completed")
-	_ = seedSteerConversation(t, s.db, "att-quiet", "completed")
+	drafted := seedSteerConversation(t, s.db, "att-draft", dbtest.SeedConcluded)
+	_ = seedSteerConversation(t, s.db, "att-quiet", dbtest.SeedConcluded)
 
 	attention := func() int {
 		t.Helper()
@@ -592,7 +597,7 @@ func TestConversationResponse_QueuePositionOnlyWhenQueued(t *testing.T) {
 	first := seedSteerConversation(t, s.db, "qpos-first", "")
 	second := seedSteerConversation(t, s.db, "qpos-second", "")
 	claimed := seedSteerConversation(t, s.db, "qpos-claimed", "")
-	done := seedSteerConversation(t, s.db, "qpos-done", "completed")
+	done := seedSteerConversation(t, s.db, "qpos-done", dbtest.SeedConcluded)
 
 	// Mid-flight and unclaimed is what the display ladder reads as `queued`:
 	// the stored column carries nothing at all. started_at is set on the
@@ -671,7 +676,7 @@ func TestConversationResponse_CarriesOutcomeAndChainPosition(t *testing.T) {
 		`[{"step_index":0},{"step_index":1},{"step_index":2}]`, blueprintRunID)
 	execSQL(t, s.db, `UPDATE conversations SET blueprint_step_index = 0 WHERE id = ?`, conversationID)
 	if _, err := dbtest.HolderComplete(sqlitestore.New(s.db).Conversations, context.Background(), runmode.LocalDefaultOrgID,
-		conversationID, "completed", 0, 0, 0, "did my part", "continue", "", ""); err != nil {
+		conversationID, domain.StatusOpen, 0, 0, 0, "did my part", "continue", "", ""); err != nil {
 		t.Fatalf("complete conversation: %v", err)
 	}
 

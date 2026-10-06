@@ -7,6 +7,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/hostmem"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -281,7 +282,7 @@ func TestParsePlatformReserveMB(t *testing.T) {
 // utilization is not a backlog), a blocked acquire with queued work opens
 // the episode exactly once, and an immediate acquire closes it.
 func TestNoteCapSaturationTransitions(t *testing.T) {
-	s, database, _, _, step0ConversationID := reactorFixture(t, "capsat", 1, "completed", "finish")
+	s, database, _, _, step0ConversationID := reactorFixture(t, "capsat", 1, dbtest.SeedConcluded, "finish")
 	ctx := context.Background()
 
 	s.noteCapAcquireBlocked(ctx, 4)

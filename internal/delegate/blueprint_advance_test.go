@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -115,8 +116,8 @@ func TestProcessCompletion_BlueprintStepContinueNoPendingStaysContinue(t *testin
 	if conv.Outcome != "continue" {
 		t.Errorf("conv.outcome = %q, want continue (no pending action → no coercion)", conv.Outcome)
 	}
-	if conv.Status != "completed" {
-		t.Errorf("conv.status = %q, want completed", conv.Status)
+	if !conv.Concluded() {
+		t.Errorf("conv = (status %q, completed_at %v), want concluded", conv.Status, conv.CompletedAt)
 	}
 	// The blueprint orchestrator owns task lifecycle — a mid-blueprint step
 	// completion must not close the task.
@@ -186,7 +187,7 @@ func TestTerminateBlueprint_CompletedWithUnresolvedArtifactLeavesTaskOpen(t *tes
 		t.Fatalf("place task: %v", err)
 	}
 	// The step completed and left a draft PR unresolved.
-	setConversationStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 	seedDraftPRArtifact(t, s, conversationID)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
@@ -249,7 +250,7 @@ func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *test
 	if _, err := database.Exec(`UPDATE tasks SET status = 'in_progress' WHERE id = ?`, taskID); err != nil {
 		t.Fatalf("place task: %v", err)
 	}
-	setConversationStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 	seedDraftPRArtifact(t, s, conversationID)
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, blueprintRunID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
@@ -312,11 +313,11 @@ func TestTerminateBlueprint_UnresolvedIsAskedOfTheWholeTask(t *testing.T) {
 	stampBotClaim(t, database, taskID)
 	// The prior engagement: its own step conversation, carrying the draft PR.
 	priorBlueprintRunID := blueprintRunIDForConversation(t, database, conversationID)
-	addStepConversation(t, database, priorBlueprintRunID, taskID, "r-prior-task-wide", 0, "completed")
+	addStepConversation(t, database, priorBlueprintRunID, taskID, "r-prior-task-wide", 0, dbtest.SeedConcluded)
 	seedDraftPRArtifact(t, s, "r-prior-task-wide")
 	// The engagement that is finishing now, with nothing of its own unresolved.
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
-	setConversationStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 
 	s.terminateBlueprint(runmode.LocalDefaultOrgID, "bpr-"+conversationID, taskID, "event", "",
 		loadConversation(t, s, conversationID).StartedAt, runConfig{orgID: runmode.LocalDefaultOrgID},
@@ -364,7 +365,7 @@ func TestCloseTaskIfTerminalAndResolved_StandsDownOnceTheTaskMovesOn(t *testing.
 			s, database, conversationID, taskID := setupAdvanceFixture(t, "resolved-moved-on")
 			stampBotClaim(t, database, taskID)
 			makeConversationBlueprintStep(t, database, conversationID, taskID)
-			setConversationStatus(t, database, conversationID, "completed")
+			setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 			completeBlueprintRun(t, database, "bpr-"+conversationID)
 			tc.moveOn(t, database, taskID)
 

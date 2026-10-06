@@ -684,7 +684,7 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 	return stored, nil
 }
 
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
 	// 0. The filtered total, on the same pool and the same FROM as the page
 	//    below — a count taken through a different join could disagree with
 	//    the rows it is meant to describe.
@@ -751,7 +751,8 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	//    the enrichment costs the window rather than the whole roster. Host
 	//    resolution mirrors the org roster: an unset github_base_url resolves
 	//    to the deployment default (EffectiveGitHubHost), an unset jira_base_url
-	//    normalizes to "" and matches nothing.
+	//    normalizes to "" and matches nothing, and the Linear workspace is
+	//    matched verbatim, so an org with none matches nothing either.
 	ghMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh
@@ -770,6 +771,15 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	if err != nil {
 		return nil, 0, fmt.Errorf("list team member jira identities: %w", err)
 	}
+	linearMap, err := queryIdentityMap(ctx, s.admin, `
+		SELECT l.user_id::text, l.linear_user_id
+		FROM user_linear_identities l
+		JOIN memberships m ON m.user_id = l.user_id AND m.team_id = $1
+		WHERE l.workspace_id = $2 AND l.user_id = ANY($3)
+	`, teamID, linearWorkspaceID, pgUUIDArray(ids))
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member linear identities: %w", err)
+	}
 
 	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
 	//    "Not connected" state.
@@ -779,6 +789,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		}
 		if acct, ok := jiraMap[out[i].UserID]; ok {
 			out[i].JiraAccountID = &acct
+		}
+		if id, ok := linearMap[out[i].UserID]; ok {
+			out[i].LinearUserID = &id
 		}
 	}
 	return out, total, nil

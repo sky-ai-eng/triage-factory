@@ -44,7 +44,6 @@ describe('no-ghost-conversation-status', () => {
         'agent_starting',
         'awaiting_credentials',
         'cloning',
-        'completed',
         'failed',
         'fetching',
         'open',
@@ -59,7 +58,7 @@ describe('no-ghost-conversation-status', () => {
       valid: [
         // Every branch a conversation status may legitimately take.
         "if (run.Status === 'open') park()",
-        "if (run.Status !== 'completed') wait()",
+        "if (run.Status !== 'failed') wait()",
         "switch (run.Status) { case 'queued': case 'awaiting_credentials': case 'failed': break }",
         // A status one hop from the property, named through the alias.
         "function tone(status: ConversationStatusValue) { return status === 'running' ? 'hot' : 'cold' }",
@@ -100,7 +99,12 @@ describe('no-ghost-conversation-status', () => {
         },
         {
           code: "switch (run.Status) { case 'completed': return 1; case 'cancelled': return 2 }",
-          errors: [ghost('cancelled')],
+          errors: [ghost('completed'), ghost('cancelled')],
+        },
+        {
+          // A conversation never concludes: a verdict parks it `open`.
+          code: "if (run.Status === 'completed') showDone()",
+          errors: [ghost('completed')],
         },
         {
           code: "if ('worktree_created' === run.Status) spin()",

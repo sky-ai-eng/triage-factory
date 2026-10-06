@@ -406,6 +406,41 @@ func TestAuthFlow_LoginToMe(t *testing.T) {
 	}
 }
 
+// TestAuthFlow_Me_LinearIdentityNeedsActiveOrgWorkspace: the multi-mode
+// /api/me reads the Linear pair against the active org's workspace only. A
+// binding the user holds in some other workspace is not reported in its place,
+// because a Linear user id names nobody outside the workspace that issued it.
+func TestAuthFlow_Me_LinearIdentityNeedsActiveOrgWorkspace(t *testing.T) {
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	r.seedOrg(userID, "linear-org")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO user_linear_identities (user_id, workspace_id, linear_user_id, display_name, source, verified_at)
+		 VALUES ($1, 'ws-elsewhere', 'lin-elsewhere', 'Elsewhere', 'api_key', now())`, userID)
+
+	resp, _ := r.driveCallback(userID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+	meResp := r.requestWithSid("GET", "/api/me", r.sidFromResp(resp))
+	if meResp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
+	}
+	var me map[string]any
+	if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+		t.Fatalf("decode /api/me: %v", err)
+	}
+	if me["active_org_id"] == nil {
+		t.Fatalf("active_org_id absent; the Linear read under test needs an active org: %v", me)
+	}
+	for _, field := range []string{"linear_user_id", "linear_display_name"} {
+		if v, ok := me[field]; ok {
+			t.Errorf("%s = %v, want absent (the active org has no Linear workspace)", field, v)
+		}
+	}
+}
+
 // TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin covers TFAC-560: a
 // brand-new GitHub login whose profile has no "Name" set (full_name and name
 // both empty in user_metadata — the common case for a just-accepted invite)

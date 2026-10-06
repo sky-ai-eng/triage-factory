@@ -51,6 +51,43 @@ func TestFailFastScope_StopsRetryingAHostThatFailed(t *testing.T) {
 	}
 }
 
+// TestFailFastScope_TruncatedBodyMarksUnreachable: inside a fail-fast scope,
+// a response that breaks off mid-body marks Jira unreachable, so a later GET
+// whose body also breaks off gets one attempt. The same GET outside any scope
+// keeps its retries.
+func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
+	shortBackoff(t)
+	var served atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		served.Add(1)
+		truncated(w)
+	}))
+	t.Cleanup(srv.Close)
+	c := testClient(srv.URL)
+	ctx := upstream.WithFailFast(context.Background())
+
+	if err := c.put(ctx, srv.URL+"/rest/api/2/issue/SKY-1", map[string]string{"k": "v"}); err == nil {
+		t.Fatal("a truncated response answered")
+	}
+	u, _ := url.Parse(srv.URL)
+	if !upstream.Unreachable(ctx, u.Host) {
+		t.Fatal("a truncated response did not mark the host unreachable")
+	}
+	before := served.Load()
+	if _, err := c.get(ctx, srv.URL+"/rest/api/2/myself"); err == nil {
+		t.Fatal("a truncated response answered")
+	}
+	if got := served.Load() - before; got != 1 {
+		t.Errorf("a later GET made %d attempts, want 1", got)
+	}
+
+	before = served.Load()
+	_, _ = c.get(context.Background(), srv.URL+"/rest/api/2/myself")
+	if got := served.Load() - before; got != 1+maxRateLimitRetries {
+		t.Errorf("a GET outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
+	}
+}
+
 // TestFailFastScope_NoRetryAfterWait: once Jira is unreachable in the scope,
 // a 429 asking for a wait the client would otherwise honor is returned at
 // once.

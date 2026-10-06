@@ -74,8 +74,8 @@ func TestSpendStore_Postgres_RLS_ViewSecurityInvoker(t *testing.T) {
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
 
 	seeder := newPgSpendSeeder(h.AdminDB, orgA)
-	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
+	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
 	systemA := seeder.System(t, dbtest.SystemSpendFixture{Job: "scorer", Model: "m", Cost: 0.05, Tokens: dbtest.SpendTokens{Input: 5, Output: 5, CacheRead: 5, CacheCreation: 5}, StartedAt: spendTestTime})
 
 	// alice (teamA): her team's run, the org system row; NOT teamB's run.
@@ -128,8 +128,8 @@ func TestSpendStore_Postgres_SpendByCategorySystem_BypassesRLS(t *testing.T) {
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
 
 	seeder := newPgSpendSeeder(h.AdminDB, orgA)
-	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
+	seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
 
 	// Admin-pool System read: org-wide, sees both teams → manual = $3.
 	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -176,8 +176,8 @@ func TestSpendStore_Postgres_ListSpendSystem_BypassesRLS(t *testing.T) {
 	pgtest.MustExec(t, h.AdminDB, `INSERT INTO agents (id, org_id) VALUES ($1, $2)`, agentA, orgA)
 
 	seeder := newPgSpendSeeder(h.AdminDB, orgA)
-	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: "completed", StartedAt: spendTestTime})
-	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: "completed", StartedAt: spendTestTime})
+	convA := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamA, CreatorUserID: alice, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(1.0), Tokens: dbtest.SpendTokens{Input: 1, Output: 1, CacheRead: 1, CacheCreation: 1}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
+	convB := seeder.Conversation(t, dbtest.ConversationSpendFixture{TeamID: teamB, CreatorUserID: bob, TriggerType: "manual", ActorAgentID: agentA, Model: "m", Cost: float64Ptr(2.0), Tokens: dbtest.SpendTokens{Input: 2, Output: 2, CacheRead: 2, CacheCreation: 2}, Status: dbtest.SeedConcluded, StartedAt: spendTestTime})
 
 	// Admin-pool System read: org-wide, sees BOTH teams' runs.
 	adminStore := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
@@ -288,13 +288,18 @@ func newPgSpendSeeder(conn *sql.DB, orgID string) dbtest.SpendSeeder {
 		Conversation: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
+			status, concluded := dbtest.SeedStatus(f.Status)
+			var completedAt any
+			if concluded {
+				completedAt = f.StartedAt
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO conversations
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at)
-				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10)
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
+				VALUES ($1, $2, $3, $4, $5, 'manual', $6, $7, $8, $9, $10, $11)
 			`,
 				id, orgID, f.TeamID, pgUUIDArg(f.CreatorUserID), f.TriggerType,
-				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, f.Status, f.StartedAt,
+				pgUUIDArg(f.ActorAgentID), pgUUIDArg(f.TriggerID), f.Model, status, f.StartedAt, completedAt,
 			); err != nil {
 				t.Fatalf("seed run: %v", err)
 			}

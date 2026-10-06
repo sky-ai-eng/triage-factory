@@ -204,6 +204,66 @@ func TestDoRequest_RecordsEveryAttempt(t *testing.T) {
 	}
 }
 
+// truncated answers 200 with a Content-Length longer than the body it writes,
+// then drops the connection, so the client's body read fails after the
+// headers arrived.
+func truncated(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"issues":[{"ke`))
+	w.(http.Flusher).Flush()
+	panic(http.ErrAbortHandler)
+}
+
+// TestDoRequest_TruncatedBodyRetriedLikeATransportFailure: a GET whose body
+// breaks off mid-read is retried as a dropped connection is, and both
+// attempts are counted.
+func TestDoRequest_TruncatedBodyRetriedLikeATransportFailure(t *testing.T) {
+	shortBackoff(t)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			truncated(w)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, tally := upstream.WithTally(context.Background())
+	body, err := testClient(srv.URL).get(ctx, srv.URL)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if string(body) != `{"ok":true}` || atomic.LoadInt32(&calls) != 2 {
+		t.Errorf("body = %s after %d attempts, want ok after 2", body, atomic.LoadInt32(&calls))
+	}
+	if tally.Count(upstream.Transient) != 1 || tally.Count(upstream.OK) != 1 {
+		t.Errorf("tally: %d transient, %d ok; want 1, 1", tally.Count(upstream.Transient), tally.Count(upstream.OK))
+	}
+}
+
+// TestDoRequest_TruncatedBodyMutationNotRetried: a mutation whose response
+// breaks off is returned after one attempt, since Jira may have applied it.
+func TestDoRequest_TruncatedBodyMutationNotRetried(t *testing.T) {
+	shortBackoff(t)
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		truncated(w)
+	}))
+	t.Cleanup(srv.Close)
+
+	err := testClient(srv.URL).put(context.Background(), srv.URL, map[string]string{"k": "v"})
+	var te *upstream.TransportError
+	if !errors.As(err, &te) {
+		t.Fatalf("err = %v, want a *upstream.TransportError", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("attempts = %d, want 1: the write may have applied", got)
+	}
+}
+
 // TestDoRequest_HTML403IsNotRetried: a 403 that is not Jira's own JSON (a
 // proxy's page, or Data Center's login lockout) is Transient for counting,
 // but it does not clear within a backoff, so even a GET returns it at once.

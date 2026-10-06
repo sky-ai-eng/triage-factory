@@ -68,16 +68,18 @@ func TestTaskStore_AttentionOrder_Postgres(t *testing.T) {
 			Conversation: func(t *testing.T, taskID, storedStatus string) string {
 				t.Helper()
 				convID := uuid.New().String()
+				stored, concluded := dbtest.SeedStatus(storedStatus)
 				// origin='interactive': the origin CHECK demands the blueprint
 				// parents only for 'blueprint', so this is how a conversation
 				// with no sequence behind it is spelled.
 				if _, err := conn.Exec(`
 					INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
-					                           trigger_type, origin, status)
+					                           trigger_type, origin, status, completed_at)
 					VALUES ($1, $2, $3,
 					        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-					        'team', $4, 'manual', 'interactive', NULLIF($5, ''))
-				`, convID, orgID, userID, taskID, storedStatus); err != nil {
+					        'team', $4, 'manual', 'interactive', NULLIF($5, ''),
+					        CASE WHEN $6 THEN now() END)
+				`, convID, orgID, userID, taskID, stored, concluded); err != nil {
 					t.Fatalf("seed conversation: %v", err)
 				}
 				return convID

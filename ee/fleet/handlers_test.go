@@ -75,7 +75,7 @@ func TestVersionSkews(t *testing.T) {
 func TestSummarizeRunsAndQueue(t *testing.T) {
 	now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
 	timings := []domain.ConversationTiming{
-		{Status: "completed", StartedAt: now.Add(-10 * time.Minute), ClaimedAt: tp(now.Add(-9 * time.Minute)), DurationMS: ip(60000)},
+		{Status: "open", StartedAt: now.Add(-10 * time.Minute), ClaimedAt: tp(now.Add(-9 * time.Minute)), CompletedAt: tp(now.Add(-8 * time.Minute)), DurationMS: ip(60000)},
 		{Status: "failed", FailureKind: "memory_limit", StartedAt: now.Add(-8 * time.Minute), ClaimedAt: tp(now.Add(-8 * time.Minute)), DurationMS: ip(30000)},
 		// An UNCLASSIFIED failure (empty failure_kind) — must still count as failed.
 		{Status: "failed", StartedAt: now.Add(-7 * time.Minute), ClaimedAt: tp(now.Add(-7 * time.Minute)), DurationMS: ip(1000)},

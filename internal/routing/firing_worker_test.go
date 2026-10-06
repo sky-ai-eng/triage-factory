@@ -273,7 +273,7 @@ func firingsFor(t *testing.T, database *sql.DB, entityID string) []domain.Pendin
 func endTaskConversations(t *testing.T, database *sql.DB, taskID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		UPDATE conversations SET status = 'completed', completed_at = CURRENT_TIMESTAMP,
+		UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP,
 		       ended_at = CURRENT_TIMESTAMP, ended_reason = 'step_advanced'
 		WHERE task_id = ? AND ended_at IS NULL
 	`, taskID); err != nil {
@@ -551,7 +551,7 @@ func TestFiringWorker_RunStillRunningAfterItsConversationEndsHoldsTheRow(t *test
 
 	// The conversation reaches its terminal status; its run has not been
 	// marked terminal yet.
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?`, taskID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?`, taskID); err != nil {
 		t.Fatalf("complete conversation: %v", err)
 	}
 	callsBefore := atomic.LoadInt64(&stub.calls)

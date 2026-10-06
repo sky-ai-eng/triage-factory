@@ -54,8 +54,8 @@ func seedLiveConversation(t *testing.T, s *Server, taskID string) string {
 	id := uuid.New().String()
 	execSQL(t, s.db, `
 		INSERT INTO conversations (id, task_id, status, trigger_type, origin,
-		                          team_id, visibility, creator_user_id)
-		VALUES (?, ?, 'completed', 'manual', 'delegation', ?, 'team', ?)`,
+		                          team_id, visibility, creator_user_id, completed_at)
+		VALUES (?, ?, 'open', 'manual', 'delegation', ?, 'team', ?, CURRENT_TIMESTAMP)`,
 		id, taskID, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
 	return id
 }

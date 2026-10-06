@@ -6,6 +6,7 @@ import {
   formatDurationMs,
   formatElapsed,
   isActiveStatus,
+  isConcluded,
   isFailedStatus,
   retryingAt,
   retryingAtLabel,
@@ -180,13 +181,12 @@ function lifecycleOf(task: Task, run: Conversation | undefined): Lifecycle {
   const s = run.Status
   if (s === 'queued' || isActiveStatus(s)) return 'working'
   if (isFailedStatus(s)) return 'failed'
-  if (s === 'open') return 'idle'
-  // The one stored success terminal means three things (lib/conversationStatus
-  // completionKind): the work is over, a step handed off, or the agent stopped
+  // A concluded conversation means three things (lib/conversationStatus
+  // completionKind): the work is over, a step handed off, or the work stopped
   // without finishing. Only the last is not a finish.
-  if (s === 'completed') return completionKind(run) === 'stopped' ? 'canceled' : 'done'
-  // A status this build does not know: nothing is moving, and the card says
-  // so rather than guessing a verdict.
+  if (isConcluded(run)) return completionKind(run) === 'stopped' ? 'canceled' : 'done'
+  // Parked without a verdict, or a status this build does not know: nothing
+  // is moving, and the card says so rather than guessing a verdict.
   return 'idle'
 }
 
@@ -222,7 +222,7 @@ function chainShape(
   steps: Conversation[] | undefined,
 ): { done: number; total: number } | undefined {
   if (!steps || steps.length <= 1) return undefined
-  return { total: steps.length, done: steps.filter((s) => s.Status === 'completed').length }
+  return { total: steps.length, done: steps.filter(isConcluded).length }
 }
 
 // formatAge — coarse "just now / 4h ago / 3d ago" for the card's age readout.

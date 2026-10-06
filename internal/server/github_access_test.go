@@ -1187,6 +1187,24 @@ func TestOrgSettingsGet_EnvOverlaidJiraIsSettled(t *testing.T) {
 	}
 }
 
+// Each half of the Cloud credential counts on its own, as the PAT does: the
+// resolver reads the overlaid value, so a rebind that stores a new one is not
+// what it reads.
+func TestOrgSettingsGet_EnvOverlaidJiraCloudCredentialIsSettled(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	for _, name := range []string{"TRIAGE_FACTORY_JIRA_EMAIL", "TRIAGE_FACTORY_JIRA_API_TOKEN"} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(name, "from-env")
+			if !orgCredentialView(t, s).JiraEnvProvided {
+				t.Errorf("jira_credential_env_provided = false with %s set, want true", name)
+			}
+		})
+	}
+}
+
 // orgCredentialView is the org settings GET's credential-facing fields — what
 // Settings reads to decide between reporting a credential and offering to
 // replace it.

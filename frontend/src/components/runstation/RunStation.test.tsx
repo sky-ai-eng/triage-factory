@@ -65,7 +65,8 @@ describe('RunStation composer gate', () => {
 
   it('names the blueprint when that is what refused', () => {
     station({
-      Status: 'completed',
+      Status: 'open',
+      CompletedAt: '2026-07-16T11:00:00Z',
       Outcome: 'finish',
       resumable: false,
       resume_blocked_reason: 'blueprint_concluded',

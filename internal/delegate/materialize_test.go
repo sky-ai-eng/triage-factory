@@ -369,7 +369,7 @@ func seedMemory(t *testing.T, ctx context.Context, stores db.Stores, database *s
 	t.Helper()
 	stepIndex := f.stepIndex
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: f.conversationID, TaskID: f.taskID, PromptID: f.promptID, Status: "completed", Model: "m",
+		ID: f.conversationID, TaskID: f.taskID, PromptID: f.promptID, Status: dbtest.SeedConcluded, Model: "m",
 		BlueprintRunID: f.blueprintRunID, BlueprintStepIndex: &stepIndex,
 	})
 	if _, err := stores.TaskMemory.UpsertAgentMemory(ctx, runmode.LocalDefaultOrgID, f.conversationID, f.blueprintRunID, f.content, domain.MemorySourceAgent); err != nil {

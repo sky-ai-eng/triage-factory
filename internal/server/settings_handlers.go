@@ -786,11 +786,12 @@ type orgSettingsResponse struct {
 	// Cloud org (which has no PAT) still reports true.
 	HasJiraCredential bool `json:"has_jira_credential"`
 	// JiraCredentialEnvProvided is the Jira half of GitHubPATEnvProvided, and
-	// covers the URL as well as the token: the resolver reads BOTH from the
-	// overlaid secret, so an env-supplied host makes a rebind partly ineffective
-	// even for a Cloud org whose email + API token aren't shadowed at all.
-	// Either half being env-supplied is enough to make "replace this credential"
-	// a promise Settings can't keep. Local mode only.
+	// covers the URL as well as the credential: the resolver reads the host and
+	// the Data Center PAT or Cloud email + API token from the overlaid secrets,
+	// so an env-supplied host makes a rebind partly ineffective even when the
+	// credential itself isn't shadowed. Any one of them being env-supplied is
+	// enough to make "replace this credential" a promise Settings can't keep.
+	// Local mode only.
 	JiraCredentialEnvProvided bool `json:"jira_credential_env_provided,omitempty"`
 	// EnabledModels is the org's STORED enable-set, or null when it has
 	// expressed no preference. Deliberately not the resolved set: the models
@@ -925,7 +926,8 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 	local := runmode.Current() == runmode.ModeLocal
 	ghPATEnv := local && auth.EnvProvidesKey(integrations.KeyGitHubPAT)
 	jiraCredEnv := local &&
-		(auth.EnvProvidesKey(integrations.KeyJiraPAT) || auth.EnvProvidesKey(integrations.KeyJiraURL))
+		(auth.EnvProvidesKey(integrations.KeyJiraURL) || auth.EnvProvidesKey(integrations.KeyJiraPAT) ||
+			auth.EnvProvidesKey(integrations.KeyJiraEmail) || auth.EnvProvidesKey(integrations.KeyJiraAPIToken))
 
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var err error

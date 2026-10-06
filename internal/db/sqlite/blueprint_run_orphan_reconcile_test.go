@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -89,8 +90,8 @@ func TestMarkRunStatus_ParksOrphanedChild_OnTerminal(t *testing.T) {
 }
 
 // TestMarkRunStatus_LeavesTerminalChild pins that a clean finish (the common
-// path, where the finishing step is already 'completed') does not clobber the
-// child's terminal status/outcome.
+// path, where the finishing step has already recorded its verdict) does not
+// clobber the child's status/outcome.
 func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	stores := sqlitestore.New(conn)
@@ -108,19 +109,19 @@ func TestMarkRunStatus_LeavesTerminalChild(t *testing.T) {
 	})
 	step0 := 0
 	insertConversationForTest(t, conn, domain.Conversation{
-		ID: "of-child", TaskID: task.ID, PromptID: "of-p0", Status: "completed",
+		ID: "of-child", TaskID: task.ID, PromptID: "of-p0", Status: dbtest.SeedConcluded,
 		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})
-	if _, err := conn.Exec(`UPDATE conversations SET status = 'completed', outcome = 'finish' WHERE id = 'of-child'`); err != nil {
-		t.Fatalf("set child completed: %v", err)
+	if _, err := conn.Exec(`UPDATE conversations SET outcome = 'finish' WHERE id = 'of-child'`); err != nil {
+		t.Fatalf("set child verdict: %v", err)
 	}
 
 	if _, err := stores.Blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
 		t.Fatalf("MarkRunStatus: %v", err)
 	}
 
-	if got := childConversationStatusDB(t, conn, "of-child"); got != "completed" {
-		t.Errorf("child conversation status = %q, want completed (a terminal child must not be re-cancelled)", got)
+	if got := childConversationStatusDB(t, conn, "of-child"); got != domain.StatusOpen {
+		t.Errorf("child conversation status = %q, want open (a concluded child must not be re-cancelled)", got)
 	}
 	var outcome string
 	if err := conn.QueryRow(`SELECT COALESCE(outcome,'') FROM conversations WHERE id = 'of-child'`).Scan(&outcome); err != nil {
@@ -278,7 +279,10 @@ func TestReconcileOrphanedConversations_CountsClaimDesyncs(t *testing.T) {
 			ID: id, TaskID: task.ID, PromptID: "ds-p0", Status: "running",
 			Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
 		})
-		if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, id); err != nil {
+		stored, concluded := dbtest.SeedStatus(status)
+		if _, err := conn.Exec(`UPDATE conversations SET status = ?,
+			completed_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END
+			WHERE id = ?`, stored, concluded, id); err != nil {
 			t.Fatalf("set %s status: %v", id, err)
 		}
 	}
@@ -293,7 +297,7 @@ func TestReconcileOrphanedConversations_CountsClaimDesyncs(t *testing.T) {
 	}
 
 	// Dangling claims on terminal rows (the crash-after-flip shape).
-	seedChild("ds-done", "completed")
+	seedChild("ds-done", dbtest.SeedConcluded)
 	activeClaim("ds-done-cl", "ds-done")
 	seedChild("ds-failed", "failed")
 	activeClaim("ds-failed-cl", "ds-failed")

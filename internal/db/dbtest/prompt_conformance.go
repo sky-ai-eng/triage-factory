@@ -27,8 +27,8 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 
 // ConversationSeederForStats is a callback the harness invokes to populate
 // rows in the conversations table for Stats assertions. statusByOffset maps
-// row index → status string ("completed" / "failed" / "running"
-// etc.); the seeder generates one run per entry, with started_at
+// row index → status string (SeedConcluded / "failed" / "running"
+// etc., resolved through SeedStatus); the seeder generates one run per entry, with started_at
 // staggered across days so the per-day grouping has signal. Returns
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
@@ -260,7 +260,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "S", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create stats prompt: %v", err)
 		}
-		seedConversations(t, id, []string{"completed", "completed", "completed", "failed", "running"})
+		seedConversations(t, id, []string{SeedConcluded, SeedConcluded, SeedConcluded, "failed", "running"})
 		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
 			t.Fatalf("stats: %v", err)
@@ -302,7 +302,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "DB", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		seedConversations(t, id, []string{"completed", "completed", "failed"})
+		seedConversations(t, id, []string{SeedConcluded, SeedConcluded, "failed"})
 
 		stats, err := store.Stats(ctx, orgID, id)
 		if err != nil {
@@ -385,7 +385,7 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: "rh-1", Name: "RH", Body: "x", Source: "user"}); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		seedConversations(t, "rh-1", []string{"completed", "failed"})
+		seedConversations(t, "rh-1", []string{SeedConcluded, "failed"})
 		if err := store.Delete(ctx, orgID, "rh-1"); err != nil {
 			t.Fatalf("delete prompt with conversation history failed (the FK-500 regression): %v", err)
 		}

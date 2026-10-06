@@ -1088,8 +1088,11 @@ CREATE TABLE public.conversations (
     -- hydrating from messages). App-validated, and a one-way ratchet: once an
     -- engagement runs native the SDK can never continue the transcript.
     runtime text DEFAULT 'sdk'::text NOT NULL,
-    -- Outcome or nothing: 'open' (a park), a terminal ('completed' | 'failed'), or
-    -- NULL mid-flight. Queued and running are derived from claims, never stored.
+    -- 'open' (a park, including the one a step's verdict records), the terminal
+    -- 'failed', or NULL mid-flight. Queued and running are derived from claims,
+    -- never stored. A conversation never concludes: 'open' with completed_at set
+    -- is a step that recorded its verdict, and its blueprint run says whether the
+    -- work is done.
     status text,
     model text,
     -- SDK resume handle. NULL under runtime='native', where messages are truth.
@@ -1400,6 +1403,26 @@ CREATE TABLE public.user_jira_identities (
 );
 
 
+-- Workspace-scoped Linear identity bindings, the sibling of user_jira_identities.
+-- Linear is cloud-only, so the scope is the workspace rather than a host: the key
+-- is (user_id, workspace_id), where workspace_id is the Linear organization id the
+-- org's Linear credential belongs to, matching the per-(user, workspace) key the
+-- Linear credential is custodied under ("linear_token/<workspace_id>").
+-- linear_user_id is the workspace-scoped User UUID (viewer.id); 'scim' is
+-- reserved and has no writer.
+CREATE TABLE public.user_linear_identities (
+    user_id uuid NOT NULL,
+    workspace_id text NOT NULL,
+    linear_user_id text NOT NULL,
+    display_name text,
+    source text NOT NULL,
+    verified_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT user_linear_identities_source_check CHECK ((source = ANY (ARRAY['api_key'::text, 'connect_oauth'::text, 'scim'::text])))
+);
+
+
 ALTER TABLE ONLY public.pending_firings ALTER COLUMN id SET DEFAULT nextval('public.pending_firings_id_seq'::regclass);
 
 
@@ -1634,6 +1657,10 @@ ALTER TABLE ONLY public.user_github_identities
 
 ALTER TABLE ONLY public.user_jira_identities
     ADD CONSTRAINT user_jira_identities_pkey PRIMARY KEY (user_id, jira_base_url);
+
+
+ALTER TABLE ONLY public.user_linear_identities
+    ADD CONSTRAINT user_linear_identities_pkey PRIMARY KEY (user_id, workspace_id);
 
 
 ALTER TABLE ONLY public.user_settings
@@ -1899,6 +1926,9 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_github_identities FOR
 
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_jira_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_linear_identities FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.user_settings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
@@ -2290,6 +2320,10 @@ ALTER TABLE ONLY public.user_github_identities
 
 ALTER TABLE ONLY public.user_jira_identities
     ADD CONSTRAINT user_jira_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.user_linear_identities
+    ADD CONSTRAINT user_linear_identities_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users(id) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY public.user_settings
@@ -2753,6 +2787,17 @@ CREATE POLICY user_jira_identities_modify ON public.user_jira_identities USING (
 CREATE POLICY user_jira_identities_select ON public.user_jira_identities FOR SELECT USING ((user_id = tf.current_user_id()));
 
 
+ALTER TABLE public.user_linear_identities ENABLE ROW LEVEL SECURITY;
+
+
+-- Self-only, like user_jira_identities. No org_id leg, for the same reason: the
+-- row is the user's own, and the workspace column is what scopes it.
+CREATE POLICY user_linear_identities_modify ON public.user_linear_identities USING ((user_id = tf.current_user_id())) WITH CHECK ((user_id = tf.current_user_id()));
+
+
+CREATE POLICY user_linear_identities_select ON public.user_linear_identities FOR SELECT USING ((user_id = tf.current_user_id()));
+
+
 ALTER TABLE public.user_settings ENABLE ROW LEVEL SECURITY;
 
 
@@ -3130,6 +3175,13 @@ GRANT ALL ON TABLE public.user_jira_identities TO anon;
 GRANT ALL ON TABLE public.user_jira_identities TO authenticated;
 GRANT ALL ON TABLE public.user_jira_identities TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_jira_identities TO tf_app;
+
+
+GRANT ALL ON TABLE public.user_linear_identities TO postgres;
+GRANT ALL ON TABLE public.user_linear_identities TO anon;
+GRANT ALL ON TABLE public.user_linear_identities TO authenticated;
+GRANT ALL ON TABLE public.user_linear_identities TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.user_linear_identities TO tf_app;
 
 
 GRANT ALL ON TABLE public.user_settings TO postgres;

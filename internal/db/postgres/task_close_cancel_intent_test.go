@@ -66,14 +66,16 @@ func newPgCloseIntentSeeder(conn *sql.DB, orgID, userID string) (dbtest.TaskClos
 			brID := seedPgBlueprintRunForClose(t, conn, orgID, userID, taskID, blueprintStatus)
 			promptID := seedPgStepPromptForClose(t, conn, orgID, userID)
 			convID := uuid.New().String()
+			stored, concluded := dbtest.SeedStatus(convStatus)
 			if _, err := conn.Exec(`
 					INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id,
 					                           prompt_id, trigger_type, origin, status,
-					                           blueprint_run_id, blueprint_step_index)
+					                           blueprint_run_id, blueprint_step_index, completed_at)
 					VALUES ($1, $2, NULL,
 					        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-					        'team', $3, $4, 'event', 'blueprint', NULLIF($5, ''), $6, 0)
-				`, convID, orgID, taskID, promptID, convStatus, brID); err != nil {
+					        'team', $3, $4, 'event', 'blueprint', NULLIF($5, ''), $6, 0,
+					        CASE WHEN $7 THEN now() END)
+				`, convID, orgID, taskID, promptID, stored, brID, concluded); err != nil {
 				t.Fatalf("seed conversation: %v", err)
 			}
 			return brID, convID

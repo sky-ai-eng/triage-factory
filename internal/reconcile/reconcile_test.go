@@ -312,7 +312,7 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 		if _, err := conn.Exec(`INSERT INTO entities (id, source, source_id, kind) VALUES (?, 'github', ?, 'pull_request')`, entityID, entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
-		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'completed')`, conversationID); err != nil {
+		if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status, completed_at) VALUES (?, 'interactive', 'open', CURRENT_TIMESTAMP)`, conversationID); err != nil {
 			t.Fatalf("seed conversation: %v", err)
 		}
 	}

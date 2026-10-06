@@ -44,8 +44,8 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 				t.Helper()
 				id := uuid.New().String()
 				if _, err := conn.Exec(`
-					INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id)
-					SELECT ?, task_id, prompt_id, 'completed', model, blueprint_run_id FROM conversations WHERE id = ?
+					INSERT INTO conversations (id, task_id, prompt_id, status, model, blueprint_run_id, completed_at)
+					SELECT ?, task_id, prompt_id, 'open', model, blueprint_run_id, CURRENT_TIMESTAMP FROM conversations WHERE id = ?
 				`, id, conversationID); err != nil {
 					t.Fatalf("seed sibling conversation: %v", err)
 				}

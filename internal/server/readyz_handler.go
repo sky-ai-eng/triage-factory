@@ -254,8 +254,8 @@ func checkLabel(ok bool) string {
 // "Being driven" is an unreleased claim (idx_claims_one_active), on any
 // surface. "Waiting" is the needs-driving predicate, narrowed to delegation the way
 // this counter always was, and it must be spelled in FULL: a delegation
-// conversation parked at `open` that a follow-up message has woken is
-// claimable and displays as queued, so counting only the mid-flight (NULL)
+// conversation parked at `open` with no recorded verdict that a follow-up
+// message has woken is claimable and displays as queued, so counting only the mid-flight (NULL)
 // arm would undercount exactly the runs an operator is watching for. This
 // query and internal/db's claim predicate have to agree about what "waiting"
 // means; they are two spellings of one definition, which is why the arms are
@@ -280,6 +280,7 @@ func (s *Server) countActiveRuns(ctx context.Context) (int, error) {
 		       AND c.archived_at IS NULL
 		       AND (c.status IS NULL
 		            OR (c.status = 'open'
+		                AND c.completed_at IS NULL
 		                AND EXISTS (SELECT 1 FROM messages m
 		                            WHERE m.conversation_id = c.id
 		                              AND m.delivered = false

@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -53,8 +54,9 @@ func (s *stoppingSpawner) stoppedIDs() []string {
 
 // seedRunOnTask stages one blueprint_run in blueprintStatus with its step-0
 // conversation on the task, in the given STORED conversation status ("" =
-// SQL NULL, the mid-flight state). This is the shape a fired trigger leaves
-// behind; the router's own delegation path is not the thing under test here.
+// SQL NULL, the mid-flight state; dbtest.SeedConcluded, a recorded verdict).
+// This is the shape a fired trigger leaves behind; the router's own delegation
+// path is not the thing under test here.
 func seedRunOnTask(t *testing.T, database *sql.DB, taskID, blueprintStatus, convStatus string) (blueprintRunID, convID string) {
 	t.Helper()
 	promptID := uuid.New().String()
@@ -79,16 +81,18 @@ func seedRunOnTask(t *testing.T, database *sql.DB, taskID, blueprintStatus, conv
 
 	convID = uuid.New().String()
 	var status any
-	if convStatus != "" {
-		status = convStatus
+	stored, concluded := dbtest.SeedStatus(convStatus)
+	if stored != "" {
+		status = stored
 	}
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model, trigger_type,
 		                           team_id, visibility, creator_user_id, origin,
-		                           blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, ?, ?, 'm', 'manual', ?, 'team', ?, 'blueprint', ?, 0)
+		                           blueprint_run_id, blueprint_step_index, completed_at)
+		VALUES (?, ?, ?, ?, 'm', 'manual', ?, 'team', ?, 'blueprint', ?, 0,
+		        CASE WHEN ? THEN CURRENT_TIMESTAMP END)
 	`, convID, taskID, promptID, status, runmode.LocalDefaultTeamID,
-		runmode.LocalDefaultUserID, blueprintRunID); err != nil {
+		runmode.LocalDefaultUserID, blueprintRunID, concluded); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return blueprintRunID, convID
@@ -182,7 +186,7 @@ func TestCloseCancelIntent_FinishedBlueprintStaysResumable(t *testing.T) {
 	r.spawner = sp
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#finished-blueprint")
-	brID, convID := seedRunOnTask(t, database, taskID, "completed", "completed")
+	brID, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {

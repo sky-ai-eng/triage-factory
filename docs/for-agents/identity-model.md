@@ -1,8 +1,8 @@
 # Per-user integration identity
 
 How TF stores "who this user is on the providers it acts against" — GitHub
-(`user_github_identities`, SKY-396) and Jira (`user_jira_identities`, SKY-397)
-today, Linear as a planned sibling (SKY-398). This is the *integration-identity*
+(`user_github_identities`, SKY-396), Jira (`user_jira_identities`, SKY-397) and
+Linear (`user_linear_identities`, SKY-398). This is the *integration-identity*
 layer; it is not login.
 
 ## Two layers TF must not conflate
@@ -11,8 +11,8 @@ layer; it is not login.
 
 - **Access** = "TF may read/write this org's repos/issues." Impersonal, org- or
   service-scoped: a GitHub **App installation token**, a Jira **service-account
-  OAuth** (SKY-347), a Linear **`client_credentials` app-actor** token. Carries
-  no person.
+  OAuth** (SKY-347), a Linear **`actor=app` install** token or org API key.
+  Carries no person.
 - **Identity** = "this TF user is `@login` / `accountId` / `viewer.id` on this
   host." A per-user *whoami*, captured once and stored. Powers per-user
   predicates (`author_in: [me]`), the personal dashboard, and routing a task to
@@ -27,7 +27,7 @@ needs its own per-user identity binding regardless of how access is granted.
 
 | Layer | GitHub | Jira | Linear |
 | -- | -- | -- | -- |
-| **Access** (impersonal) | App installation token | service-account OAuth (SKY-347) | `client_credentials` app-actor |
+| **Access** (impersonal) | App installation token | service-account OAuth (SKY-347) | `actor=app` install, or an org API key |
 | **Identity** (per-user whoami) | `login` + verified primary email | `accountId` | `viewer.id` |
 
 Distinct from **GoTrue's `auth.identities`**, which records *login* identities
@@ -42,13 +42,15 @@ Each provider gets its own host/scope-scoped table:
 ```
 user_github_identities (user_id, github_base_url, login, github_user_id, email, source, verified_at, …)  -- SKY-396, shipped
 user_jira_identities   (user_id, jira_base_url,   account_id, display_name, source, verified_at, …)  -- SKY-397, shipped
-user_linear_identities (user_id, workspace_id,    linear_user_id, display_name, source, verified_at, …)  -- SKY-398
+user_linear_identities (user_id, workspace_id,    linear_user_id, display_name, source, verified_at, …)  -- SKY-398, shipped
 ```
 
 Each keyed `UNIQUE (user_id, <scope>)`, user-scoped RLS (self-only read/write,
 no org leg), `verified_at` stamped on each authenticated confirmation, `source`
-recording how the binding was captured (`pat` | `connect_oauth` | `scim` |
-`login_claim`).
+recording how the binding was captured, from a closed set per table: GitHub
+`pat` | `connect_oauth` | `scim` | `login_claim`; Jira `pat` | `cloud_api_token`
+| `connect_oauth` | `scim`; Linear `api_key` | `connect_oauth` | `scim` (Linear
+has no PAT).
 
 ### Why siblings, not a generic `user_external_identities(provider, base_url, external_id, …)`
 
@@ -60,7 +62,7 @@ earlier SKY-396 draft proposed one. **Linear is the tiebreak against it:**
 | -- | -- | -- |
 | GitHub | **host** (github.com / GHEC / GHES) | `login` — id ≈ name (one value) |
 | Jira | **host** (Cloud site / Server-DC) | `accountId` + separate `displayName` |
-| Linear | **workspace** (cloud-only, no host) | `viewer.id` + separate `name` |
+| Linear | **workspace** (cloud-only, no host) | `viewer.id` + separate `displayName` |
 
 - **The scope column can't be uniform.** GitHub and Jira scope by host; Linear
   is cloud-only and scopes by *workspace* (a person has a distinct
@@ -107,6 +109,12 @@ self-features (`author_in:[me]`, personal dashboard, routing-to-you) go inert;
 team reads are unaffected. Drift (rename, left-the-org) reintroduces the absent
 state post-onboarding — runtime stays tolerant regardless of the onboarding gate.
 
+Linear's scope is the org's workspace (`OrgSettings.LinearWorkspaceID`, learned
+from the org's Linear credential), and its reads match it exactly. A Linear user
+id names nobody outside the workspace that issued it, so no reader substitutes a
+binding from another workspace — where `/api/me`'s Jira pair, for one, falls
+back to the most recently verified host.
+
 ## Tickets
 
 - **SKY-396** — `user_github_identities` (shipped here).
@@ -114,6 +122,7 @@ state post-onboarding — runtime stays tolerant regardless of the onboarding ga
   `jira_display_name` off the row into a host-scoped table keyed on
   `jira.CanonicalHost`, symmetric with the per-(user, host) PAT vault key from
   SKY-442; blocks SKY-270).
-- **SKY-398** — `user_linear_identities` (workspace-scoped; gated on a Linear
-  integration existing).
+- **SKY-398** — `user_linear_identities` (shipped; workspace-scoped, keyed on the
+  same workspace id the per-user `linear_token/<workspace_id>` credential is
+  custodied under).
 - **SKY-271** — capture flows + onboarding gate (consumes these tables).

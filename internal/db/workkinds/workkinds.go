@@ -159,9 +159,11 @@ func PendingFiringKey(taskID, triggerID string) string { return taskID + ":" + t
 //
 // The two halves answer for different things and neither implies the other.
 // The conversation half is the gate's own rule — the conversation store's
-// live-conversation predicate applied to the row's task, which each dialect
-// package tests against that store — and it holds for a conversation with no
-// running run behind it, such as one resumed after its run completed. The
+// live-conversation predicate applied to the row's task (un-ended, top-level,
+// and not settled: neither failed nor concluded with its step's verdict),
+// which each dialect package tests against that store — and it holds for a
+// conversation with no running run behind it, such as one resumed after its
+// run completed. The
 // run half is the fence's: the one-active-run index refuses a second run
 // while one is marked running, and a run is marked terminal only after its
 // last conversation is, so between those two writes the task has no live
@@ -180,7 +182,7 @@ func PendingFiringsTaskBusy(d workitem.Dialect) string {
 	}
 	return "(EXISTS (SELECT 1 FROM conversations r WHERE " + convOrg +
 		"r.task_id = t.task_id AND r.ended_at IS NULL AND r.parent_conversation_id IS NULL" +
-		" AND (r.status IS NULL OR r.status NOT IN ('completed','failed')))" +
+		" AND (r.status IS NULL OR NOT (r.status = 'failed' OR (r.status = 'open' AND r.completed_at IS NOT NULL))))" +
 		" OR EXISTS (SELECT 1 FROM blueprint_runs b WHERE " + runOrg +
 		"b.task_id = t.task_id AND b.status = 'running'))"
 }

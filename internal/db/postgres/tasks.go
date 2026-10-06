@@ -151,21 +151,21 @@ const pgTaskRuleOrderJoin = `
 // Both subqueries carry the org id alongside the task id, the way every read in
 // this package does: the FK makes it redundant, and it is the defense in depth
 // that stands if the FK ever doesn't.
-const pgTaskAttentionTier = `CASE
+var pgTaskAttentionTier = `CASE
 	         WHEN t.closed_at IS NOT NULL THEN 2
 	         WHEN EXISTS (SELECT 1 FROM conversations r
 	                      WHERE r.org_id = t.org_id AND r.task_id = t.id
 	                        AND ` + pgConversationAttentionSQL + `)
 	              THEN 0
-	         ELSE CASE (SELECT ` + pgDisplayStatusSQL + `
-	                    FROM conversations r
-	                    WHERE r.org_id = t.org_id AND r.task_id = t.id
-	                    ORDER BY r.started_at DESC, r.id
-	                    LIMIT 1)
-	                WHEN 'failed'    THEN 1
-	                WHEN 'completed' THEN 3
-	                ELSE 2
-	              END
+	         ELSE COALESCE((SELECT CASE
+	                                 WHEN ` + pgDisplayStatusSQL + ` = 'failed' THEN 1
+	                                 WHEN ` + db.ConcludedConversationSQL("r") + ` THEN 3
+	                                 ELSE 2
+	                               END
+	                        FROM conversations r
+	                        WHERE r.org_id = t.org_id AND r.task_id = t.id
+	                        ORDER BY r.started_at DESC, r.id
+	                        LIMIT 1), 2)
 	       END`
 
 // pgTaskClaimantJoin mirrors sqliteTaskClaimantJoin, org-scoped on the agents
@@ -993,7 +993,7 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, orgID, taskID, cl
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND task_id = $2
-		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, orgID, taskID)
 	if err != nil {
 		return false, nil, fmt.Errorf("list active conversations: %w", err)
@@ -1022,7 +1022,7 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, orgID, taskID, cl
 		      WHERE c.org_id = br.org_id
 		        AND c.task_id = $2
 		        AND c.blueprint_run_id = br.id
-		        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		        AND `+db.UnsettledConversationSQL("c")+`
 		  )
 	`, orgID, taskID); err != nil {
 		return false, nil, fmt.Errorf("stamp run cancel intent: %w", err)
@@ -1417,7 +1417,9 @@ func countConsecutiveFailedConversations(ctx context.Context, q queryer, orgID, 
 					ELSE 'blueprint'
 				END AS kind,
 				r.blueprint_run_id,
-				COALESCE(cr.status, r.status) AS status,
+				CASE WHEN cr.id IS NOT NULL THEN cr.status
+				     WHEN `+db.ConcludedConversationSQL("r")+` THEN 'completed'
+				     ELSE r.status END AS status,
 				COALESCE(cr.started_at, r.started_at) AS started_at,
 				ROW_NUMBER() OVER (
 					PARTITION BY COALESCE(r.blueprint_run_id, r.id)

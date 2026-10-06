@@ -45,7 +45,6 @@ describe('stationState', () => {
     const expected: Record<string, StationKey> = {
       queued: 'queued',
       open: 'open',
-      completed: 'done',
       failed: 'failed',
     }
     for (const status of CONVERSATION_STATUSES) {
@@ -62,10 +61,11 @@ describe('stationState', () => {
   // The machine wears ONE light, so a mid-chain step wearing the same green
   // DONE plate as a finished task is the whole bug: the viewer reads the
   // biggest thing on the page and concludes the work stopped.
-  describe('a completed conversation is three endings, not one', () => {
+  describe('a concluded conversation is three endings, not one', () => {
     const step = (index: number, total: number, outcome: string) =>
       conversation({
-        Status: 'completed',
+        Status: 'open',
+        CompletedAt: '2026-07-16T11:00:00Z',
         blueprint_run_id: 'br1',
         blueprint_step_index: index,
         blueprint_step_count: total,
@@ -90,7 +90,9 @@ describe('stationState', () => {
     })
 
     it('lights an abort amber — the agent gave up and the task is still open', () => {
-      const state = stationState(conversation({ Status: 'completed', Outcome: 'abort' }))
+      const state = stationState(
+        conversation({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', Outcome: 'abort' }),
+      )
       expect(state.key).toBe('stopped')
       expect(state.label).toBe('STOPPED')
       expect(state.light).toBe('var(--color-warm)')
@@ -111,6 +113,16 @@ describe('stationState', () => {
     it('falls back to the plain state word when the position is unknowable', () => {
       // blueprint_step_count 0 — the server could not resolve the plan.
       expect(stationState(step(1, 0, 'continue')).label).toBe('DONE')
+    })
+
+    it('reads DONE off a finished run even when a follow-up on its last step reported an abort', () => {
+      const state = stationState({ ...step(3, 4, 'abort'), blueprint_run_status: 'completed' })
+      expect(state.key).toBe('done')
+    })
+
+    it('keeps IDLE for a parked conversation with no verdict, whatever its run says', () => {
+      const parked = conversation({ Status: 'open', blueprint_run_status: 'running' })
+      expect(stationState(parked).key).toBe('open')
     })
   })
 })

@@ -215,8 +215,8 @@ func TestStall_ASlowPreTerminalSnapshotWithinItsBoundCompletes(t *testing.T) {
 		t.Fatal("the conclusion's snapshot was cut off; no blob was written")
 	}
 	assertSnapshotState(t, f.s, f.keyID, domain.WorkspaceSnapshotWritten, f.claimID)
-	if got := storedStatus(t, f.database, f.conversationID); got != "completed" {
-		t.Errorf("status = %q, want completed", got)
+	if !storedConcluded(t, f.database, f.conversationID) {
+		t.Errorf("status = %q, want concluded", storedStatus(t, f.database, f.conversationID))
 	}
 }
 
@@ -246,8 +246,8 @@ func TestStall_APreTerminalSnapshotPastItsBoundFailsWithoutAStall(t *testing.T) 
 	if cause := context.Cause(f.claimCtx); cause != nil {
 		t.Fatalf("the engagement was stopped (%v); the snapshot's own bound should have ended it", cause)
 	}
-	if got := storedStatus(t, f.database, f.conversationID); got != "completed" {
-		t.Errorf("status = %q, want completed", got)
+	if !storedConcluded(t, f.database, f.conversationID) {
+		t.Errorf("status = %q, want concluded", storedStatus(t, f.database, f.conversationID))
 	}
 	assertSnapshotState(t, f.s, f.keyID, domain.WorkspaceSnapshotFailed, f.claimID)
 }

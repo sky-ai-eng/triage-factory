@@ -1197,25 +1197,50 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRun
 	return err
 }
 
-func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {
+func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// CAS aborted → running, clearing the stale abort metadata. The resumed step
-	// re-finalizes the blueprint through the normal post-resume disposition.
-	res, err := s.q.ExecContext(ctx, `
-		UPDATE blueprint_runs
-		SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
-		WHERE id = ? AND status = 'aborted'
-	`, id)
+	// CAS aborted → running while the task is still open and the conversation
+	// is the run's current step, clearing the stale abort metadata, then
+	// withdraw that conversation's verdict. The
+	// resumed step re-finalizes the blueprint through the normal post-resume
+	// disposition, and a verdict left behind would read as one it had already
+	// given. One transaction, so a reopened run never carries a stale verdict.
+	var reopened bool
+	err := inTx(ctx, s.q, func(q queryer) error {
+		res, err := q.ExecContext(ctx, `
+			UPDATE blueprint_runs
+			SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
+			WHERE id = ? AND status = 'aborted'
+			  AND EXISTS (SELECT 1 FROM tasks t
+			              WHERE t.id = blueprint_runs.task_id AND t.status NOT IN ('done', 'dismissed'))
+			  AND EXISTS (SELECT 1 FROM conversations c
+			              WHERE c.id = ? AND c.blueprint_run_id = blueprint_runs.id
+			                AND c.blueprint_step_index = blueprint_runs.current_step_index)
+		`, id, stepConversationID)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return nil
+		}
+		reopened = true
+		_, err = q.ExecContext(ctx, `
+			UPDATE conversations
+			SET outcome = NULL, outcome_reason = NULL, completed_at = NULL
+			WHERE id = ? AND blueprint_run_id = ?
+		`, stepConversationID, id)
+		return err
+	})
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return false, err
-	}
-	return n > 0, nil
+	return reopened, nil
 }
 
 func (s *blueprintStore) RequestRunCancelSystem(ctx context.Context, orgID, id string) (bool, error) {
@@ -1326,8 +1351,7 @@ func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, b
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE blueprint_run_id = ?
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, blueprintRunID)
 	if err != nil {
 		return nil, err
@@ -1344,11 +1368,11 @@ func (s *blueprintStore) ActiveStepConversationIDs(ctx context.Context, orgID, b
 	return out, rows.Err()
 }
 
-func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
+func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]db.RunProgress, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
-	out := make(map[string]int, len(blueprintRunIDs))
+	out := make(map[string]db.RunProgress, len(blueprintRunIDs))
 	if len(blueprintRunIDs) == 0 {
 		return out, nil
 	}
@@ -1358,7 +1382,7 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	}
 	ph := strings.TrimRight(strings.Repeat("?, ", len(args)), ", ")
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT id, json_array_length(step_plan)
+		SELECT id, json_array_length(step_plan), status
 		FROM blueprint_runs WHERE id IN (`+ph+`)
 	`, args...)
 	if err != nil {
@@ -1366,12 +1390,12 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, status string
 		var n int
-		if err := rows.Scan(&id, &n); err != nil {
+		if err := rows.Scan(&id, &n, &status); err != nil {
 			return nil, err
 		}
-		out[id] = n
+		out[id] = db.RunProgress{StepCount: n, Status: domain.BlueprintRunStatus(status)}
 	}
 	return out, rows.Err()
 }

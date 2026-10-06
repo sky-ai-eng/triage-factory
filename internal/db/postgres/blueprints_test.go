@@ -447,7 +447,7 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	// processCompletion does, and confirm ConversationsForBlueprint surfaces it — the channel the
 	// orchestrator advances on (the successor to the old per-step verdict).
 	stepConversationID := seedPgStepConversation(t, h, orgID, userID, taskID, stepPromptID, blueprintRunID, 0)
-	if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, stepConversationID, "completed", 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
+	if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, stepConversationID, domain.StatusOpen, 0, 0, 0, "did the thing", "finish", "", ""); err != nil {
 		t.Fatalf("complete step conversation: %v", err)
 	}
 	stepConversations, err := blueprints.ConversationsForBlueprint(ctx, orgID, blueprintRunID)
@@ -503,12 +503,12 @@ func TestBlueprintStore_Postgres_RunLifecycle(t *testing.T) {
 	}
 }
 
-// TestBlueprintStore_Postgres_StepPlanLengths pins the batched plan-length
-// read the run projection uses to say whether a step is its chain's last one:
-// one query over many blueprint runs, counted in SQL over the frozen plan, and
-// a run it cannot resolve is absent from the map rather than reported as a
-// zero-step plan.
-func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
+// TestBlueprintStore_Postgres_RunProgress pins the batched read the run
+// projection uses to say whether a step is its chain's last one and whether
+// its work is done: one query over many blueprint runs, the plan counted in SQL
+// over the frozen plan, the run's status beside it, and a run it cannot resolve
+// absent from the map rather than reported as a zero-step plan.
+func TestBlueprintStore_Postgres_RunProgress(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
 
@@ -539,28 +539,31 @@ func TestBlueprintStore_Postgres_StepPlanLengths(t *testing.T) {
 		BlueprintID: blueprintID, TaskID: oneStepTaskID,
 		WorktreePath: "/tmp/wt-pg-spl-1", StepPlan: plan[:1],
 	})
+	if _, err := blueprints.MarkRunStatusSystem(ctx, orgID, oneID, domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		t.Fatalf("MarkRunStatusSystem: %v", err)
+	}
 	missingID := uuid.NewString()
 
-	got, err := blueprints.StepPlanLengths(ctx, orgID, []string{threeID, oneID, missingID})
+	got, err := blueprints.RunProgress(ctx, orgID, []string{threeID, oneID, missingID})
 	if err != nil {
-		t.Fatalf("StepPlanLengths: %v", err)
+		t.Fatalf("RunProgress: %v", err)
 	}
-	if got[threeID] != 3 {
-		t.Errorf("three-step plan length = %d, want 3", got[threeID])
+	if got[threeID].StepCount != 3 || got[threeID].Status != domain.BlueprintRunStatusRunning {
+		t.Errorf("three-step run = %+v, want 3 steps, running", got[threeID])
 	}
-	if got[oneID] != 1 {
-		t.Errorf("one-step plan length = %d, want 1", got[oneID])
+	if got[oneID].StepCount != 1 || got[oneID].Status != domain.BlueprintRunStatusCompleted {
+		t.Errorf("one-step run = %+v, want 1 step, completed", got[oneID])
 	}
 	if _, ok := got[missingID]; ok {
 		t.Error("an unresolvable blueprint run must be absent from the map, not reported as a zero-step plan")
 	}
 
-	empty, err := blueprints.StepPlanLengths(ctx, orgID, nil)
+	empty, err := blueprints.RunProgress(ctx, orgID, nil)
 	if err != nil {
-		t.Fatalf("StepPlanLengths(nil): %v", err)
+		t.Fatalf("RunProgress(nil): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("StepPlanLengths(nil) = %v, want an empty map", empty)
+		t.Errorf("RunProgress(nil) = %v, want an empty map", empty)
 	}
 }
 

@@ -96,20 +96,20 @@ func (ag *agentHandler) writeConversationResource(w http.ResponseWriter, r *http
 				arts = a
 			}
 		}
-		// The owning blueprint's plan length, so the conversation page can tell a
-		// handed-off step from the one that ended the task. Best-effort like
-		// the artifact list above: a failure (or a blueprint row RLS hides)
-		// leaves the count at 0 and the projection unqualified, never a failed
-		// status fetch.
-		var stepCount int
+		// The owning blueprint's plan length and status, so the conversation
+		// page can tell a handed-off step from the one that ended the task, and
+		// whether the work is done. Best-effort like the artifact list above: a
+		// failure (or a blueprint row RLS hides) leaves both unresolved and the
+		// projection unqualified, never a failed status fetch.
+		var progress db.RunProgress
 		if conv.BlueprintRunID != "" {
-			if lens, lerr := tx.Blueprints.StepPlanLengths(r.Context(), orgID, []string{conv.BlueprintRunID}); lerr != nil {
-				serverLog.Warn("blueprint step-plan length lookup failed; omitting blueprint_step_count", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", lerr)
+			if runs, lerr := tx.Blueprints.RunProgress(r.Context(), orgID, []string{conv.BlueprintRunID}); lerr != nil {
+				serverLog.Warn("blueprint run progress lookup failed; omitting blueprint_step_count and blueprint_run_status", "conversation", conv.ID, "blueprint_run", conv.BlueprintRunID, "error", lerr)
 			} else {
-				stepCount = lens[conv.BlueprintRunID]
+				progress = runs[conv.BlueprintRunID]
 			}
 		}
-		resp = conversationResponse(conv, counts[conv.ID], arts, stepCount, "")
+		resp = conversationResponse(conv, counts[conv.ID], arts, progress, "")
 		return nil
 	}); err != nil {
 		internalError(w, "agent", err)
@@ -439,16 +439,18 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 //     conversation; the list path batches every conversation in one query — N+1 avoidance).
 //   - arts is the conversation's artifact set, which the caller reads best-effort (only
 //     for conversations that have any artifact, so a conversation with none costs no list).
-//   - stepCount is the length of the owning blueprint run's frozen plan, from
-//     Blueprints.StepPlanLengths (batched the same way). 0 when the conversation has no
-//     blueprint, and when the caller could not resolve one — a manual blueprint
-//     run belongs to its creator under RLS, so a teammate reads 0 here and gets
-//     the unqualified projection, which is what they already get for the chain
-//     rail.
+//   - progress is the owning blueprint run's plan length and status, from
+//     Blueprints.RunProgress (batched the same way). Zero values when the
+//     conversation has no blueprint, and when the caller could not resolve one
+//     — a manual blueprint run belongs to its creator under RLS, so a teammate
+//     reads 0 and "" here and gets the unqualified projection, which is what
+//     they already get for the chain rail.
 //
-// stepCount is what makes a step's position legible: paired with
-// blueprint_step_index it says whether a completed step is its chain's last —
+// The plan length is what makes a step's position legible: paired with
+// blueprint_step_index it says whether a concluded step is its chain's last —
 // the difference between the task being over and the next step picking it up.
+// The run's status is what says whether the work is done at all: a
+// conversation never concludes, so its own status cannot.
 // Outcome alone cannot say that. It is the vocabulary an agent emits about its
 // OWN ending, and what a given value implies for the chain depends on the
 // runtime: under the SDK a terminal step reports `finish`, while the native
@@ -471,7 +473,7 @@ func (ag *agentHandler) handleAgentActions(w http.ResponseWriter, r *http.Reques
 // purpose: that route's client is the run station, whose live transcript
 // already shows the call this line would summarize, and buying it there would
 // add a query to a polled route for a field it does not render.
-func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, stepCount int, currentAction string) map[string]any {
+func conversationResponse(conv *domain.Conversation, artifactCount int, arts []domain.Artifact, progress db.RunProgress, currentAction string) map[string]any {
 	out := map[string]any{
 		"ID":            conv.ID,
 		"TaskID":        conv.TaskID,
@@ -503,7 +505,8 @@ func conversationResponse(conv *domain.Conversation, artifactCount int, arts []d
 		"actor_agent_name":     conv.ActorAgentName,
 		"blueprint_run_id":     conv.BlueprintRunID,
 		"blueprint_step_index": conv.BlueprintStepIndex,
-		"blueprint_step_count": stepCount,
+		"blueprint_step_count": progress.StepCount,
+		"blueprint_run_status": string(progress.Status),
 		"artifact_count":       artifactCount,
 		// The token rollups the conversation read already SUMs, alongside the cost /
 		// duration / turns ones above. snake_case like every key added since
@@ -1097,7 +1100,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     the actual artifacts, but a conversation with none can't have an unresolved one, so
 //     it costs no list.
 //   - blueprint_step_count for the conversations that belong to a blueprint: one
-//     StepPlanLengths over the deduped blueprint_run ids.
+//     RunProgress over the deduped blueprint_run ids.
 //   - current_action for the conversations displaying as `running`: one
 //     NewestAssistantToolCallsForConversations over just those ids, composed
 //     into prose per current_action.go. Only running conversations are read —
@@ -1105,7 +1108,7 @@ func (ag *agentHandler) handleAgentPermissions(w http.ResponseWriter, r *http.Re
 //     tool call on a stopped conversation describes something that is no longer
 //     happening.
 //
-// Deliberately best-effort: a ListByConversations, StepPlanLengths or
+// Deliberately best-effort: a ListByConversations, RunProgress or
 // NewestAssistantToolCallsForConversations failure drops what that read
 // contributes (logged) but leaves counts and the rest intact. These
 // are display annotations on rows the caller can already see, so surfacing the
@@ -1138,8 +1141,9 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	}
 	// One read for every blueprint in the set, keyed by blueprint_run id and
 	// deduped first (a chain's steps all name the same one). Best-effort: a
-	// failure leaves every blueprint_step_count at 0, which reads as "position
-	// unknown" and costs the qualifier, not the row.
+	// failure leaves every blueprint_step_count at 0 and every
+	// blueprint_run_status empty, which read as "unknown" and cost the
+	// qualifier, not the row.
 	var blueprintRunIDs []string
 	seenBlueprints := map[string]bool{}
 	for i := range convs {
@@ -1150,12 +1154,12 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 		seenBlueprints[id] = true
 		blueprintRunIDs = append(blueprintRunIDs, id)
 	}
-	stepCounts := map[string]int{}
+	progress := map[string]db.RunProgress{}
 	if len(blueprintRunIDs) > 0 {
-		if lens, lerr := tx.Blueprints.StepPlanLengths(ctx, orgID, blueprintRunIDs); lerr != nil {
-			serverLog.Warn("blueprint step-plan length batch lookup failed; omitting blueprint_step_count", "error", lerr)
+		if runs, lerr := tx.Blueprints.RunProgress(ctx, orgID, blueprintRunIDs); lerr != nil {
+			serverLog.Warn("blueprint run progress batch lookup failed; omitting blueprint_step_count and blueprint_run_status", "error", lerr)
 		} else {
-			stepCounts = lens
+			progress = runs
 		}
 	}
 	// current_action for the conversations that are actually working, and only
@@ -1181,7 +1185,7 @@ func enrichConversations(ctx context.Context, tx db.TxStores, orgID string, conv
 	out := make([]map[string]any, len(convs))
 	for i := range convs {
 		out[i] = conversationResponse(&convs[i], counts[convs[i].ID], artsByConv[convs[i].ID],
-			stepCounts[convs[i].BlueprintRunID],
+			progress[convs[i].BlueprintRunID],
 			currentAction(toolCalls[convs[i].ID], convs[i].WorktreePath))
 	}
 	return out, nil

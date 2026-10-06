@@ -28,7 +28,7 @@ func concludeRun(t *testing.T, database *sql.DB, taskID string) string {
 	).Scan(&conversationID); err != nil {
 		t.Fatalf("read the task's newest conversation: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = ?`, conversationID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, conversationID); err != nil {
 		t.Fatalf("conclude the conversation: %v", err)
 	}
 	if _, err := database.Exec(

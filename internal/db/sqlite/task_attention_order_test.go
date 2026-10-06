@@ -70,15 +70,20 @@ func TestTaskStore_AttentionOrder_SQLite(t *testing.T) {
 			Conversation: func(t *testing.T, taskID, storedStatus string) string {
 				t.Helper()
 				convID := uuid.New().String()
+				stored, concluded := dbtest.SeedStatus(storedStatus)
+				var completedAt any
+				if concluded {
+					completedAt = time.Now().UTC()
+				}
 				// origin='interactive': the origin CHECK demands the blueprint
 				// parents only for 'blueprint', so this is how a conversation
 				// with no sequence behind it is spelled.
 				if _, err := conn.Exec(`
 					INSERT INTO conversations (id, task_id, status, trigger_type, origin,
-					                           team_id, visibility, creator_user_id)
-					VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?)
-				`, convID, taskID, nullIfEmptyString(storedStatus),
-					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID); err != nil {
+					                           team_id, visibility, creator_user_id, completed_at)
+					VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?, ?)
+				`, convID, taskID, nullIfEmptyString(stored),
+					runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, completedAt); err != nil {
 					t.Fatalf("seed conversation: %v", err)
 				}
 				return convID

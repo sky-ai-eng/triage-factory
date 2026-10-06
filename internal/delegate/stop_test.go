@@ -91,7 +91,7 @@ func TestStop_AlreadyTerminal_NoWake(t *testing.T) {
 	// Trigger_type='event' requires creator_user_id IS NULL per the
 	// CHECK invariant. seedConversation defaults to manual +
 	// sentinel creator; the UPDATE has to clear creator alongside.
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, trigger_type = 'event', creator_user_id = NULL WHERE id = 'r-done'`); err != nil {
 		t.Fatalf("complete conversation: %v", err)
 	}
 
@@ -664,7 +664,7 @@ func TestRecordNativeResult_GenuineFailureIsStillAFailure(t *testing.T) {
 func TestStopConversationAndCancelBlueprint_AlreadyTerminal_LeavesBlueprintAlone(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-stale", "sess-stale", "/tmp/wt-stale")
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = 'r-stale'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'continue' WHERE id = 'r-stale'`); err != nil {
 		t.Fatalf("complete conversation: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -776,7 +776,7 @@ func TestReconcileConversationQueue_CountsAClaimDesyncAndRepairsNothing(t *testi
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-desync", "sess-desync", "/tmp/wt-desync")
 	claimID := markEngaged(t, database, "r-desync")
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = 'r-desync'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP WHERE id = 'r-desync'`); err != nil {
 		t.Fatalf("stage the desync: %v", err)
 	}
 	s := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
@@ -790,8 +790,8 @@ func TestReconcileConversationQueue_CountsAClaimDesyncAndRepairsNothing(t *testi
 	if released {
 		t.Error("boot released the desynced claim; the checker counts and repairs nothing")
 	}
-	if got := storedStatus(t, database, "r-desync"); got != "completed" {
-		t.Errorf("status = %q, want completed (untouched)", got)
+	if !storedConcluded(t, database, "r-desync") {
+		t.Errorf("status = %q, want it still concluded (untouched)", storedStatus(t, database, "r-desync"))
 	}
 }
 

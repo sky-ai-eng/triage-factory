@@ -794,14 +794,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		Role  string `json:"role"`
 	}
 	type response struct {
-		ID              string   `json:"id"`
-		Email           string   `json:"email"`
-		DisplayName     string   `json:"display_name,omitempty"`
-		AvatarURL       string   `json:"avatar_url,omitempty"`
-		GitHubUsername  string   `json:"github_username,omitempty"`
-		JiraAccountID   string   `json:"jira_account_id,omitempty"`
-		JiraDisplayName string   `json:"jira_display_name,omitempty"`
-		Orgs            []orgRow `json:"orgs"`
+		ID              string `json:"id"`
+		Email           string `json:"email"`
+		DisplayName     string `json:"display_name,omitempty"`
+		AvatarURL       string `json:"avatar_url,omitempty"`
+		GitHubUsername  string `json:"github_username,omitempty"`
+		JiraAccountID   string `json:"jira_account_id,omitempty"`
+		JiraDisplayName string `json:"jira_display_name,omitempty"`
+		// LinearUserID / LinearDisplayName are the viewer's binding in the
+		// active org's Linear workspace, and absent when there is none — no
+		// active org, an org without Linear, or no binding in its workspace.
+		LinearUserID      string   `json:"linear_user_id,omitempty"`
+		LinearDisplayName string   `json:"linear_display_name,omitempty"`
+		Orgs              []orgRow `json:"orgs"`
 		// Teams is the viewer's own team-membership rows, across every org
 		// they belong to — hence the org tag on each, since /me spans orgs
 		// where the teams list is scoped to one. Membership rows only: a team
@@ -872,19 +877,22 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		// rig still works while production calls (always wired)
 		// populate identity from the users row.
 		if s.users != nil {
-			// Identity is host-scoped (GitHub, Jira):
-			// resolve the local org's GitHub + Jira hosts, then look up
-			// each binding for (user, host). s.orgs is wired by New();
-			// guard like s.users for the bare-rig test.
-			var ghHost, jiraHost string
+			// Identity is host-scoped for GitHub and Jira and
+			// workspace-scoped for Linear: resolve the local org's hosts and
+			// Linear workspace, then look up each binding under them.
+			// s.orgs is wired by New(); guard like s.users for the
+			// bare-rig test.
+			var ghHost, jiraHost, linearWorkspace string
 			if s.orgs != nil {
 				if orgSet, err := s.orgs.GetSettings(r.Context(), runmode.LocalDefaultOrgID); err == nil {
 					ghHost = orgSet.GitHubBaseURL
 					jiraHost = orgSet.JiraBaseURL
+					linearWorkspace = orgSet.LinearWorkspaceID
 				}
 			}
 			resp.GitHubUsername, _ = s.users.GetGitHubLogin(r.Context(), runmode.LocalDefaultUserID, ghHost)
 			resp.JiraAccountID, resp.JiraDisplayName, _ = s.users.GetJiraIdentity(r.Context(), runmode.LocalDefaultUserID, jiraHost)
+			resp.LinearUserID, resp.LinearDisplayName, _ = s.users.GetLinearIdentity(r.Context(), runmode.LocalDefaultUserID, linearWorkspace)
 		}
 		// The sole local team, which local mode reports the single user as
 		// admin of — the same role the teams list gives the per-team gates, so
@@ -1070,6 +1078,25 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 		if !stillMember {
 			resp.ActiveOrgID = ""
+		}
+	}
+
+	// The Linear pair is read against the active org's workspace only, with
+	// no fallback to a binding elsewhere: a Linear user id is meaningful only
+	// in the workspace that issued it, so another org's would be the wrong id
+	// here. It runs after the stale-org drop, so an org the caller has left is
+	// never consulted.
+	if resp.ActiveOrgID != "" {
+		if err := s.tx.WithReadTx(r.Context(), resp.ActiveOrgID, claims.Subject, func(tx tfdb.TxStores) error {
+			orgSet, err := tx.Orgs.GetSettings(r.Context(), resp.ActiveOrgID)
+			if err != nil {
+				return err
+			}
+			resp.LinearUserID, resp.LinearDisplayName, err = tx.Users.GetLinearIdentity(r.Context(), claims.Subject, orgSet.LinearWorkspaceID)
+			return err
+		}); err != nil {
+			internalError(w, "auth", fmt.Errorf("/api/me linear identity for %s: %w", claims.Subject, err))
+			return
 		}
 	}
 

@@ -624,8 +624,8 @@ func seedPgTeamConversationOnEntity(t *testing.T, h *pgtest.Harness, orgID, user
 
 	conversationID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
-		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'completed', $7, $8)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index, completed_at)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, 'manual', 'open', $7, $8, now())
 	`, conversationID, orgID, userID, teamID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}
@@ -747,10 +747,10 @@ func seedPgConversationForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 
 	conversationID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, trigger_type, status, blueprint_run_id, blueprint_step_index, completed_at)
 		VALUES ($1, $2, $3,
 		        (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1),
-		        'team', $4, $5, 'manual', 'completed', $6, $7)
+		        'team', $4, $5, 'manual', 'open', $6, $7, now())
 	`, conversationID, orgID, userID, taskID, promptID, brID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed run: %v", err)
 	}

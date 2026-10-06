@@ -209,7 +209,7 @@ func RunConversationReturnedRowConformance(t *testing.T, mk ConversationReturned
 		call func(store db.ConversationStore, ctx context.Context, orgID, conversationID, claimID string) (*domain.Conversation, error)
 	}{
 		{"CompleteForClaimSystem", func(store db.ConversationStore, ctx context.Context, orgID, conversationID, claimID string) (*domain.Conversation, error) {
-			return store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0.5, 1000, 2, "done", "finish", "", "")
+			return store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0.5, 1000, 2, "done", "finish", "", "")
 		}},
 	} {
 		t.Run(tc.name+"_returns_the_stored_row", func(t *testing.T) {
@@ -343,7 +343,7 @@ func RunConversationAppPoolReturnedRowConformance(t *testing.T, mk ConversationA
 	// that the ended_at IS NULL guard still holds under RLS rather than the
 	// policy being what excluded the third row.
 	first := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-	second := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+	second := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 	stamped, err := store.EndConversationsForTask(ctx, orgID, taskID, domain.EndedRequeued)
 	if err != nil {
 		t.Fatalf("EndConversationsForTask: %v", err)

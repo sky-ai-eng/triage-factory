@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -64,7 +65,7 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 }
 
 // seedPromptConversation records one conversations row against promptID, started at
-// startedAt, with the given terminal status ('completed' or 'failed').
+// startedAt, with the given settled status (dbtest.SeedConcluded or 'failed').
 // conversations.blueprint_run_id is NOT NULL, so this mints a throwaway
 // single-step blueprint_run to hang the conversation off, mirroring
 // seedPgConversationsForStats.
@@ -81,10 +82,11 @@ func seedPromptConversation(t *testing.T, h *Harness, orgID, userID, teamID, tas
 		VALUES ($1, $2, $3, $4, $5, 'manual', 'completed', '/tmp/wt', $6, '[]')
 	`, brID, orgID, userID, bpID, taskID, startedAt)
 	convID := uuid.New().String()
+	stored, concluded := dbtest.SeedStatus(status)
 	MustExec(t, h.AdminDB, `
-		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, blueprint_run_id)
-		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8, $9)
-	`, convID, orgID, userID, teamID, taskID, promptID, status, startedAt, brID)
+		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility, task_id, prompt_id, status, started_at, blueprint_run_id, completed_at)
+		VALUES ($1, $2, $3, $4, 'team', $5, $6, $7, $8::timestamptz, $9, CASE WHEN $10::boolean THEN $8::timestamptz END)
+	`, convID, orgID, userID, teamID, taskID, promptID, stored, startedAt, brID, concluded)
 	// Accounting rides the ledger + claim telemetry the stats derive from.
 	MustExec(t, h.AdminDB, `
 		INSERT INTO messages (org_id, conversation_id, role, subtype, content, cost_usd, created_at)
@@ -154,10 +156,10 @@ func TestMarketplaceStats_PromptAggregation_TwoTeamsAndDeletedCopy(t *testing.T)
 	// resolution, so a nanosecond-precision time.Now() would never compare
 	// equal after the round trip through the stats row.
 	base := time.Now().UTC().Add(-24 * time.Hour).Truncate(time.Microsecond)
-	seedPromptConversation(t, h, orgA, bob, teamB, taskB, teamBPromptID, "completed", base)
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, teamBPromptID, dbtest.SeedConcluded, base)
 	seedPromptConversation(t, h, orgA, bob, teamB, taskB, teamBPromptID, "failed", base.Add(time.Hour))
 	latestRunAt := base.Add(2 * time.Hour)
-	seedPromptConversation(t, h, orgA, carol, teamC, taskC, teamCPromptID, "completed", latestRunAt)
+	seedPromptConversation(t, h, orgA, carol, teamC, taskC, teamCPromptID, dbtest.SeedConcluded, latestRunAt)
 	// A still-in-flight run, started AFTER every terminal run above. It must
 	// count toward neither total_runs nor success_rate (it hasn't resolved
 	// either way) nor last_run_at — if it leaked into the aggregate, both
@@ -322,7 +324,7 @@ func TestMarketplaceStats_Idempotent(t *testing.T) {
 		t.Fatalf("teamB install: %v", err)
 	}
 	taskB := seedMarketplaceStatsTask(t, h, orgA, bob, teamB)
-	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, "completed", time.Now().UTC())
+	seedPromptConversation(t, h, orgA, bob, teamB, taskB, rootPromptID, dbtest.SeedConcluded, time.Now().UTC())
 
 	if err := stores.Marketplace.RecomputeStatsSystem(t.Context(), orgA); err != nil {
 		t.Fatalf("first RecomputeStatsSystem: %v", err)

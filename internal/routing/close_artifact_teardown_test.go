@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -145,7 +146,7 @@ func TestCloseCascade_TearsDownTheTasksArtifacts(t *testing.T) {
 	r.spawner = sp
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#teardown")
-	_, convID := seedRunOnTask(t, database, taskID, "completed", "completed")
+	_, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
 	prID, reviewID := seedUnresolvedArtifacts(t, database, convID, "owner/repo", 7)
 
 	enqueueMerged(t, database, entityID)
@@ -206,7 +207,7 @@ func TestCloseCascade_ObligationCloseTearsDownToo(t *testing.T) {
 	r.spawner = sp
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "octo/repo#9")
-	_, convID := seedRunOnTask(t, database, taskID, "completed", "completed")
+	_, convID := seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
 	prID, reviewID := seedUnresolvedArtifacts(t, database, convID, "octo/repo", 9)
 
 	// The divergence the obligation repairs: the entity's snapshot says
@@ -243,7 +244,7 @@ func TestCloseCascade_ReplayedCloseTearsNothingDown(t *testing.T) {
 	r.spawner = sp
 
 	entityID, taskID := seedCIFailedTaskOnEntity(t, r, database, "owner/repo#replayed-teardown")
-	seedRunOnTask(t, database, taskID, "completed", "completed")
+	seedRunOnTask(t, database, taskID, "completed", dbtest.SeedConcluded)
 
 	enqueueMerged(t, database, entityID)
 	if err := r.drainEventQueue(context.Background()); err != nil {

@@ -15,13 +15,19 @@ package domain
 //
 //	queued | fetching | cloning | agent_starting |
 //	awaiting_credentials | running | open            (non-terminal)
-//	completed | failed                               (terminal)
+//	failed                                           (terminal)
 //
-// The terminal half is deliberately two names with one owner each: the agent
-// concluded, or the infrastructure died. Stopping a conversation without concluding it
-// is a park (`open`), not a third terminal — a park that is never resumed IS
-// the cancellation, and cancellation itself is already spelled at the task
-// layer (return-to-queue, drag-to-done) and the blueprint layer
+// The status says whether the transcript can be driven, and the one terminal
+// is the infrastructure dying under the agent. A conversation never
+// concludes: a step's verdict (Outcome, OutcomeReason, ResultSummary) is
+// recorded on the step's conversation and parks it `open` like any other turn
+// end, and whether the work is done is its blueprint run's status to say.
+// A conversation parked with its verdict is CONCLUDED — status `open` with
+// CompletedAt set (Conversation.Concluded) — which is what every "will this
+// conversation take more input on its own" question reads instead of a
+// status. Stopping a conversation is a park too — a park that is never
+// resumed IS the cancellation, and cancellation itself is already spelled at
+// the task layer (return-to-queue, drag-to-done) and the blueprint layer
 // (`cancel_requested` / BlueprintRunStatusCancelled).
 //
 // Keeping the sets here means "is this conversation active?" / "is this a phase?" has
@@ -63,19 +69,18 @@ const (
 )
 
 // The displayed conversation statuses that are not claim phases: the two
-// derived states, the parked state, and the terminals.
+// derived states, the parked state, and the terminal.
 const (
 	// StatusQueued — work is waiting and nobody is driving it. Derived.
 	StatusQueued = "queued"
 	// StatusRunning — an engagement exists and the agent process is live.
 	// Derived.
 	StatusRunning = "running"
-	// StatusOpen — a turn ended without a conclusion: parked, not executing,
-	// not concluded, resumed through its own path rather than the dispatcher.
+	// StatusOpen — a turn ended: parked, not executing, resumed through its
+	// own path rather than the dispatcher. A turn that ended with the step's
+	// verdict parks here too, with CompletedAt set (Conversation.Concluded).
 	StatusOpen = "open"
 
-	// StatusCompleted — the agent reached a conclusion.
-	StatusCompleted = "completed"
 	// StatusFailed — the infrastructure under the agent died.
 	StatusFailed = "failed"
 )
@@ -104,12 +109,10 @@ func IsClaimPhase(status string) bool {
 }
 
 // AllTerminalConversationStatuses returns the terminal display statuses. One set, and
-// it describes stored rows as faithfully as it describes new writes: the
-// retired terminals were rewritten by migration rather than carried forward as
-// names every predicate has to remember (202608010002, SQLite; Postgres had no
-// rows to migrate). A stored status this doesn't list is a bug, not history.
+// it describes stored rows as faithfully as it describes new writes: no stored
+// row carries a terminal this doesn't list, and one that did would be a bug.
 func AllTerminalConversationStatuses() []string {
-	return []string{StatusCompleted, StatusFailed}
+	return []string{StatusFailed}
 }
 
 // AllConversationStatuses returns every value a displayed Conversation.Status may
@@ -121,18 +124,37 @@ func AllConversationStatuses() []string {
 }
 
 // IsTerminalConversationStatus reports whether status is a terminal
-// conversation state — one the conversation never leaves.
+// conversation state — one the conversation never leaves. That is `failed`
+// alone; a concluded conversation is `open` and is answered by
+// Conversation.Concluded, which needs more than the status to say.
 //
 // NB failed conversations are terminal regardless of failure_kind: failure_kind is a
 // *classification* of the failure (memory_limit / crash / …) and is
 // legitimately empty on an unclassified or legacy failed row, so a failure
 // count keys on status=="failed", never on a non-empty failure_kind.
 func IsTerminalConversationStatus(status string) bool {
-	switch status {
-	case StatusCompleted, StatusFailed:
-		return true
-	}
-	return false
+	return status == StatusFailed
+}
+
+// Concluded reports whether the conversation is parked with its step's
+// verdict: `open`, with the conclusion stamped. It is the Go spelling of the
+// stores' concluded fragment, and the half of Settled that a status alone
+// cannot answer.
+//
+// CompletedAt rather than Outcome, because the stamp is the one both kinds of
+// concluded row carry: a conclusion recorded without an outcome token (the
+// reactor resolves an empty outcome by position) is concluded all the same.
+// A wake leaves the stamp in place — a follow-up on finished work parks
+// concluded again — and only the re-open of an aborted blueprint clears it,
+// together with the verdict it withdraws.
+func (c *Conversation) Concluded() bool {
+	return c.Status == StatusOpen && c.CompletedAt != nil
+}
+
+// Settled reports whether the conversation takes no more work on its own:
+// failed, or concluded. A follow-up may still wake a concluded one.
+func (c *Conversation) Settled() bool {
+	return IsTerminalConversationStatus(c.Status) || c.Concluded()
 }
 
 // ParkReason is WHY a conversation was parked `open` — the closed vocabulary

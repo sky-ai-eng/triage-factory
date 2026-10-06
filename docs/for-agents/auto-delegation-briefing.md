@@ -218,10 +218,10 @@ You can land 140, 141, 142 in any order relative to each other — all three are
 Current contract (in `internal/agentprompt/blocks/completion/`):
 
 ```json
-{ "status": "completed", "summary": "...", "links": {} }
+{ "outcome": "finish", "summary": "..." }
 ```
 
-After SKY-148: `status` can also be `"task_unsolvable"`. The spawner-assigned `"failed"` state is never returned by the agent — it's set by the spawner when no valid JSON arrives.
+`outcome` is `finish` or `abort` (an abort carries a `reason`), plus `continue` on a non-final blueprint step. The verdict is recorded on the step's conversation and acted on by its blueprint run; the conversation itself parks `open`. The `failed` state is never returned by the agent — it's set by the spawner when the runtime under the agent dies.
 
 After SKY-141: the agent is required to have written its run memory on disk **before** returning its completion JSON — at the fixed path `./_tfac/memory.md`, which the executor mirrors into `conversation_memory` after every tool call that changes it, with a final read at park, at conclusion and on failure. The spawner verifies this and auto-resumes the session once with a correction message if the file is missing. This happens externally via `--resume`, not via hooks.
 

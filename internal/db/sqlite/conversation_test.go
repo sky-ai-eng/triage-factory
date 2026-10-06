@@ -123,9 +123,14 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	}
 	// An empty status is the mid-flight state — SQL NULL, which the display
 	// ladder reads as `queued` — not the empty string, which is no status.
+	resolved, concluded := dbtest.SeedStatus(conv.Status)
 	var status any
-	if conv.Status != "" {
-		status = conv.Status
+	if resolved != "" {
+		status = resolved
+	}
+	if concluded && conv.CompletedAt == nil {
+		at := time.Now().UTC()
+		conv.CompletedAt = &at
 	}
 	// team_id defaults to the local sentinel team; a conversation staged for
 	// a team-narrowing test names its own.
@@ -133,13 +138,19 @@ func seedSQLiteConversation(t *testing.T, conn *sql.DB, conv domain.Conversation
 	if teamID == "" {
 		teamID = runmode.LocalDefaultTeamID
 	}
+	// A conclusion stamp, when the seed carries one, is what makes an `open`
+	// row concluded rather than paused.
+	var completedAt any
+	if conv.CompletedAt != nil {
+		completedAt = conv.CompletedAt.UTC()
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?)
+		                           creator_user_id, blueprint_run_id, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?)
 	`, id, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, teamID, creator, conv.BlueprintRunID); err != nil {
+		trigger, triggerID, teamID, creator, conv.BlueprintRunID, completedAt); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}
 	return id
@@ -522,7 +533,7 @@ func TestConversationStore_SQLite_ActiveIDsForTeamSystem(t *testing.T) {
 
 	running := mk("running")
 	open := mk("open")
-	mk("completed")
+	mk(dbtest.SeedConcluded)
 	mk("failed")
 
 	ids, err := store.ActiveIDsForTeamSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID)
