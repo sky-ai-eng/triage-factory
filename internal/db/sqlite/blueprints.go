@@ -1197,12 +1197,13 @@ func parkOrphanedChildConversations(ctx context.Context, q queryer, blueprintRun
 	return err
 }
 
-func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id string) (bool, error) {
+func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// CAS aborted → running while the task is still open, clearing the stale
-	// abort metadata, then withdraw the verdict the current step recorded. The
+	// CAS aborted → running while the task is still open and the conversation
+	// is the run's current step, clearing the stale abort metadata, then
+	// withdraw that conversation's verdict. The
 	// resumed step re-finalizes the blueprint through the normal post-resume
 	// disposition, and a verdict left behind would read as one it had already
 	// given. One transaction, so a reopened run never carries a stale verdict.
@@ -1214,7 +1215,10 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 			WHERE id = ? AND status = 'aborted'
 			  AND EXISTS (SELECT 1 FROM tasks t
 			              WHERE t.id = blueprint_runs.task_id AND t.status NOT IN ('done', 'dismissed'))
-		`, id)
+			  AND EXISTS (SELECT 1 FROM conversations c
+			              WHERE c.id = ? AND c.blueprint_run_id = blueprint_runs.id
+			                AND c.blueprint_step_index = blueprint_runs.current_step_index)
+		`, id, stepConversationID)
 		if err != nil {
 			return err
 		}
@@ -1229,9 +1233,8 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 		_, err = q.ExecContext(ctx, `
 			UPDATE conversations
 			SET outcome = NULL, outcome_reason = NULL, completed_at = NULL
-			WHERE blueprint_run_id = ?
-			  AND blueprint_step_index = (SELECT current_step_index FROM blueprint_runs WHERE id = ?)
-		`, id, id)
+			WHERE id = ? AND blueprint_run_id = ?
+		`, stepConversationID, id)
 		return err
 	})
 	if err != nil {

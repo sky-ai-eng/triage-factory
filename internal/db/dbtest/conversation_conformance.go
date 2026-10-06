@@ -1153,7 +1153,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("second flip on a queued row succeeded; want refused (CAS loser)")
 		}
 
-		// completed → ok, whatever the outcome, once the blueprint that owned
+		// concluded → ok, whatever the outcome, once the blueprint that owned
 		// the step has stopped. The agent stopping mid-work and the agent
 		// finishing are both states a person can follow up on, and both left a
 		// workspace behind to follow up in. Settling the blueprint first is the
@@ -1165,7 +1165,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, abortConversation); err != nil || !ok {
-			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
+			t.Errorf("from concluded+abort: ok=%v err=%v, want true", ok, err)
 		}
 		finishConversation, finishBR, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
 		if _, err := HolderComplete(store, ctx, orgID, finishConversation, domain.StatusOpen, 0, 0, 0, "shipped", "finish", "", ""); err != nil {
@@ -1173,7 +1173,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		seed.SetBlueprintRunStatus(t, finishBR, "completed")
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, finishConversation); err != nil || !ok {
-			t.Errorf("from completed+finish: ok=%v err=%v, want true — a follow-up on concluded work", ok, err)
+			t.Errorf("from concluded+finish: ok=%v err=%v, want true — a follow-up on concluded work", ok, err)
 		}
 		// failed → refused. The infrastructure under it died, so there is no
 		// workspace to land a follow-up in; this is the one rest state the CAS
@@ -1187,9 +1187,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 	})
 
-	// The window between a step's terminal write and its blueprint reacting to
-	// it, where the conversation reads `completed` to every status-only gate and
-	// only a statement that also reads the parent can tell the difference.
+	// The window between a step's verdict and its blueprint reacting to it,
+	// where the conversation reads concluded, exactly as it will once the
+	// blueprint has moved on, and only a statement that also reads the parent
+	// can tell the difference.
 	t.Run("MarkQueuedForResume_RefusesAConcludedStepOfARunningBlueprint", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()

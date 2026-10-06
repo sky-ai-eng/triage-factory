@@ -655,9 +655,15 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	brID := insertBlueprintRunForTest(t, conn, domain.BlueprintRun{
 		ID: "reopen-run", BlueprintID: "reopen-blueprint", TaskID: task.ID,
 	})
+	insertPromptForBlueprintTest(t, conn, domain.Prompt{ID: "reopen-prompt", Name: "Reopen Step", Body: "x", Source: "user"})
+	step0 := 0
+	insertConversationForTest(t, conn, domain.Conversation{
+		ID: "reopen-step", TaskID: task.ID, PromptID: "reopen-prompt", Status: dbtest.SeedConcluded,
+		Model: "claude-sonnet-4-6", BlueprintRunID: brID, BlueprintStepIndex: &step0,
+	})
 
 	// A running blueprint is not re-openable (the CAS guards on status='aborted').
-	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID); err != nil || reopened {
+	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID, "reopen-step"); err != nil || reopened {
 		t.Errorf("ReopenRunForResume on running: reopened=%v err=%v, want false", reopened, err)
 	}
 
@@ -667,7 +673,11 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	if _, err := blueprints.MarkRunStatus(ctx, org, brID, domain.BlueprintRunStatusAborted, "stopped for review", &step); err != nil {
 		t.Fatalf("MarkRunStatus(aborted): %v", err)
 	}
-	reopened, err := blueprints.ReopenRunForResume(ctx, org, brID)
+	// A conversation that is not the run's current step reopens nothing.
+	if reopened, err := blueprints.ReopenRunForResume(ctx, org, brID, "not-a-step"); err != nil || reopened {
+		t.Errorf("ReopenRunForResume naming another conversation: reopened=%v err=%v, want false", reopened, err)
+	}
+	reopened, err := blueprints.ReopenRunForResume(ctx, org, brID, "reopen-step")
 	if err != nil || !reopened {
 		t.Fatalf("ReopenRunForResume on aborted: reopened=%v err=%v, want true", reopened, err)
 	}
@@ -686,7 +696,7 @@ func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	}
 
 	// Idempotent: a second re-open on the now-running row is a guarded no-op.
-	if reopened, _ := blueprints.ReopenRunForResume(ctx, org, brID); reopened {
+	if reopened, _ := blueprints.ReopenRunForResume(ctx, org, brID, "reopen-step"); reopened {
 		t.Error("second ReopenRunForResume on running succeeded; want no-op false")
 	}
 }

@@ -808,7 +808,7 @@ func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, 
 		// conversation and its blueprint never split across the
 		// resumable/terminal boundary.
 		if reopenAbortedBlueprint && conv.BlueprintRunID != "" {
-			if _, err := ts.Blueprints.ReopenRunForResume(ctx, orgID, conv.BlueprintRunID); err != nil {
+			if _, err := ts.Blueprints.ReopenRunForResume(ctx, orgID, conv.BlueprintRunID, conv.ID); err != nil {
 				return false, fmt.Errorf("flip status: %w", err)
 			}
 		}

@@ -109,11 +109,8 @@ func IsClaimPhase(status string) bool {
 }
 
 // AllTerminalConversationStatuses returns the terminal display statuses. One set, and
-// it describes stored rows as faithfully as it describes new writes: the
-// retired terminals were rewritten by migration rather than carried forward as
-// names every predicate has to remember (202608010002 and 202610060001,
-// SQLite; Postgres had no rows to migrate). A stored status this doesn't list
-// is a bug, not history.
+// it describes stored rows as faithfully as it describes new writes: no stored
+// row carries a terminal this doesn't list, and one that did would be a bug.
 func AllTerminalConversationStatuses() []string {
 	return []string{StatusFailed}
 }

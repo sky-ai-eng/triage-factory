@@ -699,16 +699,20 @@ type BlueprintStore interface {
 	// advance/close it. A follow-up can change the blueprint only while its
 	// task is open, so a task a person has since closed leaves the run aborted.
 	//
-	// The re-open also withdraws the verdict its current step recorded
+	// The re-open also withdraws the verdict stepConversationID recorded
 	// (outcome, outcome_reason and the conclusion stamp): a running blueprint
 	// whose current step still carried one would read as a step that had
-	// already given its answer, and the reactor would act on it again.
+	// already given its answer, and the reactor would act on it again. It
+	// re-opens only when stepConversationID is that run's conversation at its
+	// current step, so the run and the withdrawal land together or not at all,
+	// and no other conversation's verdict is touched.
 	// Returns (true, nil) when it re-opened the row, (false, nil) when the
 	// blueprint was not aborted (already running for an `open` resume,
-	// finished, or finalized by a racing path) or its task is closed. Runs
-	// inside the same tx as ConversationStore.MarkQueuedForResume so the run
-	// flip and the blueprint re-open commit atomically.
-	ReopenRunForResume(ctx context.Context, orgID string, id string) (reopened bool, err error)
+	// finished, or finalized by a racing path), its task is closed, or the
+	// conversation is not its current step. Runs inside the same tx as
+	// ConversationStore.MarkQueuedForResume so the run flip and the blueprint
+	// re-open commit atomically.
+	ReopenRunForResume(ctx context.Context, orgID, id, stepConversationID string) (reopened bool, err error)
 
 	// RequestRunCancelSystem raises the DB sequence-cancel signal
 	// (cancel_requested = true) on a still-running blueprint_run, so the claim

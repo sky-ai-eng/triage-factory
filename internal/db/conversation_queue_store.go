@@ -253,10 +253,9 @@ func renderOutcomesSQL(keep func(HandBackPolicy) bool) string {
 
 // TerminalConversationStatusesSQL is the terminal conversation statuses as a
 // SQL IN-list body — one name: the infrastructure died. A conversation never
-// concludes; its step's verdict parks it `open` (ConcludedConversationSQL). It
-// describes stored rows as faithfully as new writes, because every retired
-// status was rewritten by migration rather than carried forward (202608010002
-// and 202610060001, SQLite; Postgres had no rows to migrate). Mirrors
+// concludes; its step's verdict parks it `open` (ConcludedConversationSQL). No
+// stored row carries a status outside domain.AllConversationStatuses, so this
+// list is complete for stored rows as well as new writes. Mirrors
 // domain.AllTerminalConversationStatuses.
 //
 // A predicate asking "will this conversation take more work on its own"

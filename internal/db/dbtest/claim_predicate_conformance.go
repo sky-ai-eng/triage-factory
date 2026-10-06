@@ -1037,7 +1037,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
 					t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
 				}
-				reopened, err := h.Stores.Blueprints.ReopenRunForResume(ctx, h.OrgID, conv.BlueprintRunID)
+				reopened, err := h.Stores.Blueprints.ReopenRunForResume(ctx, h.OrgID, conv.BlueprintRunID, convID)
 				if err != nil || reopened != tc.wantReopen {
 					t.Fatalf("ReopenRunForResume = (%v, %v), want (%v, nil)", reopened, err, tc.wantReopen)
 				}

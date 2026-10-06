@@ -18,12 +18,16 @@
 --
 -- completed_at stays as the terminal write stamped it: it is the conclusion
 -- stamp that makes an `open` row concluded, and what the idle sweeps age the
--- row from, exactly as they did while it read `completed`. park_reason is
--- cleared: a verdict records no reason, because nothing stopped the
--- conversation, and a reason left over from an earlier park in the same
--- conversation would describe a turn that is no longer the last one.
+-- row from, exactly as they did while it read `completed`. A row the terminal
+-- write left without one is stamped from the oldest evidence it carries
+-- (its boundary, then its start), because an `open` row with no stamp is
+-- unsettled: it would read as live and be claimable on undelivered input.
+-- park_reason is cleared: a verdict records no reason, because nothing
+-- stopped the conversation, and a reason left over from an earlier park in
+-- the same conversation would describe a turn that is no longer the last one.
 UPDATE conversations
 SET status = 'open',
+    completed_at = COALESCE(completed_at, ended_at, started_at),
     park_reason = NULL
 WHERE status = 'completed';
 
