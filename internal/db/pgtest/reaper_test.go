@@ -2,6 +2,8 @@ package pgtest
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"net"
 	"strings"
 	"testing"
@@ -98,5 +100,32 @@ func TestRegisterWithReaper_RejectsWrongAnswer(t *testing.T) {
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("registerWithReaper accepted an answer other than the acknowledgement")
+	}
+}
+
+// TestRegisterWithReaper_HonorsContextWhileAwaitingAck pins the boot bound:
+// a reaper that holds the connection open without answering must not keep
+// the caller past its context, whatever the exchange's own timeout is.
+func TestRegisterWithReaper_HonorsContextWhileAwaitingAck(t *testing.T) {
+	endpoint, lines := fakeReaper(t, func(conn net.Conn) {
+		// Never answer; return when the client gives up and closes.
+		_, _ = conn.Read(make([]byte, 1))
+	})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	conn, err := registerWithReaper(ctx, endpoint)
+	elapsed := time.Since(start)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("registerWithReaper succeeded against a reaper that never answered")
+	}
+	<-lines // the dial and the filter line both went through; only the wait was cut short
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want one wrapping the context's %v", err, context.DeadlineExceeded)
+	}
+	if elapsed >= reaperAckTimeout/2 {
+		t.Errorf("returned after %v; the context ended after 200ms", elapsed)
 	}
 }

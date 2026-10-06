@@ -108,12 +108,23 @@ func registerWithReaper(ctx context.Context, endpoint string) (net.Conn, error) 
 	}
 	fail := func(err error) (net.Conn, error) {
 		_ = conn.Close()
+		if cause := ctx.Err(); cause != nil {
+			// An expired deadline is how a canceled ctx unblocks the
+			// exchange, so the context is the reason, not the timeout.
+			err = fmt.Errorf("%w: %w", err, cause)
+		}
 		return nil, err
 	}
 
 	if err := conn.SetDeadline(time.Now().Add(reaperAckTimeout)); err != nil {
 		return fail(fmt.Errorf("set registration deadline: %w", err))
 	}
+	// The deadline bounds a reaper that never answers. ctx ending has to
+	// cut the wait short too, or a canceled boot sits out the whole
+	// timeout on a socket a dying reaper is keeping open.
+	stopWatch := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stopWatch()
+
 	if _, err := io.WriteString(conn, reaperFilter(testcontainers.GenericLabels())); err != nil {
 		return fail(fmt.Errorf("send filter to reaper %s: %w", endpoint, err))
 	}
@@ -123,6 +134,12 @@ func registerWithReaper(ctx context.Context, endpoint string) (net.Conn, error) 
 	}
 	if string(ack) != reaperAck {
 		return fail(fmt.Errorf("reaper %s answered %q, want %q", endpoint, ack, reaperAck))
+	}
+	// Detach ctx before clearing the deadline: a watcher that already ran
+	// could otherwise expire it on the connection being kept, so a ctx
+	// that ended mid-exchange abandons the registration instead.
+	if !stopWatch() {
+		return fail(fmt.Errorf("register with reaper %s: context ended during the exchange", endpoint))
 	}
 	// The connection is held for the life of the process from here, so
 	// the deadline that bounded the exchange must not outlive it.
