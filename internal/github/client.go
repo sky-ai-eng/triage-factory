@@ -218,9 +218,10 @@ func (c *Client) newRequest(ctx context.Context, method, fullURL string, body an
 // request is the single ctx-aware request core behind the do() family
 // (Get/Post/Put/Patch/Delete) and GetRaw. It builds through newRequest, honors
 // ctx for cancellation (request-scoped cancellation, handler deadlines,
-// poller/shutdown abort — additive to the 30s client timeout), reads the full
-// body, and returns a typed *HTTPError on any non-2xx so every caller can
-// status-discriminate via errors.As and read the body from HTTPError.Body.
+// poller/shutdown abort — additive to the 30s client timeout), returns the
+// body doWithRetry read, and returns a typed *HTTPError on any non-2xx so
+// every caller can status-discriminate via errors.As and read the body from
+// HTTPError.Body.
 //
 // GET requests go through doIdempotent (rate-limit pre-flight + retry);
 // every other method is a mutation and goes through doMutation (single
@@ -328,8 +329,6 @@ func (c *Client) GetConditional(ctx context.Context, path, etag string) (body []
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNotModified {
-		// Drain so the connection can be reused.
-		_, _ = io.Copy(io.Discard, resp.Body)
 		return nil, "", true, nil
 	}
 
@@ -389,6 +388,10 @@ func (c *Client) Delete(ctx context.Context, path string) ([]byte, error) {
 // is the right behavior here — the signed S3 URL would reject our Bearer
 // token anyway.
 //
+// A body that breaks off partway is not retried, because what was read is
+// already in dst; the error wraps a *upstream.TransportError, so it classifies
+// as the transport failure it is (see streamedBody).
+//
 // ctx cancels the (potentially long) download; it's additive to the 15-minute
 // clone timeout. Returns the number of bytes written to dst.
 func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Writer, maxBytes int64) (int64, error) {
@@ -400,7 +403,7 @@ func (c *Client) DownloadArtifact(ctx context.Context, path string, dst io.Write
 	// API calls that share the same client. Inherits Transport/Jar/CheckRedirect.
 	client := *c.http
 	client.Timeout = downloadTimeout
-	resp, err := c.doWithRetry(ctx, &client, true, build)
+	resp, err := c.doStream(ctx, &client, build)
 	if err != nil {
 		return 0, fmt.Errorf("download request %s: %w", path, err)
 	}
@@ -533,10 +536,6 @@ func (c *Client) postGraphQL(ctx context.Context, body any, idempotent bool) ([]
 	}
 	defer resp.Body.Close()
 
-	// Surface a body-read failure rather than proceeding with an empty/partial
-	// payload — matching request() and GetConditional. A truncated read on a
-	// 200 would otherwise fall through, fail the partial-error unmarshal, and
-	// return empty data with no error (silent partial behavior).
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read graphql response body: %w", err)

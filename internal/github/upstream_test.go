@@ -295,3 +295,123 @@ func TestDismissReview_422(t *testing.T) {
 		t.Errorf("DismissReview = %v, want the commented-review explanation", err)
 	}
 }
+
+// truncated answers status with a Content-Length longer than the body it
+// writes, then drops the connection, so the client's body read fails after
+// the headers arrived.
+func truncated(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", "1000")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(`{"message":"Serv`))
+	w.(http.Flusher).Flush()
+	panic(http.ErrAbortHandler)
+}
+
+// TestTruncatedBody_GetRetriedLikeATransportFailure: a GET whose response
+// breaks off mid-body, a success's or an error's, is retried as a dropped
+// connection is, through request and through GetConditional. Both attempts
+// are counted, and the first as transient rather than ok.
+func TestTruncatedBody_GetRetriedLikeATransportFailure(t *testing.T) {
+	for _, via := range []struct {
+		name string
+		get  func(context.Context, *Client) ([]byte, error)
+	}{
+		{name: "request", get: func(ctx context.Context, c *Client) ([]byte, error) { return c.Get(ctx, "/x") }},
+		{name: "GetConditional", get: func(ctx context.Context, c *Client) ([]byte, error) {
+			body, _, _, err := c.GetConditional(ctx, "/x", `"etag"`)
+			return body, err
+		}},
+	} {
+		for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
+			t.Run(via.name+"/"+strconv.Itoa(status), func(t *testing.T) {
+				var calls atomic.Int32
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					if calls.Add(1) == 1 {
+						truncated(w, status)
+					}
+					_, _ = w.Write([]byte(`{"ok":true}`))
+				}))
+				t.Cleanup(srv.Close)
+
+				ctx, tally := upstream.WithTally(context.Background())
+				data, err := via.get(ctx, clientAgainst(srv.URL))
+				if err != nil {
+					t.Fatalf("get: %v", err)
+				}
+				if string(data) != `{"ok":true}` || calls.Load() != 2 {
+					t.Errorf("body = %q after %d attempts, want the retry's after 2", data, calls.Load())
+				}
+				if tally.Attempts() != 2 || tally.Count(upstream.Transient) != 1 || tally.Count(upstream.OK) != 1 {
+					t.Errorf("tally = %d attempts, %d transient, %d ok; want 2, 1, 1",
+						tally.Attempts(), tally.Count(upstream.Transient), tally.Count(upstream.OK))
+				}
+			})
+		}
+	}
+}
+
+// TestTruncatedBody_GraphQLQueryRetried: a GraphQL query is a read, so a
+// response that breaks off mid-body is retried like a GET's.
+func TestTruncatedBody_GraphQLQueryRetried(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if posts.Add(1) == 1 {
+			truncated(w, http.StatusOK)
+		}
+		_, _ = w.Write([]byte(`{"data":{"viewer":{"login":"x"}}}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	data, err := clientAgainst(srv.URL).PostGraphQL(context.Background(), map[string]any{"query": "{ viewer { login } }"})
+	if err != nil {
+		t.Fatalf("PostGraphQL: %v", err)
+	}
+	if !strings.Contains(string(data), `"login":"x"`) || posts.Load() != 2 {
+		t.Errorf("data = %s after %d attempts, want the retry's after 2", data, posts.Load())
+	}
+}
+
+// TestTruncatedBody_WritesNotRetried: a write whose response breaks off may
+// already have been applied, so a REST write and a GraphQL mutation are each
+// returned after one attempt, as a transport failure rather than a local one.
+func TestTruncatedBody_WritesNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(context.Context, *Client) error
+	}{
+		{name: "REST", write: func(ctx context.Context, c *Client) error {
+			_, err := c.Post(ctx, "/repos/o/r/issues/1/comments", map[string]any{"body": "x"})
+			return err
+		}},
+		{name: "GraphQL mutation", write: func(ctx context.Context, c *Client) error {
+			_, err := c.PostGraphQLMutation(ctx, map[string]any{"query": "mutation { x }"})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				truncated(w, http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+
+			ctx, tally := upstream.WithTally(context.Background())
+			err := tc.write(ctx, clientAgainst(srv.URL))
+			var te *upstream.TransportError
+			if !errors.As(err, &te) {
+				t.Fatalf("err = %v, want a *upstream.TransportError", err)
+			}
+			if class, ok := upstream.ClassOf(err); !ok || class != upstream.Transient {
+				t.Errorf("ClassOf = (%q, %v), want transient", class, ok)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Errorf("attempts = %d, want 1: the write may have applied", got)
+			}
+			if tally.Attempts() != 1 || tally.Count(upstream.Transient) != 1 {
+				t.Errorf("tally = %d attempts, %d transient; want 1, 1", tally.Attempts(), tally.Count(upstream.Transient))
+			}
+		})
+	}
+}

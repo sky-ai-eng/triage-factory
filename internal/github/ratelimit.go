@@ -193,7 +193,7 @@ type reqBuilder func() (*http.Request, error)
 // secondary/abuse limit) or a transient failure up to maxRateLimitRetries extra
 // attempts. See doWithRetry.
 func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Response, error) {
-	return c.doWithRetry(ctx, c.http, true, build)
+	return c.doWithRetry(ctx, c.http, true, false, build)
 }
 
 // doMutation sends a single, non-retried request over c.http. A mutation
@@ -202,14 +202,20 @@ func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Resp
 // rate-limited 429/403 response short-circuits straight into ErrRateLimited
 // and a transient failure is returned as-is. See doWithRetry.
 func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Response, error) {
-	return c.doWithRetry(ctx, c.http, false, build)
+	return c.doWithRetry(ctx, c.http, false, false, build)
+}
+
+// doStream is doIdempotent over hc for a response the caller streams instead
+// of buffering: a success comes back with its body unread. See doWithRetry.
+func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder) (*http.Response, error) {
+	return c.doWithRetry(ctx, hc, true, true, build)
 }
 
 // doWithRetry is the shared request loop behind every request-core method
 // (request, GetConditional, postGraphQL, DownloadArtifact — the last supplies
-// its own hc with an extended timeout, everything else passes c.http). Every
-// attempt is classified and counted (upstream.Record) against the client's
-// org.
+// its own hc with an extended timeout and streams its body, everything else
+// passes c.http). Every attempt is classified and counted (upstream.Record)
+// against the client's org.
 //
 // For idempotent calls it pre-flights a known exhausted budget (awaitBudget)
 // and retries up to maxRateLimitRetries extra attempts:
@@ -217,12 +223,12 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 //     x-ratelimit-remaining: 0, or a secondary-limit body — honoring
 //     Retry-After when present, else the primary reset time when that's what
 //     triggered it, else exponential backoff;
-//   - a transient failure — a dropped connection, a 5xx or a 408 — after the
-//     response's Retry-After when it has one, else transient backoff. A
-//     transient failure that another attempt would only repeat is returned
-//     at once: a 403 whose body is not JSON (a proxy in front of GHES), a
-//     TLS failure, or a timeout (upstream.RetryableResponse,
-//     upstream.RetryableTransport).
+//   - a transient failure — a dropped connection, a response body that breaks
+//     off partway, a 5xx or a 408 — after the response's Retry-After when it
+//     has one, else transient backoff. A transient failure that another
+//     attempt would only repeat is returned at once: a 403 whose body is not
+//     JSON (a proxy in front of GHES), a TLS failure, or a timeout
+//     (upstream.RetryableResponse, upstream.RetryableTransport).
 //
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
@@ -232,15 +238,17 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // transient failure marks its host unreachable, and every later request to
 // that host gets one attempt the same way a mutation does. A request that
 // timed out counts toward its host's silence, and a later request to a silent
-// host is not sent (upstream.Silent).
+// host is not sent (upstream.Silent). A body that breaks off counts toward
+// unreachable only: the host answered.
 //
-// Any response that isn't retried is returned to the caller. A success keeps
-// its body untouched and still open, so callers that stream
-// (DownloadArtifact) or need the raw status (GetConditional's 304) keep their
-// own post-processing. An error response's body has already been read,
-// capped at upstream.MaxErrorBody, to classify it, and is replayed onto the
-// response for the caller.
-func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bool, build reqBuilder) (*http.Response, error) {
+// Any response that isn't retried is returned to the caller with its body
+// already read — whole for a success, capped at upstream.MaxErrorBody for an
+// error — and replayed onto the response, so a success is counted only once
+// its body has arrived. A streamed request (stream) is the exception: its
+// success comes back with the body unread and the attempt not yet counted,
+// and streamedBody counts it when the caller's read ends. That read is never
+// retried, because what it read is already in the caller's hands.
+func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, stream bool, build reqBuilder) (*http.Response, error) {
 	if idempotent {
 		if err := c.awaitBudget(ctx); err != nil {
 			return nil, err
@@ -288,22 +296,43 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 		upstream.MarkAnswered(ctx, host)
 		c.recordRateLimit(resp.Header)
 
+		if stream && resp.StatusCode < 400 {
+			resp.Body = &streamedBody{ReadCloser: resp.Body, ctx: ctx, orgID: c.orgID, host: host}
+			return resp, nil
+		}
+
+		var data []byte
+		var readErr error
+		if resp.StatusCode < 400 {
+			data, readErr = io.ReadAll(resp.Body)
+		} else {
+			data, readErr = upstream.ReadErrorBody(resp.Body)
+		}
+		resp.Body.Close()
+		if readErr != nil {
+			// The response broke off mid-body: a transport failure like one
+			// from Do, retried on the same terms. GitHub did answer, so it
+			// counts toward unreachable but never toward silent.
+			class, counted := upstream.ClassifyTransport(ctx, readErr)
+			if !counted {
+				return nil, readErr
+			}
+			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+			if !upstream.RetryableTransport(readErr, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, host)
+				return nil, &upstream.TransportError{Err: readErr}
+			}
+			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		resp.Body = newBodyReader(data)
+
 		if resp.StatusCode < 400 {
 			upstream.Record(ctx, upstream.GitHub, c.orgID, upstream.OK)
 			return resp, nil
 		}
-
-		data, readErr := upstream.ReadErrorBody(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
-				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-				upstream.MarkUnreachable(ctx, host)
-				return nil, &upstream.TransportError{Err: readErr}
-			}
-			return nil, readErr
-		}
-		resp.Body = newBodyReader(data)
 
 		retryAfter, hasRetryAfter := upstream.RetryAfter(resp.Header)
 		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
@@ -394,6 +423,58 @@ func isSecondaryRateLimitBody(body []byte) bool {
 // normally by the caller.
 func newBodyReader(data []byte) io.ReadCloser {
 	return io.NopCloser(bytes.NewReader(data))
+}
+
+// streamedBody is the body of a success doWithRetry returns unread, and it
+// counts that attempt once the outcome is known. A body read to its end, or
+// closed early by a caller that stopped reading, is OK. A read that breaks
+// off partway is a transport failure: it is counted as one, marks the host
+// unreachable, and is returned as a *upstream.TransportError so a caller can
+// tell it from a fault of its own, such as a failed write to its destination.
+type streamedBody struct {
+	io.ReadCloser
+	ctx   context.Context
+	orgID string
+	host  string
+	ended bool
+}
+
+func (b *streamedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	switch err {
+	case nil:
+	case io.EOF:
+		b.end(upstream.OK, true)
+	default:
+		class, counted := upstream.ClassifyTransport(b.ctx, err)
+		b.end(class, counted)
+		if counted {
+			err = &upstream.TransportError{Err: err}
+		}
+	}
+	return n, err
+}
+
+func (b *streamedBody) Close() error {
+	b.end(upstream.OK, true)
+	return b.ReadCloser.Close()
+}
+
+// end counts the attempt the first time its outcome is known. An outcome
+// that is not counted (the caller's ctx ended) is not counted at Close
+// either.
+func (b *streamedBody) end(class upstream.Class, counted bool) {
+	if b.ended {
+		return
+	}
+	b.ended = true
+	if !counted {
+		return
+	}
+	upstream.Record(b.ctx, upstream.GitHub, b.orgID, class)
+	if class != upstream.OK {
+		upstream.MarkUnreachable(b.ctx, b.host)
+	}
 }
 
 // dialFailed reports whether err is a connection that never opened.

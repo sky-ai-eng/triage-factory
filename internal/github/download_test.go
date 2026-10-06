@@ -5,11 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/upstream"
 )
 
 // clientAgainst wires a Client at a specific test server's base URL. The
@@ -261,5 +265,72 @@ func TestDownloadArtifact_ErrorResponse(t *testing.T) {
 	}
 	if he.StatusCode != http.StatusNotFound {
 		t.Errorf("StatusCode = %d, want %d", he.StatusCode, http.StatusNotFound)
+	}
+}
+
+// TestDownloadArtifact_TruncatedBody: a download whose body breaks off is not
+// retried, since part of it is already in dst, but the error classifies as
+// the transport failure it is, and the attempt is counted as one.
+func TestDownloadArtifact_TruncatedBody(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		truncated(w, http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, tally := upstream.WithTally(context.Background())
+	var dst bytes.Buffer
+	_, err := clientAgainst(srv.URL).DownloadArtifact(ctx, "/logs", &dst, 1<<20)
+	if class, ok := upstream.ClassOf(err); !ok || class != upstream.Transient {
+		t.Fatalf("ClassOf(%v) = (%q, %v), want transient", err, class, ok)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("attempts = %d, want 1: the body was already being written to dst", got)
+	}
+	if tally.Attempts() != 1 || tally.Count(upstream.Transient) != 1 {
+		t.Errorf("tally = %d attempts, %d transient; want 1, 1", tally.Attempts(), tally.Count(upstream.Transient))
+	}
+}
+
+// failingWriter refuses every write, standing in for a full disk.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("no space left on device") }
+
+// TestDownloadArtifact_CountedOnceAsOK: a download GitHub served in full is
+// one ok attempt, whether it was read to its end, refused by the size cap
+// before a byte was read, or abandoned because dst failed. A failed write is
+// the caller's fault, so its error does not classify as an upstream one.
+func TestDownloadArtifact_CountedOnceAsOK(t *testing.T) {
+	payload := []byte("pretend this is a zip archive")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(payload)
+	}))
+	t.Cleanup(srv.Close)
+
+	for _, tc := range []struct {
+		name     string
+		dst      io.Writer
+		maxBytes int64
+		wantErr  bool
+	}{
+		{name: "read to the end", dst: &bytes.Buffer{}, maxBytes: 1024},
+		{name: "over the cap", dst: &bytes.Buffer{}, maxBytes: 4, wantErr: true},
+		{name: "dst write fails", dst: failingWriter{}, maxBytes: 1024, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, tally := upstream.WithTally(context.Background())
+			_, err := clientAgainst(srv.URL).DownloadArtifact(ctx, "/logs", tc.dst, tc.maxBytes)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, want error: %v", err, tc.wantErr)
+			}
+			if class, ok := upstream.ClassOf(err); ok {
+				t.Errorf("ClassOf(%v) = %q, want no upstream class", err, class)
+			}
+			if tally.Attempts() != 1 || tally.Count(upstream.OK) != 1 {
+				t.Errorf("tally = %d attempts, %d ok; want 1, 1", tally.Attempts(), tally.Count(upstream.OK))
+			}
+		})
 	}
 }
