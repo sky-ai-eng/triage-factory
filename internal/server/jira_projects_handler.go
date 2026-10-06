@@ -65,6 +65,10 @@ type jiraProjectJSON struct {
 	Name string `json:"name"`
 }
 
+// TODO(TFAC-1055): the org comes from the session and membership is never
+// checked — org_secrets RLS matches org_id alone — so a member removed from
+// the org, whose session still names it, can list its projects. Move this to
+// POST /api/orgs/{org_id}/jira/projects/list behind RequireOrgMember.
 func (s *Server) handleJiraProjectsList(w http.ResponseWriter, r *http.Request) {
 	orgID, ok := s.requireOrg(w, r)
 	if !ok {

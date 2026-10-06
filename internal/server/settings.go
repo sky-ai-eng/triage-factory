@@ -564,6 +564,13 @@ func decodeJiraDeployment(w http.ResponseWriter, body []byte) (jira.Deployment, 
 
 // handleJiraStatuses returns available statuses for given Jira projects.
 // Query params: ?project=PROJ1&project=PROJ2 (or uses configured projects if omitted).
+//
+// TODO(TFAC-1055): the org comes from the session and membership is never
+// checked — org_secrets RLS matches org_id alone — so a member removed from
+// the org, whose session still names it, can read its statuses. The answer is
+// also a bare array with a default-team fallback. Replace with POST
+// /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list, a paged list
+// for one project behind RequireOrgMember.
 func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
