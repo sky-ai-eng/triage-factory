@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -44,7 +45,7 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 	workingTask, working := seed("ca_run", "running", bash)
 	silentTask, silent := seed("ca_silent", "running", nil)
 	openTask, open := seed("ca_open", "open", bash)
-	doneTask, done := seed("ca_done", "completed", bash)
+	doneTask, done := seed("ca_done", dbtest.SeedConcluded, bash)
 	failedTask, failed := seed("ca_failed", "failed", bash)
 	// `queued` is derived, never stored: a conversation with no stored status
 	// and nothing driving it displays as queued.
@@ -100,7 +101,7 @@ func TestHandleConversations_CurrentAction(t *testing.T) {
 	}{
 		{"a working conversation whose newest turn called no tool", silentTask, silent, domain.StatusRunning},
 		{"a parked conversation", openTask, open, domain.StatusOpen},
-		{"a completed conversation", doneTask, done, domain.StatusCompleted},
+		{"a concluded conversation", doneTask, done, domain.StatusOpen},
 		{"a failed conversation", failedTask, failed, domain.StatusFailed},
 		{"a queued conversation", queuedTask, queued, domain.StatusQueued},
 	} {

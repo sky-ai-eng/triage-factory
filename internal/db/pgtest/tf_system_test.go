@@ -322,8 +322,8 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		// The nonzero cost exercises the terminal settle's messages UPDATE
 		// (claims SELECT + newest-row fallback) under the executor role's
 		// grant set.
-		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, "completed", 0.01, 1000, 3,
-			"did the thing", "completed", "", ""); err != nil {
+		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, domain.StatusOpen, 0.01, 1000, 3,
+			"did the thing", "finish", "", ""); err != nil {
 			t.Errorf("holder complete: %v", err)
 		}
 

@@ -534,7 +534,7 @@ func TestStageOrDeliverAdditiveEvent_NoLiveOwnerFallsBackToStaged(t *testing.T) 
 func TestStageOrDeliverAdditiveEvent_TerminalRunNotDelivered(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-inj3", "sess", "/tmp/wt")
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed', outcome = 'finish' WHERE id = 'r-inj3'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'finish' WHERE id = 'r-inj3'`); err != nil {
 		t.Fatalf("terminate run: %v", err)
 	}
 	stores := testSpawnerStores(database)

@@ -2,6 +2,7 @@ package sqlite_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
@@ -32,11 +33,14 @@ func TestPendingFiringsGate_SQLite(t *testing.T) {
 			},
 			SetStatus: func(t *testing.T, conversationID, status string) {
 				t.Helper()
+				resolved, concluded := dbtest.SeedStatus(status)
 				var v any
-				if status != "" {
-					v = status
+				if resolved != "" {
+					v = resolved
 				}
-				execOne(t, conn, "set status", `UPDATE conversations SET status = ? WHERE id = ?`, v, conversationID)
+				execOne(t, conn, "set status", `UPDATE conversations SET status = ?,
+					completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+					WHERE id = ?`, v, concluded, time.Now().UTC(), conversationID)
 			},
 		}
 		return stores.PendingFirings, stores.Conversations, runmode.LocalDefaultOrgID, seed

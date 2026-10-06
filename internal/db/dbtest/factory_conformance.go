@@ -243,7 +243,7 @@ func RunFactoryReadStoreConformance(t *testing.T, mk FactoryStoreFactory) {
 		conversationNone := seed.Conversation(t, taskID, "running")
 		conversationGenerated := seed.Conversation(t, taskID, "running")
 		conversationPopulated := seed.Conversation(t, taskID, "running")
-		conversationTerminal := seed.Conversation(t, taskID, "completed") // must NOT appear
+		conversationTerminal := seed.Conversation(t, taskID, SeedConcluded) // must NOT appear
 
 		seed.SetConversationMemory(t, conversationNone, nullSentinel, domain.MemorySourceNone)
 		seed.SetConversationMemory(t, conversationGenerated, "a summary nobody's agent wrote", domain.MemorySourceGenerated)

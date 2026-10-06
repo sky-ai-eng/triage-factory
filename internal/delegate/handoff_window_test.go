@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -41,7 +42,7 @@ func giveConversationResumeState(t *testing.T, database *sql.DB, conversationID 
 func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff", 2, dbtest.SeedConcluded, "continue")
 	giveConversationResumeState(t, database, step0ConversationID)
 
 	// The composer's half: the run detail read says no, with the rung the
@@ -55,8 +56,8 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	if !errors.Is(err, ErrStepHandedOff) {
 		t.Fatalf("SendMessage = %v, want ErrStepHandedOff", err)
 	}
-	if st := storedStatus(t, database, step0ConversationID); st != "completed" {
-		t.Errorf("stored status = %q, want completed — a refused wake un-terminals nothing", st)
+	if !storedConcluded(t, database, step0ConversationID) {
+		t.Errorf("stored status = %q, want it still concluded — a refused wake un-terminals nothing", storedStatus(t, database, step0ConversationID))
 	}
 	if got := pendingRows(t, s, step0ConversationID); len(got) != 0 {
 		t.Errorf("a refused follow-up left %d queued rows behind; the gate runs before the write", len(got))
@@ -95,7 +96,7 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 func TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-final", 1, "completed", "finish")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-final", 1, dbtest.SeedConcluded, "finish")
 	giveConversationResumeState(t, database, step0ConversationID)
 
 	stepConversation := loadConversation(t, s, step0ConversationID)
@@ -140,7 +141,7 @@ func TestFollowUp_StopResumeOfAMidBlueprintStepStillLands(t *testing.T) {
 	// The resumed step concludes. The blueprint is still on it, so this
 	// terminal is the one the reactor advances on.
 	if _, err := database.Exec(
-		`UPDATE conversations SET status = 'completed', outcome = 'continue' WHERE id = ?`, step0ConversationID); err != nil {
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome = 'continue' WHERE id = ?`, step0ConversationID); err != nil {
 		t.Fatalf("conclude the resumed step: %v", err)
 	}
 	stepConversation := loadConversation(t, s, step0ConversationID)
@@ -199,11 +200,11 @@ func TestProcessCompletion_SnapshotLandsBeforeTheTerminalCommits(t *testing.T) {
 	if puts != 1 {
 		t.Fatalf("snapshot writes = %d, want 1 — a completed terminal snapshots", puts)
 	}
-	if statusAtPut == "completed" {
-		t.Errorf("the conversation already read completed while the snapshot was still being written; a wake in that window resumes a torn blob")
+	if statusAtPut == domain.StatusOpen {
+		t.Errorf("the conversation already read open while the snapshot was still being written; a wake in that window resumes a torn blob")
 	}
-	if st := storedStatus(t, database, conversationID); st != "completed" {
-		t.Errorf("stored status = %q, want completed once both writes are done", st)
+	if !storedConcluded(t, database, conversationID) {
+		t.Errorf("stored status = %q, want concluded once both writes are done", storedStatus(t, database, conversationID))
 	}
 }
 

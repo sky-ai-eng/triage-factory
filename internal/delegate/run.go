@@ -869,9 +869,11 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // backend produced it (the live driver, the one-shot sandbox fallback, or a
 // resume). It classifies the turn-end and acts uniformly:
 //
-//   - valid conclusion → record the outcome (finalize / let the orchestrator
-//     advance or close). A queued review/PR is an async sidecar artifact and
-//     never parks the run; the step completes with its real outcome.
+//   - valid conclusion → record the step's verdict, which parks the
+//     conversation `open` with the conclusion stamped (a conversation never
+//     concludes; its blueprint run, which the orchestrator advances or
+//     closes off this verdict, does). A queued review/PR is an async sidecar
+//     artifact and changes nothing here; the step records its real outcome.
 //   - no conclusion (prose / nothing) → the run is open, not a termination:
 //     park it open (snapshot + flip + keep the warm worktree) and return.
 //     Every backend hands its no-conclusion turn here with the process
@@ -899,10 +901,11 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // the file after its last tool call, and it carries the inherited fingerprint
 // that keeps content the agent never wrote from being ingested as its work.
 //
-// Returns parked: true when the run ended dormant (open) rather than terminal,
+// Returns parked: true when the turn ended without a verdict (dormant, open),
 // which is what keeps the session JSONL on disk as the warm resume cache. A
-// terminal completion (including one that produced a draft PR / pending review)
-// returns false — the artifact is a resolvable sidecar, not a reason to park.
+// verdict or a failure (including a verdict that produced a draft PR / pending
+// review) returns false — the step has given its answer, and the artifact is a
+// resolvable sidecar, not a reason to keep the tree warm.
 //
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in
@@ -1032,7 +1035,7 @@ func (s *Spawner) processCompletion(
 	// (reactToStepTerminal / terminateBlueprint). blueprintRunID is always non-empty here.
 
 	resultSummary := ""
-	status := "completed"
+	status := domain.StatusOpen
 	var outcome, outcomeReason string
 	failureKind := domain.ConversationFailureUnclassified
 	switch {
@@ -1041,7 +1044,7 @@ func (s *Spawner) processCompletion(
 		// runtime's own error text as the summary: without it the run persists as
 		// a bare agent_error and the only copy of "why" is the executor's stderr,
 		// so the UI shows a failure with no reason.
-		status = "failed"
+		status = domain.StatusFailed
 		failureKind = domain.ConversationFailureAgentError
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
 	case class == turnValid:
@@ -1057,19 +1060,23 @@ func (s *Spawner) processCompletion(
 		// the totals folded onto the result. NOT a NULL-outcome completion, which
 		// the orchestrator would read as a clean finish on a final step. Same
 		// no-usable-result kind as the never-produced-a-result-event failure.
-		status = "failed"
+		//
+		// TODO(TFAC-1053): an envelope that stays invalid is the workflow's
+		// fault, not the runtime's; it belongs on the blueprint, with this
+		// conversation left `open` so a person can ask again.
+		status = domain.StatusFailed
 		failureKind = domain.ConversationFailureNoResult
 		resultSummary = "agent did not return a valid completion envelope"
 	}
 
 	// The classification is settled; carry it onto the terminal span. A
 	// failed run additionally gets the failure kind, which is the closed
-	// domain.ConversationFailure* vocabulary rather than the free-text summary.
-	terminal = status
-	if status == "failed" {
+	// domain.ConversationFailure* vocabulary rather than the free-text summary;
+	// a verdict gets its outcome.
+	if status == domain.StatusFailed {
 		terminal = status + "_" + string(failureKind)
-	} else if outcome != "" {
-		terminal = status + "_" + outcome
+	} else {
+		terminal = "concluded_" + outcome
 	}
 
 	// Detached context: the run's ctx may have been cancelled (user
@@ -1087,16 +1094,16 @@ func (s *Spawner) processCompletion(
 	// finish terminates) per blueprintDecisionForStepConversation, and the approval state is
 	// derived downstream from the unresolved-artifact set (has_unresolved_artifacts).
 
-	// Every non-failed terminal snapshots its workspace — while the worktree and
-	// session transcript are still on disk — then lets the cleanup defers tear
-	// the worktree down (parked stays false: keeping a concluded run's worktree
+	// Every verdict snapshots its workspace — while the worktree and session
+	// transcript are still on disk — then lets the cleanup defers tear the
+	// worktree down (parked stays false: keeping a concluded step's worktree
 	// warm is not acceptable, so cold rehydrate from this blob is the resume
-	// path). `completed` is the whole non-failed terminal set, whatever the
-	// outcome: an abort is picked back up by a human, and a finish is the case a
-	// follow-up on concluded work needs — a workspace that only exists for the
-	// runs that went badly is a workspace nobody can follow up on. A failed run
-	// is excluded: the infrastructure under it died, so there is nothing coherent
-	// to rehydrate, and failConversation drops whatever blob it had.
+	// path). Whatever the outcome: an abort is picked back up by a human, and a
+	// finish is the case a follow-up on concluded work needs — a workspace that
+	// only exists for the runs that went badly is a workspace nobody can follow
+	// up on. A failed run is excluded: the infrastructure under it died, so
+	// there is nothing coherent to rehydrate, and failConversation drops
+	// whatever blob it had.
 	//
 	// Every step of a blueprint writes to the one key the blueprint shares, so a
 	// multi-step run overwrites its own blob per step and the last writer — the
@@ -1110,12 +1117,12 @@ func (s *Spawner) processCompletion(
 	//
 	// The claim is still held, so the snapshot is one of the engagement's
 	// operations: bounded, and the idle limit does not apply while it runs.
-	if status == "completed" {
+	if status == domain.StatusOpen {
 		snapCtx, endSnap := s.beginWorkspaceOp(ctx, conversationID, "snapshot")
 		err := s.snapshotWorkspace(snapCtx, orgID, conversationID, namespace, claimID, claudeCwd, sessionID, domain.ConversationRuntimeSDK)
 		endSnap()
 		if err != nil {
-			delegateLog.Warn("snapshot workspace for completed conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
+			delegateLog.Warn("snapshot workspace for concluded conversation failed", "conversation", conversationID, "outcome", outcome, "error", err)
 		}
 	}
 
@@ -1145,7 +1152,7 @@ func (s *Spawner) processCompletion(
 	s.updateBreakerCounter(task.ID, triggerType, status)
 
 	// broadcastStatus prefers the row the write actually persisted over the
-	// caller's own status variable — the same value here (Complete writes
+	// caller's own status variable — the same value here (the write stores
 	// status verbatim, no COALESCE), but sourced from what landed rather than
 	// what was asked for, per the returned-row standard.
 	broadcastStatus := status
@@ -1154,11 +1161,11 @@ func (s *Spawner) processCompletion(
 	}
 
 	// Task disposition (close on finish, leave-open on abort) is the
-	// orchestrator's job now, not the step's: reactToStepTerminal reads this run's
-	// terminal conversations.outcome and routes through terminateBlueprint,
-	// which owns the terminal column. A step completion must never close the
-	// task here — the next step may be about to run.
-	if status == "failed" {
+	// orchestrator's job now, not the step's: reactToStepTerminal reads this
+	// step's recorded verdict and routes through terminateBlueprint, which owns
+	// the terminal column. A step's verdict must never close the task here —
+	// the next step may be about to run.
+	if status == domain.StatusFailed {
 		s.broadcastConversationFailed(orgID, conversationID, failureKind)
 	} else {
 		s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
@@ -1167,9 +1174,9 @@ func (s *Spawner) processCompletion(
 	// error toast so the user notices even if they've clicked away from the
 	// runs page.
 	switch status {
-	case "completed":
+	case domain.StatusOpen:
 		toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
-	case "failed":
+	case domain.StatusFailed:
 		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s failed: %s", shortConversationID(conversationID), truncateToastMsg(resultSummary, 160)))
 	}
 

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -24,6 +25,21 @@ var ErrNoSuchMessage = errors.New("no message with that id on that conversation"
 // closed-set-in-Go column: the write is refused rather than storing a word
 // nothing can read back.
 var ErrInvalidEndedReason = errors.New("db: not an ended_reason (see domain.AllEndedReasons)")
+
+// ErrInvalidConversationEnding is returned by ConversationStore.CompleteForClaimSystem
+// for a status that is not an engagement's ending: `open` (the step's verdict)
+// or `failed`. Refused at the door in both dialects, so no writer can store
+// any other status through it.
+var ErrInvalidConversationEnding = errors.New("db: an engagement ends `open` (a verdict) or `failed`")
+
+// ValidateConversationEnding is CompleteForClaimSystem's door check, shared by
+// both dialects.
+func ValidateConversationEnding(status string) error {
+	if status != domain.StatusOpen && status != domain.StatusFailed {
+		return fmt.Errorf("%w: %q", ErrInvalidConversationEnding, status)
+	}
+	return nil
+}
 
 //go:generate go run github.com/vektra/mockery/v2 --name=ConversationStore --output=./mocks --case=underscore --with-expecter
 
@@ -231,9 +247,9 @@ type ConversationStore interface {
 	// --- Lifecycle ---
 
 	// MarkQueuedForResume is resume-by-enqueue's status flip: the
-	// compare-and-swap over every state a conversation can come to rest on
-	// and be woken from — `open` or `completed`, whatever the outcome —
-	// back to mid-flight: resume-by-enqueue re-queues the SAME row as
+	// compare-and-swap over the one state a conversation can come to rest on
+	// and be woken from — `open`, with or without its step's verdict — back to
+	// mid-flight: resume-by-enqueue re-queues the SAME row as
 	// ordinary claimable work instead of spawning an in-process goroutine.
 	// Releases any still-active claim with outcome 'requeued' (ownership is
 	// re-established by ClaimNextConversation minting a fresh claim at the actual
@@ -267,21 +283,27 @@ type ConversationStore interface {
 	// miss to 409.
 	//
 	// Two blueprint facts ARE checked here, in the write, because no caller
-	// can check them without racing. The first: a `completed` row whose
-	// blueprint is still running is refused. That row has handed its terminal
-	// to the reactor and is moments from being advanced past or finalized;
-	// un-terminaling it makes the reactor read a successor's state where this
-	// engagement's terminal should be, and the blueprint dies on it.
+	// can check them without racing. The first: a concluded row (parked with
+	// its step's verdict) whose blueprint is still running is refused. That
+	// row has handed its verdict to the reactor and is moments from being
+	// advanced past or finalized; waking it makes the reactor read a
+	// successor's state where this engagement's verdict should be, and the
+	// blueprint dies on it.
 	//
-	// The second is the `open` arm's: it refuses a step whose run was called
-	// off (cancel requested, or cancelled), the run the claim gate drives
-	// nothing under. A follow-up's gate refuses that too, but a cancel and its
-	// settlement can land between the gate and this write, and a step woken
-	// under a called-off run is a mid-flight row the claim gate refuses, no
+	// The second: it refuses a step whose run was called off (cancel
+	// requested, or cancelled), the run the claim gate drives nothing under.
+	// A follow-up's gate refuses that too, but a cancel and its settlement can
+	// land between the gate and this write, and a step woken under a
+	// called-off run is a mid-flight row the claim gate refuses, no
 	// settlement arm matches once the run is cancelled, and the stranded-run
-	// replay ignores. Otherwise the `open` arm is unconditional — a stopped
-	// mid-blueprint step is a paused step continuing, and its conclusion
-	// SHOULD advance the sequence. The check reads the run past blueprint_runs
+	// replay ignores. Otherwise a parked row with no verdict wakes
+	// unconditionally — a stopped mid-blueprint step is a paused step
+	// continuing, and its verdict SHOULD advance the sequence.
+	//
+	// The wake leaves the conclusion stamp where it is: a follow-up on a
+	// finished blueprint that parks again is concluded again. Only the
+	// re-open of an aborted blueprint (BlueprintStore.ReopenRunForResume,
+	// in the same transaction) withdraws it. The check reads the run past blueprint_runs
 	// RLS, so a teammate who cannot see another user's manual run gets the
 	// creator's answer.
 	//
@@ -439,18 +461,19 @@ type ConversationStore interface {
 	// (ended_at IS NULL), and top-level, since a subagent row belongs to its
 	// spawner's engagement rather than to the task. That is the base, and the
 	// claim gate asks exactly it — which conversation owns the task's one
-	// workspace tree — because a `completed` row on a task nobody moved off
-	// it still holds that tree. It is the conversation-layer half of the rule
+	// workspace tree — because a concluded row on a task nobody moved off it
+	// still holds that tree. It is the conversation-layer half of the rule
 	// the blueprint layer backstops with
 	// blueprint_runs_one_active_run_per_task.
 	//
 	// The two reads below ask a narrower question on top of the base: will
-	// this conversation read new input on its own? That adds the status
+	// this conversation read new input on its own? That adds the settled
 	// clause, because a concluded conversation reads nothing until a resume
 	// re-queues it — so an event landing on its task mints a conversation
-	// rather than folding into one nobody is going to read. A conversation
-	// parked `open` passes both: it is wakeable, and it is still the one the
-	// task is about.
+	// rather than folding into one nobody is going to read. Concluded is not
+	// a status: it is `open` with the conclusion stamped, so the clause reads
+	// the stamp as well. A conversation parked `open` without a verdict passes
+	// both: it is wakeable, and it is still the one the task is about.
 	//
 	// Each dialect spells the base once and composes both questions from it
 	// rather than restating either per door. They are exclusions, so a clause
@@ -472,13 +495,15 @@ type ConversationStore interface {
 	HasLiveConversationForTask(ctx context.Context, orgID, taskID string) (bool, error)
 
 	// ActiveIDsForTask returns the IDs of conversations on the task that
-	// haven't reached a terminal state. Used by the task routes'
+	// haven't settled — neither failed nor concluded with their step's
+	// verdict. Used by the task routes'
 	// disposition cascade to enumerate the conversations to stop.
 	ActiveIDsForTask(ctx context.Context, orgID, taskID string) ([]string, error)
 
 	// ListResumableWorktreePathsSystem returns the worktree_path of every
-	// conversation the next claim or message continues — parked in `open`, or
-	// left mid-flight by an engagement the process stopped under — with a
+	// conversation the next claim or message continues — parked in `open`
+	// without a verdict, or left mid-flight by an engagement the process
+	// stopped under — with a
 	// non-empty worktree_path, via the admin pool in Postgres (the startup
 	// sweep reads it before any JWT-claims context exists). Read at startup so
 	// the worktree-cleanup sweep preserves such a conversation's warm
@@ -545,7 +570,8 @@ type ConversationStore interface {
 
 	// ActiveIDsForTeamSystem returns the IDs of every active conversation owned by the
 	// team (conversations.team_id = teamID), using the same active set as
-	// ActiveIDsForTask: status NOT IN ('completed','failed').
+	// ActiveIDsForTask: every conversation that is not settled (failed, or
+	// concluded).
 	// This is the team-archive force-stop cascade's enumeration, the
 	// team-scoped sibling of ActiveIDsForTaskSystem — each returned id is
 	// passed to spawner.StopConversationAndCancelBlueprint, which hard-kills a
@@ -556,8 +582,8 @@ type ConversationStore interface {
 	ActiveIDsForTeamSystem(ctx context.Context, orgID, teamID string) ([]string, error)
 
 	// EntitiesWithOpenConversations returns the subset of entityIDs that have at
-	// least one conversation currently in the `open` state (a turn ended without
-	// a conclusion). Drives the factory snapshot's idle badge.
+	// least one conversation currently in the `open` state without its step's
+	// verdict (a turn ended without a conclusion). Drives the factory snapshot's idle badge.
 	EntitiesWithOpenConversations(ctx context.Context, orgID string, entityIDs []string) (map[string]struct{}, error)
 
 	// --- Transcript / messages ---
@@ -893,9 +919,9 @@ type ConversationStore interface {
 	EndConversationsForTeamSystem(ctx context.Context, orgID, teamID string, reason domain.EndedReason) ([]domain.Conversation, error)
 
 	// EndTerminalConversationsForTaskSystem is the task boundary door
-	// (EndConversationsForTask) on the admin pool, narrowed to the rows whose
-	// transcript has already finished — status is one of
-	// domain.AllTerminalConversationStatuses. Everything else about it is the
+	// (EndConversationsForTask) on the admin pool, narrowed to the settled
+	// rows — failed, or concluded (domain.Conversation.Settled). Everything
+	// else about it is the
 	// same door: top-level rows only, already-ended rows untouched, the
 	// stamped rows returned as Get projects them.
 	//
@@ -1098,12 +1124,20 @@ type ConversationStore interface {
 	// itself resolve.
 	SettleCompactionRequestForClaimSystem(ctx context.Context, orgID, conversationID, claimID string, requestID, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int, costUSD *float64, reason string) (*domain.Message, error)
 
-	// CompleteForClaimSystem finalizes a conversation (status + terminal narrative
+	// CompleteForClaimSystem records an engagement's ending (status + narrative
 	// fields only — the conversation carries no accounting cache) and
 	// releases the conversation's active claim (if one exists) with an
-	// outcome mapped from status ('failed' releases as 'failed', anything
-	// else as 'completed'), stamping the invocation's reported
-	// duration/turns telemetry onto the released claim.
+	// outcome mapped from status ('failed' releases as 'failed', a verdict
+	// as 'completed'), stamping the invocation's reported duration/turns
+	// telemetry onto the released claim.
+	//
+	// status is one of two endings, and anything else is refused with
+	// ErrInvalidConversationEnding. `open` is the step's verdict: a
+	// conversation never concludes, so the verdict parks it like any other
+	// turn end, with no park reason (nothing stopped it), and completed_at is
+	// the conclusion stamp that makes it concluded
+	// (domain.Conversation.Concluded) and that the idle sweeps age it from.
+	// `failed` is the runtime under the agent dying.
 	//
 	// costUSD is the invocation's reported total, settled as ONE lump on
 	// the engagement's own newest message row — the newest row attributed
@@ -1150,11 +1184,11 @@ type ConversationStore interface {
 	// any) with outcome 'failed'. The delegate spawner's
 	// failConversation path uses this so a racing terminal write
 	// (cancel, completion) isn't clobbered. Returns
-	// ok=false (no error) if the row is already terminal; the
-	// caller logs and continues — the racing path's terminal
-	// status stands.
+	// ok=false (no error) if the row is already settled — failed, or
+	// concluded with its step's verdict; the caller logs and continues —
+	// the racing path's ending stands.
 	//
-	// `open` is intentionally NOT in the protected set, and it is safe
+	// An `open` row without a verdict is intentionally NOT in the protected set, and it is safe
 	// because of who can reach an `open` row with this write. A parked
 	// conversation is only ever driven again by a wake that flips it to
 	// `running` before any engagement could fail it, and the engagement
@@ -1175,7 +1209,7 @@ type ConversationStore interface {
 	// pending stop intent is cleared with the flip.
 	MarkFailedIfActiveForClaimSystem(ctx context.Context, orgID, conversationID, claimID, failureKind string) (bool, error)
 
-	// ParkOpenForClaimSystem flips a conversation to `open`: it stopped without concluding. This is
+	// ParkOpenForClaimSystem flips a conversation to `open`: a turn ended without a verdict. This is
 	// the ONLY writer of that state, and there is deliberately only one —
 	// a turn that ended idle and a user's cancel produce the same row, because
 	// they are the same fact about the conversation. Stamps parked_at (only

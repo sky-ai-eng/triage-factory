@@ -29,21 +29,6 @@ func newConversationQueueStore(conn *sql.DB) db.ConversationQueueStore {
 
 var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 
-// conversationTerminalStatusesSQL is the terminal conversation statuses as a SQL
-// IN-list body — two names, one owner each: the agent concluded, or the
-// infrastructure died. It describes stored rows as faithfully as new writes,
-// because every retired status was rewritten by migration rather than carried
-// forward (202608010002, SQLite; Postgres had no rows to migrate). Mirrors
-// domain.AllTerminalConversationStatuses.
-//
-// Every exclusion predicate in this package interpolates this rather than
-// re-spelling the literals. That matters more than the saved keystrokes: these
-// guards are exclusions (`status NOT IN (…)`), so a status missing from one
-// doesn't fail closed — it readmits a finished conversation to parking, cancelling, or
-// the active-work counters. Sixteen hand-copied copies is how the set drifted
-// a value at a time.
-const conversationTerminalStatusesSQL = `'completed','failed'`
-
 // --- The needs-driving predicate ---------------------------------------
 //
 // The SQLite mirror of the Postgres fragments — see
@@ -116,7 +101,8 @@ func undeliveredInputDuringClaimSQL(claimExpr string) string {
 // needsDrivingSQL is the eligibility predicate, identical for every surface:
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
-// parked and woken by new input. A terminal conversation is never eligible,
+// parked without a verdict and woken by new input. A terminal or concluded
+// conversation is never eligible — resuming one takes the explicit wake —
 // and neither is one with a pending stop — the settlement parks it instead,
 // nor one a hand-back is holding until a time still ahead. The Postgres twin
 // carries the model for the time gate and the two predicates split around it.
@@ -127,7 +113,7 @@ const needsDrivingSQL = awaitingDrivingSQL + `
 const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND r.stop_requested_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
-	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
+	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
 // nextAttemptDueSQL is the time gate, compared as text in the claims lease
 // layout: HandBackClaimSystem stamps next_attempt_at with sqliteNowPlusExpr,
@@ -770,7 +756,7 @@ func countClaimDesyncs(ctx context.Context, q queryer) (db.OrphanedStepCheck, er
 	rows, err := q.QueryContext(ctx, `
 		SELECT c.id, count(*) OVER ()
 		FROM conversations c
-		WHERE c.status IN (`+conversationTerminalStatusesSQL+`)
+		WHERE `+db.SettledConversationSQL("c")+`
 		  AND EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
 		ORDER BY c.started_at, c.id
 		LIMIT ?
@@ -1106,10 +1092,10 @@ func (s *conversationQueueStore) SettleUnclaimedStopsForTaskSystem(ctx context.C
 // narrows to; scope is an AND-clause over the victims' alias r, binding args.
 func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope string, args ...any) ([]db.SettledStop, error) {
 	type victim struct {
-		id, orgID, status, by, reason string
-		intent                        bool
-		runID                         sql.NullString
-		step                          sql.NullInt64
+		id, orgID, by, reason string
+		intent, settled       bool
+		runID                 sql.NullString
+		step                  sql.NullInt64
 	}
 	var out []db.SettledStop
 	// The no-intent arm leaves out a step whose latest claim was released
@@ -1120,14 +1106,14 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 	cutoff := time.Now().UTC().Add(-db.ReactorGrace)
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		rows, err := q.QueryContext(ctx, `
-			SELECT r.id, r.org_id, COALESCE(r.status, ''), COALESCE(r.stop_requested_by, ''),
+			SELECT r.id, r.org_id, COALESCE(`+db.SettledConversationSQL("r")+`, 0), COALESCE(r.stop_requested_by, ''),
 			       r.stop_requested_at IS NOT NULL, COALESCE(r.stop_requested_reason, ''),
 			       r.blueprint_run_id, r.blueprint_step_index
 			FROM conversations r
 			LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 			WHERE NOT EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = r.id AND cl.released_at IS NULL)
 			  AND (r.stop_requested_at IS NOT NULL
-			       OR ((r.status IS NULL OR r.status = 'open')
+			       OR (`+db.UnsettledConversationSQL("r")+`
 			           AND br.status = 'running' AND br.cancel_requested = 1
 			           AND NOT EXISTS (SELECT 1 FROM claims cl_g
 			                           WHERE cl_g.conversation_id = r.id AND cl_g.released_at > ?)))
@@ -1140,7 +1126,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		var victims []victim
 		for rows.Next() {
 			var v victim
-			if err := rows.Scan(&v.id, &v.orgID, &v.status, &v.by, &v.intent, &v.reason, &v.runID, &v.step); err != nil {
+			if err := rows.Scan(&v.id, &v.orgID, &v.settled, &v.by, &v.intent, &v.reason, &v.runID, &v.step); err != nil {
 				rows.Close()
 				return err
 			}
@@ -1151,7 +1137,9 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		}
 		now := time.Now().UTC()
 		for _, v := range victims {
-			terminal := v.status == "completed" || v.status == "failed"
+			// A settled victim (failed, or concluded) keeps its ending: only
+			// its intent clears, and it cancels nothing.
+			terminal := v.settled
 			// An intent names who stopped the row, and why when it says; a
 			// row with none is here because its run's cancel never reached
 			// it, and the reactor's cancel is what it records.
@@ -1512,7 +1500,7 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND r.status IN (`+conversationTerminalStatusesSQL+`)
+		  AND `+db.SettledConversationSQL("r")+`
 		  AND COALESCE(r.completed_at, r.started_at) <= ?
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl

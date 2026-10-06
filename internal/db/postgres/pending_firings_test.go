@@ -347,7 +347,7 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 		EndConversation: func(t *testing.T, conversationID string) {
 			t.Helper()
 			pgExecOne(t, h, "end conversation",
-				`UPDATE conversations SET status = 'completed', ended_at = now(), ended_reason = $1 WHERE id = $2`,
+				`UPDATE conversations SET status = 'open', completed_at = now(), ended_at = now(), ended_reason = $1 WHERE id = $2`,
 				string(domain.EndedStepAdvanced), conversationID)
 		},
 		ExpireLease: func(t *testing.T, firingID int64) {

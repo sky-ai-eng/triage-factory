@@ -137,36 +137,26 @@ func endedFollowUpBlock(conv *domain.Conversation) string {
 }
 
 // resumableState reports whether a run with no warm process can be woken by a
-// follow-up message. Two stored states qualify, and between them they are every
-// non-failed rung a conversation can come to rest on:
-//
-//   - open      — a turn ended without a conclusion.
-//   - completed — the agent concluded. Whatever the outcome: an abort is work a
-//     human picks back up, a finish is work a human follows up on, and both
-//     have a workspace to land in because every completed terminal snapshots.
-//
-// Outcome no longer discriminates, so this reads as status alone. It keeps the
-// two-argument shape because the MarkQueuedForResume CAS it mirrors is still
-// spelled over the same pair, and a caller that has an outcome in hand should
-// not have to know that this predicate has stopped caring.
+// follow-up message. One stored state qualifies, and it is every non-failed
+// rung a conversation can come to rest on: `open`. A conversation that
+// concluded its step is `open` too, whatever its verdict: an abort is work a
+// human picks back up, a finish is work a human follows up on, and both have a
+// workspace to land in because every conclusion snapshots.
 //
 // `failed` is the exclusion: the infrastructure under the run died, so there is
 // no coherent workspace to rehydrate. It is also an ended conversation, which
 // the rung above this one refuses first and for a reason a person can read.
-// Runs never park for approval; a terminal run that left an unresolved artifact
-// (draft PR / ready review) resumes through this same path plus the feedback
-// ledger, not through a parked status.
-func resumableState(status, _ string) bool {
-	switch status {
-	case "open", "completed":
-		return true
-	default:
-		return false
-	}
+// Runs never park for approval; a concluded run that left an unresolved
+// artifact (draft PR / ready review) resumes through this same path plus the
+// feedback ledger, not through a parked status.
+func resumableState(status string) bool {
+	return status == domain.StatusOpen
 }
 
 // injectionWillFlush reports whether an injection staged against a conversation
-// with no warm process will actually be read.
+// with no warm process will actually be read. concluded is whether the
+// conversation is parked with its step's verdict (Conversation.Concluded), and
+// outcome is that verdict.
 //
 // Deliberately narrower than resumableState, and the gap is the point.
 // resumableState answers "can a person wake this?", which concluded work now
@@ -177,21 +167,20 @@ func resumableState(status, _ string) bool {
 // deferral spawned in the meantime. Staging is an automated channel and needs
 // an automated reader:
 //
-//   - open              — a claim picks it back up as soon as input lands.
-//   - completed + abort — the agent stopped mid-work; the blueprint re-opens on
+//   - open, no verdict — a claim picks it back up as soon as input lands.
+//   - concluded, abort — the agent stopped mid-work; the blueprint re-opens on
 //     the resume, so the work is still in flight in every sense but the row.
 //
 // A conversation that finished is not in that set, whatever a message could do
 // to it.
-func injectionWillFlush(status, outcome string) bool {
-	switch status {
-	case "open":
-		return true
-	case "completed":
-		return domain.ConversationOutcome(outcome) == domain.ConversationOutcomeAbort
-	default:
+func injectionWillFlush(status string, concluded bool, outcome string) bool {
+	if status != domain.StatusOpen {
 		return false
 	}
+	if !concluded {
+		return true
+	}
+	return domain.ConversationOutcome(outcome) == domain.ConversationOutcomeAbort
 }
 
 // blueprintFollowUpBlock is the other half of "resumable": the run's own state
@@ -221,10 +210,9 @@ func injectionWillFlush(status, outcome string) bool {
 // running, and no terminal write moves current_step_index, so the aborting
 // conversation IS the final step and the shared predicate already admits it.
 // An EARLIER step of that same aborted blueprint must be refused — the resume's
-// blueprint re-open is conditioned on the conversation's own completed+abort
-// terminal, so an earlier step (completed+continue, or parked open) would flip
-// to mid-flight with the blueprint still 'aborted' and its index still pointing
-// past it: claimable by nothing, forever.
+// blueprint re-open only ever re-opens the run on its current step, so an
+// earlier step would flip to mid-flight with the blueprint still 'aborted' and
+// its index still pointing past it: claimable by nothing, forever.
 //
 // The second is the hand-off — a step that concluded while its blueprint is
 // still running, refused for the reason the CAS states (see
@@ -256,7 +244,7 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv
 		}
 		return ResumeBlockedBlueprintConcluded, br
 	}
-	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Status == domain.StatusCompleted {
+	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Concluded() {
 		return ResumeBlockedStepHandedOff, br
 	}
 	// The run travels back so the model rung can ask modelForClaim without a
@@ -510,7 +498,7 @@ func (s *Spawner) queueFollowUp(ctx context.Context, orgID string, conv domain.C
 	// Past the gate, the only question left is which half accepted it: a
 	// conversation resting somewhere a wake reaches needs the flip below, and
 	// one whose driver already drains its queue needs nothing further.
-	wake := resumableState(conv.Status, conv.Outcome)
+	wake := resumableState(conv.Status)
 
 	// The write, and it is an ordinary transcript insert whatever the runtime —
 	// the queue IS the transcript's undelivered tail (role='user', blank
@@ -648,13 +636,13 @@ func drainsUndeliveredInput(conv domain.Conversation) bool {
 func (s *Spawner) followUpBlock(ctx context.Context, orgID string, conv *domain.Conversation) string {
 	// The boundary first: a conversation its task has moved past takes no
 	// message whatever its status, so this is asked ahead of the
-	// resting/draining split below — a `completed` row on a requeued task
+	// resting/draining split below — a concluded row on a requeued task
 	// looks perfectly resumable from status alone, and a `queued` one is
 	// draining a queue whose engagement the boundary just ended.
 	if block := endedFollowUpBlock(conv); block != "" {
 		return block
 	}
-	if !resumableState(conv.Status, conv.Outcome) {
+	if !resumableState(conv.Status) {
 		if drainsUndeliveredInput(*conv) {
 			return ""
 		}
@@ -796,17 +784,20 @@ var errWakeRefused = errors.New("wake refused")
 // since it cannot show delivery is coming and a false success is worse than a
 // conflict the client resolves by refreshing.
 func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, conv domain.Conversation) (flipped bool, err error) {
-	// A completed+abort conversation's blueprint already terminated (aborted)
-	// when the step stopped. Re-open it to running in the same tx as the flip so
-	// the resumed step's new conclusion re-finalizes it through the normal
-	// post-resume disposition. Not for claimability — an abort leaves
-	// current_step_index on the step that aborted, so the finished-blueprint arm
-	// of the claim gate would take it either way — but for disposition: an abort
-	// is work that paused mid-plan. A blueprint that FINISHED is the opposite
-	// case and stays finished; finished machinery never restarts and the
-	// follow-up rides it as-is (ReopenRunForResume's status='aborted' CAS is a
-	// no-op there, and on a still-running blueprint).
-	reopenAbortedBlueprint := conv.Status == domain.StatusCompleted && domain.ConversationOutcome(conv.Outcome) == domain.ConversationOutcomeAbort
+	// A follow-up can change the blueprint only while its task is still open.
+	// An aborted blueprint terminated when its step stopped, and the step it
+	// stopped on is this conversation. Re-open it to running in the same tx as
+	// the flip, withdrawing the verdict that aborted it, so the resumed step's
+	// next verdict finalizes it through the normal post-resume disposition.
+	// Not for claimability — an abort leaves current_step_index on the step
+	// that aborted, so the finished-blueprint arm of the claim gate would take
+	// it either way — but for disposition: an abort is work that paused
+	// mid-plan. A blueprint that FINISHED is the opposite case and stays
+	// finished; finished machinery never restarts and the follow-up rides it
+	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted' and a
+	// task still open, so it is a no-op on a finished or still-running
+	// blueprint and on a task a person has since closed.
+	reopenAbortedBlueprint := conv.Concluded()
 
 	f, err := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
 	if err != nil {

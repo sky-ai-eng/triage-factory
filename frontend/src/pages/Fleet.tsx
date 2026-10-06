@@ -676,11 +676,12 @@ function CopyId({ id, kind }: { id: string; kind: string }) {
 // declared conversation status rather than a status-keyed record: the record
 // carried two names the backend had already stopped emitting, and a record's
 // keys are invisible to the vocabulary lint — a `case` arm is not.
+//
+// A conversation never concludes, so no status says an engagement ended well;
+// SandboxState reads that off the claim's own outcome instead.
 function statusTone(status: ConversationStatusValue): ChipTone {
   if (isActiveStatus(status)) return 'rust'
   switch (status) {
-    case 'completed':
-      return 'good'
     case 'failed':
       return 'problem'
     case 'queued':
@@ -697,7 +698,9 @@ function SandboxState({ claim }: { claim: FleetSandboxClaim }) {
     : (claim.status ?? '—')
   return (
     <span className="inline-flex items-center gap-1.5">
-      <Chip tone={statusTone(claim.status ?? '')}>{label}</Chip>
+      <Chip tone={claim.outcome === 'completed' ? 'good' : statusTone(claim.status ?? '')}>
+        {label}
+      </Chip>
       {claim.live && <Chip tone="rust">live</Chip>}
     </span>
   )

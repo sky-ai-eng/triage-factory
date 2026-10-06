@@ -76,7 +76,7 @@ func TestFollowUpOnFinishedBlueprint_IsClaimedAndDriven(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-followup", "sess-followup", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-followup'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish' WHERE id='r-followup'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
 	bpr := blueprintRunIDForConversation(t, database, "r-followup")
@@ -115,7 +115,7 @@ func TestFollowUpOnFinishedBlueprint_LeavesTheBlueprintAndTaskAlone(t *testing.T
 	s, database, conversationID, taskID := setupAdvanceFixture(t, "followup-frozen")
 	stampBotClaim(t, database, taskID)
 	if _, err := database.Exec(
-		`UPDATE conversations SET status='completed', outcome='finish', worktree_path=? WHERE id=?`,
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish', worktree_path=? WHERE id=?`,
 		t.TempDir(), conversationID,
 	); err != nil {
 		t.Fatalf("finish conversation: %v", err)
@@ -173,7 +173,7 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 				database := newDelegateTestDB(t)
 				seedConversation(t, database, "r-earlier", "sess-earlier", t.TempDir())
 				if _, err := database.Exec(
-					`UPDATE conversations SET status='completed', outcome=? WHERE id='r-earlier'`, tc.outcome,
+					`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome=? WHERE id='r-earlier'`, tc.outcome,
 				); err != nil {
 					t.Fatalf("conclude conversation: %v", err)
 				}
@@ -189,8 +189,8 @@ func TestFollowUpOnANonFinalStepIsRefused(t *testing.T) {
 				if !errors.Is(err, ErrConversationConcluded) {
 					t.Fatalf("err = %v, want ErrConversationConcluded — a wake here strands the row for good", err)
 				}
-				if st := storedStatus(t, database, "r-earlier"); st != "completed" {
-					t.Errorf("stored status = %q, want completed — a refused wake writes nothing", st)
+				if !storedConcluded(t, database, "r-earlier") {
+					t.Errorf("stored status = %q, want it still concluded — a refused wake writes nothing", storedStatus(t, database, "r-earlier"))
 				}
 				if gotStatus, gotStep := blueprintState(t, database, bpr); gotStatus != tc.blueprint || gotStep != 1 {
 					t.Errorf("blueprint = (%q, %d), want it untouched at (%q, 1)", gotStatus, gotStep, tc.blueprint)
@@ -208,7 +208,7 @@ func TestFollowUpOnTheAbortedStepItselfIsAccepted(t *testing.T) {
 	paths.SetForTest(t, t.TempDir())
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-aborted", "sess-aborted", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-aborted'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort' WHERE id='r-aborted'`); err != nil {
 		t.Fatalf("abort conversation: %v", err)
 	}
 	bpr := blueprintRunIDForConversation(t, database, "r-aborted")
@@ -305,7 +305,7 @@ func TestModelForClaim_FollowUpDoesNotInheritTheStepModel(t *testing.T) {
 func TestFollowUpRecordsTaskEvent(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-timeline", "sess-timeline", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-timeline'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish' WHERE id='r-timeline'`); err != nil {
 		t.Fatalf("finish conversation: %v", err)
 	}
 	bpr := blueprintRunIDForConversation(t, database, "r-timeline")
@@ -338,7 +338,7 @@ func TestFollowUpRecordsTaskEvent(t *testing.T) {
 	if meta.ConversationID != "r-timeline" || meta.TaskID != taskID || meta.UserID != runmode.LocalDefaultUserID {
 		t.Errorf("metadata = %+v, want it to name the conversation, task and actor", meta)
 	}
-	if meta.BlueprintRunID != bpr || meta.FromStatus != "completed" || meta.FromOutcome != "finish" {
+	if meta.BlueprintRunID != bpr || meta.FromStatus != "open" || meta.FromOutcome != "finish" {
 		t.Errorf("metadata = %+v, want the pre-flip rest state and the blueprint it belonged to", meta)
 	}
 	if got := taskStatus(t, database, taskID); got == "done" {
@@ -389,7 +389,7 @@ func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-disabled", "sess-disabled", t.TempDir())
 	if _, err := database.Exec(
-		`UPDATE conversations SET status='completed', outcome='finish', model=? WHERE id='r-disabled'`,
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish', model=? WHERE id='r-disabled'`,
 		domain.ModelOpus,
 	); err != nil {
 		t.Fatalf("conclude conversation: %v", err)
@@ -429,8 +429,8 @@ func TestFollowUp_ModelNotEnabledIsRefusedBeforeTheWrite(t *testing.T) {
 	if queued != 0 {
 		t.Errorf("a refused send queued %d message(s)", queued)
 	}
-	if st := storedStatus(t, database, "r-disabled"); st != "completed" {
-		t.Errorf("stored status = %q, want completed — a refused send writes nothing", st)
+	if !storedConcluded(t, database, "r-disabled") {
+		t.Errorf("stored status = %q, want it still concluded — a refused send writes nothing", storedStatus(t, database, "r-disabled"))
 	}
 
 	// Re-enabling is the whole fix, and it takes effect on the next read: the

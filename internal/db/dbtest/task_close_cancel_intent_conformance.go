@@ -107,7 +107,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 		s, orgID, seed := mk(t)
 		taskID := seed.Task(t)
 		eventID := seed.Event(t, taskID)
-		brID, _ := seed.BlueprintAndConversation(t, taskID, "completed", "completed")
+		brID, _ := seed.BlueprintAndConversation(t, taskID, "completed", SeedConcluded)
 
 		closed, conversationIDs, err := s.CloseWithConversationCancelIntentSystem(ctx, orgID, taskID, "entity_closed", "github:pr:merged", eventID)
 		if err != nil {
@@ -117,7 +117,7 @@ func RunTaskCloseCancelIntentConformance(t *testing.T, mk TaskCloseCancelIntentF
 			t.Error("closed = false, want true")
 		}
 		if len(conversationIDs) != 0 {
-			t.Errorf("conversation ids = %v, want none — a terminal conversation is not stopped", conversationIDs)
+			t.Errorf("conversation ids = %v, want none — a concluded conversation is not stopped", conversationIDs)
 		}
 		if seed.CancelRequested(t, brID) {
 			t.Error("cancel_requested = true on a finished blueprint; the post-close resume flow is now refused forever")

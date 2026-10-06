@@ -86,7 +86,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	step0 := 0
 	step0ConversationID := "freeze-run0"
 	dbtest.SeedConversation(t, database, domain.Conversation{
-		ID: step0ConversationID, TaskID: task.ID, PromptID: "freeze-p0", Status: "completed",
+		ID: step0ConversationID, TaskID: task.ID, PromptID: "freeze-p0", Status: dbtest.SeedConcluded,
 		Model: "claude-sonnet-4-6", Outcome: "continue",
 		BlueprintRunID: brID, BlueprintStepIndex: &step0,
 	})

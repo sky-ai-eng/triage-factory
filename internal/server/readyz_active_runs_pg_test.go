@@ -46,7 +46,8 @@ func TestCountActiveRuns_Postgres(t *testing.T) {
 	working := seed(nil)
 	woken := seed("open")
 	seed("open") // parked with nothing queued — not waiting
-	done := seed("completed")
+	done := seed("open")
+	pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET completed_at = now() WHERE id = $1`, done)
 
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)

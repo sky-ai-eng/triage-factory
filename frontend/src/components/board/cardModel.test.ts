@@ -49,7 +49,8 @@ describe('deriveCard lifecycle', () => {
     const m = deriveCard(
       task({ status: 'queued' }),
       conversation({
-        Status: 'completed',
+        Status: 'open',
+        CompletedAt: '2026-07-16T11:00:00Z',
         ResultSummary: 'opened a draft pull request',
         DurationMs: 252_000,
         artifact_counts: { branch: 1, pull_request: 1 },
@@ -126,8 +127,12 @@ describe('deriveCard lifecycle', () => {
 
   it('reads the terminals: done, failed, and the stop that is not a finish', () => {
     expect(
-      deriveCard(task(), conversation({ Status: 'completed', DurationMs: 60_000 }), undefined, NOW)
-        .lifecycle,
+      deriveCard(
+        task(),
+        conversation({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', DurationMs: 60_000 }),
+        undefined,
+        NOW,
+      ).lifecycle,
     ).toBe('done')
     const failed = deriveCard(
       task(),
@@ -144,7 +149,8 @@ describe('deriveCard lifecycle', () => {
       deriveCard(
         task(),
         conversation({
-          Status: 'completed',
+          Status: 'open',
+          CompletedAt: '2026-07-16T11:00:00Z',
           Outcome: 'abort',
           blueprint_step_index: 0,
           blueprint_step_count: 2,
@@ -170,7 +176,11 @@ describe('deriveCard lifecycle', () => {
   it('keeps the scorer’s summary once the run has written its own account', () => {
     const m = deriveCard(
       task(),
-      conversation({ Status: 'completed', ResultSummary: 'Serialized the read behind a mutex.' }),
+      conversation({
+        Status: 'open',
+        CompletedAt: '2026-07-16T11:00:00Z',
+        ResultSummary: 'Serialized the read behind a mutex.',
+      }),
       undefined,
       NOW,
     )
@@ -225,7 +235,7 @@ describe('deriveCard lifecycle', () => {
     expect(
       deriveCard(
         task({ status: 'done', event_type: 'github:pr:ci_check_failed' }),
-        conversation({ Status: 'completed', DurationMs: 60_000 }),
+        conversation({ Status: 'open', CompletedAt: '2026-07-16T11:00:00Z', DurationMs: 60_000 }),
         undefined,
         NOW,
       ).event?.label,
@@ -238,7 +248,7 @@ describe('deriveCard lifecycle', () => {
 
   it('reports the chain as shape, only past one step', () => {
     const steps = [
-      conversation({ ID: 's0', Status: 'completed' }),
+      conversation({ ID: 's0', Status: 'open', CompletedAt: '2026-07-16T11:00:00Z' }),
       conversation({ ID: 's1', Status: 'running' }),
       conversation({ ID: 's2', Status: '' }),
     ]

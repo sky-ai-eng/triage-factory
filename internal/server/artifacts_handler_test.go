@@ -11,6 +11,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -184,7 +185,7 @@ func TestArtifactWrites_KindScoped(t *testing.T) {
 func TestArtifactGet_ServesEveryKind(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
-	conversationID := seedSteerConversation(t, srv.db, "anykind", "completed")
+	conversationID := seedSteerConversation(t, srv.db, "anykind", dbtest.SeedConcluded)
 
 	branch, ok := domain.NewBranchArtifact("acme/api", "refs/heads/feature/x", "deadbeef", true)
 	if !ok {
@@ -226,7 +227,7 @@ func TestArtifactGet_ServesEveryKind(t *testing.T) {
 // written, because the disclosure footer is already on the body from creation
 // and approval has nothing to add. Approval is a decoupled sidecar: it must
 // NOT touch conversation status. The fixture pre-seeds the conversation as
-// 'completed', and we assert it STAYS 'completed' (approve didn't flip it).
+// concluded, and we assert it STAYS concluded (approve didn't flip it).
 // Task closure here is a no-op because the fixture blueprint_run is still
 // 'running' (not a clean completion); the terminal-on-last closure is covered
 // by the dedicated dismiss/closure tests.
@@ -266,12 +267,8 @@ func TestArtifactApprove(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePROpen {
 		t.Errorf("artifact state = %q, want open", got)
 	}
-	var convStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want completed", convStatus)
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded")
 	}
 	// Approval writes no memory: the conversation's row is the agent's own
 	// account of what it tried, and a verdict about an artifact is not that.
@@ -488,12 +485,8 @@ func TestArtifactDismiss_PR(t *testing.T) {
 		t.Errorf("resolution = %q, want dismissed", d.Resolution)
 	}
 	// The conversation lifecycle is untouched — dismiss is a decoupled sidecar.
-	var convStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded (dismiss must not flip conversation lifecycle)")
 	}
 }
 
@@ -847,7 +840,7 @@ func TestArtifactApprove_NonDraft_409(t *testing.T) {
 // it, returning all three ids.
 func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
+	conversationID = seedSteerConversation(t, s.db, suffix, dbtest.SeedConcluded)
 	taskID = fixtureUUID("t_" + suffix)
 	// The fixture's premise is a delegated run that opened a draft PR, so its
 	// task is bot-claimed — the state the terminal-on-last closing hooks
@@ -900,7 +893,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_ab', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'in_progress', ?)`, eventType, runmode.LocalDefaultAgentID)
 	brID := seedBlueprintRunSQLite(t, s.db, "00000000-0000-4000-8000-000000000023")
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES ('r_ab', '00000000-0000-4000-8000-000000000023', 'p_ab', 'completed', 'manual', ?, 0)`, brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at) VALUES ('r_ab', '00000000-0000-4000-8000-000000000023', 'p_ab', 'open', 'manual', ?, 0, CURRENT_TIMESTAMP)`, brID)
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, "r_ab", "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
 	}
@@ -1070,12 +1063,8 @@ func TestArtifactReject_PR(t *testing.T) {
 
 	assertAgentMemoryUntouched(t, srv, conversationID)
 
-	var convStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want completed (reject must not flip conversation lifecycle)", convStatus)
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded (reject must not flip conversation lifecycle)")
 	}
 }
 

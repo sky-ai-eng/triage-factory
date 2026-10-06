@@ -121,13 +121,18 @@ func newSQLiteSpendSeeder(conn *sql.DB) dbtest.SpendSeeder {
 		Conversation: func(t *testing.T, f dbtest.ConversationSpendFixture) string {
 			t.Helper()
 			id := uuid.New().String()
+			status, concluded := dbtest.SeedStatus(f.Status)
+			var completedAt any
+			if concluded {
+				completedAt = f.StartedAt
+			}
 			if _, err := conn.Exec(`
 				INSERT INTO conversations
-					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at)
-				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?)
+					(id, org_id, team_id, creator_user_id, trigger_type, origin, actor_agent_id, trigger_id, model, status, started_at, completed_at)
+				VALUES (?, ?, ?, ?, ?, 'manual', ?, ?, ?, ?, ?, ?)
 			`,
 				id, runmode.LocalDefaultOrgID, f.TeamID, nullStr(f.CreatorUserID), f.TriggerType,
-				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, f.Status, f.StartedAt,
+				nullStr(f.ActorAgentID), nullStr(f.TriggerID), f.Model, status, f.StartedAt, completedAt,
 			); err != nil {
 				t.Fatalf("seed conversation: %v", err)
 			}

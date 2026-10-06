@@ -37,8 +37,8 @@ func TestProcessCompletion_DraftPRDoesNotPark(t *testing.T) {
 	if parked {
 		t.Fatal("processCompletion(draft PR) = true; want parked=false (a draft PR is a sidecar; the step never parks)")
 	}
-	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "continue" {
-		t.Fatalf("conv = {status:%q outcome:%q}, want {completed continue}", conv.Status, conv.Outcome)
+	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "continue" {
+		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with continue", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, taskID, true)
 }
@@ -61,8 +61,8 @@ func TestProcessCompletion_PlainAbortWritesSnapshot(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(plain abort) = true; want parked=false (worktree torn down, snapshot is the resume path)")
 	}
-	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "abort" {
-		t.Fatalf("conv = {status:%q outcome:%q}, want {completed abort}", conv.Status, conv.Outcome)
+	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "abort" {
+		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with abort", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, taskID, true)
 }
@@ -84,8 +84,8 @@ func TestProcessCompletion_CleanFinishWritesSnapshot(t *testing.T) {
 	if parked {
 		t.Error("processCompletion(clean finish) = true; want parked=false (a finish is terminal; the snapshot is the resume path, not a warm tree)")
 	}
-	if conv := loadConversation(t, s, conversationID); conv.Status != "completed" || conv.Outcome != "finish" {
-		t.Fatalf("conv = {status:%q outcome:%q}, want {completed finish}", conv.Status, conv.Outcome)
+	if conv := loadConversation(t, s, conversationID); !conv.Concluded() || conv.Outcome != "finish" {
+		t.Fatalf("conv = {status:%q completed_at:%v outcome:%q}, want concluded with finish", conv.Status, conv.CompletedAt, conv.Outcome)
 	}
 	assertSnapshotPresent(t, s, taskID, true)
 }
@@ -164,7 +164,7 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 	wireBlobStore(t, s)
 
 	oldKey := taskIDForConversation(t, database, oldConversationID)
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`, oldConversationID); err != nil {
 		t.Fatalf("age old run: %v", err)
 	}
 	ageConversationMint(t, database, oldConversationID, "-20 days")
@@ -172,7 +172,7 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 
 	seedConversation(t, database, "r-fresh", "sess-fresh", "/tmp/wt-fresh")
 	freshKey := taskIDForConversation(t, database, "r-fresh")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now') WHERE id='r-fresh'`); err != nil {
 		t.Fatalf("complete fresh run: %v", err)
 	}
 	putTestSnapshot(t, s, freshKey)
@@ -192,14 +192,14 @@ func TestReapExpiredSnapshots_DropsExpiredKeepsFresh(t *testing.T) {
 func TestListReapableSnapshotKeys_CoversEveryTerminalAndExcludesInTTL(t *testing.T) {
 	s, database, abortConversationID, _ := setupAdvanceFixture(t, "reap-rules")
 	abortKey := taskIDForConversation(t, database, abortConversationID)
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, abortConversationID); err != nil {
 		t.Fatalf("age abort run: %v", err)
 	}
 	ageConversationMint(t, database, abortConversationID, "-30 days")
 
 	seedConversation(t, database, "r-fin2", "s", "/tmp/wt")
 	finishKey := taskIDForConversation(t, database, "r-fin2")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish', completed_at=datetime('now','-30 days') WHERE id='r-fin2'`); err != nil {
 		t.Fatalf("finish run: %v", err)
 	}
 	ageConversationMint(t, database, "r-fin2", "-30 days")
@@ -243,13 +243,13 @@ func TestListReapableSnapshotKeys_CoversEveryTerminalAndExcludesInTTL(t *testing
 func TestListReapableSnapshotKeys_SharedTaskNeedsAllPastTTL(t *testing.T) {
 	s, database, conversationID1, taskID := setupAdvanceFixture(t, "reap-shared")
 	bpr := blueprintRunIDForConversation(t, database, conversationID1)
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now','-30 days') WHERE id=?`, conversationID1); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
 	ageConversationMint(t, database, conversationID1, "-30 days")
 	// A second step on the SAME blueprint_run, also completed+abort but fresh.
 	addStepConversation(t, database, bpr, taskID, "run2-shared", 1, "running")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now') WHERE id='run2-shared'`); err != nil {
 		t.Fatalf("complete step 2: %v", err)
 	}
 
@@ -324,7 +324,7 @@ func TestListReapableSnapshotKeys_NewestFailedConversationHoldsTheKey(t *testing
 	cutoff := time.Now().Add(-14 * 24 * time.Hour)
 
 	if _, err := database.Exec(
-		`UPDATE conversations SET status='completed', outcome='continue', completed_at=datetime('now','-30 days') WHERE id=?`, step1,
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='continue', completed_at=datetime('now','-30 days') WHERE id=?`, step1,
 	); err != nil {
 		t.Fatalf("age step 1: %v", err)
 	}
@@ -419,7 +419,7 @@ func TestListReapableSnapshotKeys_InFlightConversationHoldsTheKey(t *testing.T) 
 	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "", 0); err != nil {
 		t.Fatalf("release claim: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish', completed_at=datetime('now','-30 days') WHERE id='step-live'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish', completed_at=datetime('now','-30 days') WHERE id='step-live'`); err != nil {
 		t.Fatalf("settle the engagement: %v", err)
 	}
 	if !keysContain(reapKeys(t, s, cutoff), taskID) {

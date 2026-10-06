@@ -251,6 +251,49 @@ func renderOutcomesSQL(keep func(HandBackPolicy) bool) string {
 	return strings.Join(parts, ",")
 }
 
+// TerminalConversationStatusesSQL is the terminal conversation statuses as a
+// SQL IN-list body — one name: the infrastructure died. A conversation never
+// concludes; its step's verdict parks it `open` (ConcludedConversationSQL). It
+// describes stored rows as faithfully as new writes, because every retired
+// status was rewritten by migration rather than carried forward (202608010002
+// and 202610060001, SQLite; Postgres had no rows to migrate). Mirrors
+// domain.AllTerminalConversationStatuses.
+//
+// A predicate asking "will this conversation take more work on its own"
+// wants SettledConversationSQL / UnsettledConversationSQL, which add the
+// concluded rows; this list alone is for the questions only a failure
+// answers.
+const TerminalConversationStatusesSQL = `'failed'`
+
+// ConcludedConversationSQL is a conversation parked with its step's verdict,
+// over the alias the caller names: `open`, with the conclusion stamped. The Go
+// spelling is domain.Conversation.Concluded, which carries why the stamp
+// rather than the outcome token is what decides. One text for both dialects.
+func ConcludedConversationSQL(alias string) string {
+	return `(` + alias + `.status = 'open' AND ` + alias + `.completed_at IS NOT NULL)`
+}
+
+// SettledConversationSQL is a conversation that takes no more work on its own:
+// failed, or concluded. A follow-up may still wake a concluded one, and the
+// wake is what takes it out of this set.
+//
+// Every exclusion predicate in both dialects interpolates this (through its
+// complement below) rather than re-spelling the clauses. That matters more
+// than the saved keystrokes: these guards are exclusions, so a case missing
+// from one doesn't fail closed — it readmits a finished conversation to
+// parking, cancelling, or the active-work counters. Sixteen hand-copied copies
+// is how the set drifted a value at a time.
+func SettledConversationSQL(alias string) string {
+	return `(` + alias + `.status IN (` + TerminalConversationStatusesSQL + `) OR ` + ConcludedConversationSQL(alias) + `)`
+}
+
+// UnsettledConversationSQL is the null-safe complement of
+// SettledConversationSQL: a NULL status (mid-flight) is unsettled, and once
+// the status is known both of settled's clauses are definite.
+func UnsettledConversationSQL(alias string) string {
+	return `(` + alias + `.status IS NULL OR NOT ` + SettledConversationSQL(alias) + `)`
+}
+
 // EpisodeStartSQL renders when a conversation's current queue episode began,
 // against the conversation alias convAlias as it stood before the claim the
 // episode is being counted for. Both dialects' episode counts compare their

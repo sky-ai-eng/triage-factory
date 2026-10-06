@@ -16,11 +16,19 @@ import type {
 // working) and so is `open` (parked between turns).
 export const ACTIVE_STATUSES = ['running', ...CLAIM_PHASES] as const
 
-// FAILED_STATUSES — the terminals that are not a success, styled rose rather
-// than neutral. Derived by excluding the one success rather than re-listing
-// the other three, so a renamed terminal can't quietly fall out of it; a
-// future terminal lands here by default, which is the safe direction.
-export const FAILED_STATUSES = TERMINAL_CONVERSATION_STATUSES.filter((s) => s !== 'completed')
+// FAILED_STATUSES — the terminals, styled rose rather than neutral. Every
+// terminal is a failure: a conversation never concludes, so the only state it
+// never leaves is the runtime under it dying. A future terminal lands here by
+// default, which is the safe direction.
+export const FAILED_STATUSES = TERMINAL_CONVERSATION_STATUSES
+
+// isConcluded — the conversation is parked with its step's verdict: `open`,
+// with the conclusion stamped. Mirrors domain.Conversation.Concluded. A
+// concluded conversation is still resumable; whether the work it belongs to is
+// done is its blueprint run's status, which completionKind reads.
+export function isConcluded(conversation: Conversation): boolean {
+  return conversation.Status === 'open' && conversation.CompletedAt != null
+}
 
 export function isTerminalStatus(
   status: ConversationStatusValue,
@@ -116,9 +124,9 @@ export function chainPosition(conversation: Conversation): ChainPosition | null 
   return { step: index + 1, total, isFinal: index >= total - 1 }
 }
 
-// CompletionKind splits the one stored success terminal into what it actually
-// meant. `completed` is where three different endings land, and collapsing them
-// to one word is how a mid-chain step came to read as the whole task finishing:
+// CompletionKind splits a concluded conversation into what its verdict meant
+// for the work. Three different endings land there, and collapsing them to one
+// word is how a mid-chain step came to read as the whole task finishing:
 //
 //   - 'handoff' — a step of a chain that isn't the last one, whose part is done.
 //     Another step picks the work up; the task is NOT over.
@@ -154,12 +162,30 @@ export function chainPosition(conversation: Conversation): ChainPosition | null 
 // length) is the one genuine unknown. It reads as final, which is the
 // conservative direction for the two arms that care and irrelevant to the two
 // that don't.
+//
+// The verdict is the fallback, though, not the first word. A conversation never
+// concludes, so the blueprint run's status is what says whether the work is
+// done, and where the server could read it, it decides every step except one
+// that handed off: a finished run is done even when a later follow-up on its
+// last step reported something else, and an aborted, failed or cancelled run
+// stopped whatever the step said before it. Only a run still `running` (its
+// reactor has not acted on the verdict yet) or one the server could not read
+// falls through to the verdict switch.
 export type CompletionKind = 'done' | 'handoff' | 'stopped'
 
 export function completionKind(conversation: Conversation): CompletionKind | null {
-  if (conversation.Status !== 'completed') return null
+  if (!isConcluded(conversation)) return null
   const pos = chainPosition(conversation)
   const isFinal = pos ? pos.isFinal : true
+  if (conversation.Outcome === 'continue' && !isFinal) return 'handoff'
+  switch (conversation.blueprint_run_status) {
+    case 'completed':
+      return 'done'
+    case 'aborted':
+    case 'failed':
+    case 'cancelled':
+      return 'stopped'
+  }
   switch (conversation.Outcome) {
     case 'continue':
       return isFinal ? 'done' : 'handoff'
@@ -175,18 +201,26 @@ export function completionKind(conversation: Conversation): CompletionKind | nul
   }
 }
 
-// completionGloss — the plain-language line for a settled conversation, in one
-// place so the dock and the telemetry rail can't tell the viewer two
-// different stories about the same row. Empty for a conversation that hasn't completed.
+// completionGloss — the plain-language line for a concluded conversation, in
+// one place so the dock and the telemetry rail can't tell the viewer two
+// different stories about the same row. Empty for a conversation that hasn't
+// concluded.
 export function completionGloss(conversation: Conversation): string {
   const kind = completionKind(conversation)
   if (!kind) return ''
   const pos = chainPosition(conversation)
   if (kind === 'stopped') {
-    // Two ways to stop, and they are different news: the agent decided to,
-    // or it ended on nothing the workflow could act on (no outcome recorded,
-    // or one this build doesn't know). The rail prints the raw token beside
-    // this, so the second line doesn't repeat it.
+    // The ways to stop are different news: the workflow was cancelled or
+    // failed around the step, the agent decided to stop, or it ended on
+    // nothing the workflow could act on (no outcome recorded, or one this
+    // build doesn't know). The rail prints the raw token beside this, so the
+    // last line doesn't repeat it.
+    if (conversation.blueprint_run_status === 'cancelled') {
+      return 'workflow cancelled — the task stays open for a human'
+    }
+    if (conversation.blueprint_run_status === 'failed') {
+      return 'the workflow failed — the task stays open for a human'
+    }
     return conversation.Outcome === 'abort'
       ? 'stopped without finishing — the task stays open for a human'
       : 'ended without a usable outcome — the workflow stopped here for a human'
@@ -198,6 +232,10 @@ export function completionGloss(conversation: Conversation): string {
   // safe to say: the agent chose to end the workflow. Every other non-final
   // ending is 'stopped' above and must never be described as a deliberate one.
   if (pos && !pos.isFinal) return 'ended the workflow early — the later steps were skipped'
+  // A finished run stays finished: a follow-up on its last step that ended on
+  // an abort is recorded on the step and reopens nothing.
+  if (conversation.Outcome === 'abort')
+    return 'work complete — a later follow-up’s abort reopened nothing'
   if (pos) return `work complete — the last of ${pos.total} steps`
   return 'work complete'
 }
@@ -236,20 +274,18 @@ export function parkReasonLabel(reason: string): string {
 
 // isResumableConversation mirrors the backend resumableState gate — the STATUS half of
 // resumability, and the cheap first cut only. A conversation with no live turn can be
-// woken by a follow-up when it parked `open` or when it concluded: an abort is
+// woken by a follow-up when it parked `open`, concluded or not: an abort is
 // work a human picks back up, a finish is work a human follows up on, and both
-// have a workspace to land in because every completed terminal snapshots.
-// `failed` is the exclusion — the infrastructure under it died, so there is no
-// tree to rehydrate.
-//
-// Outcome no longer discriminates, which is why this reads as status alone.
+// have a workspace to land in because every verdict snapshots. `failed` is the
+// exclusion — the infrastructure under it died, so there is no tree to
+// rehydrate.
 //
 // Status is one of three inputs, and the only one the client can see: whether
 // the workspace survived and whether anything would drive it are server-side
 // facts. So this is never the whole answer — use canResumeConversation, which folds in
 // the server's own verdict.
 export function isResumableConversation(conversation: Conversation): boolean {
-  return conversation.Status === 'open' || conversation.Status === 'completed'
+  return conversation.Status === 'open'
 }
 
 // canResumeConversation is the composer's gate for a conversation with no live

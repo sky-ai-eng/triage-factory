@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -51,7 +52,7 @@ func TestDelegate_LeavesTheTaskInProgress(t *testing.T) {
 // next step is not a board event. The card was placed at mint and the reactor
 // writes no column of its own.
 func TestReactor_StepAdvanceLeavesTheColumnAlone(t *testing.T) {
-	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "noboard", 2, "completed", "continue")
+	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "noboard", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 	seedLocalBotAgent(t, database)
 	stampBotClaim(t, database, taskID)
@@ -192,9 +193,15 @@ func readTaskStatus(t *testing.T, database *sql.DB, taskID string) string {
 	return status
 }
 
+// setConversationStatus stores a conversation's status. dbtest.SeedConcluded
+// stages a recorded verdict: `open` with completed_at stamped.
 func setConversationStatus(t *testing.T, database *sql.DB, conversationID, status string) {
 	t.Helper()
-	if _, err := database.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, conversationID); err != nil {
+	stored, concluded := dbtest.SeedStatus(status)
+	if _, err := database.Exec(
+		`UPDATE conversations SET status = ?, completed_at = CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE completed_at END WHERE id = ?`,
+		stored, concluded, conversationID,
+	); err != nil {
 		t.Fatalf("set run status: %v", err)
 	}
 }
@@ -209,14 +216,17 @@ func blueprintRunIDForConversation(t *testing.T, database *sql.DB, conversationI
 }
 
 // addStepConversation appends another step run to an existing blueprint_run, so
-// a test can exercise a blueprint whose steps are more than one row.
+// a test can exercise a blueprint whose steps are more than one row. status
+// takes dbtest.SeedConcluded like setConversationStatus.
 func addStepConversation(t *testing.T, database *sql.DB, blueprintRunID, taskID, conversationID string, stepIndex int, status string) {
 	t.Helper()
+	stored, concluded := dbtest.SeedStatus(status)
 	if _, err := database.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, team_id, visibility,
-		                  creator_user_id, worktree_path, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, 'test-prompt', ?, 'manual', ?, 'team', ?, '/tmp/wt-step', ?, ?)
-	`, conversationID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex); err != nil {
+		                  creator_user_id, worktree_path, blueprint_run_id, blueprint_step_index, completed_at)
+		VALUES (?, ?, 'test-prompt', ?, 'manual', ?, 'team', ?, '/tmp/wt-step', ?, ?,
+		        CASE WHEN ? THEN CURRENT_TIMESTAMP END)
+	`, conversationID, taskID, stored, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, blueprintRunID, stepIndex, concluded); err != nil {
 		t.Fatalf("add step run: %v", err)
 	}
 }

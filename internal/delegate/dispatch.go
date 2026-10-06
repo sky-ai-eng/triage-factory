@@ -906,8 +906,12 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 		// read the step as one the cancel never reached; it leaves the step
 		// alone for db.ReactorGrace after that release, and cancels the run
 		// in this engagement's place only if the reactor has not by then.
+		// The stop recorded no verdict, so the copy carries none: a claim
+		// of a step that had concluded before (a follow-up) still holds the
+		// old stamp in hand, and this engagement is not answering with it.
 		parked := *conv
-		parked.Status = "open"
+		parked.Status = domain.StatusOpen
+		parked.CompletedAt = nil
 		s.reactToStepTerminal(ctx, orgID, br, parked, runConfig{
 			orgID:  orgID,
 			teamID: conv.TeamID,
@@ -1167,8 +1171,9 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	stepConversation.CreatorUserID = conv.CreatorUserID
 	stepConversation.Model = conv.Model
 	// Same predicate reactToStepTerminal uses to leave the blueprint running: an
-	// `open` step is dormant, not done, so its staged skill stays for the resume.
-	stepParked = stepConversation.Status == "open"
+	// `open` step with no verdict is dormant, not done, so its staged skill
+	// stays for the resume. A concluded one has given its answer.
+	stepParked = stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded()
 	s.reactToStepTerminal(ctx, orgID, br, *stepConversation, cfg, startTime)
 }
 
@@ -1571,28 +1576,29 @@ func (s *Spawner) reactToStepTerminal(ctx context.Context, orgID string, br *dom
 		return
 	}
 
-	// Parked mid-step with no cancel behind it: leave the blueprint running, the
-	// worktree on disk, the snapshot in the blob store for the resume path —
-	// and the task's column where it is. Only `open` parks now: a step that
-	// queued a draft PR / pending review completes normally and the
+	// Parked mid-step with no verdict and no cancel behind it: leave the
+	// blueprint running, the worktree on disk, the snapshot in the blob store
+	// for the resume path — and the task's column where it is. A step that
+	// queued a draft PR / pending review records its verdict normally and the
 	// orchestrator advances, the artifact riding along as a sidecar.
-	if stepConversation.Status == "open" {
+	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() {
 		dispatchLog.Info("blueprint_run step paused; blueprint remains running", "blueprint_run", br.ID, "step", stepIdx, "status", stepConversation.Status)
 		return
 	}
 
-	switch stepConversation.Status {
-	case "failed":
+	switch {
+	case stepConversation.Status == domain.StatusFailed:
 		s.terminateBlueprint(orgID, br.ID, br.TaskID, triggerType, creatorUserID, startTime, cfg,
 			domain.BlueprintRunStatusFailed, "step "+stepConversation.Status, &stepIdx, false)
 		return
-	case "completed":
-		// fall through to the outcome decision below
+	case stepConversation.Concluded():
+		// The step recorded its verdict: fall through to the outcome decision
+		// below.
 	default:
-		// Neither a terminal nor the park above, on a row this engagement just
-		// wrote a terminal to: something re-queued or re-claimed the
-		// conversation in between, so this status is a SUCCESSOR's, not a
-		// wedged step. Same answer as a claim fence, for the same reason —
+		// Neither a failure, a verdict nor the park above, on a row this
+		// engagement just wrote its ending to: something re-queued or
+		// re-claimed the conversation in between, so this status is a
+		// SUCCESSOR's, not a wedged step. Same answer as a claim fence, for the same reason —
 		// every transition below would be decided on someone else's state.
 		// Failing the blueprint here is how a successor's liveness got read as
 		// this engagement's corruption, unrecoverably.

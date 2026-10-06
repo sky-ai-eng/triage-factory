@@ -46,14 +46,14 @@ func RunPendingFiringsGateAgreement(t *testing.T, mk func(t *testing.T) (db.Pend
 			seed.EndConversation(t, parent)
 			seed.SubConversation(t, tup.TaskID, tup.PromptID, parent)
 		}},
-		{"completed_conversation", false, func(t *testing.T, seed PendingFiringsGateSeeder, tup PendingFiringsTuple) {
-			seed.SetStatus(t, seed.LiveConversation(t, tup.TaskID, tup.PromptID), "completed")
+		{"concluded_conversation", false, func(t *testing.T, seed PendingFiringsGateSeeder, tup PendingFiringsTuple) {
+			seed.SetStatus(t, seed.LiveConversation(t, tup.TaskID, tup.PromptID), SeedConcluded)
 		}},
 		{"open_conversation_not_ended", false, func(t *testing.T, seed PendingFiringsGateSeeder, tup PendingFiringsTuple) {
 			seed.SetStatus(t, seed.LiveConversation(t, tup.TaskID, tup.PromptID), "open")
 		}},
-		{"completed_conversation_run_still_running", true, func(t *testing.T, seed PendingFiringsGateSeeder, tup PendingFiringsTuple) {
-			seed.SetStatus(t, seed.LiveConversation(t, tup.TaskID, tup.PromptID), "completed")
+		{"concluded_conversation_run_still_running", true, func(t *testing.T, seed PendingFiringsGateSeeder, tup PendingFiringsTuple) {
+			seed.SetStatus(t, seed.LiveConversation(t, tup.TaskID, tup.PromptID), SeedConcluded)
 			seed.RunForTask(t, tup.TaskID)
 		}},
 	}

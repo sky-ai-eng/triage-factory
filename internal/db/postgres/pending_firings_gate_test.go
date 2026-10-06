@@ -30,11 +30,14 @@ func TestPendingFiringsGate_Postgres(t *testing.T) {
 			},
 			SetStatus: func(t *testing.T, conversationID, status string) {
 				t.Helper()
+				resolved, concluded := dbtest.SeedStatus(status)
 				var v any
-				if status != "" {
-					v = status
+				if resolved != "" {
+					v = resolved
 				}
-				pgExecOne(t, h, "set status", `UPDATE conversations SET status = $1 WHERE id = $2`, v, conversationID)
+				pgExecOne(t, h, "set status", `UPDATE conversations SET status = $1,
+					completed_at = CASE WHEN $3 THEN COALESCE(completed_at, now()) ELSE completed_at END
+					WHERE id = $2`, v, conversationID, concluded)
 			},
 		}
 		return stores.PendingFirings, stores.Conversations, orgID, seed

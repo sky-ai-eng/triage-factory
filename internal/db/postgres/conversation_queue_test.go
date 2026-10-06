@@ -348,7 +348,10 @@ func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.
 			PromptID: promptID, CreatorUserID: userID,
 		}).ID
 		if status != "" {
-			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, id, status)
+			stored, concluded := dbtest.SeedStatus(status)
+			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2,
+				completed_at = CASE WHEN $3 THEN now() ELSE completed_at END
+				WHERE id = $1`, id, stored, concluded)
 		}
 		return id
 	}
@@ -363,7 +366,7 @@ func TestConversationQueueStore_Postgres_ReconcileCountsClaimDesyncs(t *testing.
 	}
 
 	// Dangling claims on terminal rows (the crash-after-flip shape).
-	doneID := seedChild("completed")
+	doneID := seedChild(dbtest.SeedConcluded)
 	doneClaim := activeClaim(doneID)
 	failedID := seedChild("failed")
 	failedClaim := activeClaim(failedID)
@@ -613,7 +616,10 @@ func TestConversationQueueStore_Postgres_FleetQueueShares(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, conversationID, status string) {
 				t.Helper()
-				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1 WHERE id = $2`, status, conversationID); err != nil {
+				resolved, concluded := dbtest.SeedStatus(status)
+				if _, err := h.AdminDB.Exec(`UPDATE conversations SET status = $1,
+					completed_at = CASE WHEN $3 THEN COALESCE(completed_at, now()) ELSE completed_at END
+					WHERE id = $2`, resolved, conversationID, concluded); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -838,9 +844,12 @@ func TestConversationQueueStore_Postgres_ExecutorClaims(t *testing.T) {
 				conversationID := firePgStep(t, h, stores, orgID, bpID, seedPgTask(t, h, orgID, userID), domain.Conversation{
 					PromptID: promptID, CreatorUserID: userID,
 				}).ID
+				resolved, concluded := dbtest.SeedStatus(status)
 				if _, err := h.AdminDB.Exec(`
-					UPDATE conversations SET status = $1, failure_kind = NULLIF($2, '') WHERE id = $3
-				`, status, failureKind, conversationID); err != nil {
+					UPDATE conversations SET status = $1, failure_kind = NULLIF($2, ''),
+					    completed_at = CASE WHEN $4 THEN COALESCE(completed_at, now()) ELSE completed_at END
+					WHERE id = $3
+				`, resolved, failureKind, conversationID, concluded); err != nil {
 					t.Fatalf("force terminal state: %v", err)
 				}
 				return conversationID
@@ -952,11 +961,14 @@ func TestClaimPredicate_Postgres(t *testing.T) {
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()
+				resolved, concluded := dbtest.SeedStatus(status)
 				var stored any
-				if status != "" {
-					stored = status
+				if resolved != "" {
+					stored = resolved
 				}
-				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2 WHERE id = $1`, convID, stored)
+				pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = $2,
+					completed_at = CASE WHEN $3 THEN COALESCE(completed_at, now()) ELSE completed_at END
+					WHERE id = $1`, convID, stored, concluded)
 			},
 			StoredStatus: func(t *testing.T, convID string) string {
 				t.Helper()
@@ -1200,21 +1212,27 @@ func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixtu
 		},
 		StageStaleStopIntent: func(t *testing.T, conversationID, status, by string) {
 			t.Helper()
+			resolved, concluded := dbtest.SeedStatus(status)
 			if _, err := h.AdminDB.Exec(
-				`UPDATE conversations SET status = $1, stop_requested_at = now(), stop_requested_by = NULLIF($2, '') WHERE id = $3`,
-				status, by, conversationID,
+				`UPDATE conversations SET status = $1, stop_requested_at = now(), stop_requested_by = NULLIF($2, ''),
+				 completed_at = CASE WHEN $4 THEN COALESCE(completed_at, now()) ELSE completed_at END
+				 WHERE id = $3`,
+				resolved, by, conversationID, concluded,
 			); err != nil {
 				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
 			}
 		},
 		SetStoredStatus: func(t *testing.T, conversationID, status string) {
 			t.Helper()
-			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = NULLIF($1, '') WHERE id = $2`, status, conversationID)
+			resolved, concluded := dbtest.SeedStatus(status)
+			pgtest.MustExec(t, h.AdminDB, `UPDATE conversations SET status = NULLIF($1, ''),
+				completed_at = CASE WHEN $3 THEN COALESCE(completed_at, now()) ELSE completed_at END
+				WHERE id = $2`, resolved, conversationID, concluded)
 		},
 		BackdateConclusion: func(t *testing.T, conversationID string, ago time.Duration) {
 			t.Helper()
 			pgtest.MustExec(t, h.AdminDB,
-				`UPDATE conversations SET completed_at = now() - make_interval(secs => $1) WHERE id = $2`,
+				`UPDATE conversations SET completed_at = now() - make_interval(secs => $1) WHERE id = $2 AND completed_at IS NOT NULL`,
 				ago.Seconds(), conversationID)
 			pgtest.MustExec(t, h.AdminDB,
 				`UPDATE claims SET released_at = now() - make_interval(secs => $1) WHERE conversation_id = $2 AND released_at IS NOT NULL`,

@@ -163,11 +163,11 @@ type ListingSummary struct {
 // aggregated run activity across every copy installed from it (TFAC-540).
 // TeamsUsing counts only installing teams whose copy still exists
 // (prompts/blueprints.deleted_at IS NULL). TotalRuns/SuccessRate/LastRunAt
-// count only TERMINAL runs (completed/failed for prompts; completed/failed/
-// cancelled/aborted for blueprints) — a still-running run hasn't resolved
-// either way, so it counts toward neither "how much work got done" nor "how
-// well," and must not silently score as a failure just because it isn't
-// 'completed' yet. This holds across copy deletion too: root_object_id
+// count only RESOLVED runs (concluded or failed conversations for prompts;
+// completed/failed/cancelled/aborted blueprint runs for blueprints) — a run
+// still in flight hasn't resolved either way, so it counts toward neither "how
+// much work got done" nor "how well," and must not silently score as a failure
+// just because it hasn't concluded yet. This holds across copy deletion too: root_object_id
 // survives deletion on the install row (see MarketplaceStore.MaterializeListing),
 // so a listing's lifetime usage never drops just because a consumer cleaned
 // up their copy — but it's still only *resolved* lifetime usage.

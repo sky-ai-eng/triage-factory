@@ -870,21 +870,21 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 		}); err != nil {
 			t.Fatalf("InsertMessage under synth claims: %v", err)
 		}
-		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, "completed", cost, durationMs, numTurns, resultSummary, outcome, "", ""); err != nil {
+		if _, err := dbtest.HolderComplete(stores.Conversations, ctx, orgID, conversationID, domain.StatusOpen, cost, durationMs, numTurns, resultSummary, outcome, "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 	}
 	settle(0.5, 1500, 3, "", "")
 	settle(0.25, 500, 2, "ok", "finish")
 
-	// Verify through the derived projection: row landed in completed, the
+	// Verify through the derived projection: row landed concluded, the
 	// totals reflect both cycles, creator stayed the original user.
 	got, err := stores.Conversations.GetSystem(ctx, orgID, conversationID)
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem: err=%v got=%v", err, got)
 	}
-	if got.Status != "completed" {
-		t.Errorf("status = %q, want completed", got.Status)
+	if !got.Concluded() {
+		t.Errorf("status = %q (completed_at %v), want concluded", got.Status, got.CompletedAt)
 	}
 	if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.75 {
 		t.Errorf("total_cost_usd = %v, want 0.75 (0.5 lump + 0.25 lump)", got.TotalCostUSD)
@@ -941,16 +941,28 @@ func seedPgConversation(t *testing.T, conn *sql.DB, orgID string, conv domain.Co
 	// ladder reads as `queued` — not the empty string, which is no status.
 	// team_id defaults to the org's first team; a conversation staged for a
 	// team-narrowing test names its own.
+	// A conclusion stamp, when the seed carries one, is what makes an `open`
+	// row concluded rather than paused.
+	resolved, concluded := dbtest.SeedStatus(conv.Status)
+	conv.Status = resolved
+	if concluded && conv.CompletedAt == nil {
+		at := time.Now().UTC()
+		conv.CompletedAt = &at
+	}
+	var completedAt any
+	if conv.CompletedAt != nil {
+		completedAt = conv.CompletedAt.UTC()
+	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, org_id, task_id, team_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, visibility, creator_user_id,
-		                           blueprint_run_id, blueprint_step_index)
+		                           blueprint_run_id, blueprint_step_index, completed_at)
 		VALUES ($1, $2, $3,
 		        COALESCE(NULLIF($12, '')::uuid,
 		                 (SELECT id FROM teams WHERE org_id = $2 ORDER BY created_at ASC LIMIT 1)),
-		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11)
+		        $4, NULLIF($5, ''), $6, $7, NULLIF($8, '')::uuid, 'team', $9, $10, $11, $13)
 	`, id, orgID, conv.TaskID, conv.PromptID, conv.Status, conv.Model,
-		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID); err != nil {
+		trigger, conv.TriggerID, creator, conv.BlueprintRunID, stepIdx, conv.TeamID, completedAt); err != nil {
 		t.Fatalf("seed conversation %s: %v", id, err)
 	}
 	return id
@@ -1102,7 +1114,7 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 	brID := seedPgBlueprintRun(t, h, orgID, creator, taskID)
 	stepIdx := 0
 	convID := seedPgConversation(t, h.AdminDB, orgID, domain.Conversation{
-		TaskID: taskID, PromptID: "p_handoff_rls", Status: "completed", Model: "m",
+		TaskID: taskID, PromptID: "p_handoff_rls", Status: dbtest.SeedConcluded, Model: "m",
 		TriggerType: "manual", CreatorUserID: creator,
 		BlueprintRunID: brID, BlueprintStepIndex: &stepIdx,
 	})
@@ -1140,8 +1152,8 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 	if err := h.AdminDB.QueryRow(`SELECT status FROM conversations WHERE id = $1`, convID).Scan(&status); err != nil {
 		t.Fatalf("read status: %v", err)
 	}
-	if status != "completed" {
-		t.Errorf("status = %q, want completed — a refused CAS writes nothing", status)
+	if status != domain.StatusOpen {
+		t.Errorf("status = %q, want open — a refused CAS writes nothing", status)
 	}
 
 	// Once the blueprint stops, the same teammate's follow-up lands. The guard

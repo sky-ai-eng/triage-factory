@@ -1349,19 +1349,34 @@ func (s *blueprintStore) ReopenRunForResume(ctx context.Context, orgID, id strin
 	if !isValidUUID(id) {
 		return false, nil
 	}
-	// CAS aborted → running, clearing the stale abort metadata. The resumed step
-	// re-finalizes the blueprint through the normal post-resume disposition.
+	// CAS aborted → running while the task is still open, clearing the stale
+	// abort metadata, and withdraw the verdict the current step recorded in the
+	// same statement. The resumed step re-finalizes the blueprint through the
+	// normal post-resume disposition, and a verdict left behind would read as
+	// one it had already given.
 	// App pool — runs inside the resume's synthetic-claims tx alongside the run
-	// flip, so the two commit atomically.
-	res, err := s.app.ExecContext(ctx, `
-		UPDATE blueprint_runs
-		SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
-		WHERE org_id = $1 AND id = $2 AND status = 'aborted'
-	`, orgID, id)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
+	// flip, so the two commit atomically. The withdrawal writes the same
+	// conversation row the flip just wrote, under the same policy.
+	var n int
+	err := s.app.QueryRowContext(ctx, `
+		WITH reopened AS (
+			UPDATE blueprint_runs br
+			SET status = 'running', abort_reason = NULL, aborted_at_step = NULL, completed_at = NULL
+			WHERE br.org_id = $1 AND br.id = $2 AND br.status = 'aborted'
+			  AND EXISTS (SELECT 1 FROM tasks t
+			              WHERE t.org_id = br.org_id AND t.id = br.task_id
+			                AND t.status NOT IN ('done', 'dismissed'))
+			RETURNING br.id, br.current_step_index
+		), withdrawn AS (
+			UPDATE conversations c
+			SET outcome = NULL, outcome_reason = NULL, completed_at = NULL
+			FROM reopened
+			WHERE c.org_id = $1 AND c.blueprint_run_id = reopened.id
+			  AND c.blueprint_step_index = reopened.current_step_index
+			RETURNING c.id
+		)
+		SELECT count(*) FROM reopened
+	`, orgID, id).Scan(&n)
 	if err != nil {
 		return false, err
 	}
@@ -1402,8 +1417,8 @@ func (s *blueprintStore) ActiveStepConversationIDsSystem(ctx context.Context, or
 	return blueprintActiveStepConversationIDs(ctx, s.admin, orgID, blueprintRunID)
 }
 
-func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]int, error) {
-	out := make(map[string]int, len(blueprintRunIDs))
+func (s *blueprintStore) RunProgress(ctx context.Context, orgID string, blueprintRunIDs []string) (map[string]db.RunProgress, error) {
+	out := make(map[string]db.RunProgress, len(blueprintRunIDs))
 	if len(blueprintRunIDs) == 0 {
 		return out, nil
 	}
@@ -1413,7 +1428,7 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	// projection there, exactly as the chain rail already does for a run whose
 	// blueprint row it cannot read.
 	rows, err := s.app.QueryContext(ctx, `
-		SELECT id::text, json_array_length(step_plan::json)
+		SELECT id::text, json_array_length(step_plan::json), status
 		FROM blueprint_runs
 		WHERE org_id = $1 AND id = ANY($2)
 	`, orgID, pgUUIDArray(blueprintRunIDs))
@@ -1422,12 +1437,12 @@ func (s *blueprintStore) StepPlanLengths(ctx context.Context, orgID string, blue
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
+		var id, status string
 		var n int
-		if err := rows.Scan(&id, &n); err != nil {
+		if err := rows.Scan(&id, &n, &status); err != nil {
 			return nil, err
 		}
-		out[id] = n
+		out[id] = db.RunProgress{StepCount: n, Status: domain.BlueprintRunStatus(status)}
 	}
 	return out, rows.Err()
 }
@@ -1439,8 +1454,7 @@ func blueprintActiveStepConversationIDs(ctx context.Context, q queryer, orgID, b
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE org_id = $1 AND blueprint_run_id = $2
-		  AND (status IS NULL
-		       OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, orgID, blueprintRunID)
 	if err != nil {
 		return nil, err

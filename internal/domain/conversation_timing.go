@@ -21,6 +21,13 @@ type ConversationTiming struct {
 	DurationMS  *int
 }
 
+// Concluded reports whether the timed conversation is parked with its step's
+// verdict — Conversation.Concluded over the same two columns. It is what a
+// "runs completed" count reads.
+func (t ConversationTiming) Concluded() bool {
+	return t.Status == StatusOpen && t.CompletedAt != nil
+}
+
 // QueuedConversation is one currently-queued conversation's org + enqueue time, for the fleet
 // queue view's oldest-waiting age and per-org share. Deliberately unwindowed
 // (a long-waiting conversation is exactly the interesting one), so it is a separate read

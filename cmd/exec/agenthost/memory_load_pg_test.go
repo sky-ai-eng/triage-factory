@@ -22,8 +22,8 @@ func seedPgConversationWithMemory(t *testing.T, h *pgtest.Harness, stores db.Sto
 	t.Helper()
 	conversationID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status)
-		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'completed')
+		INSERT INTO conversations (id, org_id, team_id, creator_user_id, visibility, trigger_type, origin, status, completed_at)
+		VALUES ($1, $2, $3, $4, $5, 'manual', 'interactive', 'open', now())
 	`, conversationID, orgID, teamID, creatorID, visibility); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}

@@ -68,8 +68,8 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	}
 	blueprintRunID := seedBlueprintRunSQLite(t, database, "00000000-0000-4000-8000-000000000024")
 	if _, err := database.Exec(
-		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
-		 VALUES ('r_pa', '00000000-0000-4000-8000-000000000024', 'p_pa', 'completed', 'manual', ?, 0)`,
+		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at)
+		 VALUES ('r_pa', '00000000-0000-4000-8000-000000000024', 'p_pa', 'open', 'manual', ?, 0, CURRENT_TIMESTAMP)`,
 		blueprintRunID,
 	); err != nil {
 		t.Fatalf("seed conversation: %v", err)
@@ -140,14 +140,10 @@ func assertPendingApprovalCleanedUp(
 		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
-	// The conversation is untouched by the resolve — it stays terminal
-	// (completed). A resolve must never flip conversations.status.
-	var convStatus string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("scan conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want %q (teardown must not flip conversation lifecycle)", convStatus, "completed")
+	// The conversation is untouched by the resolve — it stays concluded. A
+	// resolve must never flip conversations.status.
+	if !storedConcluded(t, database, conversationID) {
+		t.Error("conversation no longer concluded (teardown must not flip conversation lifecycle)")
 	}
 
 	// The review artifact must be flipped to dismissed (its proposed snapshot is
@@ -234,12 +230,8 @@ func assertPendingApprovalCarried(
 		t.Errorf("task.status = %q, want %q", taskStatus, wantTaskStatus)
 	}
 
-	var convStatus string
-	if err := database.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("scan conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want %q", convStatus, "completed")
+	if !storedConcluded(t, database, conversationID) {
+		t.Error("conversation no longer concluded")
 	}
 
 	var reviewState string
@@ -1353,12 +1345,8 @@ func TestTeardownTaskArtifacts_Idempotent(t *testing.T) {
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
-	var convStatusAfter string
-	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatusAfter); err != nil {
-		t.Fatalf("scan after second call: %v", err)
-	}
-	if convStatusAfter != "completed" {
-		t.Errorf("conversation status drifted after second call: %q (teardown must not flip conversation lifecycle)", convStatusAfter)
+	if !storedConcluded(t, s.db, conversationID) {
+		t.Error("conversation no longer concluded after second call (teardown must not flip conversation lifecycle)")
 	}
 	mem, err := sqlitestore.New(s.db).TaskMemory.GetForConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil || mem == nil {
@@ -1391,12 +1379,8 @@ func TestTeardownTaskArtifacts_FailureHoldsArtifactForRetry(t *testing.T) {
 	s.teardownTaskArtifacts(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, taskID)
 
 	// The conversation is untouched (never flipped — teardown doesn't touch its status).
-	var convStatus string
-	if err := s.db.QueryRow(`SELECT status FROM conversations WHERE id = ?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("scan conversation after sabotaged teardown: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Fatalf("conversation status = %q after failure; want %q (conversation untouched)", convStatus, "completed")
+	if !storedConcluded(t, s.db, conversationID) {
+		t.Fatal("conversation no longer concluded after failure; want it untouched")
 	}
 
 	// Heal the table; the next call must resolve the still-pending review.

@@ -167,25 +167,21 @@ func TestSendMessage_QueuedSDKNotSteerable(t *testing.T) {
 
 // TestResumableState pins the wake gate the routing and the
 // MarkQueuedForResume CAS both key on: every state a conversation comes to
-// rest on is resumable except `failed`, and outcome does not discriminate.
+// rest on is resumable except `failed`. A conversation that concluded its step
+// is `open` too, so the verdict does not discriminate.
 func TestResumableState(t *testing.T) {
 	cases := []struct {
-		status, outcome string
-		want            bool
+		status string
+		want   bool
 	}{
-		{"open", "", true},
-		{"completed", "abort", true},
-		{"completed", "finish", true}, // concluded work is followed up on
-		{"completed", "continue", true},
-		{"completed", "", true},
-		{"running", "", false},
-		{"queued", "", false},
-		{"failed", "", false},      // the one rest state with no workspace left
-		{"failed", "abort", false}, // outcome never rescues a status
+		{domain.StatusOpen, true}, // parked, concluded or not
+		{domain.StatusRunning, false},
+		{domain.StatusQueued, false},
+		{domain.StatusFailed, false}, // the one rest state with no workspace left
 	}
 	for _, tc := range cases {
-		if got := resumableState(tc.status, tc.outcome); got != tc.want {
-			t.Errorf("resumableState(%q, %q) = %v, want %v", tc.status, tc.outcome, got, tc.want)
+		if got := resumableState(tc.status); got != tc.want {
+			t.Errorf("resumableState(%q) = %v, want %v", tc.status, got, tc.want)
 		}
 	}
 }
@@ -207,8 +203,7 @@ func TestDrainsUndeliveredInput(t *testing.T) {
 		{domain.ConversationRuntimeNative, domain.StatusRunning, true},
 		{domain.ConversationRuntimeNative, domain.ClaimPhaseCloning, true},
 		{domain.ConversationRuntimeNative, domain.StatusQueued, true},
-		{domain.ConversationRuntimeNative, domain.StatusOpen, false},      // parked: needs a wake
-		{domain.ConversationRuntimeNative, domain.StatusCompleted, false}, // ditto
+		{domain.ConversationRuntimeNative, domain.StatusOpen, false}, // parked or concluded: needs a wake
 		{domain.ConversationRuntimeNative, domain.StatusFailed, false},
 
 		{domain.ConversationRuntimeSDK, domain.StatusRunning, false},
@@ -234,9 +229,9 @@ func TestDrainsUndeliveredInput(t *testing.T) {
 //
 // The refusal holds for every terminal too, `aborted` included. An aborted
 // blueprint's own step resumes and re-opens it, but an earlier one does not —
-// the re-open is conditioned on the conversation's completed+abort terminal, so
-// waking an earlier step leaves the blueprint terminal with current_step_index
-// pointing past the row, and nothing ever claims it.
+// the re-open only ever re-opens the run on its current step, so waking an
+// earlier step leaves the blueprint terminal with current_step_index pointing
+// past the row, and nothing ever claims it.
 func TestBlueprintDrivableForClaim(t *testing.T) {
 	idx := func(i int) *int { return &i }
 	cases := []struct {
@@ -287,22 +282,24 @@ func TestBlueprintDrivableForClaim(t *testing.T) {
 // never arrive.
 func TestInjectionWillFlush(t *testing.T) {
 	cases := []struct {
-		status, outcome string
-		want            bool
+		status    string
+		concluded bool
+		outcome   string
+		want      bool
 	}{
-		{"open", "", true},
-		{"completed", "abort", true},
-		{"completed", "finish", false},
-		{"completed", "", false},
-		{"failed", "", false},
+		{domain.StatusOpen, false, "", true},
+		{domain.StatusOpen, true, "abort", true},
+		{domain.StatusOpen, true, "finish", false},
+		{domain.StatusOpen, true, "", false},
+		{domain.StatusFailed, false, "", false},
 	}
 	for _, tc := range cases {
-		if got := injectionWillFlush(tc.status, tc.outcome); got != tc.want {
-			t.Errorf("injectionWillFlush(%q, %q) = %v, want %v", tc.status, tc.outcome, got, tc.want)
+		if got := injectionWillFlush(tc.status, tc.concluded, tc.outcome); got != tc.want {
+			t.Errorf("injectionWillFlush(%q, concluded=%v, %q) = %v, want %v", tc.status, tc.concluded, tc.outcome, got, tc.want)
 		}
-		if injectionWillFlush(tc.status, tc.outcome) && !resumableState(tc.status, tc.outcome) {
-			t.Errorf("injectionWillFlush(%q, %q) is true where resumableState is false; it must stay the narrower of the two",
-				tc.status, tc.outcome)
+		if injectionWillFlush(tc.status, tc.concluded, tc.outcome) && !resumableState(tc.status) {
+			t.Errorf("injectionWillFlush(%q, concluded=%v, %q) is true where resumableState is false; it must stay the narrower of the two",
+				tc.status, tc.concluded, tc.outcome)
 		}
 	}
 }
@@ -314,7 +311,7 @@ func TestInjectionWillFlush(t *testing.T) {
 func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-ab", "sess-ab", "/tmp/does-not-exist-ab")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
 	// The blueprint an abort terminates, as the reactor leaves it — without
@@ -338,7 +335,7 @@ func TestSendMessage_CompletedAbortIsResumable(t *testing.T) {
 func TestSendMessage_CompletedFinishIsResumable(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-fin", "sess-fin", t.TempDir())
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='finish' WHERE id='r-fin'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish' WHERE id='r-fin'`); err != nil {
 		t.Fatalf("completed+finish: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status='completed', current_step_index=0 WHERE id='seedbpr-r-fin'`); err != nil {

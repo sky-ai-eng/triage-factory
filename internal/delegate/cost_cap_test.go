@@ -64,7 +64,7 @@ func seedSpendAt(t *testing.T, database *sql.DB, cost float64, occurredAt time.T
 	if _, err := database.Exec(`
 		INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at)
-		VALUES (?, ?, ?, ?, 'manual', 'manual', 'm', 'completed', ?)
+		VALUES (?, ?, ?, ?, 'manual', 'manual', 'm', 'open', ?)
 	`,
 		convID, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
 		runmode.LocalDefaultUserID, occurredAt,

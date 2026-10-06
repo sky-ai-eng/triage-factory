@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -199,15 +200,16 @@ func TestHandleReadyz_ActiveRunsCount(t *testing.T) {
 		{"run_readyz_working", ""},
 		{"run_readyz_woken", "open"},
 		{"run_readyz_parked", "open"},
-		{"run_readyz_done", "completed"},
+		{"run_readyz_done", dbtest.SeedConcluded},
 	} {
 		var stored any
-		if seed.status != "" {
-			stored = seed.status
+		status, concluded := dbtest.SeedStatus(seed.status)
+		if status != "" {
+			stored = status
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO conversations (id, status, origin) VALUES (?, ?, 'interactive')`,
-			seed.id, stored,
+			`INSERT INTO conversations (id, status, origin, completed_at) VALUES (?, ?, 'interactive', CASE WHEN ? THEN CURRENT_TIMESTAMP END)`,
+			seed.id, stored, concluded,
 		); err != nil {
 			t.Fatalf("seed run %s: %v", seed.id, err)
 		}

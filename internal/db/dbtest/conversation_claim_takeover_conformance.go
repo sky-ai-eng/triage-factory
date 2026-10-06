@@ -274,7 +274,7 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		open := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
 		f.SetStoredStatus(t, open.ID, domain.StatusOpen)
 		done := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
-		f.SetStoredStatus(t, done.ID, "completed")
+		f.SetStoredStatus(t, done.ID, SeedConcluded)
 		midFlight := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch-1)
 		current := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
 
@@ -492,11 +492,11 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}
 			return c
 		}
-		stranded := conclude(t, "completed")
+		stranded := conclude(t, domain.StatusOpen)
 		f.BackdateConclusion(t, stranded.ID, 2*grace)
-		strandedFailed := conclude(t, "failed")
+		strandedFailed := conclude(t, domain.StatusFailed)
 		f.BackdateConclusion(t, strandedFailed.ID, 2*grace)
-		fresh := conclude(t, "completed")
+		fresh := conclude(t, domain.StatusOpen)
 
 		parked := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
 		if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, parked.ID, db.ParkIdle()); err != nil || !ok {
@@ -507,13 +507,13 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 		// A terminal row still holding a live claim: its engagement is not
 		// done with it, whatever the status says.
 		held := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
-		f.SetStoredStatus(t, held.ID, "completed")
+		f.SetStoredStatus(t, held.ID, SeedConcluded)
 		f.BackdateConclusion(t, held.ID, 2*grace)
 
 		// Resumed and failed again just now, on the infra-failure terminal:
 		// it keeps the first conclusion's completed_at, so only the fresh
 		// release says a reactor may still be on its way.
-		resumed := conclude(t, "failed")
+		resumed := conclude(t, domain.StatusFailed)
 		f.BackdateConclusion(t, resumed.ID, 2*grace)
 		f.SetStoredStatus(t, resumed.ID, "")
 		again, err := f.Stores.ConversationQueue.ClaimNextConversation(ctx, claimLeaseExecutor, claimLeaseBootEpoch, db.ClaimPlacement{}, testClaimLease)

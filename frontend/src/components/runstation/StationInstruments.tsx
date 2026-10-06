@@ -3,6 +3,7 @@ import type { Message, Conversation } from '../../types'
 import {
   claimIdleReadout,
   completionGloss,
+  isConcluded,
   formatDurationMs,
   formatElapsed,
   isActiveConversation,
@@ -195,7 +196,7 @@ export function TelemetryRail({
         />
       </Section>
 
-      {conversation.Status === 'completed' && conversation.ResultSummary && (
+      {isConcluded(conversation) && conversation.ResultSummary && (
         <Section label="Summary" last>
           <p className="whitespace-pre-line text-secondary leading-relaxed text-ink-2">
             {conversation.ResultSummary}

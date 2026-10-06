@@ -527,7 +527,7 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 		Model: "claude-sonnet-4-6", BlueprintRunID: "op-blueprint-run", BlueprintStepIndex: &step0,
 	})
 	// Persist a terminal outcome the way processCompletion does.
-	if _, err := dbtest.HolderComplete(stores.Conversations, ctx, org, "op-run", "completed", 0, 0, 0, "did the thing", "continue", "", ""); err != nil {
+	if _, err := dbtest.HolderComplete(stores.Conversations, ctx, org, "op-run", domain.StatusOpen, 0, 0, 0, "did the thing", "continue", "", ""); err != nil {
 		t.Fatalf("complete step conversation: %v", err)
 	}
 
@@ -543,11 +543,12 @@ func TestBlueprintStore_SQLite_ConversationsForBlueprint_SurfacesOutcome(t *test
 	}
 }
 
-// TestBlueprintStore_SQLite_StepPlanLengths pins the batched plan-length read
-// the run projection uses to say whether a step is its chain's last one. It
-// counts in SQL over the frozen plan, and a blueprint run it cannot resolve is
-// absent from the map rather than reported as a zero-step plan.
-func TestBlueprintStore_SQLite_StepPlanLengths(t *testing.T) {
+// TestBlueprintStore_SQLite_RunProgress pins the batched read the run
+// projection uses to say whether a step is its chain's last one and whether its
+// work is done. It counts in SQL over the frozen plan, reads the run's status
+// beside it, and a blueprint run it cannot resolve is absent from the map
+// rather than reported as a zero-step plan.
+func TestBlueprintStore_SQLite_RunProgress(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints
 	ctx := context.Background()
@@ -571,26 +572,30 @@ func TestBlueprintStore_SQLite_StepPlanLengths(t *testing.T) {
 		StepPlan: plan[:1],
 	})
 
-	got, err := blueprints.StepPlanLengths(ctx, org, []string{"len-bpr-three", "len-bpr-one", "len-bpr-missing"})
+	if _, err := blueprints.MarkRunStatusSystem(ctx, org, "len-bpr-one", domain.BlueprintRunStatusCompleted, "", nil); err != nil {
+		t.Fatalf("MarkRunStatusSystem: %v", err)
+	}
+
+	got, err := blueprints.RunProgress(ctx, org, []string{"len-bpr-three", "len-bpr-one", "len-bpr-missing"})
 	if err != nil {
-		t.Fatalf("StepPlanLengths: %v", err)
+		t.Fatalf("RunProgress: %v", err)
 	}
-	if got["len-bpr-three"] != 3 {
-		t.Errorf("three-step plan length = %d, want 3", got["len-bpr-three"])
+	if three := got["len-bpr-three"]; three.StepCount != 3 || three.Status != domain.BlueprintRunStatusRunning {
+		t.Errorf("three-step run = %+v, want 3 steps, running", three)
 	}
-	if got["len-bpr-one"] != 1 {
-		t.Errorf("one-step plan length = %d, want 1", got["len-bpr-one"])
+	if one := got["len-bpr-one"]; one.StepCount != 1 || one.Status != domain.BlueprintRunStatusCompleted {
+		t.Errorf("one-step run = %+v, want 1 step, completed", one)
 	}
 	if _, ok := got["len-bpr-missing"]; ok {
 		t.Error("an unresolvable blueprint run must be absent from the map, not reported as a zero-step plan")
 	}
 
-	empty, err := blueprints.StepPlanLengths(ctx, org, nil)
+	empty, err := blueprints.RunProgress(ctx, org, nil)
 	if err != nil {
-		t.Fatalf("StepPlanLengths(nil): %v", err)
+		t.Fatalf("RunProgress(nil): %v", err)
 	}
 	if len(empty) != 0 {
-		t.Errorf("StepPlanLengths(nil) = %v, want an empty map", empty)
+		t.Errorf("RunProgress(nil) = %v, want an empty map", empty)
 	}
 }
 
@@ -635,9 +640,10 @@ func TestBlueprintStore_SQLite_MarkRunStatus_Guarded(t *testing.T) {
 }
 
 // TestBlueprintStore_SQLite_ReopenRunForResume pins the resume re-open CAS: an
-// aborted blueprint_run flips back to running (clearing its abort metadata) so a
-// resume of its completed+abort step can re-finalize; a non-aborted row is a
-// guarded no-op.
+// aborted blueprint_run on an open task flips back to running (clearing its
+// abort metadata) so a follow-up on the step that aborted it can re-finalize; a
+// non-aborted row is a guarded no-op. The task gate and the verdict withdrawal
+// are covered by the shared claim predicate conformance.
 func TestBlueprintStore_SQLite_ReopenRunForResume(t *testing.T) {
 	conn := openSQLiteForTest(t)
 	blueprints := sqlitestore.New(conn).Blueprints

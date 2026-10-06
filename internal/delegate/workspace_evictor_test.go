@@ -193,7 +193,7 @@ func TestEvictIdleWorkspaces_RefusesWhileASiblingStepIsClaimed(t *testing.T) {
 	if _, err := s.conversations.SetExecutorSystem(ctx, runmode.LocalDefaultOrgID, "step-live", "", 0); err != nil {
 		t.Fatalf("release sibling claim: %v", err)
 	}
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', completed_at=datetime('now','-2 hours') WHERE id='step-live'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, completed_at=datetime('now','-2 hours') WHERE id='step-live'`); err != nil {
 		t.Fatalf("settle sibling: %v", err)
 	}
 	ageConversationMint(t, database, "step-live", "-2 hours")

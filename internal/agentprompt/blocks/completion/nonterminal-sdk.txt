@@ -3,7 +3,7 @@ You are one step inside a multi-step blueprint, and you are NOT the final step. 
 This changes only how your run ends. Your terminal JSON envelope (see the completion contract) gains one more `outcome` value — `continue` — and that is almost always the right call:
 
 - "continue" — your part is done; hand off to the next step. THIS IS THE DEFAULT. When you've finished the work this step was asked to do, emit `continue` and let the next step pick up from here. Choose it unless one of the narrow exceptions below clearly applies.
-  {"outcome": "continue", "summary": "<what you did / what the next step should know>", "links": {}}
+  {"outcome": "continue", "summary": "<what you did / what the next step should know>"}
 
 - "finish" — end the ENTIRE blueprint early and close the task. This is the rare exception. Only emit `finish` if THIS step's own instructions defined explicit criteria for ending the whole workflow early AND those criteria are now met (e.g. "if there's nothing to review, finish here"). Absent such criteria in your instructions, never decide on your own that the blueprint is over — emit `continue` instead.
 

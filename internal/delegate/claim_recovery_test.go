@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -156,7 +157,7 @@ func backdateConclusion(t *testing.T, database *sql.DB, conversationID string, a
 // reactor. Two dispatchers' passes find the run at once; the advance is
 // compare-and-swap guarded, so exactly one step 1 is minted.
 func TestReplayStrandedRuns_AdvancesARunExactlyOnceWhenTwoPassesRace(t *testing.T) {
-	s, database, brID, _, step0 := reactorFixture(t, "stranded-race", 2, "completed", "continue")
+	s, database, brID, _, step0 := reactorFixture(t, "stranded-race", 2, dbtest.SeedConcluded, "continue")
 	backdateConclusion(t, database, step0, 2*strandedRunGrace)
 	other := NewSpawner(database, testSpawnerStores(database), nil, nil, "claude-sonnet-4-6")
 
@@ -189,7 +190,7 @@ func TestReplayStrandedRuns_AdvancesARunExactlyOnceWhenTwoPassesRace(t *testing.
 // reactor that is merely running right now is not stranded, whether the grace
 // says so or this process's own engagement registry does.
 func TestReplayStrandedRuns_LeavesARunInsideTheGraceAndOneThisProcessDrives(t *testing.T) {
-	s, database, brID, _, step0 := reactorFixture(t, "stranded-fresh", 2, "completed", "continue")
+	s, database, brID, _, step0 := reactorFixture(t, "stranded-fresh", 2, dbtest.SeedConcluded, "continue")
 	backdateConclusion(t, database, step0, time.Second)
 	s.replayStrandedRuns(context.Background())
 	if q := queuedStepConversations(t, database, brID); len(q) != 0 {
@@ -214,7 +215,7 @@ func TestTerminateBlueprint_AnAlreadyTerminalRunRunsNoSideEffects(t *testing.T) 
 	stampBotClaim(t, database, taskID)
 	makeConversationBlueprintStep(t, database, conversationID, taskID)
 	blueprintRunID := "bpr-" + conversationID
-	setConversationStatus(t, database, conversationID, "completed")
+	setConversationStatus(t, database, conversationID, dbtest.SeedConcluded)
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'aborted' WHERE id = ?`, blueprintRunID); err != nil {
 		t.Fatalf("end the run first: %v", err)
 	}

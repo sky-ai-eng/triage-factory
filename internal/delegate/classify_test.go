@@ -22,7 +22,7 @@ func TestClassifyAgentResult_Valid(t *testing.T) {
 		{"prose with stray braces then envelope", `Config {enabled:true} updated. {"outcome":"finish","summary":"done"}`, "finish"},
 		// Nested object in the envelope: the decoder consumes the whole balanced
 		// object (a last-{ heuristic would have grabbed only the inner one).
-		{"nested links object", `{"outcome":"finish","summary":"shipped","links":{"pr":"http://x/1"}}`, "finish"},
+		{"nested object", `{"outcome":"finish","summary":"shipped","extra":{"pr":"http://x/1"}}`, "finish"},
 		// Trailing text after the JSON (no fence) is ignored.
 		{"trailing prose", `{"outcome":"abort","reason":"blocked"} — see the log for details`, "abort"},
 	}

@@ -51,7 +51,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	// live on the claims row now (the timing read derives claimed_at from the
 	// latest claim, duration from the claims' telemetry SUM).
 	if _, err := conn.Exec(`
-		UPDATE conversations SET status='completed',
+		UPDATE conversations SET status='open',
 		       completed_at=datetime(started_at, '+7 seconds')
 		WHERE id='fr-run-0'`); err != nil {
 		t.Fatalf("complete conversation: %v", err)
@@ -73,7 +73,7 @@ func TestConversationQueueStore_SQLite_FleetReads(t *testing.T) {
 	}
 	var completed *domain.ConversationTiming
 	for i := range timings {
-		if timings[i].Status == "completed" {
+		if timings[i].Concluded() {
 			completed = &timings[i]
 		}
 	}

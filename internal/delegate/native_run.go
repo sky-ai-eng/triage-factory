@@ -864,7 +864,7 @@ func (s *Spawner) recordNativeResult(
 	}
 	s.attachConversationMemoryEntities(context.WithoutCancel(ctx), orgID, conversationID, task.EntityID)
 
-	// Snapshot before the terminal write. A `continue` hands the shared
+	// Snapshot before the verdict's write. A `continue` hands the shared
 	// workspace to the next step and an `abort` leaves a message-resumable
 	// conversation; both can be picked up on an executor that never held
 	// this worktree, so the blob has to exist by the time the status commits.
@@ -882,16 +882,19 @@ func (s *Spawner) recordNativeResult(
 	outcome := string(result.Outcome)
 	outcomeReason := result.OutcomeReason
 
-	// One fenced write for both trigger types — the fence's ownership check
-	// stands in for the RLS pass the former synthetic-claims route provided,
-	// the same trade the SDK completion path makes.
+	// The verdict parks the conversation `open` with the conclusion stamped:
+	// the step is concluded, the conversation is not, and the blueprint run
+	// the reactor advances or closes off this verdict holds whether the work
+	// is done. One fenced write for both trigger types — the fence's ownership
+	// check stands in for the RLS pass the former synthetic-claims route
+	// provided, the same trade the SDK completion path makes.
 	//
 	// costUSD is zero here on purpose, and it is not a gap: the native
 	// runtime settles cost per assistant row at call time, so the ledger is
 	// already complete. Passing a lump would double-count.
 	bgCtx := context.WithoutCancel(ctx)
 	s.releaseActivity(conversationID, cfg.claimID)
-	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, "completed", 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
+	updated, err := s.conversations.CompleteForClaimSystem(bgCtx, orgID, conversationID, cfg.claimID, domain.StatusOpen, 0, result.DurationMs, result.NumTurns, result.ResultSummary, outcome, outcomeReason, "")
 	if err != nil {
 		if errors.Is(err, db.ErrClaimReleased) {
 			delegateLog.Error("engagement fenced out at conclusion; a successor owns the conversation",
@@ -901,11 +904,11 @@ func (s *Spawner) recordNativeResult(
 		delegateLog.Warn("record completion for conversation failed", "conversation", conversationID, "error", err)
 	}
 
-	broadcastStatus := "completed"
+	broadcastStatus := domain.StatusOpen
 	if updated != nil {
 		broadcastStatus = updated.Status
 	}
-	s.updateBreakerCounter(task.ID, triggerType, "completed")
+	s.updateBreakerCounter(task.ID, triggerType, domain.StatusOpen)
 	s.broadcastConversationUpdate(orgID, conversationID, broadcastStatus)
 	toast.Success(s.wsHub, orgID, fmt.Sprintf("Run %s completed", shortConversationID(conversationID)))
 	return engagementDisposition{}

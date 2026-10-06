@@ -1046,8 +1046,11 @@ CREATE TABLE public.conversations (
     -- hydrating from messages). App-validated, and a one-way ratchet: once an
     -- engagement runs native the SDK can never continue the transcript.
     runtime text DEFAULT 'sdk'::text NOT NULL,
-    -- Outcome or nothing: 'open' (a park), a terminal ('completed' | 'failed'), or
-    -- NULL mid-flight. Queued and running are derived from claims, never stored.
+    -- 'open' (a park, including the one a step's verdict records), the terminal
+    -- 'failed', or NULL mid-flight. Queued and running are derived from claims,
+    -- never stored. A conversation never concludes: 'open' with completed_at set
+    -- is a step that recorded its verdict, and its blueprint run says whether the
+    -- work is done.
     status text,
     model text,
     -- SDK resume handle. NULL under runtime='native', where messages are truth.

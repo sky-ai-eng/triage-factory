@@ -398,7 +398,7 @@ func TestFollowUp_LostToTerminalIsAConflict(t *testing.T) {
 func TestFollowUp_CompletedAbortReopensBlueprintAtomically(t *testing.T) {
 	database := newDelegateTestDB(t)
 	seedConversation(t, database, "r-ab", "sess-ab", "/tmp/wt-ab")
-	if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome='abort' WHERE id='r-ab'`); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort' WHERE id='r-ab'`); err != nil {
 		t.Fatalf("completed+abort: %v", err)
 	}
 	bpr := blueprintRunIDForConversation(t, database, "r-ab")

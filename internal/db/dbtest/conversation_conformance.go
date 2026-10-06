@@ -320,7 +320,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage 1: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 1.25, 4000, 3, "", "", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 1.25, 4000, 3, "", "", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -346,15 +346,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0.75, 2000, 5, "all done", "abort", "needs human", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0.75, 2000, 5, "all done", "abort", "needs human", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v, got=%v", err, got)
 		}
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed", got.Status)
+		if !got.Concluded() {
+			t.Errorf("status = %q (completed_at %v), want concluded", got.Status, got.CompletedAt)
 		}
 		if got.CompletedAt == nil {
 			t.Errorf("completed_at not stamped")
@@ -430,7 +430,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 4000, 3, "done", "continue", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 4000, 3, "done", "continue", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 
@@ -450,8 +450,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v, got=%v", err, got)
 		}
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed — skipping the lump must not skip the terminal write", got.Status)
+		if !got.Concluded() {
+			t.Errorf("status = %q (completed_at %v), want concluded — skipping the lump must not skip the terminal write", got.Status, got.CompletedAt)
 		}
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != stamped {
 			t.Errorf("total_cost_usd = %v, want %v (the ledger SUM over per-row stamps)", deref(got.TotalCostUSD), stamped)
@@ -479,7 +479,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage a: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "abort", "wait", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 1.25, 0, 0, "", "abort", "wait", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 
@@ -496,7 +496,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage c: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("second Complete: %v", err)
 		}
 
@@ -609,7 +609,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("InsertMessage b: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0.125, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0.125, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err = store.Get(ctx, orgID, conversationID)
@@ -653,7 +653,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage 2: %v", err)
 		}
 		// No active claim at all: the fallback owns the settle.
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("first Complete: %v", err)
 		}
 		// A live claim whose engagement recorded nothing (both rows predate
@@ -661,7 +661,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-rowless", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0.75, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0.75, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("rowless-engagement Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
@@ -801,7 +801,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Fatalf("InsertMessage tool: %v", err)
 		}
 		// No claim at all: the fallback arm owns this settle.
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 1.25, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 1.25, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		msgs, err := store.MessagesForConversations(ctx, orgID, []string{conversationID})
@@ -865,15 +865,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-norows", 1); err != nil {
 			t.Fatalf("SetExecutorSystem: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 9.99, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 9.99, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed", got.Status)
+		if !got.Concluded() {
+			t.Errorf("status = %q (completed_at %v), want concluded", got.Status, got.CompletedAt)
 		}
 		if got.TotalCostUSD != nil {
 			t.Errorf("total_cost_usd = %v, want nil (no ledger row to settle on)", *got.TotalCostUSD)
@@ -917,7 +917,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 				got.InputTokens, got.OutputTokens, got.CacheReadTokens, got.CacheCreationTokens)
 		}
 
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "done", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		got2, err := store.Get(ctx, orgID, conversationID)
@@ -1108,7 +1108,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("re-call on open: ok=%v err=%v, want false/nil", ok, err)
 		}
 		// Terminal → ok=false.
-		conversationID2 := seedConversationForTest(t, orgID, seed, "completed")
+		conversationID2 := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		ok, err = HolderPark(store, ctx, orgID, conversationID2, db.ParkIdle())
 		if err != nil || ok {
 			t.Errorf("on completed: ok=%v err=%v, want false/nil", ok, err)
@@ -1160,7 +1160,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// order the reactor writes in; the window between the two writes is the
 		// subtest below.
 		abortConversation, abortBR, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if _, err := HolderComplete(store, ctx, orgID, abortConversation, "completed", 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, abortConversation, domain.StatusOpen, 0, 0, 0, "stopped", "abort", "needs a human", ""); err != nil {
 			t.Fatalf("complete+abort: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, abortBR, "aborted")
@@ -1168,7 +1168,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("from completed+abort: ok=%v err=%v, want true", ok, err)
 		}
 		finishConversation, finishBR, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if _, err := HolderComplete(store, ctx, orgID, finishConversation, "completed", 0, 0, 0, "shipped", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, finishConversation, domain.StatusOpen, 0, 0, 0, "shipped", "finish", "", ""); err != nil {
 			t.Fatalf("complete+finish: %v", err)
 		}
 		seed.SetBlueprintRunStatus(t, finishBR, "completed")
@@ -1195,7 +1195,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ctx := context.Background()
 
 		conversationID, brID, _ := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step: %v", err)
 		}
 		// The blueprint has not reacted yet — exactly the live failure.
@@ -1206,8 +1206,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if err != nil {
 			t.Fatalf("get after refused flip: %v", err)
 		}
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed — a refused CAS writes nothing", got.Status)
+		if !got.Concluded() {
+			t.Errorf("status = %q (completed_at %v), want concluded — a refused CAS writes nothing", got.Status, got.CompletedAt)
 		}
 
 		// Once the sequence stops, the same call lands: the step it came to
@@ -1357,7 +1357,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("status = %q, want failed", got.Status)
 		}
 		// Already terminal → refused.
-		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
+		doneConversation := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if ok, _ := HolderMarkFailed(store, ctx, orgID, doneConversation, ""); ok {
 			t.Errorf("MarkFailedIfActive flipped a completed conversation; want refused")
 		}
@@ -1399,7 +1399,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := HolderPark(store, ctx, orgID, conversationID, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || !ok {
 			t.Errorf("re-cancel a parked conversation: ok=%v err=%v, want true/nil", ok, err)
 		}
-		doneConversation := seedConversationForTest(t, orgID, seed, "completed")
+		doneConversation := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if ok, err := HolderPark(store, ctx, orgID, doneConversation, db.ParkStopped(domain.ParkReasonUserCancelled, "")); err != nil || ok {
 			t.Errorf("cancel a completed conversation: ok=%v err=%v, want false/nil", ok, err)
 		}
@@ -1516,10 +1516,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			})
 		}
 		step1, step2 := mkStep(), mkStep()
-		if _, err := HolderComplete(store, ctx, orgID, step1, "completed", 0, 0, 0, "handed off", "continue", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, step1, domain.StatusOpen, 0, 0, 0, "handed off", "continue", "", ""); err != nil {
 			t.Fatalf("complete step 1: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, step2, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, step2, domain.StatusOpen, 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
 			t.Fatalf("complete step 2: %v", err)
 		}
 
@@ -1668,7 +1668,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		conversationID, bpr, taskID := seedConversationWithBlueprintForTest(t, orgID, seed, "running")
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "shipped it", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		// Minted and queued two days ago, concluded just now.
@@ -1803,7 +1803,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetExecutorSystem(ctx, orgID, live, "", 0); err != nil {
 			t.Fatalf("release claim: %v", err)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, live, "completed", 0, 0, 0, "done", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, live, domain.StatusOpen, 0, 0, 0, "done", "finish", "", ""); err != nil {
 			t.Fatalf("complete sibling: %v", err)
 		}
 		if got := evictableFor(t, store, ctx, time.Now().Add(time.Hour), taskID); got == nil {
@@ -1959,7 +1959,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		t.Run("Complete_completed", func(t *testing.T) {
 			conversationID := stage(t)
-			if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+			if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			assertReleased(t, conversationID, "completed")
@@ -2019,7 +2019,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			// re-mint a claim (simulating a racing engagement), then fail — the
 			// guard refuses and the claim stays live.
 			conversationID := stage(t)
-			if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+			if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 				t.Fatalf("Complete: %v", err)
 			}
 			if _, err := store.SetExecutorSystem(ctx, orgID, conversationID, "exec-race", 9); err != nil {
@@ -2090,7 +2090,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if _, err := store.SetActiveClaimPhaseSystem(ctx, orgID, conversationID, "agent_starting"); err != nil {
 			t.Fatalf("SetActiveClaimPhaseSystem: %v", err)
 		}
-		if _, err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claim.ID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claim.ID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("CompleteForClaimSystem: %v", err)
 		}
 		// A write against the released claim is a silent no-op: the released
@@ -2104,8 +2104,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// And the released claim's phase never leaks into the display: the
 		// coalesce only reads the ACTIVE claim.
-		if got, _ := store.Get(ctx, orgID, conversationID); got.Status != "completed" {
-			t.Errorf("Status = %q, want completed (a released claim's phase is inert history)", got.Status)
+		if got, _ := store.Get(ctx, orgID, conversationID); !got.Concluded() {
+			t.Errorf("Status = %q (completed_at %v), want concluded (a released claim's phase is inert history)", got.Status, got.CompletedAt)
 		}
 	})
 
@@ -2164,15 +2164,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Errorf("row delivered = %v, want true", msgs[0].Delivered)
 		}
 
-		if _, err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0.5, 1500, 2, "done", "finish", "", ""); err != nil {
+		if _, err := store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0.5, 1500, 2, "done", "finish", "", ""); err != nil {
 			t.Fatalf("CompleteForClaimSystem: %v", err)
 		}
 		got, err := store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
 		}
-		if got.Status != "completed" {
-			t.Errorf("status = %q, want completed", got.Status)
+		if !got.Concluded() {
+			t.Errorf("status = %q (completed_at %v), want concluded", got.Status, got.CompletedAt)
 		}
 		if got.TotalCostUSD == nil || *got.TotalCostUSD != 0.5 {
 			t.Errorf("total_cost_usd = %v, want 0.5 settled on the engagement's own row", got.TotalCostUSD)
@@ -2237,7 +2237,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		})
 		refuse("InsertMessageForClaimSystem", err)
 		refuse("MarkDeliveredForClaimSystem", store.MarkDeliveredForClaimSystem(ctx, orgID, conversationID, claimID, []int{int(ownedID)}, ""))
-		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, "completed", 0, 0, 0, "", "finish", "", "")
+		_, err = store.CompleteForClaimSystem(ctx, orgID, conversationID, claimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", "")
 		refuse("CompleteForClaimSystem", err)
 		_, err = store.MarkFailedIfActiveForClaimSystem(ctx, orgID, conversationID, claimID, string(domain.ConversationFailureCrash))
 		refuse("MarkFailedIfActiveForClaimSystem", err)
@@ -2742,7 +2742,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// bookkeeping releases the claim, so the stamp must land on a
 		// released row. An active-claim predicate here would silently drop
 		// every engagement's actuals.
-		if _, err := HolderComplete(store, ctx, orgID, conversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, conversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		peak2, cpu2 := 998, int64(20_000_000)
@@ -2991,7 +2991,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		taskB := seed.Task(t, entB, domain.EventGitHubPROpened, evB)
 
 		convA1 := seedConversationForTaskTest(t, orgID, taskA, "running", seed)
-		convA2 := seedConversationForTaskTest(t, orgID, taskA, "completed", seed)
+		convA2 := seedConversationForTaskTest(t, orgID, taskA, SeedConcluded, seed)
 		convB1 := seedConversationForTaskTest(t, orgID, taskB, "running", seed)
 
 		// Mix in a valid-but-absent UUID and a non-UUID literal: both must be
@@ -3060,7 +3060,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		task := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		seedConversationForTaskTest(t, orgID, task, "running", seed)
-		seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
 
 		convs, total, err := store.List(ctx, orgID, db.ConversationListFilter{}, db.ListOpts{Limit: 200})
 		if err != nil {
@@ -3122,19 +3122,21 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if ok, err := store.MarkQueuedForResume(ctx, orgID, queued); err != nil || !ok {
 			t.Fatalf("MarkQueuedForResume: ok=%v err=%v", ok, err)
 		}
-		done := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		done := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
 
 		if got := filter(domain.StatusQueued); len(got) != 1 || got[0] != queued {
 			t.Errorf("statuses=[queued] = %v, want [%s]", got, queued)
 		}
-		if got := filter(domain.StatusCompleted); len(got) != 1 || got[0] != done {
-			t.Errorf("statuses=[completed] = %v, want [%s]", got, done)
+		// A concluded conversation displays `open`: the verdict is not a
+		// status, so the filter finds it under the park it is.
+		if got := filter(domain.StatusOpen); len(got) != 1 || got[0] != done {
+			t.Errorf("statuses=[open] = %v, want [%s]", got, done)
 		}
-		if got := filter(domain.StatusQueued, domain.StatusCompleted); len(got) != 2 {
-			t.Errorf("statuses=[queued,completed] = %v, want both", got)
+		if got := filter(domain.StatusQueued, domain.StatusOpen); len(got) != 2 {
+			t.Errorf("statuses=[queued,open] = %v, want both", got)
 		}
-		if got := filter(domain.StatusOpen); len(got) != 0 {
-			t.Errorf("statuses=[open] = %v, want none", got)
+		if got := filter(domain.StatusFailed); len(got) != 0 {
+			t.Errorf("statuses=[failed] = %v, want none", got)
 		}
 
 		// An active claim with no phase displays `running`; each phase then
@@ -3180,15 +3182,15 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		theirs := seed.Team(t, "lft-theirs")
 		seedFor := func(teamID, status string) string {
 			t.Helper()
-			return seed.Conversation(t, domain.Conversation{
+			return seed.Conversation(t, concludedSeed(domain.Conversation{
 				TaskID: task, TeamID: teamID, PromptID: conversationTestPrompt(t),
 				Status: status, Model: "m", BlueprintRunID: seed.BlueprintRun(t, task),
-			})
+			}))
 		}
-		// Terminal statuses, so the display ladder reads them off the stored
+		// Settled rows, so the display ladder reads them off the stored
 		// column and the composition case turns on the team, not on staging.
-		myDone := seedFor(mine, domain.StatusCompleted)
-		theirDone := seedFor(theirs, domain.StatusCompleted)
+		myDone := seedFor(mine, SeedConcluded)
+		theirDone := seedFor(theirs, SeedConcluded)
 		theirFailed := seedFor(theirs, domain.StatusFailed)
 
 		list := func(filter db.ConversationListFilter) []string {
@@ -3251,10 +3253,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// narrow together. A right-status wrong-team row and a right-team
 		// wrong-status row are both out.
 		got := list(db.ConversationListFilter{
-			TeamIDs: []string{theirs}, Statuses: []string{domain.StatusCompleted},
+			TeamIDs: []string{theirs}, Statuses: []string{domain.StatusOpen},
 		})
 		if len(got) != 1 || got[0] != theirDone {
-			t.Errorf("team_ids=[theirs] + statuses=[completed] = %v, want [%s]", got, theirDone)
+			t.Errorf("team_ids=[theirs] + statuses=[open] = %v, want [%s]", got, theirDone)
 		}
 		if got := list(db.ConversationListFilter{
 			TeamIDs: []string{mine}, Statuses: []string{domain.StatusFailed},
@@ -3308,7 +3310,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		first := seedConversationForTaskTest(t, orgID, task, "", seed)
 		second := seedConversationForTaskTest(t, orgID, task, "", seed)
 		third := seedConversationForTaskTest(t, orgID, task, "", seed)
-		done := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		done := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
 		seed.BackdateStartedAt(t, first, 30*time.Minute)
 		seed.BackdateStartedAt(t, second, 20*time.Minute)
 		seed.BackdateStartedAt(t, third, 10*time.Minute)
@@ -3402,8 +3404,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// A terminal conversation carrying a draft PR is the plain case; the
 		// same conversation's open PR and its unfinalized review are not.
-		drafted := seedConversationForTaskTest(t, orgID, task, "completed", seed)
-		quiet := seedConversationForTaskTest(t, orgID, task, "completed", seed)
+		drafted := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
+		quiet := seedConversationForTaskTest(t, orgID, task, SeedConcluded, seed)
 		seed.Artifact(t, quiet, domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "")
 		seed.Artifact(t, quiet, domain.ArtifactKindReview, domain.ArtifactStateReviewPending,
 			`{"number":7,"review_event":""}`)
@@ -3445,7 +3447,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if len(got) != 2 {
 			t.Fatalf("attention with a prompted live conversation = %v, want 2 rows", got)
 		}
-		if _, err := HolderComplete(store, ctx, orgID, live, "completed", 0, 0, 0, "", "", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, live, domain.StatusOpen, 0, 0, 0, "", "", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		// Its draft PR now counts (it stopped being live), but on its own
@@ -3468,7 +3470,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		// One running + one terminal → ids=[running].
 		runningConversation := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		_ = seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		_ = seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		ids, _ = store.ActiveIDsForTask(ctx, orgID, taskID)
 		if len(ids) != 1 || ids[0] != runningConversation {
 			t.Errorf("ActiveIDs = %v, want [%s]", ids, runningConversation)
@@ -3494,7 +3496,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// abort row is exactly what the boundary has to end.
 		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
 
 		before := time.Now().UTC().Add(-time.Second)
@@ -3537,7 +3539,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Already ended, by a different boundary: the first one is the one
 		// that happened, and a later sweep must not overwrite it.
-		earlier := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		earlier := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		if _, err := store.EndConversation(ctx, orgID, earlier, domain.EndedStepAdvanced); err != nil {
 			t.Fatalf("seed an already-ended row: %v", err)
 		}
@@ -3588,17 +3590,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// still driving a row.
 		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		parked := seedConversationForTaskTest(t, orgID, taskID, "open", seed)
-		concluded := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		concluded := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		failed := seedConversationForTaskTest(t, orgID, taskID, "failed", seed)
 
 		// A subagent of the live row, terminal in its own right: it ends with
 		// its spawner, never with the task.
-		subagent := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		subagent := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		seed.SetParentConversation(t, subagent, live)
 
 		// Already ended, by an earlier boundary. The first boundary is the one
 		// that happened, so this row keeps its own reason.
-		earlier := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		earlier := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		if _, err := store.EndConversation(ctx, orgID, earlier, domain.EndedStepAdvanced); err != nil {
 			t.Fatalf("seed an already-ended row: %v", err)
 		}
@@ -3747,7 +3749,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("EndedAtStaysNullOnAFreshConversation", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		got, err := store.Get(ctx, orgID, conversationID)
 		if err != nil || got == nil {
 			t.Fatalf("Get: err=%v got=%v", err, got)
@@ -3769,7 +3771,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 		one := seedConversationForTaskTest(t, orgID, taskID, "running", seed)
-		two := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		two := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 
 		stamped, err := store.EndConversationSystem(ctx, orgID, one, domain.EndedFailed)
 		if err != nil || stamped == nil {
@@ -3812,17 +3814,17 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		seedFor := func(teamID, status string) string {
 			t.Helper()
-			return seed.Conversation(t, domain.Conversation{
+			return seed.Conversation(t, concludedSeed(domain.Conversation{
 				TaskID: taskID, TeamID: teamID, PromptID: conversationTestPrompt(t),
 				Status: status, Model: "m", BlueprintRunID: seed.BlueprintRun(t, taskID),
-			})
+			}))
 		}
 		midFlight := seedFor(archived, "")
-		concluded := seedFor(archived, domain.StatusCompleted)
+		concluded := seedFor(archived, SeedConcluded)
 		elsewhere := seedFor(other, "")
 
 		// A boundary that already happened is the one that happened.
-		alreadyEnded := seedFor(archived, domain.StatusCompleted)
+		alreadyEnded := seedFor(archived, SeedConcluded)
 		if _, err := store.EndConversationSystem(ctx, orgID, alreadyEnded, domain.EndedTakenOver); err != nil {
 			t.Fatalf("stage the already-ended row: %v", err)
 		}
@@ -3934,7 +3936,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); !has {
 			t.Error("a live event-triggered conversation must hold the task's gate")
 		}
-		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if has, _ := store.HasLiveConversationForTask(ctx, orgID, taskID); has {
@@ -3992,7 +3994,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// row back mid-flight, so it reads as live again — for its own task,
 		// and only its own. A human-paced follow-up on one card must never
 		// hold up automated triage of a different card on the same entity.
-		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("conclude before resume: %v", err)
 		}
 		// The blueprint settles first: a resume fixture that skipped this would
@@ -4010,7 +4012,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 
 		// Terminate it — terminal, plus the already-ended manual conversation,
 		// resolves back to "".
-		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := HolderComplete(store, ctx, orgID, eventConversationID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("Complete: %v", err)
 		}
 		if id, err := store.LiveConversationIDForTaskSystem(ctx, orgID, taskID); err != nil || id != "" {
@@ -4065,7 +4067,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// completed WITH a worktree → excluded by the status filter. A completed
 		// conversation that left an unresolved artifact no longer parks, so its
 		// worktree is not preserved as a warm resume cache.
-		completed := seedConversationForTest(t, orgID, seed, "completed")
+		completed := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if _, err := store.SetWorktreePath(ctx, orgID, completed, "/tmp/triagefactory-runs/completed"); err != nil {
 			t.Fatalf("set worktree (completed): %v", err)
 		}
@@ -4114,7 +4116,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 			t.Error("mid-flight worktree missing from ListResumableWorktreePathsSystem")
 		}
 		if got["/tmp/triagefactory-runs/completed"] {
-			t.Error("completed worktree leaked — status filter failed (completed conversations no longer park)")
+			t.Error("concluded worktree leaked — status filter failed (a verdict leaves nothing to continue)")
 		}
 		if got["/tmp/triagefactory-runs/running"] {
 			t.Error("running worktree leaked — status filter failed")
@@ -4149,10 +4151,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// A conversation that never recorded a path is skipped rather than
 		// answered with: what the read is after is a tree, and an empty column
 		// names none.
-		pathless := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "completed", Model: "m",
+		pathless := seed.Conversation(t, concludedSeed(domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: SeedConcluded, Model: "m",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		})
+		}))
 		seed.BackdateStartedAt(t, pathless, 10*time.Minute)
 		if got, err := store.NewestWorktreePathForTaskSystem(ctx, orgID, taskID); err != nil || got != "" {
 			t.Errorf("with only a pathless conversation: path=%q err=%v, want empty/nil", got, err)
@@ -4161,10 +4163,10 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// The older conversation's tree, once it has one. An ended
 		// conversation still counts — the boundary says the task moved on,
 		// not that its workspace did.
-		older := seed.Conversation(t, domain.Conversation{
-			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: "completed", Model: "m",
+		older := seed.Conversation(t, concludedSeed(domain.Conversation{
+			TaskID: taskID, PromptID: conversationTestPrompt(t), Status: SeedConcluded, Model: "m",
 			BlueprintRunID: seed.BlueprintRun(t, taskID),
-		})
+		}))
 		seed.BackdateStartedAt(t, older, 8*time.Minute)
 		if _, err := store.SetWorktreePath(ctx, orgID, older, "/tmp/triagefactory-runs/older"); err != nil {
 			t.Fatalf("set worktree (older): %v", err)
@@ -5291,8 +5293,8 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 		taskID := seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 
-		owing := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
-		settled := seedConversationForTaskTest(t, orgID, taskID, "completed", seed)
+		owing := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
+		settled := seedConversationForTaskTest(t, orgID, taskID, SeedConcluded, seed)
 		live := seedConversationForTaskTest(t, orgID, taskID, "", seed)
 		for _, id := range []string{owing, settled} {
 			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
@@ -5322,7 +5324,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("ListMemoryOwed_ScopesToOneOrgWhenAsked", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedRequeued); err != nil {
 			t.Fatalf("end: %v", err)
 		}
@@ -5353,7 +5355,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 	t.Run("ListMemoryOwed_ANoneRowSettlesTheDebt", func(t *testing.T) {
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
-		conversationID := seedConversationForTest(t, orgID, seed, "completed")
+		conversationID := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		if _, err := store.EndConversationSystem(ctx, orgID, conversationID, domain.EndedFailed); err != nil {
 			t.Fatalf("end: %v", err)
 		}
@@ -5381,7 +5383,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		}
 		end := func(suffix string) string {
 			t.Helper()
-			id := seedConversationForTest(t, orgID, seed, "completed")
+			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
 			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %s: %v", suffix, err)
 			}
@@ -5422,9 +5424,9 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		// is waiting on. The closed one ended longest ago, so ordering by age
 		// alone would put it first — which is exactly the answer the open-task
 		// term exists to prevent.
-		newOpen := seedConversationForTest(t, orgID, seed, "completed")
-		oldOpen := seedConversationForTest(t, orgID, seed, "completed")
-		closedTaskConv := seedConversationForTest(t, orgID, seed, "completed")
+		newOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
+		oldOpen := seedConversationForTest(t, orgID, seed, SeedConcluded)
+		closedTaskConv := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		ages := map[string]time.Duration{
 			newOpen:        1 * time.Hour,
 			oldOpen:        6 * time.Hour,
@@ -5463,7 +5465,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		for i := range 3 {
-			id := seedConversationForTest(t, orgID, seed, "completed")
+			id := seedConversationForTest(t, orgID, seed, SeedConcluded)
 			if _, err := store.EndConversationSystem(ctx, orgID, id, domain.EndedRequeued); err != nil {
 				t.Fatalf("end %d: %v", i, err)
 			}
@@ -5493,7 +5495,7 @@ func RunConversationStoreConformance(t *testing.T, mk ConversationStoreFactory) 
 		store, orgID, _, seed := mk(t)
 		ctx := context.Background()
 		parent := seedConversationForTest(t, orgID, seed, "running")
-		sub := seedConversationForTest(t, orgID, seed, "completed")
+		sub := seedConversationForTest(t, orgID, seed, SeedConcluded)
 		seed.SetParentConversation(t, sub, parent)
 		if _, err := store.EndConversationSystem(ctx, orgID, sub, domain.EndedFailed); err != nil {
 			t.Fatalf("end the subagent conversation: %v", err)
@@ -5583,6 +5585,35 @@ func seedConversationForTest(t *testing.T, orgID string, seed ConversationSeeder
 	return seedConversationForTaskTest(t, orgID, taskID, status, seed)
 }
 
+// SeedConcluded is the seed spelling of a conversation parked with its step's
+// verdict — status `open` with the conclusion stamped. It is not a status: a
+// conversation never concludes, so the row shape takes two columns to spell.
+// Every seeder that takes a status string accepts it, resolving it through
+// SeedStatus, so a subtest staging concluded work names the shape once.
+const SeedConcluded = "concluded"
+
+// SeedStatus resolves a seed's status into what a seeder stores: SeedConcluded
+// becomes `open` with concluded set (the seeder stamps completed_at), and any
+// other status is stored as written.
+func SeedStatus(status string) (stored string, concluded bool) {
+	if status == SeedConcluded {
+		return domain.StatusOpen, true
+	}
+	return status, false
+}
+
+// concludedSeed expands SeedConcluded on a seed row; any other status passes
+// through as written.
+func concludedSeed(conv domain.Conversation) domain.Conversation {
+	stored, concluded := SeedStatus(conv.Status)
+	conv.Status = stored
+	if concluded && conv.CompletedAt == nil {
+		at := time.Now().UTC()
+		conv.CompletedAt = &at
+	}
+	return conv
+}
+
 // seedConversationWithBlueprintForTest is seedConversationForTest plus the
 // blueprint_run id it minted (running, like a real firing) and the task the
 // chain hangs off — for subtests whose subject is the parent's state rather
@@ -5594,10 +5625,10 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 	ev := seed.Event(t, ent, domain.EventGitHubPROpened)
 	taskID = seed.Task(t, ent, domain.EventGitHubPROpened, ev)
 	brID := seed.BlueprintRun(t, taskID)
-	return seed.Conversation(t, domain.Conversation{
+	return seed.Conversation(t, concludedSeed(domain.Conversation{
 		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: brID,
-	}), brID, taskID
+	})), brID, taskID
 }
 
 // seedConversationForTaskTest creates a conversation on an existing task,
@@ -5607,10 +5638,10 @@ func seedConversationWithBlueprintForTest(t *testing.T, orgID string, seed Conve
 func seedConversationForTaskTest(t *testing.T, orgID, taskID, status string, seed ConversationSeeder) string {
 	t.Helper()
 	_ = orgID
-	return seed.Conversation(t, domain.Conversation{
+	return seed.Conversation(t, concludedSeed(domain.Conversation{
 		TaskID: taskID, PromptID: conversationTestPrompt(t), Status: status, Model: "m",
 		BlueprintRunID: seed.BlueprintRun(t, taskID),
-	})
+	}))
 }
 
 // conversationTestPromptID is the prompt-row id the backend test files

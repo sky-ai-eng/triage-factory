@@ -137,38 +137,41 @@ const sqliteTaskRuleOrderJoin = `
 //	2  in flight   — an agent is working, and a task with no conversation at
 //	                 all: neither is anybody's move, and a row that has not
 //	                 started must not sort below finished work.
-//	3  completed   — its newest conversation concluded. Done reading, last.
+//	3  concluded   — its newest conversation is parked with its step's
+//	                 verdict. Done reading, last.
 //
 // Tier 0 is `sqliteConversationAttentionSQL` — the SAME predicate the
 // conversations list's `attention` filter and the rail's `needs` count read,
 // lifted to a per-task EXISTS. A second definition of "needs you" would let a
 // lane disagree with the rail counted above it.
 //
-// The status halves read the DISPLAY status, not the stored column: the card a
+// The failed half reads the DISPLAY status, not the stored column: the card a
 // human is looking at reads the display ladder, and a conversation mid-claim
-// carries no stored status at all. `failed` / `completed` mirror
-// domain.StatusFailed / domain.StatusCompleted, which SQL cannot import; the
-// dual-dialect conformance suite is what holds the two literals to them.
+// carries no stored status at all. The concluded half reads the stored pair
+// db.ConcludedConversationSQL names, which a claimed conversation cannot match (a
+// wake is what puts one under a claim, and it clears the status). `failed`
+// mirrors domain.StatusFailed, which SQL cannot import; the dual-dialect
+// conformance suite is what holds the literal to it.
 //
 // "Newest" is (started_at DESC, id) — the same ordering ConversationStore.List
 // groups a task's conversations by, so the conversation this reads is the one
 // the board renders on the card. A task with no conversation yields SQL NULL,
 // which no WHEN matches: the ELSE is what puts it in tier 2 rather than
 // needing its own arm.
-const sqliteTaskAttentionTier = `CASE
+var sqliteTaskAttentionTier = `CASE
 	         WHEN t.closed_at IS NOT NULL THEN 2
 	         WHEN EXISTS (SELECT 1 FROM conversations r
 	                      WHERE r.task_id = t.id AND ` + sqliteConversationAttentionSQL + `)
 	              THEN 0
-	         ELSE CASE (SELECT ` + sqliteDisplayStatusSQL + `
-	                    FROM conversations r
-	                    WHERE r.task_id = t.id
-	                    ORDER BY r.started_at DESC, r.id
-	                    LIMIT 1)
-	                WHEN 'failed'    THEN 1
-	                WHEN 'completed' THEN 3
-	                ELSE 2
-	              END
+	         ELSE COALESCE((SELECT CASE
+	                                 WHEN ` + sqliteDisplayStatusSQL + ` = 'failed' THEN 1
+	                                 WHEN ` + db.ConcludedConversationSQL("r") + ` THEN 3
+	                                 ELSE 2
+	                               END
+	                        FROM conversations r
+	                        WHERE r.task_id = t.id
+	                        ORDER BY r.started_at DESC, r.id
+	                        LIMIT 1), 2)
 	       END`
 
 // sqliteTaskClaimantJoin resolves the name the claimee sort orders on. Both
@@ -1023,7 +1026,7 @@ func scanActiveConversationIDs(ctx context.Context, q queryer, taskID string) ([
 	rows, err := q.QueryContext(ctx, `
 		SELECT id FROM conversations
 		WHERE task_id = ?
-		  AND (status IS NULL OR status NOT IN (`+conversationTerminalStatusesSQL+`))
+		  AND `+db.UnsettledConversationSQL("conversations")+`
 	`, taskID)
 	if err != nil {
 		return nil, err
@@ -1104,7 +1107,7 @@ func closeTaskWithCancelIntent(ctx context.Context, q queryer, taskID, closeReas
 		      SELECT c.blueprint_run_id FROM conversations c
 		      WHERE c.task_id = ?
 		        AND c.blueprint_run_id IS NOT NULL
-		        AND (c.status IS NULL OR c.status NOT IN (`+conversationTerminalStatusesSQL+`))
+		        AND `+db.UnsettledConversationSQL("c")+`
 		  )
 	`, taskID); err != nil {
 		return false, nil, fmt.Errorf("stamp run cancel intent: %w", err)
@@ -1522,7 +1525,9 @@ func (s *taskStore) CountConsecutiveFailedConversations(ctx context.Context, org
 					ELSE 'blueprint'
 				END AS kind,
 				r.blueprint_run_id,
-				COALESCE(cr.status, r.status) AS status,
+				CASE WHEN cr.id IS NOT NULL THEN cr.status
+				     WHEN `+db.ConcludedConversationSQL("r")+` THEN 'completed'
+				     ELSE r.status END AS status,
 				COALESCE(cr.started_at, r.started_at) AS started_at,
 				ROW_NUMBER() OVER (
 					PARTITION BY COALESCE(r.blueprint_run_id, r.id)
