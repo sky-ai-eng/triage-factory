@@ -321,7 +321,8 @@ func TestRunLinearCycleForOrg_CompletesAndStamps(t *testing.T) {
 // TestRunLinearCycleForOrg_RateLimitSchedulesAtReset: a rate limit on the
 // first request ends the cycle with no second request, reports it, stamps no
 // success and emits no poll-complete, and moves the org's next poll to the
-// reset Linear named.
+// reset Linear named. Neither a config save (PollSoon) nor a wake from
+// suspend (PollAllSoon) brings that poll forward.
 func TestRunLinearCycleForOrg_RateLimitSchedulesAtReset(t *testing.T) {
 	recorder := recordSpans(t)
 	reset := time.Now().Add(20 * time.Minute).Truncate(time.Millisecond)
@@ -340,6 +341,14 @@ func TestRunLinearCycleForOrg_RateLimitSchedulesAtReset(t *testing.T) {
 	}
 	if got := m.linearSlot(runmode.LocalDefaultOrgID); !got.Equal(reset) {
 		t.Errorf("next poll = %v, want the reset %v", got, reset)
+	}
+	m.PollSoon("linear", runmode.LocalDefaultOrgID)
+	m.PollAllSoon()
+	if m.pollDue("linear", runmode.LocalDefaultOrgID, time.Now()) {
+		t.Error("PollSoon and PollAllSoon made the org due before the reset")
+	}
+	if !m.pollDue("linear", runmode.LocalDefaultOrgID, reset) {
+		t.Error("the org is not due at the reset")
 	}
 	if _, ok := m.successSnapshot("linear")[runmode.LocalDefaultOrgID]; ok {
 		t.Error("a rate-limited cycle stamped success")

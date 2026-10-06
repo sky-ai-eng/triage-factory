@@ -443,7 +443,11 @@ type EntityStore interface {
 	// confirms must advance or it stays a candidate forever — and
 	// since candidates are ordered oldest-first against a per-cycle
 	// budget, one such entity would consume that budget every cycle and
-	// starve every other candidate behind it.
+	// starve every other candidate behind it. The tracker's Linear
+	// confirmation has the same oldest-first budget and stamps every
+	// attempt Linear did not refuse for rate, a failed one included, so an
+	// issue that keeps failing goes to the back of the queue rather than
+	// holding its head.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping. It
 	// stamps a wall-clock column the next cycle's candidate query reads and

@@ -731,6 +731,97 @@ func TestRefreshLinear_ConfirmationBudget(t *testing.T) {
 	if len(evts) != linearConfirmBudget {
 		t.Errorf("unreachable events = %d, want %d", len(evts), linearConfirmBudget)
 	}
+
+	// No router runs here, so all 25 stay active. The next cycle asks first
+	// about the five this one did not reach.
+	fx.client.calls = nil
+	if _, err := fx.cycle(t, linRules()); err != nil {
+		t.Fatalf("second RefreshLinear: %v", err)
+	}
+	want := []string{"getIssue:uuid-21", "getIssue:uuid-22", "getIssue:uuid-23", "getIssue:uuid-24", "getIssue:uuid-25"}
+	if got := getIssueCalls(fx.client); len(got) < len(want) || !slices.Equal(got[:len(want)], want) {
+		t.Errorf("second cycle asked %v, want it to start with %v", got, want)
+	}
+}
+
+// TestRefreshLinear_FailingConfirmationsRotate: an issue whose confirmation
+// keeps failing goes to the back of the queue, so a budget's worth of them
+// does not hold the head every cycle and keep the rest from being asked.
+func TestRefreshLinear_FailingConfirmationsRotate(t *testing.T) {
+	fx := newLinearFixture(t)
+	var issues []linear.Issue
+	for n := 1; n <= linearConfirmBudget+5; n++ {
+		issues = append(issues, linIssue(n))
+	}
+	fx.seed(t, issues...)
+	fx.client.batchOmits = map[string]bool{}
+	fx.client.notFound = map[string]bool{}
+	failing := map[string]bool{}
+	for n, is := range issues {
+		fx.client.batchOmits[is.ID] = true
+		if n < linearConfirmBudget {
+			failing["getIssue:"+is.ID] = true
+		} else {
+			fx.client.notFound[is.ID] = true
+		}
+	}
+	fx.client.fail = func(call string, _ int) error {
+		if failing[call] {
+			return &linear.StatusError{Status: 502, Class: upstream.Transient}
+		}
+		return nil
+	}
+
+	evts, err := fx.cycle(t, linRules())
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if len(evts) != 0 {
+		t.Fatalf("first cycle events = %v, want none: every read it made failed", eventTypes(evts))
+	}
+	evts, err = fx.cycle(t, linRules())
+	if err != nil {
+		t.Fatalf("second RefreshLinear: %v", err)
+	}
+	var retired []string
+	for _, e := range evts {
+		var meta events.LinearIssueUnreachableMetadata
+		_ = json.Unmarshal([]byte(e.MetadataJSON), &meta)
+		retired = append(retired, meta.IssueIdentifier)
+	}
+	if want := []string{"ENG-21", "ENG-22", "ENG-23", "ENG-24", "ENG-25"}; !slices.Equal(retired, want) {
+		t.Errorf("second cycle retired %v, want %v", retired, want)
+	}
+}
+
+// TestRefreshLinear_ConfirmationQueueIsOldestFirst: entities with no snapshot
+// and tracked issues missing from their batch share one queue, ordered by how
+// long since each was polled, so neither kind waits behind the other.
+func TestRefreshLinear_ConfirmationQueueIsOldestFirst(t *testing.T) {
+	fx := newLinearFixture(t)
+	fx.seed(t, linIssue(1))
+	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-2", "issue", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	fx.client.put(linIssue(2))
+	fx.client.batchOmits = map[string]bool{"uuid-1": true}
+
+	if _, err := fx.cycle(t, linRules()); err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got, want := getIssueCalls(fx.client), []string{"getIssue:uuid-1", "getIssue:ENG-2"}; !slices.Equal(got, want) {
+		t.Errorf("confirmations = %v, want the longer-unpolled missing issue before the newer stub: %v", got, want)
+	}
+}
+
+func getIssueCalls(f *fakeLinear) []string {
+	var out []string
+	for _, c := range f.callLog() {
+		if strings.HasPrefix(c, "getIssue:") {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // TestRefreshLinear_DiscoveryUnreachedReportsNoPoll: when every call fails on

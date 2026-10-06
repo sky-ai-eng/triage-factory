@@ -1,11 +1,13 @@
 package tracker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -31,9 +33,9 @@ const (
 	// time: tracked issues the batch read did not return, and entities with
 	// no snapshot to batch by. Each is a request on top of the batch reads,
 	// and a whole team's issues can go missing at once when a credential
-	// loses access. The rest wait for the next cycle; entities are listed
-	// oldest-polled first, so each cycle's budget reaches the ones the last
-	// one did not.
+	// loses access. The rest wait for the next cycle. Candidates are asked
+	// about oldest-polled first and every attempt stamps the entity, so each
+	// cycle's budget reaches the ones the last one did not.
 	linearConfirmBudget = 20
 )
 
@@ -248,7 +250,15 @@ func (t *Tracker) RefreshLinear(ctx context.Context, client LinearClient, teams 
 		return emitted, err
 	}
 
-	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, append(individual, missing...), prevs, teams, allDone)
+	// One queue for both kinds, in the order the entities were listed,
+	// which is oldest-polled first.
+	candidates := append(individual, missing...)
+	listed := make(map[string]int, len(entities))
+	for i, e := range entities {
+		listed[e.ID] = i
+	}
+	slices.SortFunc(candidates, func(a, b domain.Entity) int { return cmp.Compare(listed[a.ID], listed[b.ID]) })
+	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, candidates, prevs, teams, allDone)
 	emitted += confirmed
 	if err != nil {
 		return emitted, err
@@ -312,7 +322,7 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 // issue is gone, so only Linear answering not-found for the issue itself emits
 // unreachable; an issue that does come back is applied like any refreshed one.
 // Any other failure is no evidence either way, and the entity is asked about
-// again next cycle.
+// again on a later cycle, behind the candidates not yet asked.
 func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearClient, orgID string, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
 	if len(candidates) == 0 {
 		return 0, nil
@@ -334,12 +344,22 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 			ref = prev.ID
 		}
 		issue, err := client.GetIssue(ctx, ref)
+		if errors.Is(err, linear.ErrRateLimited) {
+			span.SetAttributes(telemetry.Outcome("rate_limited"))
+			return emitted, err
+		}
+		// Stamp the attempt whatever the answer. Candidates are asked about
+		// oldest-polled first, so one left unstamped heads the queue again
+		// next cycle, and enough that keep failing would spend every cycle's
+		// budget on the same issues. A rate-limited request is not an
+		// attempt: Linear said nothing about the issue.
+		if stampErr := t.entities.MarkPolledSystem(context.Background(), orgID, e.ID); stampErr != nil {
+			trackerLog.WarnContext(ctx, "stamping a linear confirmation failed; the entity keeps its place in the queue",
+				"source_id", e.SourceID, "entity_id", e.ID, "error", stampErr)
+		}
 		switch {
 		case err == nil:
 			emitted += t.applyLinearIssue(ctx, orgID, e, prevs[e.ID], *issue, teams, allDone)
-		case errors.Is(err, linear.ErrRateLimited):
-			span.SetAttributes(telemetry.Outcome("rate_limited"))
-			return emitted, err
 		case errors.Is(err, linear.ErrNotFound):
 			t.emitLinearUnreachable(ctx, orgID, e, nil, teams, "not_found")
 			emitted++

@@ -203,8 +203,9 @@ A request still rate limited after the client's 30 seconds of waiting ends the
 org's cycle where it lands. Nothing further is sent to Linear that cycle, the
 writes already made stand, and the poll-complete sentinel is not emitted. When
 Linear said when the window resets, the org's next cycle is scheduled for then
-instead of at its poll interval. A rate-limited request says nothing about the
-issues it asked for, so it never leads to `unreachable`.
+instead of at its poll interval, and a settings save does not bring it forward.
+A rate-limited request says nothing about the issues it asked for, so it never
+leads to `unreachable`.
 
 ## Slack Events
 
@@ -288,6 +289,12 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `last_comment_id`, `last_comment_at`
 - `open_child_count` — sub-issues not in an armed team's done states
 - `created_at`, `updated_at`, `archived`, `trashed`
+
+Turning Linear off for an org clears these snapshots, as it does for any
+source. The factory belt places a Linear issue by its snapshot's `team_id`, so
+while Linear is off its issues are not on the belt. They return as the tracker
+re-reads them after Linear is turned back on, up to 20 a cycle. Jira issues stay
+on the belt through a pause, because a Jira key's prefix is its project.
 
 ## Event lifecycle
 

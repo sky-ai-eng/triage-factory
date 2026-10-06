@@ -173,7 +173,7 @@ func (m *Manager) runLinearCycleForOrg(ctx context.Context, orgID string, now ti
 			linearLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear poll cycle stopped by rate limit", "org", orgID, "reset", rl.Reset, "error", err)
 			m.reportError("linear", orgID, err)
 			if !rl.Reset.IsZero() {
-				m.schedulePoll("linear", orgID, rl.Reset)
+				m.holdPoll("linear", orgID, rl.Reset)
 			}
 			return
 		}

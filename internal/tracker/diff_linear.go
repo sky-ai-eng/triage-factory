@@ -96,8 +96,9 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	}
 
 	// One event per cycle however many comments landed: the snapshot only
-	// knows the newest.
-	if curr.LastCommentID != "" && curr.LastCommentID != prev.LastCommentID {
+	// knows the newest. A newest comment older than the last one seen is the
+	// last one deleted, which is not a comment.
+	if curr.LastCommentID != "" && curr.LastCommentID != prev.LastCommentID && !linearCommentOlder(curr.LastCommentAt, prev.LastCommentAt) {
 		emit(domain.EventLinearIssueCommented, "", events.LinearIssueCommentedMetadata{
 			LinearIssueIdentity: id, CommentID: curr.LastCommentID,
 		})
@@ -135,4 +136,13 @@ func linearIdentity(snap domain.LinearSnapshot) events.LinearIssueIdentity {
 		AssigneeUserID:  snap.AssigneeUserID,
 		Title:           snap.Title,
 	}
+}
+
+// linearCommentOlder reports whether comment time a is before b. A time that
+// does not parse, or is absent, is not older, so a comment whose time is
+// unknown still counts as new.
+func linearCommentOlder(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339Nano, a)
+	tb, errB := time.Parse(time.RFC3339Nano, b)
+	return errA == nil && errB == nil && ta.Before(tb)
 }

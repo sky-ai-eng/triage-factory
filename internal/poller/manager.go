@@ -126,6 +126,10 @@ type Manager struct {
 	// Restart can briefly overlap an old and a new poll goroutine.
 	dueMu    sync.Mutex
 	nextPoll map[string]time.Time
+	// pollHold, also under dueMu and keyed like nextPoll, is a time before
+	// which an org is not polled whatever its slot says: the reset of a rate
+	// limit the upstream reported (holdPoll).
+	pollHold map[string]time.Time
 
 	// dashboardBackfillInflight collapses concurrent dashboard-history
 	// backfill kicks for the same (org, user, host) within this process so a
@@ -342,7 +346,8 @@ func clampPollInterval(d time.Duration) time.Duration {
 }
 
 // pollDue reports whether orgID is eligible for a poll of source at now. An
-// org with no recorded slot (never polled, pruned, or PollSoon'd) is due.
+// org with no recorded slot (never polled, pruned, or PollSoon'd) is due
+// unless a rate-limit hold (holdPoll) is still ahead of now.
 //
 // pollDue + schedulePoll are check-then-act under two separate dueMu
 // acquisitions, not an atomic CAS. The only place two cyclers run concurrently
@@ -353,7 +358,14 @@ func clampPollInterval(d time.Duration) time.Duration {
 func (m *Manager) pollDue(source, orgID string, now time.Time) bool {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
-	next, ok := m.nextPoll[pollKey(source, orgID)]
+	key := pollKey(source, orgID)
+	if hold, ok := m.pollHold[key]; ok {
+		if now.Before(hold) {
+			return false
+		}
+		delete(m.pollHold, key)
+	}
+	next, ok := m.nextPoll[key]
 	return !ok || !now.Before(next)
 }
 
@@ -373,6 +385,25 @@ func (m *Manager) schedulePoll(source, orgID string, at time.Time) {
 	m.nextPoll[pollKey(source, orgID)] = at
 }
 
+// holdPoll schedules orgID's next poll of source at until and keeps it from
+// being polled any sooner. PollSoon and PollAllSoon clear the slot but not
+// the hold, because neither a config save nor a wake from suspend lifts the
+// upstream's rate limit, and a poll sent before its reset fails again. The
+// hold lapses once pollDue sees it pass.
+func (m *Manager) holdPoll(source, orgID string, until time.Time) {
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	if m.nextPoll == nil {
+		m.nextPoll = make(map[string]time.Time)
+	}
+	if m.pollHold == nil {
+		m.pollHold = make(map[string]time.Time)
+	}
+	key := pollKey(source, orgID)
+	m.nextPoll[key] = until
+	m.pollHold[key] = until
+}
+
 // prunePoll drops scheduler slots for orgs no longer in the active set, so
 // the map doesn't grow unbounded as orgs churn and a deactivated→reactivated
 // org isn't held back by a stale future slot. Called once per cycle with the
@@ -390,14 +421,21 @@ func (m *Manager) prunePoll(source string, activeOrgIDs []string) {
 			delete(m.nextPoll, key)
 		}
 	}
+	for key := range m.pollHold {
+		if strings.HasPrefix(key, prefix) && !active[strings.TrimPrefix(key, prefix)] {
+			delete(m.pollHold, key)
+		}
+	}
 }
 
 // PollSoon makes orgID immediately eligible for the next poll of source by
-// dropping its scheduler slot — and ONLY its slot. The running loop picks it
-// up on its next wake (≤ basePollInterval). This is the targeted, load-safe
-// alternative to restarting the process-global loop on a config change:
-// clearing every slot would re-poll every tenant at once, stampeding shared
-// GHES/GHEC API budgets — the exact thing per-org intervals exist to prevent.
+// dropping its scheduler slot — and ONLY its slot. A rate-limit hold
+// (holdPoll) stays, so an org waiting out a limit is polled at its reset.
+// The running loop picks it up on its next wake (≤ basePollInterval). This
+// is the targeted, load-safe alternative to restarting the process-global
+// loop on a config change: clearing every slot would re-poll every tenant at
+// once, stampeding shared GHES/GHEC API budgets — the exact thing per-org
+// intervals exist to prevent.
 // Deleting a missing key (or from a nil map) is a no-op, so this is safe
 // before the first poll and harmless if the loop isn't running yet.
 func (m *Manager) PollSoon(source, orgID string) {
@@ -418,6 +456,8 @@ func (m *Manager) PollSoon(source, orgID string) {
 // whose interval the sleep reached is already overdue, so polling it now
 // restores its schedule rather than compressing it. An org whose interval is
 // longer than the sleep is pulled forward by at most the difference, once.
+// Rate-limit holds stay: each is the upstream's wall-clock reset, which the
+// sleep did not move.
 func (m *Manager) PollAllSoon() {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
