@@ -930,7 +930,7 @@ func TestFleet_Eviction_RoundTripsTheUncommittedDelta(t *testing.T) {
 	// for a reason that has nothing to do with what this case is about.
 	pgtest.MustExec(t, f.h.AdminDB, `
 		UPDATE conversations
-		SET status = 'completed',
+		SET status = 'open',
 		    completed_at = now() - interval '7 hours',
 		    started_at   = now() - interval '7 hours',
 		    queued_at    = now() - interval '7 hours'

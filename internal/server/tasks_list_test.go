@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -922,15 +923,20 @@ func TestTaskList_TokenIsBoundToItsSearchAndSort(t *testing.T) {
 func seedListConversation(t *testing.T, database *sql.DB, taskID, storedStatus string) string {
 	t.Helper()
 	convID := uuid.New().String()
+	resolved, concluded := dbtest.SeedStatus(storedStatus)
 	var status any
-	if storedStatus != "" {
-		status = storedStatus
+	if resolved != "" {
+		status = resolved
+	}
+	var completedAt any
+	if concluded {
+		completedAt = time.Now().UTC()
 	}
 	execSQL(t, database, `
 		INSERT INTO conversations (id, task_id, status, trigger_type, origin,
-		                          team_id, visibility, creator_user_id)
-		VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?)`,
-		convID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID)
+		                          team_id, visibility, creator_user_id, completed_at)
+		VALUES (?, ?, ?, 'manual', 'interactive', ?, 'team', ?, ?)`,
+		convID, taskID, status, runmode.LocalDefaultTeamID, runmode.LocalDefaultUserID, completedAt)
 	return convID
 }
 
@@ -959,7 +965,7 @@ func TestTaskList_AttentionOrderSurvivesPaging(t *testing.T) {
 		id := seedTaskFixture(t, s.db, taskFixture{
 			name: name, status: "in_progress", claimedUser: true, priority: priority(p),
 		})
-		conv := seedListConversation(t, s.db, id, domain.StatusCompleted)
+		conv := seedListConversation(t, s.db, id, dbtest.SeedConcluded)
 		if needsYou {
 			seedDraftPR(t, s.db, conv)
 		}

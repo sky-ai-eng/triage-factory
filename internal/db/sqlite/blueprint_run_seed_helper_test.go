@@ -3,9 +3,11 @@ package sqlite_test
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -119,7 +121,8 @@ func nullIfEmptyForTest(s string) any {
 // arbitrary status without staging a whole firing for each. The trigger_type↔creator CHECK is satisfied by pairing
 // 'manual' with the sentinel user and 'event' with NULL. Fields honored:
 // ID, TaskID, PromptID, Status, Model, TriggerType, TriggerID,
-// BlueprintRunID, BlueprintStepIndex.
+// BlueprintRunID, BlueprintStepIndex, CompletedAt. A Status of
+// dbtest.SeedConcluded writes the concluded shape: `open`, stamped.
 func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversation) {
 	t.Helper()
 	trigger := conv.TriggerType
@@ -141,17 +144,25 @@ func insertConversationForTest(t *testing.T, conn *sql.DB, conv domain.Conversat
 	// An empty Status writes SQL NULL — the mid-flight state, which is what
 	// an unconcluded conversation carries — not an empty string, which is not
 	// a status at all.
+	resolved, concluded := dbtest.SeedStatus(conv.Status)
 	var status any
-	if conv.Status != "" {
-		status = conv.Status
+	if resolved != "" {
+		status = resolved
+	}
+	var completedAt any
+	switch {
+	case conv.CompletedAt != nil:
+		completedAt = conv.CompletedAt.UTC()
+	case concluded:
+		completedAt = time.Now().UTC()
 	}
 	if _, err := conn.Exec(`
 		INSERT INTO conversations (id, task_id, prompt_id, status, model,
 		                           trigger_type, trigger_id, team_id, visibility,
-		                           creator_user_id, blueprint_run_id, blueprint_step_index, queued_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, CURRENT_TIMESTAMP)
+		                           creator_user_id, blueprint_run_id, blueprint_step_index, queued_at, completed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'team', ?, ?, ?, CURRENT_TIMESTAMP, ?)
 	`, conv.ID, conv.TaskID, conv.PromptID, status, conv.Model,
-		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID, stepIdx); err != nil {
+		trigger, triggerID, runmode.LocalDefaultTeamID, creator, conv.BlueprintRunID, stepIdx, completedAt); err != nil {
 		t.Fatalf("insert conversation %s: %v", conv.ID, err)
 	}
 }

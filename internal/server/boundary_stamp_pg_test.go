@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -33,11 +34,16 @@ func pgConversationBoundary(t *testing.T, h *pgtest.Harness, conversationID stri
 func teamArchiveConversation(t *testing.T, r *teamArchiveRig, status any) string {
 	t.Helper()
 	id := uuid.New().String()
+	concluded := false
+	if s, ok := status.(string); ok {
+		status, concluded = dbtest.SeedStatus(s)
+	}
 	pgtest.MustExec(t, r.h.AdminDB, `
 		INSERT INTO conversations (id, org_id, creator_user_id, team_id, visibility,
-		                           type, origin, trigger_type, status)
-		VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5)
-	`, id, r.orgID, r.owner, r.teamID, status)
+		                           type, origin, trigger_type, status, completed_at)
+		VALUES ($1, $2, $3, $4, 'team', 'delegation', 'interactive', 'manual', $5,
+		        CASE WHEN $6::boolean THEN now() END)
+	`, id, r.orgID, r.owner, r.teamID, status, concluded)
 	return id
 }
 
@@ -52,10 +58,10 @@ func TestTeamArchive_EndsEveryUnEndedConversationTheTeamHolds(t *testing.T) {
 
 	midFlight := teamArchiveConversation(t, r, nil)
 	parked := teamArchiveConversation(t, r, "open")
-	concluded := teamArchiveConversation(t, r, "completed")
+	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
 
 	// A boundary that already happened is the one that happened.
-	alreadyEnded := teamArchiveConversation(t, r, "completed")
+	alreadyEnded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
 	pgtest.MustExec(t, r.h.AdminDB,
 		`UPDATE conversations SET ended_at = now(), ended_reason = $2 WHERE id = $1`,
 		alreadyEnded, string(domain.EndedTakenOver))
@@ -156,7 +162,7 @@ func TestTeamArchive_RingsTheMemoryDoorbellForEveryConversationItStamped(t *test
 
 	midFlight := teamArchiveConversation(t, r, nil)
 	parked := teamArchiveConversation(t, r, "open")
-	concluded := teamArchiveConversation(t, r, "completed")
+	concluded := teamArchiveConversation(t, r, dbtest.SeedConcluded)
 
 	// Already ended: whatever it owes was rung for by the boundary that
 	// actually ended it, so this archive neither stamps nor rings.

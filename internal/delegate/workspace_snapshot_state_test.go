@@ -171,7 +171,7 @@ func TestReapExpiredSnapshots_DropsStateWithTheBlob(t *testing.T) {
 	wsKey := taskIDForConversation(t, database, conversationID)
 
 	if _, err := database.Exec(
-		`UPDATE conversations SET status='completed', outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`,
+		`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='abort', completed_at=datetime('now','-20 days') WHERE id=?`,
 		conversationID); err != nil {
 		t.Fatalf("age the conversation: %v", err)
 	}

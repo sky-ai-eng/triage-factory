@@ -230,7 +230,7 @@ func TestSendMessage_NativeCompletedIsResumable(t *testing.T) {
 		t.Run(outcome, func(t *testing.T) {
 			database := newDelegateTestDB(t)
 			seedConversation(t, database, "r-done", "", t.TempDir())
-			if _, err := database.Exec(`UPDATE conversations SET status='completed', outcome=? WHERE id='r-done'`, outcome); err != nil {
+			if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome=? WHERE id='r-done'`, outcome); err != nil {
 				t.Fatalf("complete: %v", err)
 			}
 			blueprintTerminal := "completed"

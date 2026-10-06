@@ -220,7 +220,7 @@ func TestReconcileRunQueue_ParksOrphanUnderTerminalBlueprint(t *testing.T) {
 // 'continue' enqueues the next step and bumps current_step_index, leaving the
 // blueprint running.
 func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "adv", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "adv", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 
 	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
@@ -248,7 +248,7 @@ func TestReactor_AdvanceEnqueuesNextStep(t *testing.T) {
 // been executing the blueprint — proving the actor is stable across steps and
 // immune to a mid-blueprint claim change.
 func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
-	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "actor-inherit", 2, "completed", "continue")
+	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "actor-inherit", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 
@@ -291,7 +291,7 @@ func TestReactor_AdvanceInheritsActorAgent(t *testing.T) {
 // carried NULL there — autonomous cost in the usage by-category split with
 // an empty by-rule breakdown.
 func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "trig-inherit", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "trig-inherit", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
 
@@ -328,7 +328,7 @@ func TestReactor_AdvanceInheritsTriggerID(t *testing.T) {
 // TestReactor_FinalStepFinishCompletes: the final step completing with 'finish'
 // terminates the blueprint completed and closes the task.
 func TestReactor_FinalStepFinishCompletes(t *testing.T) {
-	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "fin", 1, "completed", "finish")
+	s, database, brID, taskID, step0ConversationID := reactorFixture(t, "fin", 1, dbtest.SeedConcluded, "finish")
 	org := runmode.LocalDefaultOrgID
 
 	stepConversation, _ := s.conversations.GetSystem(context.Background(), org, step0ConversationID)
@@ -351,7 +351,7 @@ func TestReactor_FinalStepFinishCompletes(t *testing.T) {
 // TestReactor_CancelRequestedTerminates: a continue outcome on a cancel-requested
 // blueprint does NOT advance — it finalizes the blueprint cancelled.
 func TestReactor_CancelRequestedTerminates(t *testing.T) {
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "can", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "can", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 	if _, err := s.blueprints.RequestRunCancelSystem(context.Background(), org, brID); err != nil {
 		t.Fatalf("RequestRunCancelSystem: %v", err)
@@ -442,7 +442,7 @@ func TestReactor_IgnoresTerminalFromAStepTheBlueprintMovedPast(t *testing.T) {
 	// with the given outcome.
 	stage := func(t *testing.T, suffix, step0Outcome string) (*Spawner, *sql.DB, string, string, domain.Conversation) {
 		t.Helper()
-		s, database, brID, taskID, step0ConversationID := reactorFixture(t, suffix, 3, "completed", step0Outcome)
+		s, database, brID, taskID, step0ConversationID := reactorFixture(t, suffix, 3, dbtest.SeedConcluded, step0Outcome)
 		ctx := context.Background()
 
 		// The advance the reactor itself performed on step 0's first
@@ -554,7 +554,7 @@ func TestReactor_LeavesASuccessorsConversationAlone(t *testing.T) {
 
 	for _, status := range []string{domain.StatusQueued, domain.StatusRunning, domain.ClaimPhaseCloning} {
 		t.Run(status, func(t *testing.T) {
-			s, database, brID, taskID, step0ConversationID := reactorFixture(t, "successor-"+status, 2, "completed", "continue")
+			s, database, brID, taskID, step0ConversationID := reactorFixture(t, "successor-"+status, 2, dbtest.SeedConcluded, "continue")
 
 			stepConversation := loadConversation(t, s, step0ConversationID)
 			stepConversation.Status = status

@@ -218,9 +218,7 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 		t.Fatalf("seed prompt: %v", err)
 	}
 	taskID := uuid.New().String()
-	// 'done' is the terminal task status (an earlier version of the seed used
-	// 'completed', which was never a valid task value — 'completed'
-	// is conversation-level; a later CHECK constraint caught the latent bug).
+	// 'done' is the terminal task status.
 	if _, err := conn.Exec(`
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
 		VALUES (?, ?, ?, ?, 'done')
@@ -232,8 +230,8 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	blueprintRunID := seedBlueprintRunForConversation(t, conn, taskID)
 	conversationID = uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index)
-		VALUES (?, ?, 'p_task_memory', 'completed', ?, ?)
+		INSERT INTO conversations (id, task_id, prompt_id, status, blueprint_run_id, blueprint_step_index, completed_at)
+		VALUES (?, ?, 'p_task_memory', 'open', ?, ?, CURRENT_TIMESTAMP)
 	`, conversationID, taskID, blueprintRunID, dbtest.TaskMemorySeedStepIndex); err != nil {
 		t.Fatalf("seed conversation: %v", err)
 	}

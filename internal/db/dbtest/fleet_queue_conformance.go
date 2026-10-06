@@ -119,7 +119,7 @@ func RunFleetQueueSharesConformance(t *testing.T, mk FleetQueueSharesFactory) {
 		queued := seed.StageStep(t) // counts as queued
 		_ = queued
 		done := seed.StageStep(t)
-		seed.ForceStatus(t, done, "completed") // terminal: excluded from both
+		seed.ForceStatus(t, done, SeedConcluded) // concluded: excluded from both
 		parked := seed.StageStep(t)
 		seed.ForceStatus(t, parked, "open") // hibernated: excluded from active
 

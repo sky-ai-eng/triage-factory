@@ -35,21 +35,6 @@ func newConversationQueueStore(conn *sql.DB) db.ConversationQueueStore {
 
 var _ db.ConversationQueueStore = (*conversationQueueStore)(nil)
 
-// conversationTerminalStatusesSQL is the terminal conversation statuses as a SQL
-// IN-list body — two names, one owner each: the agent concluded, or the
-// infrastructure died. It describes stored rows as faithfully as new writes,
-// because every retired status was rewritten by migration rather than carried
-// forward (202608010002, SQLite; Postgres had no rows to migrate). Mirrors
-// domain.AllTerminalConversationStatuses.
-//
-// Every exclusion predicate in this package interpolates this rather than
-// re-spelling the literals. That matters more than the saved keystrokes: these
-// guards are exclusions (`status NOT IN (…)`), so a status missing from one
-// doesn't fail closed — it readmits a finished conversation to parking, cancelling, or
-// the active-work counters. Sixteen hand-copied copies is how the set drifted
-// a value at a time.
-const conversationTerminalStatusesSQL = `'completed','failed'`
-
 // insertConversation is the mint a delegation conversation is written by. It
 // takes the queryer because it always runs on the transaction that also
 // commits the blueprint_run or the current_step_index pointer the row belongs
@@ -199,9 +184,11 @@ func undeliveredInputDuringClaimSQL(claimExpr string) string {
 // needsDrivingSQL is the eligibility predicate, identical for every surface:
 // nobody is driving it, it has not been retired, and it is either mid-flight
 // (fresh mint, or a claim that released without writing an outcome) or
-// parked and woken by new input. A terminal conversation is never eligible,
-// whatever rows it holds — resuming one takes the explicit un-terminal write
-// (MarkQueuedForResume).
+// parked without a verdict and woken by new input. A terminal conversation is
+// never eligible, and neither is a concluded one, whatever rows it holds —
+// resuming either takes the explicit wake (MarkQueuedForResume), which is
+// where the guards a concluded step needs (its blueprint may still be acting
+// on its verdict) are applied.
 //
 // The NULL arm is what makes both reap cases work with no write beyond the
 // claim release: a claim reaped mid-setup still has its undelivered prompt
@@ -226,7 +213,7 @@ const needsDrivingSQL = awaitingDrivingSQL + `
 const awaitingDrivingSQL = `r.archived_at IS NULL
 	  AND r.stop_requested_at IS NULL
 	  AND NOT ` + activeClaimExistsSQL + `
-	  AND (r.status IS NULL OR (r.status = 'open' AND ` + undeliveredInputExistsSQL + `))`
+	  AND (r.status IS NULL OR (r.status = 'open' AND r.completed_at IS NULL AND ` + undeliveredInputExistsSQL + `))`
 
 // nextAttemptDueSQL is the time gate: no hand-back is holding the row back, or
 // the wait it set is over. statement_timestamp(), the clock the claim leases
@@ -764,10 +751,10 @@ func (s *conversationQueueStore) ReacquireClaimLeaseSystem(ctx context.Context, 
 // ClaimNextConversation's FOR UPDATE OF r: whichever commits second re-reads
 // its own predicate and matches nothing.
 //
-// The run cancel keys off the conversation's status as the victims read it
-// (`was`), because a conversation that concluded before the settlement reached
-// it had its terminal handled by the holder, and this pass only clears the
-// stale intent.
+// The run cancel keys off whether the conversation was settled as the victims
+// read it (`was_settled`), because a conversation that failed or concluded
+// before the settlement reached it had its ending handled by the holder, and
+// this pass only clears the stale intent.
 func (s *conversationQueueStore) SettleUnclaimedStopsSystem(ctx context.Context) ([]db.SettledStop, error) {
 	return s.settleUnclaimedStops(ctx, "")
 }
@@ -805,15 +792,17 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 	var out []db.SettledStop
 	err := inTx(ctx, s.conn, func(q queryer) error {
 		// 1. The runs a settlement may cancel: running, cancel-requested, and
-		// holding a non-terminal conversation nobody drives that one of the
+		// holding an unsettled conversation nobody drives that one of the
 		// arms below admits. Every victim that cancels a run is one of those.
+		// A concluded step is not one: its verdict is the reactor's to act on,
+		// and the reactor reads the cancel first.
 		rows, err := q.QueryContext(ctx, `
 			SELECT br.id::text FROM blueprint_runs br
 			WHERE br.status = 'running' AND br.cancel_requested = true
 			  AND EXISTS (
 			      SELECT 1 FROM conversations r
 			      WHERE r.blueprint_run_id = br.id
-			        AND (r.status IS NULL OR r.status = 'open')
+			        AND `+db.UnsettledConversationSQL("r")+`
 			        AND `+settleNoLiveClaimSQL+`
 			        AND (r.stop_requested_at IS NOT NULL OR NOT `+settleReleasedRecentlySQL(graceArg)+`)
 			        `+scope+`
@@ -838,24 +827,27 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 		}
 
 		// 2. The settlement. The first victim arm is the intent; the second is
-		// a non-terminal step under a cancel-requested run that no intent ever
+		// an unsettled step under a cancel-requested run that no intent ever
 		// reached, once its latest engagement has had the grace to reach its
 		// reactor. The last clause is the lock order: a victim whose
 		// settlement writes its run is admitted only when that run is locked.
+		// A settled victim (failed, or concluded) keeps its ending: only its
+		// intent clears, and it cancels nothing.
 		rows, err = q.QueryContext(ctx, `
 			WITH victims AS (
 				SELECT r.id, r.org_id, r.blueprint_run_id, r.blueprint_step_index, r.status,
+				       COALESCE(`+db.SettledConversationSQL("r")+`, false) AS was_settled,
 				       r.stop_requested_at, r.stop_requested_by, r.stop_requested_reason
 				FROM conversations r
 				LEFT JOIN blueprint_runs br ON br.id = r.blueprint_run_id
 				WHERE `+settleNoLiveClaimSQL+`
 				  AND (r.stop_requested_at IS NOT NULL
-				       OR ((r.status IS NULL OR r.status = 'open')
+				       OR (`+db.UnsettledConversationSQL("r")+`
 				           AND br.status = 'running' AND br.cancel_requested = true
 				           AND NOT `+settleReleasedRecentlySQL(graceArg)+`))
 				  AND (br.id IS NULL
 				       OR NOT (br.status = 'running' AND br.cancel_requested = true)
-				       OR r.status IN (`+conversationTerminalStatusesSQL+`)
+				       OR `+db.SettledConversationSQL("r")+`
 				       OR br.id = ANY(`+lockedArg+`::uuid[]))
 				  `+scope+`
 				ORDER BY r.id
@@ -863,9 +855,9 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 			),
 			settled AS (
 				UPDATE conversations c
-				SET status = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN v.status ELSE 'open' END,
-				    parked_at = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.parked_at ELSE COALESCE(c.parked_at, now()) END,
-				    park_reason = CASE WHEN v.status IN (`+conversationTerminalStatusesSQL+`) THEN c.park_reason
+				SET status = CASE WHEN v.was_settled THEN v.status ELSE 'open' END,
+				    parked_at = CASE WHEN v.was_settled THEN c.parked_at ELSE COALESCE(c.parked_at, now()) END,
+				    park_reason = CASE WHEN v.was_settled THEN c.park_reason
 				                       WHEN v.stop_requested_at IS NULL THEN 'blueprint_cancelled'
 				                       WHEN v.stop_requested_reason IS NOT NULL THEN v.stop_requested_reason
 				                       WHEN v.stop_requested_by IS NULL THEN 'system_cancelled'
@@ -875,7 +867,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				    stop_requested_reason = NULL,
 				    next_attempt_at = NULL
 				FROM victims v WHERE c.id = v.id
-				RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.status AS was,
+				RETURNING c.id, c.org_id, c.blueprint_run_id, c.blueprint_step_index, v.was_settled,
 				          v.stop_requested_at AS intent_at, v.stop_requested_by, v.stop_requested_reason
 			),
 			cancelled AS (
@@ -889,7 +881,7 @@ func (s *conversationQueueStore) settleUnclaimedStops(ctx context.Context, scope
 				FROM settled s
 				WHERE br.id = s.blueprint_run_id AND br.status = 'running' AND br.cancel_requested = true
 				  AND br.id = ANY(`+lockedArg+`::uuid[])
-				  AND s.was IS DISTINCT FROM 'completed' AND s.was IS DISTINCT FROM 'failed'
+				  AND NOT s.was_settled
 				RETURNING br.id
 			)
 			SELECT s.org_id::text, s.id::text,
@@ -1240,7 +1232,7 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND r.status IN (`+conversationTerminalStatusesSQL+`)
+		  AND `+db.SettledConversationSQL("r")+`
 		  AND COALESCE(r.completed_at, r.started_at) <= now() - make_interval(secs => $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl
@@ -1606,7 +1598,7 @@ func countClaimDesyncs(ctx context.Context, q queryer) (db.OrphanedStepCheck, er
 	rows, err := q.QueryContext(ctx, `
 		SELECT c.id::text, count(*) OVER ()
 		FROM conversations c
-		WHERE c.status IN (`+conversationTerminalStatusesSQL+`)
+		WHERE `+db.SettledConversationSQL("c")+`
 		  AND EXISTS (SELECT 1 FROM claims cl WHERE cl.conversation_id = c.id AND cl.released_at IS NULL)
 		ORDER BY c.started_at, c.id
 		LIMIT $1

@@ -136,7 +136,7 @@ func fenceConversationCount(t *testing.T, database *sql.DB, entityID string) int
 func fenceCompleteConversations(t *testing.T, database *sql.DB, entityID string) {
 	t.Helper()
 	if _, err := database.Exec(`
-		UPDATE conversations SET status = 'completed', completed_at = ?
+		UPDATE conversations SET status = 'open', completed_at = ?
 		WHERE task_id IN (SELECT id FROM tasks WHERE entity_id = ?)
 	`, time.Now(), entityID); err != nil {
 		t.Fatalf("complete conversations: %v", err)
@@ -260,7 +260,7 @@ func TestFiringWorker_AlreadyFiredRun_SkipsWithoutDuplicate(t *testing.T) {
 	// The prior firing concluded, conversation and run both: the worker must
 	// read it as already-fired, not as a live engagement to wait behind. A
 	// run still marked running would hold the row at the claim instead.
-	if _, err := database.Exec(`UPDATE conversations SET status = 'completed' WHERE id = ?`, priorStepID); err != nil {
+	if _, err := database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, priorStepID); err != nil {
 		t.Fatalf("conclude prior step: %v", err)
 	}
 	if _, err := database.Exec(`UPDATE blueprint_runs SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?`, priorBlueprintRunID); err != nil {

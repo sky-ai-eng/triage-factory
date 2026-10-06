@@ -415,7 +415,10 @@ func TestConversationQueueStore_SQLite_FleetQueueShares(t *testing.T) {
 			},
 			ForceStatus: func(t *testing.T, conversationID, status string) {
 				t.Helper()
-				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, status, conversationID); err != nil {
+				resolved, concluded := dbtest.SeedStatus(status)
+				if _, err := conn.Exec(`UPDATE conversations SET status = ?,
+					completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+					WHERE id = ?`, resolved, concluded, time.Now().UTC(), conversationID); err != nil {
 					t.Fatalf("force status %q: %v", status, err)
 				}
 			},
@@ -521,9 +524,12 @@ func TestConversationQueueStore_SQLite_ExecutorClaims(t *testing.T) {
 				t.Helper()
 				seq++
 				conversationID := stageSqliteStep(t, conn, stores, fmt.Sprintf("rq-exclaims-%d", seq)).ID
+				resolved, concluded := dbtest.SeedStatus(status)
 				if _, err := conn.Exec(`
-					UPDATE conversations SET status = ?, failure_kind = NULLIF(?, '') WHERE id = ?
-				`, status, failureKind, conversationID); err != nil {
+					UPDATE conversations SET status = ?, failure_kind = NULLIF(?, ''),
+					    completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+					WHERE id = ?
+				`, resolved, failureKind, concluded, time.Now().UTC(), conversationID); err != nil {
 					t.Fatalf("force terminal state: %v", err)
 				}
 				return conversationID
@@ -628,11 +634,14 @@ func TestClaimPredicate_SQLite(t *testing.T) {
 			},
 			SetStoredStatus: func(t *testing.T, convID, status string) {
 				t.Helper()
+				resolved, concluded := dbtest.SeedStatus(status)
 				var stored any
-				if status != "" {
-					stored = status
+				if resolved != "" {
+					stored = resolved
 				}
-				if _, err := conn.Exec(`UPDATE conversations SET status = ? WHERE id = ?`, stored, convID); err != nil {
+				if _, err := conn.Exec(`UPDATE conversations SET status = ?,
+					completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+					WHERE id = ?`, stored, concluded, time.Now().UTC(), convID); err != nil {
 					t.Fatalf("set stored status: %v", err)
 				}
 			},
@@ -905,16 +914,22 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 		},
 		StageStaleStopIntent: func(t *testing.T, conversationID, status, by string) {
 			t.Helper()
+			resolved, concluded := dbtest.SeedStatus(status)
 			if _, err := conn.Exec(
-				`UPDATE conversations SET status = ?, stop_requested_at = CURRENT_TIMESTAMP, stop_requested_by = NULLIF(?, '') WHERE id = ?`,
-				status, by, conversationID,
+				`UPDATE conversations SET status = ?, stop_requested_at = CURRENT_TIMESTAMP, stop_requested_by = NULLIF(?, ''),
+				 completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+				 WHERE id = ?`,
+				resolved, by, concluded, time.Now().UTC(), conversationID,
 			); err != nil {
 				t.Fatalf("stage stale stop intent on %s: %v", conversationID, err)
 			}
 		},
 		SetStoredStatus: func(t *testing.T, conversationID, status string) {
 			t.Helper()
-			if _, err := conn.Exec(`UPDATE conversations SET status = NULLIF(?, '') WHERE id = ?`, status, conversationID); err != nil {
+			resolved, concluded := dbtest.SeedStatus(status)
+			if _, err := conn.Exec(`UPDATE conversations SET status = NULLIF(?, ''),
+				completed_at = CASE WHEN ? THEN COALESCE(completed_at, ?) ELSE completed_at END
+				WHERE id = ?`, resolved, concluded, time.Now().UTC(), conversationID); err != nil {
 				t.Fatalf("set stored status on %s: %v", conversationID, err)
 			}
 		},
@@ -924,7 +939,7 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 			// release stamp both columns, so the backdate lands in the layout
 			// the reads compare against.
 			at := time.Now().UTC().Add(-ago)
-			if _, err := conn.Exec(`UPDATE conversations SET completed_at = ? WHERE id = ?`, at, conversationID); err != nil {
+			if _, err := conn.Exec(`UPDATE conversations SET completed_at = ? WHERE id = ? AND completed_at IS NOT NULL`, at, conversationID); err != nil {
 				t.Fatalf("backdate completed_at on %s: %v", conversationID, err)
 			}
 			if _, err := conn.Exec(`UPDATE claims SET released_at = ? WHERE conversation_id = ? AND released_at IS NOT NULL`, at, conversationID); err != nil {

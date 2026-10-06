@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 )
 
@@ -16,10 +17,11 @@ import (
 func seedConversationOnTeam(t *testing.T, h *Harness, orgID, creatorID, teamID, status string) string {
 	t.Helper()
 	var id string
+	stored, concluded := dbtest.SeedStatus(status)
 	if err := h.AdminDB.QueryRow(`
-		INSERT INTO conversations (org_id, creator_user_id, team_id, trigger_type, origin, status, model)
-		VALUES ($1, $2, $3, 'manual', 'manual', $4, 'm') RETURNING id
-	`, orgID, creatorID, teamID, status).Scan(&id); err != nil {
+		INSERT INTO conversations (org_id, creator_user_id, team_id, trigger_type, origin, status, model, completed_at)
+		VALUES ($1, $2, $3, 'manual', 'manual', $4, 'm', CASE WHEN $5 THEN now() END) RETURNING id
+	`, orgID, creatorID, teamID, stored, concluded).Scan(&id); err != nil {
 		t.Fatalf("seed %s conversation on team %s: %v", status, teamID, err)
 	}
 	return id
@@ -39,7 +41,7 @@ func TestConversationStore_Postgres_ActiveIDsForTeamSystem(t *testing.T) {
 
 	running := seedConversationOnTeam(t, h, orgA, alice, teamA, "running")
 	open := seedConversationOnTeam(t, h, orgA, alice, teamA, "open")
-	seedConversationOnTeam(t, h, orgA, alice, teamA, "completed")
+	seedConversationOnTeam(t, h, orgA, alice, teamA, dbtest.SeedConcluded)
 	seedConversationOnTeam(t, h, orgA, alice, teamB, "running") // sibling team — excluded
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, SecretKey)

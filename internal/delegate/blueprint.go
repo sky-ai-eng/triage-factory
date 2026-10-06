@@ -42,8 +42,9 @@ const (
 // the step's position to the orchestrator's next move. runOutcome is the step
 // run's conversations.outcome — the step itself (a blueprint_steps row) carries
 // no outcome, which is why this reads the run and is named for it. Only valid
-// for a step whose run reached status='completed'; the non-terminal statuses
-// (open, cancelled, failed) are handled by the caller before this is consulted.
+// for a concluded step conversation (parked `open` with its verdict recorded);
+// a conversation parked without a verdict, or a failed one, is handled by the
+// caller before this is consulted.
 //
 // abortReason is non-empty only for the missing-outcome-on-a-non-final-step
 // case ("no-outcome"); for an explicit abort it is empty and the caller
@@ -569,12 +570,13 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 		blueprintLog.Warn("read step conversation failed", "step_conversation", stepConversationID, "error", err)
 		return
 	}
-	// Still dormant after the resume (went open again) → the blueprint stays
-	// running; the next resume drives finalization. Unless a cancel is behind
-	// the park: a cancelled resume parks `open` rather than writing a terminal
-	// of its own, so cancel_requested is what tells the two apart — the same
-	// ordering reactToStepTerminal uses, and for the same reason.
-	if stepConversation.Status == "open" && !cr.CancelRequested {
+	// Still dormant after the resume (went open again with no verdict) → the
+	// blueprint stays running; the next resume drives finalization. Unless a
+	// cancel is behind the park: a cancelled resume parks `open` rather than
+	// recording a verdict of its own, so cancel_requested is what tells the
+	// two apart — the same ordering reactToStepTerminal uses, and for the same
+	// reason.
+	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() && !cr.CancelRequested {
 		return
 	}
 
@@ -612,14 +614,14 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 }
 
 // blueprintTerminalForResumedStepConversation maps a resumed step
-// conversation's terminal state + position to the blueprint's terminal status.
-// Mirrors reactToStepTerminal's
-// disposition, for the resume path: a clean completion routes through
-// blueprintDecisionForStepConversation (finish/advance/abort), and the
-// non-terminal-completed statuses map to the matching blueprint terminal.
+// conversation's ending + position to the blueprint's terminal status.
+// Mirrors reactToStepTerminal's disposition, for the resume path: a recorded
+// verdict routes through blueprintDecisionForStepConversation
+// (finish/advance/abort), and a failure maps to the matching blueprint
+// terminal.
 func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
-	switch stepConversation.Status {
-	case "completed":
+	switch {
+	case stepConversation.Concluded():
 		decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
 		switch decision {
 		case blueprintStepFinish:
@@ -633,7 +635,7 @@ func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conver
 		default: // blueprintStepAdvance — mid-blueprint resume not implemented
 			return domain.BlueprintRunStatusAborted, "multi_step_resume_not_implemented"
 		}
-	case "failed":
+	case stepConversation.Status == domain.StatusFailed:
 		return domain.BlueprintRunStatusFailed, "step " + stepConversation.Status
 	default:
 		return domain.BlueprintRunStatusFailed, "step ended with status " + stepConversation.Status

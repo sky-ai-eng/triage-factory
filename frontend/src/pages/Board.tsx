@@ -796,15 +796,18 @@ export default function Board() {
 
           // A few server paths still mutate task state but
           // only emit conversation_update (review/PR approval flips
-          // task='done', then broadcasts the conversation completion). Without
+          // task='done', then broadcasts the conversation's verdict). Without
           // a refetch here the card stays in its old column until a
           // manual refresh. Cheap to re-pull all three lanes — the
-          // queries are indexed and short.
+          // queries are indexed and short. A verdict parks the conversation
+          // `open`, so a park refetches too.
           if (isPermissionTerminalStatus(status)) {
             // The conversation is no longer running a turn, so any prompt parked on it is
             // stale — drop its queue so a finished card doesn't keep an
             // unanswerable Allow/Deny control.
             dropPermissionConversation(conversationID)
+            scheduleFetchTasks()
+          } else if (status === 'open') {
             scheduleFetchTasks()
           }
 
@@ -821,7 +824,7 @@ export default function Board() {
               }
             }
             if (isChainStep) {
-              if (isTerminalStatus(status)) {
+              if (isTerminalStatus(status) || status === 'open') {
                 scheduleFetchTasks()
               }
             } else {

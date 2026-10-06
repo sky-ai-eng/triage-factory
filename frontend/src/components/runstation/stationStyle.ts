@@ -77,9 +77,54 @@ export function stationState(conversation: Conversation): StationState {
       belt: 0.16,
     }
   }
+  // A concluded conversation is parked with its step's verdict, and its plate
+  // says what that verdict meant for the work — see completionKind. The
+  // machine wears a different light for each ending, because "this step is
+  // done" and "the task is done" are not the same news, and a green DONE plate
+  // was telling a viewer mid-chain that the whole thing had stopped.
+  switch (completionKind(conversation)) {
+    case 'handoff': {
+      // Cyan, not green: the powered-and-waiting trim. This step concluded
+      // and the line moved on, so the belt keeps idling — green here reads
+      // as "nothing follows", which is exactly the wrong conclusion. The
+      // position rides the label so the plate itself says where you are.
+      const pos = chainPosition(conversation)
+      return {
+        key: 'handoff',
+        light: HMI_CYAN,
+        label: pos ? `STEP ${pos.step}/${pos.total} DONE` : 'STEP DONE',
+        live: false,
+        scanner: false,
+        heat: 0.12,
+        belt: 0.34,
+      }
+    }
+    case 'stopped':
+      // The agent gave up, or the workflow stopped around it, and the task is
+      // still open — that is a your-move amber, never a success green.
+      return {
+        key: 'stopped',
+        light: 'var(--color-warm)',
+        label: 'STOPPED',
+        live: false,
+        scanner: false,
+        heat: 0.12,
+        belt: 0,
+      }
+    case 'done':
+      return {
+        key: 'done',
+        light: 'var(--color-ink-2)',
+        label: 'DONE',
+        live: false,
+        scanner: false,
+        heat: 0.12,
+        belt: 0,
+      }
+  }
   switch (conversation.Status) {
     case 'open':
-      // Honest idle: not executing, not concluded. Powered, waiting — the
+      // Honest idle: not executing, no verdict. Powered, waiting — the
       // machine glows its baseline cyan, belt idling, vents barely warm.
       return {
         key: 'open',
@@ -100,52 +145,6 @@ export function stationState(conversation: Conversation): StationState {
         heat: 0.3,
         belt: 0.5,
       }
-    case 'completed': {
-      // One stored terminal, three endings — see completionKind. The machine
-      // wears a different light for each, because "this step is done" and "the
-      // task is done" are not the same news, and the green DONE plate was
-      // telling a viewer mid-chain that the whole thing had stopped.
-      switch (completionKind(conversation)) {
-        case 'handoff': {
-          // Cyan, not green: the powered-and-waiting trim. This step concluded
-          // and the line moved on, so the belt keeps idling — green here reads
-          // as "nothing follows", which is exactly the wrong conclusion. The
-          // position rides the label so the plate itself says where you are.
-          const pos = chainPosition(conversation)
-          return {
-            key: 'handoff',
-            light: HMI_CYAN,
-            label: pos ? `STEP ${pos.step}/${pos.total} DONE` : 'STEP DONE',
-            live: false,
-            scanner: false,
-            heat: 0.12,
-            belt: 0.34,
-          }
-        }
-        case 'stopped':
-          // An abort is a completed row, but the agent gave up and the task is
-          // still open — that is a your-move amber, never a success green.
-          return {
-            key: 'stopped',
-            light: 'var(--color-warm)',
-            label: 'STOPPED',
-            live: false,
-            scanner: false,
-            heat: 0.12,
-            belt: 0,
-          }
-        default:
-          return {
-            key: 'done',
-            light: 'var(--color-ink-2)',
-            label: 'DONE',
-            live: false,
-            scanner: false,
-            heat: 0.12,
-            belt: 0,
-          }
-      }
-    }
     case 'failed':
       return {
         key: 'failed',

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -32,7 +33,7 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 // did nothing.
 func TestHandleAgentActions(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "acts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "acts", dbtest.SeedConcluded)
 
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
@@ -46,7 +47,7 @@ func TestHandleAgentActions(t *testing.T) {
 		DetailJSON: `{"method":"PUT","path":"/repos/octo/repo/pulls/42/merge","http_status":404,"attempted":"pr_merged"}`,
 	})
 	// A second conversation's action, to pin the scoping.
-	other := seedSteerConversation(t, s.db, "otheracts", "completed")
+	other := seedSteerConversation(t, s.db, "otheracts", dbtest.SeedConcluded)
 	seedConversationAction(t, s, other, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,
@@ -96,7 +97,7 @@ func TestHandleAgentActions(t *testing.T) {
 // answer.
 func TestHandleAgentActions_Empty(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "noacts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "noacts", dbtest.SeedConcluded)
 	rec := doJSON(t, s, http.MethodPost, "/api/agent/conversations/"+conversationID+"/actions/list", map[string]any{})
 	page := decodeList[map[string]any](t, rec)
 	if len(page.Items) != 0 || page.Total() != 0 {
@@ -125,7 +126,7 @@ func TestHandleAgentActions_UnknownConversationNotFound(t *testing.T) {
 // nothing at all.
 func TestHandleAgentActions_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "badacts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "badacts", dbtest.SeedConcluded)
 	seedConversationAction(t, s, conversationID, domain.ExternalAction{
 		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
 		Target: "octo/repo", Credential: domain.CredentialGitHubApp,

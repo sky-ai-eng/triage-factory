@@ -287,13 +287,13 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	if err := s.app.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
-			COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN concluded THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
 			COALESCE(AVG(run_cost), 0),
 			COALESCE(AVG(run_duration), 0)::bigint,
 			COALESCE(SUM(run_cost), 0)
 		FROM (
-			SELECT c.status,
+			SELECT c.status, `+db.ConcludedConversationSQL("c")+` AS concluded,
 			       (SELECT SUM(m.cost_usd) FROM messages m WHERE m.conversation_id = c.id AND m.org_id = c.org_id) AS run_cost,
 			       (SELECT SUM(cl.duration_ms) FROM claims cl WHERE cl.conversation_id = c.id)                     AS run_duration
 			FROM conversations c WHERE c.org_id = $1 AND c.prompt_id = $2

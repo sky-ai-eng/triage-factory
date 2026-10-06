@@ -166,8 +166,13 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			_, err = h.Stores.ConversationQueue.ResetProcessingConversations(ctx, predicateExecutorID, predicateBootEpoch+1)
 		case "parked":
 			_, err = HolderPark(h.Stores.Conversations, ctx, orgID, convID, db.ParkIdle())
-		case "completed", "failed":
-			_, err = HolderComplete(h.Stores.Conversations, ctx, orgID, convID, outcome, 0, 0, 0, "", "", "", "")
+		case "completed":
+			// The engagement recorded its step's verdict: the conversation
+			// parks open with the conclusion stamped, the claim releases
+			// 'completed'.
+			_, err = HolderComplete(h.Stores.Conversations, ctx, orgID, convID, domain.StatusOpen, 0, 0, 0, "", "", "", "")
+		case "failed":
+			_, err = HolderComplete(h.Stores.Conversations, ctx, orgID, convID, domain.StatusFailed, 0, 0, 0, "", "", "", "")
 		default:
 			t.Fatalf("release: unsupported outcome %q", outcome)
 		}
@@ -272,7 +277,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				convID := h.StageDelegation(t, runtime)
 				mustClaim(t, h, convID)
 				release(t, h, h.OrgID, convID, "completed")
-				h.SetStoredStatus(t, convID, "completed")
+				h.SetStoredStatus(t, convID, SeedConcluded)
 				h.SetBlueprintState(t, "completed", 0)
 				h.InsertRow(t, convID, userRow("try again", false))
 				mustNotClaim(t, h)
@@ -318,7 +323,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			t.Run("Ended_IsNotBroughtBackByTheUnTerminalWrite", func(t *testing.T) {
 				for _, tc := range []struct{ name, status string }{
 					{"parked", "open"},
-					{"concluded", "completed"},
+					{"concluded", SeedConcluded},
 				} {
 					t.Run(tc.name, func(t *testing.T) {
 						h := mk(t)
@@ -342,8 +347,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 						if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || flipped {
 							t.Fatalf("MarkQueuedForResume on an ended %s run = (%v, %v), want no flip", tc.status, flipped, err)
 						}
-						if st := h.StoredStatus(t, convID); st != tc.status {
-							t.Errorf("stored status = %q, want %q — a refused flip writes nothing", st, tc.status)
+						if want, _ := SeedStatus(tc.status); h.StoredStatus(t, convID) != want {
+							t.Errorf("stored status = %q, want %q — a refused flip writes nothing", h.StoredStatus(t, convID), want)
 						}
 						// And the input that would have ridden the wake
 						// changes nothing, which is the shape this refusal
@@ -364,7 +369,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					mustClaim(t, h, convID)
 					mustNotClaim(t, h)
 					release(t, h, h.OrgID, convID, "completed")
-					h.SetStoredStatus(t, convID, "completed")
+					h.SetStoredStatus(t, convID, SeedConcluded)
 				}
 			})
 
@@ -380,7 +385,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				first := h.StageDelegation(t, runtime)
 				mustClaim(t, h, first)
 				release(t, h, h.OrgID, first, "completed")
-				h.SetStoredStatus(t, first, "completed")
+				h.SetStoredStatus(t, first, SeedConcluded)
 
 				second := h.StageDelegation(t, runtime)
 				mustClaim(t, h, second)
@@ -391,8 +396,8 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, first); err != nil || flipped {
 					t.Fatalf("MarkQueuedForResume(%s) = (%v, %v), want no flip under a running blueprint", first, flipped, err)
 				}
-				if st := h.StoredStatus(t, first); st != "completed" {
-					t.Errorf("stored status = %q, want completed — a refused CAS writes nothing", st)
+				if st := h.StoredStatus(t, first); st != domain.StatusOpen {
+					t.Errorf("stored status = %q, want open — a refused CAS writes nothing", st)
 				}
 
 				// And the queued row it would have woken changes nothing:
@@ -431,7 +436,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 						ids[i] = h.StageDelegation(t, runtime)
 						mustClaim(t, h, ids[i])
 						release(t, h, h.OrgID, ids[i], "completed")
-						h.SetStoredStatus(t, ids[i], "completed")
+						h.SetStoredStatus(t, ids[i], SeedConcluded)
 					}
 					h.SetBlueprintState(t, blueprintStatus, currentStep)
 					return ids[0], ids[1]
@@ -466,7 +471,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 					// first resume consumed the conversation's claimability —
 					// which is what "follow up on it again" means.
 					release(t, h, h.OrgID, last, "completed")
-					h.SetStoredStatus(t, last, "completed")
+					h.SetStoredStatus(t, last, SeedConcluded)
 					resume(t, h, last)
 					mustClaim(t, h, last)
 				})
@@ -496,10 +501,13 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 				t.Run("CancelledBlueprintDrivesNothing", func(t *testing.T) {
 					// Called off is not the same as finished: nothing under a
 					// cancelled blueprint is claimable, its last conversation
-					// included.
+					// included — and the wake refuses before anything is
+					// queued, so no follow-up sits on a row nothing claims.
 					h := mk(t)
 					_, last := stage(t, h, "cancelled", 1)
-					resume(t, h, last)
+					if flipped, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, last); err != nil || flipped {
+						t.Fatalf("MarkQueuedForResume(%s) under a cancelled blueprint = (%v, %v), want no flip", last, flipped, err)
+					}
 					mustNotClaim(t, h)
 				})
 			})
@@ -836,7 +844,7 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		later := h.StageDelegation(t, "sdk")
 		taskID := mustClaim(t, h, later).TaskID
 		release(t, h, h.OrgID, later, "completed")
-		h.SetStoredStatus(t, later, "completed")
+		h.SetStoredStatus(t, later, SeedConcluded)
 
 		// Point the blueprint back at the earlier step so its own clause
 		// admits that row: what refuses it now is the task alone, which is
@@ -955,5 +963,111 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 		next := h.StageDelegation(t, "sdk")
 		mustClaim(t, h, next)
+	})
+
+	// A verdict parks the conversation and leaves it the task's to resume. A
+	// follow-up on it is live work again: the router folds an arriving event
+	// into it and the claim gate drives it, exactly as for any woken row. The
+	// verdict stays on the row until a new one replaces it.
+	t.Run("AFollowUpOnAConcludedConversationIsLiveAgain", func(t *testing.T) {
+		h := mk(t)
+		convID := h.StageDelegation(t, "sdk")
+		taskID := mustClaim(t, h, convID).TaskID
+		if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "done", "finish", "", ""); err != nil {
+			t.Fatalf("record verdict: %v", err)
+		}
+		h.SetBlueprintState(t, "completed", 0)
+		if live, err := h.Stores.Conversations.HasLiveConversationForTask(ctx, h.OrgID, taskID); err != nil || live {
+			t.Fatalf("HasLiveConversationForTask on a concluded conversation = (%v, %v), want (false, nil)", live, err)
+		}
+
+		if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+			t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+		}
+		if live, err := h.Stores.Conversations.HasLiveConversationForTask(ctx, h.OrgID, taskID); err != nil || !live {
+			t.Errorf("HasLiveConversationForTask during a follow-up = (%v, %v), want (true, nil)", live, err)
+		}
+		if id, err := h.Stores.Conversations.LiveConversationIDForTaskSystem(ctx, h.OrgID, taskID); err != nil || id != convID {
+			t.Errorf("the router's read = %q err=%v, want the resumed %q", id, err, convID)
+		}
+		mustClaim(t, h, convID)
+		got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+		if err != nil || got == nil {
+			t.Fatalf("Get: err=%v got=%v", err, got)
+		}
+		if got.Outcome != string(domain.ConversationOutcomeFinish) || got.CompletedAt == nil {
+			t.Errorf("verdict after the follow-up's claim = (outcome %q, completed_at %v), want the recorded finish kept", got.Outcome, got.CompletedAt)
+		}
+	})
+
+	// The reopen rule: a follow-up can change the blueprint only while its
+	// task is still open. An aborted blueprint reopens, and the step's abort
+	// verdict is withdrawn with it so the reactor reads the follow-up's own
+	// verdict, not the one that aborted the run. A closed task, or a blueprint
+	// that finished, reopens nothing and keeps the verdict as it was.
+	t.Run("AFollowUpReopensAnAbortedBlueprintOnlyWhileItsTaskIsOpen", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			blueprint  string
+			closeTask  bool
+			wantReopen bool
+		}{
+			{"aborted, task open", "aborted", false, true},
+			{"aborted, task closed", "aborted", true, false},
+			{"finished", "completed", false, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				convID := h.StageDelegation(t, "sdk")
+				taskID := mustClaim(t, h, convID).TaskID
+				if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "looked", "abort", "needs a human", ""); err != nil {
+					t.Fatalf("record verdict: %v", err)
+				}
+				h.SetBlueprintState(t, tc.blueprint, 0)
+				if tc.closeTask {
+					if _, err := h.Stores.Tasks.CloseSystem(ctx, h.OrgID, taskID, "user_done", ""); err != nil {
+						t.Fatalf("close task: %v", err)
+					}
+				}
+				conv, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+				if err != nil || conv == nil {
+					t.Fatalf("Get: err=%v conv=%v", err, conv)
+				}
+
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+					t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+				}
+				reopened, err := h.Stores.Blueprints.ReopenRunForResume(ctx, h.OrgID, conv.BlueprintRunID, convID)
+				if err != nil || reopened != tc.wantReopen {
+					t.Fatalf("ReopenRunForResume = (%v, %v), want (%v, nil)", reopened, err, tc.wantReopen)
+				}
+
+				br, err := h.Stores.Blueprints.GetRunSystem(ctx, h.OrgID, conv.BlueprintRunID)
+				if err != nil || br == nil {
+					t.Fatalf("GetRunSystem: err=%v br=%v", err, br)
+				}
+				wantRun := domain.BlueprintRunStatus(tc.blueprint)
+				if tc.wantReopen {
+					wantRun = domain.BlueprintRunStatusRunning
+				}
+				if br.Status != wantRun {
+					t.Errorf("blueprint run = %q, want %q", br.Status, wantRun)
+				}
+
+				after, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+				if err != nil || after == nil {
+					t.Fatalf("Get after: err=%v conv=%v", err, after)
+				}
+				if tc.wantReopen {
+					if after.Outcome != "" || after.OutcomeReason != "" || after.CompletedAt != nil {
+						t.Errorf("verdict after the reopen = (outcome %q, reason %q, completed_at %v), want withdrawn",
+							after.Outcome, after.OutcomeReason, after.CompletedAt)
+					}
+				} else if after.Outcome != "abort" || after.OutcomeReason != "needs a human" || after.CompletedAt == nil {
+					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want the abort kept — nothing reopened",
+						after.Outcome, after.OutcomeReason, after.CompletedAt)
+				}
+			})
+		}
 	})
 }

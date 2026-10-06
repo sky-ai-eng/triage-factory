@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -24,7 +25,7 @@ import (
 // the reactor would need a real agent, and a real one cancelled this early
 // returns at its first pre-agent gate without writing anything at all.
 func TestWaitForDispatches_JoinsADetachedTerminalWrite(t *testing.T) {
-	s, database, brID, _, step0ConversationID := reactorFixture(t, "shutdown-join", 2, "completed", "continue")
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "shutdown-join", 2, dbtest.SeedConcluded, "continue")
 	org := runmode.LocalDefaultOrgID
 
 	stepConversation, err := s.conversations.GetSystem(context.Background(), org, step0ConversationID)

@@ -52,10 +52,12 @@ type ClaimLeaseFixture struct {
 	// method writes, since every status write releases its claim.
 	SetStoredStatus func(t *testing.T, conversationID, status string)
 
-	// BackdateConclusion moves a conversation's completed_at, and the release
-	// of every claim of it already released, `ago` into the past, on the
-	// clock and in the layout each dialect stamps them with. It stages a
-	// conclusion old enough to be outside a grace no test can wait out.
+	// BackdateConclusion moves a conversation's completed_at, when it has
+	// one, and the release of every claim of it already released, `ago` into
+	// the past, on the clock and in the layout each dialect stamps them with.
+	// It stages a conclusion old enough to be outside a grace no test can
+	// wait out. A row with no conclusion gains none: on an `open` row the
+	// stamp is what makes it concluded rather than parked.
 	BackdateConclusion func(t *testing.T, conversationID string, ago time.Duration)
 
 	// SetNextAttempt rewrites a conversation's next_attempt_at to database now
@@ -256,7 +258,7 @@ func RunClaimLeaseConformance(t *testing.T, mk ClaimLeaseFactory) {
 			}},
 			{"CompleteForClaimSystem", func() error {
 				_, err := conversations.CompleteForClaimSystem(ctx, f.OrgID, conversationID, conv.ClaimID,
-					domain.StatusCompleted, 0, 0, 0, "done", string(domain.ConversationOutcomeFinish), "", "")
+					domain.StatusOpen, 0, 0, 0, "done", string(domain.ConversationOutcomeFinish), "", "")
 				return err
 			}},
 			{"MarkFailedIfActiveForClaimSystem", func() error {

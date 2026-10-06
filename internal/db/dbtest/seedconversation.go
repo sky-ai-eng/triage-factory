@@ -24,9 +24,11 @@ import (
 // parents), 'interactive' otherwise; status falls back to NULL — the
 // mid-flight state, which is what an unconcluded conversation carries now
 // that "queued" and "running" are derived from the claim table rather than
-// stored (see SeedActiveClaim).
+// stored (see SeedActiveClaim). A status of SeedConcluded seeds the parked,
+// concluded shape: `open` with completed_at stamped.
 func SeedConversation(tb testing.TB, database *sql.DB, conv domain.Conversation) {
 	tb.Helper()
+	conv = concludedSeed(conv)
 
 	orgID := conv.OrgID
 	if orgID == "" {

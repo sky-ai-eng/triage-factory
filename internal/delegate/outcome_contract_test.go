@@ -115,8 +115,8 @@ func TestProcessCompletion_FinishRecordsOutcome(t *testing.T) {
 		res(`{"outcome":"finish","summary":"shipped it"}`), cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
-	if conv.Status != "completed" {
-		t.Errorf("conv.status = %q, want completed", conv.Status)
+	if !conv.Concluded() {
+		t.Errorf("conv = (status %q, completed_at %v), want concluded", conv.Status, conv.CompletedAt)
 	}
 	if conv.Outcome != "finish" {
 		t.Errorf("conv.outcome = %q, want finish", conv.Outcome)
@@ -142,8 +142,8 @@ func TestProcessCompletion_AbortLeavesTaskOpen(t *testing.T) {
 		cwd, nil, "", "event", "")
 
 	conv := loadConversation(t, s, conversationID)
-	if conv.Status != "completed" {
-		t.Errorf("conv.status = %q, want completed (abort is run-completed, task-open)", conv.Status)
+	if !conv.Concluded() {
+		t.Errorf("conv = (status %q, completed_at %v), want concluded (an abort is a verdict; the task stays open)", conv.Status, conv.CompletedAt)
 	}
 	if conv.Outcome != "abort" {
 		t.Errorf("conv.outcome = %q, want abort", conv.Outcome)

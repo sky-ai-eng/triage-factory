@@ -192,6 +192,19 @@ func storedStatus(t *testing.T, database *sql.DB, convID string) string {
 	return status.String
 }
 
+// storedConcluded reports whether a conversation is parked with its step's
+// verdict recorded: stored `open` with completed_at stamped.
+func storedConcluded(t *testing.T, database *sql.DB, convID string) bool {
+	t.Helper()
+	var concluded bool
+	if err := database.QueryRow(
+		`SELECT status = 'open' AND completed_at IS NOT NULL FROM conversations WHERE id = ?`, convID,
+	).Scan(&concluded); err != nil {
+		t.Fatalf("read conclusion for %s: %v", convID, err)
+	}
+	return concluded
+}
+
 // markEngaged puts a seeded conversation into the state a claimed one is
 // really in: no stored outcome, one unreleased claim. "Running" is an
 // engagement now, not a column value. Returns the claim id, which is what an

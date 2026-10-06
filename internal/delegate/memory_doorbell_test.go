@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -54,7 +55,7 @@ func (d *doorbell) assertRangOnceFor(t *testing.T, orgID, conversationID string)
 // blueprint's pause between steps to a generation rather than a sweep interval.
 func TestReactor_AdvanceRingsTheMemoryDoorbell(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
-	s, _, brID, _, step0 := reactorFixture(t, "adv-doorbell", 2, "completed", "continue")
+	s, _, brID, _, step0 := reactorFixture(t, "adv-doorbell", 2, dbtest.SeedConcluded, "continue")
 	d := &doorbell{}
 	s.SetOnMemoryOwed(d.ring)
 
@@ -101,7 +102,7 @@ func TestFailConversation_RingsTheMemoryDoorbell(t *testing.T) {
 // model call, and which still has to exist before the task opens anything new.
 func TestFailClaimedConversation_RingsTheMemoryDoorbell(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
-	s, database, _, _, step0 := reactorFixture(t, "claimed-doorbell", 2, "completed", "continue")
+	s, database, _, _, step0 := reactorFixture(t, "claimed-doorbell", 2, dbtest.SeedConcluded, "continue")
 	d := &doorbell{}
 	s.SetOnMemoryOwed(d.ring)
 

@@ -148,7 +148,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 		ok, err := f.Stores.Conversations.RequestStopSystem(ctx, f.OrgID, id, stopTestUser, "", "")
@@ -205,7 +205,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		done, _ := f.StageStep(t)
 		conv := claim(t, f, done)
 		request(t, f, done, stopTestUser)
-		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, done, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, done, conv.ClaimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 		assertNoIntent(t, f, done, "CompleteForClaimSystem")
@@ -361,14 +361,14 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		f := mk(t)
 		id, _ := f.StageStep(t)
 		conv := claim(t, f, id)
-		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, id, conv.ClaimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 		br := runOf(t, f, id)
 		if _, err := f.Stores.Blueprints.RequestRunCancelSystem(ctx, f.OrgID, br.ID); err != nil {
 			t.Fatalf("RequestRunCancelSystem: %v", err)
 		}
-		f.StageStaleStopIntent(t, id, "completed", stopTestUser)
+		f.StageStaleStopIntent(t, id, SeedConcluded, stopTestUser)
 		st, ok := settledFor(t, f, id)
 		if !ok {
 			t.Fatal("the settlement did not take a terminal row carrying a stale intent")
@@ -377,8 +377,8 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("settled = %+v, want no run cancelled (the conversation concluded before the stop)", st)
 		}
 		got := get(t, f, id)
-		if got.Status != "completed" || got.ParkReason != "" {
-			t.Errorf("after settlement = (%q, %q), want (completed, none)", got.Status, got.ParkReason)
+		if !got.Concluded() || got.ParkReason != "" {
+			t.Errorf("after settlement = (%q, %q, completed_at %v), want (concluded, none)", got.Status, got.ParkReason, got.CompletedAt)
 		}
 		assertNoIntent(t, f, id, "the settlement")
 		if br := runOf(t, f, id); br.Status != domain.BlueprintRunStatusRunning {
@@ -556,7 +556,7 @@ func RunStopIntentConformance(t *testing.T, mk ClaimLeaseFactory) {
 		done, _ := f.StageStep(t)
 		conv := claim(t, f, done)
 		requestStall(t, f, done)
-		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, done, conv.ClaimID, "completed", 0, 0, 0, "", "finish", "", ""); err != nil {
+		if _, err := f.Stores.Conversations.CompleteForClaimSystem(ctx, f.OrgID, done, conv.ClaimID, domain.StatusOpen, 0, 0, 0, "", "finish", "", ""); err != nil {
 			t.Fatalf("complete: %v", err)
 		}
 		assertNoIntent(t, f, done, "CompleteForClaimSystem")

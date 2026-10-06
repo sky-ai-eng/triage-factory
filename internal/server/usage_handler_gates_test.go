@@ -98,13 +98,13 @@ func (r *usageRig) seedSpend(t *testing.T) {
 		pgtest.MustExec(t, r.h.AdminDB, `INSERT INTO messages (org_id, conversation_id, role, subtype, content, model, cost_usd, created_at) VALUES ($1, $2, 'assistant', '', 'work', NULLIF($3, ''), $4, $5)`,
 			r.orgID, convID, model, cost, when)
 	}
-	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', $5)`,
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'open', $5)`,
 		[]any{r.orgID, r.teamA, r.member, when}, "claude-opus-4-8", 1.00)
-	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'completed', $5)`,
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at) VALUES ($1, $2, $3, NULL, 'event', 'manual', $4, 'claude-haiku-4-5', 'open', $5)`,
 		[]any{r.orgID, r.teamA, triggerID, when}, "claude-haiku-4-5", 0.25)
 
 	// teamB: manual run by orgAdmin ($2.00).
-	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'completed', $5)`,
+	seedSpendConv(`INSERT INTO conversations (id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at) VALUES ($1, $2, $3, $4, 'manual', 'manual', 'claude-opus-4-8', 'open', $5)`,
 		[]any{r.orgID, r.teamB, r.orgAdmin, when}, "claude-opus-4-8", 2.00)
 
 	// System job ($0.05, org-level).

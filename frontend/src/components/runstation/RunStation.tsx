@@ -13,6 +13,7 @@ import {
   formatDurationMs,
   formatElapsed,
   isActiveConversation,
+  isConcluded,
   isResumableConversation,
   canResumeConversation,
   resumeBlockedCopy,
@@ -520,11 +521,10 @@ function IntakeDock({
   const counts = approvalCounts(conversation)
   const hasUnresolved = hasUnresolvedArtifacts(conversation)
   const isTerminal = isTerminalStatus(conversation.Status)
-  // Parked: stopped without concluding. Not terminal — the composer below
-  // offers to resume it — but the conversation is over unless the user picks
-  // it up, so it takes the same Return-to-queue exit a terminal gets. That
-  // exit used to arrive via the retired `cancelled` terminal, and a stop
-  // leaves the conversation here now.
+  // Parked: a turn ended, with the step's verdict or without. Not terminal —
+  // the composer below offers to resume it — but the conversation is over
+  // unless the user picks it up, so it takes the same Return-to-queue exit a
+  // terminal gets.
   const isParked = conversation.Status === 'open'
   // A conversation takes steering when a turn is executing, or when a
   // follow-up would actually be accepted. Status is the cheap first cut and
@@ -548,13 +548,13 @@ function IntakeDock({
       : `${counts.total} artifacts await your approval`
     : active
       ? 'agent is executing — streaming live'
-      : conversation.Status === 'open'
-        ? 'open — idle, resumable'
-        : conversation.Status === 'completed'
-          ? // The state word above says which ending; this says what it means
-            // for the task, in words. Shared with the rail so the two surfaces
-            // can't drift.
-            completionGloss(conversation)
+      : isConcluded(conversation)
+        ? // The state word above says which ending; this says what it means
+          // for the task, in words. Shared with the rail so the two surfaces
+          // can't drift.
+          completionGloss(conversation)
+        : conversation.Status === 'open'
+          ? 'open — idle, resumable'
           : conversation.Status === 'failed'
             ? conversation.FailureKind === 'memory_limit'
               ? 'killed — exceeded its memory limit (raise TF_CLAIM_MEMORY_LIMIT_MB if needed)'
@@ -881,7 +881,7 @@ function stepStateOf(
   currentStepIndex?: number,
 ): StepState {
   if (isActiveStatus(s.Status)) return 'active'
-  if (s.Status === 'completed') return 'done'
+  if (isConcluded(s)) return 'done'
   if (isFailedStatus(s.Status)) return 'failed'
   if (s.ID === currentConversationID || i === currentStepIndex) return 'current'
   return 'pending'

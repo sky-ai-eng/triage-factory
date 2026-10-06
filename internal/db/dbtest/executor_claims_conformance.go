@@ -66,7 +66,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("newest_first_scoped_to_the_executor_and_capped", func(t *testing.T) {
 		store, seed := mk(t)
-		conversationID := seed.Conversation(t, "completed", "")
+		conversationID := seed.Conversation(t, SeedConcluded, "")
 		// Three claims for ours, one for a neighbour executor on the same box's
 		// deployment — the neighbour must not appear.
 		var ids []string
@@ -181,7 +181,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 	t.Run("partially_measured_claim_keeps_the_half_it_has", func(t *testing.T) {
 		// The pre-5.19 kernel shape: cpu.stat lands, memory.peak does not.
 		store, seed := mk(t)
-		conversationID := seed.Conversation(t, "completed", "")
+		conversationID := seed.Conversation(t, SeedConcluded, "")
 		released := base.Add(time.Minute)
 		seed.Claim(t, ExecutorClaimRow{
 			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
@@ -202,7 +202,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("empty_for_an_executor_with_no_claims", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Conversation(t, "completed", "")
+		_ = seed.Conversation(t, SeedConcluded, "")
 		got, err := store.RecentClaimsForExecutorSystem(ctx, "control-pod-1", 25)
 		if err != nil {
 			t.Fatalf("a control pod with no claims must read empty, not error: %v", err)
@@ -214,7 +214,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_matches_the_list_projection", func(t *testing.T) {
 		store, seed := mk(t)
-		conversationID := seed.Conversation(t, "completed", "")
+		conversationID := seed.Conversation(t, SeedConcluded, "")
 		released := base.Add(time.Minute)
 		claimID := seed.Claim(t, ExecutorClaimRow{
 			ConversationID: conversationID, ExecutorID: "exec-a", ClaimedAt: base,
@@ -243,7 +243,7 @@ func RunExecutorClaimsConformance(t *testing.T, mk ExecutorClaimsFactory) {
 
 	t.Run("ClaimByIDSystem_reports_an_unknown_id_as_absent", func(t *testing.T) {
 		store, seed := mk(t)
-		_ = seed.Conversation(t, "completed", "")
+		_ = seed.Conversation(t, SeedConcluded, "")
 		// A well-formed id that names nothing, and a malformed one — the
 		// operator can type either into a URL. Both are misses, not faults:
 		// on Postgres a non-uuid bind would otherwise surface as a 500.

@@ -111,14 +111,14 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 
 		// A concluded conversation still holding a draft pull request: the
 		// agent stopped, the PR is nobody's but a human's to finish.
-		needsYouConv := seed.Conversation(t, needsYou, domain.StatusCompleted)
+		needsYouConv := seed.Conversation(t, needsYou, SeedConcluded)
 		seed.Artifact(t, needsYouConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
 		seed.Conversation(t, failed, domain.StatusFailed)
 		// Mid-flight and claimed — `running` is derived from the live claim.
 		seed.ActiveClaim(t, seed.Conversation(t, flight, ""))
 		// Concluded with nothing unresolved, and the highest priority in the
 		// lane: reading is the last thing a lane wants shown.
-		seed.Conversation(t, quiet, domain.StatusCompleted)
+		seed.Conversation(t, quiet, SeedConcluded)
 		// `none` gets no conversation at all — not anybody's move either, so
 		// it ties with the in-flight row and the middle orders the two.
 
@@ -145,11 +145,11 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		none := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-none", Title: "b no conversation", Status: "in_progress", Priority: 0.25})
 		quiet := seed.Task(t, TaskAttentionFixture{Suffix: "keyset-quiet", Title: "a concluded", Status: "in_progress", Priority: 0.9})
 
-		needsYouConv := seed.Conversation(t, needsYou, domain.StatusCompleted)
+		needsYouConv := seed.Conversation(t, needsYou, SeedConcluded)
 		seed.Artifact(t, needsYouConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
 		seed.Conversation(t, failed, domain.StatusFailed)
 		seed.ActiveClaim(t, seed.Conversation(t, flight, ""))
-		seed.Conversation(t, quiet, domain.StatusCompleted)
+		seed.Conversation(t, quiet, SeedConcluded)
 
 		want := []string{needsYou, failed, flight, none, quiet}
 		if got, _ := list(t, s, orgID, inProgress()); !slices.Equal(got, want) {
@@ -204,9 +204,9 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		needsYou := seed.Task(t, TaskAttentionFixture{Suffix: "attn-sort-needs", Title: "zzz needs you", Status: "in_progress", Priority: 0.5})
 		quiet := seed.Task(t, TaskAttentionFixture{Suffix: "attn-sort-quiet", Title: "aaa concluded", Status: "in_progress", Priority: 0.5})
 
-		conv := seed.Conversation(t, needsYou, domain.StatusCompleted)
+		conv := seed.Conversation(t, needsYou, SeedConcluded)
 		seed.Artifact(t, conv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
-		seed.Conversation(t, quiet, domain.StatusCompleted)
+		seed.Conversation(t, quiet, SeedConcluded)
 
 		f := inProgress()
 		f.SortKey, f.SortDir = db.TaskSortTitle, db.TaskSortDirAsc
@@ -231,12 +231,12 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		closedStale := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-done-stale", Title: "done stale", Status: "done", Priority: 0.5, ClosedAt: &older})
 		closedRecent := seed.Task(t, TaskAttentionFixture{Suffix: "attn-mix-done-recent", Title: "done recent", Status: "done", Priority: 0.5, ClosedAt: &newer})
 
-		needsConv := seed.Conversation(t, openNeeds, domain.StatusCompleted)
+		needsConv := seed.Conversation(t, openNeeds, SeedConcluded)
 		seed.Artifact(t, needsConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
-		seed.Conversation(t, openQuiet, domain.StatusCompleted)
-		staleConv := seed.Conversation(t, closedStale, domain.StatusCompleted)
+		seed.Conversation(t, openQuiet, SeedConcluded)
+		staleConv := seed.Conversation(t, closedStale, SeedConcluded)
 		seed.Artifact(t, staleConv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
-		seed.Conversation(t, closedRecent, domain.StatusCompleted)
+		seed.Conversation(t, closedRecent, SeedConcluded)
 
 		got, _ := list(t, s, orgID, db.TaskListFilter{})
 		want := []string{openNeeds, openQuiet, closedRecent, closedStale}
@@ -255,9 +255,9 @@ func RunTaskAttentionOrderConformance(t *testing.T, mk TaskAttentionOrderFactory
 		stale := seed.Task(t, TaskAttentionFixture{Suffix: "attn-done-stale", Title: "stale", Status: "done", Priority: 0.5, ClosedAt: &older})
 		recent := seed.Task(t, TaskAttentionFixture{Suffix: "attn-done-recent", Title: "recent", Status: "done", Priority: 0.5, ClosedAt: &newer})
 
-		conv := seed.Conversation(t, stale, domain.StatusCompleted)
+		conv := seed.Conversation(t, stale, SeedConcluded)
 		seed.Artifact(t, conv, domain.ArtifactKindPullRequest, domain.ArtifactStatePRDraft, "")
-		seed.Conversation(t, recent, domain.StatusCompleted)
+		seed.Conversation(t, recent, SeedConcluded)
 
 		got, _ := list(t, s, orgID, db.TaskListFilter{Statuses: []string{"done"}})
 		if want := []string{recent, stale}; !slices.Equal(got, want) {

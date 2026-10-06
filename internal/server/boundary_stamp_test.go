@@ -196,8 +196,8 @@ func TestConversationRead_CarriesTheBoundary(t *testing.T) {
 	// non-ended top-level conversation the task has, this one included.
 	conversationID := uuid.NewString()
 	if _, err := s.db.Exec(
-		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index)
-		 SELECT ?, task_id, prompt_id, 'completed', trigger_type, blueprint_run_id, blueprint_step_index
+		`INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at)
+		 SELECT ?, task_id, prompt_id, 'open', trigger_type, blueprint_run_id, blueprint_step_index, CURRENT_TIMESTAMP
 		   FROM conversations WHERE id = 'r_pa'`, conversationID,
 	); err != nil {
 		t.Fatalf("seed a uuid-addressed sibling conversation: %v", err)

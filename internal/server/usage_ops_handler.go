@@ -88,10 +88,10 @@ func (h *usageHandler) handleUsageOrgOps(w http.ResponseWriter, r *http.Request)
 		if t.DurationMS != nil {
 			durations = append(durations, *t.DurationMS)
 		}
-		switch t.Status {
-		case "completed":
+		switch {
+		case t.Concluded():
 			resp.RunsCompleted++
-		case "failed":
+		case t.Status == domain.StatusFailed:
 			// Count every failed run; failure_kind is a classification that is
 			// legitimately empty on an unclassified/legacy failure, so only the
 			// classified ones feed the by-kind breakdown.

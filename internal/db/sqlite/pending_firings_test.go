@@ -254,7 +254,7 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 		EndConversation: func(t *testing.T, conversationID string) {
 			t.Helper()
 			execOne(t, conn, "end conversation",
-				`UPDATE conversations SET status = 'completed', ended_at = CURRENT_TIMESTAMP, ended_reason = ? WHERE id = ?`,
+				`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, ended_at = CURRENT_TIMESTAMP, ended_reason = ? WHERE id = ?`,
 				string(domain.EndedStepAdvanced), conversationID)
 		},
 		ExpireLease: func(t *testing.T, firingID int64) {

@@ -403,8 +403,7 @@ type agentResult struct {
 	// Reason is the natural-language "why I stopped / what a human needs
 	// to do" — required on (and only meaningful for) an abort outcome. Maps
 	// to conversations.outcome_reason, kept distinct from Summary.
-	Reason string         `json:"reason"`
-	Links  map[string]any `json:"links"` // keyed URLs (pr_review, pr, jira_issues)
+	Reason string `json:"reason"`
 }
 
 // isValid reports whether the envelope is a recognized conclusion carrying its
@@ -423,25 +422,6 @@ func (r *agentResult) isValid() bool {
 	default:
 		return false
 	}
-}
-
-// PrimaryLink returns the most relevant URL from the result.
-func (r *agentResult) PrimaryLink() string {
-	for _, key := range []string{"pr_review", "pr"} {
-		if v, ok := r.Links[key]; ok {
-			if s, ok := v.(string); ok && s != "" {
-				return s
-			}
-		}
-	}
-	if v, ok := r.Links["jira_issues"]; ok {
-		if arr, ok := v.([]any); ok && len(arr) > 0 {
-			if s, ok := arr[0].(string); ok {
-				return s
-			}
-		}
-	}
-	return ""
 }
 
 // turnClass is the three-way classification of an agent turn-end: the run is
@@ -509,8 +489,8 @@ func classifyAgentResult(text string) (turnClass, *agentResult) {
 // rest, so this tolerates leading prose, a trailing ``` fence, text after the
 // JSON, and nested objects — cases the cruder first-{-to-last-} span could not
 // (e.g. "Config {x} done. {\"outcome\":\"finish\",...}"). Objects without an
-// `outcome` key (a stray prose `{...}`, a nested links object, `{}`) are
-// skipped. Returns ok=false when no such object exists.
+// `outcome` key (a stray prose `{...}`, an object nested in the envelope,
+// `{}`) are skipped. Returns ok=false when no such object exists.
 func envelopeObject(text string) (string, bool) {
 	for i := 0; i < len(text); i++ {
 		if text[i] != '{' {

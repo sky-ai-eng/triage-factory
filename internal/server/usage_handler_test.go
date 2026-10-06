@@ -471,7 +471,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	// Manual run by the user (team-scoped).
 	exec(`INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, model, status, started_at)
-		 VALUES ('r-manual', ?, ?, ?, 'manual', 'manual', 'claude-opus-4-8', 'completed', ?)`,
+		 VALUES ('r-manual', ?, ?, ?, 'manual', 'manual', 'claude-opus-4-8', 'open', ?)`,
 		org, team, user, t1)
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,
@@ -481,7 +481,7 @@ func seedUsageLocal(t *testing.T, s *Server) (triggerID, blueprintName string) {
 	// Autonomous run fired by the trigger (NULL creator, team-scoped).
 	exec(`INSERT INTO conversations
 			(id, org_id, team_id, creator_user_id, trigger_type, origin, trigger_id, model, status, started_at)
-		 VALUES ('r-auto', ?, ?, NULL, 'event', 'manual', ?, 'claude-haiku-4-5', 'completed', ?)`,
+		 VALUES ('r-auto', ?, ?, NULL, 'event', 'manual', ?, 'claude-haiku-4-5', 'open', ?)`,
 		org, team, triggerID, t2)
 	exec(`INSERT INTO messages
 			(org_id, conversation_id, role, subtype, content, model, cost_usd,

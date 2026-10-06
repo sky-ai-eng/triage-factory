@@ -157,16 +157,19 @@ export const CLAIM_PHASES = [
 ] as const
 export type ClaimPhase = (typeof CLAIM_PHASES)[number]
 
-// TERMINAL_CONVERSATION_STATUSES are the states a conversation never leaves: the agent
-// concluded, or the infrastructure died. Stopping a conversation without concluding it
-// parks it `open` instead — cancellation is spelled at the task and blueprint
-// layers, never as a conversation status.
-export const TERMINAL_CONVERSATION_STATUSES = ['completed', 'failed'] as const
+// TERMINAL_CONVERSATION_STATUSES are the states a conversation never leaves: the
+// infrastructure under it died. A conversation never concludes — a step's
+// verdict parks it `open` with CompletedAt stamped (lib/conversationStatus
+// isConcluded), and whether the work is done is its blueprint run's status
+// (blueprint_run_status) to say. Stopping a conversation parks it `open` too —
+// cancellation is spelled at the task and blueprint layers, never as a
+// conversation status.
+export const TERMINAL_CONVERSATION_STATUSES = ['failed'] as const
 export type TerminalConversationStatus = (typeof TERMINAL_CONVERSATION_STATUSES)[number]
 
 // CONVERSATION_STATUSES is the full display union: the two derived states (queued and
 // running are never stored — they're computed from the claim/queue state),
-// the parked state, every claim phase, every terminal.
+// the parked state, every claim phase, the terminal.
 export const CONVERSATION_STATUSES = [
   'queued',
   'running',
@@ -209,7 +212,10 @@ export interface Conversation {
   // rows that predate the queue columns.
   QueuedAt?: string | null
   ClaimedAt?: string | null
-  CompletedAt?: string
+  // CompletedAt is the conclusion stamp: when the step recorded its verdict
+  // (or when the conversation failed). On an `open` conversation it is what
+  // makes it concluded rather than paused — see isConcluded.
+  CompletedAt?: string | null
   TotalCostUSD?: number
   DurationMs?: number
   NumTurns?: number
@@ -260,9 +266,10 @@ export interface Conversation {
   // renewal ('provider', 'tool:bash', 'clone', 'rehydrate', 'permission', …).
   // Absent when nothing was in flight.
   claim_current_op?: string
-  // Outcome is the parsed terminal-envelope outcome
-  // (continue|finish|abort), persisted to conversations.outcome. Empty/absent for
-  // an infra-error conversation or a step that ended without a recognized conclusion.
+  // Outcome is the step's verdict, the parsed completion-envelope outcome
+  // (continue|finish|abort), persisted to conversations.outcome. Empty/absent
+  // before a verdict, for an infra-error conversation, or for a step that ended
+  // without a recognized conclusion.
   // The blueprint run timeline reads this in place of the old verdict object.
   Outcome?: string
   // OutcomeReason is the "why I stopped" populated only on an abort outcome.
@@ -334,6 +341,13 @@ export interface Conversation {
   // falls back to the unqualified reading. Every delegated conversation belongs to
   // a blueprint, so 1 — not 0 — is the plain single-prompt case.
   blueprint_step_count?: number
+  // blueprint_run_status is the owning blueprint run's status
+  // (running|completed|aborted|failed|cancelled) — what says whether the work
+  // a concluded conversation belongs to is done, since the conversation itself
+  // never concludes. '' when the server could not resolve the run (the same
+  // RLS case blueprint_step_count reads 0 for); lib/conversationStatus then
+  // falls back to the step's own verdict.
+  blueprint_run_status?: '' | BlueprintRun['status']
   // Token rollups: the SUM over this conversation's messages, derived by the
   // same conversation read that carries TotalCostUSD / DurationMs / NumTurns. The
   // authoritative numbers — the same ones the usage dashboard reports — so a

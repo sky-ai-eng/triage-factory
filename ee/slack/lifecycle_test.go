@@ -232,7 +232,7 @@ func TestPreRunIndicatorText_CoversEveryClaimPhase(t *testing.T) {
 	}
 
 	// Everything else stays invisible rather than rendering guessed copy.
-	for _, status := range []string{domain.StatusRunning, domain.StatusOpen, domain.StatusCompleted, "", "some_future_state"} {
+	for _, status := range []string{domain.StatusRunning, domain.StatusOpen, domain.StatusFailed, "", "some_future_state"} {
 		if _, ok := preRunIndicatorText(status); ok {
 			t.Errorf("preRunIndicatorText(%q) = ok:true, want no setup copy for a non-setup status", status)
 		}

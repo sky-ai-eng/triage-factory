@@ -639,8 +639,9 @@ type TaskStore interface {
 
 	// CountConsecutiveFailedConversations counts consecutive non-success
 	// auto-fired conversations at the tail of the conversation history for
-	// (entity_id, prompt_id), stopping at the first completed row. Chain
-	// instances count once, not once-per-step. Used by the router to check
+	// (entity_id, prompt_id), stopping at the first success: a completed
+	// blueprint run, or a conversation with no blueprint that concluded with
+	// a verdict. Chain instances count once, not once-per-step. Used by the router to check
 	// the circuit-breaker threshold.
 	CountConsecutiveFailedConversations(ctx context.Context, orgID, entityID, promptID string) (int, error)
 

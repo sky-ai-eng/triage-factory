@@ -12,6 +12,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -28,7 +29,7 @@ import (
 // taskID).
 func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, repo string, number int, event string) (artifactID, conversationID, taskID string) {
 	t.Helper()
-	conversationID = seedSteerConversation(t, s.db, suffix, "completed")
+	conversationID = seedSteerConversation(t, s.db, suffix, dbtest.SeedConcluded)
 	taskID = fixtureUUID("t_" + suffix)
 	if _, err := sqlitestore.New(s.db).TaskMemory.UpsertAgentMemory(context.Background(), runmode.LocalDefaultOrgID, conversationID, "", "agent self-report", domain.MemorySourceAgent); err != nil {
 		t.Fatalf("seed agent memory: %v", err)
@@ -179,12 +180,8 @@ func TestReviewArtifactApprove(t *testing.T) {
 	if !strings.HasPrefix(art.URL, stub.URL+"/") || strings.Contains(art.URL, "github.com") {
 		t.Errorf("artifact URL = %q, want the org GitHub host %q, not hardcoded github.com", art.URL, stub.URL)
 	}
-	var convStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want completed", convStatus)
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded")
 	}
 	// Submitting a review writes no memory: the conversation's row is the
 	// agent's own account of what it tried, and a verdict about an artifact is
@@ -543,12 +540,8 @@ func TestReviewArtifactDismiss(t *testing.T) {
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStateReviewDismissed {
 		t.Errorf("artifact state = %q, want dismissed", got)
 	}
-	var convStatus string
-	if err := srv.db.QueryRow(`SELECT status FROM conversations WHERE id=?`, conversationID).Scan(&convStatus); err != nil {
-		t.Fatalf("read conversation: %v", err)
-	}
-	if convStatus != "completed" {
-		t.Errorf("conversation status = %q, want completed (dismiss must not flip conversation lifecycle)", convStatus)
+	if !storedConcluded(t, srv.db, conversationID) {
+		t.Error("conversation no longer concluded (dismiss must not flip conversation lifecycle)")
 	}
 }
 

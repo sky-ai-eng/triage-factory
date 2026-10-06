@@ -338,7 +338,7 @@ func TestFinishedThreeStepBlueprint_RefusesEarlierStepsHonestlyAndResumesTheLast
 
 	// The blueprint ran to the end: every step concluded, the plan finished,
 	// and it came to rest on its last step.
-	if _, err := f.database.Exec(`UPDATE conversations SET status='completed', outcome='finish'`); err != nil {
+	if _, err := f.database.Exec(`UPDATE conversations SET status = 'open', completed_at = CURRENT_TIMESTAMP, outcome='finish'`); err != nil {
 		t.Fatalf("conclude the steps: %v", err)
 	}
 	finishBlueprint(t, f.database, f.brID, "completed", len(f.conversationIDs)-1)

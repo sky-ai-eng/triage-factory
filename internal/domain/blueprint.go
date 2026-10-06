@@ -43,8 +43,8 @@ func ValidBlueprintRunStatus(s string) bool {
 // child left 'running' under a cancelled/completed parent strands the
 // dispatcher on phantom work and pins a worktree's branch, requeuing forever.
 // 'aborted' is terminal but message-resumable (ReopenRunForResume flips it back
-// to running); its retained child is 'completed', itself terminal, so the
-// invariant holds.
+// to running); its retained child is parked with the verdict that aborted it,
+// and a parked conversation runs nothing, so the invariant holds.
 func (s BlueprintRunStatus) Terminal() bool {
 	switch s {
 	case BlueprintRunStatusCompleted, BlueprintRunStatusAborted,

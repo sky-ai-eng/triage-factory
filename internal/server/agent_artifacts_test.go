@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -33,7 +34,7 @@ func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a 
 // for a detail-less comment.
 func TestHandleAgentArtifacts(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "arts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "arts", dbtest.SeedConcluded)
 
 	pr := seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 42, "PR_node", "feature/x", "main",
@@ -97,7 +98,7 @@ func TestHandleAgentArtifacts(t *testing.T) {
 // never a 500 from a failed response marshal.
 func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "corrupt", "completed")
+	conversationID := seedSteerConversation(t, s.db, "corrupt", dbtest.SeedConcluded)
 	art := seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo#1",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "corrupt1",
@@ -127,7 +128,7 @@ func TestHandleAgentArtifacts_CorruptDetails(t *testing.T) {
 // without special-casing.
 func TestHandleAgentArtifacts_Empty(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "noarts", "completed")
+	conversationID := seedSteerConversation(t, s.db, "noarts", dbtest.SeedConcluded)
 	rec := doJSON(t, s, http.MethodGet, "/api/agent/conversations/"+conversationID+"/artifacts", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -153,7 +154,7 @@ func TestHandleAgentArtifacts_UnknownConversationNotFound(t *testing.T) {
 // (GET /api/agent/conversations/{id}).
 func TestConversationResponse_ArtifactCount(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "cnt", "completed")
+	conversationID := seedSteerConversation(t, s.db, "cnt", dbtest.SeedConcluded)
 	seedConversationArtifact(t, s, conversationID, domain.Artifact{
 		Provider: "github", Kind: "comment", Target: "octo/repo",
 		State: domain.ArtifactStateCommentPosted, DedupKey: "c1",
@@ -182,7 +183,7 @@ func TestConversationResponse_ArtifactCount(t *testing.T) {
 // successor to the legacy pending_kind overlay.
 func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "park", "completed")
+	conversationID := seedSteerConversation(t, s.db, "park", dbtest.SeedConcluded)
 	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 7, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/7", "T", "B", true))
@@ -222,7 +223,7 @@ func TestConversationResponse_ArtifactCount_Unresolved(t *testing.T) {
 // the list endpoint against a silent has_unresolved_artifacts regression.
 func TestConversationResponse_HasUnresolved_List(t *testing.T) {
 	s := newTestServer(t)
-	conversationID := seedSteerConversation(t, s.db, "pklist", "completed")
+	conversationID := seedSteerConversation(t, s.db, "pklist", dbtest.SeedConcluded)
 	seedConversationArtifact(t, s, conversationID, domain.NewPullRequestArtifact(
 		"octo/repo", 9, "PR_node", "feature/x", "main",
 		"https://github.com/octo/repo/pull/9", "T", "B", true))
@@ -252,11 +253,11 @@ func TestConversationResponse_ArtifactCount_List(t *testing.T) {
 	// seedSteerConversation mints task t_lst with conversation r_lst and prompt
 	// p_lst; add a second conversation on the same task so the list path counts
 	// more than one conversation.
-	conv1 := seedSteerConversation(t, s.db, "lst", "completed")
+	conv1 := seedSteerConversation(t, s.db, "lst", dbtest.SeedConcluded)
 	taskID := fixtureUUID("t_lst")
 	conv2 := fixtureUUID("r_lst2")
 	brID := seedBlueprintRunSQLite(t, s.db, taskID)
-	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index) VALUES (?, ?, ?, 'completed', 'manual', ?, 0)`, conv2, taskID, fixtureUUID("p_lst"), brID)
+	execSQL(t, s.db, `INSERT INTO conversations (id, task_id, prompt_id, status, trigger_type, blueprint_run_id, blueprint_step_index, completed_at) VALUES (?, ?, ?, 'open', 'manual', ?, 0, CURRENT_TIMESTAMP)`, conv2, taskID, fixtureUUID("p_lst"), brID)
 
 	mkComment := func(key string) domain.Artifact {
 		return domain.Artifact{

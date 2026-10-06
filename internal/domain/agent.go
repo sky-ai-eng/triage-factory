@@ -448,11 +448,12 @@ type Conversation struct {
 	WorktreePath  string
 	ResultSummary string
 
-	// Outcome is the parsed terminal envelope `outcome` (ConversationOutcome
-	// vocabulary), persisted by processCompletion. Empty string === SQL
-	// NULL: an infra-error conversation (status='failed') or a blueprint step whose
-	// outcome gate exhausted its retries without a valid envelope. The
-	// orchestrator reads this to advance.
+	// Outcome is the step's verdict: the parsed completion envelope
+	// `outcome` (ConversationOutcome vocabulary), persisted with the park that
+	// records it. Empty string === SQL NULL: no verdict yet, an infra-error
+	// conversation (status='failed'), or a blueprint step whose outcome gate
+	// exhausted its retries without a valid envelope. The orchestrator reads
+	// this to advance.
 	Outcome string
 	// OutcomeReason is the natural-language "why I stopped / what a human
 	// needs to do" populated only on an abort outcome. Distinct from

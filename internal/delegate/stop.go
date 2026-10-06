@@ -353,13 +353,13 @@ func (s *Spawner) stop(orgID, conversationID, userID string, cancelBlueprint boo
 	if conv == nil {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
-	// A run that already concluded has nothing to stop, and saying so here —
-	// rather than letting the intent write discover it — is what keeps a stale
-	// stop a pure no-op. It has to come before the blueprint signal: a
-	// completed step whose blueprint is still advancing would otherwise have
-	// its NEXT step cancelled by a click aimed at work that had already
-	// finished.
-	if domain.IsTerminalConversationStatus(conv.Status) {
+	// A run that already concluded (or failed) has nothing to stop, and
+	// saying so here — rather than letting the intent write discover it — is
+	// what keeps a stale stop a pure no-op. It has to come before the
+	// blueprint signal: a concluded step whose blueprint is still advancing
+	// would otherwise have its NEXT step cancelled by a click aimed at work
+	// that had already finished.
+	if conv.Settled() {
 		return fmt.Errorf("%w %s", ErrNoActiveConversation, conversationID)
 	}
 

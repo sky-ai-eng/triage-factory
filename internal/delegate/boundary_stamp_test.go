@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -57,7 +58,7 @@ func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	t.Run("the advance lands", func(t *testing.T) {
-		s, database, brID, _, step0 := reactorFixture(t, "adv-boundary", 2, "completed", "continue")
+		s, database, brID, _, step0 := reactorFixture(t, "adv-boundary", 2, dbtest.SeedConcluded, "continue")
 		stepConversation := loadConversation(t, s, step0)
 		stepConversation.TriggerType = "manual"
 		stepConversation.CreatorUserID = runmode.LocalDefaultUserID
@@ -70,7 +71,7 @@ func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 	})
 
 	t.Run("the step insert fails", func(t *testing.T) {
-		s, database, brID, _, step0 := reactorFixture(t, "adv-boundary-fail", 2, "completed", "continue")
+		s, database, brID, _, step0 := reactorFixture(t, "adv-boundary-fail", 2, dbtest.SeedConcluded, "continue")
 		// Point the frozen plan's step 1 at a prompt that does not exist, so
 		// the transaction's last statement fails on the conversation's FK.
 		if _, err := database.Exec(
@@ -108,7 +109,7 @@ func TestReactor_AdvanceEndsTheStepItMovesPast(t *testing.T) {
 func TestReactor_AdvancedStepRefusesAFollowUp(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	ctx := context.Background()
-	s, database, brID, _, step0 := reactorFixture(t, "adv-refusal", 2, "completed", "continue")
+	s, database, brID, _, step0 := reactorFixture(t, "adv-refusal", 2, dbtest.SeedConcluded, "continue")
 	giveConversationResumeState(t, database, step0)
 
 	stepConversation := loadConversation(t, s, step0)
@@ -213,7 +214,7 @@ func TestTerminalBlueprintFailures_MarkAndEndTheStep(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s, database, brID, _, step0 := reactorFixture(t, tc.suffix, 2, "completed", "continue")
+			s, database, brID, _, step0 := reactorFixture(t, tc.suffix, 2, dbtest.SeedConcluded, "continue")
 			// A step that has been claimed and has not run: no transcript, no
 			// terminal. That is the shape all three paths are answering for.
 			if _, err := database.Exec(`UPDATE conversations SET status = NULL WHERE id = ?`, step0); err != nil {
@@ -298,7 +299,7 @@ func TestEndedFollowUpBlock_CoversTheWholeVocabulary(t *testing.T) {
 		}
 	}
 	// A live conversation has no rung, whatever else is on the row.
-	if block := endedFollowUpBlock(&domain.Conversation{Status: "completed"}); block != "" {
+	if block := endedFollowUpBlock(&domain.Conversation{Status: domain.StatusOpen}); block != "" {
 		t.Errorf("endedFollowUpBlock on a live conversation = %q, want none", block)
 	}
 }

@@ -459,7 +459,7 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 		if _, err := q.ExecContext(ctx, `UPDATE tasks SET status='dismissed', closed_at=?, close_reason='duplicate_entity_merged' WHERE entity_id=? AND status NOT IN ('done','dismissed') AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id=? AND s.event_type=tasks.event_type AND s.dedup_key=tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`, time.Now().UTC(), id, survivor); err != nil {
 			return err
 		}
-		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=1 WHERE status='running' AND cancel_requested=0 AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.entity_id=? AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND (c.status IS NULL OR c.status NOT IN ('completed','failed')))`, id); err != nil {
+		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=1 WHERE status='running' AND cancel_requested=0 AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.entity_id=? AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND `+db.UnsettledConversationSQL("c")+`)`, id); err != nil {
 			return err
 		}
 		for _, stmt := range []string{
