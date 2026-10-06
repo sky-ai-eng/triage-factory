@@ -81,7 +81,7 @@ func reDeriveRouter(t *testing.T, database *sql.DB, spawner Delegator) *Router {
 	t.Helper()
 	seedLocalBot(t, database)
 	st := sqlitestore.New(database)
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 	r.SetTaskReDerive(st.TaskReDerive)
 	r.SetExecutorID("rederive-worker-test", 1)
 	return r

@@ -131,14 +131,20 @@ var closeRelations = []closeRelation{
 		closes:   []string{domain.EventGitHubPRReviewRequested},
 		keep:     keepReviewRequestRemoved,
 	},
-	// A Jira issue was (re)assigned → retire the stale assigned/available
-	// tasks that no longer reflect the assignment, so the new assignment mints
-	// a fresh task owned by the new assignee's team.
+	// A Jira or Linear issue was (re)assigned → retire the stale
+	// assigned/available tasks that no longer reflect the assignment, so the
+	// new assignment mints a fresh task owned by the new assignee's team.
 	{
 		onEvents: []string{domain.EventJiraIssueAssigned},
 		closes:   []string{domain.EventJiraIssueAssigned, domain.EventJiraIssueAvailable},
 		prepare:  prepareJiraReassign,
-		keep:     keepJiraReassign,
+		keep:     keepReassign(domain.EventJiraIssueAvailable),
+	},
+	{
+		onEvents: []string{domain.EventLinearIssueAssigned},
+		closes:   []string{domain.EventLinearIssueAssigned, domain.EventLinearIssueAvailable},
+		prepare:  prepareLinearReassign,
+		keep:     keepReassign(domain.EventLinearIssueAvailable),
 	},
 	// A PR terminated → close every in-flight task on the entity and flip it
 	// closed. The terminating events themselves are excluded from the close
@@ -167,9 +173,24 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// A Linear issue completed → the Jira completion close, for Linear.
+	{
+		onEvents:         []string{domain.EventLinearIssueCompleted},
+		closes:           linearCloseTypesExcept(domain.EventLinearIssueCompleted),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
+	// Linear stopped giving TF a tracked issue → the Jira unreachable close,
+	// for Linear.
+	{
+		onEvents:         []string{domain.EventLinearIssueUnreachable},
+		closes:           linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
 	// The poll observed a terminal snapshot on an entity still active with
 	// no close in flight → the close that was lost, performed now. An
-	// entity has one source, so the union of the three terminal sets is
+	// entity has one source, so the union of the terminal sets is
 	// safe: the types of another source have no open task to match. The
 	// terminating events' own types stay excluded, as in the sets above, so
 	// a lifecycle task riding an auto-run survives here too.
@@ -243,13 +264,13 @@ func jiraIssueUnreachableCloseTypes() []string {
 }
 
 // closeOwedCloseTypes is what the poll's close obligation cleans up: the
-// union of the GitHub terminal set, the Jira completed set and the Jira
-// unreachable set, deduplicated, minus every terminating event's own type.
-// An entity has one source, so the types of the other source are no-ops.
-// The subtraction is explicit rather than inherited, because the two Jira
-// sets each spare only their own terminator: the obligation does not know
-// which transition was lost, so it spares them all — a task of one of those
-// types may be a lifecycle task riding the run its transition started.
+// union of the GitHub terminal set and the Jira and Linear completed and
+// unreachable sets, deduplicated, minus every terminating event's own type.
+// An entity has one source, so the types of the other sources are no-ops.
+// The subtraction is explicit rather than inherited, because each issue
+// source's two sets spare only their own terminator: the obligation does not
+// know which transition was lost, so it spares them all — a task of one of
+// those types may be a lifecycle task riding the run its transition started.
 func closeOwedCloseTypes() []string {
 	spared := map[string]bool{}
 	for _, et := range domain.EntityTerminatingEventTypes() {
@@ -257,7 +278,12 @@ func closeOwedCloseTypes() []string {
 	}
 	seen := map[string]bool{}
 	var out []string
-	for _, set := range [][]string{githubPRTerminalCloseTypes(), jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes()} {
+	sets := [][]string{
+		githubPRTerminalCloseTypes(),
+		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
+		linearCloseTypesExcept(domain.EventLinearIssueCompleted), linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
+	}
+	for _, set := range sets {
 		for _, et := range set {
 			if !seen[et] && !spared[et] {
 				seen[et] = true
@@ -281,6 +307,20 @@ func jiraCloseTypesExcept(terminator string) []string {
 		out = append(out, et)
 	}
 	return append(out, domain.EventJiraIssueAvailable)
+}
+
+// linearCloseTypesExcept is jiraCloseTypesExcept for Linear: every
+// assignee-centric Linear type plus the unassigned pool task, minus the
+// terminating event's own type.
+func linearCloseTypesExcept(terminator string) []string {
+	out := make([]string, 0, len(assigneeCentricLinearEventTypes)+1)
+	for _, et := range assigneeCentricLinearEventTypes {
+		if et == terminator {
+			continue
+		}
+		out = append(out, et)
+	}
+	return append(out, domain.EventLinearIssueAvailable)
 }
 
 // runCloses applies every typed (non-terminating) close relation matching
@@ -552,13 +592,9 @@ func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domai
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
 		return nil, false, nil
 	}
-	assigneeTeams, err := r.assigneeTeams(ctx, orgID, evt)
+	newOwnerTeams, err := r.newAssigneeTeamSet(ctx, orgID, evt, entityID)
 	if err != nil {
-		return nil, false, fmt.Errorf("resolve assignee teams for %s: %w", entityID, err)
-	}
-	newOwnerTeams := map[string]struct{}{}
-	for _, tid := range assigneeTeams {
-		newOwnerTeams[tid] = struct{}{}
+		return nil, false, err
 	}
 	if r.users != nil && meta.AssigneeAccountID == "" && meta.Assignee != "" {
 		var jiraHost string
@@ -580,21 +616,53 @@ func prepareJiraReassign(ctx context.Context, r *Router, orgID string, evt domai
 	return newOwnerTeams, true, nil
 }
 
-// keepJiraReassign: the per-assignee assigned task survives only while still
-// owned by the new assignee's team; the available pool task always retires once
-// the issue is assigned (its owner is the tracking team, so a match would be
-// coincidental).
-func keepJiraReassign(_ domain.Event, ctx closeContext, t domain.Task) bool {
-	if t.EventType == domain.EventJiraIssueAvailable {
+// prepareLinearReassign is prepareJiraReassign for Linear: the new assignee's
+// owning team(s), for the member-aware skip, under the same error contract.
+// There is no display-name fallback to apply: a Linear assignee always arrives
+// with its user id.
+func prepareLinearReassign(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
+	var meta events.LinearIssueAssignedMetadata
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
+		return nil, false, nil
+	}
+	newOwnerTeams, err := r.newAssigneeTeamSet(ctx, orgID, evt, entityID)
+	if err != nil {
+		return nil, false, err
+	}
+	return newOwnerTeams, true, nil
+}
+
+// newAssigneeTeamSet is the new assignee's teams as the set keepReassign
+// reads.
+func (r *Router) newAssigneeTeamSet(ctx context.Context, orgID string, evt domain.Event, entityID string) (map[string]struct{}, error) {
+	teams, err := r.assigneeTeams(ctx, orgID, evt)
+	if err != nil {
+		return nil, fmt.Errorf("resolve assignee teams for %s: %w", entityID, err)
+	}
+	set := make(map[string]struct{}, len(teams))
+	for _, tid := range teams {
+		set[tid] = struct{}{}
+	}
+	return set, nil
+}
+
+// keepReassign is the per-task half of a reassignment close. The per-assignee
+// assigned task survives only while still owned by the new assignee's team;
+// the source's pool task (poolType) always retires once the issue is assigned
+// (its owner is the tracking team, so a match would be coincidental).
+func keepReassign(poolType string) func(domain.Event, closeContext, domain.Task) bool {
+	return func(_ domain.Event, ctx closeContext, t domain.Task) bool {
+		if t.EventType == poolType {
+			return true
+		}
+		newOwnerTeams, _ := ctx.(map[string]struct{})
+		if owner := teamIDValue(&t); owner != "" {
+			if _, ok := newOwnerTeams[owner]; ok {
+				return false // still assigned to its owning team — not a reassignment-away
+			}
+		}
 		return true
 	}
-	newOwnerTeams, _ := ctx.(map[string]struct{})
-	if owner := teamIDValue(&t); owner != "" {
-		if _, ok := newOwnerTeams[owner]; ok {
-			return false // still assigned to its owning team — not a reassignment-away
-		}
-	}
-	return true
 }
 
 // --- shared close helpers (used by the driver) ------------------------------

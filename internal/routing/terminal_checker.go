@@ -180,17 +180,19 @@ func (r *Router) RunTerminalInvariantChecker(ctx context.Context, interval time.
 // previous value rather than reporting a zero the pass did not establish.
 func (r *Router) checkOrgTerminalInvariant(ctx context.Context, orgID string) (activeTerminal, openOnClosed int, ok bool) {
 	doneByProject := r.jiraDoneStatusesByProject(ctx, orgID)
-	candidates, err := r.entities.ListActiveTerminalCandidatesSystem(ctx, orgID, unionValues(doneByProject), TerminalCheckGrace, 0)
+	doneByLinearTeam := r.linearDoneStatesByTeam(ctx, orgID)
+	candidates, err := r.entities.ListActiveTerminalCandidatesSystem(ctx, orgID, unionValues(doneByProject), linearUnion(doneByLinearTeam), TerminalCheckGrace, 0)
 	if err != nil {
 		lifecycleLog.Error("terminal checker: list candidates failed", "org", orgID, "error", err)
 		return 0, 0, false
 	}
 	var stranded []string
 	for i := range candidates {
-		// A Jira candidate whose status is done in some OTHER project. The
-		// store's Jira filter is the flat union across projects; this is the
-		// per-project recheck that keeps the union from over-counting.
-		if snapshotIsTerminal(candidates[i], doneByProject) {
+		// A Jira candidate whose status is done in some OTHER project (or a
+		// Linear one done in another Linear team). The store's filters are
+		// flat unions; this is the per-project / per-team recheck that keeps
+		// a union from over-counting.
+		if snapshotIsTerminal(candidates[i], doneByProject, doneByLinearTeam) {
 			stranded = append(stranded, candidates[i].ID)
 		}
 	}
@@ -224,11 +226,11 @@ func capIDs(ids []string) []string {
 // is over?" — the same question, and the same answer, the tracker asks at
 // discovery time. GitHub reads it straight off the snapshot; Jira asks whether
 // the status is in ITS OWN project's done set, which is why the per-project map
-// is threaded here rather than collapsed to a union. An entity whose project
-// has no configured rules is never terminal, matching the tracker's behavior
-// for a project the user removed from settings while its entities were still
-// active.
-func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef) bool {
+// is threaded here rather than collapsed to a union; Linear asks the same of
+// its snapshot's own Linear team. An entity whose project or team has no
+// configured rules is never terminal, matching the tracker's behavior for one
+// the user removed from settings while its entities were still active.
+func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.JiraStatusRef, doneByLinearTeam map[string][]domain.LinearStateRef) bool {
 	switch entity.Source {
 	case "github":
 		var snap domain.PRSnapshot
@@ -242,6 +244,12 @@ func snapshotIsTerminal(entity domain.Entity, doneByProject map[string][]domain.
 			return false
 		}
 		return domain.ContainsStatus(doneByProject[jiraProjectKey(entity.SourceID)], snap.StatusRef())
+	case "linear":
+		var snap domain.LinearSnapshot
+		if err := json.Unmarshal([]byte(entity.SnapshotJSON), &snap); err != nil || snap.State.IsZero() {
+			return false
+		}
+		return domain.ContainsState(doneByLinearTeam[snap.TeamID], snap.StateRef())
 	default:
 		// Sources with no poller-owned terminal notion (Slack threads) are
 		// not the checker's business — the store never surfaces them either.
@@ -279,6 +287,51 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 			if key != "" && !seen[key] {
 				seen[key] = true
 				out[rule.ProjectKey] = append(out[rule.ProjectKey], done)
+			}
+		}
+	}
+	return out
+}
+
+// linearDoneStatesByTeam is jiraDoneStatusesByProject for Linear: each Linear
+// team's done states, set-unioned across every TF team that tracks it, in the
+// order the poller's toTrackerLinearRules merges them. Nil store or a read
+// failure yields an empty map, so no Linear entity reads as terminal that pass.
+func (r *Router) linearDoneStatesByTeam(ctx context.Context, orgID string) map[string][]domain.LinearStateRef {
+	out := map[string][]domain.LinearStateRef{}
+	if r.linearRules == nil {
+		return out
+	}
+	rules, err := r.linearRules.ListForOrgSystem(ctx, orgID)
+	if err != nil {
+		lifecycleLog.Error("terminal checker: list linear team rules failed, skipping linear this pass", "org", orgID, "error", err)
+		return out
+	}
+	for _, rule := range rules {
+		seen := map[string]bool{}
+		for _, existing := range out[rule.LinearTeamID] {
+			seen[domain.LinearStateDedupKey(existing)] = true
+		}
+		for _, done := range rule.DoneMembers {
+			if key := domain.LinearStateDedupKey(done); !seen[key] {
+				seen[key] = true
+				out[rule.LinearTeamID] = append(out[rule.LinearTeamID], done)
+			}
+		}
+	}
+	return out
+}
+
+// linearUnion flattens the per-team done-state map into the deduplicated flat
+// list the candidate read narrows on, the unionValues of Linear.
+func linearUnion(byTeam map[string][]domain.LinearStateRef) []domain.LinearStateRef {
+	seen := map[string]bool{}
+	out := make([]domain.LinearStateRef, 0, len(byTeam))
+	for _, values := range byTeam {
+		for _, v := range values {
+			if key := domain.LinearStateDedupKey(v); !seen[key] {
+				seen[key] = true
+				out = append(out, v)
 			}
 		}
 	}

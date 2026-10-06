@@ -35,7 +35,7 @@ var _ db.TeamActivityStore = (*teamActivityStore)(nil)
 // teamActivityEventSources mirrors factoryEntityTrackedExists's arms: the
 // sources for which a tracked set — and therefore a team event count —
 // exists.
-var teamActivityEventSources = []string{"github", "jira"}
+var teamActivityEventSources = []string{"github", "jira", "linear"}
 
 // teamActivityTaskTeamPredicate scopes a tasks row (alias t) to the subject
 // team, bound at $4: owned by it, or visible to it through task_teams while

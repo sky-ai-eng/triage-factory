@@ -97,7 +97,7 @@ func fakeSourceRouter(database *sql.DB) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 }
 
 // fakeSourceHooks builds SourceHooks for teamID: ResolveOwner always
@@ -173,7 +173,7 @@ func fakeSourceQueueRouter(database *sql.DB, spawner Delegator) *Router {
 	st := sqlitestore.New(database)
 	r := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities,
-		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, spawner,
+		st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, spawner,
 		noopScorer{}, websocket.NewHub())
 	r.SetEventQueue(st.EventQueue)
 	r.SetExecutorID(testExecutorID, 1)

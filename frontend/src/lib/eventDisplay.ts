@@ -156,6 +156,59 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'All subtasks closed — parent ticket is now an atomic work unit',
     color: 'bg-blue-500/10 text-blue-600',
   },
+
+  // --- Linear ---
+  'linear:issue:assigned': {
+    label: 'Assigned',
+    description: 'Issue was assigned',
+    color: 'bg-blue-500/10 text-blue-600',
+  },
+  'linear:issue:available': {
+    label: 'Available',
+    description: 'Unassigned issue in a pickup state',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
+  'linear:issue:status_changed': {
+    label: 'Status Changed',
+    description: 'Issue moved to another workflow state',
+    color: 'bg-violet-500/10 text-violet-600',
+  },
+  'linear:issue:priority_changed': {
+    label: 'Priority Changed',
+    description: 'Issue priority was changed',
+    color: 'bg-amber-500/10 text-amber-700',
+  },
+  'linear:issue:commented': {
+    label: 'New Comment',
+    description: 'A new comment was added to an issue',
+    color: 'bg-blue-500/10 text-blue-600',
+  },
+  'linear:issue:completed': {
+    label: 'Completed',
+    description: 'Issue entered a done state',
+    color: 'bg-emerald-500/10 text-emerald-700',
+  },
+  'linear:issue:body_updated': {
+    label: 'Issue Body Updated',
+    description: 'The issue description was edited or cleared',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
+  'linear:issue:parent_changed': {
+    label: 'Parent Changed',
+    description: 'Issue was moved under another parent, or its parent was removed',
+    color: 'bg-violet-500/10 text-violet-600',
+  },
+  'linear:issue:became_atomic': {
+    label: 'Now Actionable',
+    description: 'All sub-issues closed — parent issue is now an atomic work unit',
+    color: 'bg-blue-500/10 text-blue-600',
+  },
+  'linear:issue:unreachable': {
+    label: 'Unreachable',
+    description:
+      'Linear no longer gives Triage Factory this issue — deleted, trashed, archived, or moved',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
 }
 
 export const FALLBACK_EVENT: EventInfo = {

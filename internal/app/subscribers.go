@@ -175,7 +175,7 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 		return
 	}
 	ctx := context.Background()
-	if meta.Source == "jira" || meta.Source == "github" {
+	if meta.Source == "jira" || meta.Source == "github" || meta.Source == "linear" {
 		// Pass the poll's started_at so MarkPollComplete can ignore stale
 		// sentinels from pre-restart poll goroutines that finish late. A
 		// missing field yields StartedAt=0 → a zero time.Time, which
@@ -195,8 +195,11 @@ func (a *App) handlePollCompleted(evt domain.Event) {
 	}
 	if taken {
 		label := "GitHub"
-		if meta.Source == "jira" {
+		switch meta.Source {
+		case "jira":
 			label = "Jira"
+		case "linear":
+			label = "Linear"
 		}
 		toast.Info(a.wsHub, evt.OrgID, fmt.Sprintf(
 			"First %s poll complete — %d %s tracked",

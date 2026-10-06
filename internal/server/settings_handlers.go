@@ -1186,11 +1186,8 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}
-	// TODO(TFAC-1020): mark Linear's poll readiness restarted here, as Jira's
-	// is above, once the Linear poller records completions. Marked before then,
-	// the row would wait for a poller that does not exist and the first poll
-	// it ever completes would announce a change made long before.
 	if linearChanged && s.onLinearChanged != nil {
+		s.MarkLinearRestarted(r.Context(), orgID)
 		go s.onLinearChanged(orgID)
 	}
 

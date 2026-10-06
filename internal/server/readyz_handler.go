@@ -64,6 +64,7 @@ type LeaseStatusFunc func() (name, holderID string, term int64, isHolder bool)
 type readyzSources struct {
 	GitHub map[string]readyzOrgSource `json:"github"`
 	Jira   map[string]readyzOrgSource `json:"jira"`
+	Linear map[string]readyzOrgSource `json:"linear"`
 }
 
 // readyzRateLimit is the soft rate-limit signal (TFAC-573 follow-up):
@@ -103,7 +104,7 @@ type readyzOrgSource struct {
 // control pod it is NOT a hard check at all — a standby runs no pollers
 // by design, and hard-failing it would pull every non-leader control pod
 // out of LB rotation and collapse the HA shape to leader-only serving.
-// poller_github/poller_jira report the literal string "standby" there
+// poller_github/poller_jira/poller_linear report the literal string "standby" there
 // instead of "ok"/"failed". Poll staleness per org, per-org GitHub
 // rate-limit budget, and active_runs are SOFT signals on the holder,
 // reported for the operator to alert on but never flip the HTTP status —
@@ -162,18 +163,23 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		// rotation regardless.
 		resp.Checks["poller_github"] = "standby"
 		resp.Checks["poller_jira"] = "standby"
+		resp.Checks["poller_linear"] = "standby"
 		resp.Sources.GitHub = map[string]readyzOrgSource{}
 		resp.Sources.Jira = map[string]readyzOrgSource{}
+		resp.Sources.Linear = map[string]readyzOrgSource{}
 	case s.pollerHealth != nil:
 		snap := s.pollerHealth(ctx)
 		ghAlive, ghSources, ghDegraded := readyzSourceCheck(snap.GitHub)
 		jiraAlive, jiraSources, jiraDegraded := readyzSourceCheck(snap.Jira)
+		linearAlive, linearSources, linearDegraded := readyzSourceCheck(snap.Linear)
 		resp.Checks["poller_github"] = checkLabel(ghAlive)
 		resp.Checks["poller_jira"] = checkLabel(jiraAlive)
+		resp.Checks["poller_linear"] = checkLabel(linearAlive)
 		resp.Sources.GitHub = ghSources
 		resp.Sources.Jira = jiraSources
-		hardOK = hardOK && ghAlive && jiraAlive
-		degraded = ghDegraded || jiraDegraded
+		resp.Sources.Linear = linearSources
+		hardOK = hardOK && ghAlive && jiraAlive && linearAlive
+		degraded = ghDegraded || jiraDegraded || linearDegraded
 
 		for orgID, st := range snap.GitHubRateLimit {
 			resp.RateLimit.GitHub[orgID] = readyzOrgRateLimit{
@@ -188,8 +194,10 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		// dereffing or silently claiming "ok" for a check that never ran.
 		resp.Checks["poller_github"] = "failed"
 		resp.Checks["poller_jira"] = "failed"
+		resp.Checks["poller_linear"] = "failed"
 		resp.Sources.GitHub = map[string]readyzOrgSource{}
 		resp.Sources.Jira = map[string]readyzOrgSource{}
+		resp.Sources.Linear = map[string]readyzOrgSource{}
 		hardOK = false
 	}
 

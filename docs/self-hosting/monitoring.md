@@ -29,10 +29,11 @@ curl -fsS http://localhost:3000/readyz | jq .
   "status": "ok",
   "checked_at": 1783300042,
   "version": "v1.12.0",
-  "checks": {"db": "ok", "migrations": "ok", "poller_github": "ok", "poller_jira": "ok"},
+  "checks": {"db": "ok", "migrations": "ok", "poller_github": "ok", "poller_jira": "ok", "poller_linear": "ok"},
   "sources": {
     "github": {"<org_id>": {"last_success_unix": 1783300000, "age_seconds": 42, "interval_seconds": 300}},
-    "jira":   {"<org_id>": {"last_success_unix": 1783299900, "age_seconds": 142, "interval_seconds": 300}}
+    "jira":   {"<org_id>": {"last_success_unix": 1783299900, "age_seconds": 142, "interval_seconds": 300}},
+    "linear": {"<org_id>": {"interval_seconds": 300}}
   },
   "rate_limit": {
     "github": {"<org_id>": {"remaining": 4321, "reset_unix": 1783303600, "used": 679}}
@@ -41,7 +42,7 @@ curl -fsS http://localhost:3000/readyz | jq .
 }
 ```
 
-A poller check (`poller_github`, `poller_jira`) fails when that source's poll
+A poller check (`poller_github`, `poller_jira`, `poller_linear`) fails when that source's poll
 loop has made no progress for 90 seconds: it has not woken, completed a request
 to the upstream, waited on a rate limit or a retry backoff, or finished an
 org's poll. A cycle that runs longer than that while its requests keep

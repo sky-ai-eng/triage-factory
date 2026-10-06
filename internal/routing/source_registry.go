@@ -150,25 +150,25 @@ func resolveSourceOwner(ctx context.Context, hooks SourceHooks, source, orgID st
 // rationale.
 var sourceRegistry = map[string]SourceHooks{}
 
-// reservedSourcePrefixes are the prefixes RegisterSource refuses. github and
-// jira route natively — their resolvers are methods on the Router using its
+// reservedSourcePrefixes are the prefixes RegisterSource refuses. github,
+// jira and linear route natively — their resolvers are methods on the Router using its
 // stores, and hooks are consulted BEFORE the native paths at every wire
 // point, so a registration here would silently shadow heavily-tested
 // built-in behavior. system and webhook are bus-only by design (coalesced
 // signals / raw deliveries) and must never become router-bound.
 var reservedSourcePrefixes = map[string]bool{
-	"github": true, "jira": true, "system": true, "webhook": true,
+	"github": true, "jira": true, "linear": true, "system": true, "webhook": true,
 }
 
 // routedPrefixes is the set of event-source prefixes the router consumes —
 // the membership RouterBound reports and internal/ingest gates its durable
-// outbox enqueue on. Seeded with the built-in github/jira sources (routed
+// outbox enqueue on. Seeded with the built-in github/jira/linear sources (routed
 // natively, no hooks); RegisterSource adds each registered source's prefix.
 // Same startup-write / steady-state-read contract as sourceRegistry.
 var routedPrefixes = builtinRoutedPrefixes()
 
 func builtinRoutedPrefixes() map[string]bool {
-	return map[string]bool{"github": true, "jira": true}
+	return map[string]bool{"github": true, "jira": true, "linear": true}
 }
 
 // RegisterSource registers hooks for an event-source prefix — the segment
@@ -197,7 +197,7 @@ func RegisterSource(source string, hooks SourceHooks) {
 }
 
 // RouterBound reports whether the router consumes eventType — true for the
-// built-in github:/jira: sources and for every registered source. This is
+// built-in github:/jira:/linear: sources and for every registered source. This is
 // the durability boundary: internal/ingest enqueues router-bound events
 // into the durable outbox and leaves everything else (system:*, webhook:*)
 // bus-only.

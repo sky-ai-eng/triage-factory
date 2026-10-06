@@ -223,4 +223,6 @@ func TestTerminalCloseSet_CoversTaskTypes(t *testing.T) {
 	// type: a completion can leave a jira:issue:completed task standing, an
 	// unreachable issue cannot leave anything.
 	covers("jira:issue:", jiraIssueUnreachableCloseTypes(), domain.EventJiraIssueUnreachable)
+	covers("linear:issue:", linearCloseTypesExcept(domain.EventLinearIssueCompleted), domain.EventLinearIssueCompleted)
+	covers("linear:issue:", linearCloseTypesExcept(domain.EventLinearIssueUnreachable), domain.EventLinearIssueUnreachable)
 }

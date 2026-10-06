@@ -8,7 +8,7 @@ import (
 )
 
 // coreRegisteredSources are the event sources whose schemas register from
-// this package's own init()s (github.go, jira.go, system.go) — the only
+// this package's own init()s (github.go, jira.go, linear.go, system.go) — the only
 // ones TestAllDomainEventTypesRegistered can verify. An out-of-core source
 // (an ee package's own init(), e.g. ee/slack for "slack") registers its
 // schema only when ee/ is actually linked in, which this package must never
@@ -16,7 +16,7 @@ import (
 // lives at the composition root (package main, which does link ee/ via
 // blank imports) — same precedent as feature_parity_test.go's
 // TestRegisteredFeaturesAreDeclared.
-var coreRegisteredSources = map[string]bool{"github": true, "jira": true, "system": true}
+var coreRegisteredSources = map[string]bool{"github": true, "jira": true, "linear": true, "system": true}
 
 // TestAllDomainEventTypesRegistered asserts every core-sourced event type
 // seeded into events_catalog has a matching schema registered. Catches the

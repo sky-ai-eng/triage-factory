@@ -2916,10 +2916,10 @@ export async function createIsoScene(container: HTMLDivElement): Promise<IsoScen
 }
 
 // Compute chip decoration (hue + short label) from a snapshot entity.
-// GitHub: hue from the repo, label is the PR number. Jira: hue from
-// the project key prefix of source_id, label is the full source_id.
-// Same hue for every chip belonging to the same repo/project keeps
-// them visually grouped without any user config.
+// GitHub: hue from the repo, label is the PR number. Jira and Linear: hue
+// from the project / team key prefix of source_id, label is the full
+// source_id. Same hue for every chip belonging to the same repo/project/team
+// keeps them visually grouped without any user config.
 function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
   if (entity.source === 'github') {
     return {
@@ -2927,7 +2927,7 @@ function chipDecorFor(entity: FactoryEntity): { hue?: number; label?: string } {
       label: entity.number != null ? `#${entity.number}` : undefined,
     }
   }
-  if (entity.source === 'jira') {
+  if (entity.source === 'jira' || entity.source === 'linear') {
     const projectKey = entity.source_id?.split('-')[0]
     return {
       hue: projectKey ? hashHue(projectKey) : undefined,

@@ -303,7 +303,7 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // true, hence the integer comparison on $.merged. The unpolled cutoff is
 // computed in Go: local is one process, so the clock that stamped
 // last_polled_at is this one.
-func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -321,7 +321,8 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		  )`
 	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
 	// error, and a ref set with no ids (or no names) genuinely has nothing to
-	// match on that side. With neither, no Jira entity can be terminal.
+	// match on that side. With neither, no Jira (or Linear) entity can be
+	// terminal.
 	arm := func(path string, values []string) string {
 		placeholders := make([]string, len(values))
 		for i, v := range values {
@@ -341,6 +342,17 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 	if len(matches) > 0 {
 		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
 	}
+	var linearMatches []string
+	if ids := domain.LinearStateIDs(linearDone); len(ids) > 0 {
+		linearMatches = append(linearMatches, arm("$.state.id", ids))
+	}
+	if names := domain.LinearStateNames(linearDone); len(names) > 0 {
+		linearMatches = append(linearMatches, arm("$.state.name", names))
+	}
+	linearArm := ""
+	if len(linearMatches) > 0 {
+		linearArm = ` OR (source = 'linear' AND (` + strings.Join(linearMatches, " OR ") + `))`
+	}
 	limitClause := ""
 	if limit > 0 {
 		limitClause = " LIMIT ?"
@@ -357,7 +369,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		    (source = 'github' AND (
 		       json_extract(snapshot_json, '$.merged') = 1
 		       OR upper(COALESCE(json_extract(snapshot_json, '$.state'), '')) IN ('CLOSED', 'MERGED')
-		    ))`+jiraArm+`
+		    ))`+jiraArm+linearArm+`
 		  )
 		ORDER BY created_at ASC, id ASC`+limitClause, args...)
 	if err != nil {

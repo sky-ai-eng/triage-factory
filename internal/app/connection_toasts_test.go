@@ -169,14 +169,14 @@ func TestScoringFailure_NoToast(t *testing.T) {
 }
 
 // TestHandlePollCompleted_StampsEverySource: a completed poll stamps its
-// source's last-poll time, GitHub's as much as Jira's, because the team
-// activity page reads both.
+// source's last-poll time, for every polled source, because the team activity
+// page reads them all.
 func TestHandlePollCompleted_StampsEverySource(t *testing.T) {
 	stores, _ := openConnectionTestStores(t)
 	a := &App{stores: stores, wsHub: websocket.NewHub()}
 	org := runmode.LocalDefaultOrgID
 
-	for _, source := range []string{"github", "jira"} {
+	for _, source := range []string{"github", "jira", "linear"} {
 		a.handlePollCompleted(domain.Event{
 			OrgID:        org,
 			EventType:    domain.EventSystemPollCompleted,
@@ -188,7 +188,7 @@ func TestHandlePollCompleted_StampsEverySource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LastPollTimes: %v", err)
 	}
-	for _, source := range []string{"github", "jira"} {
+	for _, source := range []string{"github", "jira", "linear"} {
 		if _, ok := times[source]; !ok {
 			t.Errorf("no last-poll time for %s after its completion; got %v", source, times)
 		}

@@ -113,7 +113,7 @@ func fenceRouter(database *sql.DB, spawner Delegator) *Router {
 	// automation fires); teamRepos/jiraRules nil → scope gate fails open.
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		nil, nil, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, nil, nil, nil, nil, spawner, noopScorer{}, websocket.NewHub())
 }
 
 func fenceConversationCount(t *testing.T, database *sql.DB, entityID string) int {

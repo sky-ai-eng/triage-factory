@@ -30,7 +30,7 @@ func reviewRouter(database *sql.DB) *Router {
 	return NewRouter(
 		testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, st.Users,
 		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
+		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, nil, noopScorer{}, websocket.NewHub(),
 	)
 }
 

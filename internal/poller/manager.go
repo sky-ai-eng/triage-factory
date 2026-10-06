@@ -16,6 +16,7 @@ import (
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/reporename"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -45,10 +46,14 @@ type Manager struct {
 	repos        db.RepositoryStore       // configured-repo names for GitHub poller startup
 	orgs         db.OrgsStore             // enumerate active orgs at each poll tick + per-org settings (GitHub/Jira base URLs, poll intervals)
 	jiraRules    db.JiraStatusRulesStore  // per-team Jira project rules; discovery polls the org-wide union (every team's rules)
+	linearRules  db.LinearTeamRulesStore  // per-team Linear team rules; discovery polls the org-wide union, merged per Linear team
 	githubGroups db.TeamGitHubGroupsStore // GitHub-team → TF-team mappings; reconciled (stale-team prune) each GitHub cycle
 	secrets      db.SecretStore           // integration creds via SecretStore (keychain in local, vault in multi)
 	apps         db.GitHubAppsStore       // per-org App installations, read per cycle to fan the poll out across them
 	resolver     ghclient.Resolver        // per-cycle, per-installation GitHub client resolution (App installation token → PAT)
+	// linearResolver builds each org's Linear service client. The cycle reads
+	// only its ForSystem half: polling is attributed to the org's identity.
+	linearResolver linear.Resolver
 
 	// ReconcileGrant refreshes the org's App-installation mirror — which
 	// installations exist, how wide each grant is, and which repositories each
@@ -93,8 +98,8 @@ type Manager struct {
 	// rather than leaking an event.
 	EventSources db.OrgEventSourceStore
 
-	// OnError fires when a poll cycle returns an error. Source is "github"
-	// or "jira"; orgID identifies the tenant whose cycle errored (empty
+	// OnError fires when a poll cycle returns an error. Source is "github",
+	// "jira" or "linear"; orgID identifies the tenant whose cycle errored (empty
 	// when the failure is upstream of the per-org loop, e.g. listing
 	// active orgs itself). nil-safe. Production leaves it unset: a
 	// connection failure reaches people as the connection state below, not
@@ -108,9 +113,10 @@ type Manager struct {
 	// Manager directly).
 	connections db.PollReadinessStore
 
-	mu       sync.Mutex
-	ghStop   chan struct{}
-	jiraStop chan struct{}
+	mu         sync.Mutex
+	ghStop     chan struct{}
+	jiraStop   chan struct{}
+	linearStop chan struct{}
 
 	// dueMu guards nextPoll, the scheduler clock. Each source runs ONE
 	// base-tick loop (every basePollInterval) that polls an org only once
@@ -120,6 +126,10 @@ type Manager struct {
 	// Restart can briefly overlap an old and a new poll goroutine.
 	dueMu    sync.Mutex
 	nextPoll map[string]time.Time
+	// pollHold, also under dueMu and keyed like nextPoll, is a time before
+	// which an org is not polled whatever its slot says: the reset of a rate
+	// limit the upstream reported (holdPoll).
+	pollHold map[string]time.Time
 
 	// dashboardBackfillInflight collapses concurrent dashboard-history
 	// backfill kicks for the same (org, user, host) within this process so a
@@ -150,6 +160,7 @@ type Manager struct {
 	heartbeatMu    sync.Mutex
 	lastGithubTick time.Time
 	lastJiraTick   time.Time
+	lastLinearTick time.Time
 
 	// pollSuccessMu guards lastGithubSuccess/lastJiraSuccess — per-org
 	// timestamp of the last poll that completed a RefreshGitHub/RefreshJira
@@ -159,24 +170,27 @@ type Manager struct {
 	pollSuccessMu     sync.Mutex
 	lastGithubSuccess map[string]time.Time
 	lastJiraSuccess   map[string]time.Time
+	lastLinearSuccess map[string]time.Time
 }
 
-func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver) *Manager {
+func NewManager(database *sql.DB, pub tracker.Publisher, users db.UsersStore, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, eventQueue db.EventQueueStore, orgs db.OrgsStore, jiraRules db.JiraStatusRulesStore, linearRules db.LinearTeamRulesStore, githubGroups db.TeamGitHubGroupsStore, secrets db.SecretStore, apps db.GitHubAppsStore, connections db.PollReadinessStore, resolver ghclient.Resolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
-		database:     database,
-		pub:          pub,
-		tasks:        tasks,
-		entities:     entities,
-		eventQueue:   eventQueue,
-		users:        users,
-		repos:        repos,
-		orgs:         orgs,
-		jiraRules:    jiraRules,
-		githubGroups: githubGroups,
-		secrets:      secrets,
-		apps:         apps,
-		connections:  connections,
-		resolver:     resolver,
+		database:       database,
+		pub:            pub,
+		tasks:          tasks,
+		entities:       entities,
+		eventQueue:     eventQueue,
+		users:          users,
+		repos:          repos,
+		orgs:           orgs,
+		jiraRules:      jiraRules,
+		linearRules:    linearRules,
+		githubGroups:   githubGroups,
+		secrets:        secrets,
+		apps:           apps,
+		connections:    connections,
+		resolver:       resolver,
+		linearResolver: linearResolver,
 	}
 }
 
@@ -272,6 +286,7 @@ func (m *Manager) RestartAll() {
 	m.stopAll()
 	m.startGitHub()
 	m.startJira()
+	m.startLinear()
 }
 
 // RestartJira stops and restarts only the Jira polling loop. Runs in both
@@ -331,7 +346,8 @@ func clampPollInterval(d time.Duration) time.Duration {
 }
 
 // pollDue reports whether orgID is eligible for a poll of source at now. An
-// org with no recorded slot (never polled, pruned, or PollSoon'd) is due.
+// org with no recorded slot (never polled, pruned, or PollSoon'd) is due
+// unless a rate-limit hold (holdPoll) is still ahead of now.
 //
 // pollDue + schedulePoll are check-then-act under two separate dueMu
 // acquisitions, not an atomic CAS. The only place two cyclers run concurrently
@@ -342,7 +358,14 @@ func clampPollInterval(d time.Duration) time.Duration {
 func (m *Manager) pollDue(source, orgID string, now time.Time) bool {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
-	next, ok := m.nextPoll[pollKey(source, orgID)]
+	key := pollKey(source, orgID)
+	if hold, ok := m.pollHold[key]; ok {
+		if now.Before(hold) {
+			return false
+		}
+		delete(m.pollHold, key)
+	}
+	next, ok := m.nextPoll[key]
 	return !ok || !now.Before(next)
 }
 
@@ -362,6 +385,25 @@ func (m *Manager) schedulePoll(source, orgID string, at time.Time) {
 	m.nextPoll[pollKey(source, orgID)] = at
 }
 
+// holdPoll schedules orgID's next poll of source at until and keeps it from
+// being polled any sooner. PollSoon and PollAllSoon clear the slot but not
+// the hold, because neither a config save nor a wake from suspend lifts the
+// upstream's rate limit, and a poll sent before its reset fails again. The
+// hold lapses once pollDue sees it pass.
+func (m *Manager) holdPoll(source, orgID string, until time.Time) {
+	m.dueMu.Lock()
+	defer m.dueMu.Unlock()
+	if m.nextPoll == nil {
+		m.nextPoll = make(map[string]time.Time)
+	}
+	if m.pollHold == nil {
+		m.pollHold = make(map[string]time.Time)
+	}
+	key := pollKey(source, orgID)
+	m.nextPoll[key] = until
+	m.pollHold[key] = until
+}
+
 // prunePoll drops scheduler slots for orgs no longer in the active set, so
 // the map doesn't grow unbounded as orgs churn and a deactivated→reactivated
 // org isn't held back by a stale future slot. Called once per cycle with the
@@ -379,14 +421,21 @@ func (m *Manager) prunePoll(source string, activeOrgIDs []string) {
 			delete(m.nextPoll, key)
 		}
 	}
+	for key := range m.pollHold {
+		if strings.HasPrefix(key, prefix) && !active[strings.TrimPrefix(key, prefix)] {
+			delete(m.pollHold, key)
+		}
+	}
 }
 
 // PollSoon makes orgID immediately eligible for the next poll of source by
-// dropping its scheduler slot — and ONLY its slot. The running loop picks it
-// up on its next wake (≤ basePollInterval). This is the targeted, load-safe
-// alternative to restarting the process-global loop on a config change:
-// clearing every slot would re-poll every tenant at once, stampeding shared
-// GHES/GHEC API budgets — the exact thing per-org intervals exist to prevent.
+// dropping its scheduler slot — and ONLY its slot. A rate-limit hold
+// (holdPoll) stays, so an org waiting out a limit is polled at its reset.
+// The running loop picks it up on its next wake (≤ basePollInterval). This
+// is the targeted, load-safe alternative to restarting the process-global
+// loop on a config change: clearing every slot would re-poll every tenant at
+// once, stampeding shared GHES/GHEC API budgets — the exact thing per-org
+// intervals exist to prevent.
 // Deleting a missing key (or from a nil map) is a no-op, so this is safe
 // before the first poll and harmless if the loop isn't running yet.
 func (m *Manager) PollSoon(source, orgID string) {
@@ -407,6 +456,8 @@ func (m *Manager) PollSoon(source, orgID string) {
 // whose interval the sleep reached is already overdue, so polling it now
 // restores its schedule rather than compressing it. An org whose interval is
 // longer than the sleep is pulled forward by at most the difference, once.
+// Rate-limit holds stay: each is the upstream's wall-clock reset, which the
+// sleep did not move.
 func (m *Manager) PollAllSoon() {
 	m.dueMu.Lock()
 	defer m.dueMu.Unlock()
@@ -466,6 +517,11 @@ func (m *Manager) stopAll() {
 		close(m.jiraStop)
 		m.jiraStop = nil
 		jiraLog.Info("tracker stopped")
+	}
+	if m.linearStop != nil {
+		close(m.linearStop)
+		m.linearStop = nil
+		linearLog.Info("tracker stopped")
 	}
 }
 

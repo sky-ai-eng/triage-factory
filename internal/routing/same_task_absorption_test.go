@@ -222,7 +222,7 @@ func newAbsorbTestRouter(database *sql.DB, conversations db.ConversationStore, s
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), conversations, st.Entities, st.PendingFirings,
-		st.Events, st.Orgs, st.Teams, nil, nil, nil,
+		st.Events, st.Orgs, st.Teams, nil, nil, nil, nil,
 		stub, noopScorer{}, websocket.NewHub())
 }
 
@@ -586,7 +586,7 @@ func TestTryAutoDelegate_SameTask_StageToNonResumableRun_NoOrphanedRow(t *testin
 	spawner := delegate.NewSpawner(database, sqlitestore.New(database), nil, nil, "m")
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), nil, nil, nil,
 		testTaskStore(database), sqlitestore.New(database).Conversations, sqlitestore.New(database).Entities, sqlitestore.New(database).PendingFirings,
-		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil,
+		sqlitestore.New(database).Events, sqlitestore.New(database).Orgs, sqlitestore.New(database).Teams, nil, nil, nil, nil,
 		spawner, noopScorer{}, websocket.NewHub())
 
 	if !mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "") {
@@ -651,7 +651,7 @@ func TestTryAutoDelegate_SameTask_StampsAgentClaimOnInjectedTask(t *testing.T) {
 	// bot-disabled-team gate degrades to "proceed" and doesn't interfere.
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database), st.Agents, nil, nil,
 		testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
-		st.Events, st.Orgs, st.Teams, nil, nil, nil,
+		st.Events, st.Orgs, st.Teams, nil, nil, nil, nil,
 		stub, noopScorer{}, websocket.NewHub())
 
 	mustAutoDelegate(t, router, task, trigger, entityID, secondEventID, "")
@@ -868,7 +868,7 @@ func TestTryAutoDelegate_LiveManualConversation_AbsorbsTheEvent(t *testing.T) {
 	stub := &injectingStubDelegator{outcome: delegate.InjectDeliveredLocal}
 	router := NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings,
-		st.Events, st.Orgs, st.Teams, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
+		st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, stub, noopScorer{}, websocket.NewHub())
 	bumpTaskViaRealUpsert(t, router, task, trigger, entityID, secondEventID)
 
 	injectedConversationID := ""

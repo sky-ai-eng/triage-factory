@@ -224,31 +224,43 @@ func (s *entityStore) ListActiveSystem(ctx context.Context, orgID, source string
 // non-match rather than a NULL-propagating predicate, and the IS NOT NULL
 // guard skips rows that never stored a snapshot at all. The unpolled cutoff
 // is subtracted from the server clock, the one that stamped last_polled_at.
-func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
+func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error) {
 	args := []any{orgID, unpolledFor.Seconds(), domain.EntityCloseSettlingEventTypes()}
 	// Each arm is omitted rather than emitted empty: `IN ()` is a syntax
 	// error, and a ref set with no ids (or no names) genuinely has nothing to
-	// match on that side. With neither, no Jira entity can be terminal. Both
-	// halves are user-configured text, so they bind as placeholders rather
-	// than riding an array literal.
-	arm := func(key string, values []string) string {
+	// match on that side. With neither, no Jira (or Linear) entity can be
+	// terminal. Both halves are user-configured text, so they bind as
+	// placeholders rather than riding an array literal. path is a jsonb
+	// accessor chain ending in ->>.
+	arm := func(path string, values []string) string {
 		placeholders := make([]string, len(values))
 		for i, v := range values {
 			args = append(args, v)
 			placeholders[i] = "$" + strconv.Itoa(len(args))
 		}
-		return `snapshot_json->>'` + key + `' IN (` + strings.Join(placeholders, ", ") + `)`
+		return `snapshot_json` + path + ` IN (` + strings.Join(placeholders, ", ") + `)`
 	}
 	var matches []string
 	if ids := domain.JiraStatusIDs(jiraDone); len(ids) > 0 {
-		matches = append(matches, arm("status_id", ids))
+		matches = append(matches, arm("->>'status_id'", ids))
 	}
 	if names := domain.JiraStatusNames(jiraDone); len(names) > 0 {
-		matches = append(matches, arm("status", names))
+		matches = append(matches, arm("->>'status'", names))
 	}
 	jiraArm := ""
 	if len(matches) > 0 {
 		jiraArm = ` OR (source = 'jira' AND (` + strings.Join(matches, " OR ") + `))`
+	}
+	var linearMatches []string
+	if ids := domain.LinearStateIDs(linearDone); len(ids) > 0 {
+		linearMatches = append(linearMatches, arm("->'state'->>'id'", ids))
+	}
+	if names := domain.LinearStateNames(linearDone); len(names) > 0 {
+		linearMatches = append(linearMatches, arm("->'state'->>'name'", names))
+	}
+	linearArm := ""
+	if len(linearMatches) > 0 {
+		linearArm = ` OR (source = 'linear' AND (` + strings.Join(linearMatches, " OR ") + `))`
 	}
 	limitClause := ""
 	if limit > 0 {
@@ -270,7 +282,7 @@ func (s *entityStore) ListActiveTerminalCandidatesSystem(ctx context.Context, or
 		    (source = 'github' AND (
 		       snapshot_json->>'merged' = 'true'
 		       OR upper(COALESCE(snapshot_json->>'state', '')) IN ('CLOSED', 'MERGED')
-		    ))`+jiraArm+`
+		    ))`+jiraArm+linearArm+`
 		  )
 		ORDER BY created_at ASC, id ASC`+limitClause, args...)
 	if err != nil {

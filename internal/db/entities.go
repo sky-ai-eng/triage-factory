@@ -286,6 +286,12 @@ type EntityStore interface {
 	//     required because either side may be missing one — a rule seeded from
 	//     the headless env vars carries no ids, and a snapshot captured before
 	//     status ids were recorded carries none until its next poll refresh.
+	//   - linear: a superset, the Jira way. Terminality is per Linear team —
+	//     linear_team_rules' done states — so this filters on linearDone, the
+	//     caller's flat union across teams, matching a ref's id against the
+	//     snapshot's state.id or its name against state.name, and the caller
+	//     re-checks each row against its own team's set. An empty linearDone
+	//     excludes Linear entirely.
 	//
 	// Rows with no stored snapshot never match — an unseeded stub has said
 	// nothing about whether its subject is finished, and a snapshot an
@@ -295,7 +301,7 @@ type EntityStore interface {
 	// (admin pool): the checker is a background job with no JWT claims, and
 	// the invariant it counts is org-wide. org_id stays in the WHERE clause
 	// as defense in depth.
-	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error)
+	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error)
 
 	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
 
@@ -437,7 +443,11 @@ type EntityStore interface {
 	// confirms must advance or it stays a candidate forever — and
 	// since candidates are ordered oldest-first against a per-cycle
 	// budget, one such entity would consume that budget every cycle and
-	// starve every other candidate behind it.
+	// starve every other candidate behind it. The tracker's Linear
+	// confirmation has the same oldest-first budget and stamps every
+	// attempt Linear did not refuse for rate, a failed one included, so an
+	// issue that keeps failing goes to the back of the queue rather than
+	// holding its head.
 	//
 	// Exempt from the returned-row rule: fire-and-forget bookkeeping. It
 	// stamps a wall-clock column the next cycle's candidate query reads and

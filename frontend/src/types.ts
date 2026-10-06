@@ -1,4 +1,4 @@
-export type TaskSource = 'github' | 'jira' | 'slack'
+export type TaskSource = 'github' | 'jira' | 'linear' | 'slack'
 export type EntityKind = 'pr' | 'issue' | 'epic' | 'message'
 
 export interface Task {

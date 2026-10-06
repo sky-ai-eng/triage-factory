@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ingest"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
@@ -419,7 +420,7 @@ func (a *App) buildRouting() {
 	// Event router — records events, creates/bumps tasks, auto-delegates on
 	// matching triggers, runs inline close checks. It drains the durable
 	// event_queue (not the bus); the ingestor enqueues there at emit time.
-	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
+	a.router = routing.NewRouter(a.stores.Prompts, a.stores.Blueprints, a.stores.EventHandlers, a.stores.Agents, a.stores.TeamAgents, a.stores.Users, a.stores.Tasks, a.stores.Conversations, a.stores.Entities, a.stores.PendingFirings, a.stores.Events, a.stores.Orgs, a.stores.Teams, a.stores.TeamGitHubRepos, a.stores.JiraStatusRules, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.spawner, a.scorer, a.wsHub)
 	a.router.SetEventQueue(a.stores.EventQueue)
 	// The event-source pause. This is the single funnel every source's events
 	// cross, so it is where a paused source stops minting tasks — poll-driven
@@ -478,7 +479,7 @@ func (a *App) scorerCallbacks() ai.RunnerCallbacks {
 // state, which the poller persists and logs once per change, so OnError stays
 // unset: nothing toasts a poll failure.
 func (a *App) newPollerManager() *poller.Manager {
-	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver)
+	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, linear.NewResolver(a.stores.Secrets, a.stores.Orgs))
 	// The App-installation grant mirror, refreshed by pull at the head of every
 	// GitHub cycle. Deliberately NOT a system:poll: subscriber like the scorer /
 	// profiler / reconciler: those all hang off a poll COMPLETION,

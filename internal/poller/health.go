@@ -23,6 +23,7 @@ const heartbeatStaleFactor = 3
 type HealthSnapshot struct {
 	GitHub SourceHealth
 	Jira   SourceHealth
+	Linear SourceHealth
 	// GitHubRateLimit is the per-org last-observed GitHub primary
 	// rate-limit budget (TFAC-573 follow-up to the TFAC-569 rate-limit-
 	// aware client), read from m.resolver's RateLimitReader registry when
@@ -34,7 +35,7 @@ type HealthSnapshot struct {
 	GitHubRateLimit map[string]ghclient.RateLimitState
 }
 
-// SourceHealth is one poll source's (github/jira) liveness state.
+// SourceHealth is one poll source's (github/jira/linear) liveness state.
 type SourceHealth struct {
 	// Alive reports whether the poll loop made progress within
 	// heartbeatStaleFactor*basePollInterval of now — the /readyz hard
@@ -74,9 +75,9 @@ type OrgPollHealth struct {
 // see the current set.
 //
 // The active-org list and each org's settings row are each read exactly
-// once here and shared across the GitHub/Jira/rate-limit branches below —
-// not once per branch — since org_settings carries both poll intervals in
-// a single row. A probe hit is meant to be cheap and frequent (an LB
+// once here and shared across the per-source and rate-limit branches below —
+// not once per branch — since one settings read carries every source's poll
+// interval. A probe hit is meant to be cheap and frequent (an LB
 // health check can poll every few seconds), so avoiding N redundant reads
 // per org here matters at multi-mode scale.
 func (m *Manager) Health(ctx context.Context) HealthSnapshot {
@@ -94,6 +95,7 @@ func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 	return HealthSnapshot{
 		GitHub:          m.sourceHealth(orgIDs, settings, "github"),
 		Jira:            m.sourceHealth(orgIDs, settings, "jira"),
+		Linear:          m.sourceHealth(orgIDs, settings, "linear"),
 		GitHubRateLimit: m.rateLimitSnapshot(orgIDs),
 	}
 }
@@ -127,8 +129,11 @@ func (m *Manager) sourceHealth(orgIDs []string, settings map[string]domain.OrgSe
 	for _, orgID := range orgIDs {
 		orgSet := settings[orgID]
 		interval := orgSet.GitHubPollInterval
-		if source == "jira" {
+		switch source {
+		case "jira":
 			interval = orgSet.JiraPollInterval
+		case "linear":
+			interval = orgSet.LinearPollInterval
 		}
 		orgs[orgID] = OrgPollHealth{
 			LastSuccess:     successMap[orgID],
@@ -141,8 +146,11 @@ func (m *Manager) sourceHealth(orgIDs []string, settings map[string]domain.OrgSe
 func (m *Manager) heartbeat(source string) time.Time {
 	m.heartbeatMu.Lock()
 	defer m.heartbeatMu.Unlock()
-	if source == "jira" {
+	switch source {
+	case "jira":
 		return m.lastJiraTick
+	case "linear":
+		return m.lastLinearTick
 	}
 	return m.lastGithubTick
 }
@@ -153,8 +161,11 @@ func (m *Manager) successSnapshot(source string) map[string]time.Time {
 	m.pollSuccessMu.Lock()
 	defer m.pollSuccessMu.Unlock()
 	src := m.lastGithubSuccess
-	if source == "jira" {
+	switch source {
+	case "jira":
 		src = m.lastJiraSuccess
+	case "linear":
+		src = m.lastLinearSuccess
 	}
 	out := make(map[string]time.Time, len(src))
 	for k, v := range src {
@@ -175,6 +186,12 @@ func (m *Manager) stampJiraHeartbeat() {
 	m.heartbeatMu.Unlock()
 }
 
+func (m *Manager) stampLinearHeartbeat() {
+	m.heartbeatMu.Lock()
+	m.lastLinearTick = time.Now()
+	m.heartbeatMu.Unlock()
+}
+
 func (m *Manager) stampGitHubSuccess(orgID string) {
 	m.pollSuccessMu.Lock()
 	if m.lastGithubSuccess == nil {
@@ -190,5 +207,14 @@ func (m *Manager) stampJiraSuccess(orgID string) {
 		m.lastJiraSuccess = make(map[string]time.Time)
 	}
 	m.lastJiraSuccess[orgID] = time.Now()
+	m.pollSuccessMu.Unlock()
+}
+
+func (m *Manager) stampLinearSuccess(orgID string) {
+	m.pollSuccessMu.Lock()
+	if m.lastLinearSuccess == nil {
+		m.lastLinearSuccess = make(map[string]time.Time)
+	}
+	m.lastLinearSuccess[orgID] = time.Now()
 	m.pollSuccessMu.Unlock()
 }

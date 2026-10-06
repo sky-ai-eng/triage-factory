@@ -43,7 +43,7 @@ func hookedReDeriveRouter(t *testing.T, database *sql.DB, handlers db.EventHandl
 	if handlers == nil {
 		handlers = testEventHandlerStore(database)
 	}
-	r := NewRouter(testPromptStore(database), testBlueprintStore(database), handlers, st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
+	r := NewRouter(testPromptStore(database), testBlueprintStore(database), handlers, st.Agents, st.TeamAgents, nil, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events, st.Orgs, st.Teams, nil, nil, nil, nil, nil, noopScorer{}, websocket.NewHub())
 	r.SetTaskReDerive(hookedReDerive{TaskReDeriveStore: st.TaskReDerive, beforeComplete: beforeComplete})
 	r.SetExecutorID("rederive-worker-test", 1)
 	return r

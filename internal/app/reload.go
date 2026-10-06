@@ -98,16 +98,12 @@ func (r *reloader) onJiraChanged(orgID string) {
 }
 
 // onLinearChanged reacts to a change in an org's armed Linear configuration:
-// it re-dues that org's Linear poll, in both modes. Unlike Jira there is no
-// process-global loop to restart in local mode — the cadence is per org, so
-// re-duing the one org is the whole reaction. PollSoon is a no-op for a source
-// with no scheduled slot, so this is safe before anything polls Linear.
-//
-// TODO(TFAC-1020): arm the one-shot "config took effect" toast here
-// (setAnnouncePending), as onJiraChanged does, once the Linear poller records
-// completions. Armed before then, the first poll ever completed would announce
-// a change made long before it.
+// it arms the one-shot "config took effect" toast and re-dues that org's
+// Linear poll, in both modes. Unlike Jira there is no process-global loop to
+// restart in local mode — the cadence is per org, so re-duing the one org is
+// the whole reaction.
 func (r *reloader) onLinearChanged(orgID string) {
+	r.setAnnouncePending(orgID, "linear")
 	serverLog.Info("linear config changed; re-duing linear poll for org", "org", orgID)
 	r.pollSoon("linear", orgID)
 }

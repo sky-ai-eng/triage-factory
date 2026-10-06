@@ -107,6 +107,7 @@ type Router struct {
 	teams         dbpkg.TeamsStore            // per-team auto_delegate_enabled kill-switch read post-internal/config deletion
 	teamRepos     dbpkg.TeamGitHubReposStore  // team↔repo tracking gate; nil-safe — gate is skipped (no filtering) when unset
 	jiraRules     dbpkg.JiraStatusRulesStore  // team↔project tracking gate; nil-safe — Jira gate skipped when unset
+	linearRules   dbpkg.LinearTeamRulesStore  // team↔Linear-team tracking gate; nil-safe — Linear gate skipped when unset
 	githubGroups  dbpkg.TeamGitHubGroupsStore // github-team→TF-team mapping; resolves review_requested team visibility. nil-safe — review routing degrades to handler-team visibility when unset
 	rederive      dbpkg.TaskReDeriveStore     // score re-evaluation queue the re-derive worker claims from; set post-construction via SetTaskReDerive (nil → worker is a no-op)
 	spawner       Delegator
@@ -166,12 +167,12 @@ type Router struct {
 // teamRepos is nil-safe — the team↔repo gate is skipped (no
 // handler is dropped) when missing, matching prior behavior where
 // repos were org-global and every team implicitly tracked them all.
-// jiraRules is nil-safe the same way — the team↔project gate is
-// skipped when missing. githubGroups is nil-safe — review_requested
+// jiraRules and linearRules are nil-safe the same way — the team↔project
+// and team↔Linear-team gates are skipped when missing. githubGroups is nil-safe — review_requested
 // visibility routing degrades to handler-team visibility (the
 // pre-ticket behavior) when missing or when an event carries no requested
 // identity.
-func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
+func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handlers dbpkg.EventHandlerStore, agents dbpkg.AgentStore, teamAgents dbpkg.TeamAgentStore, users dbpkg.UsersStore, tasks dbpkg.TaskStore, conversations dbpkg.ConversationStore, entities dbpkg.EntityStore, firings dbpkg.PendingFiringsStore, events dbpkg.EventStore, orgs dbpkg.OrgsStore, teams dbpkg.TeamsStore, teamRepos dbpkg.TeamGitHubReposStore, jiraRules dbpkg.JiraStatusRulesStore, linearRules dbpkg.LinearTeamRulesStore, githubGroups dbpkg.TeamGitHubGroupsStore, spawner Delegator, scorer Scorer, ws *websocket.Hub) *Router {
 	return &Router{
 		prompts:       prompts,
 		blueprints:    blueprints,
@@ -188,6 +189,7 @@ func NewRouter(prompts dbpkg.PromptStore, blueprints dbpkg.BlueprintStore, handl
 		teams:         teams,
 		teamRepos:     teamRepos,
 		jiraRules:     jiraRules,
+		linearRules:   linearRules,
 		githubGroups:  githubGroups,
 		spawner:       spawner,
 		scorer:        scorer,

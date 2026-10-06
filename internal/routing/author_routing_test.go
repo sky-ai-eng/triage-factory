@@ -784,7 +784,7 @@ func firingRouter(database *sql.DB, stub *stubDelegator) *Router {
 	st := sqlitestore.New(database)
 	return NewRouter(testPromptStore(database), testBlueprintStore(database), testEventHandlerStore(database),
 		st.Agents, st.TeamAgents, st.Users, testTaskStore(database), st.Conversations, st.Entities, st.PendingFirings, st.Events,
-		st.Orgs, st.Teams, nil, nil, st.TeamGitHubGroups, stub, noopScorer{}, websocket.NewHub())
+		st.Orgs, st.Teams, nil, nil, nil, st.TeamGitHubGroups, stub, noopScorer{}, websocket.NewHub())
 }
 
 // enableTeamAutoDelegate opts each team fully into auto-delegation: a
