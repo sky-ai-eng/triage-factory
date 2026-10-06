@@ -14,11 +14,11 @@ import (
 )
 
 // Headless bootstrap (TFAC-411). When TF_HEADLESS is set in local mode, the
-// server provisions the local tenant and seeds tracked repos + Jira (Data
-// Center) config + the operator's identity entirely from environment
-// variables, so a keychain-less / browser-less install reaches setup_complete
-// with no manual setup. This is the single-user local-mode experience — NOT
-// the multi-tenant deployment.
+// server provisions the local tenant and seeds tracked repos + Jira config +
+// the operator's identity entirely from environment variables, so a
+// keychain-less / browser-less install reaches setup_complete with no manual
+// setup. This is the single-user local-mode experience — NOT the multi-tenant
+// deployment.
 //
 // Invariants:
 //   - Local mode only. The app gates the call on a.local() && HeadlessEnabled();
@@ -34,12 +34,17 @@ import (
 
 // Headless env var names. The bot/access credentials come through the existing
 // internal/auth overlay (TRIAGE_FACTORY_GITHUB_URL / _GITHUB_BOT_PAT / _JIRA_URL
-// / _JIRA_BOT_PAT); the vars below are the headless-only seed + identity inputs.
+// and either _JIRA_BOT_PAT or _JIRA_EMAIL + _JIRA_API_TOKEN); the vars below are
+// the headless-only seed + identity inputs.
 const (
-	envHeadless             = "TF_HEADLESS"
-	envRepos                = "TRIAGE_FACTORY_REPOS"
-	envGitHubUserPAT        = "TRIAGE_FACTORY_GITHUB_USER_PAT"
+	envHeadless      = "TF_HEADLESS"
+	envRepos         = "TRIAGE_FACTORY_REPOS"
+	envGitHubUserPAT = "TRIAGE_FACTORY_GITHUB_USER_PAT"
+	// The operator's Jira identity token: a PAT on Data Center, an API token on
+	// Cloud. Cloud authenticates the token together with the account email,
+	// which is the second var.
 	envJiraUserPAT          = "TRIAGE_FACTORY_JIRA_USER_PAT"
+	envJiraUserEmail        = "TRIAGE_FACTORY_JIRA_USER_EMAIL"
 	envJiraProjects         = "TRIAGE_FACTORY_JIRA_PROJECTS"
 	envJiraPickupStatuses   = "TRIAGE_FACTORY_JIRA_PICKUP_STATUSES"
 	envJiraInProgressStatus = "TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS"
@@ -55,7 +60,7 @@ const (
 // headless bootstrap. (The credential overlay vars are NOT here: they apply on
 // every secret read regardless of TF_HEADLESS, so they're never "orphaned".)
 var headlessSeedVars = []string{
-	envRepos, envGitHubUserPAT, envJiraUserPAT, envJiraProjects,
+	envRepos, envGitHubUserPAT, envJiraUserPAT, envJiraUserEmail, envJiraProjects,
 	envJiraPickupStatuses, envJiraInProgressStatus, envJiraInReviewStatus,
 	envJiraDoneStatus, envCloneProtocol,
 }
@@ -81,13 +86,13 @@ func WarnIfHeadlessSeedVarsOrphaned() {
 	}
 }
 
-// headlessConfig is the parsed, non-credential headless input. The bot/user
-// PATs and host URLs are resolved separately (overlay-backed creds + the
-// dedicated USER_PAT vars).
+// headlessConfig is the parsed headless input apart from the org credentials,
+// which come through the overlay-backed secret store.
 type headlessConfig struct {
 	repos                []domain.TeamGitHubRepo
 	githubUserPAT        string
 	jiraUserPAT          string
+	jiraUserEmail        string
 	jiraProjects         []string
 	jiraPickupStatuses   []string
 	jiraInProgressStatus string
@@ -101,12 +106,12 @@ type headlessConfig struct {
 func (c headlessConfig) jiraIntent() bool {
 	return len(c.jiraProjects) > 0 || len(c.jiraPickupStatuses) > 0 ||
 		c.jiraInProgressStatus != "" || c.jiraInReviewStatus != "" ||
-		c.jiraDoneStatus != "" || c.jiraUserPAT != ""
+		c.jiraDoneStatus != "" || c.jiraUserPAT != "" || c.jiraUserEmail != ""
 }
 
 // jiraComplete reports whether every field the Jira status model requires is
-// present (projects + a non-empty pickup set + in-progress + done). The bot
-// URL/PAT presence is checked separately by the caller. The in-review status is
+// present (projects + a non-empty pickup set + in-progress + done). The org
+// credential is checked separately by the caller. The in-review status is
 // optional and absent here on purpose: it arms nothing, so a deployment that
 // never sets it is fully configured.
 func (c headlessConfig) jiraComplete() bool {
@@ -119,6 +124,7 @@ func loadHeadlessConfig() headlessConfig {
 		repos:                parseRepos(os.Getenv(envRepos)),
 		githubUserPAT:        strings.TrimSpace(os.Getenv(envGitHubUserPAT)),
 		jiraUserPAT:          strings.TrimSpace(os.Getenv(envJiraUserPAT)),
+		jiraUserEmail:        strings.TrimSpace(os.Getenv(envJiraUserEmail)),
 		jiraProjects:         parseCSV(os.Getenv(envJiraProjects)),
 		jiraPickupStatuses:   parseCSV(os.Getenv(envJiraPickupStatuses)),
 		jiraInProgressStatus: strings.TrimSpace(os.Getenv(envJiraInProgressStatus)),
@@ -175,16 +181,19 @@ func parseRepos(raw string) []domain.TeamGitHubRepo {
 	return out
 }
 
-// jiraDCIdentity is the validated Data-Center per-user credential the bootstrap
-// will persist — computed (with its network validation) before the write tx.
-type jiraDCIdentity struct {
+// jiraIdentitySeed is the validated per-user Jira credential the bootstrap will
+// persist — computed (with its network validation) before the write tx.
+type jiraIdentitySeed struct {
 	host        string
 	envelope    string
 	accountID   string
 	displayName string
+	// source is the identity row's source marker, the value the HTTP bind
+	// writes for the same scheme.
+	source string
 }
 
-// RunHeadlessBootstrap provisions the local tenant and seeds repos + Jira (DC) +
+// RunHeadlessBootstrap provisions the local tenant and seeds repos + Jira +
 // identity from environment variables. Local-mode only; the caller gates on
 // HeadlessEnabled(). Idempotent and never-overwriting (see the package doc).
 // Returns an error only for an unexpected failure the caller should log; every
@@ -259,32 +268,40 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 		headlessLog.Warn("TRIAGE_FACTORY_GITHUB_USER_PAT is unset; GitHub identity won't be bound and you'll be prompted to Connect in the UI. Set it (often the same value as the bot PAT) for a no-browser boot.")
 	}
 
-	// Jira readiness: the bot URL/PAT plus a complete status config. The host is
-	// resolved only when we'll actually use it.
-	jiraReady := creds.JiraURL != "" && creds.JiraPAT != "" && cfg.jiraComplete()
-	// "Intent to use Jira" includes the bot URL/PAT, not just the headless seed
-	// vars — so an operator who set the Jira credentials but forgot the
+	// Jira readiness: an org credential usable for the host's deployment plus a
+	// complete status config. The deployment is the resolver's own call
+	// (DeploymentForMarker): an env-only setup stores no marker, so the host
+	// shape decides — a *.atlassian.net host is Cloud and reads the email + API
+	// token, any other host is Data Center and reads the PAT.
+	jiraHost, jiraHostOK := resolveJiraHost(creds.JiraURL)
+	jiraDeployment := jira.DeploymentForMarker(jira.AuthMethod(creds.JiraAuthMethod), jiraHost)
+	_, jiraCredOK := integrations.JiraSystemConfig(creds)
+	jiraReady := jiraCredOK && cfg.jiraComplete()
+	// "Intent to use Jira" includes the org credential, not just the headless
+	// seed vars — so an operator who set the Jira credentials but forgot the
 	// project/status config still gets told why Jira wasn't configured, rather
 	// than silently discovering an empty Jira page.
-	jiraIntended := creds.JiraURL != "" || creds.JiraPAT != "" || cfg.jiraIntent()
+	jiraIntended := creds.JiraURL != "" || creds.JiraPAT != "" || creds.JiraEmail != "" ||
+		creds.JiraAPIToken != "" || cfg.jiraIntent()
 	if jiraIntended && !jiraReady {
-		headlessLog.Warn("Jira config is incomplete; skipping Jira setup (need TRIAGE_FACTORY_JIRA_URL + _JIRA_BOT_PAT + _JIRA_PROJECTS + _JIRA_PICKUP_STATUSES + _JIRA_INPROGRESS_STATUS + _JIRA_DONE_STATUS)")
-	}
-	var jiraHost string
-	if jiraReady {
-		host, ok := resolveJiraHost(creds.JiraURL)
-		if !ok {
+		if creds.JiraURL != "" && !jiraHostOK {
 			headlessLog.Warn("Jira URL is misconfigured; skipping Jira setup", "url", creds.JiraURL)
-			jiraReady = false
 		} else {
-			jiraHost = host
+			// The deployment is named when the host resolved, so an operator who
+			// set a Cloud host with the Data Center PAT (or the reverse) can see
+			// which credential the host asked for.
+			var args []any
+			if jiraHostOK {
+				args = append(args, "host", jiraHost, "deployment", jiraDeployment)
+			}
+			headlessLog.Warn("Jira config is incomplete; skipping Jira setup (need TRIAGE_FACTORY_JIRA_URL, the service credential for its deployment — _JIRA_BOT_PAT for Data Center, _JIRA_EMAIL + _JIRA_API_TOKEN for Cloud — and _JIRA_PROJECTS + _JIRA_PICKUP_STATUSES + _JIRA_INPROGRESS_STATUS + _JIRA_DONE_STATUS)", args...)
 		}
 	}
 
-	var jiraIdentity *jiraDCIdentity
+	var jiraIdentity *jiraIdentitySeed
 	if jiraReady {
 		if cfg.jiraUserPAT != "" {
-			jiraIdentity = s.validateJiraDCIdentity(ctx, jiraHost, cfg.jiraUserPAT)
+			jiraIdentity = s.validateJiraIdentity(ctx, jiraHost, jiraDeployment, cfg.jiraUserEmail, cfg.jiraUserPAT)
 		} else {
 			// Same gate problem as GitHub: configuring Jira projects without a
 			// per-user token leaves the operator stuck at the Jira Connect page.
@@ -391,7 +408,7 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 				if perr := tx.Secrets.PutUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, jiraTokenKey(jiraIdentity.host), jiraIdentity.envelope, "Jira user access token"); perr != nil {
 					return perr
 				}
-				if uerr := tx.Users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraIdentity.host, jiraIdentity.accountID, jiraIdentity.displayName, "pat"); uerr != nil {
+				if uerr := tx.Users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraIdentity.host, jiraIdentity.accountID, jiraIdentity.displayName, jiraIdentity.source); uerr != nil {
 					return uerr
 				}
 				boundJiraName = jiraIdentity.displayName
@@ -420,32 +437,55 @@ func (s *Server) RunHeadlessBootstrap(ctx context.Context) error {
 	return nil
 }
 
-// validateJiraDCIdentity validates a Data-Center per-user PAT against the org's
-// Jira host and returns the credential envelope + identity to persist. Returns
-// nil (with a WARN) on any failure — Jira identity is best-effort.
-func (s *Server) validateJiraDCIdentity(ctx context.Context, host, pat string) *jiraDCIdentity {
-	jiraUser, err := auth.ValidateJira(ctx, jira.DataCenterPAT(host, pat))
+// validateJiraIdentity validates the operator's per-user Jira token against the
+// org's Jira host and returns the credential envelope + identity to persist.
+// The scheme follows the org's deployment, not the variables set: ForUser
+// refuses a credential whose scheme doesn't match the deployment, so binding
+// one would leave an identity row whose token never resolves. Cloud is Basic
+// auth over the account email + API token, Data Center a PAT on its own.
+// Returns nil (with a WARN) on any failure — Jira identity is best-effort.
+func (s *Server) validateJiraIdentity(ctx context.Context, host string, deployment jira.Deployment, email, token string) *jiraIdentitySeed {
+	var (
+		cfg    jira.Config
+		cred   jira.UserCredential
+		source string
+	)
+	if deployment == jira.DeploymentCloud {
+		if email == "" {
+			headlessLog.Warn("Jira is Cloud but TRIAGE_FACTORY_JIRA_USER_EMAIL is unset; a Cloud API token authenticates with its account email, so Jira identity not bound", "host", host)
+			return nil
+		}
+		cfg = jira.CloudAPIToken(host, email, token)
+		cred = jira.UserCredential{Method: jira.AuthMethodCloudAPIToken, Email: email, Token: token}
+		source = string(jira.AuthMethodCloudAPIToken)
+	} else {
+		if email != "" {
+			headlessLog.Warn("ignoring TRIAGE_FACTORY_JIRA_USER_EMAIL: the Jira host is Data Center, where the identity token is a PAT used on its own", "host", host)
+		}
+		cfg = jira.DataCenterPAT(host, token)
+		cred = jira.UserCredential{Method: jira.AuthMethodDCPAT, Token: token}
+		source = "pat"
+	}
+	jiraUser, err := auth.ValidateJira(ctx, cfg)
 	if err != nil {
-		headlessLog.Warn("TRIAGE_FACTORY_JIRA_USER_PAT failed validation; Jira identity not bound", "host", host, "error", err)
+		headlessLog.Warn("TRIAGE_FACTORY_JIRA_USER_PAT failed validation; Jira identity not bound", "host", host, "deployment", deployment, "error", err)
 		return nil
 	}
 	if jiraUser.StableID() == "" {
 		headlessLog.Warn("Jira returned no account for TRIAGE_FACTORY_JIRA_USER_PAT; Jira identity not bound", "host", host)
 		return nil
 	}
-	envelope, err := jira.MarshalUserCredential(jira.UserCredential{
-		Method: jira.AuthMethodDCPAT,
-		Token:  pat,
-	})
+	envelope, err := jira.MarshalUserCredential(cred)
 	if err != nil {
 		headlessLog.Warn("could not encode Jira user credential; Jira identity not bound", "error", err)
 		return nil
 	}
-	return &jiraDCIdentity{
+	return &jiraIdentitySeed{
 		host:        host,
 		envelope:    envelope,
 		accountID:   jiraUser.StableID(),
 		displayName: jiraUser.DisplayName,
+		source:      source,
 	}
 }
 

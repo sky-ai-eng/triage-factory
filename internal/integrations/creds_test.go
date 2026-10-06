@@ -3,6 +3,7 @@ package integrations_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"slices"
 	"testing"
 
@@ -712,5 +713,107 @@ func TestLinearEnvKeyAlone_Resolves(t *testing.T) {
 	}
 	if cred.Method != linear.AuthMethodAPIKey || cred.APIKey != "lin_api_env" {
 		t.Errorf("credential = %+v, want the env key as api_key", cred)
+	}
+}
+
+// jiraSystemCredentialResolver is the optional extension the production
+// jira.Resolver implements, asserted the way internal/credprovision reaches it.
+type jiraSystemCredentialResolver interface {
+	ResolveSystemCredential(ctx context.Context, orgID string) (jira.SystemCredential, error)
+}
+
+// TestJiraEnvCredentialAlone_Resolves is env-only Jira end to end, for both
+// deployments: the credential comes from TRIAGE_FACTORY_JIRA_*, nothing is
+// stored (so no auth-method marker), and the host shape picks which credential
+// is read. A Cloud host reads the email + API token and ignores a PAT; a Data
+// Center host reads the PAT and ignores the Cloud pair.
+func TestJiraEnvCredentialAlone_Resolves(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want jira.SystemCredential
+	}{
+		{
+			name: "cloud",
+			env: map[string]string{
+				"TRIAGE_FACTORY_JIRA_URL":       "https://acme.atlassian.net/",
+				"TRIAGE_FACTORY_JIRA_EMAIL":     "bot@acme.example",
+				"TRIAGE_FACTORY_JIRA_API_TOKEN": "cloud-token",
+				"TRIAGE_FACTORY_JIRA_BOT_PAT":   "ignored-pat",
+			},
+			want: jira.SystemCredential{
+				URL: "https://acme.atlassian.net", Deployment: jira.DeploymentCloud,
+				Email: "bot@acme.example", APIToken: "cloud-token",
+			},
+		},
+		{
+			name: "data center",
+			env: map[string]string{
+				"TRIAGE_FACTORY_JIRA_URL":       "https://jira.acme.example",
+				"TRIAGE_FACTORY_JIRA_BOT_PAT":   "dc-pat",
+				"TRIAGE_FACTORY_JIRA_EMAIL":     "ignored@acme.example",
+				"TRIAGE_FACTORY_JIRA_API_TOKEN": "ignored-token",
+			},
+			want: jira.SystemCredential{
+				URL: "https://jira.acme.example", Deployment: jira.DeploymentDataCenter,
+				PAT: "dc-pat",
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stores := openStores(t)
+			ctx := context.Background()
+			org := runmode.LocalDefaultOrgID
+			for name, v := range tc.env {
+				t.Setenv(name, v)
+			}
+
+			creds, err := integrations.LoadSystem(ctx, stores.Secrets, org)
+			if err != nil {
+				t.Fatalf("LoadSystem: %v", err)
+			}
+			if creds.JiraAuthMethod != "" {
+				t.Fatalf("JiraAuthMethod = %q, want no stored marker", creds.JiraAuthMethod)
+			}
+			cfg, ok := integrations.JiraSystemConfig(creds)
+			if !ok || cfg.Deployment != tc.want.Deployment || cfg.BaseURL != tc.want.URL {
+				t.Errorf("JiraSystemConfig = (%s %s, %v), want (%s %s, true)", cfg.Deployment, cfg.BaseURL, ok, tc.want.Deployment, tc.want.URL)
+			}
+			resolver, ok := jira.NewResolver(stores.Secrets, stores.Orgs).(jiraSystemCredentialResolver)
+			if !ok {
+				t.Fatal("jira resolver does not resolve raw system credentials")
+			}
+			cred, err := resolver.ResolveSystemCredential(ctx, org)
+			if err != nil {
+				t.Fatalf("ResolveSystemCredential: %v", err)
+			}
+			if cred != tc.want {
+				t.Errorf("credential = %+v, want %+v", cred, tc.want)
+			}
+		})
+	}
+}
+
+// A Cloud host with only the Data Center PAT in the environment is not a
+// configured org: the PAT is not a Cloud credential, so it is not read.
+func TestJiraEnvCloudHostWithPATOnly_NotConfigured(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://acme.atlassian.net")
+	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "dc-pat")
+	t.Setenv("TRIAGE_FACTORY_JIRA_EMAIL", "")
+	t.Setenv("TRIAGE_FACTORY_JIRA_API_TOKEN", "")
+
+	creds, err := integrations.LoadSystem(ctx, stores.Secrets, runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("LoadSystem: %v", err)
+	}
+	if _, ok := integrations.JiraSystemConfig(creds); ok {
+		t.Error("JiraSystemConfig ok = true for a Cloud host with only a PAT")
+	}
+	_, err = jira.NewResolver(stores.Secrets, stores.Orgs).ForSystem(ctx, runmode.LocalDefaultOrgID)
+	if !errors.Is(err, jira.ErrNoJiraSystemCredential) {
+		t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
 	}
 }

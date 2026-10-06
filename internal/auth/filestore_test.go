@@ -181,7 +181,7 @@ func TestFileBackend_EnvOverlayWins(t *testing.T) {
 	if err := PutSecret(keyGitHubPAT, "file-value"); err != nil {
 		t.Fatalf("PutSecret: %v", err)
 	}
-	// The TRIAGE_FACTORY_* overlay shadows the stored value for the 4 well-known
+	// The TRIAGE_FACTORY_* overlay shadows the stored value for the well-known
 	// keys, file backend or not.
 	t.Setenv(envKeys[keyGitHubPAT], "env-value")
 	if got, _ := GetSecret(keyGitHubPAT); got != "env-value" {

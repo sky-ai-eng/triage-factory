@@ -47,8 +47,8 @@ the UI once over a tunnel, or provision everything from environment variables
 To skip the browser entirely — for a reproducible container, a CI runner, or any
 unattended deploy — set `TF_HEADLESS=1`. On first start (local mode only) the
 server provisions itself from the environment: it creates the workspace, tracks
-the listed repos, optionally configures Jira (Data Center), and binds your
-identity — landing directly on the app with no setup wizard.
+the listed repos, optionally configures Jira (Data Center or Cloud), and binds
+your identity — landing directly on the app with no setup wizard.
 
 This is **not Linux-specific** — it works the same on macOS (a laptop, a mac CI
 runner). On any machine with a working OS keychain, secrets go to the keychain as
@@ -63,9 +63,12 @@ only for the keychain-less file backend. The rest of the flow is identical.
 | `TRIAGE_FACTORY_GITHUB_USER_PAT` | *Your* identity token. Required for a no-browser boot — without it you'll be asked to connect your GitHub identity in the UI. Usually the same value as the bot PAT for a solo operator. |
 | `TRIAGE_FACTORY_REPOS` | Comma-separated `owner/repo` list to track. Without at least one, the factory has nothing to poll. |
 | `TRIAGE_FACTORY_CLONE_PROTOCOL` | `https` (default) or `ssh` — how repos are cloned to the box. Optional. |
-| `TRIAGE_FACTORY_JIRA_URL` | Jira (Data Center) host. Optional. |
-| `TRIAGE_FACTORY_JIRA_BOT_PAT` | Jira service token. Optional. |
-| `TRIAGE_FACTORY_JIRA_USER_PAT` | Your Jira identity token. Required whenever Jira is configured. |
+| `TRIAGE_FACTORY_JIRA_URL` | Jira host. Optional. A `*.atlassian.net` host is Cloud; any other host is Data Center. |
+| `TRIAGE_FACTORY_JIRA_BOT_PAT` | Jira service token on Data Center. |
+| `TRIAGE_FACTORY_JIRA_EMAIL` | Atlassian account email of the Jira service credential on Cloud. |
+| `TRIAGE_FACTORY_JIRA_API_TOKEN` | Atlassian API token of the Jira service credential on Cloud. |
+| `TRIAGE_FACTORY_JIRA_USER_PAT` | Your Jira identity token: a personal access token on Data Center, an API token on Cloud. Required whenever Jira is configured. |
+| `TRIAGE_FACTORY_JIRA_USER_EMAIL` | Your Atlassian account email. Required with the identity token on Cloud; ignored on Data Center. |
 | `TRIAGE_FACTORY_JIRA_PROJECTS` | Comma-separated project keys (e.g. `SKY,TFAC`). |
 | `TRIAGE_FACTORY_JIRA_PICKUP_STATUSES` | Comma-separated statuses that mean "ready to pick up". |
 | `TRIAGE_FACTORY_JIRA_INPROGRESS_STATUS` | The single in-progress status. |
@@ -73,8 +76,13 @@ only for the keychain-less file backend. The rest of the flow is identical.
 | `TRIAGE_FACTORY_JIRA_DONE_STATUS` | The single done status. |
 | `ANTHROPIC_API_KEY` | Claude credential — local mode inherits it from the environment for scoring and delegation. |
 
-The Jira variables apply one global status mapping to every tracked project. Jira
-here is optional and Data Center only; Jira Cloud onboarding stays in the UI.
+The Jira variables apply one global status mapping to every tracked project. The
+host decides which credentials are read: a `*.atlassian.net` host is Jira Cloud,
+which authenticates with an email + API token (`_JIRA_EMAIL` + `_JIRA_API_TOKEN`
+for the service credential, `_JIRA_USER_EMAIL` + `_JIRA_USER_PAT` for you), and
+any other host is Data Center, which uses the PATs alone. No variable selects the
+method. A Cloud site served from a custom domain reads as Data Center here, so
+connect that one in the UI instead.
 
 Headless defaults to **HTTPS** cloning, authenticated with the bot PAT — a
 headless box usually has no SSH agent, so HTTPS is the credential-bearing path

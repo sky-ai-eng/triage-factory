@@ -19,6 +19,9 @@ const (
 	keyJiraURL   = "jira_url"
 	keyJiraPAT   = "jira_pat"
 
+	keyJiraEmail    = "jira_email"
+	keyJiraAPIToken = "jira_api_token"
+
 	keyLinearAPIKey = "linear_api_key"
 )
 
@@ -28,11 +31,21 @@ const (
 // reads from TRIAGE_FACTORY_{GITHUB,JIRA}_USER_PAT (see internal/server's
 // headless bootstrap). The URL vars carry the shared host and are not
 // actor-specific, so they keep their plain names.
+//
+// Jira's org credential has two shapes: a Data Center PAT (_JIRA_BOT_PAT) or a
+// Cloud email + API token (_JIRA_EMAIL + _JIRA_API_TOKEN). No variable carries
+// the jira_auth_method marker. With no marker stored, the resolver picks the
+// deployment from the host shape and reads that deployment's keys, so the
+// values present are the whole configuration and a method variable would only
+// be one more value that could disagree with them.
 var envKeys = map[string]string{
 	keyGitHubURL: "TRIAGE_FACTORY_GITHUB_URL",
 	keyGitHubPAT: "TRIAGE_FACTORY_GITHUB_BOT_PAT",
 	keyJiraURL:   "TRIAGE_FACTORY_JIRA_URL",
 	keyJiraPAT:   "TRIAGE_FACTORY_JIRA_BOT_PAT",
+
+	keyJiraEmail:    "TRIAGE_FACTORY_JIRA_EMAIL",
+	keyJiraAPIToken: "TRIAGE_FACTORY_JIRA_API_TOKEN",
 
 	keyLinearAPIKey: "TRIAGE_FACTORY_LINEAR_API_KEY",
 }
@@ -73,14 +86,18 @@ type Credentials struct {
 }
 
 // EnvProvided returns which credential groups have values supplied by
-// environment variables: "github" if URL+PAT are set, "jira" likewise, and
-// "linear" if the API key is set (Linear has no host to configure).
+// environment variables: "github" if URL+PAT are set, "jira" if the URL is set
+// with either complete credential (the Data Center PAT, or the Cloud email +
+// API token), and "linear" if the API key is set (Linear has no host to
+// configure).
 func EnvProvided() []string {
 	var out []string
 	if os.Getenv(envKeys[keyGitHubURL]) != "" && os.Getenv(envKeys[keyGitHubPAT]) != "" {
 		out = append(out, "github")
 	}
-	if os.Getenv(envKeys[keyJiraURL]) != "" && os.Getenv(envKeys[keyJiraPAT]) != "" {
+	jiraDC := os.Getenv(envKeys[keyJiraPAT]) != ""
+	jiraCloud := os.Getenv(envKeys[keyJiraEmail]) != "" && os.Getenv(envKeys[keyJiraAPIToken]) != ""
+	if os.Getenv(envKeys[keyJiraURL]) != "" && (jiraDC || jiraCloud) {
 		out = append(out, "jira")
 	}
 	if os.Getenv(envKeys[keyLinearAPIKey]) != "" {
@@ -107,9 +124,9 @@ func EnvProvidesKey(key string) bool {
 
 // GetSecret reads a single secret by key, returning "" (not an error) when no
 // entry exists. For the well-known credential keys (github_url, github_pat,
-// jira_url, jira_pat, linear_api_key) any matching TRIAGE_FACTORY_* env var
-// overrides the stored value. Unknown keys read straight from the active
-// backend.
+// jira_url, jira_pat, jira_email, jira_api_token, linear_api_key) any matching
+// TRIAGE_FACTORY_* env var overrides the stored value. Unknown keys read
+// straight from the active backend.
 //
 // This is the read-path entry point for the local-mode SecretStore
 // (internal/db/sqlite). The keyed shape lets multi-mode consumers
