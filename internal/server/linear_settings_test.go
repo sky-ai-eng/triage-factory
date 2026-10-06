@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/zalando/go-keyring"
@@ -31,15 +32,6 @@ func TestOrgSettingsPatch_LinearPollInterval(t *testing.T) {
 		t.Error("changing the Linear cadence did not re-due Linear polling")
 	}
 
-	// The floor is the one the Jira cadence has: a value below it is refused
-	// for both, with the field named.
-	for _, field := range []string{"jira_poll_interval", "linear_poll_interval"} {
-		rec := patchOrgSettings(t, s, map[string]any{field: "5s"})
-		if rec.Code != http.StatusUnprocessableEntity {
-			t.Fatalf("a 5s %s = %d, want 422; body=%s", field, rec.Code, rec.Body.String())
-		}
-		assertFirstError(t, rec, httpx.ReasonOutOfRange, field)
-	}
 	rec := patchOrgSettings(t, s, map[string]any{"linear_poll_interval": "soon"})
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("an unparseable cadence = %d, want 422; body=%s", rec.Code, rec.Body.String())
@@ -49,6 +41,30 @@ func TestOrgSettingsPatch_LinearPollInterval(t *testing.T) {
 	patchOrgSettingsOK(t, s, map[string]any{"linear_poll_interval": "15m0s"})
 	if kicked() {
 		t.Error("resaving the same Linear cadence re-dued Linear polling")
+	}
+}
+
+// TestOrgSettingsPatch_PollIntervalFloor: every source's cadence has the
+// scheduler's tick as its floor. A shorter one would be stored and then polled
+// at the tick anyway, so it is refused with the field named rather than
+// accepted for a cadence that never happens.
+func TestOrgSettingsPatch_PollIntervalFloor(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	for _, field := range []string{"github_poll_interval", "jira_poll_interval", "linear_poll_interval"} {
+		for _, short := range []string{"29s", "0s", "-5m"} {
+			rec := patchOrgSettings(t, s, map[string]any{field: short})
+			if rec.Code != http.StatusUnprocessableEntity {
+				t.Fatalf("%s = %q: status %d, want 422; body=%s", field, short, rec.Code, rec.Body.String())
+			}
+			assertFirstError(t, rec, httpx.ReasonOutOfRange, field)
+		}
+		patchOrgSettingsOK(t, s, map[string]any{field: poller.MinPollInterval.String()})
+		if got := orgSettingsSnapshot(t, s)[field]; got != "30s" {
+			t.Errorf("%s after saving the floor = %v, want 30s", field, got)
+		}
 	}
 }
 

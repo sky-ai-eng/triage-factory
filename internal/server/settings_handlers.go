@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
+	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -1332,11 +1333,11 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		}
 		next := f.def
 		if st == httpx.PatchSet {
-			d, err := parseMinDuration(v, orgPollIntervalMinMinutes)
+			d, err := parseMinDuration(v, poller.MinPollInterval)
 			if err != nil {
 				ranges.OutOfRange(f.field, fmt.Sprintf(
-					"%s must be a duration of at least %dm (e.g. \"15m\"), or null for the default",
-					f.field, orgPollIntervalMinMinutes))
+					"%s must be a duration of at least %s (e.g. \"5m\"), or null for the default",
+					f.field, poller.MinPollInterval))
 			}
 			next = d
 		}
@@ -1603,10 +1604,6 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 	return false
 }
 
-// orgPollIntervalMinMinutes is the floor for an org poll interval. Anything
-// tighter risks GitHub/Jira rate limits across a fleet of orgs.
-const orgPollIntervalMinMinutes = 10
-
 // modelsRemovedBySave lists the models this save took OUT of the org's
 // effective set — resolved on both sides, so clearing a stored set (which
 // widens to the deployment's whole universe) removes nothing and setting one for the first
@@ -1686,13 +1683,13 @@ func (s *Server) disabledModelsWarning(ctx context.Context, orgID, userID string
 // rendering live in the authz package)
 // --------------------------------------------------------------------
 
-func parseMinDuration(s string, minSeconds int) (time.Duration, error) {
+func parseMinDuration(s string, floor time.Duration) (time.Duration, error) {
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, err
 	}
-	if d < time.Duration(minSeconds)*time.Second {
-		return 0, fmt.Errorf("duration %s below minimum %ds", s, minSeconds)
+	if d < floor {
+		return 0, fmt.Errorf("duration %s below minimum %s", s, floor)
 	}
 	return d, nil
 }
