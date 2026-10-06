@@ -441,6 +441,64 @@ func TestAuthFlow_Me_LinearIdentityNeedsActiveOrgWorkspace(t *testing.T) {
 	}
 }
 
+// TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace: with the active org in
+// a Linear workspace, the multi-mode /api/me reports the user's binding in
+// that workspace and not the one they hold elsewhere. Once the user leaves the
+// org the pair is gone with it, even though the session still points there.
+func TestAuthFlow_Me_LinearIdentityFromActiveOrgWorkspace(t *testing.T) {
+	r := newAuthRig(t)
+
+	userID := r.seedUser()
+	orgID, teamID := r.seedOrg(userID, "linear-ws-org")
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO org_settings (org_id, linear_workspace_id, linear_workspace_url_key)
+		 VALUES ($1, 'ws-org', 'acme')
+		 ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id,
+		                                    linear_workspace_url_key = EXCLUDED.linear_workspace_url_key`, orgID)
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO user_linear_identities (user_id, workspace_id, linear_user_id, display_name, source, verified_at)
+		 VALUES ($1, 'ws-elsewhere', 'lin-elsewhere', 'Elsewhere', 'api_key', now() + interval '1 hour'),
+		        ($1, 'ws-org', 'lin-me', 'Me In Linear', 'api_key', now())`, userID)
+
+	resp, _ := r.driveCallback(userID)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("callback status=%d, want 302", resp.StatusCode)
+	}
+	sid := r.sidFromResp(resp)
+
+	readMe := func() map[string]any {
+		t.Helper()
+		meResp := r.requestWithSid("GET", "/api/me", sid)
+		defer meResp.Body.Close()
+		if meResp.StatusCode != http.StatusOK {
+			t.Fatalf("/api/me status=%d, want 200", meResp.StatusCode)
+		}
+		var me map[string]any
+		if err := json.NewDecoder(meResp.Body).Decode(&me); err != nil {
+			t.Fatalf("decode /api/me: %v", err)
+		}
+		return me
+	}
+
+	me := readMe()
+	if me["active_org_id"] != orgID.String() {
+		t.Fatalf("active_org_id = %v, want %s", me["active_org_id"], orgID)
+	}
+	if me["linear_user_id"] != "lin-me" || me["linear_display_name"] != "Me In Linear" {
+		t.Errorf("linear pair = (%v, %v), want (lin-me, Me In Linear)", me["linear_user_id"], me["linear_display_name"])
+	}
+
+	// The org must keep an owner, so hand it to someone else first.
+	pgtest.AddOrgMember(t, r.h, r.seedUser().String(), orgID.String(), teamID.String(), "owner", "admin")
+	pgtest.MustExec(t, r.h.AdminDB, `DELETE FROM org_memberships WHERE user_id = $1 AND org_id = $2`, userID, orgID)
+	me = readMe()
+	for _, field := range []string{"active_org_id", "linear_user_id", "linear_display_name"} {
+		if v, ok := me[field]; ok && v != "" {
+			t.Errorf("after leaving the org: %s = %v, want absent", field, v)
+		}
+	}
+}
+
 // TestAuthFlow_LoginToMe_DisplayNameFallsBackToGitHubLogin covers TFAC-560: a
 // brand-new GitHub login whose profile has no "Name" set (full_name and name
 // both empty in user_metadata — the common case for a just-accepted invite)

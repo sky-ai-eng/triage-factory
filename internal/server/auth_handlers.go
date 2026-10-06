@@ -954,12 +954,19 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	err := tfdb.WithReadTx(r.Context(), s.db,
 		tfdb.Claims{Sub: claims.Subject, OrgID: resp.ActiveOrgID},
 		func(tx *sql.Tx) error {
-			// Identity is host-scoped for both providers (GitHub,
-			// Jira): prefer the row bound to the active org's host
-			// (GitHub login via the correlated subquery; Jira account_id +
-			// display_name via the LATERAL, which keeps the pair on one row),
-			// else the most recently verified row. An absent row scans to ""
-			// exactly as the old NULL columns did.
+			// Identity is host-scoped for GitHub and Jira: prefer the row
+			// bound to the active org's host (GitHub login via the correlated
+			// subquery; Jira account_id + display_name via the LATERAL, which
+			// keeps the pair on one row), else the most recently verified row.
+			//
+			// Linear is workspace-scoped and has no such fallback: a Linear
+			// user id is meaningful only in the workspace that issued it, so
+			// the pair is read against the active org's workspace or not at
+			// all. This transaction is on the admin pool, so RLS does not
+			// stop the workspace read at an org the caller has left; the
+			// membership EXISTS does.
+			//
+			// An absent row scans to "" for every provider.
 			if err := tx.QueryRowContext(r.Context(), `
 				SELECT u.id::text,
 				       COALESCE(u.display_name, ''),
@@ -976,7 +983,9 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 				            LIMIT 1
 				       ), ''),
 				       COALESCE(j.account_id, ''),
-				       COALESCE(j.display_name, '')
+				       COALESCE(j.display_name, ''),
+				       COALESCE(li.linear_user_id, ''),
+				       COALESCE(li.display_name, '')
 				  FROM public.users u
 			  LEFT JOIN LATERAL (
 			           SELECT ji.account_id, ji.display_name
@@ -989,8 +998,18 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 			                     ji.verified_at DESC NULLS LAST
 			            LIMIT 1
 			       ) j ON true
+			  LEFT JOIN user_linear_identities li
+			         ON li.user_id = u.id
+			        AND li.workspace_id = (
+			           SELECT os.linear_workspace_id FROM org_settings os
+			            WHERE os.org_id = tf.current_org_id()
+			              AND EXISTS (SELECT 1 FROM org_memberships om
+			                           WHERE om.org_id = os.org_id
+			                             AND om.user_id = tf.current_user_id())
+			       )
 				 WHERE u.id = tf.current_user_id()
-			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.JiraAccountID, &resp.JiraDisplayName); err != nil {
+			`).Scan(&resp.ID, &resp.DisplayName, &resp.AvatarURL, &resp.GitHubUsername, &resp.JiraAccountID, &resp.JiraDisplayName,
+				&resp.LinearUserID, &resp.LinearDisplayName); err != nil {
 				return fmt.Errorf("user lookup: %w", err)
 			}
 
@@ -1078,25 +1097,6 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 		if !stillMember {
 			resp.ActiveOrgID = ""
-		}
-	}
-
-	// The Linear pair is read against the active org's workspace only, with
-	// no fallback to a binding elsewhere: a Linear user id is meaningful only
-	// in the workspace that issued it, so another org's would be the wrong id
-	// here. It runs after the stale-org drop, so an org the caller has left is
-	// never consulted.
-	if resp.ActiveOrgID != "" {
-		if err := s.tx.WithReadTx(r.Context(), resp.ActiveOrgID, claims.Subject, func(tx tfdb.TxStores) error {
-			orgSet, err := tx.Orgs.GetSettings(r.Context(), resp.ActiveOrgID)
-			if err != nil {
-				return err
-			}
-			resp.LinearUserID, resp.LinearDisplayName, err = tx.Users.GetLinearIdentity(r.Context(), claims.Subject, orgSet.LinearWorkspaceID)
-			return err
-		}); err != nil {
-			internalError(w, "auth", fmt.Errorf("/api/me linear identity for %s: %w", claims.Subject, err))
-			return
 		}
 	}
 
