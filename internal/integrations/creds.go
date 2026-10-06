@@ -1,6 +1,6 @@
-// Package integrations bundles the four well-known integration
-// secrets (GitHub URL + PAT, Jira URL + PAT) into the auth.Credentials
-// transport shape every downstream consumer already deconstructs.
+// Package integrations bundles the well-known integration secrets
+// (GitHub, Jira, Linear) into the auth.Credentials transport shape every
+// downstream consumer already deconstructs.
 // Every credential read in the binary routes through here so the
 // SecretStore seam is the canonical credential path: local-mode taps
 // the keychain via the SQLite store, multi-mode taps the Postgres
@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -46,6 +47,19 @@ const (
 	KeyJiraEmail      = "jira_email"
 	KeyJiraAPIToken   = "jira_api_token"
 	KeyJiraAuthMethod = "jira_auth_method"
+)
+
+// Linear service-credential keys. KeyLinearAuthMethod is the linear.AuthMethod
+// marker naming the shape the org's credential takes: an API key stored under
+// KeyLinearAPIKey, or an app install whose refresh-token envelope is stored
+// under KeyLinearAppInstall. An absent marker reads as the API key shape, which
+// is the only one the TRIAGE_FACTORY_LINEAR_API_KEY overlay can supply.
+// internal/linear's resolver keeps its own copies of the keys it reads (it
+// cannot import this package); its keys_drift_test pins the agreement.
+const (
+	KeyLinearAPIKey     = "linear_api_key"
+	KeyLinearAuthMethod = "linear_auth_method"
+	KeyLinearAppInstall = "linear_app_install"
 )
 
 // legacyJiraDisplayName is the legacy key that held the Jira display
@@ -129,10 +143,10 @@ func BedrockKeys() []string {
 }
 
 // AllKeys returns the integration-credential keys the SecretStore manages for a
-// tenant — the GitHub + Jira well-known keys plus the legacy keys still swept
-// alongside them. It is the per-credential unbind routes' shared vocabulary and
-// the base of the uninstall sweep, and it stays scoped to credentials whose
-// companion DB state those routes reconcile.
+// tenant — the GitHub, Jira and Linear well-known keys plus the legacy keys
+// still swept alongside them. It is the per-credential unbind routes' shared
+// vocabulary and the base of the uninstall sweep, and it stays scoped to
+// credentials whose companion DB state those routes reconcile.
 //
 // It is NOT the full uninstall sweep: org-level secrets that live in the same
 // keychain but aren't integration credentials (the Anthropic API key, the
@@ -143,6 +157,7 @@ func AllKeys() []string {
 	return []string{
 		KeyGitHubURL, KeyGitHubPAT,
 		KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
+		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall,
 		legacyJiraDisplayName, legacyGitHubUsername,
 	}
 }
@@ -261,6 +276,8 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
 	get(KeyJiraAuthMethod, &creds.JiraAuthMethod)
+	get(KeyLinearAPIKey, &creds.LinearAPIKey)
+	get(KeyLinearAuthMethod, &creds.LinearAuthMethod)
 	if len(errs) > 0 {
 		return creds, errors.Join(errs...)
 	}
@@ -301,15 +318,22 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
 	get(KeyJiraAuthMethod, &creds.JiraAuthMethod)
+	get(KeyLinearAPIKey, &creds.LinearAPIKey)
+	get(KeyLinearAuthMethod, &creds.LinearAuthMethod)
 	if len(errs) > 0 {
 		return creds, errors.Join(errs...)
 	}
 	return creds, nil
 }
 
-// Save writes the four-string bundle. Empty strings are skipped (not
-// written as "") — handlers that want to clear a field call the
+// Save writes the GitHub and Jira halves of the bundle. Empty strings are
+// skipped (not written as "") — handlers that want to clear a field call the
 // targeted Clear* helpers instead.
+//
+// The Linear fields are not written here. Callers rebind one integration by
+// loading the bundle, changing its half and saving it back, and a Load in
+// local mode returns an env-supplied value, which a Save of the whole bundle
+// would then persist; the Linear credential is written by its own bind.
 func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Credentials) error {
 	pairs := []struct{ key, value string }{
 		{KeyGitHubURL, c.GitHubURL},
@@ -355,6 +379,37 @@ func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
 		return jira.Config{}, false
 	}
 	return jira.DataCenterPAT(host, c.JiraPAT), true
+}
+
+// LinearSystemConfig builds the linear.Config for an org's stored Linear
+// service credential from an already-loaded Credentials bundle, for handlers
+// that hold one. ok is true only for the api_key shape (or no marker) with a
+// key: an app install's credential is an access token the resolver mints,
+// which the bundle does not carry, so those callers go through
+// linear.Resolver.ForSystem.
+func LinearSystemConfig(c auth.Credentials) (linear.Config, bool) {
+	switch linear.AuthMethod(c.LinearAuthMethod) {
+	case linear.AuthMethodAPIKey, "":
+		if c.LinearAPIKey != "" {
+			return linear.APIKey(c.LinearAPIKey), true
+		}
+	}
+	return linear.Config{}, false
+}
+
+// LinearSystemConfigured reports whether the org has a Linear service
+// credential: a key under an api_key marker or no marker, or an app_install
+// marker. Whether an install's envelope is present and still mints is the
+// resolver's to answer, so a configured org can still fail to resolve.
+func LinearSystemConfigured(c auth.Credentials) bool {
+	switch linear.AuthMethod(c.LinearAuthMethod) {
+	case linear.AuthMethodAPIKey, "":
+		return c.LinearAPIKey != ""
+	case linear.AuthMethodAppInstall:
+		return true
+	default:
+		return false
+	}
 }
 
 // GitHubReady reports whether orgID's GitHub access resolves to a usable
@@ -491,6 +546,12 @@ func ClearJiraOtherScheme(ctx context.Context, secrets db.SecretStore, orgID str
 	default:
 		return nil
 	}
+}
+
+// ClearLinear removes the org's Linear service credential: both shapes and
+// the marker naming which one is in use.
+func ClearLinear(ctx context.Context, secrets db.SecretStore, orgID string) error {
+	return clearKeys(ctx, secrets, orgID, KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall)
 }
 
 func clearKeys(ctx context.Context, secrets db.SecretStore, orgID string, keys ...string) error {

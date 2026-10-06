@@ -18,6 +18,8 @@ const (
 	keyGitHubPAT = "github_pat"
 	keyJiraURL   = "jira_url"
 	keyJiraPAT   = "jira_pat"
+
+	keyLinearAPIKey = "linear_api_key"
 )
 
 // Environment variable names (TRIAGE_FACTORY_ prefix matches existing convention).
@@ -31,6 +33,8 @@ var envKeys = map[string]string{
 	keyGitHubPAT: "TRIAGE_FACTORY_GITHUB_BOT_PAT",
 	keyJiraURL:   "TRIAGE_FACTORY_JIRA_URL",
 	keyJiraPAT:   "TRIAGE_FACTORY_JIRA_BOT_PAT",
+
+	keyLinearAPIKey: "TRIAGE_FACTORY_LINEAR_API_KEY",
 }
 
 // Credentials holds the stored ORG auth configuration (PAT_1, the bot
@@ -57,10 +61,20 @@ type Credentials struct {
 	JiraEmail      string
 	JiraAPIToken   string
 	JiraAuthMethod string
+
+	// Linear service credential. LinearAuthMethod is the linear.AuthMethod
+	// marker ("api_key" | "app_install"); an empty marker with a key is the
+	// api_key shape, which is what the env overlay alone produces.
+	// LinearAPIKey is the personal key that shape stores. An app install's
+	// credential is an envelope this bundle does not carry: the resolver reads
+	// it.
+	LinearAPIKey     string
+	LinearAuthMethod string
 }
 
 // EnvProvided returns which credential groups have values supplied by
-// environment variables: "github" if URL+PAT are set, "jira" likewise.
+// environment variables: "github" if URL+PAT are set, "jira" likewise, and
+// "linear" if the API key is set (Linear has no host to configure).
 func EnvProvided() []string {
 	var out []string
 	if os.Getenv(envKeys[keyGitHubURL]) != "" && os.Getenv(envKeys[keyGitHubPAT]) != "" {
@@ -68,6 +82,9 @@ func EnvProvided() []string {
 	}
 	if os.Getenv(envKeys[keyJiraURL]) != "" && os.Getenv(envKeys[keyJiraPAT]) != "" {
 		out = append(out, "jira")
+	}
+	if os.Getenv(envKeys[keyLinearAPIKey]) != "" {
+		out = append(out, "linear")
 	}
 	return out
 }
@@ -89,8 +106,8 @@ func EnvProvidesKey(key string) bool {
 }
 
 // GetSecret reads a single secret by key, returning "" (not an error) when no
-// entry exists. For the four well-known credential keys (github_url,
-// github_pat, jira_url, jira_pat) any matching TRIAGE_FACTORY_* env var
+// entry exists. For the well-known credential keys (github_url, github_pat,
+// jira_url, jira_pat, linear_api_key) any matching TRIAGE_FACTORY_* env var
 // overrides the stored value. Unknown keys read straight from the active
 // backend.
 //

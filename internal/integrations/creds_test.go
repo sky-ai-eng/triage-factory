@@ -14,6 +14,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -544,5 +545,172 @@ func TestSlackWorkspaceKeysFor_Format(t *testing.T) {
 	}
 	if got := ks.All(); !slices.Equal(got, want) {
 		t.Errorf("All() = %v, want %v", got, want)
+	}
+}
+
+// TestLinearSystemConfig pins the marker × key-presence matrix of the two
+// Linear helpers: a client config exists only for a key under an api_key
+// marker or no marker, while an app_install marker counts as configured
+// whatever the bundle holds, because its credential is an envelope the
+// resolver reads.
+func TestLinearSystemConfig(t *testing.T) {
+	cases := []struct {
+		name           string
+		marker, key    string
+		wantConfig     bool
+		wantConfigured bool
+	}{
+		{"api_key with key", "api_key", "lin_api_org", true, true},
+		{"api_key without key", "api_key", "", false, false},
+		{"app_install without key", "app_install", "", false, true},
+		{"app_install with a stale key", "app_install", "lin_api_org", false, true},
+		{"no marker with key", "", "lin_api_org", true, true},
+		{"no marker, no key", "", "", false, false},
+		{"unknown marker", "saml_v9", "lin_api_org", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			creds := auth.Credentials{LinearAuthMethod: tc.marker, LinearAPIKey: tc.key}
+			cfg, ok := integrations.LinearSystemConfig(creds)
+			if ok != tc.wantConfig {
+				t.Errorf("LinearSystemConfig ok = %v, want %v", ok, tc.wantConfig)
+			}
+			if ok && cfg != linear.APIKey(tc.key) {
+				t.Errorf("LinearSystemConfig = %+v, want APIKey(%q)", cfg, tc.key)
+			}
+			if got := integrations.LinearSystemConfigured(creds); got != tc.wantConfigured {
+				t.Errorf("LinearSystemConfigured = %v, want %v", got, tc.wantConfigured)
+			}
+		})
+	}
+}
+
+// putLinear stores a Linear service credential the way its bind does: key by
+// key, since Save does not write the Linear half of the bundle.
+func putLinear(t *testing.T, secrets db.SecretStore, org string) {
+	t.Helper()
+	for key, value := range map[string]string{
+		integrations.KeyLinearAuthMethod: "api_key",
+		integrations.KeyLinearAPIKey:     "lin_api_org",
+		integrations.KeyLinearAppInstall: `{"refresh_token":"r1"}`,
+	} {
+		if err := secrets.Put(context.Background(), org, key, value, ""); err != nil {
+			t.Fatalf("Put %s: %v", key, err)
+		}
+	}
+}
+
+func TestLoad_ReadsLinear(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	putLinear(t, stores.Secrets, org)
+
+	for name, load := range map[string]func(context.Context, db.SecretStore, string) (auth.Credentials, error){
+		"Load":       integrations.Load,
+		"LoadSystem": integrations.LoadSystem,
+	} {
+		got, err := load(ctx, stores.Secrets, org)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got.LinearAuthMethod != "api_key" || got.LinearAPIKey != "lin_api_org" {
+			t.Errorf("%s Linear half = (%q, %q), want (api_key, lin_api_org)", name, got.LinearAuthMethod, got.LinearAPIKey)
+		}
+	}
+}
+
+// TestSave_LeavesLinearAlone pins that Save writes nothing for Linear: a
+// rebind that round-trips the whole bundle must not persist a Linear value
+// Load surfaced from the environment.
+func TestSave_LeavesLinearAlone(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
+		LinearAPIKey: "lin_api_env", LinearAuthMethod: "api_key",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := integrations.Load(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.LinearAPIKey != "" || got.LinearAuthMethod != "" {
+		t.Errorf("Save wrote the Linear half: %+v", got)
+	}
+}
+
+func TestClearLinear_LeavesGitHubAndJira(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+
+	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
+		GitHubURL: "https://github.example.com",
+		GitHubPAT: "ghp-test",
+		JiraURL:   "https://jira.example.com",
+		JiraPAT:   "jira-test",
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	putLinear(t, stores.Secrets, org)
+
+	if err := integrations.ClearLinear(ctx, stores.Secrets, org); err != nil {
+		t.Fatalf("ClearLinear: %v", err)
+	}
+	got, err := integrations.Load(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.LinearAPIKey != "" || got.LinearAuthMethod != "" {
+		t.Errorf("Linear creds survived ClearLinear: %+v", got)
+	}
+	envelope, err := stores.Secrets.Get(ctx, org, integrations.KeyLinearAppInstall)
+	if err != nil {
+		t.Fatalf("Get app install: %v", err)
+	}
+	if envelope != "" {
+		t.Errorf("app install envelope survived ClearLinear: %q", envelope)
+	}
+	if got.GitHubPAT == "" || got.JiraPAT == "" {
+		t.Errorf("GitHub or Jira creds disappeared after ClearLinear: %+v", got)
+	}
+}
+
+func TestAllKeys_IncludesLinear(t *testing.T) {
+	for _, k := range []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall} {
+		if !slices.Contains(integrations.AllKeys(), k) {
+			t.Errorf("AllKeys missing %q", k)
+		}
+	}
+}
+
+// TestLinearEnvKeyAlone_Resolves is the env-only local setup end to end: the
+// key comes from TRIAGE_FACTORY_LINEAR_API_KEY, nothing is stored, and both
+// the bundle helpers and the resolver treat it as a configured api_key org.
+func TestLinearEnvKeyAlone_Resolves(t *testing.T) {
+	stores := openStores(t)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "lin_api_env")
+
+	creds, err := integrations.LoadSystem(ctx, stores.Secrets, org)
+	if err != nil {
+		t.Fatalf("LoadSystem: %v", err)
+	}
+	if !integrations.LinearSystemConfigured(creds) {
+		t.Error("LinearSystemConfigured = false with the key in the environment")
+	}
+	if cfg, ok := integrations.LinearSystemConfig(creds); !ok || cfg != linear.APIKey("lin_api_env") {
+		t.Errorf("LinearSystemConfig = (%+v, %v), want APIKey(lin_api_env)", cfg, ok)
+	}
+	cred, err := linear.NewResolver(stores.Secrets, stores.Orgs).ResolveSystemCredential(ctx, org)
+	if err != nil {
+		t.Fatalf("ResolveSystemCredential: %v", err)
+	}
+	if cred.Method != linear.AuthMethodAPIKey || cred.APIKey != "lin_api_env" {
+		t.Errorf("credential = %+v, want the env key as api_key", cred)
 	}
 }

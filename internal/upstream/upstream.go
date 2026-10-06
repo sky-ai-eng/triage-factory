@@ -1,14 +1,15 @@
 // Package upstream is the shared request-outcome model for TF's HTTP API
-// clients (GitHub, Jira, Slack's Web API): one classification of what a
-// request's response or failure means, the retry primitives every client's
+// clients (GitHub, Jira, Linear, Slack's Web API): one classification of what
+// a request's response or failure means, the retry primitives every client's
 // own retry loop is built from, bounded reads and short excerpts of error
 // bodies, and the request and retry counters. The LLM providers count into
 // the same counters, classified by internal/inference.
 //
 // Each client keeps its own retry loop and its own limits. What lives here is
 // only what they share, so a client whose upstream signals a rate limit or an
-// auth failure in a non-standard way (GitHub's rate-limit 403s) classifies
-// that response itself before falling back to ClassifyResponse.
+// auth failure in a non-standard way (GitHub's rate-limit 403s, Linear's
+// RATELIMITED 400s) classifies that response itself before falling back to
+// ClassifyResponse.
 package upstream
 
 import (
@@ -32,6 +33,7 @@ type Name string
 const (
 	GitHub Name = "github"
 	Jira   Name = "jira"
+	Linear Name = "linear"
 	Slack  Name = "slack"
 
 	// The LLM providers internal/inference serves. Their requests are

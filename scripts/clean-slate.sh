@@ -22,6 +22,7 @@ echo "Cleaning Triage Factory local state..."
 keychain_keys=(
   github_url github_pat github_username
   jira_url jira_pat jira_email jira_api_token jira_auth_method jira_display_name
+  linear_api_key linear_auth_method linear_app_install
   anthropic_api_key jira_oauth_client_secret
   aws_access_key_id aws_secret_access_key aws_session_token aws_region
   aws_bearer_token_bedrock bedrock_model_id bedrock_base_url

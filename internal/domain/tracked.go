@@ -1,7 +1,10 @@
 package domain
 
 import (
+	"encoding/json"
+	"slices"
 	"sort"
+	"strings"
 )
 
 // PRSnapshot is the extracted state we store for a GitHub pull request.
@@ -274,4 +277,118 @@ type JiraSnapshot struct {
 // against a rule's members through JiraStatusRef.SameStatus.
 func (s JiraSnapshot) StatusRef() JiraStatusRef {
 	return JiraStatusRef{ID: s.StatusID, Name: s.Status}
+}
+
+// LinearSnapshot is the extracted state of a Linear issue that each poll
+// diffs against, the Linear sibling of JiraSnapshot. The entity's source_id is
+// the issue's identifier ("ENG-123"); the UUID rides here because it is the
+// one value a team move does not change.
+type LinearSnapshot struct {
+	ID         string `json:"id"`
+	Identifier string `json:"identifier"`
+	Title      string `json:"title"`
+	// BodyHash covers the raw description string. Empty means unknown rather
+	// than an explicitly cleared description.
+	BodyHash string         `json:"body_hash,omitempty"`
+	State    LinearStateRef `json:"state"`
+	Assignee string         `json:"assignee"` // display name
+	// AssigneeUserID is the assignee's Linear user id, the same shape a
+	// credential's viewer.id has, so it is what identity matching keys on.
+	AssigneeUserID string   `json:"assignee_user_id,omitempty"`
+	Priority       int      `json:"priority"` // 0 = no priority, 1 = urgent … 4 = low
+	PriorityLabel  string   `json:"priority_label"`
+	Labels         []string `json:"labels"`
+	// TeamID is the Linear team's UUID, the unit a TF team tracks.
+	TeamID           string `json:"team_id"`
+	TeamKey          string `json:"team_key"`
+	ParentID         string `json:"parent_id,omitempty"`
+	ParentIdentifier string `json:"parent_identifier,omitempty"`
+	// LastCommentID and LastCommentAt are the newest comment's. Linear has no
+	// comment count on an issue, so a change in the newest comment is the
+	// comment signal.
+	LastCommentID string `json:"last_comment_id,omitempty"`
+	LastCommentAt string `json:"last_comment_at,omitempty"`
+	// OpenChildCount is the number of sub-issues whose state is not in the
+	// configured done set.
+	OpenChildCount int    `json:"open_child_count"`
+	URL            string `json:"url"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	UpdatedAt      string `json:"updated_at,omitempty"`
+	Archived       bool   `json:"archived,omitempty"`
+	Trashed        bool   `json:"trashed,omitempty"`
+}
+
+// StateRef is the snapshot's workflow state, for comparison against a rule's
+// members through LinearStateRef.SameState.
+func (s LinearSnapshot) StateRef() LinearStateRef {
+	return s.State
+}
+
+// LinearStateRef is one Linear workflow state: its id, its display name, and
+// its type (triage, backlog, unstarted, started, completed or canceled).
+//
+// It is a type of its own rather than a JiraStatusRef because it carries the
+// type, which Jira has no analogue for and which the rule picker pre-arms
+// from; a Linear value under a Jira type would read as interchangeable with
+// one.
+type LinearStateRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// IsZero reports whether the ref names nothing at all.
+func (r LinearStateRef) IsZero() bool { return r.ID == "" && r.Name == "" }
+
+// SameState reports whether two refs name the same state. Ids decide when
+// both carry one; otherwise the names do.
+func (r LinearStateRef) SameState(other LinearStateRef) bool {
+	if r.ID != "" && other.ID != "" {
+		return r.ID == other.ID
+	}
+	return r.Name != "" && r.Name == other.Name
+}
+
+// LinearStateDedupKey is the value a ref is deduplicated and set-compared on:
+// the id when it has one, else the name under a prefix so a name can never
+// collide with an id that happens to read like it.
+func LinearStateDedupKey(r LinearStateRef) string {
+	if r.ID != "" {
+		return "id:" + r.ID
+	}
+	return "name:" + r.Name
+}
+
+// ContainsState reports whether refs holds one naming the same state as s.
+func ContainsState(refs []LinearStateRef, s LinearStateRef) bool {
+	return slices.ContainsFunc(refs, func(r LinearStateRef) bool { return r.SameState(s) })
+}
+
+// MarshalLinearStateRefs renders a rule's members for storage. A nil slice
+// renders as [] rather than null, so the stored value is always a JSON array.
+func MarshalLinearStateRefs(refs []LinearStateRef) (string, error) {
+	if refs == nil {
+		refs = []LinearStateRef{}
+	}
+	raw, err := json.Marshal(refs)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// UnmarshalLinearStateRefs reads a rule's members back. An empty column reads
+// as no members.
+func UnmarshalLinearStateRefs(raw string) ([]LinearStateRef, error) {
+	if strings.TrimSpace(raw) == "" {
+		return []LinearStateRef{}, nil
+	}
+	var refs []LinearStateRef
+	if err := json.Unmarshal([]byte(raw), &refs); err != nil {
+		return nil, err
+	}
+	if refs == nil {
+		refs = []LinearStateRef{}
+	}
+	return refs, nil
 }

@@ -91,7 +91,7 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //   - Transport — how a call reached its upstream where a subsystem has
 //     more than one route (the system-LLM path's "subprocess" vs "direct").
 //   - Upstream — which external API system a request went to, i.e.
-//     upstream.Name ("github", "jira", "slack"). Never a host.
+//     upstream.Name ("github", "jira", "linear", "slack"). Never a host.
 //   - Op — which operation a multiplexed channel carried, where one span
 //     name covers a switch: a capbroker IPC method, a relay
 //     "<namespace>.<op>" pair. Every value is a Go constant in the

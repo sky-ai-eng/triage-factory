@@ -20,8 +20,8 @@ const meterName = "internal/upstream"
 
 // instruments is the counter pair, created once per provider. upstream and
 // outcome are closed vocabularies (Name, Class); org_id is not, so the series
-// count grows with the number of orgs, by at most 25 per counter for each
-// (5 names × 5 classes). That per-org breakdown is what the metrics are for.
+// count grows with the number of orgs, by at most 30 per counter for each
+// (6 names × 5 classes). That per-org breakdown is what the metrics are for.
 type instruments struct {
 	requests metric.Int64Counter
 	retries  metric.Int64Counter
