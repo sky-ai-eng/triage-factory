@@ -42,7 +42,9 @@ const (
 // PAT (Bearer), so the Cloud halves are stored under their own keys; the
 // auth-method marker records which scheme the org uses so the resolver reads
 // the right pair. These mirror jira.resolver's (unexported, cycle-dodging)
-// copies — keep them in sync; keys_drift_test pins the agreement.
+// copies — keep them in sync; keys_drift_test pins the agreement. The email and
+// API token are in the env overlay too (envKeys in internal/auth/keychain.go);
+// the marker is not, so an env-only org resolves its deployment from the host.
 const (
 	KeyJiraEmail      = "jira_email"
 	KeyJiraAPIToken   = "jira_api_token"

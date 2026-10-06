@@ -20,7 +20,7 @@ your credentials" event. (Desktop/keychain installs don't need the key.)
 
 `TF_SECRETS_BACKEND` overrides the auto-selection: `auto` (default), `keychain`
 (force the keychain; error if unavailable), or `file` (force the encrypted file).
-Unlike the four `TRIAGE_FACTORY_*` org-credential overlays, the file backend is
+Unlike the `TRIAGE_FACTORY_*` org-credential overlays, the file backend is
 writable, so credentials entered in Settings (the Anthropic key, a GitHub App,
 your per-user Jira token) persist across restarts on a headless box.
 
