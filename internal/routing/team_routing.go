@@ -150,17 +150,26 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 }
 
 // teamTracksEventLinearTeam reads the Linear team id off an event's metadata
-// and asks the store whether teamID tracks it. Every Linear issue event
-// carries linear_team_id (events.LinearIssueIdentity). The gate keys on the
-// UUID rather than the team key, because a key can be renamed in Linear and
-// the id cannot. Fail-open on a missing / malformed id or a store error, the
-// posture teamTracksEventRepo documents.
+// and asks the store whether teamID tracks it. The gate keys on the UUID
+// rather than the team key, because a key can be renamed in Linear and the id
+// cannot. Fail-open on malformed metadata or a store error, the posture
+// teamTracksEventRepo documents.
+//
+// Metadata that parses but names no team is refused rather than allowed. The
+// tracker sets linear_team_id on every Linear event whenever anything knows
+// the team, and leaves it empty only on an unreachable issue that has no
+// snapshot and whose key names no single armed team, so no team can be shown
+// to track it. The event still closes the entity's tasks; the close relations do not
+// read this gate.
 func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
 		LinearTeamID string `json:"linear_team_id"`
 	}
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.LinearTeamID == "" {
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
 		return true
+	}
+	if m.LinearTeamID == "" {
+		return false
 	}
 	tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, m.LinearTeamID)
 	if err != nil {

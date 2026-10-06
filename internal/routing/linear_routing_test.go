@@ -73,9 +73,10 @@ func (erroringLinearRules) TracksTeamSystem(context.Context, string, string) (bo
 }
 
 // TestLinearGate covers the team↔Linear-team gate: a team that tracks the
-// event's Linear team passes, one that does not is dropped, and every way the
-// gate cannot answer — no store, no linear_team_id, a failed read — allows,
-// the gate's documented fail-open posture.
+// event's Linear team passes, one that does not is dropped, and an event that
+// names no Linear team is dropped for every team, since none can be shown to
+// track it. Every way the gate cannot answer — no store, malformed metadata, a
+// failed read — allows, the gate's documented fail-open posture.
 func TestLinearGate(t *testing.T) {
 	database := newGateDB(t)
 	teamA := runmode.LocalDefaultTeamID
@@ -93,10 +94,14 @@ func TestLinearGate(t *testing.T) {
 		t.Error("a team that does not track the Linear team passed the gate")
 	}
 
-	noTeam := evt
-	noTeam.MetadataJSON = `{"issue_identifier":"ENG-1"}`
-	if !r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
-		t.Error("an event with no linear_team_id should fail open")
+	noTeam := linearEvent(domain.EventLinearIssueUnreachable, "ent-1", "", "")
+	for _, team := range []string{teamA, teamB} {
+		if r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{TeamID: team}, map[string]bool{}) {
+			t.Errorf("an event with no linear_team_id passed the gate for team %s", team)
+		}
+	}
+	if !r.handlerScopeMatchesEvent(ctx, noTeam, domain.EventHandler{}, map[string]bool{}) {
+		t.Error("a handler with no team is not gated, and was dropped")
 	}
 	malformed := evt
 	malformed.MetadataJSON = `not json`
@@ -317,22 +322,27 @@ func TestLinearAssigneeTeams_WorkspaceScoped(t *testing.T) {
 }
 
 // TestLinearUnreachable_ClosesEntityAndTasks: unreachable terminates the
-// entity and closes its tasks, as Jira's does.
+// entity and closes its tasks, as Jira's does. An event that names no Linear
+// team closes them too: the gate that refuses it reads only handlers.
 func TestLinearUnreachable_ClosesEntityAndTasks(t *testing.T) {
-	database := newGateDB(t)
-	ctx := context.Background()
-	entityID, taskIDs := seedDivergentEntity(t, database, "linear", "ENG-5",
-		`{"id":"uuid-5","identifier":"ENG-5","team_id":"lt-eng","state":{"id":"st-Todo","name":"Todo"}}`,
-		domain.EventLinearIssueAssigned)
+	for _, linearTeamID := range []string{"lt-eng", ""} {
+		t.Run("linear_team_id="+linearTeamID, func(t *testing.T) {
+			database := newGateDB(t)
+			ctx := context.Background()
+			entityID, taskIDs := seedDivergentEntity(t, database, "linear", "ENG-5",
+				`{"id":"uuid-5","identifier":"ENG-5","team_id":"lt-eng","state":{"id":"st-Todo","name":"Todo"}}`,
+				domain.EventLinearIssueAssigned)
 
-	linearRouter(database).HandleEvent(ctx, linearEvent(domain.EventLinearIssueUnreachable, entityID, "lt-eng", ""))
+			linearRouter(database).HandleEvent(ctx, linearEvent(domain.EventLinearIssueUnreachable, entityID, linearTeamID, ""))
 
-	e, err := sqlitestore.New(database).Entities.Get(ctx, runmode.LocalDefaultOrgID, entityID)
-	if err != nil || e == nil || e.State != "closed" {
-		t.Fatalf("entity = %+v err=%v, want closed", e, err)
-	}
-	if status, reason := taskCloseReason(t, database, taskIDs[0]); status != "done" || reason != "entity_closed" {
-		t.Errorf("task = (%s, %s), want (done, entity_closed)", status, reason)
+			e, err := sqlitestore.New(database).Entities.Get(ctx, runmode.LocalDefaultOrgID, entityID)
+			if err != nil || e == nil || e.State != "closed" {
+				t.Fatalf("entity = %+v err=%v, want closed", e, err)
+			}
+			if status, reason := taskCloseReason(t, database, taskIDs[0]); status != "done" || reason != "entity_closed" {
+				t.Errorf("task = (%s, %s), want (done, entity_closed)", status, reason)
+			}
+		})
 	}
 }
 

@@ -190,6 +190,13 @@ Any other failure to read the issue is not evidence either way, and it is
 asked about again on a later cycle. At most 20 issues are asked about one at a
 time per cycle; the rest wait for the next.
 
+The event's metadata is the issue's last-known state. An entity with no
+snapshot (one a source pause cleared) that Linear answers not-found for has
+only its identifier, so its `linear_team_id` comes from the armed team whose
+key the identifier carries. When no armed team has that key, or more than one
+does, the event names no team: it still closes the entity and its tasks, but
+the team gate refuses it for every team, so no team's handlers receive it.
+
 #### Rate limits
 
 A request still rate limited after the client's 30 seconds of waiting ends the

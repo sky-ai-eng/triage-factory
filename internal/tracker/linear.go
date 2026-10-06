@@ -61,6 +61,23 @@ func (r LinearRules) ForTeam(id string) *LinearTeamRule {
 	return nil
 }
 
+// teamIDForKey returns the id of the armed team whose key is key, or "" when
+// no armed team has it or more than one does. A key stored at arming time can
+// be stale after a rename in Linear, so two rules can share one.
+func (r LinearRules) teamIDForKey(key string) string {
+	id := ""
+	for _, rule := range r {
+		if rule.Key != key {
+			continue
+		}
+		if id != "" {
+			return ""
+		}
+		id = rule.ID
+	}
+	return id
+}
+
 func (r LinearRules) doneForTeam(id string) []domain.LinearStateRef {
 	if rule := r.ForTeam(id); rule != nil {
 		return rule.Done
@@ -324,7 +341,7 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
 			return emitted, err
 		case errors.Is(err, linear.ErrNotFound):
-			t.emitLinearUnreachable(ctx, orgID, e, nil, "not_found")
+			t.emitLinearUnreachable(ctx, orgID, e, nil, teams, "not_found")
 			emitted++
 			retired++
 		default:
@@ -343,7 +360,7 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 // is seeded without a diff.
 func (t *Tracker) applyLinearIssue(ctx context.Context, orgID string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
 	if reason := linearIssueGone(e, issue, teams); reason != "" {
-		t.emitLinearUnreachable(ctx, orgID, e, &issue, reason)
+		t.emitLinearUnreachable(ctx, orgID, e, &issue, teams, reason)
 		return 1
 	}
 	state := linearIssueToState(issue, allDone)
@@ -427,12 +444,15 @@ func linearIssueGone(e domain.Entity, issue linear.Issue, teams LinearRules) str
 
 // emitLinearUnreachable publishes the terminal event for an entity whose issue
 // Linear will no longer give TF. The metadata is the stored snapshot's
-// last-known state; a field the snapshot lacks is filled from the issue when
-// there is one (a trashed, moved or archived issue still answered), so the
-// event carries the issue's team whenever anything knows it. Published rather
-// than committed with a snapshot, as Jira's is: there is no new snapshot, and
-// closing the entity is the router's job.
-func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e domain.Entity, issue *linear.Issue, reason string) {
+// last-known state. A field the snapshot lacks is filled from the issue when
+// there is one (a trashed, moved or archived issue still answered), and the
+// team id last of all from the armed team whose key the identifier carries,
+// which is what names the team for an entity with no snapshot that Linear
+// answers not-found for. An event that still names no team reaches no team's
+// handlers: the router's gate refuses it. Published rather than committed
+// with a snapshot, as Jira's is: there is no new snapshot, and closing the
+// entity is the router's job.
+func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e domain.Entity, issue *linear.Issue, teams LinearRules, reason string) {
 	var snap domain.LinearSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
@@ -458,6 +478,13 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 	}
 	if snap.TeamKey == "" {
 		snap.TeamKey = extractProject(e.SourceID)
+	}
+	if snap.TeamID == "" {
+		snap.TeamID = teams.teamIDForKey(snap.TeamKey)
+	}
+	if snap.TeamID == "" {
+		trackerLog.WarnContext(ctx, "no single armed Linear team has this issue's key; its unreachable event names no team, so no team's handlers receive it",
+			"source_id", e.SourceID, "entity_id", e.ID, "team_key", snap.TeamKey)
 	}
 	snap.Identifier = e.SourceID
 	entityID := e.ID

@@ -167,7 +167,9 @@ func TestDiffLinearSnapshots_DoneIsTheTeams(t *testing.T) {
 
 // TestLinearEvents_EveryTypeCarriesTeamID is the invariant the router's team
 // gate rests on: every Linear event the tracker can emit, whichever path
-// emits it, carries linear_team_id. The emitting paths are driven until every
+// emits it, carries linear_team_id whenever anything knows the team, an entity
+// with no snapshot included. TestRefreshLinear_SnapshotlessUnreachable covers
+// the case where nothing does. The emitting paths are driven until every
 // linear:issue:* type in the catalog has been produced at least once, so a new
 // type added without passing through here fails rather than going unchecked.
 func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
@@ -195,14 +197,18 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	diff(base, done)                          // completed
 	diff(withChildren, base)                  // became_atomic
 
-	// unreachable is the one Linear event the diff does not produce.
+	// unreachable is the one Linear event the diff does not produce. It is
+	// emitted for an entity with a snapshot and for one without, which has
+	// only its identifier and the armed teams to name the team from.
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID)
 	snapJSON, _ := json.Marshal(base)
 	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
-		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, "not_found")
+		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, linRules(), "not_found")
+	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
+		domain.Entity{ID: "ent-2", SourceID: "ENG-2"}, nil, linRules(), "not_found")
 	all = append(all, pub.nonSystemEvents()...)
 
 	seen := map[string]bool{}

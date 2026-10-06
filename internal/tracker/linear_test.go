@@ -510,6 +510,49 @@ func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	}
 }
 
+// TestRefreshLinear_SnapshotlessUnreachable: an entity with no snapshot that
+// Linear answers not-found for has no stored team and no issue to read one
+// from, so its unreachable names the armed team whose key its identifier
+// carries. It names none when no armed team has the key, or when two do
+// because one's stored key is stale.
+func TestRefreshLinear_SnapshotlessUnreachable(t *testing.T) {
+	stale := LinearTeamRule{ID: "team-old", Key: "ENG", Done: linDoneSet}
+	ops := LinearRules{{ID: "team-ops", Key: "OPS", Done: linDoneSet}}
+	cases := []struct {
+		name     string
+		teams    LinearRules
+		wantTeam string
+	}{
+		{"key armed", linRules(), linTeamID},
+		{"key not armed", ops, ""},
+		{"key armed twice", append(linRules(), stale), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newLinearFixture(t)
+			if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-9", "issue", "", ""); err != nil {
+				t.Fatal(err)
+			}
+			fx.client.notFound = map[string]bool{"ENG-9": true}
+
+			evts, err := fx.cycle(t, tc.teams)
+			if err != nil {
+				t.Fatalf("RefreshLinear: %v", err)
+			}
+			if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
+				t.Fatalf("events = %v, want [unreachable]", got)
+			}
+			var meta events.LinearIssueUnreachableMetadata
+			if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+				t.Fatal(err)
+			}
+			if meta.LinearTeamID != tc.wantTeam || meta.IssueIdentifier != "ENG-9" || meta.LinearTeamKey != "ENG" {
+				t.Errorf("metadata = %+v, want linear_team_id %q", meta, tc.wantTeam)
+			}
+		})
+	}
+}
+
 // TestRefreshLinear_LosingCASHasNoEffect: a refresh whose snapshot CAS loses
 // writes nothing — no event, no queue row, no snapshot.
 func TestRefreshLinear_LosingCASHasNoEffect(t *testing.T) {

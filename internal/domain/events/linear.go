@@ -7,9 +7,11 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Every metadata struct carries the same identity block: the issue's
 // identifier and UUID, its Linear team (id and key), its assignee (display
 // name and Linear user id) and its title. linear_team_id is what the router's
-// team gate reads, so it is on every Linear event without exception; the
-// assignee's user id is what assignee-centric routing joins against
-// user_linear_identities.
+// team gate reads, so the tracker sets it on every Linear event whenever
+// anything knows the team. The one event that can lack it is unreachable for
+// an issue with no snapshot whose key names no single armed team, and the
+// gate refuses that event for every team. The assignee's user id is what
+// assignee-centric routing joins against user_linear_identities.
 //
 // Status and priority are open-set discriminators, as on Jira: a transition
 // carries the new state name or priority label in both metadata and the
@@ -17,8 +19,8 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // predicate is written in and what a reader of the event sees.
 
 // LinearIssueIdentity is the block every Linear issue event's metadata
-// embeds. Embedded rather than repeated so the invariant that every event
-// carries linear_team_id is one declaration.
+// embeds. Embedded rather than repeated so every event carries linear_team_id
+// by one declaration.
 type LinearIssueIdentity struct {
 	IssueIdentifier string `json:"issue_identifier"` // "ENG-123"
 	IssueID         string `json:"issue_id"`         // Linear's UUID
