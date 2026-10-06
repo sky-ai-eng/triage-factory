@@ -415,3 +415,72 @@ func TestTruncatedBody_WritesNotRetried(t *testing.T) {
 		})
 	}
 }
+
+// TestTruncatedBody_WaitsOutRetryAfter: the headers of a response whose body
+// broke off arrived intact, so the retry waits for the Retry-After they carry
+// rather than the transient backoff.
+func TestTruncatedBody_WaitsOutRetryAfter(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.Header().Set("Retry-After", "1")
+			truncated(w, http.StatusTooManyRequests)
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	start := time.Now()
+	if _, err := clientAgainst(srv.URL).Get(context.Background(), "/x"); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Errorf("upstream requests = %d, want 2", got)
+	}
+	if elapsed := time.Since(start); elapsed < time.Second {
+		t.Errorf("retried after %v, before the 1s Retry-After", elapsed)
+	}
+}
+
+// TestTruncatedBody_WaitBeyondCapIsNotRetried: a response whose body broke
+// off, and whose headers ask for a wait longer than transientBackoffMax, is
+// returned after one attempt instead of being retried early, as the intact
+// response would be.
+func TestTruncatedBody_WaitBeyondCapIsNotRetried(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		header map[string]string
+	}{
+		{name: "Retry-After", status: http.StatusServiceUnavailable, header: map[string]string{"Retry-After": "120"}},
+		{name: "primary reset", status: http.StatusOK, header: map[string]string{
+			"X-RateLimit-Remaining": "0",
+			"X-RateLimit-Reset":     strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				for k, v := range tc.header {
+					w.Header().Set(k, v)
+				}
+				truncated(w, tc.status)
+			}))
+			t.Cleanup(srv.Close)
+
+			start := time.Now()
+			_, err := clientAgainst(srv.URL).Get(context.Background(), "/x")
+			var te *upstream.TransportError
+			if !errors.As(err, &te) {
+				t.Fatalf("err = %v, want a *upstream.TransportError", err)
+			}
+			if got := calls.Load(); got != 1 {
+				t.Errorf("upstream requests = %d, want 1", got)
+			}
+			if time.Since(start) > 5*time.Second {
+				t.Error("the call waited instead of returning")
+			}
+		})
+	}
+}
