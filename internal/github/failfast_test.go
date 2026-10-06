@@ -1,6 +1,7 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"net/http"
@@ -227,5 +228,79 @@ func TestFailFastScope_NoRetryAfterWait(t *testing.T) {
 	}
 	if got := served.Load(); got != 1 {
 		t.Errorf("made %d attempts, want 1", got)
+	}
+}
+
+// TestFailFastScope_TruncatedBodyMarksUnreachable: inside a fail-fast scope,
+// a response that breaks off mid-body marks its host unreachable, so a later
+// GET whose body also breaks off gets one attempt. The same GET outside any
+// scope keeps its retries.
+func TestFailFastScope_TruncatedBodyMarksUnreachable(t *testing.T) {
+	var served atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		served.Add(1)
+		truncated(w, http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	c := clientAgainst(srv.URL)
+	ctx := upstream.WithFailFast(context.Background())
+
+	if _, err := c.Post(ctx, "/repos/o/r/issues/1/comments", map[string]any{"body": "x"}); err == nil {
+		t.Fatal("a truncated response answered")
+	}
+	u, _ := url.Parse(srv.URL)
+	if !upstream.Unreachable(ctx, u.Host) {
+		t.Fatal("a truncated response did not mark the host unreachable")
+	}
+	before := served.Load()
+	if _, err := c.Get(ctx, "/x"); err == nil {
+		t.Fatal("a truncated response answered")
+	}
+	if got := served.Load() - before; got != 1 {
+		t.Errorf("a later GET made %d attempts, want 1", got)
+	}
+
+	before = served.Load()
+	_, _ = c.Get(context.Background(), "/x")
+	if got := served.Load() - before; got != 1+maxRateLimitRetries {
+		t.Errorf("a GET outside the scope made %d attempts, want %d", got, 1+maxRateLimitRetries)
+	}
+}
+
+// TestFailFastScope_RedirectedFailureMarksTheServingHost: a download is
+// redirected from the API host to a storage host. When the storage host's
+// response fails, by breaking off mid-body or by answering 503, the storage
+// host is marked unreachable and the API host is not, so later API requests
+// in the scope keep their retries.
+func TestFailFastScope_RedirectedFailureMarksTheServingHost(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		serve func(http.ResponseWriter)
+	}{
+		{name: "truncated body", serve: func(w http.ResponseWriter) { truncated(w, http.StatusOK) }},
+		{name: "503", serve: func(w http.ResponseWriter) { w.WriteHeader(http.StatusServiceUnavailable) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			storage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { tc.serve(w) }))
+			t.Cleanup(storage.Close)
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, storage.URL+"/blob", http.StatusFound)
+			}))
+			t.Cleanup(api.Close)
+			ctx := upstream.WithFailFast(context.Background())
+
+			var dst bytes.Buffer
+			if _, err := clientAgainst(api.URL).DownloadArtifact(ctx, "/logs", &dst, 1<<20); err == nil {
+				t.Fatal("a failed download succeeded")
+			}
+			apiURL, _ := url.Parse(api.URL)
+			storageURL, _ := url.Parse(storage.URL)
+			if upstream.Unreachable(ctx, apiURL.Host) {
+				t.Error("the storage host's failure marked the API host unreachable")
+			}
+			if !upstream.Unreachable(ctx, storageURL.Host) {
+				t.Error("the storage host that failed was not marked unreachable")
+			}
+		})
 	}
 }

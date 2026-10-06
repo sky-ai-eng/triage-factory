@@ -537,7 +537,7 @@ type errorBodyRoundTripper struct{}
 func (errorBodyRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return &http.Response{
 		StatusCode: http.StatusTooManyRequests,
-		Header:     http.Header{"Retry-After": []string{"1"}},
+		Header:     http.Header{},
 		Body:       io.NopCloser(&erroringReader{}),
 	}, nil
 }

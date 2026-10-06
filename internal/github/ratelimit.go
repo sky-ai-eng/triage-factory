@@ -37,10 +37,11 @@ const (
 	rateLimitBackoffBase = 1 * time.Second
 
 	// transientBackoffMax caps the wait before retrying a transient failure,
-	// and is the longest Retry-After on a 5xx that is waited out; a longer
-	// one returns the response instead of retrying before the server asked.
-	// A transient failure carries no reset time to wait for, so the cap is
-	// the poll-cycle scale, not the rate-limit one.
+	// and is the longest Retry-After on a 5xx, or on a response whose body
+	// broke off, that is waited out; a longer one returns the failure instead
+	// of retrying before the server asked. A transient failure carries no
+	// reset time of its own (a spent budget's reset is awaitBudget's to wait
+	// out), so the cap is the poll-cycle scale, not the rate-limit one.
 	transientBackoffMax = 30 * time.Second
 )
 
@@ -192,8 +193,8 @@ type reqBuilder func() (*http.Request, error)
 // rate limit (a 429, or a 403 that signals an exhausted primary budget or a
 // secondary/abuse limit) or a transient failure up to maxRateLimitRetries extra
 // attempts. See doWithRetry.
-func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Response, error) {
-	return c.doWithRetry(ctx, c.http, true, build)
+func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Response, []byte, error) {
+	return c.doWithRetry(ctx, c.http, true, false, build)
 }
 
 // doMutation sends a single, non-retried request over c.http. A mutation
@@ -201,15 +202,22 @@ func (c *Client) doIdempotent(ctx context.Context, build reqBuilder) (*http.Resp
 // replayed — a retried mutation could double the side effect — so a
 // rate-limited 429/403 response short-circuits straight into ErrRateLimited
 // and a transient failure is returned as-is. See doWithRetry.
-func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Response, error) {
-	return c.doWithRetry(ctx, c.http, false, build)
+func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Response, []byte, error) {
+	return c.doWithRetry(ctx, c.http, false, false, build)
+}
+
+// doStream is doIdempotent over hc for a response the caller streams instead
+// of buffering: a success comes back with its body unread, and only an error
+// response's body is returned. See doWithRetry.
+func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder) (*http.Response, []byte, error) {
+	return c.doWithRetry(ctx, hc, true, true, build)
 }
 
 // doWithRetry is the shared request loop behind every request-core method
 // (request, GetConditional, postGraphQL, DownloadArtifact — the last supplies
-// its own hc with an extended timeout, everything else passes c.http). Every
-// attempt is classified and counted (upstream.Record) against the client's
-// org.
+// its own hc with an extended timeout and streams its body, everything else
+// passes c.http). Every attempt is classified and counted (upstream.Record)
+// against the client's org.
 //
 // For idempotent calls it pre-flights a known exhausted budget (awaitBudget)
 // and retries up to maxRateLimitRetries extra attempts:
@@ -217,12 +225,15 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 //     x-ratelimit-remaining: 0, or a secondary-limit body — honoring
 //     Retry-After when present, else the primary reset time when that's what
 //     triggered it, else exponential backoff;
-//   - a transient failure — a dropped connection, a 5xx or a 408 — after the
-//     response's Retry-After when it has one, else transient backoff. A
-//     transient failure that another attempt would only repeat is returned
-//     at once: a 403 whose body is not JSON (a proxy in front of GHES), a
-//     TLS failure, or a timeout (upstream.RetryableResponse,
-//     upstream.RetryableTransport).
+//   - a transient failure — a dropped connection, a response body that breaks
+//     off partway, a 5xx or a 408 — after the response's Retry-After when it
+//     has one, else transient backoff. A body that breaks off is retried
+//     only once the budget its headers report has room again (awaitBudget),
+//     since a retry against a spent budget would be refused. A transient
+//     failure that another attempt would only repeat is returned at once: a
+//     403 whose body is not JSON (a proxy in front of GHES), a TLS failure, a
+//     timeout (upstream.RetryableResponse, upstream.RetryableTransport), or
+//     one whose Retry-After is beyond transientBackoffMax.
 //
 // Every sleep is ctx-aware. Mutations get exactly one attempt: a rate limit
 // returns ErrRateLimited immediately, and a transient failure is returned to
@@ -232,18 +243,24 @@ func (c *Client) doMutation(ctx context.Context, build reqBuilder) (*http.Respon
 // transient failure marks its host unreachable, and every later request to
 // that host gets one attempt the same way a mutation does. A request that
 // timed out counts toward its host's silence, and a later request to a silent
-// host is not sent (upstream.Silent).
+// host is not sent (upstream.Silent). A body that breaks off counts toward
+// unreachable only: the host answered. A response that fails marks the host
+// that served it, which after a redirect (an artifact's signed storage URL)
+// is not the host the request was sent to, so a storage host's failure does
+// not cost later API requests their retries.
 //
-// Any response that isn't retried is returned to the caller. A success keeps
-// its body untouched and still open, so callers that stream
-// (DownloadArtifact) or need the raw status (GetConditional's 304) keep their
-// own post-processing. An error response's body has already been read,
-// capped at upstream.MaxErrorBody, to classify it, and is replayed onto the
-// response for the caller.
-func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bool, build reqBuilder) (*http.Response, error) {
+// Any response that isn't retried is returned to the caller along with its
+// body, already read — whole for a success, capped at upstream.MaxErrorBody
+// for an error — so a success is counted only once its body has arrived. The
+// response's own Body is spent (http.NoBody). A streamed request (stream) is
+// the exception: its success comes back with the body unread, no bytes, and
+// the attempt not yet counted, and streamedBody counts it when the caller's
+// read ends. That read is never retried, because what it read is already in
+// the caller's hands.
+func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, stream bool, build reqBuilder) (*http.Response, []byte, error) {
 	if idempotent {
 		if err := c.awaitBudget(ctx); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
@@ -255,11 +272,11 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 	for attempt := 1; ; attempt++ {
 		req, err := build()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		host := req.URL.Host
 		if upstream.Silent(ctx, host) {
-			return nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
+			return nil, nil, &upstream.TransportError{Err: upstream.ErrHostSilent}
 		}
 		sent := time.Now()
 		resp, err := hc.Do(req)
@@ -269,41 +286,79 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 				// to it that fails says the proxy is down, not GitHub. That is
 				// a fault on this host, returned unmarked and uncounted: GitHub
 				// unreachable behind a live proxy arrives as the proxy's 502.
-				return nil, err
+				return nil, nil, err
 			}
 			class, counted := upstream.ClassifyTransport(ctx, err)
 			if !counted {
-				return nil, err
+				return nil, nil, err
 			}
 			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
 			if !upstream.RetryableTransport(err, idempotent) || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
 				upstream.MarkTransportFailure(ctx, host, sent, err)
-				return nil, &upstream.TransportError{Err: err}
+				return nil, nil, &upstream.TransportError{Err: err}
 			}
 			if err := c.retryAfter(ctx, attempt, class, transientBackoff(attempt)); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			continue
 		}
 		upstream.MarkAnswered(ctx, host)
 		c.recordRateLimit(resp.Header)
+		// The response came from the last hop of any redirect.
+		servedBy := host
+		if resp.Request != nil {
+			servedBy = resp.Request.URL.Host
+		}
+
+		if stream && resp.StatusCode < 400 {
+			resp.Body = &streamedBody{ReadCloser: resp.Body, ctx: ctx, orgID: c.orgID, host: servedBy}
+			return resp, nil, nil
+		}
+
+		var data []byte
+		var readErr error
+		if resp.StatusCode < 400 {
+			data, readErr = io.ReadAll(resp.Body)
+		} else {
+			data, readErr = upstream.ReadErrorBody(resp.Body)
+		}
+		resp.Body.Close()
+		resp.Body = http.NoBody
+		if readErr != nil {
+			// The response broke off mid-body: a transport failure like one
+			// from Do, retried on the same terms, after the Retry-After its
+			// headers carry, since those arrived intact. GitHub did answer, so
+			// it counts toward unreachable but never toward silent.
+			class, counted := upstream.ClassifyTransport(ctx, readErr)
+			if !counted {
+				return nil, nil, readErr
+			}
+			upstream.Record(ctx, upstream.GitHub, c.orgID, class)
+			wait, hasRetryAfter := upstream.RetryAfter(resp.Header)
+			if !hasRetryAfter {
+				wait = transientBackoff(attempt)
+			}
+			if !upstream.RetryableTransport(readErr, idempotent) || attempt >= maxAttempts ||
+				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
+				upstream.MarkUnreachable(ctx, servedBy)
+				return nil, nil, &upstream.TransportError{Err: readErr}
+			}
+			// Headers that report a spent primary budget mean the retry would
+			// be refused until it resets, so it waits as the next request
+			// would, or stops with ErrRateLimited.
+			if err := c.awaitBudget(ctx); err != nil {
+				return nil, nil, err
+			}
+			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
+				return nil, nil, err
+			}
+			continue
+		}
 
 		if resp.StatusCode < 400 {
 			upstream.Record(ctx, upstream.GitHub, c.orgID, upstream.OK)
-			return resp, nil
+			return resp, data, nil
 		}
-
-		data, readErr := upstream.ReadErrorBody(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			if class, counted := upstream.ClassifyTransport(ctx, readErr); counted {
-				upstream.Record(ctx, upstream.GitHub, c.orgID, class)
-				upstream.MarkUnreachable(ctx, host)
-				return nil, &upstream.TransportError{Err: readErr}
-			}
-			return nil, readErr
-		}
-		resp.Body = newBodyReader(data)
 
 		retryAfter, hasRetryAfter := upstream.RetryAfter(resp.Header)
 		primaryReset, primaryExhausted := primaryBudgetExhausted(resp.Header)
@@ -328,10 +383,10 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			}
 
 			if !idempotent || wait > maxRateLimitWait || attempt >= maxAttempts || upstream.Unreachable(ctx, host) {
-				return nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
+				return nil, nil, &ErrRateLimited{ResumeAt: time.Now().Add(wait)}
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		case upstream.Transient:
 			wait := transientBackoff(attempt)
@@ -340,14 +395,14 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent bo
 			}
 			if !upstream.RetryableResponse(resp.StatusCode, class, idempotent) || attempt >= maxAttempts ||
 				wait > transientBackoffMax || upstream.Unreachable(ctx, host) {
-				upstream.MarkUnreachable(ctx, host)
-				return resp, nil
+				upstream.MarkUnreachable(ctx, servedBy)
+				return resp, data, nil
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		default:
-			return resp, nil
+			return resp, data, nil
 		}
 	}
 }
@@ -389,11 +444,56 @@ func isSecondaryRateLimitBody(body []byte) bool {
 	return bytes.Contains(b, []byte("secondary rate limit")) || bytes.Contains(b, []byte("abuse detection mechanism"))
 }
 
-// newBodyReader wraps already-read bytes as a Response.Body replacement, so
-// a response whose body doWithRetry drained to inspect can still be read
-// normally by the caller.
-func newBodyReader(data []byte) io.ReadCloser {
-	return io.NopCloser(bytes.NewReader(data))
+// streamedBody is the body of a success doWithRetry returns unread, and it
+// counts that attempt once the outcome is known. A body read to its end, or
+// closed early by a caller that stopped reading, is OK. A read that breaks
+// off partway is a transport failure: it is counted as one, marks the host
+// unreachable, and is returned as a *upstream.TransportError so a caller can
+// tell it from a fault of its own, such as a failed write to its destination.
+type streamedBody struct {
+	io.ReadCloser
+	ctx   context.Context
+	orgID string
+	host  string
+	ended bool
+}
+
+func (b *streamedBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	switch err {
+	case nil:
+	case io.EOF:
+		b.end(upstream.OK, true)
+	default:
+		class, counted := upstream.ClassifyTransport(b.ctx, err)
+		b.end(class, counted)
+		if counted {
+			err = &upstream.TransportError{Err: err}
+		}
+	}
+	return n, err
+}
+
+func (b *streamedBody) Close() error {
+	b.end(upstream.OK, true)
+	return b.ReadCloser.Close()
+}
+
+// end counts the attempt the first time its outcome is known. An outcome
+// that is not counted (the caller's ctx ended) is not counted at Close
+// either.
+func (b *streamedBody) end(class upstream.Class, counted bool) {
+	if b.ended {
+		return
+	}
+	b.ended = true
+	if !counted {
+		return
+	}
+	upstream.Record(b.ctx, upstream.GitHub, b.orgID, class)
+	if class != upstream.OK {
+		upstream.MarkUnreachable(b.ctx, b.host)
+	}
 }
 
 // dialFailed reports whether err is a connection that never opened.
