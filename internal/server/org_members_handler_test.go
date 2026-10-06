@@ -201,6 +201,11 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	pgtest.MustExec(t, r.h.AdminDB,
 		`INSERT INTO user_github_identities (user_id, github_base_url, login, source, verified_at)
 		 VALUES ($1, 'https://github.com', 'admin-gh', 'pat', now())`, r.admin)
+	// A Linear binding in a workspace this org is not in: the org has no
+	// Linear workspace, so it must not surface as the admin's readiness.
+	pgtest.MustExec(t, r.h.AdminDB,
+		`INSERT INTO user_linear_identities (user_id, workspace_id, linear_user_id, source, verified_at)
+		 VALUES ($1, 'ws-elsewhere', 'lin-admin', 'api_key', now())`, r.admin)
 
 	rec := httptest.NewRecorder()
 	r.omh.handleOrgMembersList(rec, r.req(http.MethodPost, r.memb, "", map[string]any{}))
@@ -241,6 +246,9 @@ func TestOrgMembersList_AnyMemberReads(t *testing.T) {
 	}
 	if byID[r.admin].JiraAccountID != nil {
 		t.Errorf("admin jira_account_id = %v, want nil (not connected)", *byID[r.admin].JiraAccountID)
+	}
+	if byID[r.admin].LinearUserID != nil {
+		t.Errorf("admin linear_user_id = %v, want nil (bound only outside the org's workspace)", *byID[r.admin].LinearUserID)
 	}
 }
 

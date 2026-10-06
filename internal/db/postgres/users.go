@@ -326,6 +326,82 @@ func (s *usersStore) ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL 
 	return nil
 }
 
+func (s *usersStore) GetLinearIdentity(ctx context.Context, userID, workspaceID string) (string, string, error) {
+	return getLinearIdentity(ctx, s.q, userID, workspaceID)
+}
+
+func (s *usersStore) GetLinearIdentitySystem(ctx context.Context, userID, workspaceID string) (string, string, error) {
+	return getLinearIdentity(ctx, s.admin, userID, workspaceID)
+}
+
+func (s *usersStore) UserIDsForLinearAccountSystem(ctx context.Context, workspaceID, linearUserID string) ([]string, error) {
+	// Reverse of getLinearIdentity: (workspace, linear user) → user_id(s).
+	// Both ids match verbatim; every matching row is returned.
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT user_id::text
+		FROM user_linear_identities
+		WHERE workspace_id = $1 AND linear_user_id = $2
+		ORDER BY user_id ASC
+	`, workspaceID, linearUserID)
+	if err != nil {
+		return nil, fmt.Errorf("read user_linear_identities by account: %w", err)
+	}
+	return scanIDs(rows, "user_linear_identities.user_id")
+}
+
+func getLinearIdentity(ctx context.Context, q queryer, userID, workspaceID string) (string, string, error) {
+	var linearUserID, displayName sql.NullString
+	err := q.QueryRowContext(ctx,
+		`SELECT linear_user_id, display_name FROM user_linear_identities WHERE user_id = $1 AND workspace_id = $2`,
+		userID, workspaceID,
+	).Scan(&linearUserID, &displayName)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("read user_linear_identities: %w", err)
+	}
+	return linearUserID.String, displayName.String, nil
+}
+
+func (s *usersStore) UpsertLinearIdentity(ctx context.Context, userID, workspaceID, linearUserID, displayName, source string) error {
+	if workspaceID == "" {
+		return fmt.Errorf("upsert user_linear_identities: workspace_id required")
+	}
+	if linearUserID == "" {
+		return fmt.Errorf("upsert user_linear_identities: linear_user_id required")
+	}
+	var nameVal any
+	if displayName != "" {
+		nameVal = displayName
+	}
+	_, err := s.q.ExecContext(ctx, `
+		INSERT INTO user_linear_identities
+			(user_id, workspace_id, linear_user_id, display_name, source, verified_at, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, now(), now(), now())
+		ON CONFLICT (user_id, workspace_id) DO UPDATE SET
+			linear_user_id = EXCLUDED.linear_user_id,
+			display_name   = EXCLUDED.display_name,
+			source         = EXCLUDED.source,
+			verified_at    = EXCLUDED.verified_at,
+			updated_at     = now()
+	`, userID, workspaceID, linearUserID, nameVal, source)
+	if err != nil {
+		return fmt.Errorf("upsert user_linear_identities: %w", err)
+	}
+	return nil
+}
+
+func (s *usersStore) ClearLinearIdentity(ctx context.Context, userID, workspaceID string) error {
+	if _, err := s.q.ExecContext(ctx,
+		`DELETE FROM user_linear_identities WHERE user_id = $1 AND workspace_id = $2`,
+		userID, workspaceID,
+	); err != nil {
+		return fmt.Errorf("delete user_linear_identities: %w", err)
+	}
+	return nil
+}
+
 func (s *usersStore) GetLastActingTeam(ctx context.Context, userID string) (string, error) {
 	var teamID sql.NullString
 	err := s.q.QueryRowContext(ctx,

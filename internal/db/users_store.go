@@ -8,9 +8,9 @@ import (
 )
 
 // UsersStore owns the users table — identity facts that aren't secrets
-// (display_name) live on the row, plus the host-scoped per-provider
-// identity bindings in user_github_identities and
-// user_jira_identities. The keychain holds only actual
+// (display_name) live on the row, plus the per-provider identity bindings:
+// host-scoped in user_github_identities and user_jira_identities,
+// workspace-scoped in user_linear_identities. The keychain holds only actual
 // credentials (PATs in local mode); usernames and display names live in
 // the DB so local mode and multi mode share storage.
 //
@@ -140,6 +140,47 @@ type UsersStore interface {
 	// Exempt from the returned-row rule: it is a delete.
 	ClearJiraIdentity(ctx context.Context, userID, jiraBaseURL string) error
 
+	// GetLinearIdentity returns the user's Linear (linear_user_id,
+	// display_name) in a specific workspace (user_linear_identities, keyed on
+	// (user_id, workspace_id)), both "" when no row exists for that (user,
+	// workspace) pair. workspaceID is the org's Linear workspace
+	// (domain.OrgSettings.LinearWorkspaceID); callers resolve it from the org
+	// rather than taking it from a request. It is matched verbatim: Linear
+	// hands it back from the credential, so there is no host-style spelling to
+	// normalize. An empty workspaceID matches nothing, since the writer refuses
+	// one — an org with no Linear workspace has no Linear identities.
+	//
+	// A caller never substitutes a binding from another workspace when this
+	// one has none: a Linear user id is meaningful only in the workspace that
+	// issued it.
+	GetLinearIdentity(ctx context.Context, userID, workspaceID string) (linearUserID, displayName string, err error)
+
+	// UpsertLinearIdentity writes (or refreshes) the user's Linear identity
+	// in a workspace. linear_user_id + display_name come from one
+	// authenticated viewer query (viewer.id, viewer.displayName); source
+	// records how the binding was captured ('api_key' | 'connect_oauth' |
+	// 'scim'); verified_at is stamped to now() on every call. Upserts on the
+	// (user_id, workspace_id) key. workspaceID and linearUserID are required —
+	// one is the scope, the other the assignee-match key — so an empty one is
+	// rejected before touching the DB (NOT NULL only catches SQL NULL, not
+	// ""). Passing "" for displayName stores NULL. Returns an error when the
+	// user row does not exist. App pool only, like UpsertJiraIdentity: a
+	// capture is a claims-bearing request, and a claims-free writer (SCIM)
+	// would need a `...System` variant added.
+	//
+	// Exempt from the returned-row rule: same as UpsertJiraIdentity — a
+	// column-projection surface with no row read to project.
+	UpsertLinearIdentity(ctx context.Context, userID, workspaceID, linearUserID, displayName, source string) error
+
+	// ClearLinearIdentity deletes the user's Linear identity row for a
+	// workspace. No-op (nil error) when no row exists for that (user,
+	// workspace) pair. Mirrors ClearJiraIdentity, including that an
+	// org-credential disconnect does not call it: identity is owned by its own
+	// capture surface.
+	//
+	// Exempt from the returned-row rule: it is a delete.
+	ClearLinearIdentity(ctx context.Context, userID, workspaceID string) error
+
 	// --- Admin-pool variants (`...System`) ---
 	//
 	// GetGitHubLoginSystem mirrors GetGitHubLogin but routes through
@@ -244,6 +285,30 @@ type UsersStore interface {
 	// need a separate claims-scoped method with its own RLS story, and none
 	// is needed today. SQLite collapses to one connection.
 	UserIDsForJiraAccountSystem(ctx context.Context, jiraBaseURL, accountID string) ([]string, error)
+
+	// GetLinearIdentitySystem mirrors GetLinearIdentity but routes through the
+	// admin pool in Postgres, for claims-free callers that have no JWT claims
+	// to open an app-pool read under. Callers resolve the workspace the same
+	// way GetLinearIdentity's do. SQLite collapses the two variants to one
+	// connection.
+	GetLinearIdentitySystem(ctx context.Context, userID, workspaceID string) (linearUserID, displayName string, err error)
+
+	// UserIDsForLinearAccountSystem returns every TF user bound to
+	// linearUserID in workspaceID in user_linear_identities — the reverse of
+	// GetLinearIdentity, and the Linear twin of UserIDsForJiraAccountSystem.
+	// Workspace-scoped, org-agnostic. Empty slice (not error) when no binding
+	// exists, and for an empty workspaceID.
+	//
+	// Returns a set for the same reason the Jira twin does: the key is
+	// (user_id, workspace_id), so nothing stops two TF users binding one
+	// Linear user (a shared account, a stale row). Callers union the resulting
+	// teams. Both ids match verbatim; source / verified_at are out of scope.
+	//
+	// Admin pool / claims-free: system/router callers only. Exposing this
+	// reverse lookup to a request handler would be a cross-user identity probe
+	// (resolve any Linear user → any TF user). SQLite collapses to one
+	// connection.
+	UserIDsForLinearAccountSystem(ctx context.Context, workspaceID, linearUserID string) ([]string, error)
 
 	// UserIDsForVerifiedEmailSystem returns the principal user id(s) holding a
 	// VERIFIED login-identity email equal to email (case-insensitive), on the

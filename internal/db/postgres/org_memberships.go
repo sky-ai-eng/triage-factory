@@ -39,7 +39,7 @@ func newOrgMembershipsStore(app, admin queryer) db.OrgMembershipsStore {
 
 var _ db.OrgMembershipsStore = (*orgMembershipsStore)(nil)
 
-func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.OrgMember, int, error) {
+func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.OrgMember, int, error) {
 	// 1. Core roster on the app pool (RLS-gated). display_name is nullable —
 	//    COALESCE renders the empty string, matching GetDisplayName's "".
 	//    The count runs on the same pool and predicate as the page, so
@@ -93,7 +93,8 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 	//    and miss every github.com binding, so the whole roster would read
 	//    "Not connected". Jira has no public default host, so an unset
 	//    jira_base_url normalizes to "" and matches nothing — correct, since
-	//    that org has no Jira configured.
+	//    that org has no Jira configured. The Linear workspace is matched
+	//    verbatim, and an org with none matches nothing for the same reason.
 	ghMap, err := s.identityMap(ctx, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh
@@ -112,6 +113,15 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 	if err != nil {
 		return nil, 0, fmt.Errorf("list org member jira identities: %w", err)
 	}
+	linearMap, err := s.identityMap(ctx, `
+		SELECT l.user_id::text, l.linear_user_id
+		FROM user_linear_identities l
+		JOIN org_memberships om ON om.user_id = l.user_id AND om.org_id = $1
+		WHERE l.workspace_id = $2
+	`, orgID, linearWorkspaceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list org member linear identities: %w", err)
+	}
 
 	// 3. Merge. An absent (or empty) binding leaves the pointer nil — the
 	//    "Not connected" state, matching config_handler's "" → nil rule.
@@ -121,6 +131,9 @@ func (s *orgMembershipsStore) ListWithIdentity(ctx context.Context, orgID, githu
 		}
 		if acct, ok := jiraMap[out[i].UserID]; ok {
 			out[i].JiraAccountID = &acct
+		}
+		if id, ok := linearMap[out[i].UserID]; ok {
+			out[i].LinearUserID = &id
 		}
 	}
 	return out, total, nil

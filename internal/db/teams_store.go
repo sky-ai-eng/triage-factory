@@ -339,7 +339,10 @@ type TeamsStore interface {
 	// (EffectiveGitHubHost: an unset github_base_url resolves to the deployment default;
 	// NormalizeJiraHost: an unset jira_base_url matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
-	// host.
+	// host. linearWorkspaceID is the org's Linear workspace
+	// (domain.OrgSettings.LinearWorkspaceID), matched verbatim; "" matches
+	// nothing, and a member's LinearUserID is nil when they hold no binding in
+	// it.
 	//
 	// Postgres: the roster reads under the app pool (memberships_select RLS —
 	// any org member may read a team-in-org's roster); the identity enrichment
@@ -350,7 +353,7 @@ type TeamsStore interface {
 	// synthetic member. Local mode runs the roster's own consumers (the
 	// assignee picker, the predicate editor's variant choice), so this is a
 	// read both dialects owe an answer to.
-	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts ListOpts) ([]domain.TeamMember, int, error)
+	ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts ListOpts) ([]domain.TeamMember, int, error)
 
 	// AddMember enrolls userID on teamID with role ("admin" | "member" |
 	// "viewer"). App pool: memberships_insert RLS gates the write to team

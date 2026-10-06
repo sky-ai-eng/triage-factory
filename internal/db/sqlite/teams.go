@@ -641,15 +641,15 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 // same tables. Local mode is N=1 — the tenant seed enrolls the one implicit
 // user on the sole team with role 'admin' — so this returns exactly that
 // single member, with whatever GitHub / Jira binding they hold on the org's
-// hosts. It is a real query rather than a synthesized row because the
-// membership row genuinely exists: TeamIDsForUserInOrgSystem already resolves
-// the local user through it.
+// hosts and Linear binding they hold in its workspace. It is a real query
+// rather than a synthesized row because the membership row genuinely exists:
+// TeamIDsForUserInOrgSystem already resolves the local user through it.
 //
 // The roster's consumers run here too — the assignee picker, the predicate
 // editor's variant choice — so this is a read local mode needs answered, not
 // a stub for interface parity. The WRITES below are the local refusals:
 // enrolling a second member is the thing N=1 has no concept of.
-func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
+func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jiraBaseURL, linearWorkspaceID string, opts db.ListOpts) ([]domain.TeamMember, int, error) {
 	// The filtered total, on the same FROM as the page below so the count
 	// can't describe a different set than the rows it accompanies.
 	var total int
@@ -702,7 +702,8 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	// Postgres impl uses. Host resolution is the interface's, not the raw
 	// setting's: an unset github_base_url resolves to the deployment default, which is
 	// where the capture paths bind (they key on ghbase.ResolveBaseURL), and an
-	// unset jira_base_url normalizes to "" and matches nothing.
+	// unset jira_base_url normalizes to "" and matches nothing. The Linear
+	// workspace is matched verbatim, so an org with none matches nothing too.
 	ghMap, err := queryIdentityMap(ctx, s.q, `
 		SELECT gh.user_id, gh.login
 		FROM user_github_identities gh
@@ -721,6 +722,15 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	if err != nil {
 		return nil, 0, fmt.Errorf("list team member jira identities: %w", err)
 	}
+	linearMap, err := queryIdentityMap(ctx, s.q, `
+		SELECT l.user_id, l.linear_user_id
+		FROM user_linear_identities l
+		JOIN memberships m ON m.user_id = l.user_id AND m.team_id = ?
+		WHERE l.workspace_id = ?
+	`, teamID, linearWorkspaceID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list team member linear identities: %w", err)
+	}
 	// An absent (or empty) binding leaves the pointer nil — the "Not
 	// connected" state.
 	for i := range out {
@@ -729,6 +739,9 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 		}
 		if acct, ok := jiraMap[out[i].UserID]; ok {
 			out[i].JiraAccountID = &acct
+		}
+		if id, ok := linearMap[out[i].UserID]; ok {
+			out[i].LinearUserID = &id
 		}
 	}
 	return out, total, nil

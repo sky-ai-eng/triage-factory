@@ -58,6 +58,12 @@ type IdentityRoutingFactory func(t *testing.T) (IdentityRoutingStores, IdentityR
 //     host does not match).
 //   - UserIDsForJiraAccountSystem (the Jira twin) pins the identical
 //     contract keyed on the Atlassian account id instead of a login.
+//   - UserIDsForLinearAccountSystem (the Linear twin) pins it keyed on a
+//     workspace and a Linear user id, both matched verbatim, with the
+//     workspace as the scope where the others use a host. Linear has no
+//     capture route yet to cover its writes through, so the arm also pins
+//     the UsersStore Linear surface the reverse lookup reads from: the
+//     Get / GetSystem / Upsert / Clear round trip, and the writer's refusals.
 //   - TeamIDsForUserInOrgSystem returns exactly the user's teams in
 //     that org, excludes their teams in other orgs, and returns an
 //     empty slice for a non-member.
@@ -234,6 +240,168 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		}
 		if len(got) != 0 {
 			t.Errorf("UserIDsForJiraAccountSystem(other host) = %v; want empty slice", got)
+		}
+	})
+
+	const workspace = "6a0b8c3e-1f2d-4e5a-9b7c-0d1e2f3a4b5c"
+	const linearUser = "2d9e4f1a-7b3c-4d5e-8f6a-1b2c3d4e5f60"
+
+	t.Run("UserIDsForLinearAccount_ResolvesBoundUser", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, linearUser, "Aidan", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForLinearAccountSystem(ctx, workspace, linearUser)
+		if err != nil {
+			t.Fatalf("UserIDsForLinearAccountSystem: %v", err)
+		}
+		assertSameSet(t, "UserIDsForLinearAccountSystem", got, []string{u})
+	})
+
+	t.Run("UserIDsForLinearAccount_ReturnsAllUsersSharingAccount", func(t *testing.T) {
+		// The (user_id, workspace_id) key constrains uniqueness per user, so
+		// two TF users can bind the same Linear user in one workspace — the
+		// method must surface both (callers union the teams).
+		stores, seed := mk(t)
+		u1 := seed.User(t)
+		u2 := seed.User(t)
+		for _, u := range []string{u1, u2} {
+			if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, "shared-linear-user", "Shared", "api_key"); err != nil {
+				t.Fatalf("UpsertLinearIdentity(%s): %v", u, err)
+			}
+		}
+		got, err := stores.Users.UserIDsForLinearAccountSystem(ctx, workspace, "shared-linear-user")
+		if err != nil {
+			t.Fatalf("UserIDsForLinearAccountSystem: %v", err)
+		}
+		assertSameSet(t, "UserIDsForLinearAccountSystem", got, []string{u1, u2})
+	})
+
+	t.Run("UserIDsForLinearAccount_EmptyOnNoBinding", func(t *testing.T) {
+		stores, seed := mk(t)
+		// Bind a different Linear user so the table is non-empty — the
+		// absent row, not an empty table, is what must yield the empty slice.
+		u := seed.User(t)
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, "somebody", "Somebody", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForLinearAccountSystem(ctx, workspace, "nobody")
+		if err != nil {
+			t.Fatalf("UserIDsForLinearAccountSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("UserIDsForLinearAccountSystem(no binding) = %v; want empty slice", got)
+		}
+		// An org with no Linear workspace resolves nobody.
+		got, err = stores.Users.UserIDsForLinearAccountSystem(ctx, "", "somebody")
+		if err != nil {
+			t.Fatalf("UserIDsForLinearAccountSystem(no workspace): %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("UserIDsForLinearAccountSystem(no workspace) = %v; want empty slice", got)
+		}
+	})
+
+	t.Run("UserIDsForLinearAccount_WorkspaceScoped", func(t *testing.T) {
+		// Identity is keyed on (user_id, workspace); the same Linear user id
+		// read against another workspace is not this binding.
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, linearUser, "Aidan", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
+		got, err := stores.Users.UserIDsForLinearAccountSystem(ctx, "other-workspace", linearUser)
+		if err != nil {
+			t.Fatalf("UserIDsForLinearAccountSystem: %v", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("UserIDsForLinearAccountSystem(other workspace) = %v; want empty slice", got)
+		}
+	})
+
+	t.Run("LinearIdentity_RoundTrip", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+
+		// Both readers answer alike, and agree with each other at every step.
+		read := func(t *testing.T, ws string) (string, string) {
+			t.Helper()
+			id, name, err := stores.Users.GetLinearIdentity(ctx, u, ws)
+			if err != nil {
+				t.Fatalf("GetLinearIdentity: %v", err)
+			}
+			sysID, sysName, err := stores.Users.GetLinearIdentitySystem(ctx, u, ws)
+			if err != nil {
+				t.Fatalf("GetLinearIdentitySystem: %v", err)
+			}
+			if sysID != id || sysName != name {
+				t.Errorf("GetLinearIdentitySystem = (%q, %q), GetLinearIdentity = (%q, %q); want equal", sysID, sysName, id, name)
+			}
+			return id, name
+		}
+
+		if id, name := read(t, workspace); id != "" || name != "" {
+			t.Fatalf("absent row reads (%q, %q), want empty", id, name)
+		}
+
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, linearUser, "Aidan", "api_key"); err != nil {
+			t.Fatalf("UpsertLinearIdentity: %v", err)
+		}
+		if id, name := read(t, workspace); id != linearUser || name != "Aidan" {
+			t.Errorf("after bind = (%q, %q), want (%q, Aidan)", id, name, linearUser)
+		}
+
+		// A second workspace is a second row, not an overwrite of the first.
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, "second-workspace", "lin-elsewhere", "Elsewhere", "connect_oauth"); err != nil {
+			t.Fatalf("UpsertLinearIdentity(second workspace): %v", err)
+		}
+		if id, _ := read(t, workspace); id != linearUser {
+			t.Errorf("first workspace after second bind = %q, want %q (distinct key)", id, linearUser)
+		}
+
+		// A re-bind in the same workspace replaces the identity, and an
+		// empty display name stores NULL, which reads back as "".
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, "lin-rebound", "", "connect_oauth"); err != nil {
+			t.Fatalf("UpsertLinearIdentity(rebind): %v", err)
+		}
+		if id, name := read(t, workspace); id != "lin-rebound" || name != "" {
+			t.Errorf("after rebind = (%q, %q), want (lin-rebound, \"\")", id, name)
+		}
+		if got, err := stores.Users.UserIDsForLinearAccountSystem(ctx, workspace, linearUser); err != nil || len(got) != 0 {
+			t.Errorf("reverse lookup of the replaced id = %v, %v; want empty", got, err)
+		}
+
+		if err := stores.Users.ClearLinearIdentity(ctx, u, workspace); err != nil {
+			t.Fatalf("ClearLinearIdentity: %v", err)
+		}
+		if id, name := read(t, workspace); id != "" || name != "" {
+			t.Errorf("after clear = (%q, %q), want empty", id, name)
+		}
+		if id, _ := read(t, "second-workspace"); id != "lin-elsewhere" {
+			t.Errorf("second workspace after clearing the first = %q, want lin-elsewhere", id)
+		}
+		// Clearing what is already gone is a no-op, not an error.
+		if err := stores.Users.ClearLinearIdentity(ctx, u, workspace); err != nil {
+			t.Errorf("ClearLinearIdentity(absent): %v", err)
+		}
+	})
+
+	t.Run("UpsertLinearIdentity_Refusals", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, "", linearUser, "Aidan", "api_key"); err == nil {
+			t.Error("UpsertLinearIdentity(empty workspace) = nil, want an error")
+		}
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, "", "Aidan", "api_key"); err == nil {
+			t.Error("UpsertLinearIdentity(empty linear user id) = nil, want an error")
+		}
+		// The source set is closed, and Linear has no PAT.
+		if err := stores.Users.UpsertLinearIdentity(ctx, u, workspace, linearUser, "Aidan", "pat"); err == nil {
+			t.Error("UpsertLinearIdentity(source=pat) = nil, want the source CHECK to refuse it")
+		}
+		if id, _, err := stores.Users.GetLinearIdentity(ctx, u, workspace); err != nil || id != "" {
+			t.Errorf("after refused writes GetLinearIdentity = %q, %v; want no row", id, err)
 		}
 	})
 
