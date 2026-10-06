@@ -641,9 +641,9 @@ func (s *teamsStore) SetDailyCostCapSystem(ctx context.Context, teamID string, c
 // same tables. Local mode is N=1 — the tenant seed enrolls the one implicit
 // user on the sole team with role 'admin' — so this returns exactly that
 // single member, with whatever GitHub / Jira binding they hold on the org's
-// hosts and Linear binding they hold in its workspace. It is a real query rather than a synthesized row because the
-// membership row genuinely exists: TeamIDsForUserInOrgSystem already resolves
-// the local user through it.
+// hosts and Linear binding they hold in its workspace. It is a real query
+// rather than a synthesized row because the membership row genuinely exists:
+// TeamIDsForUserInOrgSystem already resolves the local user through it.
 //
 // The roster's consumers run here too — the assignee picker, the predicate
 // editor's variant choice — so this is a read local mode needs answered, not
