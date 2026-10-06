@@ -565,6 +565,7 @@ func (a *App) wire() {
 	if a.plan.serveHTTP {
 		a.srv.SetOnGitHubChanged(a.reloader.onGitHubChanged)
 		a.srv.SetOnJiraChanged(a.reloader.onJiraChanged)
+		a.srv.SetOnLinearChanged(a.reloader.onLinearChanged)
 		a.srv.SetOnSourcesChanged(a.sourcesChanged)
 		// The boundaries the server itself stamps (requeue/undo, takeover,
 		// delegate, team archive) and the configuration saves that may have

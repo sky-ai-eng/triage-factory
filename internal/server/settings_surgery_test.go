@@ -128,6 +128,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		"jira_base_url":        "https://jira.example.com",
 		"github_poll_interval": "31m0s",
 		"jira_poll_interval":   "37m0s",
+		"linear_poll_interval": "41m0s",
 		// github_clone_protocol is seeded at its own default rather than at
 		// "https", because clearing it is a transition INTO ssh mode and that
 		// transition runs the local ssh preflight — a real gate, and one no test
@@ -150,6 +151,7 @@ func TestOrgSettingsPatch_NullClearsEveryClearableField(t *testing.T) {
 		{"jira_base_url", ""},
 		{"github_poll_interval", defaults.GitHubPollInterval.String()},
 		{"jira_poll_interval", defaults.JiraPollInterval.String()},
+		{"linear_poll_interval", defaults.LinearPollInterval.String()},
 		{"github_clone_protocol", defaults.GitHubCloneProtocol},
 		// enabled_models is NOT omitempty on the wire: null is the org's "no
 		// preference expressed", which is a state the settings form has to

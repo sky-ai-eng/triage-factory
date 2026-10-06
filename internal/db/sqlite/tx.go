@@ -130,6 +130,7 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		OrgMemberships:           newOrgMembershipsStore(),
 		Teams:                    newTeamsStore(tx, tx),
 		JiraStatusRules:          newJiraStatusRulesStore(tx, tx),
+		LinearTeamRules:          newLinearTeamRulesStore(tx, tx),
 		TeamGitHubGroups:         newTeamGitHubGroupsStore(tx, tx),
 		TeamGitHubRepos:          newTeamGitHubReposStore(tx, tx),
 		GitHubApps:               newGitHubAppsStore(tx, newSecretStore()),

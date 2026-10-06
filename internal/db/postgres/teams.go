@@ -77,7 +77,7 @@ const pgTeamSettingsColumns = `array_to_json(jira_projects)::text,
 		       default_model, auto_delegate_enabled, auto_mode_enabled,
 		       permission_absent_grace_ms, permission_absent_autodeny_enabled,
 		       max_daily_cost_usd, branch_template, review_posture,
-		       base_branch_push_policy, enabled_models`
+		       base_branch_push_policy, enabled_models, array_to_json(linear_teams)::text`
 
 // scanTeamSettings decodes one team_settings row in pgTeamSettingsColumns order.
 func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
@@ -94,13 +94,14 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 		reviewPosture           string
 		basePushPolicy          string
 		enabledModels           sql.NullString
+		linearTeamsJSON         string
 	)
 	if err := scan(
 		&projectsJSON, &aiThreshold, &aiInterval,
 		&defaultModel, &autoDelegate, &autoMode,
 		&permAbsentGraceMS, &permAbsentAutodeny,
 		&maxDailyCost, &branchTemplate, &reviewPosture, &basePushPolicy,
-		&enabledModels,
+		&enabledModels, &linearTeamsJSON,
 	); err != nil {
 		return domain.TeamSettings{}, err
 	}
@@ -114,8 +115,15 @@ func scanTeamSettings(scan func(...any) error) (domain.TeamSettings, error) {
 	if err != nil {
 		return domain.TeamSettings{}, err
 	}
+	linearTeams := []string{}
+	if linearTeamsJSON != "" {
+		if err := json.Unmarshal([]byte(linearTeamsJSON), &linearTeams); err != nil {
+			return domain.TeamSettings{}, fmt.Errorf("unmarshal team_settings.linear_teams: %w", err)
+		}
+	}
 	return domain.TeamSettings{
 		JiraProjects:                    projects,
+		LinearTeams:                     linearTeams,
 		AIReprioritizeThreshold:         aiThreshold,
 		AIPreferenceUpdateInterval:      aiInterval,
 		DefaultModel:                    defaultModel,
@@ -594,6 +602,10 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 	if projects == nil {
 		projects = []string{}
 	}
+	linearTeams := u.LinearTeams
+	if linearTeams == nil {
+		linearTeams = []string{}
+	}
 	// max_daily_cost_usd rides along (0 → NULL via nullFloat) so a
 	// read-modify-write team-settings save round-trips the org-admin-set value
 	// untouched. The team-settings handler never populates that field from its
@@ -607,8 +619,8 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			auto_mode_enabled,
 			permission_absent_grace_ms, permission_absent_autodeny_enabled,
 			max_daily_cost_usd, branch_template, review_posture,
-			base_branch_push_policy, enabled_models, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+			base_branch_push_policy, enabled_models, linear_teams, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
 		ON CONFLICT (team_id) DO UPDATE SET
 			jira_projects = EXCLUDED.jira_projects,
 			ai_reprioritize_threshold = EXCLUDED.ai_reprioritize_threshold,
@@ -623,6 +635,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 			review_posture = EXCLUDED.review_posture,
 			base_branch_push_policy = EXCLUDED.base_branch_push_policy,
 			enabled_models = EXCLUDED.enabled_models,
+			linear_teams = EXCLUDED.linear_teams,
 			updated_at = now()
 		RETURNING `+pgTeamSettingsColumns,
 		teamID, projects, u.AIReprioritizeThreshold,
@@ -630,7 +643,7 @@ func (s *teamsStore) UpdateSettings(ctx context.Context, teamID string, u domain
 		u.AutoModeEnabled,
 		u.PermissionAbsentGraceMS, u.PermissionAbsentAutodenyEnabled,
 		nullFloat(u.MaxDailyCostUSD), u.BranchTemplate, u.ReviewPosture,
-		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels),
+		u.BaseBranchPushPolicy, db.ModelSetColumnValue(u.EnabledModels), linearTeams,
 	).Scan)
 	if err != nil {
 		return domain.TeamSettings{}, fmt.Errorf("upsert team_settings: %w", err)

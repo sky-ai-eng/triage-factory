@@ -309,6 +309,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol:   "https",
 			JiraBaseURL:           "https://acme.atlassian.net",
 			JiraPollInterval:      3 * time.Minute,
+			LinearWorkspaceID:     "linear-workspace-uuid",
+			LinearWorkspaceURLKey: "acme",
+			LinearPollInterval:    11 * time.Minute,
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",
 			EnabledModels:         []string{domain.ModelSonnet, domain.ModelHaiku},
@@ -1000,6 +1003,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		stores, ids := factory(t)
 		want := domain.TeamSettings{
 			JiraProjects:                    []string{"SKY", "ENG", "OPS"},
+			LinearTeams:                     []string{"linear-team-b", "linear-team-a"},
 			AIReprioritizeThreshold:         7,
 			AIPreferenceUpdateInterval:      30,
 			DefaultModel:                    domain.ModelOpus,
@@ -1050,6 +1054,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// and nil is the answer, which is exactly what a fresh row must hand
 		// back.
 		want.JiraProjects = []string{}
+		want.LinearTeams = []string{}
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("after SetDailyCostCapSystem on a fresh team\n got: %+v\nwant: %+v (defaults + cap)", got, want)
 		}
@@ -1180,6 +1185,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if len(got.JiraProjects) != 0 {
 			t.Errorf("JiraProjects=%v; want empty slice", got.JiraProjects)
+		}
+		if got.LinearTeams == nil || len(got.LinearTeams) != 0 {
+			t.Errorf("LinearTeams=%#v; want an empty non-nil slice", got.LinearTeams)
 		}
 	})
 

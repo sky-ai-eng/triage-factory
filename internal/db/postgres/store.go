@@ -291,6 +291,10 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// (poller manager + scorer reads at boot/poll-tick without
 		// JWT claims).
 		JiraStatusRules: newJiraStatusRulesStore(app, admin),
+		// LinearTeamRules: the same split as JiraStatusRules — app for
+		// ListForTeam + ReplaceForTeam under the linear_rules_* RLS
+		// policies, admin for the poller's and router's ...System reads.
+		LinearTeamRules: newLinearTeamRulesStore(app, admin),
 		// TeamGitHubGroups holds both pools: app for ListForTeam +
 		// SetForTeam (request-handler reads/writes gated by
 		// team_github_groups_* RLS policies) and admin for
@@ -517,6 +521,7 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		OrgMemberships:        newOrgMembershipsStore(tx, tx),
 		Teams:                 newTeamsStore(tx, tx),
 		JiraStatusRules:       newJiraStatusRulesStore(tx, tx),
+		LinearTeamRules:       newLinearTeamRulesStore(tx, tx),
 		TeamGitHubGroups:      newTeamGitHubGroupsStore(tx, tx),
 		TeamGitHubRepos:       newTeamGitHubReposStore(tx, tx),
 		// Both pools collapse to tx (test door). BackfillInstallationsFromAPI's

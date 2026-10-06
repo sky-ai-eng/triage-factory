@@ -97,6 +97,18 @@ func (r *reloader) onJiraChanged(orgID string) {
 	r.pollSoon("jira", orgID) // apply now, don't wait out the interval
 }
 
+// onLinearChanged reacts to a change in an org's armed Linear configuration:
+// it re-dues that org's Linear poll, in both modes, and arms the one-shot
+// "config took effect" toast. Unlike Jira there is no process-global loop to
+// restart in local mode — the cadence is per org, so re-duing the one org is
+// the whole reaction. PollSoon is a no-op for a source with no scheduled slot,
+// so this is safe before anything polls Linear.
+func (r *reloader) onLinearChanged(orgID string) {
+	serverLog.Info("linear config changed; re-duing linear poll for org", "org", orgID)
+	r.setAnnouncePending(orgID, "linear")
+	r.pollSoon("linear", orgID)
+}
+
 // initialPoll starts polling — RestartAll in both modes. The poll loops fan
 // out over ListActiveSystem each wake, so orgs and repos added via the UI /
 // admin API are picked up without a restart, and the poll-complete

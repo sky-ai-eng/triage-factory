@@ -376,6 +376,35 @@ func TestGetIssue_NotFound(t *testing.T) {
 	}
 }
 
+func TestGetTeam(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"team":{"id":"team-1","key":"TFAC","name":"Triage Factory","private":true}}}`}))
+	got, err := s.client().GetTeam(context.Background(), "team-1")
+	if err != nil {
+		t.Fatalf("GetTeam: %v", err)
+	}
+	if want := (Team{ID: "team-1", Key: "TFAC", Name: "Triage Factory", Private: true}); got != want {
+		t.Errorf("GetTeam = %+v, want %+v", got, want)
+	}
+	if v := string(s.requests()[0].Variables["id"]); v != `"team-1"` {
+		t.Errorf("id variable = %s, want \"team-1\"", v)
+	}
+}
+
+func TestGetTeam_NotFound(t *testing.T) {
+	cases := map[string]reply{
+		"entity not found text": {status: http.StatusBadRequest, body: `{"errors":[{"message":"Entity not found: Team","extensions":{"code":"INVALID_INPUT"}}]}`},
+		"null team":             {body: `{"data":{"team":null}}`},
+	}
+	for name, rep := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t, scripted(rep))
+			if _, err := s.client().GetTeam(context.Background(), "team-x"); !errors.Is(err, ErrNotFound) {
+				t.Fatalf("err = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
 const issueJSON = `{
   "id": "uuid-1", "identifier": "TFAC-86", "title": "Linear", "description": "body",
   "url": "https://linear.app/sky/issue/TFAC-86", "priority": 2, "priorityLabel": "High",

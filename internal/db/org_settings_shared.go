@@ -22,22 +22,46 @@ type SourceOverride struct {
 	HasInterval bool
 }
 
-// ApplyOrgSourceOverrides fills set's four org_event_sources-backed fields. A
+// SourceOverrides is the per-kind SourceOverride for every source whose
+// org_event_sources row OrgsStore composes into domain.OrgSettings. Linear has
+// a poll cadence and no base URL: it is SaaS-only, so its BaseURL is never
+// written and never read.
+type SourceOverrides struct {
+	GitHub, Jira, Linear SourceOverride
+}
+
+// Set records ov under kind, ignoring a kind OrgsStore does not compose.
+func (o *SourceOverrides) Set(kind string, ov SourceOverride) {
+	switch kind {
+	case "github":
+		o.GitHub = ov
+	case "jira":
+		o.Jira = ov
+	case "linear":
+		o.Linear = ov
+	}
+}
+
+// ApplyOrgSourceOverrides fills set's org_event_sources-backed fields. A
 // missing poll-interval override resolves to DefaultOrgSettings()'s 5-minute
 // cadence — the same fallback the org_settings NOT NULL DEFAULT columns used
 // to give for free. A missing base-URL override resolves to "", matching that
 // column's existing NULL round-trip.
-func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverride) {
+func ApplyOrgSourceOverrides(set *domain.OrgSettings, ov SourceOverrides) {
 	defaults := domain.DefaultOrgSettings()
-	set.GitHubBaseURL = github.BaseURL
+	set.GitHubBaseURL = ov.GitHub.BaseURL
 	set.GitHubPollInterval = defaults.GitHubPollInterval
-	if github.HasInterval {
-		set.GitHubPollInterval = github.Interval
+	if ov.GitHub.HasInterval {
+		set.GitHubPollInterval = ov.GitHub.Interval
 	}
-	set.JiraBaseURL = jira.BaseURL
+	set.JiraBaseURL = ov.Jira.BaseURL
 	set.JiraPollInterval = defaults.JiraPollInterval
-	if jira.HasInterval {
-		set.JiraPollInterval = jira.Interval
+	if ov.Jira.HasInterval {
+		set.JiraPollInterval = ov.Jira.Interval
+	}
+	set.LinearPollInterval = defaults.LinearPollInterval
+	if ov.Linear.HasInterval {
+		set.LinearPollInterval = ov.Linear.Interval
 	}
 }
 
@@ -46,9 +70,11 @@ func ApplyOrgSourceOverrides(set *domain.OrgSettings, github, jira SourceOverrid
 // anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 // background_jobs_model, llm_auth_method, max_daily_cost_usd,
 // max_concurrent_runs, marketplace_enabled, api_token_max_age_days,
-// github_credential_class, version.
-// GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval are left
-// at the Go zero value — callers apply ApplyOrgSourceOverrides afterward.
+// linear_workspace_id, linear_workspace_url_key, github_credential_class,
+// version.
+// GitHubBaseURL / GitHubPollInterval / JiraBaseURL / JiraPollInterval /
+// LinearPollInterval are left at the Go zero value — callers apply
+// ApplyOrgSourceOverrides afterward.
 //
 // The scan itself has no dialect content left (both backends read the same
 // plain column types for what remains after github_base_url /
@@ -64,6 +90,8 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		maxConcurrentRuns              sql.NullInt64
 		marketplaceEnabled             bool
 		apiTokenMaxAgeDays             sql.NullInt64
+		linearWorkspaceID              sql.NullString
+		linearWorkspaceURLKey          sql.NullString
 		credentialClass                string
 		version                        int
 	)
@@ -71,6 +99,7 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		&cloneProto,
 		&anthRef, &bedRef, &enabledModels, &backgroundJobsModel, &llmAuthMethod,
 		&maxDailyCost, &maxConcurrentRuns, &marketplaceEnabled, &apiTokenMaxAgeDays,
+		&linearWorkspaceID, &linearWorkspaceURLKey,
 		&credentialClass, &version,
 	); err != nil {
 		return domain.OrgSettings{}, err
@@ -115,6 +144,9 @@ func ScanOrgSettingsCore(scan func(...any) error) (domain.OrgSettings, error) {
 		MaxConcurrentRuns:  concurrentRuns,
 		MarketplaceEnabled: marketplaceEnabled,
 		APITokenMaxAgeDays: tokenMaxAge,
+		// NULL → "": no Linear credential bound.
+		LinearWorkspaceID:     linearWorkspaceID.String,
+		LinearWorkspaceURLKey: linearWorkspaceURLKey.String,
 		// Surfaced verbatim, never coerced to a known value: callers switch on
 		// it and refuse what they don't recognise, which is the whole point of
 		// storing the class instead of inferring it.

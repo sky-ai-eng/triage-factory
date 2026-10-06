@@ -588,6 +588,39 @@ CREATE TABLE public.jira_project_status_rules (
 );
 
 
+-- One row per (team, Linear team) the team watches — the Linear sibling of
+-- jira_project_status_rules, with a Linear team (keyed by UUID) as the tracked
+-- unit. linear_team_key ("ENG") and linear_team_name are display values
+-- refreshed on every write. Members are jsonb arrays of {"id","name","type"}
+-- workflow-state refs, a canonical one such object; the id is the identity.
+-- No in_review rule. A row is watched-but-unarmed (every rule empty) or armed
+-- (pickup members, plus members and a canonical for in_progress and done) —
+-- never half of a mapping. "canonical is in members" needs a subquery, so it
+-- is the HTTP validator's.
+CREATE TABLE public.linear_team_rules (
+    team_id uuid NOT NULL,
+    linear_team_id text NOT NULL,
+    linear_team_key text NOT NULL,
+    linear_team_name text DEFAULT ''::text NOT NULL,
+    pickup_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_progress_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    in_progress_canonical jsonb,
+    done_members jsonb DEFAULT '[]'::jsonb NOT NULL,
+    done_canonical jsonb,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT ltr_linear_team_id_populated CHECK (linear_team_id <> ''),
+    CONSTRAINT ltr_linear_team_key_populated CHECK (linear_team_key <> ''),
+    CONSTRAINT ltr_armed_or_unarmed CHECK (
+        (jsonb_array_length(pickup_members) = 0
+            AND jsonb_array_length(in_progress_members) = 0 AND in_progress_canonical IS NULL
+            AND jsonb_array_length(done_members) = 0 AND done_canonical IS NULL)
+        OR (jsonb_array_length(pickup_members) > 0
+            AND jsonb_array_length(in_progress_members) > 0 AND in_progress_canonical IS NOT NULL
+            AND jsonb_array_length(done_members) > 0 AND done_canonical IS NOT NULL)
+    )
+);
+
+
 -- One row per (team, github_org_login, github_team_slug): a team routing a
 -- GitHub team's review requests to itself. Dumb string labels, no membership
 -- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
@@ -676,6 +709,15 @@ CREATE TABLE public.org_settings (
     -- expires_at: a token's row records the expiry it was minted with, and this
     -- narrows that at every use.
     api_token_max_age_days integer CHECK (api_token_max_age_days IS NULL OR api_token_max_age_days BETWEEN 1 AND 365),
+    -- The Linear workspace the org's Linear credential belongs to, learned from
+    -- the credential's own organization { id urlKey }, never typed. Written by
+    -- the credential bind / install, cleared by the unbind; UpdateSettings
+    -- carries them through a read-modify-write and the settings PATCH has no
+    -- field for either. NULL = no Linear credential bound. A user's own Linear
+    -- credential is keyed under linear_workspace_id. The Linear poll cadence is
+    -- org_event_sources.poll_interval under kind 'linear', not a column here.
+    linear_workspace_id text,
+    linear_workspace_url_key text,
     -- Optimistic-concurrency token for the whole-row settings save: the read
     -- hands it to the client, the write requires it, a stale token gets 409, and
     -- there is no merge. Bumped by OrgsStore.UpdateSettings alone, and it covers
@@ -1235,6 +1277,10 @@ CREATE TABLE public.team_agents (
 CREATE TABLE public.team_settings (
     team_id uuid NOT NULL,
     jira_projects text[] DEFAULT '{}'::text[] NOT NULL,
+    -- The Linear team UUIDs this team tracks, in display order. Display order
+    -- only: linear_team_rules is the truth for which Linear teams are tracked,
+    -- as jira_project_status_rules is for jira_projects.
+    linear_teams text[] DEFAULT '{}'::text[] NOT NULL,
     ai_reprioritize_threshold integer DEFAULT 5 NOT NULL,
     ai_preference_update_interval integer DEFAULT 20 NOT NULL,
     -- default_model is a concrete model id (a modelcatalog key), never a vendor
@@ -1418,6 +1464,10 @@ ALTER TABLE ONLY public.events
 
 ALTER TABLE ONLY public.jira_project_status_rules
     ADD CONSTRAINT jira_project_status_rules_pkey PRIMARY KEY (team_id, project_key);
+
+
+ALTER TABLE ONLY public.linear_team_rules
+    ADD CONSTRAINT linear_team_rules_pkey PRIMARY KEY (team_id, linear_team_id);
 
 
 ALTER TABLE ONLY public.team_github_groups
@@ -1824,6 +1874,9 @@ CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.event_handlers FOR EACH RO
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.jira_project_status_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
+CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.linear_team_rules FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
+
+
 CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.org_settings FOR EACH ROW EXECUTE FUNCTION tf.set_updated_at();
 
 
@@ -1920,6 +1973,10 @@ ALTER TABLE ONLY public.events
 
 ALTER TABLE ONLY public.jira_project_status_rules
     ADD CONSTRAINT jira_project_status_rules_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
+
+
+ALTER TABLE ONLY public.linear_team_rules
+    ADD CONSTRAINT linear_team_rules_team_id_fkey FOREIGN KEY (team_id) REFERENCES public.teams(id) ON DELETE CASCADE;
 
 
 ALTER TABLE ONLY public.team_github_groups
@@ -2317,6 +2374,23 @@ CREATE POLICY jira_rules_select ON public.jira_project_status_rules FOR SELECT U
 
 
 CREATE POLICY jira_rules_update ON public.jira_project_status_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
+
+
+ALTER TABLE public.linear_team_rules ENABLE ROW LEVEL SECURITY;
+
+
+CREATE POLICY linear_rules_delete ON public.linear_team_rules FOR DELETE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
+
+
+CREATE POLICY linear_rules_insert ON public.linear_team_rules FOR INSERT WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
+
+
+CREATE POLICY linear_rules_select ON public.linear_team_rules FOR SELECT USING ((tf.team_in_current_org(team_id) AND (EXISTS ( SELECT 1
+   FROM public.memberships m
+  WHERE ((m.team_id = linear_team_rules.team_id) AND (m.user_id = tf.current_user_id()))))));
+
+
+CREATE POLICY linear_rules_update ON public.linear_team_rules FOR UPDATE USING ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id))) WITH CHECK ((tf.team_in_current_org(team_id) AND tf.user_is_team_admin(team_id)));
 
 
 ALTER TABLE public.team_github_groups ENABLE ROW LEVEL SECURITY;
@@ -2804,6 +2878,13 @@ GRANT ALL ON TABLE public.jira_project_status_rules TO anon;
 GRANT ALL ON TABLE public.jira_project_status_rules TO authenticated;
 GRANT ALL ON TABLE public.jira_project_status_rules TO service_role;
 GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.jira_project_status_rules TO tf_app;
+
+
+GRANT ALL ON TABLE public.linear_team_rules TO postgres;
+GRANT ALL ON TABLE public.linear_team_rules TO anon;
+GRANT ALL ON TABLE public.linear_team_rules TO authenticated;
+GRANT ALL ON TABLE public.linear_team_rules TO service_role;
+GRANT SELECT,INSERT,DELETE,UPDATE ON TABLE public.linear_team_rules TO tf_app;
 
 
 GRANT ALL ON TABLE public.team_github_groups TO postgres;

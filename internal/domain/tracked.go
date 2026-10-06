@@ -377,6 +377,32 @@ func MarshalLinearStateRefs(refs []LinearStateRef) (string, error) {
 	return string(raw), nil
 }
 
+// MarshalLinearStateRef renders a rule's canonical for storage. The zero ref
+// renders as "", which the stores turn into SQL NULL: an unset canonical.
+func MarshalLinearStateRef(ref LinearStateRef) (string, error) {
+	if ref.IsZero() {
+		return "", nil
+	}
+	raw, err := json.Marshal(ref)
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+// UnmarshalLinearStateRef reads a canonical back. An empty column is an unset
+// canonical, not an error.
+func UnmarshalLinearStateRef(raw string) (LinearStateRef, error) {
+	if strings.TrimSpace(raw) == "" {
+		return LinearStateRef{}, nil
+	}
+	var ref LinearStateRef
+	if err := json.Unmarshal([]byte(raw), &ref); err != nil {
+		return LinearStateRef{}, err
+	}
+	return ref, nil
+}
+
 // UnmarshalLinearStateRefs reads a rule's members back. An empty column reads
 // as no members.
 func UnmarshalLinearStateRefs(raw string) ([]LinearStateRef, error) {

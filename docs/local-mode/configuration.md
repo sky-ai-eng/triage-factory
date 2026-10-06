@@ -23,6 +23,34 @@ Jira setup in Settings goes connect → watch → map:
    valid saved state, so **Save** is blocked only by a half-finished rule (one
    with statuses picked but no write target), never by an unmapped project.
 
+## Linear setup
+
+Linear setup also goes connect → watch → map, with one difference: Linear
+types every workflow state, so watching a team maps it for you.
+
+1. Connect Linear under Workspace settings. The workspace is read from the
+   credential itself; there is nothing to type.
+2. Under the team's **Linear teams** section, the picker lists the Linear teams
+   your credential can see, read live from Linear. Private teams are marked.
+3. **Watch** a team in one click. Its workflow states are read straight away
+   and its rules are filled in from their types:
+   - pickup: every triage, backlog and unstarted state
+   - in progress: every started state, moving issues into the first one on the
+     board
+   - done: every completed and canceled state, moving issues into the first
+     completed one
+4. Adjust the mapping if it doesn't suit the team, then **Save**. The pre-fill
+   only lives in the form until you save. A workflow with no started or no
+   completed state can't be filled in, so that team shows *States not mapped*
+   until you map it by hand.
+5. Only a saved, fully mapped team is polled. A Linear team is either watched
+   with nothing mapped or mapped with all three rules; **Save** is blocked on a
+   team that is mapped part way, and clearing all three rules leaves it watched.
+
+Rules are stored by state id, so renaming a state in Linear doesn't break them.
+A state deleted from the workflow is flagged on the team's row for you to
+remove.
+
 ## Credentials
 
 All credentials (GitHub PAT, Jira PAT, the Anthropic key, GitHub App private

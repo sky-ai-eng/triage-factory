@@ -87,6 +87,28 @@ func (c *Client) ListTeams(ctx context.Context, q, after string, first int) (Tea
 	}, nil
 }
 
+// GetTeam returns one team by its UUID. A team that does not exist, or that
+// the credential cannot see, is an error matching ErrNotFound: Linear answers
+// both the same way.
+func (c *Client) GetTeam(ctx context.Context, id string) (Team, error) {
+	if err := requireID("team id", id); err != nil {
+		return Team{}, err
+	}
+	var data struct {
+		Team *Team `json:"team"`
+	}
+	if err := c.query(ctx, teamQuery, map[string]any{"id": id}, &data); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Team{}, fmt.Errorf("linear: team %s: %w", id, err)
+		}
+		return Team{}, err
+	}
+	if data.Team == nil {
+		return Team{}, fmt.Errorf("%w: team %s", ErrNotFound, id)
+	}
+	return *data.Team, nil
+}
+
 // ListWorkflowStates returns every workflow state of a team, ordered by
 // position.
 func (c *Client) ListWorkflowStates(ctx context.Context, teamID string) ([]WorkflowState, error) {

@@ -24,6 +24,7 @@ func TestBaseline_AppliesCleanly(t *testing.T) {
 	expectedTables := []string{
 		"orgs", "teams", "users", "user_github_identities", "user_jira_identities", "memberships", "org_memberships", "sessions", "user_api_tokens",
 		"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
+		"linear_team_rules",
 		"team_github_groups", "team_github_repos",
 		"prompts", "events_catalog", "entities", "entity_links", "events",
 		"event_handlers", "tasks", "task_events", "conversations", "claims", "artifacts",

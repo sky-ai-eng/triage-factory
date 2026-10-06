@@ -474,6 +474,7 @@ var orgScopedTables = []string{
 	// users + auth.users handled separately (auth.users is image-owned).
 	// Settings:
 	"org_settings", "team_settings", "user_settings", "jira_project_status_rules",
+	"linear_team_rules",
 	"team_github_groups", "team_github_repos",
 	"user_github_identities",
 	"user_jira_identities",

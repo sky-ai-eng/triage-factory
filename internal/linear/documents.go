@@ -55,6 +55,11 @@ query Teams($filter: TeamFilter, $first: Int!, $after: String) {
   }
 }`
 
+const teamQuery = `
+query Team($id: String!) {
+  team(id: $id) { id key name private }
+}`
+
 const workflowStatesQuery = `
 query WorkflowStates($teamID: ID!, $first: Int!, $after: String) {
   workflowStates(filter: { team: { id: { eq: $teamID } } }, first: $first, after: $after) {

@@ -119,7 +119,8 @@ const orgSettingsColumns = `github_clone_protocol,
 	       anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 	       background_jobs_model, llm_auth_method,
 	       max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-	       api_token_max_age_days, github_credential_class, version`
+	       api_token_max_age_days, linear_workspace_id, linear_workspace_url_key,
+	       github_credential_class, version`
 
 func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSettings, error) {
 	set, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
@@ -136,27 +137,28 @@ func getOrgSettings(ctx context.Context, q queryer, orgID string) (domain.OrgSet
 	} else if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_settings: %w", err)
 	}
-	github, jira, err := readSourceOverrides(ctx, q, orgID)
+	overrides, err := readSourceOverrides(ctx, q, orgID)
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
 	}
-	db.ApplyOrgSourceOverrides(&set, github, jira)
+	db.ApplyOrgSourceOverrides(&set, overrides)
 	return set, nil
 }
 
-// readSourceOverrides reads the github + jira org_event_sources rows'
+// readSourceOverrides reads the github, jira and linear org_event_sources rows'
 // base_url / poll_interval in one query. A NULL column, or an altogether
 // absent row, reports the zero db.SourceOverride for that column — applied by
 // db.ApplyOrgSourceOverrides. EXTRACT(EPOCH FROM NULL) is NULL, so the
 // nullable interval scans straight into sql.NullFloat64 the same way
 // orgSettingsColumns' poll-interval expressions used to.
-func readSourceOverrides(ctx context.Context, q queryer, orgID string) (github, jira db.SourceOverride, err error) {
+func readSourceOverrides(ctx context.Context, q queryer, orgID string) (db.SourceOverrides, error) {
+	var out db.SourceOverrides
 	rows, err := q.QueryContext(ctx, `
 		SELECT kind, base_url, EXTRACT(EPOCH FROM poll_interval)::double precision
 		FROM org_event_sources
-		WHERE org_id = $1 AND kind IN ('github', 'jira')`, orgID)
+		WHERE org_id = $1 AND kind IN ('github', 'jira', 'linear')`, orgID)
 	if err != nil {
-		return db.SourceOverride{}, db.SourceOverride{}, err
+		return db.SourceOverrides{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -166,20 +168,15 @@ func readSourceOverrides(ctx context.Context, q queryer, orgID string) (github, 
 			secs    sql.NullFloat64
 		)
 		if err := rows.Scan(&kind, &baseURL, &secs); err != nil {
-			return db.SourceOverride{}, db.SourceOverride{}, err
+			return db.SourceOverrides{}, err
 		}
 		ov := db.SourceOverride{BaseURL: baseURL.String}
 		if secs.Valid {
 			ov.Interval, ov.HasInterval = secondsToDuration(secs.Float64), true
 		}
-		switch kind {
-		case "github":
-			github = ov
-		case "jira":
-			jira = ov
-		}
+		out.Set(kind, ov)
 	}
-	return github, jira, rows.Err()
+	return out, rows.Err()
 }
 
 // upsertSourceOverride writes org_event_sources.base_url + poll_interval for
@@ -281,6 +278,8 @@ const orgSettingsConflictUpdate = `
 			max_concurrent_runs = EXCLUDED.max_concurrent_runs,
 			marketplace_enabled = EXCLUDED.marketplace_enabled,
 			api_token_max_age_days = EXCLUDED.api_token_max_age_days,
+			linear_workspace_id = EXCLUDED.linear_workspace_id,
+			linear_workspace_url_key = EXCLUDED.linear_workspace_url_key,
 			version = org_settings.version + 1,
 			updated_at = now()`
 
@@ -318,6 +317,9 @@ func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
 		// the handler let through below the band would be an error at the DB
 		// rather than a silently stored non-policy — nullInt keeps 0 out of it.
 		nullInt(u.APITokenMaxAgeDays),
+		// "" is no Linear credential bound, which the column holds as NULL.
+		nullString(u.LinearWorkspaceID),
+		nullString(u.LinearWorkspaceURLKey),
 	}
 }
 
@@ -343,10 +345,10 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-			api_token_max_age_days,
+			api_token_max_age_days, linear_workspace_id, linear_workspace_url_key,
 			version, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, now()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 1, now()
 		)`+conflict+`
 		RETURNING `+orgSettingsColumns, orgSettingsWriteArgs(orgID, u)...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
@@ -375,9 +377,11 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			max_concurrent_runs = $9,
 			marketplace_enabled = $10,
 			api_token_max_age_days = $11,
+			linear_workspace_id = $12,
+			linear_workspace_url_key = $13,
 			version = version + 1,
 			updated_at = now()
-		WHERE org_id = $1 AND version = $12
+		WHERE org_id = $1 AND version = $14
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
@@ -404,10 +408,15 @@ func (s *orgsStore) finishSettingsWrite(ctx context.Context, orgID string, u dom
 	if err := upsertSourceOverride(ctx, s.app, orgID, "jira", u.JiraBaseURL, u.JiraPollInterval); err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("upsert jira source config: %w", err)
 	}
+	// Linear is SaaS-only: no base URL, only a cadence.
+	if err := upsertSourceOverride(ctx, s.app, orgID, "linear", "", u.LinearPollInterval); err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("upsert linear source config: %w", err)
+	}
 	stored.GitHubBaseURL = u.GitHubBaseURL
 	stored.GitHubPollInterval = u.GitHubPollInterval
 	stored.JiraBaseURL = u.JiraBaseURL
 	stored.JiraPollInterval = u.JiraPollInterval
+	stored.LinearPollInterval = u.LinearPollInterval
 	return stored, nil
 }
 
@@ -441,11 +450,11 @@ func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, 
 	// This writer doesn't touch org_event_sources — read the org's current
 	// base_url / poll_interval rather than leave them zero, so the row this
 	// hands back still matches what a follow-up GetSettings finds.
-	github, jira, err := readSourceOverrides(ctx, s.app, orgID)
+	overrides, err := readSourceOverrides(ctx, s.app, orgID)
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
 	}
-	db.ApplyOrgSourceOverrides(&stored, github, jira)
+	db.ApplyOrgSourceOverrides(&stored, overrides)
 	return stored, nil
 }
 
