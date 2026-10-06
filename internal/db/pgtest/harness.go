@@ -4,12 +4,13 @@
 // call Reset between cases to TRUNCATE state.
 //
 // The shared container is a single point of failure for the whole test
-// binary: on a loaded CI runner the kernel OOM killer sometimes takes
-// out the postmaster mid-suite, which without recovery cascades into
-// every remaining Postgres test failing at Reset ("unexpected EOF" from
-// the dying connections, then "connection refused" forever after).
-// Shared and Reset detect that death (liveness probe, never
-// error-string matching) and boot a replacement in place — see
+// binary: if it dies mid-suite, every remaining Postgres test fails at
+// Reset ("unexpected EOF" from the dying connections, then "connection
+// refused" forever after). The session reaper removing it out from under
+// a running binary is prevented up front (see holdReaper in reaper.go);
+// any other death, such as the kernel OOM killer on a loaded runner, is
+// recovered from. Shared and Reset detect that death (liveness probe,
+// never error-string matching) and boot a replacement in place — see
 // reviveLocked — so a one-off kill costs one container boot instead of
 // the rest of the suite.
 //
@@ -218,6 +219,11 @@ func reviveLocked(cause error) error {
 // authenticator role) is complete, but db.Migrate has not yet run,
 // which the shared harness cannot offer once it has come up.
 func bootContainer(ctx context.Context) (pg *postgres.PostgresContainer, pgDSN, adminDSN string, err error) {
+	// Before the container exists, so it is never unprotected — see reaper.go.
+	if err := holdReaper(ctx); err != nil {
+		return nil, "", "", err
+	}
+
 	// Wait strategy: a single SQL probe for auth.users in the
 	// POSTGRES_DB-named DB. We tried a two-stage approach earlier
 	// (wait.ForLog "PostgreSQL init process complete" THEN ForSQL)
