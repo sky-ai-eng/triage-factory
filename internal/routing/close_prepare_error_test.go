@@ -61,15 +61,16 @@ func (s prepareOutageEntityStore) GetSystem(ctx context.Context, orgID, id strin
 	return s.EntityStore.GetSystem(ctx, orgID, id)
 }
 
-// prepareOutageOrgsStore fails the org-settings read only when the Jira
+// prepareOutageOrgsStore fails the org-settings read only when the named
 // reassign gate makes it.
 type prepareOutageOrgsStore struct {
 	dbpkg.OrgsStore
-	o *outage
+	o    *outage
+	gate string
 }
 
 func (s prepareOutageOrgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
-	if calledFrom("prepareJiraReassign") && s.o.down() {
+	if calledFrom(s.gate) && s.o.down() {
 		return domain.OrgSettings{}, errOutage
 	}
 	return s.OrgsStore.GetSettingsSystem(ctx, orgID)
@@ -208,7 +209,7 @@ func TestClosePrepare_JiraReassignSettingsReadFails_RequeuesThenClosesOnce(t *te
 		t.Fatalf("create entity: %v", err)
 	}
 	taskID := seedTaskOfType(t, database, entity.ID, domain.EventJiraIssueAssigned, "")
-	r.orgs = prepareOutageOrgsStore{OrgsStore: st.Orgs, o: &outage{remaining: 1}}
+	r.orgs = prepareOutageOrgsStore{OrgsStore: st.Orgs, o: &outage{remaining: 1}, gate: "prepareJiraReassign"}
 
 	meta, _ := json.Marshal(events.JiraIssueAssignedMetadata{Assignee: "Carol", AssigneeAccountID: "acc-carol"})
 	eid := entity.ID
@@ -230,6 +231,47 @@ func TestClosePrepare_JiraReassignSettingsReadFails_RequeuesThenClosesOnce(t *te
 		t.Fatalf("drainEventQueue after recovery: %v", err)
 	}
 	assertDone(t, database, domain.EventJiraIssueAssigned)
+	if status, _ := taskCloseReason(t, database, taskID); status != "done" {
+		t.Errorf("task after the replay = %q, want done — reassigned away from its team", status)
+	}
+	if n := closeAuditCount(t, database, taskID); n != 1 {
+		t.Errorf("close audit rows on the task = %d, want exactly 1", n)
+	}
+}
+
+// TestClosePrepare_LinearReassignSettingsReadFails_RequeuesThenClosesOnce is
+// the Jira test above for Linear: the workspace read behind the new
+// assignee's identity fails, and the event requeues rather than retiring the
+// task on an answer it never got.
+func TestClosePrepare_LinearReassignSettingsReadFails_RequeuesThenClosesOnce(t *testing.T) {
+	database := newTestDB(t)
+	r := newQueueWorkerRouter(t, database)
+	st := sqlitestore.New(database)
+	r.users = st.Users
+	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-77", "issue", "Issue", "https://linear.app/acme/issue/ENG-77")
+	if err != nil {
+		t.Fatalf("create entity: %v", err)
+	}
+	taskID := seedTaskOfType(t, database, entity.ID, domain.EventLinearIssueAssigned, "")
+	r.orgs = prepareOutageOrgsStore{OrgsStore: st.Orgs, o: &outage{remaining: 1}, gate: "prepareLinearReassign"}
+
+	evt := linearEvent(domain.EventLinearIssueAssigned, entity.ID, "lt-eng", "lu-carol")
+	if _, err := st.EventQueue.Enqueue(context.Background(), runmode.LocalDefaultOrgID, evt, ""); err != nil {
+		t.Fatalf("enqueue linear assigned: %v", err)
+	}
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue: %v", err)
+	}
+	assertRequeuedTransient(t, database, domain.EventLinearIssueAssigned)
+	if status, _ := taskCloseReason(t, database, taskID); status != "queued" {
+		t.Fatalf("task after the failed gate = %q, want still queued — an unreadable assignee must not retire it", status)
+	}
+
+	ripenQueue(t, database)
+	if err := r.drainEventQueue(context.Background()); err != nil {
+		t.Fatalf("drainEventQueue after recovery: %v", err)
+	}
+	assertDone(t, database, domain.EventLinearIssueAssigned)
 	if status, _ := taskCloseReason(t, database, taskID); status != "done" {
 		t.Errorf("task after the replay = %q, want done — reassigned away from its team", status)
 	}
