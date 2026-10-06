@@ -92,12 +92,16 @@ const (
 	notFoundPrefix          = "Entity not found"
 )
 
-// rateLimitWaitCap is the longest a rate-limited request waits for its
-// window to reset before trying again. backoffBase and backoffCap shape the
-// wait after a transient failure. They are vars only so tests can shorten
-// them.
+// rateLimitWaitCap is the most one request spends waiting out rate limits,
+// in total. A reset further off than what remains is not waited for: the
+// request returns its *RateLimitError, reset time included, at once. The
+// tightest caller is an agent's exec verb, which runs inside agenthost's 30s
+// call budget and would otherwise see a timeout instead of the reset; a poll
+// cycle is better served by learning the reset than by blocking on it.
+// backoffBase and backoffCap shape the wait after a transient failure. They
+// are vars only so tests can shorten them.
 var (
-	rateLimitWaitCap = 60 * time.Second
+	rateLimitWaitCap = 30 * time.Second
 	backoffBase      = 500 * time.Millisecond
 	backoffCap       = 30 * time.Second
 )
@@ -176,9 +180,10 @@ func (c *Client) mutate(ctx context.Context, doc string, vars map[string]any, ou
 //
 // Each attempt is counted under the client's org. A rate-limited attempt
 // waits for the later of Linear's request and complexity windows to reset,
-// at most rateLimitWaitCap; a transient failure of an idempotent request
-// waits out an exponential backoff. No request gets more than maxAttempts
-// attempts, and every wait ends when ctx does.
+// as long as the request's rate-limit waits stay within rateLimitWaitCap in
+// total; a transient failure of an idempotent request waits out an
+// exponential backoff. No request gets more than maxAttempts attempts, and
+// every wait ends when ctx does.
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks Linear unreachable for the rest of the scope, so
@@ -192,6 +197,7 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 	if err != nil {
 		return fmt.Errorf("linear: encode request: %w", err)
 	}
+	var rateLimitWaited time.Duration
 	for attempt := 1; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
 		if err != nil {
@@ -257,6 +263,11 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 
 		retry := upstream.RetryableResponse(resp.StatusCode, class, idempotent) &&
 			attempt < maxAttempts && !upstream.Unreachable(ctx, host)
+		wait := backoff(attempt)
+		if class == upstream.RateLimited {
+			wait = rateLimitWait(resp.Header, attempt)
+			retry = retry && rateLimitWaited+wait <= rateLimitWaitCap
+		}
 		if !retry {
 			if class == upstream.Transient {
 				upstream.MarkUnreachable(ctx, host)
@@ -276,9 +287,8 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 			return nil
 		}
 
-		wait := backoff(attempt)
 		if class == upstream.RateLimited {
-			wait = rateLimitWait(resp.Header, attempt)
+			rateLimitWaited += wait
 		}
 		if err := c.wait(ctx, class, wait); err != nil {
 			return err
@@ -386,15 +396,14 @@ func rateLimitReset(h http.Header) time.Time {
 	return reset
 }
 
-// rateLimitWait is how long a rate-limited attempt waits: until the limit
-// resets, at most rateLimitWaitCap. A reset that is absent or already past
-// falls back to the backoff, so the retry is never immediate.
+// rateLimitWait is how long a rate-limited attempt would wait: until the
+// limit resets. A reset that is absent or already past falls back to the
+// backoff, so the retry is never immediate.
 func rateLimitWait(h http.Header, attempt int) time.Duration {
-	wait := time.Until(rateLimitReset(h))
-	if wait <= 0 {
-		return backoff(attempt)
+	if wait := time.Until(rateLimitReset(h)); wait > 0 {
+		return wait
 	}
-	return min(wait, rateLimitWaitCap)
+	return backoff(attempt)
 }
 
 func backoff(attempt int) time.Duration {

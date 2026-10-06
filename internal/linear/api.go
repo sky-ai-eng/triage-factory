@@ -260,13 +260,18 @@ func (c *Client) SearchIssues(ctx context.Context, f IssueFilter, after string) 
 	}, nil
 }
 
-// ListChildren returns an issue's sub-issues and their states.
-func (c *Client) ListChildren(ctx context.Context, id string) ([]ChildIssue, error) {
-	issue, err := c.GetIssue(ctx, id)
-	if err != nil {
+// ListChildren returns an issue's sub-issues and their states. It walks the
+// sub-issue list alone rather than fetching the whole issue. An issue Linear
+// resolves to nothing is an error matching ErrNotFound.
+func (c *Client) ListChildren(ctx context.Context, idOrIdentifier string) ([]ChildIssue, error) {
+	if err := requireID("issue id", idOrIdentifier); err != nil {
 		return nil, err
 	}
-	return issue.Children, nil
+	children, err := c.issueChildren(ctx, idOrIdentifier)
+	if err != nil {
+		return nil, fmt.Errorf("linear: sub-issues of issue %s: %w", idOrIdentifier, err)
+	}
+	return children, nil
 }
 
 // AssignIssue assigns an issue to a user. UnassignIssue clears it.
@@ -515,7 +520,8 @@ func (c *Client) issueLabels(ctx context.Context, id string) ([]labelName, error
 	})
 }
 
-// issueChildren walks every sub-issue of one issue.
+// issueChildren walks every sub-issue of one issue, named by UUID or
+// identifier.
 func (c *Client) issueChildren(ctx context.Context, id string) ([]ChildIssue, error) {
 	return collect(func(after string) ([]ChildIssue, pageInfo, error) {
 		var data struct {

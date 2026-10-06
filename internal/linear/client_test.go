@@ -148,23 +148,50 @@ func TestRateLimited_WaitsForResetThenRetries(t *testing.T) {
 	}
 }
 
-func TestRateLimited_WaitIsCapped(t *testing.T) {
+// TestRateLimited_ResetPastTheBudgetReturnsAtOnce: a reset further off than
+// the request's wait budget is not slept on. The caller gets the reset time
+// straight away, and the request is not sent again.
+func TestRateLimited_ResetPastTheBudgetReturnsAtOnce(t *testing.T) {
 	shortWaits(t)
-	rateLimitWaitCap = 20 * time.Millisecond
-	s := newStub(t, scripted(rateLimited(time.Now().Add(time.Hour)), reply{body: viewerOK}))
+	reset := time.Now().Add(time.Hour).Truncate(time.Millisecond)
+	s := newStub(t, scripted(rateLimited(reset), reply{body: viewerOK}))
 
 	start := time.Now()
-	if _, err := s.client().Viewer(context.Background()); err != nil {
-		t.Fatalf("Viewer: %v", err)
+	_, err := s.client().Viewer(context.Background())
+	var rle *RateLimitError
+	if !errors.As(err, &rle) || !rle.Reset.Equal(reset) {
+		t.Fatalf("err = %v, want a *RateLimitError carrying reset %v", err, reset)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("waited %v for a reset an hour away, want the cap", elapsed)
+		t.Errorf("returned after %v, want at once", elapsed)
+	}
+	if n := len(s.requests()); n != 1 {
+		t.Errorf("attempts = %d, want 1", n)
+	}
+}
+
+// TestRateLimited_BudgetIsPerRequestNotPerWait: two waits that each fit the
+// budget but together exceed it stop at the second, so one request cannot
+// block for several budgets.
+func TestRateLimited_BudgetIsPerRequestNotPerWait(t *testing.T) {
+	shortWaits(t)
+	rateLimitWaitCap = 150 * time.Millisecond
+	s := newStub(t, func(int, recordedRequest) reply {
+		return rateLimited(time.Now().Add(100 * time.Millisecond))
+	})
+
+	_, err := s.client().Viewer(context.Background())
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("err = %v, want ErrRateLimited", err)
+	}
+	if n := len(s.requests()); n != 2 {
+		t.Errorf("attempts = %d, want 2: one wait fits the budget, a second does not", n)
 	}
 }
 
 func TestRateLimited_WaitEndsWithContext(t *testing.T) {
 	shortWaits(t)
-	s := newStub(t, scripted(rateLimited(time.Now().Add(time.Hour))))
+	s := newStub(t, scripted(rateLimited(time.Now().Add(20*time.Second))))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -842,5 +869,33 @@ func TestSearchIssues_CompletesOnlyTruncatedIssues(t *testing.T) {
 	}
 	if n := len(s.requests()); n != 2 {
 		t.Errorf("requests = %d, want the search plus one completion", n)
+	}
+}
+
+func TestListChildren_WalksOnlyTheSubIssues(t *testing.T) {
+	s := newStub(t, func(_ int, req recordedRequest) reply {
+		if !strings.Contains(req.Query, "query IssueChildren") {
+			t.Errorf("ListChildren sent %q, want only IssueChildren", req.Query)
+		}
+		return reply{body: `{"data":{"issue":{"children":{"nodes":[{"id":"c1","identifier":"ENG-2","state":{"id":"s1","name":"Todo","type":"unstarted","position":1}}],"pageInfo":{"hasNextPage":false}}}}}`}
+	})
+
+	children, err := s.client().ListChildren(context.Background(), "ENG-1")
+	if err != nil {
+		t.Fatalf("ListChildren: %v", err)
+	}
+	want := []ChildIssue{{ID: "c1", Identifier: "ENG-2", State: WorkflowState{ID: "s1", Name: "Todo", Type: "unstarted", Position: 1}}}
+	if !reflect.DeepEqual(children, want) {
+		t.Errorf("children = %+v, want %+v", children, want)
+	}
+	if string(s.requests()[0].Variables["id"]) != `"ENG-1"` {
+		t.Errorf("id = %s, want the identifier as given", s.requests()[0].Variables["id"])
+	}
+}
+
+func TestListChildren_NotFound(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"issue":null}}`}))
+	if _, err := s.client().ListChildren(context.Background(), "ENG-404"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("err = %v, want ErrNotFound", err)
 	}
 }
