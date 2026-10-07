@@ -7,6 +7,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -91,6 +92,96 @@ func TestBootstrapSchemaForTest_MatchesMigrate(t *testing.T) {
 	if got, want := dumpMigrationVersions(t, cached), dumpMigrationVersions(t, real); !reflect.DeepEqual(got, want) {
 		t.Errorf("goose_db_version versions differ.\ncached: %v\nreal:   %v", got, want)
 	}
+
+	// 6. The tenantless image is the same Migrate with no exception for
+	//    the tenant tables. It is built from the version cache's image at
+	//    head, so this also pins that image against a replay from empty.
+	tenantless := openMem(t)
+	if err := BootstrapTenantlessSchemaForTest(tenantless); err != nil {
+		t.Fatalf("BootstrapTenantlessSchemaForTest: %v", err)
+	}
+	assertSameMigratedDatabase(t, "tenantless image", tenantless, real)
+	if got, want := dumpEventsCatalog(t, tenantless), dumpEventsCatalog(t, real); !reflect.DeepEqual(got, want) {
+		t.Errorf("tenantless image: events_catalog content differs.\nrestored: %v\nreal:     %v", got, want)
+	}
+}
+
+// TestMigratedImageAt_MatchesUpTo pins the images the migration tests
+// restore in place of replaying the chain: at each version, a restored
+// image must be the database goose.UpTo leaves on an empty one opened
+// with the same DSN — same schema catalog, tables, row counts, applied
+// versions, and foreign-key enforcement.
+//
+// The versions are ascending, so run on its own the second image is
+// built from the first, through the table rebuilds that toggle
+// foreign-key enforcement inside their own migration. The first is
+// staged with enforcement off, as the tests that seed at it are, while
+// every image is built with it on.
+func TestMigratedImageAt_MatchesUpTo(t *testing.T) {
+	for _, tc := range []struct {
+		dsn     string
+		version int64
+	}{
+		{TestDSNMemoryNoForeignKeys, 202607200002},
+		{TestDSNMemory, 202609130001},
+	} {
+		label := fmt.Sprintf("image at %d", tc.version)
+		restored := openMigrationsTestDBAt(t, tc.dsn, tc.version)
+
+		replayed, err := sql.Open("sqlite", tc.dsn)
+		if err != nil {
+			t.Fatalf("open sqlite: %v", err)
+		}
+		replayed.SetMaxOpenConns(1)
+		replayed.SetMaxIdleConns(1)
+		t.Cleanup(func() { _ = replayed.Close() })
+		gooseMu.Lock()
+		goose.SetBaseFS(migrationsSQLiteFS)
+		upErr := goose.SetDialect("sqlite3")
+		if upErr == nil {
+			upErr = goose.UpTo(replayed, "migrations-sqlite", tc.version)
+		}
+		gooseMu.Unlock()
+		if upErr != nil {
+			t.Fatalf("goose.UpTo(%d) from empty: %v", tc.version, upErr)
+		}
+
+		assertSameMigratedDatabase(t, label, restored, replayed)
+		if got, want := foreignKeysEnabled(t, restored), foreignKeysEnabled(t, replayed); got != want {
+			t.Errorf("%s: foreign_keys = %v on the restored database, %v on the replayed one", label, got, want)
+		}
+	}
+}
+
+// assertSameMigratedDatabase compares what a migration leaves behind:
+// the schema catalog in creation order, the table set, every table's row
+// count, and the applied goose versions.
+func assertSameMigratedDatabase(t *testing.T, label string, got, want *sql.DB) {
+	t.Helper()
+	if g, w := dumpSchema(t, got), dumpSchema(t, want); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: sqlite_master differs.\nrestored:\n%s\nreplayed:\n%s", label, joinLines(g), joinLines(w))
+	}
+	tablesGot, tablesWant := listUserTables(t, got), listUserTables(t, want)
+	if !reflect.DeepEqual(tablesGot, tablesWant) {
+		t.Fatalf("%s: table set differs.\nrestored: %v\nreplayed: %v", label, tablesGot, tablesWant)
+	}
+	for _, table := range tablesWant {
+		if g, w := countRows(t, got, table), countRows(t, want, table); g != w {
+			t.Errorf("%s: table %s has %d row(s) restored, %d replayed", label, table, g, w)
+		}
+	}
+	if g, w := dumpMigrationVersions(t, got), dumpMigrationVersions(t, want); !reflect.DeepEqual(g, w) {
+		t.Errorf("%s: goose_db_version versions differ.\nrestored: %v\nreplayed: %v", label, g, w)
+	}
+}
+
+func foreignKeysEnabled(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	var on bool
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&on); err != nil {
+		t.Fatalf("read foreign_keys: %v", err)
+	}
+	return on
 }
 
 func openMem(t *testing.T) *sql.DB {

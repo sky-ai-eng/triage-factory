@@ -32,26 +32,7 @@ const (
 // and the chain a firing references (entity, task, handler, event, run) is
 // not what this test is about.
 func TestMigrate_PendingFiringsAdoptWorkItemBlock(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite memory: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-	if err := goose.UpTo(database, "migrations-sqlite", pendingFiringsWorkItemPrior); err != nil {
-		t.Fatalf("goose UpTo %d: %v", pendingFiringsWorkItemPrior, err)
-	}
-	// An earlier migration's table rebuild switches enforcement back on
-	// behind the DSN's setting.
-	if _, err := database.Exec(`PRAGMA foreign_keys = off`); err != nil {
-		t.Fatalf("foreign_keys off: %v", err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, pendingFiringsWorkItemPrior)
 
 	// Nothing may reference pending_firings by foreign key, trigger or view:
 	// the migration swaps the table out from under its name.

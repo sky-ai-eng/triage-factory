@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -19,25 +18,8 @@ import (
 // build did, then finishing the migration. That ordering is the whole test: a
 // row inserted after the migration proves nothing about a row that predates it.
 func TestMigrate_RetiresDeadConversationStatuses(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the retirement.
-	upToErr := goose.UpTo(database, dir, 202608010001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608010001)
 
 	// A conversation carrying each retired terminal, written the way the old
 	// build wrote them: a completed_at stamp and no parked_at. origin is not

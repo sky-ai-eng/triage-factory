@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -17,24 +16,7 @@ import (
 // Staged by migrating UP TO the previous version and writing rows the way the
 // old build did, for the same reason as TestMigrate_RetiresDeadConversationStatuses.
 func TestMigrate_ConversationVerdictParksOpen(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, 202610050001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202610050001)
 
 	seed := func(id string, completedAt, endedAt, parkReason any) {
 		t.Helper()

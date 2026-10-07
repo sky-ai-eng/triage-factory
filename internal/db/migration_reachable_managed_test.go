@@ -21,10 +21,7 @@ import (
 //     conflict to detect — GitHub repeating a repository across a paginated walk
 //     would mint a second row and a wrong total_count, quietly.
 func TestMigrate_ReachableRepoManagedClass(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 
 	const org = "00000000-0000-0000-0000-000000000001"
 	if _, err := database.Exec(

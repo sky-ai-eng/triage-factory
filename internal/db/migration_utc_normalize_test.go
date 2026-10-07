@@ -50,24 +50,6 @@ func utcNormalizeTargets(t *testing.T) map[string]bool {
 	return out
 }
 
-// migrateUpTo brings a fresh test DB to one specific goose version.
-func migrateUpTo(t *testing.T, database *sql.DB, version int64) {
-	t.Helper()
-	gooseMu.Lock()
-	defer gooseMu.Unlock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("SetDialect: %v", err)
-	}
-	if err := goose.UpTo(database, dir, version); err != nil {
-		t.Fatalf("goose.UpTo(%d): %v", version, err)
-	}
-}
-
 // timestampColumns is the schema's own answer to "what is a timestamp here",
 // which is where the migration's column list came from in the first place.
 func timestampColumns(t *testing.T, database *sql.DB) []string {
@@ -111,8 +93,7 @@ func timestampColumns(t *testing.T, database *sql.DB) []string {
 // written by post-fix code, so it needs no normalizing — and pinning to head
 // would turn every future column into a spurious failure here.
 func TestMigrate_UTCNormalizeCoversEveryTimestampColumn(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	migrateUpTo(t, database, utcNormalizePrevVersion)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, utcNormalizePrevVersion)
 
 	want := timestampColumns(t, database)
 	got := utcNormalizeTargets(t)
@@ -165,8 +146,7 @@ var utcNormalizeShapes = []struct {
 }
 
 func TestMigrate_UTCNormalizeRewritesEveryShapeAndIsIdempotent(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	migrateUpTo(t, database, utcNormalizePrevVersion)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, utcNormalizePrevVersion)
 
 	const orgID = "00000000-0000-0000-0000-000000000001"
 	if _, err := database.Exec(

@@ -29,25 +29,12 @@ import (
 //     rows that keep answering "the App can reach this" — while leaving the PAT
 //     tier's, which hang off the host instead.
 func TestMigrate_ReachableRepoCache(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// One version short of the mirror, so the rows below are staged exactly as
 	// builds before it wrote them.
-	upToErr := goose.UpTo(database, dir, 202608150006)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608150006)
+	_, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const org = "00000000-0000-0000-0000-000000000001"

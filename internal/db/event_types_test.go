@@ -10,10 +10,7 @@ import (
 // TestSeedEventTypes_FreshInstall pins that a fresh Migrate leaves
 // events_catalog with exactly one row per domain.AllEventTypes() entry.
 func TestSeedEventTypes_FreshInstall(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM events_catalog`).Scan(&n); err != nil {
@@ -30,10 +27,7 @@ func TestSeedEventTypes_FreshInstall(t *testing.T) {
 // doesn't collide with rows the baseline (or a forward migration)
 // already inserted.
 func TestSeedEventTypes_Idempotent(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("first Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 	if err := Migrate(database, "sqlite3"); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
@@ -56,10 +50,7 @@ func TestSeedEventTypes_Idempotent(t *testing.T) {
 // domain.AllEventTypes() currently declares — proving this isn't the
 // INSERT OR IGNORE-only semantics the baseline uses.
 func TestSeedEventTypes_OverwritesDrift(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 
 	const id = "github:pr:opened"
 	if _, err := database.Exec(
@@ -85,10 +76,7 @@ func TestSeedEventTypes_OverwritesDrift(t *testing.T) {
 // synthetic row with an id not in domain.AllEventTypes() (simulating a
 // retired event type) survives SeedEventTypes untouched.
 func TestSeedEventTypes_NeverDeletes(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 
 	const syntheticID = "test:synthetic:not_in_go_source"
 	if _, err := database.Exec(
@@ -117,10 +105,7 @@ func TestSeedEventTypes_NeverDeletes(t *testing.T) {
 // observable — row content alone can't distinguish a no-op UPDATE from
 // one that wrote the same values back.
 func TestSeedEventTypes_UnchangedRowsSkipWrite(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 
 	if _, err := database.Exec(`
 		CREATE TABLE test_update_counter (n INTEGER NOT NULL);

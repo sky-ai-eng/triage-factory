@@ -29,23 +29,10 @@ const (
 // migration that rewrote them into concrete wire ids would be translating a
 // local install into the native runtime's vocabulary, which nothing local sends.
 func TestMigrate_ShippedSeedPromptsStopNamingAModel(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeShippedSeedModelUnset)
 	treeFS, dir, err := migrationsFor("sqlite3")
 	if err != nil {
-		gooseMu.Unlock()
 		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, beforeShippedSeedModelUnset)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
 	}
 
 	const (
