@@ -69,31 +69,6 @@ func DetectEntityRenames(stored, observed []EntityRef) []EntityRef {
 	return out
 }
 
-// RewriteEntityArtifactKey moves an artifact dedup key off an entity's old
-// key: provider:kind:<oldKey>[:anchor] becomes provider:kind:<newKey>[:anchor].
-// It matches only a key whose provider is the entity's source and whose
-// resource segment IS the old key, whole, so "ENG-4" never matches the
-// resource "ENG-41". Reports false, with key unchanged, for anything else.
-func RewriteEntityArtifactKey(key, source, oldKey, newKey string) (string, bool) {
-	provider, rest, ok := strings.Cut(key, ":")
-	if !ok || provider != source || oldKey == "" {
-		return key, false
-	}
-	kind, rest, ok := strings.Cut(rest, ":")
-	if !ok {
-		return key, false
-	}
-	resource, anchor, hasAnchor := strings.Cut(rest, ":")
-	if resource != oldKey {
-		return key, false
-	}
-	out := provider + ":" + kind + ":" + newKey
-	if hasAnchor {
-		out += ":" + anchor
-	}
-	return out, true
-}
-
 // RewriteEntityURL moves a link that resolves to an entity's old url onto its
 // new one, keeping whatever followed it — a comment's fragment, a query, a
 // trailing path segment. It matches only a link that starts with oldURL at a

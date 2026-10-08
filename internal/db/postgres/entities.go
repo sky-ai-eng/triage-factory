@@ -577,7 +577,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 			}
 			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
 		}
-		if err := rewriteEntityArtifacts(ctx, tx, orgID, source, row.key, newKey); err != nil {
+		if err := rewriteEntityArtifacts(ctx, tx, orgID, source, externalID, row.key, newKey); err != nil {
 			return err
 		}
 		if err := rewriteEntityActionURLs(ctx, tx, orgID, source, row.url, url); err != nil {
@@ -592,32 +592,27 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 	return out, nil
 }
 
-// rewriteEntityArtifacts moves the source's artifacts off the old key: target
-// where it is the key itself, dedup_key where its resource segment is. The SQL
-// is a cheap over-approximation and domain.RewriteEntityArtifactKey decides.
-func rewriteEntityArtifacts(ctx context.Context, q queryer, orgID, source, from, to string) error {
+// rewriteEntityArtifacts moves the Target of the source's artifacts keyed on
+// the entity's id off the old key. Their dedup key carries the id, so it does
+// not move. The SQL over-approximates and domain.ArtifactKeyHasResource
+// decides.
+func rewriteEntityArtifacts(ctx context.Context, q queryer, orgID, source, externalID, from, to string) error {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, target, dedup_key FROM artifacts
-		WHERE org_id = $1 AND provider = $2 AND (target = $3 OR strpos(dedup_key, $3) > 0)`,
-		orgID, source, from)
+		SELECT id, dedup_key FROM artifacts
+		WHERE org_id = $1 AND provider = $2 AND target = $3 AND strpos(dedup_key, $4) > 0`,
+		orgID, source, from, externalID)
 	if err != nil {
 		return err
 	}
-	type pending struct{ id, target, dedupKey string }
-	var updates []pending
+	var ids []string
 	for rows.Next() {
-		var id, target, key string
-		if err := rows.Scan(&id, &target, &key); err != nil {
+		var id, key string
+		if err := rows.Scan(&id, &key); err != nil {
 			rows.Close()
 			return err
 		}
-		newTarget, targetMoved := target, false
-		if target == from {
-			newTarget, targetMoved = to, true
-		}
-		newKey, keyMoved := domain.RewriteEntityArtifactKey(key, source, from, to)
-		if targetMoved || keyMoved {
-			updates = append(updates, pending{id: id, target: newTarget, dedupKey: newKey})
+		if domain.ArtifactKeyHasResource(key, source, externalID) {
+			ids = append(ids, id)
 		}
 	}
 	if err := rows.Close(); err != nil {
@@ -626,15 +621,11 @@ func rewriteEntityArtifacts(ctx context.Context, q queryer, orgID, source, from,
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, u := range updates {
-		if _, err := q.ExecContext(ctx, `
-			UPDATE artifacts SET target = $1, dedup_key = $2, updated_at = now()
-			WHERE id = $3 AND org_id = $4`,
-			u.target, u.dedupKey, u.id, orgID); err != nil {
-			if isUniqueViolation(err) {
-				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrEntityKeyOccupied, u.dedupKey, err)
-			}
-			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
+	for _, id := range ids {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE artifacts SET target = $1, updated_at = now() WHERE id = $2 AND org_id = $3`,
+			to, id, orgID); err != nil {
+			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", id, from, to, err)
 		}
 	}
 	return nil

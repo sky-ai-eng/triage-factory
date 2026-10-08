@@ -239,14 +239,22 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if err != nil {
 			t.Fatalf("create neighbour: %v", err)
 		}
+		// The other control: the same identifier in another workspace, whose
+		// UUID has the renamed one as a string prefix.
+		const otherURL = "https://linear.app/other/issue/ENG-4/fix-it"
+		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", "ws-b", "ENG-4", "uuid-4b", "issue", "Other", otherURL); err != nil {
+			t.Fatalf("create the other workspace's ENG-4: %v", err)
+		}
 		taskID := seed.Task(t, row.ID, "rename")
 		before, _ := s.Entities.GetSystem(ctx, orgID, row.ID)
 
-		issueArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "ENG-4", "")
-		commentArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, "ENG-4", "c-1")
-		neighbourArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "ENG-41", "")
+		issueArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-4", "ENG-4", "")
+		commentArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, "uuid-4", "ENG-4", "c-1")
+		neighbourArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-41", "ENG-41", "")
+		otherArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-4b", "ENG-4", "")
 		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-4", oldURL+"#comment-c1", "rename-moved")
 		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
+		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-4", otherURL, "rename-other")
 
 		out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-4", "OPS-77", newURL)
 		if err != nil {
@@ -270,12 +278,14 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			t.Errorf("task = %+v err=%v, want it still on the entity", task, err)
 		}
 
+		// The key carries the UUID, so only the target moves.
 		for _, c := range []struct {
 			id, wantTarget, wantKey string
 		}{
-			{issueArt, "OPS-77", "linear:issue:OPS-77"},
-			{commentArt, "OPS-77", "linear:comment:OPS-77:c-1"},
-			{neighbourArt, "ENG-41", "linear:issue:ENG-41"},
+			{issueArt, "OPS-77", "linear:issue:uuid-4"},
+			{commentArt, "OPS-77", "linear:comment:uuid-4:c-1"},
+			{neighbourArt, "ENG-41", "linear:issue:uuid-41"},
+			{otherArt, "ENG-4", "linear:issue:uuid-4b"},
 		} {
 			got, err := s.Artifacts.Get(ctx, orgID, c.id)
 			if err != nil || got == nil {
@@ -289,8 +299,10 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if u, cur := seed.RawActionURL(t, "rename-moved"); u != oldURL+"#comment-c1" || cur != newURL+"#comment-c1" {
 			t.Errorf("moved action url=%q current_url=%q, want the record kept and the pointer moved", u, cur)
 		}
-		if _, cur := seed.RawActionURL(t, "rename-neighbour"); cur != "" {
-			t.Errorf("neighbour action current_url = %q, want untouched", cur)
+		for _, key := range []string{"rename-neighbour", "rename-other"} {
+			if _, cur := seed.RawActionURL(t, key); cur != "" {
+				t.Errorf("%s current_url = %q, want untouched", key, cur)
+			}
 		}
 		if n, _ := s.Entities.GetSystem(ctx, orgID, neighbour.ID); n.SourceID != "ENG-41" {
 			t.Errorf("neighbour key = %q, want ENG-41", n.SourceID)
@@ -369,12 +381,14 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	})
 }
 
-func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, key, anchor string) string {
+// upsertIdentityArtifact records a Linear artifact the way domain.ArtifactDedupKey
+// says to key one: on the issue's UUID, with the identifier as its target.
+func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, issueID, key, anchor string) string {
 	t.Helper()
 	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
 		TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: kind,
-		Target: key, ExternalID: key + anchor, State: identityArtifactState(kind),
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, kind, key, anchor),
+		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, kind, issueID, anchor),
 	})
 	if err != nil {
 		t.Fatalf("seed %s artifact on %s: %v", kind, key, err)

@@ -184,9 +184,11 @@ within a `scope`, the org's Linear workspace id, because identifiers repeat
 across workspaces.
 
 When a tracked issue answers under a new identifier, the entity is renamed in
-the same cycle: its `source_id` and `url`, and the keys of the artifacts
+the same cycle: its `source_id` and `url`, and the target of every artifact
 recorded against it, move to the new identifier, and it keeps its tasks,
-conversations and memory. The refresh emits `identifier_changed` first, ahead
+conversations and memory. A Linear artifact is keyed on the issue's UUID, so
+its key does not move, and an artifact on another workspace's issue under the
+same identifier is a different row that the rename does not touch. The refresh emits `identifier_changed` first, ahead
 of anything else it found (a move to another team usually changes the issue's
 workflow state too), in the same commit as the new snapshot. Predicates can
 filter it on `linear_team_key` and `old_linear_team_key`.
@@ -194,7 +196,14 @@ filter it on `linear_team_key` and `old_linear_team_key`.
 If no rule arms the team the issue moved to, TF has nothing to follow it with:
 the entity is renamed, `identifier_changed` is emitted, and it retires as
 `unreachable` with reason `moved`. That event names the team the issue left,
-which is the team that was tracking it.
+which is the team that was tracking it. An issue that moved and was also
+trashed or archived before a cycle saw it is handled the same way: renamed,
+`identifier_changed`, then `unreachable` with reason `trashed` or `archived`.
+
+A closed issue that reopens is matched by its UUID too, so it reactivates its
+original entity even after a move. The cycle that reactivates it renames it
+and still emits `identifier_changed`, naming the identifier and team it was
+closed under.
 
 A team key that is freed and reused can briefly name two issues: a new issue
 gets `ENG-1` before TF has seen the old `ENG-1` move. The new one is skipped

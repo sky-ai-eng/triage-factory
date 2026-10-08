@@ -302,7 +302,7 @@ func AllEventTypes() []EventType {
 		{ID: EventLinearIssuePriorityChanged, Source: "linear", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority label)"},
 		{ID: EventLinearIssueCommented, Source: "linear", Category: "issue", Label: "New Comment", Description: "A new comment was added to an issue"},
 		{ID: EventLinearIssueBodyUpdated, Source: "linear", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
-		{ID: EventLinearIssueParentChanged, Source: "linear", Category: "issue", Label: "Parent Changed", Description: "Issue was moved under another parent, or its parent was removed (uses dedup_key=new parent identifier, or none)"},
+		{ID: EventLinearIssueParentChanged, Source: "linear", Category: "issue", Label: "Parent Changed", Description: "Issue was moved under another parent, or its parent was removed (uses dedup_key=new parent UUID, or none)"},
 		{ID: EventLinearIssueCompleted, Source: "linear", Category: "issue", Label: "Issue Completed", Description: "Issue entered one of its team's done states"},
 		{ID: EventLinearIssueBecameAtomic, Source: "linear", Category: "issue", Label: "Issue Became Atomic", Description: "Last open sub-issue closed — parent is now an atomic work unit"},
 		{ID: EventLinearIssueUnreachable, Source: "linear", Category: "issue", Label: "Issue Unreachable", Description: "Triage Factory no longer follows a tracked issue — Linear answers not-found for it, it is in the trash, it was archived outside a done state, it moved to a team no rule arms, or the org's Linear credential now belongs to another workspace. Never inferred from its absence in a batch read"},

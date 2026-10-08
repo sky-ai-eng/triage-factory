@@ -332,7 +332,7 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 	// A closed issue reappearing open reactivates with the discovery snapshot
 	// in the same statement; Phase 2 re-diffs from it.
 	if !terminal && entity.State == "closed" {
-		snapJSON, _ := json.Marshal(snap)
+		snapJSON, _ := json.Marshal(linearReactivationSnapshot(*entity, snap))
 		if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 			trackerLog.Error("reactivate entity failed", "source_id", snap.Identifier, "error", err)
 		} else if !reactivated {
@@ -342,6 +342,29 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 		}
 	}
 	return 0
+}
+
+// linearReactivationSnapshot is the snapshot a closed entity reactivates with:
+// the fresh one, except that when the issue's identifier has changed since the
+// stored snapshot was taken, the stored identifier and team are kept. The
+// Phase 2 diff from it then still sees the change and emits
+// identifier_changed, in the same commit as the fresh snapshot; reactivating
+// with the fresh identity would leave that diff nothing to compare. An entity
+// with no stored snapshot reactivates with the fresh one, as a quiet seed
+// would.
+func linearReactivationSnapshot(e domain.Entity, fresh domain.LinearSnapshot) domain.LinearSnapshot {
+	if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
+		return fresh
+	}
+	var stored domain.LinearSnapshot
+	if err := json.Unmarshal([]byte(e.SnapshotJSON), &stored); err != nil {
+		return fresh
+	}
+	if stored.Identifier == "" || stored.Identifier == fresh.Identifier {
+		return fresh
+	}
+	fresh.Identifier, fresh.TeamID, fresh.TeamKey = stored.Identifier, stored.TeamID, stored.TeamKey
+	return fresh
 }
 
 // linearRenamed reports whether an issue answers under an identifier other than
@@ -485,17 +508,16 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 //
 // An issue that answers under a new identifier — moved to another Linear team,
 // or its team's key renamed — is the same issue: the entity is renamed first,
-// and the diff that follows emits identifier_changed ahead of everything else
-// it finds. When no rule arms the team the issue moved to, nothing here would
-// follow it any further, so it is renamed, its identifier_changed is emitted,
-// and it retires as unreachable with reason moved, naming the team it left.
+// before anything decides whether it can still be tracked, and the diff that
+// follows emits identifier_changed ahead of everything else it finds. When the
+// issue is retiring instead — trashed, archived outside a done state, or moved
+// to a team no rule arms — no later diff will report the move, so it is
+// renamed, its identifier_changed is published, and then its unreachable. A
+// move to an unarmed team retires with reason moved, naming the team it left.
 func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
-	if reason := linearIssueGone(issue, teams); reason != "" {
-		t.emitLinearUnreachable(ctx, orgID, e, &issue, reason)
-		return 1
-	}
 	state := linearIssueToState(issue, allDone)
 	snap := state.Snap
+	gone := linearIssueGone(issue, teams)
 	if linearRenamed(scope, e, snap) {
 		oldIdentifier := e.SourceID
 		renamed, ok := t.renameLinearEntity(ctx, scope, e, snap.Identifier, snap.URL)
@@ -503,7 +525,7 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e d
 			return 0
 		}
 		e = renamed
-		if teams.ForTeam(snap.TeamID) == nil {
+		if gone != "" || teams.ForTeam(snap.TeamID) == nil {
 			var was domain.LinearSnapshot
 			if prev != nil {
 				was = *prev
@@ -512,9 +534,17 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e d
 			for _, evt := range linearIdentifierChangedEvents(was, snap, e.ID) {
 				t.publish(ctx, evt)
 			}
-			t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableMoved)
+			if gone != "" {
+				t.emitLinearUnreachable(ctx, orgID, e, &issue, gone)
+			} else {
+				t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableMoved)
+			}
 			return 2
 		}
+	}
+	if gone != "" {
+		t.emitLinearUnreachable(ctx, orgID, e, &issue, gone)
+		return 1
 	}
 	done := teams.doneForTeam(snap.TeamID)
 	terminal := func(s domain.LinearSnapshot) bool { return domain.ContainsState(done, s.StateRef()) }

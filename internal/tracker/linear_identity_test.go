@@ -64,8 +64,9 @@ func (fx *linearFixture) seedLinearTask(t *testing.T, entityID string) string {
 
 // TestRefreshLinear_MoveBetweenArmedTeams: an issue moved from one armed team
 // to another is the same entity under its new identifier. Its tasks stay on
-// it, its url and artifact keys follow it, and the move is identifier_changed,
-// emitted before anything else the cycle diffs — never unreachable.
+// it, its url and its artifacts' targets follow it, and the move is
+// identifier_changed, emitted before anything else the cycle diffs — never
+// unreachable.
 func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	fx := newLinearFixture(t)
 	is := linIssue(4)
@@ -76,7 +77,7 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	art, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
 		Target: "ENG-4", ExternalID: is.ID, State: domain.ArtifactStateIssueUpdated,
-		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, "ENG-4", ""),
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, is.ID, ""),
 	})
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)
@@ -118,8 +119,8 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	if task, err := fx.stores.Tasks.GetSystem(context.Background(), runmode.LocalDefaultOrgID, taskID); err != nil || task == nil || task.EntityID != before.ID {
 		t.Errorf("task = %+v err=%v, want it still on the entity", task, err)
 	}
-	if a, err := fx.stores.Artifacts.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-77" || a.DedupKey != "linear:issue:OPS-77" {
-		t.Errorf("artifact = %+v err=%v, want its key moved to OPS-77", a, err)
+	if a, err := fx.stores.Artifacts.Get(context.Background(), runmode.LocalDefaultOrgID, art.ID); err != nil || a.Target != "OPS-77" || a.DedupKey != art.DedupKey {
+		t.Errorf("artifact = %+v err=%v, want its target moved to OPS-77 and its key kept", a, err)
 	}
 	if snap := fx.snapshot(t, "OPS-77"); snap.Identifier != "OPS-77" || snap.TeamID != opsTeamID {
 		t.Errorf("snapshot = %+v, want the move committed", snap)
@@ -164,6 +165,106 @@ func TestRefreshLinear_MoveToUnarmedTeam(t *testing.T) {
 	}
 	if after := fx.entity(t, "OPS-78"); after.ID != before.ID {
 		t.Errorf("entity = %s, want %s renamed", after.ID, before.ID)
+	}
+}
+
+// TestRefreshLinear_MovedAndRetiredInOneObservation: an issue that moved and
+// was also trashed or archived before a cycle saw either is renamed first, so
+// its identifier_changed is still reported, and then it retires under its new
+// identifier with the reason it is gone, naming the team that tracked it.
+func TestRefreshLinear_MovedAndRetiredInOneObservation(t *testing.T) {
+	cases := []struct {
+		name       string
+		teams      LinearRules
+		mutate     func(*linear.Issue)
+		wantReason string
+	}{
+		{"trashed after a move to an armed team", linRulesWithOps(), func(is *linear.Issue) {
+			is.Trashed, is.ArchivedAt = true, "2026-10-01T12:00:00Z"
+		}, events.LinearUnreachableTrashed},
+		{"archived after a move to an unarmed team", linRules(), func(is *linear.Issue) {
+			is.ArchivedAt = "2026-10-01T12:00:00Z"
+		}, events.LinearUnreachableArchived},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newLinearFixture(t)
+			is := linIssue(9)
+			fx.seed(t, is)
+			before := fx.entity(t, "ENG-9")
+			moved := movedToOps(is, 80)
+			tc.mutate(&moved)
+			fx.client.put(moved)
+
+			evts, err := fx.cycle(t, tc.teams)
+			if err != nil {
+				t.Fatalf("RefreshLinear: %v", err)
+			}
+			if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueIdentifierChanged, domain.EventLinearIssueUnreachable}) {
+				t.Fatalf("events = %v, want identifier_changed then unreachable", got)
+			}
+			var changed events.LinearIssueIdentifierChangedMetadata
+			if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &changed); err != nil {
+				t.Fatal(err)
+			}
+			if changed.OldIdentifier != "ENG-9" || changed.IssueIdentifier != "OPS-80" || changed.OldLinearTeamID != linTeamID {
+				t.Errorf("identifier_changed metadata = %+v", changed)
+			}
+			var gone events.LinearIssueUnreachableMetadata
+			if err := json.Unmarshal([]byte(evts[1].MetadataJSON), &gone); err != nil {
+				t.Fatal(err)
+			}
+			if gone.Reason != tc.wantReason || gone.IssueIdentifier != "OPS-80" || gone.LinearTeamID != linTeamID {
+				t.Errorf("unreachable metadata = %+v, want reason %s under OPS-80 naming the old team", gone, tc.wantReason)
+			}
+			if after := fx.entity(t, "OPS-80"); after.ID != before.ID {
+				t.Errorf("entity = %s, want %s renamed", after.ID, before.ID)
+			}
+		})
+	}
+}
+
+// TestRefreshLinear_ReopensUnderANewIdentifier: a closed issue that comes back
+// open in another armed team is found by its UUID and reactivated as the same
+// entity, renamed. Reactivation does not swallow the move: the refresh diffs it
+// and identifier_changed names the identifier and team the entity was stored
+// under.
+func TestRefreshLinear_ReopensUnderANewIdentifier(t *testing.T) {
+	fx := newLinearFixture(t)
+	is := linIssue(8)
+	fx.seed(t, is)
+	before := fx.entity(t, "ENG-8")
+	if _, err := fx.stores.Entities.MarkClosed(context.Background(), runmode.LocalDefaultOrgID, before.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	moved := movedToOps(is, 79)
+	fx.client.put(moved)
+	fx.client.search["pickup:"+opsTeamID] = []linear.Issue{moved}
+
+	evts, err := fx.cycle(t, linRulesWithOps())
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueIdentifierChanged}) {
+		t.Fatalf("events = %v, want [identifier_changed]", got)
+	}
+	var meta events.LinearIssueIdentifierChangedMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.OldIdentifier != "ENG-8" || meta.IssueIdentifier != "OPS-79" || meta.OldLinearTeamID != linTeamID ||
+		meta.OldLinearTeamKey != "ENG" || meta.LinearTeamID != opsTeamID {
+		t.Errorf("identifier_changed metadata = %+v", meta)
+	}
+	after := fx.entity(t, "OPS-79")
+	if after.ID != before.ID || after.State != "active" {
+		t.Errorf("entity = %+v, want %s reactivated under OPS-79", after, before.ID)
+	}
+	if snap := fx.snapshot(t, "OPS-79"); snap.Identifier != "OPS-79" || snap.TeamID != opsTeamID {
+		t.Errorf("snapshot = %+v, want the fresh identity committed", snap)
+	}
+	if evts, err := fx.cycle(t, linRulesWithOps()); err != nil || len(evts) != 0 {
+		t.Fatalf("next cycle: events=%v err=%v, want the move not re-emitted", eventTypes(evts), err)
 	}
 }
 

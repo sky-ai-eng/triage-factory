@@ -100,3 +100,24 @@ func TestEntityScope(t *testing.T) {
 		t.Errorf("EntityScope(linear, unbound) = %q, want empty", got)
 	}
 }
+
+func TestArtifactKeyHasResource(t *testing.T) {
+	cases := []struct {
+		key, provider, resource string
+		want                    bool
+	}{
+		{"linear:issue:uuid-4", "linear", "uuid-4", true},
+		{"linear:comment:uuid-4:c-1", "linear", "uuid-4", true},
+		{"linear:issue:uuid-41", "linear", "uuid-4", false},
+		{"linear:comment:uuid-41:uuid-4", "linear", "uuid-4", false},
+		{"jira:issue:uuid-4", "linear", "uuid-4", false},
+		{"linear:uuid-4", "linear", "uuid-4", false},
+		{"linear:issue:uuid-4", "linear", "", false},
+		{"", "linear", "uuid-4", false},
+	}
+	for _, c := range cases {
+		if got := ArtifactKeyHasResource(c.key, c.provider, c.resource); got != c.want {
+			t.Errorf("ArtifactKeyHasResource(%q, %q, %q) = %v, want %v", c.key, c.provider, c.resource, got, c.want)
+		}
+	}
+}

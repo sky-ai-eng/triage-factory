@@ -324,19 +324,26 @@ type EntityStore interface {
 	// key-derived value:
 	//
 	//   - entities.source_id, and entities.url when newURL is non-empty;
-	//   - the target and dedup_key of the source's artifacts keyed on the old
-	//     key (provider = source, dedup resource segment = the old key);
+	//   - the target of the source's artifacts keyed on the entity's id
+	//     (provider = source, dedup resource segment = externalID; see
+	//     domain.ArtifactDedupKey). Their dedup key carries the id, so it
+	//     stays. An artifact keyed on the display key is left alone: the key
+	//     repeats across scopes, and the org-wide dedup key does not say
+	//     which scope's object a row is about.
+	//     TODO(TFAC-1061): Jira artifacts are keyed on the issue key
+	//     (jira:issue:<KEY>), so a Jira rename moves none of them.
 	//   - external_actions.current_url, the audit ledger's maintained pointer,
 	//     for actions whose link resolves to the entity's old url. The record
-	//     of the act itself (target, url, detail) is never touched.
+	//     of the act itself (target, url, detail) is never touched. A url
+	//     names its scope (a Linear url carries the workspace's url key), so
+	//     this match cannot reach another scope's actions.
 	//
 	// Detection happens here: a candidate that went stale between the
 	// caller's read and this call is a no-op. Every no-op is a nil error with
 	// Renamed=false — no externalID, no row carrying it, or the key already
 	// newKey. Refused instead: ErrEntityKeyOccupied when an ACTIVE row in the
-	// scope already holds newKey (or an artifact already answers to the
-	// rewritten dedup key), and ErrEntityIdentityAmbiguous when more than one
-	// row carries the id. Neither writes anything. An empty scope is
+	// scope already holds newKey, and ErrEntityIdentityAmbiguous when more
+	// than one row carries the id. Neither writes anything. An empty scope is
 	// ErrEntityScopeRequired.
 	//
 	// The snapshot, poll_seq and last_polled_at are left alone: the caller
