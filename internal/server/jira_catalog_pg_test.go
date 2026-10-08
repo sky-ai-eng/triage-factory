@@ -102,6 +102,7 @@ func TestJiraCatalog_Postgres_AddressedAndGatedByOrg(t *testing.T) {
 		"projects list": rig.postJSONWithSid(http.MethodPost, base+"/list", bobSid, map[string]any{}),
 		"project":       rig.requestWithSid(http.MethodGet, base+"/SKY", bobSid),
 		"statuses list": rig.postJSONWithSid(http.MethodPost, base+"/SKY/statuses/list", bobSid, map[string]any{}),
+		"status":        rig.requestWithSid(http.MethodGet, base+"/SKY/statuses/"+statusDoneID, bobSid),
 	} {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {

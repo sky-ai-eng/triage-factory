@@ -22,6 +22,10 @@ func jiraProjectPath(key string) string {
 
 func jiraStatusesListPath(key string) string { return jiraProjectPath(key) + "/statuses/list" }
 
+func jiraStatusPath(key, statusID string) string {
+	return jiraProjectPath(key) + "/statuses/" + statusID
+}
+
 // TestJiraProjectsList_ProxyPagingRoundTrip walks the list the way a client
 // does — first page, then the token it was handed — and pins the two halves of
 // the proxy-list contract: the rows page, and total_count is null rather than a
@@ -175,6 +179,7 @@ func TestJiraCatalog_MalformedOrgIsNotFound(t *testing.T) {
 		"projects list": doJSON(t, s, http.MethodPost, org+"/projects/list", map[string]any{}),
 		"project":       doJSON(t, s, http.MethodGet, org+"/projects/SKY", nil),
 		"statuses list": doJSON(t, s, http.MethodPost, org+"/projects/SKY/statuses/list", map[string]any{}),
+		"status":        doJSON(t, s, http.MethodGet, org+"/projects/SKY/statuses/"+statusDoneID, nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")
@@ -196,6 +201,7 @@ func TestJiraCatalog_NotConnectedEverywhere(t *testing.T) {
 		"projects list": doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}),
 		"project":       doJSON(t, s, http.MethodGet, jiraProjectPath("SKY"), nil),
 		"statuses list": doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{}),
+		"status":        doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusDoneID), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
@@ -212,6 +218,7 @@ func TestJiraCatalog_UpstreamFailure(t *testing.T) {
 		"projects list": doJSON(t, s, http.MethodPost, jiraProjectsListPath, map[string]any{}),
 		"project":       doJSON(t, s, http.MethodGet, jiraProjectPath("SKY"), nil),
 		"statuses list": doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{}),
+		"status":        doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusDoneID), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertOneFault(t, rec, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
@@ -326,5 +333,51 @@ func TestJiraStatusesList_Refusals(t *testing.T) {
 		http.StatusBadRequest, "UNKNOWN_FIELD", "project")
 	if fake.Calls() != before {
 		t.Errorf("a refused request reached Jira %d times", fake.Calls()-before)
+	}
+}
+
+// TestJiraStatusGet: one status through the project whose workflow uses it,
+// with the same id and name the list serves. A status of another project's
+// workflow is a 404 at this project's address, as are an id Jira does not know
+// and a project Jira cannot show; an id or key outside the grammar is a 404
+// that never reaches Jira.
+func TestJiraStatusGet(t *testing.T) {
+	s, fake := newServerWithJiraCatalog(t, "SKY", "OPS")
+	opsOnly := fakeJiraStatus{ID: "20000", Name: "Queued"}
+	fake.SetStatuses("OPS", opsOnly)
+
+	rec := doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusInProgressID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+	var got jiraStatusJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := (jiraStatusJSON{ID: statusInProgressID, Name: "In Progress"}); got != want {
+		t.Errorf("status = %+v, want %+v", got, want)
+	}
+
+	if rec := doJSON(t, s, http.MethodGet, jiraStatusPath("OPS", opsOnly.ID), nil); rec.Code != http.StatusOK {
+		t.Errorf("GET the status at its own project = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	assertOneFault(t, doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", opsOnly.ID), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+	assertOneFault(t, doJSON(t, s, http.MethodGet, jiraStatusPath("SKY", statusUnknownID), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+	fake.Hide("GONE")
+	assertOneFault(t, doJSON(t, s, http.MethodGet, jiraStatusPath("GONE", statusDoneID), nil),
+		http.StatusNotFound, "NOT_FOUND", "")
+
+	before := fake.Calls()
+	for _, path := range []string{
+		jiraStatusPath("SKY", "Done"),
+		jiraStatusPath("SKY", "-1"),
+		jiraStatusPath("sky", statusDoneID),
+	} {
+		assertOneFault(t, doJSON(t, s, http.MethodGet, path, nil), http.StatusNotFound, "NOT_FOUND", "")
+	}
+	if fake.Calls() != before {
+		t.Errorf("a path outside the grammar reached Jira %d times", fake.Calls()-before)
 	}
 }

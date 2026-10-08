@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"errors"
 	"net/http"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ import (
 //   POST /api/orgs/{org_id}/jira/projects/list
 //   GET  /api/orgs/{org_id}/jira/projects/{project_key}
 //   POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list
+//   GET  /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}
 //
 // The GitHub sibling (POST /api/github/repos/list) reads a local mirror; these
 // proxy Jira live, and the difference is a property of the two estates rather
@@ -220,6 +222,54 @@ func (s *Server) handleJiraStatusesList(w http.ResponseWriter, r *http.Request) 
 	}
 	httpx.WriteProxyList(w, page, items, next)
 }
+
+// GET /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}
+//
+// Jira has no read for one status of one project — /status/{id} answers
+// instance-wide and says nothing about which workflows use it — so this reads
+// the project's statuses and picks the one asked for. That also makes it
+// answer for exactly the rows the list serves and the team write accepts. A
+// status that exists but is not in this project's workflow is a 404: the path
+// names the project, and a status is addressed through the project that uses
+// it.
+func (s *Server) handleJiraStatusGet(w http.ResponseWriter, r *http.Request) {
+	orgID, _, ok := s.az.RequireOrgMember(w, r)
+	if !ok {
+		return
+	}
+	key, ok := jiraPathProjectKey(w, r)
+	if !ok {
+		return
+	}
+	statusID := r.PathValue("status_id")
+	if !jiraStatusIDRe.MatchString(statusID) {
+		httpx.NotFound(w, "jira workflow status")
+		return
+	}
+	client, ok := s.jiraSystemClient(w, r, orgID, "jira/status")
+	if !ok {
+		return
+	}
+	statuses, err := client.ProjectStatuses(r.Context(), key)
+	if jira.IsNotFound(err) {
+		httpx.NotFound(w, "jira project")
+		return
+	}
+	if err != nil {
+		writeJiraUpstream(w, orgID, "the workflow statuses of Jira project "+key, err)
+		return
+	}
+	i := slices.IndexFunc(statuses, func(st jira.Status) bool { return st.ID == statusID })
+	if i < 0 {
+		httpx.NotFound(w, "jira workflow status")
+		return
+	}
+	writeJSON(w, http.StatusOK, jiraStatusJSON{ID: statuses[i].ID, Name: statuses[i].Name})
+}
+
+// jiraStatusIDRe is a Jira status id as both deployments write one: a decimal
+// integer, carried as a string.
+var jiraStatusIDRe = regexp.MustCompile(`^[0-9]+$`)
 
 // jiraStartAtFromCursor decodes the offset the proxy page token carries. An
 // empty cursor is the first page. Anything else must be a non-negative integer

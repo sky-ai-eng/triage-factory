@@ -1186,6 +1186,7 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/list", s.handleJiraProjectsList)
 	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}", s.handleJiraProjectGet)
 	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list", s.handleJiraStatusesList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}/statuses/{status_id}", s.handleJiraStatusGet)
 	// The org's Linear catalog — its teams, and each team's workflow states —
 	// proxied live under the org's Linear service credential and addressed at
 	// the org, so a caller in several orgs reads each without moving their
