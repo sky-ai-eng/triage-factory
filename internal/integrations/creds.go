@@ -328,10 +328,9 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 // skipped (not written as "") — handlers that want to clear a field call the
 // targeted Clear* helpers instead.
 //
-// The Linear fields are not written here. Callers rebind one integration by
-// loading the bundle, changing its half and saving it back, and a Load in
-// local mode returns an env-supplied value, which a Save of the whole bundle
-// would then persist; the Linear credential is written by its own bind.
+// The Linear fields are not written here: an app install's Linear credential is
+// an envelope the bundle does not carry, so the bundle cannot express every
+// Linear credential and writes none of them.
 func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Credentials) error {
 	pairs := []struct{ key, value string }{
 		{KeyGitHubURL, c.GitHubURL},

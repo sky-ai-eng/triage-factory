@@ -54,12 +54,12 @@ remove.
 ## Credentials
 
 All credentials (GitHub PAT, Jira PAT, the Anthropic key, GitHub App private
-keys) are stored outside the database — in the OS keychain on desktop, or an
-encrypted file on headless installs. Token fields in Settings show "leave blank
-to keep current" when a token is already stored.
+keys) are entered in Settings and stored outside the database — in the OS
+keychain on desktop, or an encrypted file on a host with no keychain. Token
+fields show "leave blank to keep current" when a token is already stored.
 
-Where exactly they land, and how the headless encrypted-file backend works, is
-covered in [Secret storage](secret-storage.md).
+Where exactly they land, and how the encrypted-file backend works, is covered in
+[Secret storage](secret-storage.md).
 
 ## Knowledge base
 
