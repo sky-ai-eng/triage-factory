@@ -563,11 +563,14 @@ type EntityStore interface {
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
 	// RekeyOrMergeSystem follows an external object's changed natural key.
-	// When newSourceID is free in the entity's own scope, the existing entity
-	// is re-keyed in place. When the key lookup in that scope returns another
-	// entity, that canonically-keyed row survives and every entity-id referent
-	// is moved to it. The operation is atomic. Returns the surviving entity id
-	// and whether a merge occurred.
+	// When an ACTIVE row in the entity's own scope holds newSourceID, that row
+	// survives and every entity-id referent is moved to it. Otherwise the
+	// entity is re-keyed in place, beside any closed rows under the key. A
+	// closed holder is never merged into: it may be another object that held
+	// the key before it was freed and reused, and tasks moved onto a closed
+	// row would never close, since its close has already run and a closed row
+	// is not refreshed. The operation is atomic. Returns the surviving entity
+	// id and whether a merge occurred.
 	//
 	// Exempt from the returned-row rule: it is a composition, not a single-row
 	// write — the merge arm moves every referent across tables and deletes the

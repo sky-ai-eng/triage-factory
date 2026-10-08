@@ -309,6 +309,56 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
+	t.Run("RekeyOrMergeSystem_merges_only_into_an_active_holder", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		const jiraScope = "https://jira.example.com"
+		create := func(key, title string) *domain.Entity {
+			t.Helper()
+			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, key, "", "issue", title, "")
+			if err != nil {
+				t.Fatalf("create %s: %v", key, err)
+			}
+			return e
+		}
+
+		// A closed row under the new key: the moving entity takes the key in
+		// place, and the closed row keeps its own history.
+		closed := create("OPS-9", "Old OPS-9")
+		if _, err := s.Entities.MarkClosed(ctx, orgID, closed.ID); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+		moving := create("ENG-5", "Moving")
+		taskID := seed.Task(t, moving.ID, "rekey")
+		survivor, merged, err := s.Entities.RekeyOrMergeSystem(ctx, orgID, moving.ID, "OPS-9")
+		if err != nil || merged || survivor != moving.ID {
+			t.Fatalf("rekey beside a closed holder = (%s, merged=%v, %v), want %s rekeyed in place", survivor, merged, err, moving.ID)
+		}
+		if got, _ := s.Entities.GetSystem(ctx, orgID, moving.ID); got == nil || got.SourceID != "OPS-9" || got.State != "active" {
+			t.Errorf("moving entity = %+v, want active under OPS-9", got)
+		}
+		if got, _ := s.Entities.GetSystem(ctx, orgID, closed.ID); got == nil || got.State != "closed" || got.Title != "Old OPS-9" {
+			t.Errorf("closed holder = %+v, want it untouched", got)
+		}
+		if task, err := s.Tasks.GetSystem(ctx, orgID, taskID); err != nil || task == nil || task.EntityID != moving.ID {
+			t.Errorf("task = %+v err=%v, want it still on the moving entity", task, err)
+		}
+		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "jira", jiraScope, "OPS-9"); got == nil || got.ID != moving.ID {
+			t.Errorf("OPS-9 resolves to %+v, want the active row", got)
+		}
+
+		// An active row under the new key is the same object found again under
+		// it: the moving entity merges into it.
+		holder := create("OPS-10", "Duplicate")
+		loser := create("ENG-6", "Moving again")
+		survivor, merged, err = s.Entities.RekeyOrMergeSystem(ctx, orgID, loser.ID, "OPS-10")
+		if err != nil || !merged || survivor != holder.ID {
+			t.Fatalf("rekey onto an active holder = (%s, merged=%v, %v), want a merge into %s", survivor, merged, err, holder.ID)
+		}
+		if got, _ := s.Entities.GetSystem(ctx, orgID, loser.ID); got != nil {
+			t.Errorf("merged-away entity still exists: %+v", got)
+		}
+	})
+
 	t.Run("RenameSystem_is_idempotent", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-5", "uuid-5", "issue", "t", ""); err != nil {

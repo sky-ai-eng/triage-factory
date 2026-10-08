@@ -749,8 +749,8 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 			SELECT e.id FROM entities e
 			JOIN entities self ON self.org_id = e.org_id AND self.id = $2
 			WHERE e.org_id = $1 AND e.source = self.source AND e.scope = self.scope AND e.source_id = $3
-			ORDER BY (e.state = 'active') DESC, e.closed_at DESC NULLS LAST, e.created_at DESC, e.id DESC
-			LIMIT 1`, orgID, id, newSourceID).Scan(&survivor); err != nil {
+			  AND e.state = 'active'`,
+			orgID, id, newSourceID).Scan(&survivor); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}

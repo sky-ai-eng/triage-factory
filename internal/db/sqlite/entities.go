@@ -711,9 +711,8 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 		if err := q.QueryRowContext(ctx, `
 			SELECT e.id FROM entities e
 			JOIN entities self ON self.id = ?
-			WHERE e.source = self.source AND e.scope = self.scope AND e.source_id = ?
-			ORDER BY CASE WHEN e.state = 'active' THEN 0 ELSE 1 END, e.closed_at DESC, e.created_at DESC, e.id DESC
-			LIMIT 1`, id, newSourceID).Scan(&survivor); err != nil {
+			WHERE e.source = self.source AND e.scope = self.scope AND e.source_id = ? AND e.state = 'active'`,
+			id, newSourceID).Scan(&survivor); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
