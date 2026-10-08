@@ -42,12 +42,13 @@ type fileEnvelope struct {
 	Ciphertext []byte `json:"ciphertext"`
 }
 
-// fileBackend is the headless secret backend: an AES-256-GCM-encrypted file
+// fileBackend is the no-keychain secret backend: an AES-256-GCM-encrypted file
 // read into memory once at construction and rewritten atomically on every
-// mutation. It exists because a headless box (Docker, a self-hosted Linux
-// server) has no OS keychain — go-keyring's secret-service path needs a D-Bus
-// session that isn't there, so the keychain backend can't be used. Selected by
-// resolveBackend when the keychain probe fails (or TF_SECRETS_BACKEND=file).
+// mutation. It exists because a host with no desktop session (Docker, a
+// self-hosted Linux server) has no OS keychain — go-keyring's secret-service
+// path needs a D-Bus session that isn't there, so the keychain backend can't be
+// used. Selected by resolveBackend when the keychain probe fails (or
+// TF_SECRETS_BACKEND=file).
 type fileBackend struct {
 	path string
 	key  aead.Key

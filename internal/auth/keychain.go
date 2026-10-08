@@ -83,8 +83,8 @@ func DeleteSecret(key string) error {
 
 // secretBackend is the storage seam the public secret functions delegate to.
 // Two impls: keychainBackend (OS keychain, the desktop default) and fileBackend
-// (an encrypted file, for headless boxes with no keychain). Backends are dumb
-// key/value doors.
+// (an encrypted file, for hosts with no keychain). Backends are dumb key/value
+// doors.
 type secretBackend interface {
 	get(key string) (string, error) // ("", nil) when absent — NOT an error
 	put(key, value string) error
