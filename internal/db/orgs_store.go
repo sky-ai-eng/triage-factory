@@ -105,10 +105,11 @@ type OrgsStore interface {
 	// DEFAULT and DefaultOrgSettings, so no door onto it disagrees. Postgres routes through
 	// the app pool (org_settings_update RLS gates by org admin).
 	//
-	// It does NOT write github_credential_class: that column is owned by the
-	// credential transitions, not by the settings writer, so
-	// updates.GitHubCredentialClass is ignored and an existing value survives
-	// every settings save. See SetGitHubCredentialClass.
+	// It does NOT write github_credential_class, linear_workspace_id or
+	// linear_workspace_url_key: those columns are owned by the credential
+	// transitions, not by the settings writer, so the matching fields of
+	// updates are ignored and an existing value survives every settings save.
+	// See SetGitHubCredentialClass and SetLinearWorkspace.
 	//
 	// It bumps the row's version unconditionally — an unguarded save is
 	// deliberately a last-writer-wins write, which is what every credential
@@ -167,4 +168,21 @@ type OrgsStore interface {
 	// nobody has read — sourced from RETURNING and projecting GetSettings'
 	// column list and scanner.
 	SetGitHubCredentialClass(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.OrgSettings, error)
+
+	// SetLinearWorkspace writes ONLY org_settings.linear_workspace_id and
+	// linear_workspace_url_key — the Linear workspace the org's credential
+	// belongs to, learned from Linear when the credential is bound and
+	// cleared ("" writes NULL) when it is unbound. Surgical for the reason
+	// SetGitHubCredentialClass is: the credential bind and unbind call it
+	// inside their own transactions, and no settings save can reach the
+	// columns, so neither can put back a value the other just replaced.
+	//
+	// It does not bump the row's version. The settings writer cannot touch
+	// these columns, so there is nothing for its concurrency token to guard,
+	// and bumping it would fail an unrelated settings save that was loaded
+	// before the bind.
+	//
+	// Same partial-INSERT shape, pool and return contract as
+	// SetGitHubCredentialClass.
+	SetLinearWorkspace(ctx context.Context, orgID, workspaceID, urlKey string) (domain.OrgSettings, error)
 }

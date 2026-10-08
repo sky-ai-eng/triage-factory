@@ -45,10 +45,10 @@
 //
 // # The registration seam
 //
-// Core ships github and jira (probed here) plus the sources TF has declared
-// but not built. Everything else registers: core never imports ee/, so an
-// out-of-tree source plugs its own probe in at startup the same way it plugs
-// into routing and entitlements.
+// Core ships github, jira and linear (probed here) plus the sources TF has
+// declared but not built. Everything else registers: core never imports ee/,
+// so an out-of-tree source plugs its own probe in at startup the same way it
+// plugs into routing and entitlements.
 package eventsource
 
 import (
@@ -229,20 +229,18 @@ type declaration struct {
 	polled  bool
 }
 
-// builtins are the sources core ships or has declared. github and jira resolve
-// through this package's own probes; linear and schedule are declared and not
+// builtins are the sources core ships or has declared. github, jira and linear
+// resolve through this package's own probes; schedule is declared and not
 // built, which is a fact the UI needs to render rather than an omission.
 //
 // linear's hasHost is false: Linear is SaaS-only with no self-host offering,
-// so org_event_sources.base_url has nothing to target for it — same reasoning
-// as Slack, stated here ahead of Linear actually shipping so the day it does,
-// HasHost is a registration decision already made rather than a default
-// nobody chose. schedule is TF's own internal cron trigger: no host, no poll
-// cadence, nothing external to configure.
+// so org_event_sources.base_url has nothing to target for it — the same
+// reasoning as Slack. schedule is TF's own internal cron trigger: no host, no
+// poll cadence, nothing external to configure.
 var builtins = []declaration{
 	{kind: KindGitHub, probe: githubState, systemProbe: githubStateSystem, required: true, hasHost: true, polled: true},
 	{kind: KindJira, probe: jiraState, systemProbe: jiraStateSystem, hasHost: true, polled: true},
-	{kind: KindLinear, polled: true},
+	{kind: KindLinear, probe: linearState, systemProbe: linearStateSystem, polled: true},
 	{kind: KindSchedule},
 }
 
@@ -409,9 +407,9 @@ func Polled(kind string) bool {
 	return i >= 0 && decls[i].polled
 }
 
-// resolver carries one pass's shared reads. The github and jira answers are
-// both cut from the same credential bundle, so it is loaded lazily and at most
-// once — a pass that resolves neither never touches the secret store. The org's
+// resolver carries one pass's shared reads. The github, jira and linear answers
+// are all cut from the same credential bundle, so it is loaded lazily and at
+// most once — a pass that resolves none of them never touches the secret store. The org's
 // paused-source set is loaded the same way, once for the whole pass however
 // many sources it answers for.
 type resolver struct {
@@ -522,6 +520,21 @@ func jiraState(ctx context.Context, r *resolver) (State, error) {
 	return StateUnconfigured, nil
 }
 
+// linearState is available exactly when the org holds a Linear service
+// credential under its stored auth-method marker. It reads the same helper the
+// integrations status read does, so Settings and this answer cannot disagree
+// about whether Linear is connected.
+func linearState(ctx context.Context, r *resolver) (State, error) {
+	creds, err := r.credentials(ctx)
+	if err != nil {
+		return "", err
+	}
+	if integrations.LinearSystemConfigured(creds) {
+		return StateAvailable, nil
+	}
+	return StateUnconfigured, nil
+}
+
 // AvailableKindsSystem is AvailableKinds for JWT-less system callers: same
 // question, same precedence, read through the admin-pool `...System` doors
 // with no claims transaction and no user identity. It exists for the brain's
@@ -531,7 +544,7 @@ func jiraState(ctx context.Context, r *resolver) (State, error) {
 // is disabled, and an event-triggered conversation has no user to claim as),
 // so the brain answers here and ships the answer with the bundle.
 //
-// A source resolves only through a system probe: core's two have them, a
+// A source resolves only through a system probe: core's builtins have them, a
 // registered source supplies Registration.SystemProbe, and one that doesn't is
 // simply absent from the answer — never advertised on a probe nobody wrote.
 // Any probe failure fails the whole read, per the package's error contract; the
@@ -620,9 +633,9 @@ func (r *systemResolver) credentials(ctx context.Context) (auth.Credentials, err
 	return creds, nil
 }
 
-// githubStateSystem / jiraStateSystem are the core probes' system twins: the
-// same derivations as githubState / jiraState, cut from the LoadSystem-loaded
-// bundle and the `...System` reads.
+// githubStateSystem / jiraStateSystem / linearStateSystem are the core probes'
+// system twins: the same derivations as githubState / jiraState / linearState,
+// cut from the LoadSystem-loaded bundle and the `...System` reads.
 func githubStateSystem(ctx context.Context, r *systemResolver) (State, error) {
 	creds, err := r.credentials(ctx)
 	if err != nil {
@@ -644,6 +657,17 @@ func jiraStateSystem(ctx context.Context, r *systemResolver) (State, error) {
 		return "", err
 	}
 	if _, ok := integrations.JiraSystemConfig(creds); ok {
+		return StateAvailable, nil
+	}
+	return StateUnconfigured, nil
+}
+
+func linearStateSystem(ctx context.Context, r *systemResolver) (State, error) {
+	creds, err := r.credentials(ctx)
+	if err != nil {
+		return "", err
+	}
+	if integrations.LinearSystemConfigured(creds) {
 		return StateAvailable, nil
 	}
 	return StateUnconfigured, nil

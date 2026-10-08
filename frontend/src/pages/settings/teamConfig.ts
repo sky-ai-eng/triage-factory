@@ -87,6 +87,9 @@ export interface TeamConfigForm {
   permission_absent_autodeny_enabled: boolean
   permission_absent_grace_seconds: number
   jira_projects: JiraProjectConfig[]
+  // The Linear teams this team tracks. They come in with the settings GET like
+  // jira_projects and save through their own PUT (saveTeamLinearTeams).
+  linear_teams: LinearTeamConfig[]
   // repos and github_groups load from their own endpoints (separate from the
   // team-settings GET), so they carry a third state: `undefined` means "not
   // loaded yet / load failed" — distinct from `[]` ("loaded, genuinely
@@ -466,6 +469,7 @@ export const emptyTeamConfig = (): TeamConfigForm => ({
   permission_absent_autodeny_enabled: true,
   permission_absent_grace_seconds: 15,
   jira_projects: [],
+  linear_teams: [],
 })
 
 // teamConfigFromSettings seeds the team-settings + Jira-rules slice of the
@@ -490,6 +494,7 @@ export function teamConfigFromSettings(data: TeamSettingsData): TeamConfigForm {
       Math.round((data.team_settings.PermissionAbsentGraceMS ?? 15000) / 1000),
     ),
     jira_projects: data.jira_projects ?? [],
+    linear_teams: (data.linear_teams ?? []).map(linearTeamFromWire),
   }
 }
 

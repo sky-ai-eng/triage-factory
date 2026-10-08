@@ -55,10 +55,11 @@ export async function disconnectJira(orgId: string): Promise<CredentialResult> {
   return credentialRequest(`/api/orgs/${orgId}/jira/access/credential`, 'DELETE')
 }
 
-// credentialRequest is the shared call shape for the credential resources:
-// a discriminated result, and the backend's optional `login` (the GitHub
-// bind's resolved identity) passed through rather than swallowed.
-async function credentialRequest(
+// credentialRequest is the shared call shape for the credential resources
+// (linearConnect.ts drives Linear's unbind through it too): a discriminated
+// result, and the backend's optional `login` (the GitHub bind's resolved
+// identity) passed through rather than swallowed.
+export async function credentialRequest(
   url: string,
   method: 'PUT' | 'DELETE',
   body?: unknown,

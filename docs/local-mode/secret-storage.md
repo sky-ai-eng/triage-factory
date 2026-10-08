@@ -1,10 +1,10 @@
 # Secret storage (local mode)
 
-Credentials Triage Factory stores (the GitHub PAT, the Jira credential, an
-Anthropic or Bedrock key, GitHub App private keys) are entered in the UI and
-kept outside the database. Local mode does not read GitHub or Jira credentials
-from environment variables; Claude can instead run on the host's own
-credentials, which are never stored (see
+Credentials Triage Factory stores (the GitHub PAT, the Jira credential, the
+Linear API key, an Anthropic or Bedrock key, GitHub App private keys) are entered
+in the UI and kept outside the database. Local mode does not read GitHub, Jira or
+Linear credentials from environment variables; Claude can instead run on the
+host's own credentials, which are never stored (see
 [configuration](configuration.md#credentials)). The secret backend is selected
 automatically:
 
@@ -30,3 +30,18 @@ Either way, credentials entered in Settings persist across restarts. See
 > The same `TF_SECRET_ENCRYPTION_KEY` also governs multi-mode deployments, where
 > it encrypts `public.org_secrets` in Postgres instead of `secrets.enc` — see
 > [self-hosting install](../self-hosting/install.md).
+
+## Linear
+
+The org's Linear connection lives under these keys:
+
+- `linear_api_key` — the personal API key the workspace connected with.
+- `linear_auth_method` — which shape the connection takes. `api_key` is the
+  only one Settings binds today.
+- `linear_app_install` — reserved for connecting Linear by installing an app
+  instead of pasting a key. Nothing writes it yet.
+- `linear_bound_as` — who the key belonged to and its workspace's name, recorded
+  when it was connected so Settings can show them. Not a secret; it is stored
+  here so it is written and removed with the key.
+
+Disconnecting Linear in Settings removes all four.

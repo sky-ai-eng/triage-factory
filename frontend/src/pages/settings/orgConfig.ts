@@ -46,6 +46,12 @@ export interface OrgConfigForm {
   jira_email: string
   jira_api_token: string
   jira_poll_interval: string
+  // The org's Linear API key, as typed. Blank on load like jira_pat — the key
+  // never leaves the vault — and bound ONLY through PUT
+  // /api/orgs/{org}/linear/access/credential (connectLinear), so it is not part
+  // of OrgSettingsPatch.
+  linear_api_key: string
+  linear_poll_interval: string
   // The model the three background jobs — scoring, project classification, repo
   // profiling — run on. A catalog key. Empty means nobody has picked one, and
   // those jobs do not run until somebody does: there is no fallback model.
@@ -116,6 +122,7 @@ export interface OrgSettingsData {
   // marker (DC PAT or Cloud email + API token) — not the presence of a PAT
   // specifically, so a Cloud org reports true despite having no PAT.
   has_jira_credential: boolean
+  linear_poll_interval: string
   // The org's stored model enable-set — the catalog keys its teams may pick
   // from — or null when it has expressed no preference, in which case every
   // model the deployment offers is enabled. There is no UI for it yet; the
@@ -176,6 +183,8 @@ export const emptyOrgConfig = (): OrgConfigForm => ({
   jira_email: '',
   jira_api_token: '',
   jira_poll_interval: '5m0s',
+  linear_api_key: '',
+  linear_poll_interval: '5m0s',
   background_jobs_model: '',
   // The blank-form value only; every real form is seeded from the GET, which
   // always carries the org's own. 'byok' rather than 'system' because it is the
@@ -215,6 +224,8 @@ export function orgConfigFromSettings(org: OrgSettingsData): OrgConfigForm {
     jira_email: '',
     jira_api_token: '',
     jira_poll_interval: org.jira_poll_interval,
+    linear_api_key: '',
+    linear_poll_interval: org.linear_poll_interval,
     background_jobs_model: org.background_jobs_model || '',
     llm_auth_method: org.llm_auth_method === 'system' ? 'system' : 'byok',
     // 0 (no cap) renders as an empty input ("No cap"); any positive cap seeds
@@ -359,8 +370,8 @@ function blankAsNull(v: string): string | null {
 // caller passes exactly the fields it edited and the PATCH's absent-means-keep
 // contract does the rest, so one surface's save can never carry — or clobber —
 // a value its user wasn't looking at. Credentials aren't representable here at
-// all: the GitHub PAT, the Jira service credential and the LLM provider
-// material each bind through their own validated resource.
+// all: the GitHub PAT, the Jira and Linear service credentials and the LLM
+// provider material each bind through their own validated resource.
 export type OrgSettingsPatch = Partial<
   Pick<
     OrgConfigForm,
@@ -369,6 +380,7 @@ export type OrgSettingsPatch = Partial<
     | 'github_clone_protocol'
     | 'jira_url'
     | 'jira_poll_interval'
+    | 'linear_poll_interval'
     | 'background_jobs_model'
     | 'llm_auth_method'
     | 'max_daily_cost_usd'
@@ -405,6 +417,8 @@ export async function patchOrgSettings(
     body.github_clone_protocol = fields.github_clone_protocol
   if (fields.jira_url !== undefined) body.jira_base_url = blankAsNull(fields.jira_url)
   if (fields.jira_poll_interval !== undefined) body.jira_poll_interval = fields.jira_poll_interval
+  if (fields.linear_poll_interval !== undefined)
+    body.linear_poll_interval = fields.linear_poll_interval
   // Blank sends null, which is not "leave it alone" here — it stops the
   // background jobs. That is the only way to turn them off short of unbinding
   // the Claude credential every other feature shares.

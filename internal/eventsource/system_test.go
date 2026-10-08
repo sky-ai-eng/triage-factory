@@ -24,7 +24,7 @@ func (r *rig) availableKindsSystem(t *testing.T) []string {
 }
 
 // TestAvailableKindsSystem_AgreesWithTheClaimsResolve pins the property the
-// include_tools stamp rests on: for core's two sources, the claims-free door
+// include_tools stamp rests on: for core's built sources, the claims-free door
 // answers exactly what AvailableKinds answers under claims — same derivation,
 // different pool.
 func TestAvailableKindsSystem_AgreesWithTheClaimsResolve(t *testing.T) {
@@ -33,6 +33,7 @@ func TestAvailableKindsSystem_AgreesWithTheClaimsResolve(t *testing.T) {
 		GitHubPAT: "ghp_test",
 		JiraURL:   "https://jira.example.com", JiraPAT: "jira-pat",
 	})
+	r.bindLinear(t, "api_key", "lin_api_x")
 
 	var claims []string
 	r.withTx(t, func(tx db.TxStores) error {
@@ -45,8 +46,28 @@ func TestAvailableKindsSystem_AgreesWithTheClaimsResolve(t *testing.T) {
 	if !slices.Equal(system, claims) {
 		t.Errorf("AvailableKindsSystem = %v, AvailableKinds = %v; the two doors must agree", system, claims)
 	}
-	if !slices.Contains(system, eventsource.KindGitHub) || !slices.Contains(system, eventsource.KindJira) {
-		t.Errorf("AvailableKindsSystem = %v, want both configured core sources", system)
+	for _, kind := range []string{eventsource.KindGitHub, eventsource.KindJira, eventsource.KindLinear} {
+		if !slices.Contains(system, kind) {
+			t.Errorf("AvailableKindsSystem = %v, want every configured core source, %s included", system, kind)
+		}
+	}
+}
+
+// TestAvailableKindsSystem_LinearFollowsItsCredential pins the stamp a run's
+// include_tools carries for Linear: absent until the org binds a key, present
+// once it does, and absent again while an admin has the source paused.
+func TestAvailableKindsSystem_LinearFollowsItsCredential(t *testing.T) {
+	r := newRig(t)
+	if got := r.availableKindsSystem(t); slices.Contains(got, eventsource.KindLinear) {
+		t.Errorf("AvailableKindsSystem = %v with no Linear credential, want linear absent", got)
+	}
+	r.bindLinear(t, "api_key", "lin_api_x")
+	if got := r.availableKindsSystem(t); !slices.Contains(got, eventsource.KindLinear) {
+		t.Errorf("AvailableKindsSystem = %v with a Linear key bound, want linear present", got)
+	}
+	r.pause(t, eventsource.KindLinear)
+	if got := r.availableKindsSystem(t); slices.Contains(got, eventsource.KindLinear) {
+		t.Errorf("AvailableKindsSystem = %v while linear is paused, want linear absent", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import { nextRadioIndex } from '../../lib/rovingRadio'
 interface PollerTimingValue {
   github_poll_interval: string
   jira_poll_interval: string
+  linear_poll_interval?: string
 }
 
 // IntervalScale is the flush, borderless cadence selector for the wizard: the
@@ -76,10 +77,14 @@ function IntervalScale({
 
 /**
  * PollerTimingGroup is the org-level poller-cadence field group — how often
- * the GitHub and Jira pollers run. Both intervals are org_settings columns,
+ * the GitHub, Jira and Linear pollers run. The intervals are org settings,
  * so they round-trip via PATCH /api/orgs/{org}/settings like the rest of the org
  * config. The Jira interval is suppressed (showJira false) on surfaces where
  * Jira isn't connected yet, since the cadence is meaningless without it.
+ *
+ * showLinear (default false) adds the Linear cadence, for the surfaces that
+ * render it alone (the wizard's Linear poll step, Settings' Linear polling
+ * section); they pass showGitHub/showJira false beside it.
  *
  * showGitHub (default true) mirrors showJira for the inverse case: the setup
  * wizard splits the cadences into a GitHub poll step and a separate Jira poll
@@ -98,6 +103,7 @@ export default function PollerTimingGroup({
   onChange,
   showGitHub = true,
   showJira = true,
+  showLinear = false,
   showHeading = true,
   bare = false,
 }: {
@@ -105,6 +111,7 @@ export default function PollerTimingGroup({
   onChange: (patch: Partial<PollerTimingValue>) => void
   showGitHub?: boolean
   showJira?: boolean
+  showLinear?: boolean
   showHeading?: boolean
   bare?: boolean
 }) {
@@ -123,6 +130,13 @@ export default function PollerTimingGroup({
             value={value.jira_poll_interval}
             onChange={(v) => onChange({ jira_poll_interval: v })}
             ariaLabel="Jira poll interval"
+          />
+        )}
+        {showLinear && (
+          <IntervalScale
+            value={value.linear_poll_interval ?? ''}
+            onChange={(v) => onChange({ linear_poll_interval: v })}
+            ariaLabel="Linear poll interval"
           />
         )}
       </div>
@@ -153,6 +167,21 @@ export default function PollerTimingGroup({
             <select
               value={value.jira_poll_interval}
               onChange={(e) => onChange({ jira_poll_interval: e.target.value })}
+              className={inputClass}
+            >
+              {POLL_INTERVAL_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {showLinear && (
+          <Field label="Linear poll interval">
+            <select
+              value={value.linear_poll_interval ?? ''}
+              onChange={(e) => onChange({ linear_poll_interval: e.target.value })}
               className={inputClass}
             >
               {POLL_INTERVAL_OPTIONS.map((o) => (

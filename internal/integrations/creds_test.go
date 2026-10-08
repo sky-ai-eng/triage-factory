@@ -569,6 +569,7 @@ func putLinear(t *testing.T, secrets db.SecretStore, org string) {
 		integrations.KeyLinearAuthMethod: "api_key",
 		integrations.KeyLinearAPIKey:     "lin_api_org",
 		integrations.KeyLinearAppInstall: `{"refresh_token":"r1"}`,
+		integrations.KeyLinearBoundAs:    `{"name":"ada","display_name":"Ada"}`,
 	} {
 		if err := secrets.Put(context.Background(), org, key, value, ""); err != nil {
 			t.Fatalf("Put %s: %v", key, err)
@@ -643,20 +644,63 @@ func TestClearLinear_LeavesGitHubAndJira(t *testing.T) {
 	if got.LinearAPIKey != "" || got.LinearAuthMethod != "" {
 		t.Errorf("Linear creds survived ClearLinear: %+v", got)
 	}
-	envelope, err := stores.Secrets.Get(ctx, org, integrations.KeyLinearAppInstall)
-	if err != nil {
-		t.Fatalf("Get app install: %v", err)
-	}
-	if envelope != "" {
-		t.Errorf("app install envelope survived ClearLinear: %q", envelope)
+	for _, k := range []string{integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs} {
+		v, err := stores.Secrets.Get(ctx, org, k)
+		if err != nil {
+			t.Fatalf("Get %s: %v", k, err)
+		}
+		if v != "" {
+			t.Errorf("%s survived ClearLinear: %q", k, v)
+		}
 	}
 	if got.GitHubPAT == "" || got.JiraPAT == "" {
 		t.Errorf("GitHub or Jira creds disappeared after ClearLinear: %+v", got)
 	}
 }
 
+// TestClearLinearOtherScheme pins that each shape drops only the other one's
+// secret: the marker and the bound-as record describe whichever shape is in
+// use, so they stay.
+func TestClearLinearOtherScheme(t *testing.T) {
+	cases := map[linear.AuthMethod]struct{ gone, kept []string }{
+		linear.AuthMethodAPIKey: {
+			gone: []string{integrations.KeyLinearAppInstall},
+			kept: []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearBoundAs},
+		},
+		linear.AuthMethodAppInstall: {
+			gone: []string{integrations.KeyLinearAPIKey},
+			kept: []string{integrations.KeyLinearAppInstall, integrations.KeyLinearAuthMethod, integrations.KeyLinearBoundAs},
+		},
+		"unknown": {
+			kept: []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAppInstall, integrations.KeyLinearAuthMethod, integrations.KeyLinearBoundAs},
+		},
+	}
+	for inUse, tc := range cases {
+		t.Run(string(inUse), func(t *testing.T) {
+			stores := openStores(t)
+			ctx := context.Background()
+			org := runmode.LocalDefaultOrgID
+			putLinear(t, stores.Secrets, org)
+
+			if err := integrations.ClearLinearOtherScheme(ctx, stores.Secrets, org, inUse); err != nil {
+				t.Fatalf("ClearLinearOtherScheme: %v", err)
+			}
+			for _, k := range tc.gone {
+				if v, err := stores.Secrets.Get(ctx, org, k); err != nil || v != "" {
+					t.Errorf("%s = %q (err %v), want cleared", k, v, err)
+				}
+			}
+			for _, k := range tc.kept {
+				if v, err := stores.Secrets.Get(ctx, org, k); err != nil || v == "" {
+					t.Errorf("%s = %q (err %v), want kept", k, v, err)
+				}
+			}
+		})
+	}
+}
+
 func TestAllKeys_IncludesLinear(t *testing.T) {
-	for _, k := range []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall} {
+	for _, k := range []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs} {
 		if !slices.Contains(integrations.AllKeys(), k) {
 			t.Errorf("AllKeys missing %q", k)
 		}

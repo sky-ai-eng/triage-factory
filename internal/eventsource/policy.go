@@ -60,8 +60,8 @@ func Disabled(ctx context.Context, store db.OrgEventSourceStore, orgID, kind str
 	return slices.Contains(kinds, kind), nil
 }
 
-// Label renders a kind the way a person writes it. Core's two are spelled the
-// way their own products spell them; a registered source gets its kind
+// Label renders a kind the way a person writes it. Core's own are spelled the
+// way their products spell them; a registered source gets its kind
 // capitalized, which is right for the single-word kinds a source registry
 // admits and is only ever cosmetic.
 func Label(kind string) string {

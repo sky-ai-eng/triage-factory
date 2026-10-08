@@ -2,8 +2,8 @@
 
 Settings are stored in the SQLite DB at `~/.triagefactory/triagefactory.db`
 (table `settings`, single row holding a YAML blob) and edited exclusively via the
-Settings page. The poll interval defaults to 5 minutes for both GitHub and Jira;
-configurable values are 30s, 1m, 2m, 5m. Maintain this configuration through the
+Settings page. The poll interval defaults to 5 minutes for GitHub, Jira and
+Linear; configurable values are 30s, 1m, 2m, 5m. Maintain this configuration through the
 UI, not direct DB access.
 
 ## Jira setup
@@ -28,8 +28,16 @@ Jira setup in Settings goes connect → watch → map:
 Linear setup also goes connect → watch → map, with one difference: Linear
 types every workflow state, so watching a team maps it for you.
 
-1. Connect Linear under Workspace settings. The workspace is read from the
-   credential itself; there is nothing to type.
+1. Connect Linear under Workspace settings → **Linear connection** (or pick
+   Linear on the setup wizard's Trackers step) by pasting a personal API key.
+   Create one in Linear under Settings → Account → Security & Access, with
+   **Read** and **Write** access. Triage Factory polls and acts in Linear as the
+   person the key belongs to, and the key shares that person's hourly Linear
+   request budget with their other keys. A Linear admin can stop members from
+   creating API keys; if yours has, ask them for one. The key is validated
+   against Linear when you connect and stored in the OS keychain (see
+   [Secret storage](secret-storage.md)). The workspace is read from the key
+   itself; there is nothing else to type.
 2. Under the team's **Linear teams** section, the picker lists the Linear teams
    your credential can see, read live from Linear. Private teams are marked.
 3. **Watch** a team in one click. Its workflow states are read straight away
@@ -53,12 +61,13 @@ remove.
 
 ## Credentials
 
-Credentials Triage Factory stores (the GitHub PAT, the Jira credential, an
-Anthropic or Bedrock key, GitHub App private keys) are entered in Settings and
-kept outside the database — in the OS keychain on desktop, or an encrypted file
-on a host with no keychain. Token fields show "leave blank to keep current" when
-a token is already stored. GitHub and Jira credentials can only be entered
-there: local mode does not read them from environment variables.
+Credentials Triage Factory stores (the GitHub PAT, the Jira credential, the
+Linear API key, an Anthropic or Bedrock key, GitHub App private keys) are
+entered in Settings and kept outside the database — in the OS keychain on
+desktop, or an encrypted file on a host with no keychain. Token fields show
+"leave blank to keep current" when a token is already stored. GitHub, Jira and
+Linear credentials can only be entered there: local mode does not read them from
+environment variables.
 
 Claude is the exception. Under **Claude credentials**, *Use system Claude Code
 credentials* (the local default) stores nothing: Triage Factory passes no

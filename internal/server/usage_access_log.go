@@ -434,6 +434,12 @@ func credentialKindLabel(kind string) string {
 		return "personal Jira credential"
 	case domain.CredentialKindJiraOAuthApp:
 		return "Atlassian OAuth app"
+	case domain.CredentialKindLinearOrg:
+		return "Linear credential"
+	case domain.CredentialKindLinearUser:
+		return "personal Linear credential"
+	case domain.CredentialKindLinearOAuthApp:
+		return "Linear OAuth app"
 	case domain.CredentialKindAnthropicKey:
 		return "Anthropic API key"
 	case domain.CredentialKindBedrock:

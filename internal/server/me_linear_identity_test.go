@@ -47,13 +47,8 @@ func TestHandleMe_LocalMode_LinearIdentityFromOrgWorkspace(t *testing.T) {
 		t.Errorf("no workspace: linear_user_id=%v linear_display_name=%v, want both absent", got.LinearUserID, got.LinearDisplayName)
 	}
 
-	set, err := s.orgs.GetSettings(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("GetSettings: %v", err)
-	}
-	set.LinearWorkspaceID = "ws-org"
-	if _, err := s.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set); err != nil {
-		t.Fatalf("UpdateSettings: %v", err)
+	if _, err := s.orgs.SetLinearWorkspace(ctx, runmode.LocalDefaultOrgID, "ws-org", ""); err != nil {
+		t.Fatalf("SetLinearWorkspace: %v", err)
 	}
 
 	// The org is in a workspace the user has not bound.

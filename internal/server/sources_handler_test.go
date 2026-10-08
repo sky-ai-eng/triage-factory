@@ -70,6 +70,7 @@ func TestOrgSources_ReflectsCredentialState(t *testing.T) {
 // a mode where the source cannot run at all.
 func TestOrgSources_LocalOmitsWhatCannotExist(t *testing.T) {
 	s := newTestServer(t)
+	unconfigureEventSources(t)
 	got := readOrgSources(t, s)
 
 	for _, kind := range []string{eventsource.KindGitHub, eventsource.KindJira, eventsource.KindLinear, eventsource.KindSchedule} {
@@ -80,8 +81,8 @@ func TestOrgSources_LocalOmitsWhatCannotExist(t *testing.T) {
 	if state, ok := got["slack"]; ok {
 		t.Errorf("slack listed in local mode as %q; a Postgres-only source is omitted, not reported off", state)
 	}
-	if got[eventsource.KindLinear] != string(eventsource.StateWIP) {
-		t.Errorf("linear = %q, want wip", got[eventsource.KindLinear])
+	if got[eventsource.KindLinear] != string(eventsource.StateUnconfigured) {
+		t.Errorf("linear = %q, want unconfigured", got[eventsource.KindLinear])
 	}
 	if got[eventsource.KindSchedule] != string(eventsource.StateWIP) {
 		t.Errorf("schedule = %q, want wip", got[eventsource.KindSchedule])

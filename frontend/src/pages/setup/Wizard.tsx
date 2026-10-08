@@ -919,6 +919,7 @@ function WizardStack({ teamId, isLocal }: { teamId: string; isLocal: boolean }) 
                                       patch: wiz.patch,
                                       error: wiz.error,
                                       advance: goNext,
+                                      hold: wiz.hold,
                                     })
                                   )}
 
