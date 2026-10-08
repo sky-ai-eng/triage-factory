@@ -13,10 +13,12 @@
 -- The counter guards the values the settings save writes, not the row's every
 -- touch: UpdateSettings bumps it, and so does SetSourceBaseURL, the credential
 -- routes' write of a source host the save also sets, when the host it writes
--- differs from the stored one. A surgical write to a
--- value the save never touches (SetGitHubCredentialClass, SetLinearWorkspace)
--- leaves it alone, so it never fails an admin's in-flight settings edit over a
--- change that edit could not have undone.
+-- differs from the stored one. SetAnthropicKeyRef and SetBedrockCredentialsRef
+-- bump it when they change a ref or llm_auth_method: the save cannot write the
+-- refs, but it validates llm_auth_method against them. A surgical write to a
+-- value the save never touches or checks (SetGitHubCredentialClass,
+-- SetLinearWorkspace) leaves it alone, so it never fails an admin's in-flight
+-- settings edit over a change that edit could not have undone.
 --
 -- Day one: local mode is N=1 — a single user on a single machine, with no
 -- second admin to race — so existing installs see no behavioural change beyond

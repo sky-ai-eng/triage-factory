@@ -536,15 +536,11 @@ func (c cannedProber) Probe(context.Context, string, modelcatalog.Model) (modelp
 // running on the host's.
 func bindLocalAnthropic(t *testing.T, s *Server) {
 	t.Helper()
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read org settings: %v", err)
-	}
-	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-	set.BedrockCredentialsRef = ""
-	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, secretKeyAnthropicAPIKey); err != nil {
 		t.Fatalf("bind anthropic: %v", err)
+	}
+	if _, err := s.allStores.Orgs.SetBedrockCredentialsRef(t.Context(), runmode.LocalDefaultOrgID, ""); err != nil {
+		t.Fatalf("unbind bedrock: %v", err)
 	}
 }
 
