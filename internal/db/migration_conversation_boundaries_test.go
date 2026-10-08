@@ -17,25 +17,12 @@ import (
 // survive it reading "never ended", the columns then round-trip every value in
 // the vocabulary, and the anti-join index the boundary reads rely on exists.
 func TestMigrate_ConversationsGainTheirBoundaryColumns(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short, so the rows below are staged exactly the way a
 	// deployed build wrote them — with no column to end them in.
-	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeTaskContextModel)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const (

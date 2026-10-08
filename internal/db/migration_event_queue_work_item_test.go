@@ -26,14 +26,7 @@ const (
 // migration as a reclaim, with no recovery path of its own, and a second
 // Migrate must be a no-op.
 func TestMigrate_EventQueueAdoptsWorkItemBlock(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-	if err := goose.UpTo(database, "migrations-sqlite", eventQueueWorkItemPrior); err != nil {
-		t.Fatalf("goose UpTo %d: %v", eventQueueWorkItemPrior, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, eventQueueWorkItemPrior)
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
 		t.Fatalf("seed event types: %v", err)
 	}

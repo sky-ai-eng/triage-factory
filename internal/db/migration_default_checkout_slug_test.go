@@ -18,25 +18,12 @@ import (
 // This stages the pre-migration rows, migrates, and asserts exactly the
 // no-selector ref moved — and nothing else did.
 func TestMigrate_DefaultCheckoutSlugRename(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the rename, so the rows below are staged
 	// exactly as builds before it wrote them.
-	upToErr := goose.UpTo(database, dir, 202608180001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608180001)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const (

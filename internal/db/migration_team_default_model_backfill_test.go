@@ -25,23 +25,10 @@ const (
 // deleted fallback resolved to, so a team that cleared its default keeps running
 // on exactly the model it was running on before the upgrade.
 func TestMigrate_BackfillsClearedTeamDefaultModel(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeModelEnableSets)
 	treeFS, dir, err := migrationsFor("sqlite3")
 	if err != nil {
-		gooseMu.Unlock()
 		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, beforeModelEnableSets)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
 	}
 
 	const orgID = "00000000-0000-0000-0000-000000000001"

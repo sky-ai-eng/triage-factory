@@ -35,25 +35,12 @@ var splitStopReasonParkReasons = []string{
 }
 
 func TestMigrate_SplitsStopReasonIntoParkReasonAndPerTurnStopReason(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the split, so the rows below are staged the
 	// way a deployed build wrote them.
-	upToErr := goose.UpTo(database, dir, 202608160004)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608160004)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const (

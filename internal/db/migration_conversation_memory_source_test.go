@@ -21,27 +21,14 @@ import (
 // hence the assertions on both surviving rows AND on conversation_memory_entities
 // being untouched.
 func TestMigrate_ConversationMemoryGainsSourceAndDropsEntityAndHumanContent(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop short of this migration, so the rows below are staged the way a
 	// deployed build wrote them — with entity_id and human_content still
 	// present. The two siblings in between (202609120001/0002) touch other
 	// tables, so where in that run the seed lands does not matter.
-	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeTaskContextModel)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const (

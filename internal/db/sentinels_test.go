@@ -30,10 +30,7 @@ import (
 // the expected sentinel. Each probe is rolled back in a transaction
 // so the test leaves no state behind.
 func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
-	d := openMigrationsTestDB(t)
-	if err := Migrate(d, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	d := newTenantlessTestDB(t)
 	// Provision the local tenant so the FK-bearing probe columns
 	// (conversations.creator_user_id → users) resolve. The migration no longer
 	// seeds tenant rows; this test exercises the DEFAULT literals against

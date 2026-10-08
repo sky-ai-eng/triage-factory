@@ -599,8 +599,8 @@ func openInMemorySQLite(t *testing.T) *sql.DB {
 // migrated, but ZERO tenant rows (no orgs/teams/users/settings). This is
 // what a brand-new local DB looks like now that nothing provisions at
 // boot — the right fixture for exercising BootstrapLocalOrg's own
-// tenant-creation path. Uses Migrate directly rather than
-// BootstrapSchemaForTest (which seeds the tenant as a convenience).
+// tenant-creation path. Uses BootstrapTenantlessSchemaForTest rather
+// than BootstrapSchemaForTest (which seeds the tenant as a convenience).
 func openTenantlessSQLite(t *testing.T) *sql.DB {
 	t.Helper()
 	conn, err := sql.Open("sqlite", db.TestDSNMemory)
@@ -610,8 +610,8 @@ func openTenantlessSQLite(t *testing.T) *sql.DB {
 	conn.SetMaxOpenConns(1)
 	conn.SetMaxIdleConns(1)
 	t.Cleanup(func() { _ = conn.Close() })
-	if err := db.Migrate(conn, "sqlite3"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.BootstrapTenantlessSchemaForTest(conn); err != nil {
+		t.Fatalf("bootstrap tenantless schema: %v", err)
 	}
 	return conn
 }

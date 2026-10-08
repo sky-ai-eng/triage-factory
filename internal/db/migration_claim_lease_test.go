@@ -4,8 +4,6 @@ import (
 	"database/sql"
 	"testing"
 	"time"
-
-	"github.com/pressly/goose/v3"
 )
 
 // The migration that gives claims a lease, and the version just before it, at
@@ -20,14 +18,7 @@ const (
 // claim carries none, the expiry index exists, and a second Migrate is a
 // no-op.
 func TestMigrate_ClaimLease(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-	if err := goose.UpTo(database, "migrations-sqlite", claimLeasePrior); err != nil {
-		t.Fatalf("goose UpTo %d: %v", claimLeasePrior, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, claimLeasePrior)
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
 		t.Fatalf("seed event types: %v", err)
 	}

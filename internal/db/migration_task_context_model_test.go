@@ -3,7 +3,6 @@ package db
 import (
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,27 +35,10 @@ const (
 // seeds them: the swap drops and recreates `tasks`, so a child row that the
 // rebuild strands announces itself here rather than at someone's boot.
 func TestMigrate_TasksRebuild_RetiresInReviewAndEmptiesTheQueueOfClaims(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop at the released schema, so the rows below are staged the way a
 	// 1.13.3 install wrote them — 'in_review' still accepted, a claim still
 	// writable on a queued row.
-	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeTaskContextModel)
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
 		t.Fatalf("seed event types: %v", err)
 	}
