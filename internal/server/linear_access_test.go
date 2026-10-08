@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 func linearCredentialPath() string {
@@ -455,6 +457,64 @@ func TestLinearCredentialDelete_LeavesUserCredentials(t *testing.T) {
 	v, err := r.stores.Secrets.GetUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey)
 	if err != nil || v == "" {
 		t.Errorf("user credential = %q (err %v) after the org unbind, want it kept", v, err)
+	}
+}
+
+// settingsRaceTx makes every versioned settings write lose, as one does when a
+// concurrent settings save commits between the handler's read and its write.
+type settingsRaceTx struct{ db.TxRunner }
+
+func (w settingsRaceTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	return w.TxRunner.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		tx.Orgs = settingsRaceOrgs{OrgsStore: tx.Orgs}
+		return fn(tx)
+	})
+}
+
+type settingsRaceOrgs struct{ db.OrgsStore }
+
+func (settingsRaceOrgs) UpdateSettingsVersioned(context.Context, string, domain.OrgSettings, int) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, db.ErrOrgSettingsVersion
+}
+
+// TestLinearCredential_SettingsRace: a bind or unbind whose settings write
+// loses to a concurrent save answers 409 and leaves the org exactly as it
+// was — the keychain writes that landed before the loss are put back.
+func TestLinearCredential_SettingsRace(t *testing.T) {
+	r := newLinearAccessRig(t)
+	r.bind(t, "lin_api_ada")
+	keys := []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs}
+	before := map[string]string{}
+	for _, k := range keys {
+		before[k] = r.secret(t, k)
+	}
+	rows := len(r.credentialRows(t))
+	r.s.tx = settingsRaceTx{TxRunner: r.s.tx}
+	r.fake.setWorkspace(linear.Organization{ID: "org-beta", Name: "Beta", URLKey: "beta"})
+
+	for _, tc := range []struct {
+		method string
+		body   any
+	}{
+		{http.MethodPut, map[string]any{"api_key": "lin_api_bea"}},
+		{http.MethodDelete, nil},
+	} {
+		rec := doJSON(t, r.s, tc.method, linearCredentialPath(), tc.body)
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), httpx.ReasonVersionConflict) {
+			t.Errorf("%s: %d %s, want 409 %s", tc.method, rec.Code, rec.Body.String(), httpx.ReasonVersionConflict)
+		}
+		r.expectNoKick(t)
+		for _, k := range keys {
+			if v := r.secret(t, k); v != before[k] {
+				t.Errorf("%s: %s = %q after the lost race, want %q", tc.method, k, v, before[k])
+			}
+		}
+		if set := r.orgSettings(t); set.LinearWorkspaceURLKey != "acme" {
+			t.Errorf("%s: workspace = %q after the lost race, want acme", tc.method, set.LinearWorkspaceURLKey)
+		}
+	}
+	if got := len(r.credentialRows(t)); got != rows {
+		t.Errorf("linear credential rows = %d after two lost races, want still %d", got, rows)
 	}
 }
 

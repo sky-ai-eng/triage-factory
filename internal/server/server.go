@@ -156,6 +156,12 @@ type Server struct {
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
 	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
+	// linearCredentialMu serializes the local-mode Linear bind and unbind
+	// across snapshot, transaction and restore. The keychain sits outside the
+	// SQLite transaction, so two overlapping writes could otherwise snapshot
+	// the same prior key and the one that fails would restore it over the one
+	// that committed.
+	linearCredentialMu sync.Mutex
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve

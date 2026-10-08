@@ -123,14 +123,11 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Local mode writes secrets to the keychain, outside the SQLite
-	// transaction. Snapshot what is there so a failure later in the
-	// transaction puts it back rather than leaving the new key half-bound —
-	// or, on a rotation, deleting the key that was working.
-	var restore func()
-	if runmode.Current() == runmode.ModeLocal {
-		restore = s.snapshotLinearSecrets(ctx, orgID)
-	}
+	// A failure later in the transaction puts the prior keys back rather than
+	// leaving the new key half-bound — or, on a rotation, deleting the key
+	// that was working.
+	restore, unlock := s.guardLocalLinearWrite(ctx, orgID)
+	defer unlock()
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		method, err := tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAuthMethod)
@@ -158,8 +155,8 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		}
 		orgSet.LinearWorkspaceID = org.ID
 		orgSet.LinearWorkspaceURLKey = org.URLKey
-		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
+		if err := saveLinearWorkspace(ctx, tx, orgID, orgSet); err != nil {
+			return err
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
@@ -170,11 +167,14 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if restore != nil {
 			restore()
 		}
-		if errors.Is(err, errLinearAppInstalled) {
+		switch {
+		case errors.Is(err, errLinearAppInstalled):
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
-			return
+		case errors.Is(err, db.ErrOrgSettingsVersion):
+			writeLinearSettingsRace(w)
+		default:
+			internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
 		}
-		internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
 		return
 	}
 
@@ -205,6 +205,11 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 	}
 	ctx := r.Context()
 
+	// A failure after the clear puts the credential back: the request reports
+	// the disconnect failed, so the org must still be connected.
+	restore, unlock := s.guardLocalLinearWrite(ctx, orgID)
+	defer unlock()
+
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		method, err := tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAuthMethod)
 		if err != nil {
@@ -229,8 +234,8 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		if orgSet.LinearWorkspaceID != "" || prevWorkspace != "" {
 			orgSet.LinearWorkspaceID = ""
 			orgSet.LinearWorkspaceURLKey = ""
-			if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-				return fmt.Errorf("save org settings: %w", err)
+			if err := saveLinearWorkspace(ctx, tx, orgID, orgSet); err != nil {
+				return err
 			}
 		}
 		if !had {
@@ -242,6 +247,13 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindLinearOrg, "", prevWorkspace),
 		})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
+		if errors.Is(err, db.ErrOrgSettingsVersion) {
+			writeLinearSettingsRace(w)
+			return
+		}
 		internalError(w, "linear-access", err)
 		return
 	}
@@ -346,6 +358,38 @@ func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) func()
 			}
 		}
 	}
+}
+
+// guardLocalLinearWrite prepares a Linear credential write in local mode, where
+// the keychain sits outside the SQLite transaction: it takes
+// linearCredentialMu and snapshots the stored keys. It returns the snapshot's
+// restore, for the caller to run when the transaction fails, and the unlock to
+// defer. Multi mode keeps secrets inside the transaction, so it returns a nil
+// restore and a no-op unlock.
+func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (restore, unlock func()) {
+	if runmode.Current() != runmode.ModeLocal {
+		return nil, func() {}
+	}
+	s.linearCredentialMu.Lock()
+	return s.snapshotLinearSecrets(ctx, orgID), s.linearCredentialMu.Unlock
+}
+
+// saveLinearWorkspace writes the org settings row carrying the Linear workspace
+// columns, guarded by the version the caller read inside the same
+// transaction. The row holds every other org setting too, and an unguarded
+// write would put back whatever a concurrent settings save just changed.
+func saveLinearWorkspace(ctx context.Context, tx db.TxStores, orgID string, orgSet domain.OrgSettings) error {
+	if _, err := tx.Orgs.UpdateSettingsVersioned(ctx, orgID, orgSet, orgSet.Version); err != nil {
+		return fmt.Errorf("save org settings: %w", err)
+	}
+	return nil
+}
+
+// writeLinearSettingsRace answers a bind or unbind whose settings write lost
+// to a concurrent settings save. Nothing was written, so the call is safe to
+// repeat as is.
+func writeLinearSettingsRace(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonVersionConflict, Message: "the organization's settings changed during this request and nothing was saved — try again"})
 }
 
 // kickLinearChanged re-dues the org's Linear poll under a changed credential
