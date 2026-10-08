@@ -137,8 +137,7 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 		insts []domain.OrgGitHubAppInstallation
 		want  bool
 	}{
-		// The PAT is the credential. The env overlay folds into creds upstream,
-		// so this is also the headless-install path.
+		// The PAT is the credential.
 		{"pat class", domain.GitHubCredentialClassPAT, nil, nil, true},
 		// The staged window of a PAT→App switch: the class already says App
 		// while the PAT is still what resolves. The PAT must keep answering here

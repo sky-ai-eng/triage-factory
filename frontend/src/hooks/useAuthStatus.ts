@@ -18,7 +18,6 @@ interface AuthStatus {
   github_url?: string
   jira_url?: string
   github_repos?: number
-  env_provided?: string[]
   // setup_complete = github_ready AND the org tracks ≥1 repo AND every model
   // choice setup requires has been made. The gate blocks the product until this
   // is true; setup_step names which configure screen an incomplete founder

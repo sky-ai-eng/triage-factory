@@ -42,12 +42,13 @@ type fileEnvelope struct {
 	Ciphertext []byte `json:"ciphertext"`
 }
 
-// fileBackend is the headless secret backend: an AES-256-GCM-encrypted file
+// fileBackend is the no-keychain secret backend: an AES-256-GCM-encrypted file
 // read into memory once at construction and rewritten atomically on every
-// mutation. It exists because a headless box (Docker, a self-hosted Linux
-// server) has no OS keychain — go-keyring's secret-service path needs a D-Bus
-// session that isn't there, so the keychain backend can't be used. Selected by
-// resolveBackend when the keychain probe fails (or TF_SECRETS_BACKEND=file).
+// mutation. It exists because a host with no desktop session (Docker, a
+// self-hosted Linux server) has no OS keychain — go-keyring's secret-service
+// path needs a D-Bus session that isn't there, so the keychain backend can't be
+// used. Selected by resolveBackend when the keychain probe fails (or
+// TF_SECRETS_BACKEND=file).
 type fileBackend struct {
 	path string
 	key  aead.Key
@@ -114,15 +115,6 @@ func (fb *fileBackend) get(key string) (string, error) {
 	fb.mu.RLock()
 	defer fb.mu.RUnlock()
 	return fb.data[key], nil // "" when absent — not an error, mirrors the keychain backend
-}
-
-func (fb *fileBackend) has(key string) bool {
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	// Treat an empty stored value as absent, matching keychainBackend.has — so
-	// the two backends agree on the secretBackend contract regardless of which
-	// is active. (The system never stores empty strings; empty means absent.)
-	return fb.data[key] != ""
 }
 
 func (fb *fileBackend) put(key, value string) error {

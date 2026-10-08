@@ -283,9 +283,10 @@ type EntityStore interface {
 	//
 	//     A ref matches on EITHER half: its id against the snapshot's
 	//     status_id, or its name against the snapshot's status. Both arms are
-	//     required because either side may be missing one — a rule seeded from
-	//     the headless env vars carries no ids, and a snapshot captured before
-	//     status ids were recorded carries none until its next poll refresh.
+	//     required because either side may be missing one — a stored rule can
+	//     carry names without ids until its team next saves the rules, and a
+	//     snapshot captured before status ids were recorded carries none until
+	//     its next poll refresh.
 	//   - linear: a superset, the Jira way. Terminality is per Linear team —
 	//     linear_team_rules' done states — so this filters on linearDone, the
 	//     caller's flat union across teams, matching a ref's id against the

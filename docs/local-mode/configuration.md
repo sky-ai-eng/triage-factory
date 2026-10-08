@@ -53,13 +53,24 @@ remove.
 
 ## Credentials
 
-All credentials (GitHub PAT, Jira PAT, the Anthropic key, GitHub App private
-keys) are stored outside the database — in the OS keychain on desktop, or an
-encrypted file on headless installs. Token fields in Settings show "leave blank
-to keep current" when a token is already stored.
+Credentials Triage Factory stores (the GitHub PAT, the Jira credential, an
+Anthropic or Bedrock key, GitHub App private keys) are entered in Settings and
+kept outside the database — in the OS keychain on desktop, or an encrypted file
+on a host with no keychain. Token fields show "leave blank to keep current" when
+a token is already stored. GitHub and Jira credentials can only be entered
+there: local mode does not read them from environment variables.
 
-Where exactly they land, and how the headless encrypted-file backend works, is
-covered in [Secret storage](secret-storage.md).
+Claude is the exception. Under **Claude credentials**, *Use system Claude Code
+credentials* (the local default) stores nothing: Triage Factory passes no
+credential to the agent, and the Claude Code process it starts authenticates
+from the environment it inherits — a Claude subscription login, an exported
+`ANTHROPIC_API_KEY`, or the Bedrock / Vertex variables Claude Code reads.
+Triage Factory never reads those variables itself. Entering a key instead
+replaces them: the inherited credential variables are stripped from the agent's
+environment, so a stray shell variable can't override the stored key.
+
+Where exactly they land, and how the encrypted-file backend works, is covered in
+[Secret storage](secret-storage.md).
 
 ## Knowledge base
 

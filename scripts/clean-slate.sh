@@ -44,9 +44,9 @@ fi
 rm -f ~/.triagefactory/triagefactory.db ~/.triagefactory/triagefactory.db-wal ~/.triagefactory/triagefactory.db-shm
 echo "  removed database"
 
-# Encrypted secret bag — the headless (no-keychain) secret backend's store.
-# Desktop installs keep secrets in the OS keychain (swept below); headless
-# installs keep them here. Harmless to remove either way.
+# Encrypted secret bag — the no-keychain secret backend's store.
+# Desktop installs keep secrets in the OS keychain (swept below); installs with
+# no keychain keep them here. Harmless to remove either way.
 rm -f ~/.triagefactory/secrets.enc
 echo "  removed encrypted secret bag (if present)"
 

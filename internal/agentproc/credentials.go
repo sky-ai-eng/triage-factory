@@ -230,8 +230,8 @@ var credentialEnvKeys = []string{
 //
 //   - empty OrgID, or an org with NO provider configured → returns an empty map.
 //     The subprocess inherits the host's env unchanged (preserves the existing
-//     "Claude Code subscription handles auth" flow + the TRIAGE_FACTORY_*-style
-//     env-overlay paths some users rely on). The model is not consulted: an org
+//     "Claude Code subscription handles auth" flow and an ANTHROPIC_API_KEY
+//     exported in the operator's shell). The model is not consulted: an org
 //     that configured nothing has nothing to select between, and the host env is
 //     the credential.
 //   - an org with a provider configured → returns that provider's env map; Run

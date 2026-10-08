@@ -58,7 +58,6 @@ export default function JiraAccessGroup({
   deployment,
   orgId,
   onReplace,
-  envProvided = false,
   onDisconnected,
   showBaseUrl = true,
   bare = false,
@@ -80,19 +79,12 @@ export default function JiraAccessGroup({
   // connected org (see the note above). Omit on surfaces with no form to
   // re-open — the control simply doesn't render.
   onReplace?: () => void
-  // The connection's host and/or token come from TRIAGE_FACTORY_* env vars
-  // (local mode only). Those win on read, so a credential typed here would be
-  // stored and then ignored — the group states that and withholds the rebind
-  // rather than offering a control that appears to work and doesn't.
-  envProvided?: boolean
   onDisconnected?: () => void
   showBaseUrl?: boolean
   bare?: boolean
 }) {
   const cloud = deployment === 'cloud'
   const field = bare ? glassInputClass : inputClass
-  // An env-supplied connection can be reported but not replaced from here.
-  const canReplace = !!onReplace && !envProvided
 
   const disconnect = async () => {
     // One request: the credential resource's DELETE clears the stored
@@ -109,9 +101,6 @@ export default function JiraAccessGroup({
       toast.error(res.error)
       return
     }
-    // Local mode only: TRIAGE_FACTORY_* env vars shadow the vault on read, so
-    // the disconnect landed but the value keeps surfacing until they're unset.
-    if (res.warning) toast.error(res.warning)
     onChange({ jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' })
     onDisconnected?.()
   }
@@ -126,7 +115,7 @@ export default function JiraAccessGroup({
           <h2 className="text-body font-medium text-ink-2">Jira connection</h2>
           {connected && (
             <div className="flex items-center gap-3">
-              {canReplace && (
+              {onReplace && (
                 <button
                   type="button"
                   onClick={onReplace}
@@ -219,7 +208,7 @@ export default function JiraAccessGroup({
             </span>
             {bare && (
               <div className="ml-auto flex items-center gap-3">
-                {canReplace && (
+                {onReplace && (
                   <button
                     type="button"
                     onClick={onReplace}
@@ -238,15 +227,6 @@ export default function JiraAccessGroup({
               </div>
             )}
           </div>
-          {/* Says why there's no Replace here, rather than leaving its absence
-              to be discovered. */}
-          {envProvided && (
-            <p className="text-reported leading-relaxed text-ink-3">
-              This connection comes from <code>TRIAGE_FACTORY_JIRA_*</code> environment variables,
-              which take precedence over anything stored here — change it where the server is
-              started, or unset those variables to manage it from Settings.
-            </p>
-          )}
         </div>
       )}
     </>

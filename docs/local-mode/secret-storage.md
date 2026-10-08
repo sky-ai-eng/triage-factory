@@ -1,17 +1,21 @@
 # Secret storage (local mode)
 
-All credentials Triage Factory uses (GitHub PAT, Jira PAT, the Anthropic key,
-GitHub App private keys) are stored outside the database. The secret backend is
-selected automatically:
+Credentials Triage Factory stores (the GitHub PAT, the Jira credential, an
+Anthropic or Bedrock key, GitHub App private keys) are entered in the UI and
+kept outside the database. Local mode does not read GitHub or Jira credentials
+from environment variables; Claude can instead run on the host's own
+credentials, which are never stored (see
+[configuration](configuration.md#credentials)). The secret backend is selected
+automatically:
 
 - **Desktop / keychain present** (macOS, or Linux with a working Secret Service):
   the OS keychain. No extra configuration.
-- **Headless** (Docker, a server with no keychain — `go-keyring` can't reach a
-  D-Bus Secret Service): an encrypted file at `~/.triagefactory/secrets.enc`.
+- **No keychain** (Docker, a server — `go-keyring` can't reach a D-Bus Secret
+  Service): an encrypted file at `~/.triagefactory/secrets.enc`.
   Secrets are encrypted app-side with AES-256-GCM; only opaque ciphertext is
   written to disk.
 
-The headless file backend **requires `TF_SECRET_ENCRYPTION_KEY`** — 32 bytes,
+The file backend **requires `TF_SECRET_ENCRYPTION_KEY`** — 32 bytes,
 generated with `openssl rand -hex 32` (the same variable and key format the
 multi-mode deployment uses, so one key works for both). If the file backend is
 selected and the key is unset or invalid, the server refuses to start. Rotating
@@ -20,9 +24,8 @@ your credentials" event. (Desktop/keychain installs don't need the key.)
 
 `TF_SECRETS_BACKEND` overrides the auto-selection: `auto` (default), `keychain`
 (force the keychain; error if unavailable), or `file` (force the encrypted file).
-Unlike the four `TRIAGE_FACTORY_*` org-credential overlays, the file backend is
-writable, so credentials entered in Settings (the Anthropic key, a GitHub App,
-your per-user Jira token) persist across restarts on a headless box.
+Either way, credentials entered in Settings persist across restarts. See
+[Running on a server](headless.md) for setting up a host with no keychain.
 
 > The same `TF_SECRET_ENCRYPTION_KEY` also governs multi-mode deployments, where
 > it encrypts `public.org_secrets` in Postgres instead of `secrets.enc` — see

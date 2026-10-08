@@ -333,7 +333,7 @@ func New(ctx context.Context, cfg Config, static fs.FS) (_ *App, err error) {
 			return nil, err
 		}
 
-		// Resolve (and, for the headless encrypted-file backend, construct +
+		// Resolve (and, for the no-keychain encrypted-file backend, construct +
 		// validate) the local secret backend up front, so a missing
 		// TF_SECRET_ENCRYPTION_KEY or an undecryptable secrets file fails the
 		// server at boot rather than on the first credential read. Multi mode

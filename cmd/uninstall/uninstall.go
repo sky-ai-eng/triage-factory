@@ -205,7 +205,7 @@ func (p uninstallPlan) summary() []string {
 	if p.hasDataDir {
 		lines = append(lines, fmt.Sprintf("%s/ (database, config, bare repo clones, workspace snapshot blobs)", p.dataDir))
 	}
-	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) on headless")
+	lines = append(lines, "stored credentials (GitHub + Jira tokens, Anthropic API key, GitHub App keys) — OS keychain on desktop, or the encrypted secrets file (removed with the data dir above) where there is no keychain")
 	if p.hasInstallLink {
 		lines = append(lines, fmt.Sprintf("install symlink at %s", p.linkPath))
 	}
@@ -271,7 +271,7 @@ func clearAllSecrets(appKeys []string) error {
 	// keychain-backed run even if TF_SECRETS_BACKEND=file is set now (and the
 	// backend-routed auth.DeleteSecret wouldn't touch the keychain in that
 	// case). SweepKeychain is a no-op when the keychain is unreachable. The
-	// headless file backend's bag lives under the state root and is already
+	// file backend's bag lives under the state root and is already
 	// removed by the data-dir RemoveAll above, so it needs no sweep here (and
 	// uninstall never needs TF_SECRET_ENCRYPTION_KEY).
 	return auth.SweepKeychain(append(integrations.AllLocalSweepKeys(), appKeys...))

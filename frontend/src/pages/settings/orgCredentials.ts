@@ -21,9 +21,7 @@ import { invalidateEventSources } from '../../hooks/useEventSources'
 // bound credential resolved to (GitHub only, and only on a bind) — the caller
 // shows it back so a rotation confirms which account the new token authenticates
 // as rather than just reporting "saved".
-export type CredentialResult =
-  | { ok: true; warning?: string; login?: string }
-  | { ok: false; error: string }
+export type CredentialResult = { ok: true; login?: string } | { ok: false; error: string }
 
 // connectGitHubPAT binds (or rotates) the org's GitHub bot token. The host is
 // not ours to send: the backend validates against whatever GitHub URL the org
@@ -58,10 +56,8 @@ export async function disconnectJira(orgId: string): Promise<CredentialResult> {
 }
 
 // credentialRequest is the shared call shape for the credential resources:
-// a discriminated result, and the backend's optional `warning` (today: the
-// local-mode env-overlay caveat, where a delete succeeds but TRIAGE_FACTORY_*
-// vars keep supplying the value) and `login` (the GitHub bind's resolved
-// identity) passed through rather than swallowed.
+// a discriminated result, and the backend's optional `login` (the GitHub
+// bind's resolved identity) passed through rather than swallowed.
 async function credentialRequest(
   url: string,
   method: 'PUT' | 'DELETE',
@@ -76,15 +72,12 @@ async function credentialRequest(
         ? {}
         : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
     })
-    const parsed = (await res.json().catch(() => null)) as {
-      warning?: string
-      login?: string
-    } | null
+    const parsed = (await res.json().catch(() => null)) as { login?: string } | null
     // Binding or unbinding a credential is exactly what moves a source
     // between available and unconfigured, so the cached availability answer is
     // now stale for every surface holding it.
     invalidateEventSources()
-    return { ok: true, warning: parsed?.warning, login: parsed?.login }
+    return { ok: true, login: parsed?.login }
   } catch (e) {
     return { ok: false, error: httpErrorMessage(e, 'Could not reach the server.') }
   }
