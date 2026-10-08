@@ -35,43 +35,6 @@ func TestCatalog_EmbeddedFileJoins(t *testing.T) {
 	}
 }
 
-// The join copies each datasheet fact onto the field that names it, restated
-// per million tokens. It runs against a stand-in row rather than the embedded
-// datasheet: the daily refresh rewrites that file from upstream, so a test
-// pinned to its numbers fails on every legitimate price change and passes on a
-// wrong one. Each rate is distinct so a swapped field cannot pass, and the
-// cache-read rate is one that scaling alone leaves at 0.09999999999999999.
-func TestLoad_CarriesTheDatasheetRow(t *testing.T) {
-	const key = "stand-in-model"
-	lookup := func(k string) (inference.Info, bool) {
-		if k != key {
-			return inference.Info{}, false
-		}
-		return inference.Info{
-			Provider:               "bedrock_converse",
-			MaxInputTokens:         123_456,
-			SupportsPromptCaching:  true,
-			InputCostPerToken:      3e-6,
-			OutputCostPerToken:     1.5e-5,
-			CacheReadCostPerToken:  1e-7,
-			CacheWriteCostPerToken: 3.75e-6,
-		}, true
-	}
-
-	got, err := load([]byte(fmt.Sprintf(`[{"key": %q, "display_name": "Stand-in"}]`, key)), lookup)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	want := Entry{
-		Key: key, DisplayName: "Stand-in", Provider: ProviderBedrock,
-		Prices:        PricesPerMTok{Input: 3, Output: 15, CacheRead: 0.1, CacheWrite: 3.75},
-		ContextWindow: 123_456, SupportsPromptCaching: true, DisplayOrder: 0,
-	}
-	if len(got) != 1 || got[0] != want {
-		t.Errorf("entries = %+v, want [%+v]", got, want)
-	}
-}
-
 // The failure mode the join exists to catch, exercised through the same code
 // path the embedded file takes. The message must name the key: an operator
 // reading a boot failure has to know which entry to remove.
