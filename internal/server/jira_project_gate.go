@@ -22,9 +22,9 @@ import (
 // board only statuses the project's workflow has, so the handler enforces both
 // sets: a rule the UI applies and the handler does not is a convention, and the
 // first headless caller breaks it. Both are asked live — the same catalog read
-// POST /api/jira/projects/list serves from, and the same ProjectStatuses read
-// GET /api/jira/statuses serves from — because a catalog of dozens behind a
-// single org credential has nothing for a mirror to earn. The rules rows are
+// POST /api/orgs/{org_id}/jira/projects/list serves from, and the same
+// ProjectStatuses read its statuses list serves from — because a catalog of
+// dozens behind a single org credential has nothing for a mirror to earn. The rules rows are
 // the only persistence: they snapshot the statuses a team actually acts on, at
 // the moment it arms them.
 //
@@ -300,8 +300,7 @@ func sameStatusSet(ids []string, stored []domain.JiraStatusRef) bool {
 // workspace can still remove a project it can no longer map.
 func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID, userID string) (*jira.Client, bool) {
 	// Read through the app pool inside WithTx so the org_secrets read runs
-	// under the caller's claims — the same door GET /api/jira/statuses uses for
-	// the same credential.
+	// under the caller's claims.
 	var creds auth.Credentials
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error

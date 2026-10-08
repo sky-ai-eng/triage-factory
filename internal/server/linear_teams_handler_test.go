@@ -35,9 +35,9 @@ func linearTeamKeysOf(items []linearTeamJSON) string {
 	return strings.Join(keys, ",")
 }
 
-// assertLinearFault fails unless rec answered status with exactly one error, of
+// assertOneFault fails unless rec answered status with exactly one error, of
 // this reason and naming this field ("" for a fault with no field).
-func assertLinearFault(t *testing.T, rec *httptest.ResponseRecorder, status int, reason, field string) {
+func assertOneFault(t *testing.T, rec *httptest.ResponseRecorder, status int, reason, field string) {
 	t.Helper()
 	if rec.Code != status {
 		t.Fatalf("status = %d, want %d; body=%s", rec.Code, status, rec.Body.String())
@@ -114,7 +114,7 @@ func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
 
 	rec := doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "alpha", "page_size": 1, "page_token": first.NextPageToken})
-	assertLinearFault(t, rec, http.StatusBadRequest, "INVALID_PARAM", "page_token")
+	assertOneFault(t, rec, http.StatusBadRequest, "INVALID_PARAM", "page_token")
 
 	rec = doJSON(t, s, http.MethodPost, linearTeamsListPath,
 		map[string]any{"q": "A", "page_size": 1, "page_token": first.NextPageToken})
@@ -128,11 +128,11 @@ func TestLinearTeamsList_TokenIsFingerprintedOnQ(t *testing.T) {
 func TestLinearTeamsList_RefusedBodies(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 0}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 201}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"page_size": 201}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"team": "x"}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearTeamsListPath, map[string]any{"team": "x"}),
 		http.StatusBadRequest, "UNKNOWN_FIELD", "team")
 	if fake.Calls() != 0 {
 		t.Errorf("a refused body reached Linear %d times", fake.Calls())
@@ -150,7 +150,7 @@ func TestLinearCatalog_NotConnected(t *testing.T) {
 		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			assertLinearFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
+			assertOneFault(t, rec, http.StatusConflict, "NOT_CONFIGURED", "")
 		})
 	}
 }
@@ -167,7 +167,7 @@ func TestLinearCatalog_UpstreamFailure(t *testing.T) {
 		"state":       doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateDone), nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			assertLinearFault(t, rec, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
+			assertOneFault(t, rec, http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
 		})
 	}
 }
@@ -185,7 +185,7 @@ func TestLinearCatalog_MalformedOrgIsNotFound(t *testing.T) {
 		"state":       doJSON(t, s, http.MethodGet, org+"/teams/"+linearTeamEng+"/states/"+linearStateDone, nil),
 	} {
 		t.Run(name, func(t *testing.T) {
-			assertLinearFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")
+			assertOneFault(t, rec, http.StatusNotFound, "NOT_FOUND", "")
 		})
 	}
 	if fake.Calls() != 0 {
@@ -210,11 +210,11 @@ func TestLinearTeamGet(t *testing.T) {
 		t.Errorf("team = %+v, want %+v", got, want)
 	}
 
-	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamGhost), nil),
+	assertOneFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(linearTeamGhost), nil),
 		http.StatusNotFound, "NOT_FOUND", "")
 	before := fake.Calls()
 	for _, id := range []string{"ENG", strings.ToUpper(linearTeamEng)} {
-		assertLinearFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(id), nil),
+		assertOneFault(t, doJSON(t, s, http.MethodGet, linearTeamPath(id), nil),
 			http.StatusNotFound, "NOT_FOUND", "")
 	}
 	if fake.Calls() != before {
@@ -273,7 +273,7 @@ func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 	if first.NextPageToken == "" {
 		t.Fatal("page 1 carried no next_page_token")
 	}
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamOps),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamOps),
 		map[string]any{"page_size": 2, "page_token": first.NextPageToken}),
 		http.StatusBadRequest, "INVALID_PARAM", "page_token")
 }
@@ -284,15 +284,15 @@ func TestLinearStatesList_TokenIsBoundToTheTeam(t *testing.T) {
 func TestLinearStatesList_Refusals(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamGhost), map[string]any{}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamGhost), map[string]any{}),
 		http.StatusNotFound, "NOT_FOUND", "")
 
 	before := fake.Calls()
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath("ENG"), map[string]any{}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath("ENG"), map[string]any{}),
 		http.StatusNotFound, "NOT_FOUND", "")
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"page_size": 0}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"page_size": 0}),
 		http.StatusBadRequest, "OUT_OF_RANGE", "page_size")
-	assertLinearFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"q": "done"}),
+	assertOneFault(t, doJSON(t, s, http.MethodPost, linearStatesListPath(linearTeamEng), map[string]any{"q": "done"}),
 		http.StatusBadRequest, "UNKNOWN_FIELD", "q")
 	if fake.Calls() != before {
 		t.Errorf("a refused request reached Linear %d times", fake.Calls()-before)
@@ -322,10 +322,10 @@ func TestLinearStateGet(t *testing.T) {
 	if rec := doJSON(t, s, http.MethodGet, linearStatePath(linearTeamOps, opsOnly.ID), nil); rec.Code != http.StatusOK {
 		t.Errorf("GET the state at its own team = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, opsOnly.ID), nil),
+	assertOneFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, opsOnly.ID), nil),
 		http.StatusNotFound, "NOT_FOUND", "")
-	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateUnknown), nil),
+	assertOneFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, linearStateUnknown), nil),
 		http.StatusNotFound, "NOT_FOUND", "")
-	assertLinearFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, "Done"), nil),
+	assertOneFault(t, doJSON(t, s, http.MethodGet, linearStatePath(linearTeamEng, "Done"), nil),
 		http.StatusNotFound, "NOT_FOUND", "")
 }

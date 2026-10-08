@@ -1,4 +1,5 @@
-import { apiList } from './apiClient'
+import { apiList, apiListAll } from './apiClient'
+import type { JiraStatusRef } from '../components/JiraStatusRule'
 
 /** One option in the Jira project picker: the key rules and JQL are written
  *  against, plus the name a human recognizes it by. These are the only two
@@ -25,20 +26,36 @@ export interface JiraProjectPage {
   hasMore: boolean
 }
 
-/** listJiraProjects reads one page of the projects this workspace's Jira
- *  credential can see.
+/** listJiraProjects reads one page of the projects the org's Jira credential
+ *  can see.
  *
  *  `q` is matched server-side against the project key and name. Nothing is
  *  cached or mirrored: the catalog is fetched from Jira on each read, which is
  *  what a list of dozens behind a single org credential is worth. */
 export async function listJiraProjects(
+  orgId: string,
   q: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<JiraProjectPage> {
   const page = await apiList<JiraProjectCandidate>(
-    '/api/jira/projects/list',
+    `/api/orgs/${encodeURIComponent(orgId)}/jira/projects/list`,
     { q, page_size: JIRA_PROJECT_PAGE_SIZE },
     options,
   )
   return { items: page.items, hasMore: page.next_page_token !== '' }
+}
+
+/** listJiraStatuses reads one project's whole workflow, ordered by name. A
+ *  project's workflow is a handful of statuses and the rules board needs all
+ *  of them, so the list is walked to the end. */
+export async function listJiraStatuses(
+  orgId: string,
+  projectKey: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<JiraStatusRef[]> {
+  return apiListAll<JiraStatusRef>(
+    `/api/orgs/${encodeURIComponent(orgId)}/jira/projects/${encodeURIComponent(projectKey)}/statuses/list`,
+    {},
+    options,
+  )
 }

@@ -10,8 +10,12 @@ import {
   type JiraProjectConfig,
 } from './teamConfig'
 import type { JiraStatusRef } from '../../components/JiraStatusRule'
-import { apiJSON, httpErrorMessage } from '../../lib/apiClient'
-import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
+import { httpErrorMessage } from '../../lib/apiClient'
+import {
+  listJiraProjects,
+  listJiraStatuses,
+  type JiraProjectCandidate,
+} from '../../lib/jiraProjects'
 
 /** How long to wait after the last keystroke before asking the server for the
  *  filtered catalog. The filter is a round trip to Jira, not an array scan, so
@@ -54,14 +58,18 @@ interface WatchRow {
  * It owns only its own view state: the catalog page and its search, per-project
  * expand/collapse, and the fetched status options. Org-level Jira *access*
  * (credentials, connect/disconnect) lives in JiraAccessGroup; this is the
- * team-scoped projects only, suppressed until Jira is connected.
+ * team-scoped projects only, suppressed until Jira is connected. `orgId`
+ * addresses the org's Jira catalog, which the project list and the status
+ * options are read from.
  */
 export default function JiraProjectRulesGroup({
+  orgId,
   value,
   onChange,
   connected,
   bare = false,
 }: {
+  orgId: string
   value: JiraProjectConfig[]
   onChange: (next: JiraProjectConfig[]) => void
   connected: boolean
@@ -70,10 +78,8 @@ export default function JiraProjectRulesGroup({
   bare?: boolean
 }) {
   // Statuses keyed by project key. Fetched per project, on demand, because a
-  // project's statuses come from ITS workflow scheme: querying several at once
-  // returns their intersection, which is safe to offer in every picker but
-  // hides statuses a project genuinely has the moment two watched projects
-  // differ — and watching is cheap now, so they will.
+  // project's statuses come from ITS workflow scheme, so two watched projects
+  // can offer different ones — and watching is cheap now, so they will.
   const [statusesByProject, setStatusesByProject] = useState<Record<string, JiraStatusRef[]>>({})
   // The project keys whose status fetch is in flight. Per-key rather than a
   // single boolean so fetching project A then B doesn't re-enable B's button
@@ -106,26 +112,29 @@ export default function JiraProjectRulesGroup({
     }
   }, [])
 
-  const fetchCandidates = useCallback(async (q: string) => {
-    abortRef.current?.abort()
-    const controller = new AbortController()
-    abortRef.current = controller
-    setCatalogLoading(true)
-    try {
-      const page = await listJiraProjects(q, { signal: controller.signal })
-      if (!mountedRef.current || controller.signal.aborted) return
-      setCandidates(page.items)
-      setCatalogTruncated(page.hasMore)
-      setCatalogError('')
-    } catch (e) {
-      if (controller.signal.aborted || !mountedRef.current) return
-      setCandidates([])
-      setCatalogTruncated(false)
-      setCatalogError(httpErrorMessage(e, 'Could not read the Jira project list.'))
-    } finally {
-      if (mountedRef.current && !controller.signal.aborted) setCatalogLoading(false)
-    }
-  }, [])
+  const fetchCandidates = useCallback(
+    async (q: string) => {
+      abortRef.current?.abort()
+      const controller = new AbortController()
+      abortRef.current = controller
+      setCatalogLoading(true)
+      try {
+        const page = await listJiraProjects(orgId, q, { signal: controller.signal })
+        if (!mountedRef.current || controller.signal.aborted) return
+        setCandidates(page.items)
+        setCatalogTruncated(page.hasMore)
+        setCatalogError('')
+      } catch (e) {
+        if (controller.signal.aborted || !mountedRef.current) return
+        setCandidates([])
+        setCatalogTruncated(false)
+        setCatalogError(httpErrorMessage(e, 'Could not read the Jira project list.'))
+      } finally {
+        if (mountedRef.current && !controller.signal.aborted) setCatalogLoading(false)
+      }
+    },
+    [orgId],
+  )
 
   // Load the catalog on mount and on each settled search. Nothing is cached
   // server-side, so this is a live read of what the org credential can see —
@@ -176,9 +185,7 @@ export default function JiraProjectRulesGroup({
     if (!key) return
     setLoadingKeys((prev) => new Set([...prev, key]))
     try {
-      const statuses = await apiJSON<JiraStatusRef[]>(
-        `/api/jira/statuses?project=${encodeURIComponent(key)}`,
-      )
+      const statuses = await listJiraStatuses(orgId, key)
       setStatusesByProject((current) => ({ ...current, [key]: statuses }))
     } catch {
       // Non-critical — the picker just shows no options until a retry.
