@@ -28,7 +28,7 @@ type Task struct {
 	// task is placed there once, when its delegation is minted; a
 	// user-claimed one is moved there by hand.
 	Status         string     `json:"status"`           // queued | in_progress | done | dismissed | snoozed
-	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (write-once, by the migration that merged two entity rows for one Jira issue: this card duplicated one already on the surviving entity)
+	CloseReason    string     `json:"close_reason"`     // run_completed | user_completed | user_dismissed | auto_closed_by_event | entity_closed | reconciled (the terminal-state sweep found the entity already finished, with no event to name) | duplicate_entity_merged (two entity rows turned out to be one Jira issue and were merged — by a migration, or by the tracker when a row learning its issue id found another row already carrying it: this card duplicated one already on the surviving entity)
 	CloseEventType string     `json:"close_event_type"` // FK to events_catalog.id; the event type that triggered the close (event-driven closes: auto_closed_by_event + entity_closed). NULL for non-event closes (run_completed, user_*, reconciled, duplicate_entity_merged)
 	ClosedAt       *time.Time `json:"closed_at"`
 	SnoozeUntil    *time.Time `json:"snooze_until"`

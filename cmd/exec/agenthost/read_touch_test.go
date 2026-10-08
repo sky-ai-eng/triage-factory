@@ -154,7 +154,7 @@ func TestReadTouch_GithubGetPR_FailedRead_NoTouch(t *testing.T) {
 func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"key":"SKY-123","fields":{"summary":"hi"}}`)
+		_, _ = io.WriteString(w, `{"id":"10123","key":"SKY-123","fields":{"summary":"hi"}}`)
 	}))
 	t.Cleanup(jira.Close)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
@@ -169,8 +169,8 @@ func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 	if err != nil || ent == nil {
 		t.Fatalf("read did not resolve-or-create the issue entity: ent=%v err=%v", ent, err)
 	}
-	if ent.Kind != "issue" {
-		t.Errorf("entity kind = %q, want issue", ent.Kind)
+	if ent.Kind != "issue" || ent.ExternalID != "10123" {
+		t.Errorf("entity = %+v, want an issue carrying the id the response named", ent)
 	}
 	if role := touchRole(t, conn, info.ConversationID, ent.ID); role != domain.MemoryRoleTouched {
 		t.Errorf("touch role = %q, want %q", role, domain.MemoryRoleTouched)

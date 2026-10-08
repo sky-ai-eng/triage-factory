@@ -45,7 +45,7 @@ type Publisher interface {
 }
 
 const (
-	jiraBatchSize = 100 // max issues per JQL key IN (...) query
+	jiraBatchSize = 100 // max issues per JQL id IN (...) / key IN (...) query
 
 	// descriptionStoreMaxRunes caps what we persist on entities.description.
 	// Jira descriptions and PR bodies are unbounded (teams regularly paste
@@ -1306,10 +1306,10 @@ func (r JiraRules) AllDoneMembers() []domain.JiraStatusRef {
 // looking up the project. Returns nil when the project isn't in the
 // configured rule set — typically because the user removed the project
 // from Settings while its entities are still active in the DB (entities
-// aren't auto-deleted on settings change). Nil matches the closure in
-// RefreshJira's terminal() (which returns false on unknown project)
-// so discovery's "should I mark this entity closed" and the diff
-// layer's "did this transition complete it" stay consistent.
+// aren't auto-deleted on settings change). Nil matches jiraCycle.terminal
+// (which returns false on unknown project) so discovery's "should I mark
+// this entity closed" and the diff layer's "did this transition complete
+// it" stay consistent.
 //
 // An earlier version fell back to the union of every configured
 // project's done members, but that misclassifies entities from removed
@@ -1324,111 +1324,73 @@ func (r JiraRules) doneMembersForKey(issueKey string) []domain.JiraStatusRef {
 	return nil
 }
 
-// RefreshJira runs the full tracking cycle for Jira issues. projects is
-// the team's full per-project rule set; the tracker dispatches discovery
-// JQL per project and looks up terminal-status sets by the issue's
-// project_key. Tickets whose project_key has no row degrade silently
-// — no terminal check, no pickup discovery.
+// jiraCycle is what one RefreshJira pass threads through its phases.
+type jiraCycle struct {
+	// scope is the org's Jira site, domain.EntityScope("jira", settings): the
+	// namespace every issue this cycle reads is keyed under.
+	scope string
+	// baseURL is what the issues' links are built from.
+	baseURL  string
+	projects JiraRules
+	// merged holds rows a merge folded into another row this cycle. They no
+	// longer exist, so the rest of the cycle skips them.
+	merged map[string]bool
+}
+
+// terminal reports whether snap sits in one of its project's done statuses.
+// An issue in a project no rule configures is never terminal.
+func (c *jiraCycle) terminal(snap domain.JiraSnapshot) bool {
+	rule := c.projects.ForKey(extractProject(snap.Key))
+	if rule == nil {
+		return false
+	}
+	return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
+}
+
+// RefreshJira runs the full tracking cycle for Jira issues: the retirement of
+// rows from another site, discovery per configured project, a batched refresh
+// of every active Jira entity on the site, the diff, the confirmation of the
+// issues the refresh did not answer for, and the poll-complete sentinel.
+// projects is the team's full per-project rule set; the tracker dispatches
+// discovery JQL per project and looks up terminal-status sets by the issue's
+// project_key. Tickets whose project_key has no row degrade silently — no
+// terminal check, no pickup discovery.
 //
-// The username parameter was dropped: actor identity now flows through
-// the snapshot (assignee_account_id) and predicate matching happens
-// downstream against the assignee_in / reporter_in / commenter_in
-// allowlists.
+// Actor identity flows through the snapshot (assignee_account_id) and
+// predicate matching happens downstream against the assignee_in /
+// reporter_in / commenter_in allowlists.
+//
+// scope is the org's Jira site, domain.EntityScope("jira", settings). An
+// issue's entity is matched on its numeric id (external_id) on that site,
+// never on its key once the id is known: the key is a display key a project
+// move or a project key rename changes, and when a fresh read answers under a
+// new one the entity is renamed to it in the same cycle. A row written before
+// ids were recorded learns its id from the first response that names it.
+// baseURL is what the issues' links are built from.
 //
 // All entity reads/writes are scoped to the Tracker's orgID (set at
 // construction). In multi mode the poller's per-org loop constructs
 // one Tracker per active org per cycle; in local mode there's one
 // Tracker for the single synthetic tenant.
-//
-// scope is the org's Jira site, domain.EntityScope("jira", settings): the
-// namespace every issue this cycle discovers is keyed under. baseURL is what
-// the issues' links are built from.
 func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
-	discoveryEventsEmitted := 0
-	terminal := func(snap domain.JiraSnapshot) bool {
-		rule := projects.ForKey(extractProject(snap.Key))
-		if rule == nil {
-			return false
-		}
-		return domain.ContainsStatus(rule.DoneMembers, snap.StatusRef())
+	if scope == "" {
+		return 0, errors.New("jira refresh: no site to key issues under")
 	}
+	c := &jiraCycle{scope: scope, baseURL: baseURL, projects: projects, merged: map[string]bool{}}
+
+	// Phase 0: rows a previous site left active. Retired first, without asking
+	// Jira, so nothing below can mistake one for this site's.
+	retired := t.RetireJiraOutOfScope(ctx, scope)
+
 	// Phase 1: Discovery
 	// A discovery error is returned once the entities it did discover are
 	// seeded, and the poller logs it with the org, so it is not logged here.
 	discovered, discoveryErr := t.discoverJira(ctx, client, baseURL, projects)
-
+	discoveryEventsEmitted := 0
 	for _, state := range discovered {
-		snap := state.Snap
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", scope, snap.Key, "", "issue", snap.Summary, snap.URL)
-		if err != nil {
-			trackerLog.Error("create entity failed", "source_id", snap.Key, "error", err)
-			continue
-		}
-		if created {
-			snapJSON, _ := json.Marshal(snap)
-			switch {
-			case terminal(snap):
-				// Already done when first seen: the snapshot and the closed
-				// state land in one statement, so the row is never active
-				// with a terminal snapshot stored. Nothing is emitted — the
-				// issue finished before TF tracked it. Discovery excludes
-				// terminal statuses, so this is the rare issue whose done
-				// set the query's exclusion did not cover.
-				if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-					trackerLog.Error("seed terminal jira snapshot failed", "source_id", snap.Key, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed terminal jira snapshot CAS lost race, skipping", "source_id", snap.Key)
-				}
-			case state.DiscoveredAssignedToCurrentUser:
-				// An issue assigned to someone else is outside both
-				// discovery queries, so appearing in the assigned-to-current-user
-				// result can itself be the assignment transition. Commit that initial
-				// event with the first snapshot; seeding first would make Phase 3
-				// diff current-against-current and retire the transition unseen.
-				events := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, projects.doneMembersForKey(snap.Key))
-				if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, events); err != nil {
-					trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed assigned jira snapshot CAS lost race, skipping", "source_id", snap.Key)
-				} else {
-					discoveryEventsEmitted += enqueued
-				}
-			default:
-				if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-					trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
-				}
-			}
-			if state.Description != "" {
-				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
-					trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
-				}
-			}
-		} else {
-			if entity.Title != snap.Summary {
-				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, entity.ID, snap.Summary)
-			}
-			if snap.BodyHash != "" && entity.Description != state.Description {
-				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description)
-			}
-			// A previously-closed issue reappearing open reactivates with the
-			// discovery snapshot in the same statement, under the poll_seq
-			// guard — the GitHub arm's reasoning: state and snapshot are one
-			// fact, and this cycle's Phase 3 re-diffs from what is written here.
-			if !terminal(snap) && entity.State == "closed" {
-				snapJSON, _ := json.Marshal(snap)
-				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-					trackerLog.Error("reactivate entity failed", "source_id", snap.Key, "error", err)
-				} else if !reactivated {
-					trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", snap.Key)
-				} else {
-					trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Key)
-				}
-			}
-		}
+		discoveryEventsEmitted += t.seedDiscoveredJira(ctx, c, state)
 	}
 
 	if discoveryErr != nil {
@@ -1440,27 +1402,26 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 	}
 
 	// Phase 2: Refresh
-	// TODO(TFAC-1061): active rows keyed under a previous Jira site are still
-	// refreshed here by key against the current one; they retire as
-	// unreachable with reason scope_changed once Jira follows the Linear
-	// tracker's scope-change pass.
-	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "jira")
+	listed, err := t.entities.ListActiveSystem(context.Background(), orgID, "jira")
 	if err != nil {
 		return 0, fmt.Errorf("list active jira entities: %w", err)
+	}
+	entities := make([]domain.Entity, 0, len(listed))
+	for _, e := range listed {
+		// A row from another site was retired in Phase 0; the router closes it.
+		if e.Scope == scope && !c.merged[e.ID] {
+			entities = append(entities, e)
+		}
 	}
 	if len(entities) == 0 {
 		// No entities to refresh, but still emit poll-complete so carry-over
 		// readiness flips true on fresh-setup / empty-project cases.
-		t.EmitPollComplete(ctx, "jira", startedAt, 0, 0)
-		return 0, nil
+		eventsEmitted := retired + discoveryEventsEmitted
+		t.EmitPollComplete(ctx, "jira", startedAt, 0, eventsEmitted)
+		return eventsEmitted, nil
 	}
 
-	keys := make([]string, len(entities))
-	for i, e := range entities {
-		keys[i] = e.SourceID
-	}
-
-	refreshed, err := t.batchFetchJira(ctx, client, baseURL, keys, projects)
+	refreshed, err := t.batchFetchJira(ctx, client, baseURL, entities, projects)
 	if err != nil {
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
@@ -1471,123 +1432,14 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 	diffEventsEmitted := 0
 	staleReads := 0
 	for _, e := range entities {
-		newState, ok := refreshed[e.SourceID]
-		if !ok {
+		newState, ok := refreshed[e.ID]
+		if !ok || c.merged[e.ID] {
 			continue
 		}
-		newSnap := newState.Snap
-
-		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
-			// Quiet-seed a snapshot-less row: a stub created
-			// outside the poller (exec-touch FindOrCreate), or an entity
-			// whose snapshot was cleared when an org admin paused this source.
-			// DiffJiraSnapshots' prev.Key=="" branch would synthesize an initial
-			// assigned/available/completed event for state that predates our
-			// tracking — spuriously minting a task, and after a pause minting
-			// one per known issue at once. Seed it like the discovery
-			// create-branch (snapshot + title + description, close if terminal) WITHOUT
-			// diffing instead. Normal discovery seeds in Phase 1, so this only
-			// ever fires for rows that arrived without one.
-			// A terminal seed closes the row in the same statement that
-			// writes its snapshot, so the entity is never active with a
-			// terminal snapshot stored, even between two phases.
-			snapJSON, _ := json.Marshal(newSnap)
-			var ok bool
-			var err error
-			if terminal(newSnap) {
-				ok, err = t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
-			} else {
-				ok, err = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
-			}
-			if err != nil {
-				trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
-			} else if !ok {
-				trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
-			}
-			if e.Title != newSnap.Summary {
-				_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
-			}
-			if newState.Snap.BodyHash != "" && e.Description != newState.Description {
-				_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, newState.Description)
-			}
-			continue
-		}
-
-		var prevSnap domain.JiraSnapshot
-		if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
-			if err := json.Unmarshal([]byte(e.SnapshotJSON), &prevSnap); err != nil {
-				trackerLog.Warn("corrupt jira snapshot, reseeding", "source_id", e.SourceID, "error", err)
-				snapJSON, _ := json.Marshal(newSnap)
-				_, _ = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
-				continue
-			}
-		}
-
-		// Drop a read that predates what we already hold, before it can reach
-		// either the diff or the snapshot write. Jira only ever moves
-		// `updated` forward, so a backwards read is the search index serving
-		// state we have already superseded — never news. Warn rather than
-		// Debug because that claim is the whole justification for
-		// suppressing: if a read that WAS news ever gets dropped here, this
-		// line is the bug report.
-		if storedAt, fetchedAt, stale := jiraReadIsStale(prevSnap, newSnap); stale {
+		emitted, stale := t.applyJiraIssue(ctx, c, e, newState)
+		diffEventsEmitted += emitted
+		if stale {
 			staleReads++
-			trackerLog.WarnContext(ctx, "jira read predates stored snapshot; suppressing this cycle's diff and snapshot write",
-				"source_id", e.SourceID, "entity_id", e.ID,
-				"stored_updated", storedAt.Format(time.RFC3339Nano),
-				"fetched_updated", fetchedAt.Format(time.RFC3339Nano))
-			continue
-		}
-
-		// An omitted description is unknown; retain the last observed body
-		// revision so a later response can still detect the next real edit.
-		if newSnap.BodyHash == "" {
-			newSnap.BodyHash = prevSnap.BodyHash
-		}
-
-		// Per-project Done.Members for this entity's project_key. Falls
-		// back to the union across all projects when the entity is in
-		// a project that's no longer configured (defensive — terminal
-		// detection still works for previously-known done statuses).
-		events := DiffJiraSnapshots(prevSnap, newSnap, e.ID, projects.doneMembersForKey(newSnap.Key))
-
-		// The close obligation — the GitHub arm's rule, read against this
-		// cycle's per-project done set: the entity is active (Phase 2 lists
-		// only active rows) and its snapshot was already terminal last
-		// cycle, so the completion that should have closed it was lost.
-		if owed, ok := t.closeOwed(ctx, orgID, e.ID, terminal(prevSnap), terminal(newSnap)); ok {
-			events = append(events, owed)
-		}
-
-		// Snapshot advance + the transitions diffed against it, one
-		// transaction, CAS'd on e.PollSeq (the value this cycle's diff was
-		// read against) — the GitHub arm's contract, same reasoning: the
-		// snapshot-diff is the sole re-emit prevention, so half of this
-		// landing is either a duplicate task (events off a snapshot that
-		// didn't win) or a lost one (a snapshot that retired transitions
-		// nobody recorded). On a miss or an error nothing was written and
-		// the winner's next cycle re-diffs, so suppression loses nothing. A
-		// refresh that observed no change commits nothing but its poll stamp.
-		prevJSON, _ := json.Marshal(prevSnap)
-		snapJSON, _ := json.Marshal(newSnap)
-		ok, enqueued, err := t.commitRefresh(ctx, orgID, e.ID, string(prevJSON), string(snapJSON), e.PollSeq, events)
-		if err != nil {
-			trackerLog.Error("jira snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
-			continue
-		}
-		if !ok {
-			trackerLog.Warn("jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
-			continue
-		}
-		diffEventsEmitted += enqueued
-
-		// Best-effort display/scorer mirrors. The event's body hash is the
-		// revision authority; these capped strings can lag a committed event.
-		if e.Title != newSnap.Summary {
-			_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, newSnap.Summary)
-		}
-		if newState.Snap.BodyHash != "" && e.Description != newState.Description {
-			_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, newState.Description)
 		}
 	}
 
@@ -1599,17 +1451,17 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 		diffSpan.SetAttributes(telemetry.Disposition("stale_read_suppressed"))
 	}
 	diffSpan.End()
-	eventsEmitted := discoveryEventsEmitted + diffEventsEmitted
+	eventsEmitted := retired + discoveryEventsEmitted + diffEventsEmitted
 
-	// Phase 4: confirm the long-unanswered keys against the issue endpoint.
+	// Phase 4: confirm the long-unanswered issues against the issue endpoint.
 	// Emits unreachable events, which the router turns into entity/task
 	// closes. Ahead of the cycle log so its event count is the whole cycle's
 	// — the same number the poll-complete sentinel carries, rather than a
 	// second, quietly smaller one for the same cycle.
-	retired := t.confirmMissingJiraEntities(ctx, client, orgID, entities, refreshed, time.Now())
-	eventsEmitted += retired
+	confirmedRetired := t.confirmMissingJiraEntities(ctx, client, c, entities, refreshed, time.Now())
+	eventsEmitted += confirmedRetired
 
-	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "retired", retired, "stale_reads", staleReads)
+	trackerLog.InfoContext(ctx, "jira refresh", "discovered", len(discovered), "entities", len(entities), "refreshed", len(refreshed), "events", eventsEmitted, "retired", retired+confirmedRetired, "stale_reads", staleReads)
 
 	// Always fire the sentinel — it means "a poll cycle completed," not "a
 	// poll produced work." Carry-over readiness depends on this firing even
@@ -1620,36 +1472,507 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 	return eventsEmitted, nil
 }
 
+// RetireJiraOutOfScope retires every active Jira entity keyed under a site
+// other than scope, emitting unreachable with reason scope_changed for each,
+// and returns how many it emitted. It runs at the top of every cycle, and on
+// its own when the org's Jira is configured but has no project to poll.
+//
+// Jira is not asked: issue ids and keys repeat across sites, so nothing the
+// new site answered would be about these issues. The rows are not moved
+// either. They stay where they are, closed with their history, and pointing
+// the org at the old site again finds them by id.
+func (t *Tracker) RetireJiraOutOfScope(ctx context.Context, scope string) int {
+	if scope == "" {
+		return 0
+	}
+	entities, err := t.entities.ListActiveSystem(context.Background(), t.orgID, "jira")
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "list active jira entities for the site check failed", "error", err)
+		return 0
+	}
+	retired := 0
+	for _, e := range entities {
+		if e.Scope == scope {
+			continue
+		}
+		t.emitJiraUnreachable(ctx, t.orgID, e, nil, events.JiraUnreachableScopeChanged, "")
+		retired++
+	}
+	return retired
+}
+
+// seedDiscoveredJira records one issue discovery found and returns the events
+// it enqueued. The issue's entity is the one carrying its id on the site,
+// under whatever key it was stored. Only when none does is it looked up by the
+// key the issue has now: a row there with no id is this issue's from before
+// ids were recorded, and learns it; a row there with another id is another
+// issue, and is skipped. Only when neither finds one is an entity created.
+func (t *Tracker) seedDiscoveredJira(ctx context.Context, c *jiraCycle, state jiraIssueState) int {
+	orgID := t.orgID
+	snap := state.Snap
+
+	var entity *domain.Entity
+	if snap.ID != "" {
+		var err error
+		entity, err = t.entities.GetByExternalIDSystem(context.Background(), orgID, "jira", c.scope, snap.ID)
+		if err != nil {
+			trackerLog.Error("look up jira entity by issue id failed", "source_id", snap.Key, "issue_id", snap.ID, "error", err)
+			return 0
+		}
+	}
+	created := false
+	if entity == nil {
+		var err error
+		entity, created, err = t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", c.scope, snap.Key, snap.ID, "issue", snap.Summary, snap.URL)
+		if errors.Is(err, db.ErrEntityKeyOccupied) {
+			// Another tracked issue still holds the key: a project deleted and
+			// recreated under the same key while the old issue's entity is still
+			// active. That entity retires once Jira confirms its issue is gone,
+			// and the next cycle creates this one.
+			trackerLog.Warn("jira key still held by another tracked issue; skipping it this cycle",
+				"source_id", snap.Key, "issue_id", snap.ID)
+			return 0
+		}
+		if err != nil {
+			trackerLog.Error("create entity failed", "source_id", snap.Key, "error", err)
+			return 0
+		}
+		if !created && snap.ID != "" && entity.ExternalID == "" {
+			learned, ok := t.learnJiraIssueID(ctx, c, *entity, snap.ID)
+			if !ok {
+				return 0
+			}
+			entity = &learned
+		}
+	}
+	if created {
+		return t.seedCreatedJira(ctx, c, *entity, state)
+	}
+
+	// A read the search index served stale must not move the entity back onto
+	// a key it has already left, nor reopen it.
+	if prev, ok := storedJiraSnapshot(*entity); ok {
+		if _, _, stale := jiraReadIsStale(prev, snap); stale {
+			return 0
+		}
+	}
+	// A known issue under a new key is renamed before anything else is written
+	// to it; the refresh below diffs the move and emits it.
+	if jiraRenamed(c.scope, *entity, snap) {
+		renamed, ok := t.renameJiraEntity(ctx, c, *entity, snap.Key)
+		if !ok {
+			return 0
+		}
+		entity = &renamed
+	}
+	t.mirrorJiraText(orgID, *entity, state)
+	// A previously-closed issue reappearing open reactivates with the
+	// discovery snapshot in the same statement, under the poll_seq guard —
+	// the GitHub arm's reasoning: state and snapshot are one fact, and this
+	// cycle's Phase 3 re-diffs from what is written here.
+	if !c.terminal(snap) && entity.State == "closed" {
+		snapJSON, _ := json.Marshal(jiraReactivationSnapshot(*entity, snap))
+		if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			trackerLog.Error("reactivate entity failed", "source_id", snap.Key, "error", err)
+		} else if !reactivated {
+			trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", snap.Key)
+		} else {
+			trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Key)
+		}
+	}
+	return 0
+}
+
+// seedCreatedJira writes the first snapshot of an entity discovery just
+// created, and returns the events it enqueued.
+func (t *Tracker) seedCreatedJira(ctx context.Context, c *jiraCycle, entity domain.Entity, state jiraIssueState) int {
+	orgID := t.orgID
+	snap := state.Snap
+	emitted := 0
+	snapJSON, _ := json.Marshal(snap)
+	switch {
+	case c.terminal(snap):
+		// Already done when first seen: the snapshot and the closed
+		// state land in one statement, so the row is never active
+		// with a terminal snapshot stored. Nothing is emitted — the
+		// issue finished before TF tracked it. Discovery excludes
+		// terminal statuses, so this is the rare issue whose done
+		// set the query's exclusion did not cover.
+		if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			trackerLog.Error("seed terminal jira snapshot failed", "source_id", snap.Key, "error", err)
+		} else if !ok {
+			trackerLog.Warn("seed terminal jira snapshot CAS lost race, skipping", "source_id", snap.Key)
+		}
+	case state.DiscoveredAssignedToCurrentUser:
+		// An issue assigned to someone else is outside both
+		// discovery queries, so appearing in the assigned-to-current-user
+		// result can itself be the assignment transition. Commit that initial
+		// event with the first snapshot; seeding first would make Phase 3
+		// diff current-against-current and retire the transition unseen.
+		evts := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, c.projects.doneMembersForKey(snap.Key))
+		if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
+			trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
+		} else if !ok {
+			trackerLog.Warn("seed assigned jira snapshot CAS lost race, skipping", "source_id", snap.Key)
+		} else {
+			emitted = enqueued
+		}
+	default:
+		if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			trackerLog.Error("seed snapshot failed", "source_id", snap.Key, "error", err)
+		} else if !ok {
+			trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Key)
+		}
+	}
+	if state.Description != "" {
+		if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
+			trackerLog.Error("seed description failed", "source_id", snap.Key, "error", err)
+		}
+	}
+	return emitted
+}
+
+// jiraReactivationSnapshot is the snapshot a closed entity reactivates with:
+// the fresh one, except that when the issue's key has changed since the stored
+// snapshot was taken, the stored key and project are kept. The Phase 2 diff
+// from it then still sees the change and emits key_changed, in the same commit
+// as the fresh snapshot; reactivating with the fresh key would leave that diff
+// nothing to compare. An entity with no stored snapshot reactivates with the
+// fresh one, as a quiet seed would.
+func jiraReactivationSnapshot(e domain.Entity, fresh domain.JiraSnapshot) domain.JiraSnapshot {
+	stored, ok := storedJiraSnapshot(e)
+	if !ok || stored.Key == "" || stored.Key == fresh.Key {
+		return fresh
+	}
+	fresh.Key, fresh.ProjectID = stored.Key, stored.ProjectID
+	return fresh
+}
+
+// storedJiraSnapshot parses an entity's stored snapshot. ok=false when it has
+// none, or one that does not parse.
+func storedJiraSnapshot(e domain.Entity) (domain.JiraSnapshot, bool) {
+	var snap domain.JiraSnapshot
+	if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
+		return snap, false
+	}
+	if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
+		return domain.JiraSnapshot{}, false
+	}
+	return snap, true
+}
+
+// jiraRenamed reports whether an issue answers under a key other than the one
+// its entity is stored under: the rename condition, decided on the issue id
+// and never on the key alone.
+func jiraRenamed(scope string, e domain.Entity, snap domain.JiraSnapshot) bool {
+	return len(domain.DetectEntityRenames(
+		[]domain.EntityRef{{Source: "jira", Scope: scope, SourceID: e.SourceID, ExternalID: e.ExternalID}},
+		[]domain.EntityRef{{Source: "jira", Scope: scope, SourceID: snap.Key, ExternalID: snap.ID}},
+	)) > 0
+}
+
+// jiraMoved reports whether an issue left the project prev records it in. The
+// project id decides when both snapshots carry one, so a project key rename —
+// which changes every key's prefix and keeps the project — is not a move; a
+// snapshot captured before project ids were recorded falls back to the key's
+// prefix.
+func jiraMoved(prev, curr domain.JiraSnapshot) bool {
+	if prev.ProjectID != "" && curr.ProjectID != "" {
+		return prev.ProjectID != curr.ProjectID
+	}
+	return extractProject(prev.Key) != extractProject(curr.Key)
+}
+
+// renameJiraEntity moves an entity onto the key its issue answers under now,
+// with the link built from that key, and returns the entity as renamed.
+// ok=false means the rename did not land and the caller writes nothing to the
+// entity this cycle: an active row still holds the key (it clears once that
+// row is renamed or retired), or the write failed.
+func (t *Tracker) renameJiraEntity(ctx context.Context, c *jiraCycle, e domain.Entity, key string) (domain.Entity, bool) {
+	url := domain.JiraIssueURL(c.baseURL, key)
+	out, err := t.entities.RenameSystem(context.Background(), t.orgID, "jira", c.scope, e.ExternalID, key, url)
+	if errors.Is(err, db.ErrEntityKeyOccupied) {
+		trackerLog.WarnContext(ctx, "jira issue moved onto a key another tracked issue still holds; renaming it next cycle",
+			"source_id", e.SourceID, "key", key, "entity_id", e.ID)
+		return e, false
+	}
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "rename jira entity failed", "source_id", e.SourceID, "key", key, "entity_id", e.ID, "error", err)
+		return e, false
+	}
+	if out.Renamed {
+		trackerLog.InfoContext(ctx, "jira issue answers under a new key; entity renamed",
+			"from", out.From, "to", out.To, "entity_id", e.ID)
+	}
+	e.SourceID, e.URL = key, url
+	return e, true
+}
+
+// learnJiraIssueID writes the issue id a response named onto an entity
+// created before ids were recorded, and returns the entity that carries it
+// afterwards. ok=false means nothing was learned and the caller leaves the
+// entity alone this cycle.
+//
+// When another row already carries the id, the two rows are one issue — left
+// split by a move nothing followed — and they are merged, the older row
+// surviving (db.EntityStore.MergeDuplicateEntitiesSystem). The survivor is
+// returned, and the merged-away row is skipped by the rest of the cycle.
+func (t *Tracker) learnJiraIssueID(ctx context.Context, c *jiraCycle, e domain.Entity, issueID string) (domain.Entity, bool) {
+	orgID := t.orgID
+	stamped, err := t.entities.StampExternalIDSystem(context.Background(), orgID, e.ID, issueID)
+	switch {
+	case errors.Is(err, db.ErrEntityIdentityAmbiguous):
+		holder, herr := t.entities.GetByExternalIDSystem(context.Background(), orgID, "jira", c.scope, issueID)
+		if herr != nil || holder == nil {
+			trackerLog.ErrorContext(ctx, "jira issue id is carried by another entity that cannot be read; leaving both",
+				"source_id", e.SourceID, "issue_id", issueID, "entity_id", e.ID, "error", herr)
+			return e, false
+		}
+		survivorID, merr := t.entities.MergeDuplicateEntitiesSystem(context.Background(), orgID, e.ID, holder.ID)
+		if merr != nil {
+			trackerLog.ErrorContext(ctx, "merging two entities for one jira issue failed; leaving both",
+				"issue_id", issueID, "entity_id", e.ID, "other_entity_id", holder.ID, "error", merr)
+			return e, false
+		}
+		for _, id := range []string{e.ID, holder.ID} {
+			if id != survivorID {
+				c.merged[id] = true
+			}
+		}
+		survivor, serr := t.entities.GetSystem(context.Background(), orgID, survivorID)
+		if serr != nil || survivor == nil {
+			trackerLog.ErrorContext(ctx, "reading the surviving jira entity after a merge failed", "entity_id", survivorID, "error", serr)
+			return e, false
+		}
+		trackerLog.InfoContext(ctx, "two entities were one jira issue; merged into the older",
+			"issue_id", issueID, "survivor_entity_id", survivorID, "source_id", survivor.SourceID)
+		return *survivor, true
+	case err != nil:
+		trackerLog.ErrorContext(ctx, "learning a jira entity's issue id failed", "source_id", e.SourceID, "issue_id", issueID, "entity_id", e.ID, "error", err)
+		return e, false
+	case stamped == nil:
+		// The row carries another id: it is another issue, which a key lookup
+		// or a response under its key should not have reached.
+		trackerLog.WarnContext(ctx, "jira entity already carries another issue id; not relearning it",
+			"source_id", e.SourceID, "issue_id", issueID, "entity_id", e.ID)
+		return e, false
+	}
+	return *stamped, true
+}
+
+// applyJiraIssue applies one fresh read of an entity's issue and returns the
+// events it enqueued, and whether the read was dropped as stale.
+//
+// An entity created before issue ids were recorded learns its id here first.
+// An issue that answers under a new key — moved to another project, or its
+// project's key renamed — is the same issue: the entity is renamed, before
+// anything decides whether it can still be tracked, and the diff that follows
+// emits key_changed ahead of everything else it finds. A move into a project
+// no rule configures retires the entity instead: no later diff would report
+// the change, so key_changed is published here, ahead of unreachable with
+// reason moved, which names the project the issue left. A move between
+// configured projects keeps the entity.
+//
+// key_changed is always the difference from the stored snapshot, so an entity
+// with no snapshot (one a source pause cleared) is renamed without one, as it
+// is seeded without every other event.
+func (t *Tracker) applyJiraIssue(ctx context.Context, c *jiraCycle, e domain.Entity, state jiraIssueState) (emitted int, stale bool) {
+	orgID := t.orgID
+	newSnap := state.Snap
+
+	if e.ExternalID == "" && newSnap.ID != "" {
+		learned, ok := t.learnJiraIssueID(ctx, c, e, newSnap.ID)
+		if !ok {
+			return 0, false
+		}
+		e = learned
+	}
+
+	var prev *domain.JiraSnapshot
+	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
+		var p domain.JiraSnapshot
+		if err := json.Unmarshal([]byte(e.SnapshotJSON), &p); err != nil {
+			trackerLog.Warn("corrupt jira snapshot, reseeding", "source_id", e.SourceID, "error", err)
+		} else {
+			prev = &p
+		}
+	}
+
+	// Drop a read that predates what we already hold, before it can reach
+	// the rename, the diff or the snapshot write. Jira only ever moves
+	// `updated` forward, so a backwards read is the search index serving
+	// state we have already superseded — never news, and never a reason to
+	// move the entity back onto a key it has left. Warn rather than Debug
+	// because that claim is the whole justification for suppressing: if a
+	// read that WAS news ever gets dropped here, this line is the bug report.
+	if prev != nil {
+		if storedAt, fetchedAt, isStale := jiraReadIsStale(*prev, newSnap); isStale {
+			trackerLog.WarnContext(ctx, "jira read predates stored snapshot; suppressing this cycle's diff and snapshot write",
+				"source_id", e.SourceID, "entity_id", e.ID,
+				"stored_updated", storedAt.Format(time.RFC3339Nano),
+				"fetched_updated", fetchedAt.Format(time.RFC3339Nano))
+			return 0, true
+		}
+	}
+
+	oldKey := e.SourceID
+	renamed := false
+	if jiraRenamed(c.scope, e, newSnap) {
+		next, ok := t.renameJiraEntity(ctx, c, e, newSnap.Key)
+		if !ok {
+			return 0, false
+		}
+		e, renamed = next, true
+	}
+
+	// Whether the issue left the project it was tracked in comes from the
+	// snapshot, not from this call's rename: a cycle that renamed the entity
+	// and stopped before retiring it is finished by the next one, and a
+	// project key rename keeps the project, so it is not a move. With no
+	// snapshot, this call's rename is the only evidence.
+	moved := renamed
+	leftProject := extractProject(oldKey)
+	if prev != nil {
+		moved = jiraMoved(*prev, newSnap)
+		leftProject = extractProject(prev.Key)
+	}
+	if moved && c.projects.ForKey(extractProject(newSnap.Key)) == nil {
+		retired := 1
+		if prev != nil {
+			for _, evt := range jiraKeyChangedEvents(*prev, newSnap, e.ID) {
+				t.publish(ctx, evt)
+				retired++
+			}
+		}
+		t.emitJiraUnreachable(ctx, orgID, e, &newSnap, events.JiraUnreachableMoved, leftProject)
+		return retired, false
+	}
+
+	if prev == nil {
+		// Quiet-seed a snapshot-less row: a stub created
+		// outside the poller (exec-touch FindOrCreate), or an entity
+		// whose snapshot was cleared when an org admin paused this source.
+		// DiffJiraSnapshots' first-discovery branch would synthesize an initial
+		// assigned/available/completed event for state that predates our
+		// tracking — spuriously minting a task, and after a pause minting
+		// one per known issue at once. Seed it like the discovery
+		// create-branch (snapshot + title + description, close if terminal) WITHOUT
+		// diffing instead. Normal discovery seeds in Phase 1, so this only
+		// ever fires for rows that arrived without one.
+		// A terminal seed closes the row in the same statement that
+		// writes its snapshot, so the entity is never active with a
+		// terminal snapshot stored, even between two phases.
+		snapJSON, _ := json.Marshal(newSnap)
+		var ok bool
+		var err error
+		if c.terminal(newSnap) {
+			ok, err = t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+		} else {
+			ok, err = t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, e.ID, string(snapJSON), e.PollSeq)
+		}
+		if err != nil {
+			trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
+		} else if !ok {
+			trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
+		}
+		t.mirrorJiraText(orgID, e, state)
+		return 0, false
+	}
+
+	// An omitted description is unknown; retain the last observed body
+	// revision so a later response can still detect the next real edit.
+	if newSnap.BodyHash == "" {
+		newSnap.BodyHash = prev.BodyHash
+	}
+
+	// Per-project Done.Members for this entity's project_key. Nil when the
+	// entity is in a project that's no longer configured: nothing reads as
+	// terminal there.
+	evts := DiffJiraSnapshots(*prev, newSnap, e.ID, c.projects.doneMembersForKey(newSnap.Key))
+
+	// The close obligation — the GitHub arm's rule, read against this
+	// cycle's per-project done set: the entity is active (Phase 2 lists
+	// only active rows) and its snapshot was already terminal last
+	// cycle, so the completion that should have closed it was lost.
+	if owed, ok := t.closeOwed(ctx, orgID, e.ID, c.terminal(*prev), c.terminal(newSnap)); ok {
+		evts = append(evts, owed)
+	}
+
+	// Snapshot advance + the transitions diffed against it, one
+	// transaction, CAS'd on e.PollSeq (the value this cycle's diff was
+	// read against) — the GitHub arm's contract, same reasoning: the
+	// snapshot-diff is the sole re-emit prevention, so half of this
+	// landing is either a duplicate task (events off a snapshot that
+	// didn't win) or a lost one (a snapshot that retired transitions
+	// nobody recorded). On a miss or an error nothing was written and
+	// the winner's next cycle re-diffs, so suppression loses nothing. A
+	// refresh that observed no change commits nothing but its poll stamp.
+	prevJSON, _ := json.Marshal(*prev)
+	snapJSON, _ := json.Marshal(newSnap)
+	ok, enqueued, err := t.commitRefresh(ctx, orgID, e.ID, string(prevJSON), string(snapJSON), e.PollSeq, evts)
+	if err != nil {
+		trackerLog.Error("jira snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
+		return 0, false
+	}
+	if !ok {
+		trackerLog.Warn("jira snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
+		return 0, false
+	}
+	t.mirrorJiraText(orgID, e, state)
+	return enqueued, false
+}
+
+// mirrorJiraText brings the entity's title, description and link up to the
+// issue's. Best effort, outside the snapshot transaction: the event's body
+// hash is the revision authority, and these capped strings can lag a
+// committed event. The link follows a key change through the rename; it is
+// mirrored here too so an entity whose link went stale without one is
+// repaired by its next refresh.
+func (t *Tracker) mirrorJiraText(orgID string, e domain.Entity, state jiraIssueState) {
+	if e.Title != state.Snap.Summary {
+		_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, state.Snap.Summary)
+	}
+	if state.Snap.BodyHash != "" && e.Description != state.Description {
+		_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, state.Description)
+	}
+	if state.Snap.URL != "" && e.SourceID == state.Snap.Key && e.URL != state.Snap.URL {
+		_, _ = t.entities.UpdateURLSystem(context.Background(), orgID, e.ID, state.Snap.URL)
+	}
+}
+
 const (
-	// jiraUnreachableGrace is how long a tracked key must go unanswered by
+	// jiraUnreachableGrace is how long a tracked issue must go unanswered by
 	// the refresh before the tracker spends a request asking Jira about it
-	// directly.
+	// directly. An entity whose issue id TF has not learned yet is asked
+	// about on its first miss instead: the refresh reads it by key, and a key
+	// the issue has left never answers again, so waiting would only delay
+	// the confirmation that learns its id and renames it.
 	//
-	// The grace is the whole safety margin. A key's absence from one search
+	// The grace is the whole safety margin. An issue's absence from one search
 	// is weak evidence — an index that hasn't caught up, a transient
 	// visibility change, or a paging bug all present identically — and the
 	// event this pass can emit closes the entity and every task on it. Many
 	// consecutive misses across an hour is not proof either, which is why
 	// the pass confirms rather than concludes; the grace is only there so
-	// the confirmation is spent on keys that look durably unanswered instead
-	// of on every blip.
+	// the confirmation is spent on issues that look durably unanswered
+	// instead of on every blip.
 	//
 	// Wall-clock rather than a cycle count because the poll interval is the
 	// user's to set: an hour is an hour whether that is six cycles or sixty.
 	jiraUnreachableGrace = time.Hour
 
 	// jiraUnreachableProbeBudget caps confirmations per cycle. These are one
-	// request per key on top of a cycle that has already done its batch
+	// request per issue on top of a cycle that has already done its batch
 	// reads, and the population they draw from is unbounded — a whole
-	// project's worth of keys can go missing at once when a project is
+	// project's worth of issues can go missing at once when a project is
 	// deleted or a credential's visibility narrows.
 	//
-	// Deferred keys are not dropped. Candidates come off a list ordered
+	// Deferred issues are not dropped. Candidates come off a list ordered
 	// oldest-last_polled_at-first, and every confirmation that reaches a
 	// verdict advances that column — a 404 by retiring the entity, a 200 by
-	// stamping it — so each cycle's budget lands on keys the previous
+	// stamping it — so each cycle's budget lands on issues the previous
 	// cycles did not reach, and a backlog drains over several cycles rather
-	// than arriving as one burst of API calls. The exception is a key whose
+	// than arriving as one burst of API calls. The exception is an issue whose
 	// confirmation keeps erroring: it stays at the head of the queue and is
 	// retried every cycle, which is the right behaviour for a transient
 	// fault and self-limiting for a persistent one (nothing behind it could
@@ -1658,38 +1981,44 @@ const (
 )
 
 // confirmMissingJiraEntities asks Jira directly about tracked entities the
-// refresh has not answered for in a while, and emits jira:issue:unreachable for
-// the keys Jira will no longer resolve. Returns the number of events emitted.
+// refresh has not answered for, and emits jira:issue:unreachable for the
+// issues Jira will no longer resolve. Returns the number of events emitted.
+// An entity with an id is asked about by id once it has gone unanswered for
+// jiraUnreachableGrace; one without is asked about by key on its first miss.
 //
-// This exists because the refresh cannot retire anything on its own. A key
-// missing from a `key IN (...)` result is skipped by the diff loop, so the
+// This exists because the refresh cannot retire anything on its own. An issue
+// missing from an `id IN (...)` result is skipped by the diff loop, so the
 // entity keeps its last snapshot and emits nothing — for as long as it takes
 // someone to notice, which for a durable entity is forever. Closing on that
 // signal alone would be wrong in the other direction: absence from a search is
 // equally consistent with an issue that is merely unindexed, archived, or newly
 // invisible to the credential, and closing those would destroy live work.
 //
-// Asking about the one key settles it, though not into the answer one might
-// want: a 404 says only that this credential cannot resolve this key, because
-// Jira answers the same way for an issue that was deleted and one it will not
-// admit exists. Both make the entity untrackable, which is what the event
-// records and all it claims. A 200 is the useful negative — the issue resolves,
-// so something upstream of the diff is failing to return it — logged loudly,
-// stamped so it stops consuming the budget, and otherwise left alone. Any other
-// error is not evidence in either direction.
-func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiraclient.Client, orgID string, entities []domain.Entity, refreshed map[string]jiraIssueState, now time.Time) int {
+// Asking about the one issue settles it, though not into the answer one might
+// want: a 404 says only that this credential cannot resolve it, because Jira
+// answers the same way for an issue that was deleted and one it will not admit
+// exists. Both make the entity untrackable, which is what the event records and
+// all it claims. A 200 is the useful negative. For an entity with no id it
+// names the id, which the entity learns, and the key the issue has now, which
+// the entity is renamed to if the issue moved; the next refresh reads it by id
+// and diffs it. For an entity that already had its id, it means something
+// upstream of the diff is failing to return the issue — logged loudly, stamped
+// so it stops consuming the budget, and otherwise left alone. Any other error
+// is not evidence in either direction.
+func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiraclient.Client, c *jiraCycle, entities []domain.Entity, refreshed map[string]jiraIssueState, now time.Time) int {
+	orgID := t.orgID
 	var candidates []domain.Entity
 	for _, e := range entities {
-		if _, answered := refreshed[e.SourceID]; answered {
+		if _, answered := refreshed[e.ID]; answered || c.merged[e.ID] {
 			continue
 		}
 		// LastPolledAt advances on every successful refresh write and is
-		// stamped at creation, so its age IS the "how long has this key gone
+		// stamped at creation, so its age IS the "how long has this issue gone
 		// unanswered" clock — no separate miss counter to keep, and nothing
 		// to lose across a restart or a change of leader. A nil value predates
 		// the column's population and says nothing about recency, so it waits
 		// for the next successful refresh to give it a reading.
-		if e.LastPolledAt == nil || now.Sub(*e.LastPolledAt) < jiraUnreachableGrace {
+		if e.ExternalID != "" && (e.LastPolledAt == nil || now.Sub(*e.LastPolledAt) < jiraUnreachableGrace) {
 			continue
 		}
 		candidates = append(candidates, e)
@@ -1704,59 +2033,62 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 
 	emitted := 0
 	confirmedWithoutSearch := 0
-	rekeyed := 0
-	merged := 0
+	repaired := 0
 	for i, e := range candidates {
 		if i >= jiraUnreachableProbeBudget {
 			span.SetAttributes(telemetry.Outcome("partial"))
-			trackerLog.InfoContext(ctx, "jira reachability confirmation budget spent; remaining keys re-checked next cycle",
+			trackerLog.InfoContext(ctx, "jira reachability confirmation budget spent; remaining issues re-checked next cycle",
 				"budget", jiraUnreachableProbeBudget, "deferred", len(candidates)-i)
 			break
 		}
 		if ctx.Err() != nil {
 			return emitted
 		}
+		if c.merged[e.ID] {
+			continue
+		}
 
-		issue, err := client.GetIssue(ctx, e.SourceID)
+		idOrKey := e.ExternalID
+		if idOrKey == "" {
+			idOrKey = e.SourceID
+		}
+		issue, err := client.GetIssue(ctx, idOrKey)
 		switch {
 		case err == nil:
-			if issue.Key != "" && issue.Key != e.SourceID {
-				survivorID, wasMerged, rekeyErr := t.entities.RekeyOrMergeSystem(ctx, orgID, e.ID, issue.Key)
-				if rekeyErr != nil {
-					trackerLog.WarnContext(ctx, "repairing moved jira issue key failed; entity stays a confirmation candidate",
-						"old_source_id", e.SourceID, "new_source_id", issue.Key, "entity_id", e.ID, "error", rekeyErr)
+			fresh := issueToState(*issue, c.baseURL, nil).Snap
+			changed := false
+			if e.ExternalID == "" && fresh.ID != "" {
+				learned, ok := t.learnJiraIssueID(ctx, c, e, fresh.ID)
+				if !ok {
 					continue
 				}
-				if wasMerged {
-					merged++
-				} else {
-					rekeyed++
-				}
-				// Deliberately silent in the event stream: Jira changed the
-				// issue's address, not its work state. A plain re-key also clears
-				// project classification in the store, since a cross-project move
-				// invalidates the old classification. We follow the current key
-				// even when its destination project is not configured; entities
-				// are durable and leaving the discovery set is not retirement.
-				trackerLog.InfoContext(ctx, "followed moved jira issue to its current key",
-					"old_source_id", e.SourceID, "new_source_id", issue.Key,
-					"entity_id", e.ID, "survivor_entity_id", survivorID, "merged", wasMerged)
-				continue
+				e, changed = learned, true
 			}
-			// Confirmed present, and yet the refresh didn't return it. The
-			// entity is being skipped every cycle by something other than
-			// the key being unresolvable — an unindexed or archived issue, or one
-			// the credential can no longer see through search. Nothing here
-			// can repair that, but an entity silently frozen is exactly what
-			// this pass exists to stop being invisible.
-			confirmedWithoutSearch++
+			if jiraRenamed(c.scope, e, fresh) {
+				renamed, ok := t.renameJiraEntity(ctx, c, e, fresh.Key)
+				if !ok {
+					continue
+				}
+				e, changed = renamed, true
+			}
+			if changed {
+				repaired++
+			} else {
+				// Confirmed present, and yet the refresh didn't return it. The
+				// entity is being skipped every cycle by something other than
+				// the issue being unresolvable — an unindexed or archived issue,
+				// or one the credential can no longer see through search.
+				// Nothing here can repair that, but an entity silently frozen is
+				// exactly what this pass exists to stop being invisible.
+				confirmedWithoutSearch++
+			}
 			// Stamp the read. Candidates are selected by how stale this
 			// column is and drawn oldest-first against a per-cycle budget,
 			// so an entity that will confirm present on every future pass
 			// would otherwise sit at the head of that queue forever, consume
 			// the budget each cycle, and starve every candidate behind it —
 			// including ones that would have confirmed unreachable. Honest as
-			// as necessary: the row *was* just read from the source, which
+			// far as it goes: the row *was* just read from the source, which
 			// is what the column records; nothing was diffed off it, which
 			// is why this is not a snapshot write.
 			if err := t.entities.MarkPolledSystem(ctx, orgID, e.ID); err != nil {
@@ -1764,7 +2096,7 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 					"source_id", e.SourceID, "entity_id", e.ID, "error", err)
 			}
 		case jiraclient.IsNotFound(err):
-			t.emitJiraUnreachable(ctx, orgID, e)
+			t.emitJiraUnreachable(ctx, orgID, e, nil, events.JiraUnreachableNotFound, "")
 			emitted++
 		default:
 			trackerLog.WarnContext(ctx, "jira reachability confirmation failed; entity left tracked",
@@ -1775,12 +2107,12 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 		trackerLog.WarnContext(ctx, "jira issues resolve but no search returned them; entities remain tracked and undiffed",
 			"count", confirmedWithoutSearch)
 	}
-	if rekeyed+merged > 0 {
-		span.SetAttributes(telemetry.Disposition("issue_keys_repaired"), telemetry.Attempt(rekeyed+merged))
+	if repaired > 0 {
+		span.SetAttributes(telemetry.Disposition("issue_ids_learned"), telemetry.Attempt(repaired))
 	}
 	if emitted > 0 {
 		// A disposition rather than a second Count — Count is one key, and the
-		// count worth keeping on this span is how many keys it examined, not
+		// count worth keeping on this span is how many issues it examined, not
 		// how many it retired. A pass that retires anything is the rare case;
 		// this is what makes it findable.
 		span.SetAttributes(telemetry.Disposition("entities_retired"), telemetry.Attempt(emitted))
@@ -1788,26 +2120,54 @@ func (t *Tracker) confirmMissingJiraEntities(ctx context.Context, client *jiracl
 	return emitted
 }
 
-// emitJiraUnreachable publishes the terminal event for an entity whose key Jira
-// will no longer resolve. Every metadata field is last-known state off the
-// stored snapshot — the source has nothing left to read — and a snapshot that
-// is absent or unparseable still emits, with blank fields: the entity has to be
-// retired either way, and a corrupt snapshot is not a reason to keep tracking
-// something that can no longer be read.
+// emitJiraUnreachable publishes the terminal event for an entity TF will no
+// longer follow, with reason in its metadata. Every field is last-known state
+// off the stored snapshot, filled from the fresh read where there is one (an
+// issue that moved still answered); a snapshot that is absent or unparseable
+// still emits, with those fields blank: the entity has to be retired either
+// way, and a corrupt snapshot is not a reason to keep tracking something that
+// can no longer be read.
+//
+// issue_key is the entity's key, which a rename has already brought up to
+// date, never one parsed from an older read. project is that key's project,
+// unless the caller names another: a move into a project no rule configures
+// names the project the issue left, which is the one whose teams tracked it.
 //
 // Publish, not the snapshot-CAS enqueue: there is no new snapshot to advance,
 // and the entity's own close is the router's job (the event terminates it).
-func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domain.Entity) {
+func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domain.Entity, fresh *domain.JiraSnapshot, reason, project string) {
 	var snap domain.JiraSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
 			trackerLog.WarnContext(ctx, "corrupt jira snapshot on an unreachable issue; emitting with last-known fields blank",
 				"source_id", e.SourceID, "entity_id", e.ID, "error", err)
+			snap = domain.JiraSnapshot{}
 		}
 	}
+	if fresh != nil {
+		if snap.Assignee == "" && snap.AssigneeAccountID == "" {
+			snap.Assignee, snap.AssigneeAccountID = fresh.Assignee, fresh.AssigneeAccountID
+		}
+		if snap.IssueType == "" {
+			snap.IssueType = fresh.IssueType
+		}
+		if snap.Status == "" {
+			snap.Status = fresh.Status
+		}
+		if snap.Summary == "" {
+			snap.Summary = fresh.Summary
+		}
+	}
+	issueID := e.ExternalID
+	if issueID == "" {
+		issueID = snap.ID
+	}
+	if project == "" {
+		project = extractProject(e.SourceID)
+	}
 	entityID := e.ID
-	trackerLog.InfoContext(ctx, "jira will not resolve this key (deleted, or no longer visible to the credential); retiring entity",
-		"source_id", e.SourceID, "entity_id", e.ID)
+	trackerLog.InfoContext(ctx, "TF will not follow this jira issue any more; retiring entity",
+		"source_id", e.SourceID, "entity_id", e.ID, "reason", reason)
 	t.publish(ctx, domain.Event{
 		OrgID:     orgID,
 		EventType: domain.EventJiraIssueUnreachable,
@@ -1816,12 +2176,14 @@ func (t *Tracker) emitJiraUnreachable(ctx context.Context, orgID string, e domai
 			Assignee:          snap.Assignee,
 			AssigneeAccountID: snap.AssigneeAccountID,
 			IssueKey:          e.SourceID,
-			Project:           extractProject(e.SourceID),
+			IssueID:           issueID,
+			Project:           project,
 			IssueType:         snap.IssueType,
 			LastStatus:        snap.Status,
 			Summary:           snap.Summary,
+			Reason:            reason,
 		}),
-		// occurred_at is deliberately left zero — Jira reports that a key does
+		// occurred_at is deliberately left zero — Jira reports that an issue does
 		// not resolve, never when it stopped, so there is no source time to
 		// carry and the nullable contract stores NULL rather than a fabricated
 		// one. Consumers fall back to created_at, which is the honest reading:
@@ -1986,13 +2348,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 
 	seen := map[string]bool{}
 	var all []jiraIssueState
-
-	// "updated" is required for the diff layer's source-time fallback —
-	// without it, JiraSnapshot.UpdatedAt is empty and emit() degrades all
-	// the way to detection time. Added explicitly here because this
-	// callsite passes a custom field list rather than relying on
-	// DefaultSearchFields.
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
+	fields := jiraIssueFields
 
 	// Live workflows, fetched only when a query has already failed and cached
 	// for the rest of the cycle so two failed queries on one project cost one
@@ -2029,8 +2385,13 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 			continue
 		}
 		for _, issue := range issues {
-			if !seen[issue.Key] {
-				seen[issue.Key] = true
+			// One issue can answer two queries; it is the same issue by id.
+			identity := issue.ID
+			if identity == "" {
+				identity = issue.Key
+			}
+			if !seen[identity] {
+				seen[identity] = true
 				state := issueToState(issue, baseURL, q.doneMembers)
 				state.DiscoveredAssignedToCurrentUser = q.assignedToCurrentUser
 				all = append(all, state)
@@ -2124,58 +2485,92 @@ func (t *Tracker) salvageJiraQuery(
 	return build(surviving), dropped
 }
 
-// batchFetchJira includes descriptions so tracked issues keep detecting body
-// edits even after reassignment takes them out of the discovery queries.
-func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client, baseURL string, keys []string, projects JiraRules) (map[string]jiraIssueState, error) {
+// jiraIssueFields is the field list every tracking read of an issue asks for.
+// "updated" is required for the diff layer's source-time fallback — without
+// it, JiraSnapshot.UpdatedAt is empty and emit() degrades all the way to
+// detection time — and "project" for telling a move from a project key
+// rename. Spelled out because these reads pass their own list rather than
+// relying on DefaultSearchFields.
+var jiraIssueFields = []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "project", "parent", "comment", "subtasks", "created", "updated"}
+
+// batchFetchJira reads every entity's issue and returns the answers keyed by
+// entity id. An entity with an issue id is read by id (`id IN (...)`) and
+// matched back by id, so an issue that moved or whose project's key was renamed
+// answers for its entity under its new key. An entity created before ids were
+// recorded is read by key (`key IN (...)`) and matched back by key, and learns
+// its id from the answer; one whose issue moved before it did answers under
+// another key, matches nothing, and is confirmed by the next phase instead.
+//
+// Descriptions are included so tracked issues keep detecting body edits even
+// after reassignment takes them out of the discovery queries.
+func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client, baseURL string, entities []domain.Entity, projects JiraRules) (map[string]jiraIssueState, error) {
 	// Serial, with one iteration per batch of tracked issues — so its cost
 	// grows with every issue TF tracks, making it the cycle's most likely
 	// creeping regression. The per-request spans underneath are each fast,
 	// so nothing else would show it.
 	ctx, span := tracer.Start(ctx, "tracker.jira.batch_fetch",
-		trace.WithAttributes(telemetry.Count(len(keys))))
+		trace.WithAttributes(telemetry.Count(len(entities))))
 	defer span.End()
 
-	results := make(map[string]jiraIssueState, len(keys))
-	// "updated" is required for the diff layer's source-time fallback.
-	// See the comment on the discovery field list for context.
-	fields := []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "parent", "comment", "subtasks", "created", "updated"}
-
+	results := make(map[string]jiraIssueState, len(entities))
 	allDone := projects.AllDoneMembers()
 
-	for i := 0; i < len(keys); i += jiraBatchSize {
-		end := i + jiraBatchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-		batch := keys[i:end]
-
-		jql := fmt.Sprintf("key IN (%s)", strings.Join(batch, ", "))
-		issues, err := client.SearchIssues(ctx, jql, fields, jiraBatchSize)
-		if err != nil {
-			span.SetStatus(codes.Error, "batch fetch")
-			return nil, fmt.Errorf("batch fetch keys %d-%d: %w", i, end, err)
-		}
-
-		for _, issue := range issues {
-			// Subtask classification uses the union of every project's
-			// done members — subtasks can live in projects other than
-			// the parent's.
-			results[issue.Key] = issueToState(issue, baseURL, allDone)
+	byID := make(map[string]string, len(entities))  // issue id → entity id
+	byKey := make(map[string]string, len(entities)) // issue key → entity id
+	var ids, keys []string
+	for _, e := range entities {
+		if e.ExternalID != "" {
+			byID[e.ExternalID] = e.ID
+			ids = append(ids, e.ExternalID)
+		} else {
+			byKey[e.SourceID] = e.ID
+			keys = append(keys, e.SourceID)
 		}
 	}
 
-	// A tracked key that comes back in no page — deleted, moved to another
-	// key, or no longer visible to the service credential — is skipped by the
-	// diff loop, so the entity holds its last snapshot and emits nothing,
-	// indefinitely and silently. Nothing here retires it (a durable entity is
-	// the user's to dismiss, not a poller's to purge), but it is said out loud,
-	// because a truncated page would masquerade as exactly this: with the gap
-	// logged, a paging bug shows up as a log line rather than as entities that
-	// quietly stop moving.
-	if missing := missingJiraKeys(keys, results); len(missing) > 0 {
+	fetch := func(field string, values []string, match func(jiraclient.Issue) (string, bool)) error {
+		for i := 0; i < len(values); i += jiraBatchSize {
+			end := min(i+jiraBatchSize, len(values))
+			jql := fmt.Sprintf("%s IN (%s)", field, strings.Join(values[i:end], ", "))
+			issues, err := client.SearchIssues(ctx, jql, jiraIssueFields, jiraBatchSize)
+			if err != nil {
+				span.SetStatus(codes.Error, "batch fetch")
+				return fmt.Errorf("batch fetch %s %d-%d: %w", field, i, end, err)
+			}
+			for _, issue := range issues {
+				if entityID, ok := match(issue); ok {
+					// Subtask classification uses the union of every project's
+					// done members — subtasks can live in projects other than
+					// the parent's.
+					results[entityID] = issueToState(issue, baseURL, allDone)
+				}
+			}
+		}
+		return nil
+	}
+	if err := fetch("id", ids, func(issue jiraclient.Issue) (string, bool) {
+		entityID, ok := byID[issue.ID]
+		return entityID, ok
+	}); err != nil {
+		return nil, err
+	}
+	if err := fetch("key", keys, func(issue jiraclient.Issue) (string, bool) {
+		entityID, ok := byKey[issue.Key]
+		return entityID, ok
+	}); err != nil {
+		return nil, err
+	}
+
+	// A tracked issue that comes back in no page — deleted, moved before its
+	// entity learned its id, or no longer visible to the service credential —
+	// is skipped by the diff loop and left to the confirmation pass. It is
+	// said out loud here as well, because a truncated page would masquerade as
+	// exactly this: with the gap logged, a paging bug shows up as a log line
+	// rather than as entities that quietly stop moving.
+	if missing := missingJiraIssues(entities, results); len(missing) > 0 {
 		span.SetAttributes(telemetry.Outcome("partial"))
-		trackerLog.WarnContext(ctx, "jira batch fetch returned no row for tracked keys",
-			"missing", len(missing), "tracked", len(keys),
+		trackerLog.WarnContext(ctx, "jira batch fetch returned no row for tracked issues",
+			"missing", len(missing), "tracked", len(entities),
 			"keys", strings.Join(missing[:min(len(missing), jiraMissingKeySample)], ", "))
 	}
 
@@ -2187,14 +2582,13 @@ func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client,
 // hundred of them in one line would bury it.
 const jiraMissingKeySample = 10
 
-// missingJiraKeys returns the requested keys that the batch fetch produced no
-// state for, in request order. A moved issue answers under its new key, so it
-// shows up here as absent rather than as a silent substitution.
-func missingJiraKeys(keys []string, results map[string]jiraIssueState) []string {
+// missingJiraIssues returns the keys of the entities the batch fetch produced
+// no state for, in request order.
+func missingJiraIssues(entities []domain.Entity, results map[string]jiraIssueState) []string {
 	var missing []string
-	for _, k := range keys {
-		if _, ok := results[k]; !ok {
-			missing = append(missing, k)
+	for _, e := range entities {
+		if _, ok := results[e.ID]; !ok {
+			missing = append(missing, e.SourceID)
 		}
 	}
 	return missing
@@ -2217,10 +2611,14 @@ type jiraIssueState struct {
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
 func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
+		ID:       issue.ID,
 		Key:      issue.Key,
 		Summary:  issue.Fields.Summary,
-		URL:      fmt.Sprintf("%s/browse/%s", strings.TrimRight(baseURL, "/"), issue.Key),
+		URL:      domain.JiraIssueURL(baseURL, issue.Key),
 		BodyHash: domain.JSONBodyHash(issue.Fields.Description),
+	}
+	if issue.Fields.Project != nil {
+		snap.ProjectID = issue.Fields.Project.ID
 	}
 	if issue.Fields.Status != nil {
 		snap.Status = issue.Fields.Status.Name

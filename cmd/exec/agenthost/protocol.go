@@ -629,11 +629,14 @@ type emptyResult struct{}
 // memoryLoadArgs / memoryLoadResult are the `memory load` wire shapes, shared
 // by the IPC method (methodMemoryLoad) and the sidecar relay op (opMemoryLoad)
 // — the two hops a sandboxed executor run makes. Result wraps the pointer so a
-// miss (nil entity) still round-trips as a well-formed envelope.
+// miss (nil entity) still round-trips as a well-formed envelope. ExternalID
+// crosses only the relay hop: the daemon resolves it from the provider (a Jira
+// issue's id), and the IPC method ignores one the jailed CLI sends.
 type memoryLoadArgs struct {
-	Source   string `json:"source"`
-	SourceID string `json:"source_id"`
-	Limit    int    `json:"limit"`
+	Source     string `json:"source"`
+	SourceID   string `json:"source_id"`
+	ExternalID string `json:"external_id,omitempty"`
+	Limit      int    `json:"limit"`
 }
 
 type memoryLoadResult struct {

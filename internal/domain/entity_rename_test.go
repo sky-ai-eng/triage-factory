@@ -2,6 +2,7 @@ package domain
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -119,5 +120,58 @@ func TestArtifactKeyHasResource(t *testing.T) {
 		if got := ArtifactKeyHasResource(c.key, c.provider, c.resource); got != c.want {
 			t.Errorf("ArtifactKeyHasResource(%q, %q, %q) = %v, want %v", c.key, c.provider, c.resource, got, c.want)
 		}
+	}
+}
+
+func TestJiraIssueResource(t *testing.T) {
+	for _, site := range []string{
+		"https://acme.atlassian.net",
+		"https://jira.example.com:8443/jira",
+		"http://10.0.0.5/a%2Fb",
+	} {
+		resource := JiraIssueResource(site, "10042")
+		if strings.ContainsAny(resource[:strings.LastIndex(resource, "/")], ":/") {
+			t.Errorf("JiraIssueResource(%q) = %q: the escaped site holds a separator", site, resource)
+		}
+		key := ArtifactDedupKey(ArtifactProviderJira, ArtifactKindComment, resource, "20001")
+		gotSite, gotID, ok := ArtifactEntityIdentity(ArtifactProviderJira, key)
+		if !ok || gotSite != site || gotID != "10042" {
+			t.Errorf("ArtifactEntityIdentity(%q) = (%q, %q, %v), want (%q, 10042)", key, gotSite, gotID, ok, site)
+		}
+		if !ArtifactKeyHasResource(key, ArtifactProviderJira, EntityArtifactResource("jira", site, "10042")) {
+			t.Errorf("%q does not name the entity's resource", key)
+		}
+	}
+	if r := JiraIssueResource("", "10042"); r != "" {
+		t.Errorf("no site = %q, want empty", r)
+	}
+	if r := JiraIssueResource("https://acme.atlassian.net", ""); r != "" {
+		t.Errorf("no id = %q, want empty", r)
+	}
+	// An artifact keyed on the issue key names no identity.
+	if _, _, ok := ArtifactEntityIdentity(ArtifactProviderJira, "jira:issue:SKY-1"); ok {
+		t.Error("a key-shaped Jira dedup key read as an identity")
+	}
+	if _, _, ok := ArtifactEntityIdentity(ArtifactProviderGitHub, "github:pull_request:o/r#1"); ok {
+		t.Error("a GitHub dedup key read as an identity")
+	}
+	if _, id, ok := ArtifactEntityIdentity(ArtifactProviderLinear, "linear:comment:uuid-1:c-1"); !ok || id != "uuid-1" {
+		t.Errorf("linear identity = (%q, %v), want uuid-1", id, ok)
+	}
+	// Two sites' issue 10042 are two resources.
+	if JiraIssueResource("https://a.example.com", "10042") == JiraIssueResource("https://b.example.com", "10042") {
+		t.Error("one id on two sites collapsed to one resource")
+	}
+}
+
+func TestEntityURL(t *testing.T) {
+	if got := EntityURL("jira", "https://acme.atlassian.net", "SKY-1"); got != "https://acme.atlassian.net/browse/SKY-1" {
+		t.Errorf("jira url = %q", got)
+	}
+	if got := EntityURL("github", "https://github.com", "o/r#1"); got != "" {
+		t.Errorf("github url = %q, want empty: callers supply it", got)
+	}
+	if got := EntityURL("jira", "", "SKY-1"); got != "" {
+		t.Errorf("jira url with no site = %q, want empty", got)
 	}
 }

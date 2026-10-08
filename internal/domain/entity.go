@@ -48,53 +48,75 @@ func NormalizeJiraKey(key string) string {
 }
 
 // EntityRefForExternal maps an external write/artifact coordinate to the
-// entity natural key it concerns, less the scope, which the caller resolves for
-// the org (entityscope.Of): source is the entities.source column
-// (== provider for the mapped providers), sourceID is the natural key
-// (== target, except for Jira, where it is the target folded to its
-// canonical spelling), kind is the entities.kind. ok=false for anything the
-// touched/produced rule skips — a repo-level GitHub target (owner/repo with
-// no '#N'), an empty key, or an unmapped provider — so the caller resolves,
-// creates, and records nothing.
+// entity it concerns, less the scope, which the caller resolves for the org
+// (entityscope.Of): Source is the entities.source column (== provider for the
+// mapped providers), SourceID is the natural key (== target, except for Jira,
+// where it is the target folded to its canonical spelling), ExternalID is the
+// provider id the entity is identified by, and kind is the entities.kind.
+// ok=false for anything the touched/produced rule skips — a repo-level GitHub
+// target (owner/repo with no '#N'), an empty key, a Jira coordinate with no
+// issue id, or an unmapped provider — so the caller resolves, creates, and
+// records nothing.
 //
 // It is the single home of the (provider, target) → entity mapping shared by
 // the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
-// conversation-end produced-artifact attach (the delegate spawner). GitHub
+// conversation-end produced-artifact attach (memoryentities.Attach). GitHub
 // targets must parse as owner/repo#N; Jira targets are issue keys; Slack
 // targets are a SlackSourceID channel/root_ts.
+//
+// A Jira coordinate needs externalID, the issue's numeric id: an issue key
+// changes when the issue moves or its project's key is renamed, so an entity
+// found or created on the key alone can be another issue's, or a second row
+// for this one. GitHub and Slack ignore externalID.
 //
 // NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
 // PRs/reviews today, so that holds — but a GitHub *issue* shares the
 // "owner/repo#N" shape, and the poller's stub enrichment would then 404 against
 // /pulls/{n} every cycle. GitHub issue support must branch on kind here (and
 // give the poller an issue-aware enrichment path).
-func EntityRefForExternal(provider, target string) (source, sourceID, kind string, ok bool) {
+func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, kind string, ok bool) {
 	switch provider {
 	case ArtifactProviderGitHub:
 		// owner/repo#N is a PR entity; a bare owner/repo is a repo-level
 		// action (a branch push's shape too) and maps to no entity.
 		if _, _, _, parsed := ParsePRTarget(target); !parsed {
-			return "", "", "", false
+			return EntityRef{}, "", false
 		}
-		return provider, target, "pr", true
+		return EntityRef{Source: provider, SourceID: target}, "pr", true
 	case ArtifactProviderJira:
 		// Normalized rather than passed through: this is the single seam
 		// every touched/produced Jira entity resolves through, so folding
 		// here is what makes a non-canonical source_id unrepresentable no
 		// matter which caller supplied the target. See NormalizeJiraKey.
 		key := NormalizeJiraKey(target)
-		if key == "" {
-			return "", "", "", false
+		if key == "" || externalID == "" {
+			return EntityRef{}, "", false
 		}
-		return provider, key, "issue", true
+		return EntityRef{Source: provider, SourceID: key, ExternalID: externalID}, "issue", true
 	case ArtifactProviderSlack:
 		if target == "" {
-			return "", "", "", false
+			return EntityRef{}, "", false
 		}
-		return provider, target, "message", true
+		return EntityRef{Source: provider, SourceID: target}, "message", true
 	default:
-		return "", "", "", false
+		return EntityRef{}, "", false
 	}
+}
+
+// EntityURL is the link an entity of source with key sourceID in scope is
+// stored under, where TF builds it from the key rather than reading it off the
+// provider: a Jira issue's {site}/browse/{KEY}, the same link the poller
+// stamps. "" for every other source, whose callers supply the url they have.
+func EntityURL(source, scope, sourceID string) string {
+	if source == ArtifactProviderJira && scope != "" && sourceID != "" {
+		return JiraIssueURL(scope, sourceID)
+	}
+	return ""
+}
+
+// JiraIssueURL is the human-facing link to the Jira issue key on site.
+func JiraIssueURL(site, key string) string {
+	return strings.TrimRight(site, "/") + "/browse/" + key
 }
 
 // Entity is a long-lived source object (PR, issue, epic, message). Lives from
@@ -117,9 +139,11 @@ type Entity struct {
 	// SlackScope for every Slack entity. Computed from org settings by
 	// EntityScope.
 	Scope    string `json:"scope"`
-	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, a Linear identifier, etc.
-	// ExternalID is the provider's stable id for the object — a Linear issue's
-	// UUID. Empty when the source has none or TF has not learned it.
+	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, a Linear identifier, etc. — the key it answers to now
+	// ExternalID is the provider's stable id for the object — a Jira issue's
+	// numeric id, a Linear issue's UUID. Empty when the source has none or TF
+	// has not learned it (a Jira entity created before issue ids were
+	// recorded, until a response names its id).
 	ExternalID string `json:"external_id,omitempty"`
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why

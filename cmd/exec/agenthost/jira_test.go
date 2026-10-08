@@ -255,7 +255,11 @@ func TestServer_JiraSearchIssues_RoundTrip(t *testing.T) {
 func TestServer_JiraUpdateIssue_FieldsCrossWire(t *testing.T) {
 	rec := &jiraRecorder{}
 	jira := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rec.record(r)
+		// The write is what this pins; the read-back of the issue it named
+		// that recording makes afterwards is not recorded over it.
+		if r.Method != http.MethodGet {
+			rec.record(r)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer jira.Close()

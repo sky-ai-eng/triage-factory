@@ -308,6 +308,60 @@ func TestAttach_RepoLevelTargetsSkipped(t *testing.T) {
 	}
 }
 
+// TestAttach_JiraArtifactsResolveByIssueID: a Jira artifact resolves its
+// entity through the site and issue id its dedup key records. An artifact
+// whose target is a key the issue has since left attaches to the issue's
+// entity without moving it back; one keyed on the issue key, or recorded on
+// another site, attaches nothing and mints nothing.
+func TestAttach_JiraArtifactsResolveByIssueID(t *testing.T) {
+	database := newTestDB(t)
+	site := testScope("jira")
+	if _, err := database.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, runmode.LocalDefaultOrgID, site); err != nil {
+		t.Fatalf("record jira site: %v", err)
+	}
+	seedConversation(t, database, "r-jira")
+	ctx := context.Background()
+	entA := primaryEntity(t, database, "r-jira")
+	moved, _, err := sqlitestore.New(database).Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	jiraArtifact := func(resource, target string) domain.Artifact {
+		return domain.Artifact{
+			Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue, Target: target,
+			State:    domain.ArtifactStateIssueUpdated,
+			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
+		}
+	}
+	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource(site, "10007"), "OLD-7"))
+	seedArtifact(t, database, "r-jira", jiraArtifact("SKY-1", "SKY-1"))
+	seedArtifact(t, database, "r-jira", jiraArtifact(domain.JiraIssueResource("https://other.example.com", "10008"), "SKY-2"))
+
+	attachAll(t, database, runmode.LocalDefaultOrgID, "r-jira", entA.ID)
+
+	if role := roleFor(t, database, "r-jira", moved.ID); role != domain.MemoryRoleProduced {
+		t.Errorf("moved issue's role = %q, want produced", role)
+	}
+	if got := entityBySource(t, database, "jira", "NEW-7"); got == nil || got.ID != moved.ID {
+		t.Errorf("NEW-7 = %+v, want the entity left under its current key", got)
+	}
+	for _, key := range []string{"OLD-7", "SKY-1", "SKY-2"} {
+		if ent := entityBySource(t, database, "jira", key); ent != nil {
+			t.Errorf("%s minted an entity: %+v", key, ent)
+		}
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-jira").Scan(&n); err != nil {
+		t.Fatalf("count join rows: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("join rows = %d, want 2 (primary and the moved issue)", n)
+	}
+}
+
 // TestAttach_ListFailureLeavesPrimaryIntact: when the artifact listing fails,
 // the produced pass is skipped but the memory upsert and the primary row
 // survive — the attach is best-effort and never aborts its caller.

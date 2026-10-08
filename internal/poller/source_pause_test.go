@@ -3,6 +3,7 @@ package poller
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -14,8 +15,11 @@ import (
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -172,5 +176,62 @@ func TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T) {
 	// looking for an admin who never touched the switch.
 	if got := spanOutcome(t, recorder, "poll.jira.org"); got != "policy_unreadable" {
 		t.Errorf("span outcome = %q, want %q", got, "policy_unreadable")
+	}
+}
+
+// jiraSecrets answers a Data Center service credential for site and nothing
+// else.
+type jiraSecrets struct {
+	dbpkg.SecretStore
+	site string
+}
+
+func (s jiraSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
+	switch key {
+	case integrations.KeyJiraURL:
+		return s.site, nil
+	case integrations.KeyJiraPAT:
+		return "pat", nil
+	}
+	return "", nil
+}
+
+// TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed: once the
+// org's Jira credential names another site, the issues the old site left tracked
+// retire with scope_changed even when no project is armed on the new one, and
+// without a Jira call. The resolver is nil, so reaching it would panic.
+func TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed(t *testing.T) {
+	recorder := recordSpans(t)
+	database := newMigratedSQLiteForPoller(t)
+	// The org has no Jira base URL of its own, so the credential's URL names
+	// the site.
+	const site = "https://new.example.com"
+	stores := sqlitestore.New(database)
+	stale, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://old.example.com", "ENG-1", "10001", "issue", "Old", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := &capturingPublisher{}
+	m := &Manager{
+		database: database, pub: published,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{site: site},
+		jiraRules:    stores.JiraStatusRules,
+		EventSources: stores.OrgEventSources,
+	}
+	m.runJiraCycleForOrg(context.Background(), nil, runmode.LocalDefaultOrgID, time.Now())
+	if got := spanOutcome(t, recorder, "poll.jira.org"); got != "unconfigured" {
+		t.Errorf("span outcome = %q, want unconfigured", got)
+	}
+	evts := published.ofType(domain.EventJiraIssueUnreachable)
+	if len(evts) != 1 || evts[0].EntityID == nil || *evts[0].EntityID != stale.ID {
+		t.Fatalf("unreachable events = %+v, want one for the old site's issue", evts)
+	}
+	var meta events.JiraIssueUnreachableMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Reason != events.JiraUnreachableScopeChanged {
+		t.Errorf("reason = %q, want scope_changed", meta.Reason)
 	}
 }

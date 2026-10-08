@@ -97,22 +97,27 @@ type Runtime interface {
 
 	// RecordReadTouch persists a durable conversation→entity touch for an addressed read
 	// (a verb targeting one entity by id/key/ts): it resolves-or-creates the
-	// entity for (provider, target, url) and records a role='touched' row. Void
-	// and best-effort like Record — a read never fails on its touch — and, like
-	// Record, relayed to the orchestrator on the sidecar so the write lands where
-	// the stores live. Set-returning reads never call it (the touched-entity
-	// rule: addressed → touch, returned-in-a-set → never).
-	RecordReadTouch(ctx context.Context, provider, target, url string)
+	// entity for (provider, target, url) and records a role='touched' row.
+	// externalID is the provider id the read's response named, for a provider
+	// whose entities are identified by one (a Jira issue's id), and "" for the
+	// rest; a Jira read with none touches nothing. Void and best-effort like
+	// Record — a read never fails on its touch — and, like Record, relayed to
+	// the orchestrator on the sidecar so the write lands where the stores live.
+	// Set-returning reads never call it (the touched-entity rule: addressed →
+	// touch, returned-in-a-set → never).
+	RecordReadTouch(ctx context.Context, provider, target, externalID, url string)
 
-	// MemoryLoad resolves the entity for (source, sourceID) by its natural key
-	// — LOOKUP ONLY, it never mints an entity — and, on a hit, returns that
+	// MemoryLoad resolves the entity for (source, sourceID) — by externalID,
+	// the provider id the entity is identified by, when the caller resolved
+	// one, else by its natural key — LOOKUP ONLY, it never mints an entity —
+	// and, on a hit, returns that
 	// entity's prior conversation memory (team-visibility-scoped to the conversation's team,
 	// composed exactly as the spawn-time materializer composes it) capped at the
 	// most recent `limit`, with Count the pre-limit scoped total. A hit records a
 	// conversation→entity 'touched' row best-effort (loading IS an address); a miss
 	// returns an empty result and records nothing. Relayed to the orchestrator on
 	// the sidecar so the reads + the touch land where the stores live.
-	MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error)
+	MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error)
 
 	// Relay / RelayNotify are the generic provider-op escape hatch: a provider
 	// handler (Slack, future) reaches its own org-bound policy op by namespace
@@ -170,7 +175,7 @@ type ExtensionRuntime interface {
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
 	Record(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction)
-	RecordReadTouch(ctx context.Context, provider, target, url string)
+	RecordReadTouch(ctx context.Context, provider, target, externalID, url string)
 }
 
 // Core DB op names — the verb-trace reads/writes served under the "core"
@@ -297,11 +302,15 @@ type recordExternalWriteArgs struct {
 
 // recordReadTouchArgs is the record_read_touch op's payload — the addressed
 // read's entity coordinates. Identity (org, run) is bound orchestrator-side
-// from the run's ConversationInfo, so the wire carries none.
+// from the run's ConversationInfo, so the wire carries none. The IPC method of
+// the same name shares the shape and ignores ExternalID: the provider id is
+// read off a response by the daemon's own verbs, never named by the jailed
+// CLI.
 type recordReadTouchArgs struct {
-	Provider string `json:"provider"`
-	Target   string `json:"target"`
-	URL      string `json:"url,omitempty"`
+	Provider   string `json:"provider"`
+	Target     string `json:"target"`
+	ExternalID string `json:"external_id,omitempty"`
+	URL        string `json:"url,omitempty"`
 }
 
 // --- directRuntime: the in-process impl over db.Stores ---
@@ -592,12 +601,12 @@ func (r *directRuntime) Record(ctx context.Context, a *domain.Artifact, act *dom
 	RecordExternalWrite(ctx, r.stores, r.info, a, act)
 }
 
-func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, url string) {
-	recordEntityTouch(ctx, r.stores, r.info, provider, target, url)
+func (r *directRuntime) RecordReadTouch(ctx context.Context, provider, target, externalID, url string) {
+	recordEntityTouch(ctx, r.stores, r.info, entityCoordinate{provider: provider, target: target, externalID: externalID, url: url})
 }
 
-func (r *directRuntime) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
-	return loadEntityMemory(ctx, r.stores, r.info, source, sourceID, limit)
+func (r *directRuntime) MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
+	return loadEntityMemory(ctx, r.stores, r.info, source, sourceID, externalID, limit)
 }
 
 func (r *directRuntime) CheckEntitlement(_ context.Context, feature string) (bool, error) {
@@ -841,20 +850,20 @@ func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain
 	r.conn.notify(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act})
 }
 
-func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, url string) {
+func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID, url string) {
 	// Fire-and-forget, mirroring Record: the read already returned, so the touch
 	// must never block it. A dropped notify costs one touch row, re-established
 	// on the next addressed hit or poll.
-	r.conn.notify(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, URL: url})
+	r.conn.notify(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url})
 }
 
 // MemoryLoad relays as a call (not a notify): unlike the fire-and-forget touch,
 // the agent waits on the returned memory. The best-effort touch it records
 // happens orchestrator-side inside loadEntityMemory, so a relay round-trip
 // carries only the read result back.
-func (r *relayRuntime) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+func (r *relayRuntime) MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
 	var res memoryLoadResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opMemoryLoad, memoryLoadArgs{Source: source, SourceID: sourceID, Limit: limit}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opMemoryLoad, memoryLoadArgs{Source: source, SourceID: sourceID, ExternalID: externalID, Limit: limit}, &res); err != nil {
 		return nil, err
 	}
 	return res.Result, nil

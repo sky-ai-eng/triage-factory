@@ -1489,33 +1489,6 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		return
 	}
 	rules := m.loadJiraRules(ctx, orgID)
-	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
-	// not key presence: a configured org has a URL plus the scheme's secret
-	// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
-	// the marker keeps this gate in lockstep with the client ForSystem builds
-	// below, so the two can't disagree. Skip silently when unconfigured or
-	// rules are missing — adding/removing a tenant's Jira config doesn't need
-	// a poller restart this way.
-	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(rules) == 0 {
-		// An anticipated skip, not a failure: an org with no Jira config
-		// is the common case, so it gets an outcome rather than an error
-		// status.
-		span.SetAttributes(telemetry.Outcome("unconfigured"))
-		conn.skip("unconfigured")
-		return
-	}
-	// Only ARMED projects can be polled: the discovery JQL is built from
-	// pickup and done members, so a watched-but-unmapped project has nothing
-	// to ask about. That already fell out of the merge below producing empty
-	// member sets, but "the cycle ran and asked nothing" and "the cycle
-	// declined to run" are different facts and only one of them is true — so
-	// the skip is stated here rather than left to emerge downstream.
-	projects := toTrackerJiraRules(rules)
-	if len(projects) == 0 {
-		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
-		conn.skip("no_armed_projects")
-		return
-	}
 	baseURL := orgSet.JiraBaseURL
 	if baseURL == "" {
 		baseURL = creds.JiraURL
@@ -1524,6 +1497,40 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		orgSet.JiraBaseURL = baseURL
 	}
 	scope := domain.EntityScope("jira", orgSet)
+	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
+	// not key presence: a configured org has a URL plus the scheme's secret
+	// matching its jira_auth_method (DC PAT, or Cloud email + token). Reading
+	// the marker keeps this gate in lockstep with the client ForSystem builds
+	// below, so the two can't disagree. Skip silently when unconfigured or
+	// rules are missing — adding/removing a tenant's Jira config doesn't need
+	// a poller restart this way.
+	_, configured := integrations.JiraSystemConfig(creds)
+	// Only ARMED projects can be polled: the discovery JQL is built from
+	// pickup and done members, so a watched-but-unmapped project has nothing
+	// to ask about. That already fell out of the merge below producing empty
+	// member sets, but "the cycle ran and asked nothing" and "the cycle
+	// declined to run" are different facts and only one of them is true — so
+	// the skip is stated here rather than left to emerge downstream.
+	projects := toTrackerJiraRules(rules)
+	if configured && len(projects) == 0 {
+		// Nothing on this site to poll, but issues a previous site left
+		// tracked still retire: that needs no Jira call, and nothing else
+		// would ever close them.
+		m.trackerForOrg(orgID).RetireJiraOutOfScope(ctx, scope)
+	}
+	if !configured || len(rules) == 0 {
+		// An anticipated skip, not a failure: an org with no Jira config
+		// is the common case, so it gets an outcome rather than an error
+		// status.
+		span.SetAttributes(telemetry.Outcome("unconfigured"))
+		conn.skip("unconfigured")
+		return
+	}
+	if len(projects) == 0 {
+		span.SetAttributes(telemetry.Outcome("no_armed_projects"))
+		conn.skip("no_armed_projects")
+		return
+	}
 	// creds load above gates configuration + supplies the baseURL fallback;
 	// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
 	// auth-method marker) builds the authenticated client. The gate

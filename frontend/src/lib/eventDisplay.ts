@@ -156,6 +156,11 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'All subtasks closed — parent ticket is now an atomic work unit',
     color: 'bg-blue-500/10 text-blue-600',
   },
+  'jira:issue:key_changed': {
+    label: 'Key Changed',
+    description: 'Issue moved to another project, or its project key was renamed',
+    color: 'bg-violet-500/10 text-violet-600',
+  },
 
   // --- Linear ---
   'linear:issue:assigned': {

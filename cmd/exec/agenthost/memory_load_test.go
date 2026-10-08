@@ -268,7 +268,7 @@ func TestRelayRuntime_MemoryLoad_RoundTrips(t *testing.T) {
 	entityID := seedEntity(t, stores, info.OrgID, "github", "octo/repo#7", "A PR")
 	seedAuthoringMemory(t, conn, info.OrgID, entityID, uuid.New().String(), "prior narrative", memBase, domain.MemoryRolePrimary)
 
-	res, err := rt.MemoryLoad(ctx, "github", "octo/repo#7", 20)
+	res, err := rt.MemoryLoad(ctx, "github", "octo/repo#7", "", 20)
 	if err != nil {
 		t.Fatalf("MemoryLoad relay: %v", err)
 	}

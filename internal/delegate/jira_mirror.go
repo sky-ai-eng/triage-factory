@@ -117,7 +117,7 @@ func (s *Spawner) mirrorJiraInProgress(orgID string, task *domain.Task) {
 	if task.TeamID != nil {
 		teamID = *task.TeamID
 	}
-	go s.runJiraMirror(orgID, task.EntitySourceID, teamID, *rule, false)
+	go s.runJiraMirror(orgID, task.EntityID, task.EntitySourceID, teamID, *rule, false)
 }
 
 // mirrorJiraInProgressForTask loads the task and re-asserts the InProgress
@@ -159,7 +159,10 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 // the same ticket (Done now comes from a human or the merge mirror, not the
 // board):
 //   - Per-issue serialization (jiraMirrorLocks): in-process mirrors for one
-//     ticket can't interleave or reorder their writes.
+//     ticket can't interleave or reorder their writes. The lock is keyed on
+//     the ticket's entity, not its key: a ticket that moved answers to both
+//     its old key and its new one, and a mirror holding each would not
+//     serialize. issueKey is only what the Jira calls address the ticket by.
 //   - Forward-only in-progress: under that lock it re-reads state and, if the
 //     ticket is already in the Done bucket, makes no in-progress move — so a
 //     terminal Done is never dragged back to In Progress, whichever goroutine
@@ -173,7 +176,7 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 // workflow — makes the mirror a no-op on every board move, so Jira silently
 // stops tracking the board and nothing tells the team. Needs the durable
 // notification channel.
-func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
+func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule domain.JiraProjectStatusRules, done bool) {
 	resolver := s.getJiraResolver()
 	if resolver == nil {
 		return
@@ -181,7 +184,7 @@ func (s *Spawner) runJiraMirror(orgID, issueKey, teamID string, rule domain.Jira
 
 	// Serialize before any Jira call so the read→write decision for this ticket
 	// is made under mutual exclusion with the other phase's mirror.
-	unlock := s.jiraMirrorLocks.lock(orgID + "\x00" + issueKey)
+	unlock := s.jiraMirrorLocks.lock(orgID + "\x00" + entityID)
 	defer unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), jiraMirrorTimeout)

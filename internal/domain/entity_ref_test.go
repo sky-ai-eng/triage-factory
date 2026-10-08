@@ -5,14 +5,16 @@ import "testing"
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
 // mapping shared by the exec-touch resolver and the conversation-end produced-artifact
 // attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
-// map to nothing), Jira targets are issue keys, Slack targets are a
-// SlackSourceID, and every other provider or empty key is skipped (ok=false).
+// map to nothing), Jira targets are issue keys and need the issue's id, Slack
+// targets are a SlackSourceID, and every other provider or empty key is
+// skipped (ok=false).
 func TestEntityRefForExternal(t *testing.T) {
 	cases := []struct {
-		name     string
-		provider string
-		target   string
-		wantOK   bool
+		name       string
+		provider   string
+		target     string
+		externalID string
+		wantOK     bool
 		// wantSourceID is the natural key expected out. Empty means "the
 		// target verbatim", which is every provider except Jira — whose keys
 		// are folded to canonical form because Jira resolves them
@@ -38,12 +40,18 @@ func TestEntityRefForExternal(t *testing.T) {
 		},
 		{
 			name:     "jira issue key → issue entity",
-			provider: ArtifactProviderJira, target: "SKY-123",
+			provider: ArtifactProviderJira, target: "SKY-123", externalID: "10042",
 			wantOK: true, wantSource: ArtifactProviderJira, wantKind: "issue",
 		},
 		{
+			// A key alone can name another issue once the one it named moved,
+			// so nothing is resolved — or minted — without the id.
+			name:     "jira key without an issue id skipped",
+			provider: ArtifactProviderJira, target: "SKY-123",
+		},
+		{
 			name:     "jira empty target skipped",
-			provider: ArtifactProviderJira, target: "",
+			provider: ArtifactProviderJira, target: "", externalID: "10042",
 		},
 		{
 			// The defect this folding closes: Jira accepts a lower-case key on
@@ -51,13 +59,13 @@ func TestEntityRefForExternal(t *testing.T) {
 			// minted verbatim here is one the poller can never match a refresh
 			// back to — silently, since nothing about the call fails.
 			name:     "jira lower-case key folded to canonical",
-			provider: ArtifactProviderJira, target: "sky-123",
+			provider: ArtifactProviderJira, target: "sky-123", externalID: "10042",
 			wantOK: true, wantSourceID: "SKY-123",
 			wantSource: ArtifactProviderJira, wantKind: "issue",
 		},
 		{
 			name:     "jira mixed-case key with padding folded",
-			provider: ArtifactProviderJira, target: "  Sky-123 ",
+			provider: ArtifactProviderJira, target: "  Sky-123 ", externalID: "10042",
 			wantOK: true, wantSourceID: "SKY-123",
 			wantSource: ArtifactProviderJira, wantKind: "issue",
 		},
@@ -65,7 +73,7 @@ func TestEntityRefForExternal(t *testing.T) {
 			// Skipped on the folded value, not the raw one — otherwise a
 			// whitespace-only target mints an entity keyed on "".
 			name:     "jira whitespace-only target skipped",
-			provider: ArtifactProviderJira, target: "   ",
+			provider: ArtifactProviderJira, target: "   ", externalID: "10042",
 		},
 		{
 			// GitHub natural keys stay verbatim: repo and owner names are
@@ -94,15 +102,23 @@ func TestEntityRefForExternal(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			source, sourceID, kind, ok := EntityRefForExternal(tc.provider, tc.target)
+			ref, kind, ok := EntityRefForExternal(tc.provider, tc.target, tc.externalID)
+			source, sourceID := ref.Source, ref.SourceID
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
 			if !tc.wantOK {
-				if source != "" || sourceID != "" || kind != "" {
-					t.Errorf("skip should return empty strings, got (%q,%q,%q)", source, sourceID, kind)
+				if ref != (EntityRef{}) || kind != "" {
+					t.Errorf("skip should return a zero ref, got (%+v,%q)", ref, kind)
 				}
 				return
+			}
+			wantExternalID := ""
+			if tc.provider == ArtifactProviderJira {
+				wantExternalID = tc.externalID
+			}
+			if ref.ExternalID != wantExternalID {
+				t.Errorf("externalID = %q, want %q", ref.ExternalID, wantExternalID)
 			}
 			if source != tc.wantSource {
 				t.Errorf("source = %q, want %q", source, tc.wantSource)

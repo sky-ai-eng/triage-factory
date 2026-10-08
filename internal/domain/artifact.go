@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"net/url"
 	"strings"
 	"time"
 )
@@ -35,8 +36,9 @@ type Artifact struct {
 
 	// Target is the resource key: 'owner/repo', 'owner/repo#123',
 	// or a Jira-style issue key (e.g. 'PROJ-123'). ExternalID is the provider-native id of the backing
-	// object (PR number / review id / issue key / branch ref); empty
-	// until the object exists. URL links to it; empty until created.
+	// object (PR number / review id / Jira issue id / comment id / branch
+	// ref); empty until the object exists. URL links to it; empty until
+	// created.
 	Target     string `json:"target"`
 	ExternalID string `json:"external_id,omitempty"`
 	URL        string `json:"url,omitempty"`
@@ -212,22 +214,26 @@ func ArtifactProviders() []string {
 //
 //   - resource: the stable resource key — 'owner/repo' for a branch or a
 //     branch-anchored PR, 'owner/repo#123' for a PR keyed on its number,
-//     the Jira issue key for a Jira issue, and the issue's UUID for anything
-//     on a Linear issue. Never a Linear identifier: a team move or a team key
-//     rename changes it, and another workspace in the same org can have an
-//     issue under the same one. The UUID is unique across workspaces, so the
-//     org-wide key cannot merge two workspaces' artifacts, and an entity
-//     rename moves the row's Target without touching its key.
+//     JiraIssueResource (the site and the issue id) for anything on a Jira
+//     issue, and the issue's UUID for anything on a Linear issue. Never a
+//     Jira key or a Linear identifier: a move or a key rename changes it, and
+//     another site or workspace in the same org can have an issue under the
+//     same one. A Jira issue id repeats across sites, which is why its
+//     resource carries the site too; a Linear UUID is unique across
+//     workspaces on its own. Either way the org-wide key cannot merge two
+//     sites' or workspaces' artifacts, and an entity rename moves the row's
+//     Target without touching its key (EntityArtifactResource).
 //   - anchor: an optional stable sub-discriminator appended when resource
-//     alone isn't unique — a branch ref for a branch, or for a PR whose
-//     number isn't known yet (see below). Empty when resource is already
-//     unique (e.g. jira:issue:PROJ-123).
+//     alone isn't unique — a branch ref for a branch, a PR whose number
+//     isn't known yet (see below), or a comment's id on its issue. Empty when
+//     resource is already unique (an issue itself).
 //
 // Examples:
 //
 //	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")          => "github:pull_request:owner/repo#123"
 //	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")  => "git:branch:owner/repo:refs/heads/x"
-//	ArtifactDedupKey("jira",   "issue",        "PROJ-123", "")                 => "jira:issue:PROJ-123"
+//	ArtifactDedupKey("jira",   "issue",        JiraIssueResource(site, "10042"), "")         => "jira:issue:https%3A%2F%2Facme.atlassian.net/10042"
+//	ArtifactDedupKey("jira",   "comment",      JiraIssueResource(site, "10042"), "20311")    => "jira:comment:https%3A%2F%2Facme.atlassian.net/10042:20311"
 //	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>") => "linear:comment:<issue uuid>:<comment id>"
 //
 // Pending→real PR — why resource/anchor are NOT the struct fields: a
@@ -244,6 +250,75 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 		key += ":" + anchor
 	}
 	return key
+}
+
+// JiraIssueResource is the dedup-key resource every artifact about a Jira
+// issue is keyed under: the issue's site and its numeric id. Both halves are
+// needed. The key a person reads changes when the issue moves or its project's
+// key is renamed, and the id repeats across sites, so an org with two Jira
+// sites has two issue 10042s. The site is query-escaped, which leaves no ':'
+// in it (ArtifactDedupKey's separator) and no '/' (this one's), so the pair
+// splits back apart unambiguously. "" when either half is unknown: there is no
+// stable resource to key on.
+func JiraIssueResource(site, issueID string) string {
+	if site == "" || issueID == "" {
+		return ""
+	}
+	return url.QueryEscape(site) + "/" + issueID
+}
+
+// ParseJiraIssueResource splits a JiraIssueResource back into its site and
+// issue id. ok=false for anything else — an artifact keyed on an issue key,
+// which carries no id.
+func ParseJiraIssueResource(resource string) (site, issueID string, ok bool) {
+	escaped, id, found := strings.Cut(resource, "/")
+	if !found || escaped == "" || id == "" {
+		return "", "", false
+	}
+	site, err := url.QueryUnescape(escaped)
+	if err != nil || site == "" {
+		return "", "", false
+	}
+	return site, id, true
+}
+
+// EntityArtifactResource is the dedup-key resource segment artifacts about the
+// entity carrying (source, scope, externalID) are keyed under: the issue's
+// site and id for Jira (JiraIssueResource), the provider id itself for every
+// other source. "" when there is no id. It is what an entity rename matches
+// artifacts by, so it never names a display key: the dedup key is org-wide and
+// says nothing else about which scope a row belongs to.
+func EntityArtifactResource(source, scope, externalID string) string {
+	if externalID == "" {
+		return ""
+	}
+	if source == ArtifactProviderJira {
+		return JiraIssueResource(scope, externalID)
+	}
+	return externalID
+}
+
+// ArtifactEntityIdentity reads the identity of the entity an artifact is about
+// off its dedup key: the scope (when the key names one) and the provider id.
+// ok=false for a key that names none — a provider whose artifacts are keyed on
+// display keys (GitHub, Slack), or a Jira artifact keyed on an issue key.
+func ArtifactEntityIdentity(provider, dedupKey string) (scope, externalID string, ok bool) {
+	p, rest, found := strings.Cut(dedupKey, ":")
+	if !found || p != provider {
+		return "", "", false
+	}
+	_, rest, found = strings.Cut(rest, ":")
+	if !found {
+		return "", "", false
+	}
+	resource, _, _ := strings.Cut(rest, ":")
+	switch provider {
+	case ArtifactProviderJira:
+		return ParseJiraIssueResource(resource)
+	case ArtifactProviderLinear:
+		return "", resource, resource != ""
+	}
+	return "", "", false
 }
 
 // ArtifactKeyHasResource reports whether key, as ArtifactDedupKey builds it,

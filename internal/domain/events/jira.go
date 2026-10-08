@@ -35,6 +35,7 @@ type JiraIssueAssignedMetadata struct {
 	Reporter          string `json:"reporter"`
 	ReporterAccountID string `json:"reporter_account_id"`
 	IssueKey          string `json:"issue_key"` // "PROJ-123"
+	IssueID           string `json:"issue_id"`  // Jira's numeric issue id
 	Project           string `json:"project"`   // "SKY"
 	IssueType         string `json:"issue_type"`
 	Priority          string `json:"priority"`
@@ -68,6 +69,7 @@ type JiraIssueAvailableMetadata struct {
 	Reporter          string `json:"reporter"`
 	ReporterAccountID string `json:"reporter_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	IssueType         string `json:"issue_type"`
 	Priority          string `json:"priority"`
@@ -101,6 +103,7 @@ type JiraIssueStatusChangedMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	IssueType         string `json:"issue_type"`
 	OldStatus         string `json:"old_status"`
@@ -132,6 +135,7 @@ type JiraIssuePriorityChangedMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	OldPriority       string `json:"old_priority"`
 	NewPriority       string `json:"new_priority"` // also the event's dedup_key
@@ -162,6 +166,7 @@ type JiraIssueCommentedMetadata struct {
 	CommenterAccountID string `json:"commenter_account_id"`
 	CommentID          string `json:"comment_id"`
 	IssueKey           string `json:"issue_key"`
+	IssueID            string `json:"issue_id"`
 	Project            string `json:"project"`
 }
 
@@ -187,6 +192,7 @@ type JiraIssueCompletedMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	IssueType         string `json:"issue_type"`
 	FinalStatus       string `json:"final_status"`
@@ -217,6 +223,7 @@ type JiraIssueBecameAtomicMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	IssueType         string `json:"issue_type"`
 	Priority          string `json:"priority"`
@@ -241,36 +248,59 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 }
 
 // -----------------------------------------------------------------------------
-// issue:unreachable — Jira will not resolve a tracked issue's key for us any
-// more. Terminal for the entity: nothing further can be observed about it, so
-// it is the one Jira event that reports the disappearance of its own subject.
+// issue:unreachable — TF will not follow a tracked issue any more. Terminal
+// for the entity: nothing further will be observed about it, so it is the one
+// Jira event that reports the disappearance of its own subject. Reason says
+// which of these it was:
 //
-// Named for what was observed rather than what probably caused it. Jira answers
-// 404 both for an issue that was deleted and for one the credential may no
-// longer see — deliberately, so that existence isn't disclosed — so the two are
-// indistinguishable from here, and a name asserting deletion would be a claim
-// this cannot support. Both leave the entity equally untrackable, which is why
-// they share one event type rather than splitting on a discriminator nothing
-// can actually read.
+//   - not_found: Jira answers 404 for the issue, asked about directly by id
+//     (or by key, for an entity whose id TF has not learned yet). Named for
+//     what was observed rather than what probably caused it: Jira answers 404
+//     both for an issue that was deleted and for one the credential may no
+//     longer see — deliberately, so that existence isn't disclosed — so the
+//     two are indistinguishable from here, and a reason asserting deletion
+//     would be a claim this cannot support.
+//   - moved: the issue moved to a project no rule configures. The entity is
+//     renamed to the new key first and key_changed is emitted ahead of this;
+//     Project names the project the issue left, which is the one that was
+//     tracking it, so that project's teams receive the close.
+//   - scope_changed: the org's Jira base URL now names another site (or the
+//     same site under another URL). Jira is not asked: issue ids and keys
+//     repeat across sites, so no answer from the new one would be about this
+//     issue.
 //
-// Every field is last-known state read off the entity's stored snapshot, not
-// the source — there is nothing left to read. That is also why there is no
-// dedup_key: a key can only stop resolving once.
+// Fields are last-known state read off the entity's stored snapshot, filled
+// from a fresh read where one exists. There is no dedup_key: an issue stops
+// being followed once.
 //
-// Emitted ONLY on a direct 404 from the issue endpoint, never on an issue's
-// absence from a search result (see the tracker's confirmation pass) — absence
-// is equally consistent with an unindexed or archived issue, a moved key, or a
-// paging bug, and this event closes the entity and every task on it.
+// Never emitted on an issue's absence from a search result (see the tracker's
+// confirmation pass) — absence is equally consistent with an unindexed or
+// archived issue or a paging bug, and this event closes the entity and every
+// task on it.
 // -----------------------------------------------------------------------------
+
+// Jira unreachable reasons.
+const (
+	// JiraUnreachableNotFound: Jira answers 404 for the issue, asked about
+	// directly.
+	JiraUnreachableNotFound = "not_found"
+	// JiraUnreachableMoved: the issue moved to a project no rule configures.
+	JiraUnreachableMoved = "moved"
+	// JiraUnreachableScopeChanged: the org's Jira base URL now names another
+	// site.
+	JiraUnreachableScopeChanged = "scope_changed"
+)
 
 type JiraIssueUnreachableMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
 	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
 	IssueType         string `json:"issue_type"`
 	LastStatus        string `json:"last_status"`
 	Summary           string `json:"summary"`
+	Reason            string `json:"reason"` // one of the JiraUnreachable* values
 }
 
 type JiraIssueUnreachablePredicate struct {
@@ -283,6 +313,42 @@ func (p JiraIssueUnreachablePredicate) Matches(m JiraIssueUnreachableMetadata) b
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType)
+}
+
+// -----------------------------------------------------------------------------
+// issue:key_changed — a tracked issue answers under a new key: it moved to
+// another project, or its project's key was renamed. The issue's id is
+// unchanged, so the entity is renamed in place and keeps its tasks,
+// conversations and memory. Emitted before any other event from the same
+// refresh, in the same commit as the snapshot. Not terminating.
+//
+// Unlike every other Jira event, it reaches a team that tracks either
+// project: the one in project, or the one in old_project, which the issue
+// left. A team whose issue moved to a project it does not track keeps its
+// tasks on the entity, and this event is the only thing that tells it the
+// issue left.
+// -----------------------------------------------------------------------------
+
+type JiraIssueKeyChangedMetadata struct {
+	Assignee          string `json:"assignee"`
+	AssigneeAccountID string `json:"assignee_account_id"`
+	IssueKey          string `json:"issue_key"`
+	IssueID           string `json:"issue_id"`
+	Project           string `json:"project"`
+	IssueType         string `json:"issue_type"`
+	Summary           string `json:"summary"`
+	OldIssueKey       string `json:"old_issue_key"`
+	OldProject        string `json:"old_project"`
+}
+
+type JiraIssueKeyChangedPredicate struct {
+	Project    *string `json:"project,omitempty" doc:"Scope to the Jira project key the issue now has (e.g. OPS)."`
+	OldProject *string `json:"old_project,omitempty" doc:"Scope to the Jira project key the issue had before (e.g. ENG)."`
+}
+
+func (p JiraIssueKeyChangedPredicate) Matches(m JiraIssueKeyChangedMetadata) bool {
+	return strEq(p.Project, m.Project) &&
+		strEq(p.OldProject, m.OldProject)
 }
 
 // -----------------------------------------------------------------------------
@@ -304,4 +370,5 @@ func init() {
 	Register(NewSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted, OwnershipOwned))
 	Register(NewSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic, OwnershipOwned))
 	Register(NewSchema[JiraIssueUnreachableMetadata, JiraIssueUnreachablePredicate](domain.EventJiraIssueUnreachable, OwnershipOwned))
+	Register(NewSchema[JiraIssueKeyChangedMetadata, JiraIssueKeyChangedPredicate](domain.EventJiraIssueKeyChanged, OwnershipOwned))
 }

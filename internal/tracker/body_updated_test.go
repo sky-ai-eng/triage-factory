@@ -81,7 +81,7 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		if !strings.Contains(request.JQL, "key IN") {
+		if !strings.HasPrefix(request.JQL, "id IN") {
 			// This tracked issue no longer matches either discovery query.
 			_, _ = w.Write([]byte(`{"issues":[],"total":0}`))
 			return
@@ -95,14 +95,14 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 		if field != "" {
 			field = `,"description":` + field
 		}
-		_, _ = fmt.Fprintf(w, `{"issues":[{"key":"PROJ-1","fields":{"summary":"Tracked elsewhere","status":{"name":"Open"},"updated":"2026-09-15T12:00:00.000+0000"%s}}],"total":1}`, field)
+		_, _ = fmt.Fprintf(w, `{"issues":[{"id":"10001","key":"PROJ-1","fields":{"summary":"Tracked elsewhere","status":{"name":"Open"},"updated":"2026-09-15T12:00:00.000+0000"%s}}],"total":1}`, field)
 	}))
 	t.Cleanup(srv.Close)
 	ctx := context.Background()
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "PROJ-1", "", "issue", "", "")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "PROJ-1", "10001", "issue", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

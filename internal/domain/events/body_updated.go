@@ -35,6 +35,7 @@ type JiraIssueBodyUpdatedMetadata struct {
 	Assignee          string   `json:"assignee"`
 	AssigneeAccountID string   `json:"assignee_account_id"`
 	IssueKey          string   `json:"issue_key"`
+	IssueID           string   `json:"issue_id"`
 	Project           string   `json:"project"`
 	IssueType         string   `json:"issue_type"`
 	Summary           string   `json:"summary"`

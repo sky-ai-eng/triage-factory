@@ -157,7 +157,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 // mint a task per known ticket, not just per terminal one.
 func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	searchResp := `{"issues":[
-		{"key":"SKY-9","fields":{
+		{"id":"10009","key":"SKY-9","fields":{
 			"summary":"Paused issue","status":{"name":"Done"},
 			"assignee":{"displayName":"Alice","accountId":"acc-1"},
 			"created":"2026-06-01T00:00:00.000+0000","updated":"2026-06-20T00:00:00.000+0000"

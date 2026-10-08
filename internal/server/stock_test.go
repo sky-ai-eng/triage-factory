@@ -239,3 +239,50 @@ func readStockDeckKeys(t *testing.T, s *Server) map[string]any {
 	}
 	return out
 }
+
+// TestStockDeck_ListsAndActsOnTheEntitysCurrentKey: an entity renamed when TF
+// learned its issue moved — before the next poll refreshed its snapshot —
+// lists under the key it answers to now, and an action on that key finds it.
+func TestStockDeck_ListsAndActsOnTheEntitysCurrentKey(t *testing.T) {
+	keyring.MockInit()
+	s := newTestServer(t)
+	seedStockConfig(t, s)
+	seedStockTicket(t, s, "SKY-1")
+	// Renamed in place; the snapshot still names the key the issue left.
+	if _, err := s.db.Exec(
+		`UPDATE entities SET source_id = 'SKY-9', url = 'https://jira.example.com/browse/SKY-9', external_id = '10001' WHERE id = 'e_stock_SKY-1'`,
+	); err != nil {
+		t.Fatalf("rename entity: %v", err)
+	}
+	if err := s.allStores.PollReadiness.MarkPollComplete(t.Context(), runmode.LocalDefaultOrgID, "jira", time.Time{}); err != nil {
+		t.Fatalf("mark jira poll complete: %v", err)
+	}
+
+	deck := readStockDeckKeys(t, s)
+	assigned, _ := deck["assigned"].([]any)
+	if len(assigned) != 1 {
+		t.Fatalf("assigned = %v, want the renamed ticket", deck["assigned"])
+	}
+	row, _ := assigned[0].(map[string]any)
+	if row["issue_key"] != "SKY-9" || row["url"] != "https://jira.example.com/browse/SKY-9" {
+		t.Errorf("deck row = %v, want it under SKY-9", row)
+	}
+
+	rec := doJSON(t, s, http.MethodPost, "/api/jira/stock/queue", map[string]any{"issue_keys": []string{"SKY-9"}})
+	var body stockBatchBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if rec.Code != http.StatusOK || body.Applied != 1 || len(body.Results) != 1 || body.Results[0].IssueKey != "SKY-9" {
+		t.Fatalf("queue SKY-9 = %d %s, want it applied", rec.Code, rec.Body.String())
+	}
+	var meta string
+	if err := s.db.QueryRow(
+		`SELECT e.metadata_json FROM tasks t JOIN events e ON e.id = t.primary_event_id WHERE t.entity_id = 'e_stock_SKY-1'`,
+	).Scan(&meta); err != nil {
+		t.Fatalf("read the queued task's event: %v", err)
+	}
+	if !strings.Contains(meta, `"issue_key":"SKY-9"`) || !strings.Contains(meta, `"issue_id":"10001"`) {
+		t.Errorf("event metadata = %s, want the current key and the issue id", meta)
+	}
+}

@@ -482,3 +482,53 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 		t.Errorf("owner = %q, want teamA %q", teamIDValue(&active[0]), teamA)
 	}
 }
+
+// TestJiraGate_KeyChangedReachesBothProjectsTeams: key_changed passes for a
+// team that tracks either the project the issue moved to or the one it left,
+// including when the destination is tracked by no team. No other Jira event
+// reads old_project.
+func TestJiraGate_KeyChangedReachesBothProjectsTeams(t *testing.T) {
+	dbh := newGateDB(t)
+	st := sqlitestore.New(dbh)
+	ctx := context.Background()
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, dbh, "team-b")
+	teamC := seedGateTeam(t, dbh, "team-c")
+	for team, project := range map[string]string{teamA: "ENG", teamB: "OPS", teamC: "WEB"} {
+		if err := st.JiraStatusRules.ReplaceForTeam(ctx, team, []domain.JiraProjectStatusRules{{
+			ProjectKey: project, PickupMembers: jiraRefs("To Do"),
+			InProgressMembers: jiraRefs("In Progress"), InProgressCanonical: jiraRef("In Progress"),
+			DoneMembers: jiraRefs("Done"), DoneCanonical: jiraRef("Done"),
+		}}); err != nil {
+			t.Fatalf("team tracks %s: %v", project, err)
+		}
+	}
+	r := gateRouter(dbh)
+
+	moved := func(eventType, from, to string) domain.Event {
+		meta, _ := json.Marshal(events.JiraIssueKeyChangedMetadata{
+			IssueKey: to + "-7", IssueID: "10001", Project: to,
+			OldIssueKey: from + "-1", OldProject: from,
+		})
+		return domain.Event{EventType: eventType, EntityID: new(string), MetadataJSON: string(meta), CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID}
+	}
+	cases := []struct {
+		name string
+		evt  domain.Event
+		want map[string]bool
+	}{
+		{"between tracked projects", moved(domain.EventJiraIssueKeyChanged, "ENG", "OPS"),
+			map[string]bool{teamA: true, teamB: true, teamC: false}},
+		{"to an untracked project", moved(domain.EventJiraIssueKeyChanged, "ENG", "SEC"),
+			map[string]bool{teamA: true, teamB: false, teamC: false}},
+		{"another event carrying an old project", moved(domain.EventJiraIssueStatusChanged, "ENG", "OPS"),
+			map[string]bool{teamA: false, teamB: true, teamC: false}},
+	}
+	for _, tc := range cases {
+		for team, want := range tc.want {
+			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != want {
+				t.Errorf("%s: gate for team %s = %v, want %v", tc.name, team, got, want)
+			}
+		}
+	}
+}

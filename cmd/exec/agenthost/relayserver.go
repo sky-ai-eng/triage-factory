@@ -436,7 +436,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		// scoped memory read, and the best-effort touch all land where the stores
 		// live. Identity is the run's own ConversationInfo (s.rt), so a sidecar cannot
 		// steer the read at another org/team's memory.
-		res, err := s.rt.MemoryLoad(ctx, a.Source, a.SourceID, a.Limit)
+		res, err := s.rt.MemoryLoad(ctx, a.Source, a.SourceID, a.ExternalID, a.Limit)
 		if err != nil {
 			return nil, err
 		}
@@ -754,7 +754,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		// the external-write path so a wedged store can't pin the frame goroutine.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
 		defer cancel()
-		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.URL)
+		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.ExternalID, a.URL)
 
 	case agentproc.OpRecordRelayDrop:
 		var a agentproc.RecordRelayDropArgs

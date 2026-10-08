@@ -456,7 +456,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 			}
 			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
 		}
-		if err := rewriteEntityArtifacts(ctx, tx, source, externalID, row.key, newKey); err != nil {
+		if err := rewriteEntityArtifacts(ctx, tx, source, domain.EntityArtifactResource(source, scope, externalID), row.key, newKey); err != nil {
 			return err
 		}
 		if err := rewriteEntityActionURLs(ctx, tx, source, row.url, url); err != nil {
@@ -472,14 +472,18 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 }
 
 // rewriteEntityArtifacts moves the Target of the source's artifacts keyed on
-// the entity's id off the old key. Their dedup key carries the id, so it does
-// not move. The SQL over-approximates and domain.ArtifactKeyHasResource
+// the entity's id off the old key. resource is the dedup-key segment that id
+// is written as (domain.EntityArtifactResource); the key carries it, so it
+// does not move. The SQL over-approximates and domain.ArtifactKeyHasResource
 // decides.
-func rewriteEntityArtifacts(ctx context.Context, q queryer, source, externalID, from, to string) error {
+func rewriteEntityArtifacts(ctx context.Context, q queryer, source, resource, from, to string) error {
+	if resource == "" {
+		return nil
+	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, dedup_key FROM artifacts
 		WHERE provider = ? AND target = ? AND instr(dedup_key, ?) > 0`,
-		source, from, externalID)
+		source, from, resource)
 	if err != nil {
 		return err
 	}
@@ -490,7 +494,7 @@ func rewriteEntityArtifacts(ctx context.Context, q queryer, source, externalID, 
 			rows.Close()
 			return err
 		}
-		if domain.ArtifactKeyHasResource(key, source, externalID) {
+		if domain.ArtifactKeyHasResource(key, source, resource) {
 			ids = append(ids, id)
 		}
 	}
@@ -701,72 +705,132 @@ func (s *entityStore) MarkPolledSystem(ctx context.Context, orgID, id string) er
 	return err
 }
 
-func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (string, bool, error) {
+// MergeDuplicateEntitiesSystem — see the interface doc. SQLite's single writer
+// is the lock: nothing interleaves between the reads that decide the survivor
+// and the writes that fold the other row into it.
+func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
-		return "", false, err
+		return "", err
 	}
-	var survivor string
-	merged := false
+	if entityID == otherID {
+		return "", fmt.Errorf("merge entities: %s with itself", entityID)
+	}
+	var survivorID string
 	err := inTx(ctx, s.q, func(q queryer) error {
-		if err := q.QueryRowContext(ctx, `
-			SELECT e.id FROM entities e
-			JOIN entities self ON self.id = ?
-			WHERE e.source = self.source AND e.scope = self.scope AND e.source_id = ? AND e.state = 'active'`,
-			id, newSourceID).Scan(&survivor); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
+		a, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, entityID))
+		if err != nil {
+			return err
+		}
+		b, err := scanEntityRow(q.QueryRowContext(ctx, `SELECT `+entitySelectCols+` FROM entities WHERE id = ?`, otherID))
+		if err != nil {
+			return err
+		}
+		if a == nil || b == nil {
+			return sql.ErrNoRows
+		}
+		survivor, loser, err := db.DuplicateEntityPair(*a, *b)
+		if err != nil {
+			return err
+		}
+		survivorID = survivor.ID
+		now := time.Now().UTC()
+
+		// The loser's active tasks whose slot the survivor already holds are
+		// dismissed in place first, which takes them out of the partial unique
+		// index the repoint below would otherwise trip.
+		if _, err := q.ExecContext(ctx, `
+			UPDATE tasks SET status = 'dismissed', closed_at = ?, close_reason = ?
+			WHERE entity_id = ? AND status NOT IN ('done','dismissed')
+			  AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id = ? AND s.event_type = tasks.event_type
+			              AND s.dedup_key = tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`,
+			now, db.DuplicateEntityMergedCloseReason, loser.ID, survivor.ID); err != nil {
+			return fmt.Errorf("dismiss duplicate tasks: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE blueprint_runs SET cancel_requested = 1
+			WHERE status = 'running' AND cancel_requested = 0 AND id IN (
+				SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id = c.task_id
+				WHERE t.entity_id = ? AND t.close_reason = ? AND c.blueprint_run_id IS NOT NULL
+				  AND `+db.UnsettledConversationSQL("c")+`)`,
+			loser.ID, db.DuplicateEntityMergedCloseReason); err != nil {
+			return fmt.Errorf("cancel duplicate tasks' runs: %w", err)
+		}
+		for _, table := range []string{"tasks", "events", "event_queue", "pending_firings"} {
+			if _, err := q.ExecContext(ctx, `UPDATE `+table+` SET entity_id = ? WHERE entity_id = ?`, survivor.ID, loser.ID); err != nil {
+				return fmt.Errorf("move %s: %w", table, err)
 			}
-			res, err := q.ExecContext(ctx, `UPDATE entities SET source_id = ?, last_polled_at = ? WHERE id = ?`, newSourceID, time.Now().UTC(), id)
-			if err != nil {
-				return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			INSERT INTO conversation_memory_entities (org_id, conversation_id, entity_id, role, created_at)
+			SELECT org_id, conversation_id, ?, role, created_at FROM conversation_memory_entities WHERE entity_id = ?
+			ON CONFLICT(conversation_id, entity_id) DO UPDATE SET role = excluded.role
+			WHERE `+fmt.Sprintf(memoryRoleRankCASE, "excluded.role")+` > `+fmt.Sprintf(memoryRoleRankCASE, "conversation_memory_entities.role"),
+			survivor.ID, loser.ID); err != nil {
+			return fmt.Errorf("move memory links: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id = ?`, loser.ID); err != nil {
+			return err
+		}
+		// A link between the two rows would become a self-link; it is dropped.
+		if _, err := q.ExecContext(ctx, `
+			DELETE FROM entity_links
+			WHERE (from_entity_id = ? AND to_entity_id = ?) OR (from_entity_id = ? AND to_entity_id = ?)`,
+			loser.ID, survivor.ID, survivor.ID, loser.ID); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `
+			INSERT OR IGNORE INTO entity_links (from_entity_id, to_entity_id, kind, origin, created_at, org_id)
+			SELECT CASE WHEN from_entity_id = ? THEN ? ELSE from_entity_id END,
+			       CASE WHEN to_entity_id = ? THEN ? ELSE to_entity_id END,
+			       kind, origin, created_at, org_id
+			FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`,
+			loser.ID, survivor.ID, loser.ID, survivor.ID, loser.ID, loser.ID); err != nil {
+			return fmt.Errorf("move entity links: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id = ? OR to_entity_id = ?`, loser.ID, loser.ID); err != nil {
+			return err
+		}
+
+		// The loser's own columns are read before it goes, and its row goes
+		// before the survivor takes its key and id: both are unique among the
+		// rows that would hold them.
+		var loserSnapshot sql.NullString
+		var loserTeam, loserCommissioner sql.NullString
+		if err := q.QueryRowContext(ctx,
+			`SELECT snapshot_json, owning_team_id, commissioned_by_user_id FROM entities WHERE id = ?`, loser.ID,
+		).Scan(&loserSnapshot, &loserTeam, &loserCommissioner); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id = ?`, loser.ID); err != nil {
+			return fmt.Errorf("delete merged entity: %w", err)
+		}
+		if _, err := q.ExecContext(ctx, `
+			UPDATE entities SET
+			  external_id             = COALESCE(external_id, ?),
+			  owning_team_id          = COALESCE(owning_team_id, ?),
+			  commissioned_by_user_id = COALESCE(commissioned_by_user_id, ?)
+			WHERE id = ?`,
+			nullStringValue(loser.ExternalID), loserTeam, loserCommissioner, survivor.ID); err != nil {
+			return fmt.Errorf("fold identity into survivor: %w", err)
+		}
+		if loser.State == "active" {
+			if _, err := q.ExecContext(ctx, `
+				UPDATE entities SET
+				  state = 'active', closed_at = NULL,
+				  source_id = ?, url = ?, snapshot_json = ?, title = ?, description = ?,
+				  last_polled_at = ?, poll_seq = MAX(poll_seq, ?) + 1
+				WHERE id = ?`,
+				loser.SourceID, loser.URL, loserSnapshot, loser.Title, loser.Description,
+				loser.LastPolledAt, loser.PollSeq, survivor.ID); err != nil {
+				return fmt.Errorf("survivor takes live state: %w", err)
 			}
-			n, err := res.RowsAffected()
-			if err != nil {
-				return err
-			}
-			if n != 1 {
-				return sql.ErrNoRows
-			}
-			survivor = id
-			return nil
 		}
-		if survivor == id {
-			return nil
-		}
-		merged = true
-		// Dismiss active tasks whose dedup slot is already occupied on the survivor.
-		if _, err := q.ExecContext(ctx, `UPDATE tasks SET status='dismissed', closed_at=?, close_reason='duplicate_entity_merged' WHERE entity_id=? AND status NOT IN ('done','dismissed') AND EXISTS (SELECT 1 FROM tasks s WHERE s.entity_id=? AND s.event_type=tasks.event_type AND s.dedup_key=tasks.dedup_key AND s.status NOT IN ('done','dismissed'))`, time.Now().UTC(), id, survivor); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `UPDATE blueprint_runs SET cancel_requested=1 WHERE status='running' AND cancel_requested=0 AND id IN (SELECT c.blueprint_run_id FROM conversations c JOIN tasks t ON t.id=c.task_id WHERE t.entity_id=? AND t.close_reason='duplicate_entity_merged' AND c.blueprint_run_id IS NOT NULL AND `+db.UnsettledConversationSQL("c")+`)`, id); err != nil {
-			return err
-		}
-		for _, stmt := range []string{
-			`UPDATE tasks SET entity_id=? WHERE entity_id=?`, `UPDATE events SET entity_id=? WHERE entity_id=?`, `UPDATE event_queue SET entity_id=? WHERE entity_id=?`, `UPDATE pending_firings SET entity_id=? WHERE entity_id=?`,
-		} {
-			if _, err := q.ExecContext(ctx, stmt, survivor, id); err != nil {
-				return err
-			}
-		}
-		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO conversation_memory_entities(org_id,conversation_id,entity_id,role,created_at) SELECT org_id,conversation_id,?,role,created_at FROM conversation_memory_entities WHERE entity_id=?`, survivor, id); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `DELETE FROM conversation_memory_entities WHERE entity_id=?`, id); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE (from_entity_id=? OR to_entity_id=?) AND (CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END)=(CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END)`, id, id, id, survivor, id, survivor); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `INSERT OR IGNORE INTO entity_links(from_entity_id,to_entity_id,kind,origin,created_at,org_id) SELECT CASE WHEN from_entity_id=? THEN ? ELSE from_entity_id END,CASE WHEN to_entity_id=? THEN ? ELSE to_entity_id END,kind,origin,created_at,org_id FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, survivor, id, survivor, id, id); err != nil {
-			return err
-		}
-		if _, err := q.ExecContext(ctx, `DELETE FROM entity_links WHERE from_entity_id=? OR to_entity_id=?`, id, id); err != nil {
-			return err
-		}
-		_, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id=?`, id)
-		return err
+		return nil
 	})
-	return survivor, merged, err
+	if err != nil {
+		return "", err
+	}
+	return survivorID, nil
 }
 
 func (s *entityStore) UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error) {

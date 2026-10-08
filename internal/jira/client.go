@@ -411,8 +411,8 @@ func (c *Client) ProjectStatuses(ctx context.Context, projectKey string) ([]Stat
 }
 
 // AssignToSelf assigns the issue to the authenticated user (currentUser).
-func (c *Client) AssignToSelf(ctx context.Context, issueKey string) error {
-	url := c.apiURL("issue/%s/assignee", issueKey)
+func (c *Client) AssignToSelf(ctx context.Context, idOrKey string) error {
+	url := c.apiURL("issue/%s/assignee", idOrKey)
 	// Setting name to "-1" assigns to the current user in Jira Server/DC.
 	// For Jira Cloud, we need accountId. We'll try the myself endpoint first.
 	myself, err := c.currentUser(ctx)
@@ -433,8 +433,8 @@ func (c *Client) AssignToSelf(ctx context.Context, issueKey string) error {
 }
 
 // Unassign removes the assignee from an issue.
-func (c *Client) Unassign(ctx context.Context, issueKey string) error {
-	url := c.apiURL("issue/%s/assignee", issueKey)
+func (c *Client) Unassign(ctx context.Context, idOrKey string) error {
+	url := c.apiURL("issue/%s/assignee", idOrKey)
 	// Detect Cloud vs Server the same way AssignToSelf does.
 	myself, err := c.currentUser(ctx)
 	if err != nil {
@@ -455,8 +455,8 @@ func (c *Client) Unassign(ctx context.Context, issueKey string) error {
 // captured earlier goes stale. A target with no id — a status a caller named
 // directly, or a rule armed before statuses were identified — falls back to
 // the case-insensitive name match, which is what this always did.
-func (c *Client) TransitionTo(ctx context.Context, issueKey string, target Status) error {
-	transitions, err := c.getTransitions(ctx, issueKey)
+func (c *Client) TransitionTo(ctx context.Context, idOrKey string, target Status) error {
+	transitions, err := c.getTransitions(ctx, idOrKey)
 	if err != nil {
 		return err
 	}
@@ -464,12 +464,12 @@ func (c *Client) TransitionTo(ctx context.Context, issueKey string, target Statu
 	for _, t := range transitions {
 		if target.ID != "" {
 			if t.To.ID == target.ID {
-				return c.doTransition(ctx, issueKey, t.ID)
+				return c.doTransition(ctx, idOrKey, t.ID)
 			}
 			continue
 		}
 		if strings.EqualFold(t.To.Name, target.Name) {
-			return c.doTransition(ctx, issueKey, t.ID)
+			return c.doTransition(ctx, idOrKey, t.ID)
 		}
 	}
 
@@ -496,22 +496,22 @@ type ClaimState struct {
 // GetClaimState fetches the current assignee and status of an issue and
 // checks whether the assignee is the authenticated user. Returns nil on
 // any error — callers treat failure as "unknown, proceed normally".
-func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState {
+func (c *Client) GetClaimState(ctx context.Context, idOrKey string) *ClaimState {
 	// Fetch only assignee + status to minimize payload. The ?fields param
 	// works identically on Cloud and Server/DC.
-	url := c.apiURL("issue/%s?fields=assignee,status", issueKey)
+	url := c.apiURL("issue/%s?fields=assignee,status", idOrKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
 		// A cancelled/expired ctx (e.g. the requesting client disconnected)
 		// is expected, not a failure worth logging — suppress the noise.
 		if ctx.Err() == nil {
-			jiraLog.Warn("claim guard: fetch issue failed", "issue", issueKey, "error", err)
+			jiraLog.Warn("claim guard: fetch issue failed", "issue", idOrKey, "error", err)
 		}
 		return nil
 	}
 	var issue Issue
 	if err := json.Unmarshal(body, &issue); err != nil {
-		jiraLog.Warn("claim guard: parse issue failed", "issue", issueKey, "error", err)
+		jiraLog.Warn("claim guard: parse issue failed", "issue", idOrKey, "error", err)
 		return nil
 	}
 
@@ -545,7 +545,13 @@ func (c *Client) GetClaimState(ctx context.Context, issueKey string) *ClaimState
 }
 
 // Issue represents core fields of a Jira issue.
+//
+// ID is Jira's numeric issue id. It is the issue's identity: a project move or
+// a project key rename gives the issue a new Key and leaves ID alone, and
+// every REST path and JQL clause that takes an issue accepts it. It is unique
+// within one Jira site only.
 type Issue struct {
+	ID     string `json:"id"`
 	Key    string `json:"key"`
 	Self   string `json:"self"`
 	Fields struct {
@@ -564,7 +570,14 @@ type Issue struct {
 			Key         string `json:"key"`
 			Name        string `json:"name"`
 		} `json:"assignee,omitempty"`
+		// Project is the project the issue is in now. Its ID survives a
+		// project key rename, which is what tells a rename from a move.
+		Project *struct {
+			ID  string `json:"id"`
+			Key string `json:"key"`
+		} `json:"project,omitempty"`
 		Parent *struct {
+			ID  string `json:"id"`
 			Key string `json:"key"`
 		} `json:"parent,omitempty"`
 		Labels  []string `json:"labels,omitempty"`
@@ -585,6 +598,7 @@ type Issue struct {
 		// partial fields (older Server versions), missing Status just means
 		// we can't classify — treat as open to stay conservative.
 		Subtasks []struct {
+			ID     string `json:"id"`
 			Key    string `json:"key"`
 			Fields struct {
 				Status *Status `json:"status,omitempty"`
@@ -772,9 +786,12 @@ func (c *Client) GetProject(ctx context.Context, projectKey string) (Project, er
 	return p, nil
 }
 
-// GetIssue fetches a single issue by key.
-func (c *Client) GetIssue(ctx context.Context, issueKey string) (*Issue, error) {
-	url := c.apiURL("issue/%s", issueKey)
+// GetIssue fetches a single issue by its id or its key. Asked by a key the
+// issue no longer has — it moved, or its project's key was renamed — Jira
+// answers with the issue under its current key, so the response, not the
+// argument, says what the issue is called now.
+func (c *Client) GetIssue(ctx context.Context, idOrKey string) (*Issue, error) {
+	url := c.apiURL("issue/%s", idOrKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
@@ -784,6 +801,21 @@ func (c *Client) GetIssue(ctx context.Context, issueKey string) (*Issue, error) 
 		return nil, fmt.Errorf("parse issue: %w", err)
 	}
 	return &issue, nil
+}
+
+// GetIssueRef reads which issue idOrKey names: its id and its current key,
+// and nothing else. A key the issue no longer has resolves the way GetIssue's
+// does, to the issue under its current key.
+func (c *Client) GetIssueRef(ctx context.Context, idOrKey string) (IssueRef, error) {
+	body, err := c.get(ctx, c.apiURL("issue/%s?fields=summary", idOrKey))
+	if err != nil {
+		return IssueRef{}, err
+	}
+	var ref IssueRef
+	if err := json.Unmarshal(body, &ref); err != nil {
+		return IssueRef{}, fmt.Errorf("parse issue: %w", err)
+	}
+	return ref, nil
 }
 
 // GetChildIssues returns all child issues of a parent (subtasks + epic children).
@@ -1029,8 +1061,8 @@ func extractFieldID(field string) string {
 // can't be parsed, the comment still landed, so we return an empty id with no
 // error rather than failing an action that already took effect. Callers that
 // only care about success can ignore the id.
-func (c *Client) AddComment(ctx context.Context, issueKey, body string) (string, error) {
-	url := c.apiURL("issue/%s/comment", issueKey)
+func (c *Client) AddComment(ctx context.Context, idOrKey, body string) (string, error) {
+	url := c.apiURL("issue/%s/comment", idOrKey)
 	respBody, err := c.postJSON(ctx, url, map[string]any{"body": c.cfg.richTextValue(body)}, false)
 	if err != nil {
 		return "", err
@@ -1045,8 +1077,8 @@ func (c *Client) AddComment(ctx context.Context, issueKey, body string) (string,
 }
 
 // GetTransitions returns the available workflow transitions for an issue.
-func (c *Client) GetTransitions(ctx context.Context, issueKey string) ([]Transition, error) {
-	return c.getTransitions(ctx, issueKey)
+func (c *Client) GetTransitions(ctx context.Context, idOrKey string) ([]Transition, error) {
+	return c.getTransitions(ctx, idOrKey)
 }
 
 // ListIssueTypes returns the issue types available in a project.
@@ -1065,8 +1097,14 @@ func (c *Client) ListIssueTypes(ctx context.Context, projectKey string) ([]Issue
 	return project.IssueTypes, nil
 }
 
+// IssueRef names an issue by its id and the key it has now.
+type IssueRef struct {
+	ID  string `json:"id"`
+	Key string `json:"key"`
+}
+
 // CreateIssue creates a new issue. parentKey and priority are optional (pass empty to skip).
-func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary, description, parentKey, priority string) (string, error) {
+func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary, description, parentKey, priority string) (IssueRef, error) {
 	fields := map[string]any{
 		"project":   map[string]string{"key": projectKey},
 		"issuetype": map[string]string{"name": issueType},
@@ -1100,21 +1138,19 @@ func (c *Client) CreateIssue(ctx context.Context, projectKey, issueType, summary
 		}
 	}
 	if err != nil {
-		return "", err
+		return IssueRef{}, err
 	}
 
-	var result struct {
-		Key string `json:"key"`
-	}
+	var result IssueRef
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("parse create response: %w", err)
+		return IssueRef{}, fmt.Errorf("parse create response: %w", err)
 	}
-	return result.Key, nil
+	return result, nil
 }
 
 // SetPriority updates the priority of an issue.
-func (c *Client) SetPriority(ctx context.Context, issueKey, priority string) error {
-	url := c.apiURL("issue/%s", issueKey)
+func (c *Client) SetPriority(ctx context.Context, idOrKey, priority string) error {
+	url := c.apiURL("issue/%s", idOrKey)
 	return c.put(ctx, url, map[string]any{"fields": map[string]any{
 		"priority": map[string]string{"name": priority},
 	}})
@@ -1147,7 +1183,7 @@ func (u UpdateIssueFields) IsEmpty() bool {
 // UpdateIssue mutates an existing issue. Only fields explicitly set on
 // `fields` are touched; everything else is preserved. Returns an error
 // if no fields were provided.
-func (c *Client) UpdateIssue(ctx context.Context, issueKey string, f UpdateIssueFields) error {
+func (c *Client) UpdateIssue(ctx context.Context, idOrKey string, f UpdateIssueFields) error {
 	if f.IsEmpty() {
 		return fmt.Errorf("no fields to update")
 	}
@@ -1182,15 +1218,15 @@ func (c *Client) UpdateIssue(ctx context.Context, issueKey string, f UpdateIssue
 		payload["update"] = map[string]any{"labels": ops}
 	}
 
-	url := c.apiURL("issue/%s", issueKey)
+	url := c.apiURL("issue/%s", idOrKey)
 	return c.put(ctx, url, payload)
 }
 
 // SetParent links an existing issue under a parent.
 // Tries fields.parent first (works for Cloud + Server/DC subtasks).
 // Falls back to Epic Link custom field on Server/DC if parent is an Epic.
-func (c *Client) SetParent(ctx context.Context, issueKey, parentKey string) error {
-	url := c.apiURL("issue/%s", issueKey)
+func (c *Client) SetParent(ctx context.Context, idOrKey, parentKey string) error {
+	url := c.apiURL("issue/%s", idOrKey)
 
 	// Try native parent field first
 	err := c.put(ctx, url, map[string]any{"fields": map[string]any{
@@ -1319,8 +1355,8 @@ func (c *Client) currentUser(ctx context.Context) (*currentUserResponse, error) 
 	return c.selfVal, nil
 }
 
-func (c *Client) getTransitions(ctx context.Context, issueKey string) ([]Transition, error) {
-	url := c.apiURL("issue/%s/transitions", issueKey)
+func (c *Client) getTransitions(ctx context.Context, idOrKey string) ([]Transition, error) {
+	url := c.apiURL("issue/%s/transitions", idOrKey)
 	body, err := c.get(ctx, url)
 	if err != nil {
 		return nil, err
@@ -1335,8 +1371,8 @@ func (c *Client) getTransitions(ctx context.Context, issueKey string) ([]Transit
 	return result.Transitions, nil
 }
 
-func (c *Client) doTransition(ctx context.Context, issueKey, transitionID string) error {
-	url := c.apiURL("issue/%s/transitions", issueKey)
+func (c *Client) doTransition(ctx context.Context, idOrKey, transitionID string) error {
+	url := c.apiURL("issue/%s/transitions", idOrKey)
 	payload := map[string]any{
 		"transition": map[string]string{"id": transitionID},
 	}
