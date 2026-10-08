@@ -1019,7 +1019,10 @@ func (s *Spawner) processCompletion(
 	// snapshot first, like the no-conclusion turn above, and the reason it
 	// records is what the blueprint reactor aborts the blueprint on. Never a
 	// NULL-outcome conclusion, which the reactor would read as a clean finish
-	// on a final step.
+	// on a final step. "No verdict" includes one an earlier engagement left:
+	// a follow-up on a step whose blueprint did not re-open still carries it,
+	// and the park withdraws it rather than letting the row read concluded on
+	// an outcome this turn never gave.
 	//
 	// parked comes back false: the step has given the only answer it will,
 	// and the blueprint acts on it (the resume path finalizes only on a

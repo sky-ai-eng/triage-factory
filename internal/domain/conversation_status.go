@@ -152,10 +152,11 @@ func (c *Conversation) Concluded() bool {
 }
 
 // ParkedOnInvalidEnvelope reports whether the conversation parked on a
-// completion envelope that never validated. Not concluded (no verdict was
-// recorded) and not settled (a person's message continues it), but like a
-// concluded step it has given its blueprint an answer to act on: the abort.
-// The SQL spelling is db.ParkedOnInvalidEnvelopeSQL.
+// completion envelope that never validated. Never concluded — the park
+// withdraws any verdict an earlier engagement left (db.ParkInvalidEnvelope) —
+// and not settled (a person's message continues it), but like a concluded
+// step it has given its blueprint an answer to act on: the abort. The SQL
+// spelling is db.ParkedOnInvalidEnvelopeSQL.
 func (c *Conversation) ParkedOnInvalidEnvelope() bool {
 	return c.Status == StatusOpen && c.ParkReason == ParkReasonInvalidEnvelope
 }

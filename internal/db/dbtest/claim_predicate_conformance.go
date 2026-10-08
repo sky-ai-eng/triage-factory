@@ -1071,6 +1071,68 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 		}
 	})
 
+	// A follow-up on a step whose blueprint does not re-open wakes with the
+	// earlier engagement's verdict still on the row. An invalid-envelope park
+	// at the end of that follow-up withdraws it, so the row reads as parked
+	// with no verdict rather than concluded on an outcome the follow-up never
+	// gave. An idle park leaves it standing, and so does a stop pending when
+	// the envelope park lands: the stop decides the park, as it decides the
+	// reason.
+	t.Run("AnInvalidEnvelopeParkWithdrawsAFollowUpsEarlierVerdict", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			park         db.Park
+			pendingStop  bool
+			wantWithdraw bool
+			wantReason   domain.ParkReason
+		}{
+			{"invalid envelope", db.ParkInvalidEnvelope(), false, true, domain.ParkReasonInvalidEnvelope},
+			{"idle", db.ParkIdle(), false, false, domain.ParkReasonIdle},
+			{"invalid envelope under a pending stop", db.ParkInvalidEnvelope(), true, false, domain.ParkReasonSystemCancelled},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				convID := h.StageDelegation(t, "sdk")
+				mustClaim(t, h, convID)
+				if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "looked", "abort", "needs a human", ""); err != nil {
+					t.Fatalf("record verdict: %v", err)
+				}
+				h.SetBlueprintState(t, "completed", 0)
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+					t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+				}
+				mustClaim(t, h, convID)
+				if tc.pendingStop {
+					if ok, err := h.Stores.Conversations.RequestStopSystem(ctx, h.OrgID, convID, "", "", ""); err != nil || !ok {
+						t.Fatalf("RequestStopSystem = (%v, %v), want (true, nil)", ok, err)
+					}
+				}
+				if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, tc.park); err != nil || !ok {
+					t.Fatalf("park = (%v, %v), want (true, nil)", ok, err)
+				}
+
+				got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+				if err != nil || got == nil {
+					t.Fatalf("Get: err=%v conv=%v", err, got)
+				}
+				if got.Status != domain.StatusOpen || got.ParkReason != tc.wantReason {
+					t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, tc.wantReason)
+				}
+				withdrawn := got.Outcome == "" && got.OutcomeReason == "" && got.CompletedAt == nil
+				kept := got.Outcome == "abort" && got.OutcomeReason == "needs a human" && got.CompletedAt != nil
+				if tc.wantWithdraw && !withdrawn {
+					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want withdrawn", got.Outcome, got.OutcomeReason, got.CompletedAt)
+				}
+				if !tc.wantWithdraw && !kept {
+					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want the earlier abort standing", got.Outcome, got.OutcomeReason, got.CompletedAt)
+				}
+				if got.ParkedOnInvalidEnvelope() && got.Concluded() {
+					t.Error("the row reads both parked on an invalid envelope and concluded")
+				}
+			})
+		}
+	})
+
 	// A step parked on an envelope that never validated records no verdict
 	// and is still the task's live conversation: it waits on a person, as a
 	// stopped step does. While its blueprint is running the wake is refused,

@@ -273,7 +273,8 @@ func ConcludedConversationSQL(alias string) string {
 }
 
 // ParkedOnInvalidEnvelopeSQL is a conversation parked on a completion envelope
-// that never validated, over the alias the caller names. Neither concluded nor
+// that never validated, over the alias the caller names. Neither concluded
+// (the park withdraws any earlier verdict, see ParkInvalidEnvelope) nor
 // settled, but like a concluded step it has handed its blueprint an answer
 // (the abort the reactor writes off this reason), so the two readers that ask
 // whether a running blueprint still owes a step its decision — the wake

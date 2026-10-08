@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -357,6 +358,63 @@ func TestResumeBlueprintAfterResume_InvalidEnvelopeAbortsARunningBlueprint(t *te
 			br := mustGetRun(t, s, org, brID)
 			if br.Status != tc.want || br.AbortReason != tc.reason {
 				t.Errorf("blueprint = (%q, reason %q), want (%q, reason %q)", br.Status, br.AbortReason, tc.want, tc.reason)
+			}
+			if got := readTaskStatus(t, database, taskID); got != taskBefore {
+				t.Errorf("task.status = %q, want it unchanged at %q", got, taskBefore)
+			}
+		})
+	}
+}
+
+// TestInvalidEnvelope_OnAFollowUpWithdrawsTheEarlierVerdict: a follow-up on a
+// step whose blueprint will not re-open (it finished, or it aborted on a task
+// since closed) wakes a row that still carries the verdict its first
+// engagement recorded. When that follow-up ends on an envelope that never
+// validated, the row parks with no verdict, like any other invalid envelope,
+// rather than reading as concluded with the old outcome. The blueprint and
+// the task are left as they were: a follow-up there changes neither.
+func TestInvalidEnvelope_OnAFollowUpWithdrawsTheEarlierVerdict(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		outcome   string
+		blueprint domain.BlueprintRunStatus
+		closeTask bool
+	}{
+		{"finished blueprint", "finish", domain.BlueprintRunStatusCompleted, false},
+		{"aborted blueprint, task closed", "abort", domain.BlueprintRunStatusAborted, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, database, brID, taskID, conversationID := reactorFixture(t, "followup-invalid-"+string(tc.blueprint), 1, dbtest.SeedConcluded, tc.outcome)
+			org := runmode.LocalDefaultOrgID
+			ctx := context.Background()
+			if _, err := database.Exec(`UPDATE conversations SET outcome_reason = 'earlier reason' WHERE id = ?`, conversationID); err != nil {
+				t.Fatalf("stage the earlier verdict's reason: %v", err)
+			}
+			finishBlueprint(t, database, brID, string(tc.blueprint), 0)
+			if tc.closeTask {
+				if _, err := s.tasks.CloseSystem(ctx, org, taskID, "user_done", ""); err != nil {
+					t.Fatalf("close task: %v", err)
+				}
+			}
+			taskBefore := readTaskStatus(t, database, taskID)
+
+			if ok, err := s.conversations.MarkQueuedForResume(ctx, org, conversationID); err != nil || !ok {
+				t.Fatalf("wake the concluded step = (%v, %v), want (true, nil)", ok, err)
+			}
+			s.processCompletion(ctx, org, conversationID, brID, holderClaimFor(t, s, org, conversationID), loadTask(t, s, taskID),
+				res(`{"outcome":"frobnicate"}`), t.TempDir(), nil, "", "manual", runmode.LocalDefaultUserID)
+			s.ResumeBlueprintAfterResume(org, conversationID, runmode.LocalDefaultUserID)
+
+			conv := loadConversation(t, s, conversationID)
+			if !conv.ParkedOnInvalidEnvelope() || conv.Concluded() {
+				t.Errorf("conv = (status %q, park_reason %q, completed_at %v), want parked on invalid_envelope and not concluded",
+					conv.Status, conv.ParkReason, conv.CompletedAt)
+			}
+			if conv.Outcome != "" || conv.OutcomeReason != "" {
+				t.Errorf("verdict = (outcome %q, reason %q), want the earlier one withdrawn", conv.Outcome, conv.OutcomeReason)
+			}
+			if br := mustGetRun(t, s, org, brID); br.Status != tc.blueprint {
+				t.Errorf("blueprint = %q, want it left %q", br.Status, tc.blueprint)
 			}
 			if got := readTaskStatus(t, database, taskID); got != taskBefore {
 				t.Errorf("task.status = %q, want it unchanged at %q", got, taskBefore)
