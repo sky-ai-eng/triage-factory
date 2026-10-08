@@ -7,7 +7,8 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Every metadata struct carries the same identity block: the issue's
 // identifier and UUID, its Linear team (id and key), its assignee (display
 // name and Linear user id) and its title. linear_team_id is what the router's
-// team gate reads, so the tracker sets it on every Linear event. It comes from
+// team gate reads (with old_linear_team_id on identifier_changed), so the
+// tracker sets it on every Linear event. It comes from
 // the stored snapshot or a fresh read of the issue, never from the
 // identifier's prefix: an identifier is a display key that a team move or a
 // team key rename changes, and the UUID is the issue's identity. The one event
@@ -295,8 +296,9 @@ func (p LinearIssueUnreachablePredicate) Matches(m LinearIssueUnreachableMetadat
 // it moved to another Linear team, or its team's key was renamed. The issue's
 // UUID is unchanged, so the entity is renamed in place and keeps its tasks,
 // conversations and memory. Emitted before any other event from the same
-// refresh, in the same commit as the snapshot, and routed like every other
-// Linear event by the current linear_team_id.
+// refresh, in the same commit as the snapshot. Unlike every other Linear
+// event, it reaches a team that tracks either Linear team: the one in
+// linear_team_id or the one in old_linear_team_id, which the issue left.
 // -----------------------------------------------------------------------------
 
 type LinearIssueIdentifierChangedMetadata struct {

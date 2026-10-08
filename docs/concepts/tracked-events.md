@@ -169,8 +169,9 @@ Every Linear event's metadata carries the issue's identity block —
 (`old_status`/`new_status`, `old_priority`/`new_priority`,
 `previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
 `last_status`, `reason`, `comment_id`, `old_identifier`/`old_linear_team_id`/
-`old_linear_team_key`). `linear_team_id` is what the router's team gate reads,
-and `assignee_user_id` is what assignee-centric routing joins against a
+`old_linear_team_key`). `linear_team_id` is what the router's team gate reads
+(with `old_linear_team_id` on `identifier_changed`, see below), and
+`assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity.
 
 #### Identity
@@ -188,10 +189,16 @@ the same cycle: its `source_id` and `url`, and the target of every artifact
 recorded against it, move to the new identifier, and it keeps its tasks,
 conversations and memory. A Linear artifact is keyed on the issue's UUID, so
 its key does not move, and an artifact on another workspace's issue under the
-same identifier is a different row that the rename does not touch. The refresh emits `identifier_changed` first, ahead
-of anything else it found (a move to another team usually changes the issue's
-workflow state too), in the same commit as the new snapshot. Predicates can
-filter it on `linear_team_key` and `old_linear_team_key`.
+same identifier is a different row that the rename does not touch.
+
+The refresh emits `identifier_changed` first, ahead of anything else it found
+(a move to another team usually changes the issue's workflow state too), in the
+same commit as the new snapshot. Predicates can filter it on `linear_team_key`
+and `old_linear_team_key`. It is the one Linear event the team gate passes for
+a team that tracks either the issue's current Linear team or the one it left,
+so a team still hears about an issue that moved to a team it does not track.
+Its tasks stay on the entity after such a move, and every later event goes
+only to the teams tracking the issue's new team.
 
 If no rule arms the team the issue moved to, TF has nothing to follow it with:
 the entity is renamed, `identifier_changed` is emitted, and it retires as

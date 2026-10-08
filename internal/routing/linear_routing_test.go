@@ -125,6 +125,51 @@ func TestLinearGate(t *testing.T) {
 	}
 }
 
+// TestLinearGate_IdentifierChangedReachesBothTeams: identifier_changed passes
+// for a team that tracks either the Linear team the issue moved to or the one
+// it left, including when the destination is tracked by no team. No other
+// event reads old_linear_team_id.
+func TestLinearGate_IdentifierChangedReachesBothTeams(t *testing.T) {
+	database := newGateDB(t)
+	teamA := runmode.LocalDefaultTeamID
+	teamB := seedGateTeam(t, database, "team-b")
+	teamC := seedGateTeam(t, database, "team-c")
+	armLinearTeam(t, database, teamA, "lt-eng", "Done")
+	armLinearTeam(t, database, teamB, "lt-ops", "Done")
+	armLinearTeam(t, database, teamC, "lt-web", "Done")
+	r := linearRouter(database)
+	ctx := context.Background()
+
+	moved := func(eventType, from, to string) domain.Event {
+		meta, _ := json.Marshal(events.LinearIssueIdentifierChangedMetadata{
+			LinearIssueIdentity: events.LinearIssueIdentity{
+				IssueIdentifier: "NEW-1", IssueID: "uuid-1", LinearTeamID: to, LinearTeamKey: "NEW",
+			},
+			OldIdentifier: "ENG-1", OldLinearTeamID: from, OldLinearTeamKey: "ENG",
+		})
+		return domain.Event{EventType: eventType, EntityID: new(string), MetadataJSON: string(meta), CreatedAt: time.Now(), OrgID: runmode.LocalDefaultOrgID}
+	}
+	cases := []struct {
+		name string
+		evt  domain.Event
+		want map[string]bool
+	}{
+		{"between tracked teams", moved(domain.EventLinearIssueIdentifierChanged, "lt-eng", "lt-ops"),
+			map[string]bool{teamA: true, teamB: true, teamC: false}},
+		{"to an untracked team", moved(domain.EventLinearIssueIdentifierChanged, "lt-eng", "lt-untracked"),
+			map[string]bool{teamA: true, teamB: false, teamC: false}},
+		{"another event carrying an old team", moved(domain.EventLinearIssueStatusChanged, "lt-eng", "lt-ops"),
+			map[string]bool{teamA: false, teamB: true, teamC: false}},
+	}
+	for _, tc := range cases {
+		for team, want := range tc.want {
+			if got := r.handlerScopeMatchesEvent(ctx, tc.evt, domain.EventHandler{TeamID: team}, map[string]bool{}); got != want {
+				t.Errorf("%s: gate for team %s = %v, want %v", tc.name, team, got, want)
+			}
+		}
+	}
+}
+
 // TestLinearGate_ReadsOnlyTheCurrentWorkspace: a team's Linear rules gate
 // events only while the org's credential belongs to the workspace they were
 // saved under. After a switch none of them admit an event, and binding the old
