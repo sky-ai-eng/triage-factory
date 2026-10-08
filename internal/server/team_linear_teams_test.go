@@ -532,7 +532,7 @@ func TestLinearTeamsPut_NoWorkspaceRecorded(t *testing.T) {
 	saved := mustPutLinearTeams(t, s, map[string]any{"id": first}, map[string]any{"id": second})
 
 	bindLinearWorkspaceForTest(t, s, "")
-	assertLinearFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusConflict, "NOT_CONFIGURED", "")
+	assertOneFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusConflict, "NOT_CONFIGURED", "")
 	if got := mustPutLinearTeams(t, s); len(got) != 0 {
 		t.Errorf("empty PUT = %+v, want an empty set", got)
 	}
