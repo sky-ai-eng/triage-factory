@@ -313,13 +313,8 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 			if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear credential: %w", err)
 			}
-			// Left alone when already clear, as the Jira unbind leaves its
-			// host: clearing it again would move the settings version for a
-			// change that did not happen.
-			if prevHost != "" {
-				if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
-					return fmt.Errorf("clear github base url: %w", err)
-				}
+			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
+				return fmt.Errorf("clear github base url: %w", err)
 			}
 		}
 		if !had {
@@ -385,13 +380,8 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 		if err := integrations.ClearJira(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear credential: %w", err)
 		}
-		// A host that is already clear is left alone: clearing it again would
-		// move the settings version and fail a settings save over a change
-		// that did not happen.
-		if prevHost != "" {
-			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindJira, ""); err != nil {
-				return fmt.Errorf("clear jira base url: %w", err)
-			}
+		if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindJira, ""); err != nil {
+			return fmt.Errorf("clear jira base url: %w", err)
 		}
 		if !had {
 			return nil

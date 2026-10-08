@@ -730,9 +730,6 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear github host: %w", err)
 		}
-		// Unconditional, unlike the PAT unbind's: a live App was removed, and
-		// a settings save clearing the host refuses while one exists, so a
-		// save loaded before this point has to conflict.
 		if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
 			return fmt.Errorf("clear github base url: %w", err)
 		}

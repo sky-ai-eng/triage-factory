@@ -478,12 +478,26 @@ func (s *orgsStore) SetLinearWorkspace(ctx context.Context, orgID, workspaceID, 
 }
 
 // SetSourceBaseURL upserts ONLY org_event_sources.base_url for kind and bumps
-// org_settings.version. See the OrgsStore interface doc for why it bumps the
-// version where SetLinearWorkspace does not; the pool and partial INSERTs
-// follow SetGitHubCredentialClass above.
+// org_settings.version, unless the host is already stored. See the OrgsStore
+// interface doc for why it bumps the version where SetLinearWorkspace does not;
+// the pool and partial INSERTs follow SetGitHubCredentialClass above.
+//
+// The unchanged-host check is a plain read. A settings save that commits a
+// different host after it ends up ordered after this call, which leaves that
+// save's host in place — the outcome the two writes would have had one after
+// the other.
 func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, error) {
 	if !db.SourceHasBaseURL(kind) {
 		return domain.OrgSettings{}, fmt.Errorf("set source base url: %q has no host to set", kind)
+	}
+	var cur sql.NullString
+	if err := s.app.QueryRowContext(ctx, `
+		SELECT base_url FROM org_event_sources WHERE org_id = $1 AND kind = $2`,
+		orgID, kind).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.OrgSettings{}, fmt.Errorf("read %s base url: %w", kind, err)
+	}
+	if cur.String == baseURL {
+		return getOrgSettings(ctx, s.app, orgID)
 	}
 	stored, err := db.ScanOrgSettingsCore(s.app.QueryRowContext(ctx, `
 		INSERT INTO org_settings (org_id, updated_at)

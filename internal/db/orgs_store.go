@@ -208,6 +208,11 @@ type OrgsStore interface {
 	// way SetGitHubCredentialClass materializes it, so the version still
 	// moves off what such an org reads.
 	//
+	// A host equal to the stored one writes nothing and moves nothing, and the
+	// returned row is the current one. A save loaded before such a call has
+	// nothing to put back, so a credential rotated on the same host, or an
+	// unbind with no host left to clear, never fails an open settings edit.
+	//
 	// org_settings is written before org_event_sources, the order the
 	// settings writers take the two rows in, so concurrent writers on Postgres
 	// queue rather than deadlock. Pool and return contract as

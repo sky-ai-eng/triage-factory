@@ -12,7 +12,8 @@
 --
 -- The counter guards the values the settings save writes, not the row's every
 -- touch: UpdateSettings bumps it, and so does SetSourceBaseURL, the credential
--- routes' write of a source host the save also sets. A surgical write to a
+-- routes' write of a source host the save also sets, when the host it writes
+-- differs from the stored one. A surgical write to a
 -- value the save never touches (SetGitHubCredentialClass, SetLinearWorkspace)
 -- leaves it alone, so it never fails an admin's in-flight settings edit over a
 -- change that edit could not have undone.

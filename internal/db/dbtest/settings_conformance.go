@@ -353,6 +353,16 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("the refused save landed: jira host %q, concurrent %d", after.JiraBaseURL, after.MaxConcurrentRuns)
 		}
 
+		// The host already stored writes nothing: the version stays, so a save
+		// loaded before a same-host credential rotation still lands.
+		same, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "jira", "https://jira-new.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (same host): %v", err)
+		}
+		if same.Version != set.Version || same.JiraBaseURL != "https://jira-new.example.com" {
+			t.Errorf("same-host SetSourceBaseURL returned version %d host %q, want %d and the host unchanged", same.Version, same.JiraBaseURL, set.Version)
+		}
+
 		// "" clears the host and nothing else.
 		cleared, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "jira", "")
 		if err != nil {
@@ -360,6 +370,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		if cleared.JiraBaseURL != "" || cleared.JiraPollInterval != 3*time.Minute || cleared.Version != set.Version+1 {
 			t.Errorf("clearing returned host %q, poll %v, version %d; want \"\", 3m, %d", cleared.JiraBaseURL, cleared.JiraPollInterval, cleared.Version, set.Version+1)
+		}
+		again, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "jira", "")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (clear an already-clear host): %v", err)
+		}
+		if again.Version != cleared.Version {
+			t.Errorf("clearing an already-clear host moved the version %d -> %d", cleared.Version, again.Version)
 		}
 
 		// A source with no host to set is refused and moves nothing.

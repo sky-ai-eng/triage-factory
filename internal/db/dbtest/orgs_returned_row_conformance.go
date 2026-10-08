@@ -143,6 +143,17 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 			t.Errorf("SetSourceBaseURL returned host %q version %d, want the new host and version %d", got.JiraBaseURL, got.Version, before.Version+1)
 		}
 
+		// The same host again writes nothing; what it hands back is still the
+		// stored row.
+		same, err := store.SetSourceBaseURL(ctx, orgID, "jira", "https://sret.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (same host): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSourceBaseURL (same host)", same, read)
+		if same.Version != got.Version {
+			t.Errorf("same-host SetSourceBaseURL moved the version %d -> %d", got.Version, same.Version)
+		}
+
 		cleared, err := store.SetSourceBaseURL(ctx, orgID, "jira", "")
 		if err != nil {
 			t.Fatalf("SetSourceBaseURL (clear): %v", err)

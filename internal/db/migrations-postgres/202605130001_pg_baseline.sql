@@ -731,10 +731,11 @@ CREATE TABLE public.org_settings (
     -- the client, the write requires it, a stale token gets 409, and there is no
     -- merge. It guards everything that save writes: this row, and base_url /
     -- poll_interval on the org's org_event_sources rows, written in the same
-    -- transaction. Every write to one of those values bumps it —
+    -- transaction. Every change to one of those values bumps it —
     -- OrgsStore.UpdateSettings, UpdateSettingsVersioned, and SetSourceBaseURL,
-    -- the credential routes' write of a source's host. Writes to values the
-    -- save never touches leave it alone: SetGitHubCredentialClass,
+    -- the credential routes' write of a source's host, which bumps it only
+    -- when the host differs from the stored one. Writes to values the save
+    -- never touches leave it alone: SetGitHubCredentialClass,
     -- SetLinearWorkspace, and the per-source off switch
     -- (OrgEventSourceStore.SetDisabled), which is last-writer-wins.
     version integer DEFAULT 1 NOT NULL,

@@ -206,6 +206,40 @@ func TestCredentialHostWrite_StaleSettingsSaveConflicts(t *testing.T) {
 	}
 }
 
+// TestJiraCredentialRotation_SameHostLeavesSettingsVersion: rotating the
+// org's Jira credential on the host it is already bound to changes no value the
+// settings save writes, so a save loaded before the rotation still lands.
+func TestJiraCredentialRotation_SameHostLeavesSettingsVersion(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	stub := jiraMyselfStub(t, `{"accountId":"bot","displayName":"Bot"}`, nil)
+	bind := func(pat string) {
+		t.Helper()
+		if rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
+			"deployment": "data_center", "url": stub.URL, "pat": pat,
+		}); rec.Code != http.StatusOK {
+			t.Fatalf("jira bind: %d: %s", rec.Code, rec.Body.String())
+		}
+	}
+	bind("jira_first")
+	loaded := orgSettingsVersion(t, s)
+
+	bind("jira_rotated")
+
+	if v := orgSettingsVersion(t, s); v != loaded {
+		t.Errorf("settings version = %d after a same-host rotation, want %d unchanged", v, loaded)
+	}
+	if rec := doJSON(t, s, http.MethodPatch, orgSettingsPath(), map[string]any{
+		"version": loaded, "max_concurrent_runs": 3,
+	}); rec.Code != http.StatusOK {
+		t.Errorf("settings save loaded before the rotation = %d %s, want 200", rec.Code, rec.Body.String())
+	}
+	if v := getSecret(t, s, integrations.KeyJiraPAT); v != "jira_rotated" {
+		t.Errorf("stored PAT = %q, want the rotated one", v)
+	}
+}
+
 // TestCredentialHostWrite_FailedWriteRestoresKeys: in local mode, a write
 // whose transaction fails after its keychain writes answers 500 and leaves the
 // org as it was — every key put back, the host unchanged, and no audit row.
