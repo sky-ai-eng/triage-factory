@@ -204,7 +204,7 @@ func TestClosePrepare_JiraReassignSettingsReadFails_RequeuesThenClosesOnce(t *te
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
 	r.users = st.Users
-	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "PROJ-77", "issue", "Issue", "https://jira.example.com/PROJ-77")
+	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "PROJ-77", "", "issue", "Issue", "https://jira.example.com/PROJ-77")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestClosePrepare_LinearReassignSettingsReadFails_RequeuesThenClosesOnce(t *
 	r := newQueueWorkerRouter(t, database)
 	st := sqlitestore.New(database)
 	r.users = st.Users
-	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-77", "issue", "Issue", "https://linear.app/acme/issue/ENG-77")
+	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-77", "", "issue", "Issue", "https://linear.app/acme/issue/ENG-77")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

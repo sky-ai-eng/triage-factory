@@ -64,7 +64,11 @@ func dashboardBackfillQueries(login string, repos []string) []string {
 // the entity-seed writes propagate it, and it's checked between queries so a
 // cancelled/timed-out backfill stops issuing further searches and seeds
 // promptly rather than running the full query set to completion.
-func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient.Client, login string, repos []string) (int, error) {
+//
+// scope is the org's GitHub host, the namespace the seeded pull requests are
+// keyed under — the same one RefreshGitHub keys them under, so the poll cycle
+// finds what the backfill seeded.
+func (t *Tracker) BackfillDashboardHistory(ctx context.Context, scope string, client *ghclient.Client, login string, repos []string) (int, error) {
 	if client == nil || login == "" {
 		return 0, nil
 	}
@@ -95,7 +99,7 @@ func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient
 				continue
 			}
 			seen[sid] = true
-			created, serr := t.seedBackfillEntity(ctx, pr)
+			created, serr := t.seedBackfillEntity(ctx, scope, pr)
 			if serr != nil {
 				log.Printf("[tracker] dashboard backfill seed %s: %v", sid, serr)
 				continue
@@ -117,12 +121,12 @@ func (t *Tracker) BackfillDashboardHistory(ctx context.Context, client *ghclient
 // discovery loop.
 // Returns true when a NEW entity was created; an already-known entity is left
 // untouched (the poll cycle owns refresh) and returns false. Emits no events.
-func (t *Tracker) seedBackfillEntity(ctx context.Context, d ghclient.DiscoveredPR) (bool, error) {
+func (t *Tracker) seedBackfillEntity(ctx context.Context, scope string, d ghclient.DiscoveredPR) (bool, error) {
 	snap := d.Snapshot
 	snap.NodeID = d.NodeID
 	sid := ghSourceID(snap.Repo, snap.Number)
 
-	entity, created, err := t.entities.FindOrCreateSystem(ctx, t.orgID, "github", sid, "pr", snap.Title, snap.URL)
+	entity, created, err := t.entities.FindOrCreateSystem(ctx, t.orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
 	if err != nil {
 		return false, err
 	}

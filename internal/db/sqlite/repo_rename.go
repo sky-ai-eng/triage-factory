@@ -404,11 +404,13 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, from, to string) error
 // the only signal — the same string httpx.IsUniqueViolation matches, repeated
 // here rather than imported because internal/db must not depend on the server.
 //
-// It exists for the two composite keys a rename can collide on: entities'
-// (source, source_id) and artifacts' (org_id, dedup_key). Both are reachable
-// without any corruption: a record carries the provider's own identity, not
-// the registry row slugHeldByAnotherRepository looks at, so a name no
-// repositories row answers to can still be spoken for by records alone.
+// It exists for the composite keys a rename can collide on: entities' active
+// key (org_id, source, scope, source_id) and artifacts' (org_id, dedup_key).
+// The entity rename and a stamp of an external id on an entity reach it too.
+// Both keys are reachable without any corruption: a record carries the
+// provider's own identity, not the registry row slugHeldByAnotherRepository
+// looks at, so a name no repositories row answers to can still be spoken for
+// by records alone.
 // Mapping the violation is what makes that a documented
 // terminal state rather than a raw driver string the caller retries forever.
 //

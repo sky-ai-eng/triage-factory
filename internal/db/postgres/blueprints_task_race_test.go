@@ -46,8 +46,8 @@ func newRaceFixture(t *testing.T, h *pgtest.Harness) raceFixture {
 	teamID := seedPgDefaultTeam(t, h, orgID, userID)
 	entityID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Race Entity', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Race Entity', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "owner/repo#race-"+entityID[:8]); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

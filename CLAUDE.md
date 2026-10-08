@@ -59,8 +59,8 @@ Triage Factory is a **single Go binary** (HTTP server + pollers + delegated-agen
 The core data model is four levels, each with its own lifecycle:
 
 ```
-Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged
-  ↓
+Entity (PR #18 / Jira SKY-123)     ← long-lived, from first poll until closed/merged;
+  ↓                                   identity (org, source, scope, source_id) + external_id
 Events                              ← append-only; every poller detection + system emission
   ↓  (0 or 1 — only if a task_rule or prompt_trigger predicate matches)
 Task                                ← "this entity needs attention, because of this event type"
@@ -96,6 +96,7 @@ mid-flight — declares the budget it spends and its backoff in one table,
 Key invariants:
 
 - **Entities are durable, events are immutable, tasks are ephemeral, conversations are the work.** Memory is written per-conversation but materialized per-entity via `conversation_memory_entities`.
+- **An entity is addressed by `(org, source, scope, source_id)` and identified by `external_id`** — the repository model. `source_id` is the display key everything reads (`owner/repo#18`, a Jira key, a Linear identifier); `scope` is the provider namespace it is unique within (GitHub host, Jira site, Linear workspace id, Slack workspace id), computed by `domain.EntityScope` and never built by hand; `external_id` is the provider's stable id (a Linear issue's UUID), NULL when not learned. Keys are unique among **active** rows of a scope only, so a freed and reused key never collides with closed history; `(org, source, scope, external_id)` is unique. A key change is a rename of the row carrying the id (`EntityStore.RenameSystem`, which moves `source_id`, `url`, artifact keys and the audit ledger's pointer in one transaction), never a second row. No entity is created, found or renamed without a scope.
 - **Dedup:** at most one active task per `(entity_id, event_type, dedup_key)` — enforced by a partial unique index in `tasks`. `dedup_key` is usually empty; open-set discriminators (label name, status name) use it to get separate tasks per value.
 - **No retroactive task creation.** A new task_rule or trigger applies to events _going forward_. Historical events in the log are not re-evaluated.
 - **Tracking changes are forward-only — the mirror of the rule above.** Adding a repo/project to a team's tracked set doesn't retroactively mint tasks for its history; removing one doesn't retroactively prune or close existing tasks. The team↔repo gate (`internal/routing` `handlerScopeMatchesEvent` + `TracksRepoSystem`) filters _future_ matches only; it deliberately does **not** reconcile `task_teams` visibility for tasks already created while the repo was tracked. A task is durable work (may have an in-flight run, an open PR, agent memory), so untracking never silently destroys it. This is symmetric in multi-team (team A untracks a shared repo → A keeps tasks it already had, gets no new ones; B is unaffected) and correct in solo N=1 (one team, so pruning visibility would orphan the task to nobody). Tradeoff acknowledged: an untracked repo stops polling, so its open PRs never emit the close event that would retire stale tasks — the answer is an explicit user-initiated "dismiss" affordance (its own ticket), never an automatic purge wired into a config save.

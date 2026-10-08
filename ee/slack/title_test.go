@@ -294,13 +294,13 @@ func TestHandleEventCallback_DispatchesTitleResolutionOnCreated(t *testing.T) {
 		{
 			name:         "a root mention names its own sender",
 			threadTS:     "",
-			wantEntityID: "entity-org-1/slack/C1/" + mentionTS,
+			wantEntityID: "entity-org-1/slack/T0PIPE001/C1/" + mentionTS,
 			wantTitle:    "ada in #general",
 		},
 		{
 			name:          "a summons names whoever rooted the thread",
 			threadTS:      rootTS,
-			wantEntityID:  "entity-org-1/slack/C1/" + rootTS,
+			wantEntityID:  "entity-org-1/slack/T0PIPE001/C1/" + rootTS,
 			wantTitle:     "grace in #general",
 			wantRepliesTS: rootTS,
 		},

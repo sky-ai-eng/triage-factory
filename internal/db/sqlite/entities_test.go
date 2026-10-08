@@ -36,7 +36,7 @@ func TestEntityStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	stores := sqlitestore.New(conn)
 
 	const bogusOrg = "11111111-1111-1111-1111-111111111111"
-	if _, _, err := stores.Entities.FindOrCreate(t.Context(), bogusOrg, "github", "owner/repo#1", "pr", "T", ""); err == nil {
+	if _, _, err := stores.Entities.FindOrCreate(t.Context(), bogusOrg, "github", "https://github.com", "owner/repo#1", "", "pr", "T", ""); err == nil {
 		t.Errorf("expected error for non-local orgID, got nil")
 	}
 	if _, err := stores.Entities.Get(t.Context(), bogusOrg, "any-id"); err == nil {
@@ -57,15 +57,15 @@ func TestEntityStore_SQLite_ListActiveJiraTeamScoped(t *testing.T) {
 
 	// Two Jira entities (no jira_project_status_rules rows configured at
 	// all) plus a GitHub entity that must never appear in a Jira read.
-	jira1, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "AAA-1", "issue", "One", "")
+	jira1, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "AAA-1", "", "issue", "One", "")
 	if err != nil {
 		t.Fatalf("seed jira1: %v", err)
 	}
-	jira2, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "BBB-2", "issue", "Two", "")
+	jira2, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "BBB-2", "", "issue", "Two", "")
 	if err != nil {
 		t.Fatalf("seed jira2: %v", err)
 	}
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#1", "pr", "PR", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#1", "", "pr", "PR", ""); err != nil {
 		t.Fatalf("seed github: %v", err)
 	}
 

@@ -280,8 +280,8 @@ func (r *slackExecRig) seedNonSlackTask(orgID, creatorID, teamID string) string 
 	entityID := uuid.New().String()
 	sourceID := "octo/repo#" + uuid.New().String()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title)
-		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
+		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr', 'https://github.com')
 	`, entityID, orgID, sourceID); err != nil {
 		r.t.Fatalf("seed entity: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", rootTS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind(t *testing.T
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *test
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -1143,7 +1143,7 @@ func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", rootTS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}

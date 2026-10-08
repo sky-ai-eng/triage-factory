@@ -64,7 +64,7 @@ func TestLocalClient_MemoryLoad_Postgres_TeamScoped(t *testing.T) {
 	team2 := pgtest.SeedTeam(t, h, orgID, "mem-load-scope-b")
 
 	// One entity, shared by both teams (entities are org-wide).
-	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "octo/repo#7", "pr", "Shared PR", "")
+	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/repo#7", "", "pr", "Shared PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestLocalClient_MemoryLoad_Postgres_Miss(t *testing.T) {
 		t.Errorf("miss result = %+v, want empty EntityID / Count 0 / no memories", res)
 	}
 	// No entity minted.
-	got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "jira", "NOPE-1")
+	got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "jira", "https://jira.example.com", "NOPE-1")
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}

@@ -47,7 +47,7 @@ func seedDivergentEntity(t *testing.T, database *sql.DB, source, sourceID, snaps
 	if source == "jira" || source == "linear" {
 		kind = "issue"
 	}
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, sourceID, kind, sourceID, "")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, sourceID, "")
 	if err != nil {
 		t.Fatalf("create entity %s: %v", sourceID, err)
 	}
@@ -326,4 +326,21 @@ func TestRunTerminalInvariantChecker_CountsOnItsOwnTicker(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the gauge never recorded the violation after several ticks")
+}
+
+// testScope is the scope a test keys an entity of source under: what
+// domain.EntityScope answers for an org with default settings where the
+// source has one, and a fixed stand-in where it has none.
+func testScope(source string) string {
+	switch source {
+	case "github":
+		return "https://github.com"
+	case "jira":
+		return "https://jira.example.com"
+	case "slack":
+		return "T0TEST"
+	case "linear":
+		return "ws-test"
+	}
+	return "test-scope"
 }

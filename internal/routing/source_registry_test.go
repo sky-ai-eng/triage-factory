@@ -71,7 +71,7 @@ func seedFakeRule(t *testing.T, database *sql.DB, teamID string) {
 
 func fakeEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	t.Helper()
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "fake", sourceID, "thing", "Fake Thing", "https://example.com/"+sourceID)
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "fake", testScope("fake"), sourceID, "", "thing", "Fake Thing", "https://example.com/"+sourceID)
 	if err != nil {
 		t.Fatalf("create fake entity: %v", err)
 	}

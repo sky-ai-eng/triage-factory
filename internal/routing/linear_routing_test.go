@@ -34,11 +34,14 @@ func linearStateRef(name string) domain.LinearStateRef {
 	return domain.LinearStateRef{ID: "st-" + name, Name: name}
 }
 
-// armLinearTeam arms linearTeamID for teamID with done as its done state.
+// armLinearTeam arms linearTeamID for teamID with done as its done state, in
+// the test workspace, and binds that workspace to the org: rules are read only
+// in the org's current workspace.
 func armLinearTeam(t *testing.T, database *sql.DB, teamID, linearTeamID, done string) {
 	t.Helper()
+	setLinearWorkspace(t, database)
 	todo, prog, fin := linearStateRef("Todo"), linearStateRef("In Progress"), linearStateRef(done)
-	if _, err := sqlitestore.New(database).LinearTeamRules.ReplaceForTeam(t.Context(), teamID, []domain.LinearTeamRules{{
+	if _, err := sqlitestore.New(database).LinearTeamRules.ReplaceForTeam(t.Context(), teamID, linearTestWorkspace, []domain.LinearTeamRules{{
 		LinearTeamID: linearTeamID, LinearTeamKey: "K" + linearTeamID,
 		PickupMembers:     []domain.LinearStateRef{todo},
 		InProgressMembers: []domain.LinearStateRef{prog}, InProgressCanonical: prog,
@@ -69,7 +72,7 @@ func linearEvent(eventType, entityID, linearTeamID, assigneeUserID string) domai
 // erroringLinearRules fails the gate's lookup.
 type erroringLinearRules struct{ dbpkg.LinearTeamRulesStore }
 
-func (erroringLinearRules) TracksTeamSystem(context.Context, string, string) (bool, error) {
+func (erroringLinearRules) TracksTeamSystem(context.Context, string, string, string) (bool, error) {
 	return false, errors.New("boom: linear_team_rules read failed")
 }
 
@@ -119,6 +122,34 @@ func TestLinearGate(t *testing.T) {
 	failing.linearRules = erroringLinearRules{}
 	if !failing.handlerScopeMatchesEvent(ctx, evt, domain.EventHandler{TeamID: teamB}, map[string]bool{}) {
 		t.Error("a failed lookup should fail open")
+	}
+}
+
+// TestLinearGate_ReadsOnlyTheCurrentWorkspace: a team's Linear rules gate
+// events only while the org's credential belongs to the workspace they were
+// saved under. After a switch none of them admit an event, and binding the old
+// workspace again restores them.
+func TestLinearGate_ReadsOnlyTheCurrentWorkspace(t *testing.T) {
+	database := newGateDB(t)
+	teamA := runmode.LocalDefaultTeamID
+	armLinearTeam(t, database, teamA, "lt-eng", "Done")
+	r := linearRouter(database)
+	ctx := context.Background()
+	evt := linearEvent(domain.EventLinearIssueAssigned, "ent-1", "lt-eng", "")
+	handler := domain.EventHandler{TeamID: teamA}
+
+	if !r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+		t.Fatal("the team's own workspace's rule did not admit the event")
+	}
+	if _, err := database.Exec(`UPDATE org_settings SET linear_workspace_id = 'ws-other' WHERE org_id = ?`, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("switch workspace: %v", err)
+	}
+	if r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+		t.Error("a rule saved under the previous workspace admitted an event")
+	}
+	setLinearWorkspace(t, database)
+	if !r.handlerScopeMatchesEvent(ctx, evt, handler, map[string]bool{}) {
+		t.Error("binding the old workspace again did not restore its rules")
 	}
 }
 
@@ -178,7 +209,7 @@ func TestLinearAssigned_RoutesToAssigneesTrackingTeam(t *testing.T) {
 	setLinearWorkspace(t, database)
 	seedLinearUserOnTeam(t, database, teamA, "lu-alice")
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ENG-1", "issue", "An issue", "")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-1", "", "issue", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +246,7 @@ func reassignFixture(t *testing.T) (database *sql.DB, router *Router, teamA, tea
 	seedLinearUserOnTeam(t, database, teamB, "lu-bob")
 	seedSystemJiraRule(t, database, teamA, domain.EventLinearIssueAssigned)
 	seedSystemJiraRule(t, database, teamB, domain.EventLinearIssueAssigned)
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-9", "issue", "An issue", "")
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-9", "", "issue", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +410,7 @@ func TestHandleEvent_TurnedOffLinear_RecordsButCreatesNoTask(t *testing.T) {
 	seedLinearUserOnTeam(t, database, team, "lu-alice")
 	turnOffSource(t, database, eventsource.KindLinear)
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ENG-off", "issue", "An issue", "")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-off", "", "issue", "An issue", "")
 	if err != nil {
 		t.Fatal(err)
 	}

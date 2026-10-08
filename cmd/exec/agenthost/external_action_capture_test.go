@@ -53,6 +53,7 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordJiraSiteForTest(t, conn)
 	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
 		t.Fatalf("seed conversation: %v", err)
@@ -726,7 +727,7 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 
 	// The PR-shaped target is what re-enables the touch; a repo-level one is
 	// skipped by the touch rule, which is why this write used to leave none.
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#1")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#1")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource(github, octo/repo#1): ent=%v err=%v", ent, err)
 	}

@@ -43,8 +43,8 @@ func TestTaskDelegate_ConversationIDResolvesToAConversation(t *testing.T) {
 		t.Fatalf("seed blueprint step: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_dresp', 'github', 'sky/repo#dresp', 'pr', 'active')`); err != nil {
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_dresp', 'github', 'sky/repo#dresp', 'pr', 'active', 'https://github.com')`); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := s.db.Exec(

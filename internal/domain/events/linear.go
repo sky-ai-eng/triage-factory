@@ -7,11 +7,14 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // Every metadata struct carries the same identity block: the issue's
 // identifier and UUID, its Linear team (id and key), its assignee (display
 // name and Linear user id) and its title. linear_team_id is what the router's
-// team gate reads, so the tracker sets it on every Linear event whenever
-// anything knows the team. The one event that can lack it is unreachable for
-// an issue with no snapshot whose key names no single armed team, and the
-// gate refuses that event for every team. The assignee's user id is what
-// assignee-centric routing joins against user_linear_identities.
+// team gate reads, so the tracker sets it on every Linear event. It comes from
+// the stored snapshot or a fresh read of the issue, never from the
+// identifier's prefix: an identifier is a display key that a team move or a
+// team key rename changes, and the UUID is the issue's identity. The one event
+// that can lack it is unreachable for an entity that has neither a snapshot
+// nor an answer from Linear, and the gate refuses that event for every team.
+// The assignee's user id is what assignee-centric routing joins against
+// user_linear_identities.
 //
 // Status and priority are open-set discriminators, as on Jira: a transition
 // carries the new state name or priority label in both metadata and the
@@ -192,9 +195,11 @@ func (p LinearIssueBodyUpdatedPredicate) Matches(m LinearIssueBodyUpdatedMetadat
 
 // -----------------------------------------------------------------------------
 // issue:parent_changed — the issue moved under another parent, or lost its
-// parent. The dedup_key is the new parent's identifier, or "none" when it was
-// cleared. Never emitted on first discovery: a parent that was already set
-// when TF started watching is not a change.
+// parent. The dedup_key is the new parent's UUID, or "none" when it was
+// cleared: an identifier changes when the parent moves team, and a dedup key
+// that changed with it would open a second task for the same parent. Never
+// emitted on first discovery: a parent that was already set when TF started
+// watching is not a change.
 // -----------------------------------------------------------------------------
 
 type LinearIssueParentChangedMetadata struct {
@@ -243,17 +248,36 @@ func (p LinearIssueBecameAtomicPredicate) Matches(m LinearIssueBecameAtomicMetad
 }
 
 // -----------------------------------------------------------------------------
-// issue:unreachable — Linear will not give TF the issue any more: it answers
-// not-found for it, the issue is in the trash, or it was archived outside a
-// done state. Terminal for the entity. As with Jira's, the fields are the last
-// known state off the stored snapshot, and the event is emitted only after
-// asking about the one issue directly — never on its absence from a batch
-// read.
+// issue:unreachable — TF will not follow the issue any more. Terminal for the
+// entity. As with Jira's, the fields are the last known state off the stored
+// snapshot, and an issue is never retired on its absence from a batch read.
+// Reason says which of these it was.
 // -----------------------------------------------------------------------------
+
+// Linear unreachable reasons.
+const (
+	// LinearUnreachableNotFound: Linear answers not-found for the issue,
+	// asked about directly.
+	LinearUnreachableNotFound = "not_found"
+	// LinearUnreachableTrashed: the issue is in the trash.
+	LinearUnreachableTrashed = "trashed"
+	// LinearUnreachableArchived: archived in a state outside its team's done
+	// states.
+	LinearUnreachableArchived = "archived"
+	// LinearUnreachableMoved: the issue moved to a Linear team no rule arms.
+	// The entity is renamed to the new identifier first, and the event names
+	// the team the issue left, which is the team that was tracking it.
+	LinearUnreachableMoved = "moved"
+	// LinearUnreachableScopeChanged: the org's Linear credential now belongs
+	// to another workspace. Linear is not asked: the current credential
+	// cannot see the old workspace.
+	LinearUnreachableScopeChanged = "scope_changed"
+)
 
 type LinearIssueUnreachableMetadata struct {
 	LinearIssueIdentity
 	LastStatus string `json:"last_status"`
+	Reason     string `json:"reason"` // one of the LinearUnreachable* values
 }
 
 type LinearIssueUnreachablePredicate struct {
@@ -264,6 +288,32 @@ type LinearIssueUnreachablePredicate struct {
 func (p LinearIssueUnreachablePredicate) Matches(m LinearIssueUnreachableMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey)
+}
+
+// -----------------------------------------------------------------------------
+// issue:identifier_changed — a tracked issue answers under a new identifier:
+// it moved to another Linear team, or its team's key was renamed. The issue's
+// UUID is unchanged, so the entity is renamed in place and keeps its tasks,
+// conversations and memory. Emitted before any other event from the same
+// refresh, in the same commit as the snapshot, and routed like every other
+// Linear event by the current linear_team_id.
+// -----------------------------------------------------------------------------
+
+type LinearIssueIdentifierChangedMetadata struct {
+	LinearIssueIdentity
+	OldIdentifier    string `json:"old_identifier"`
+	OldLinearTeamID  string `json:"old_linear_team_id"`
+	OldLinearTeamKey string `json:"old_linear_team_key"`
+}
+
+type LinearIssueIdentifierChangedPredicate struct {
+	LinearTeamKey    *string `json:"linear_team_key,omitempty" doc:"Scope to the Linear team key the issue now has (e.g. OPS)."`
+	OldLinearTeamKey *string `json:"old_linear_team_key,omitempty" doc:"Scope to the Linear team key the issue had before (e.g. ENG)."`
+}
+
+func (p LinearIssueIdentifierChangedPredicate) Matches(m LinearIssueIdentifierChangedMetadata) bool {
+	return strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		strEq(p.OldLinearTeamKey, m.OldLinearTeamKey)
 }
 
 // Ownership: every linear:issue:* type routes through the owning-team ladder
@@ -280,4 +330,5 @@ func init() {
 	Register(NewSchema[LinearIssueParentChangedMetadata, LinearIssueParentChangedPredicate](domain.EventLinearIssueParentChanged, OwnershipOwned))
 	Register(NewSchema[LinearIssueBecameAtomicMetadata, LinearIssueBecameAtomicPredicate](domain.EventLinearIssueBecameAtomic, OwnershipOwned))
 	Register(NewSchema[LinearIssueUnreachableMetadata, LinearIssueUnreachablePredicate](domain.EventLinearIssueUnreachable, OwnershipOwned))
+	Register(NewSchema[LinearIssueIdentifierChangedMetadata, LinearIssueIdentifierChangedPredicate](domain.EventLinearIssueIdentifierChanged, OwnershipOwned))
 }

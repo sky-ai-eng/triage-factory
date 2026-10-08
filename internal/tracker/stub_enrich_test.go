@@ -100,7 +100,7 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			org := runmode.LocalDefaultOrgID
 
 			// Seed a snapshot-less stub, exactly as exec-touch FindOrCreate would.
-			stub, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", "")
+			stub, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", "")
 			if err != nil {
 				t.Fatalf("seed stub: %v", err)
 			}
@@ -113,11 +113,11 @@ func TestRefreshGitHub_EnrichesSnapshotlessStub(t *testing.T) {
 			client := ghclient.NewClient(srv.URL, "tok")
 
 			// repos=nil → no discovery; the stub is reached only via Phase-2.
-			if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub: %v", err)
 			}
 
-			got, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7")
+			got, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
 			if err != nil || got == nil {
 				t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 			}
@@ -188,7 +188,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			stores := sqlitestore.New(database)
 			org := runmode.LocalDefaultOrgID
 
-			stub, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", "")
+			stub, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", "")
 			if err != nil {
 				t.Fatalf("seed stub: %v", err)
 			}
@@ -200,11 +200,11 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
-			if _, err := tr.RefreshJira(context.Background(), client, srv.URL, tc.projects); err != nil {
+			if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, tc.projects); err != nil {
 				t.Fatalf("RefreshJira: %v", err)
 			}
 
-			got, err := stores.Entities.GetBySource(ctx, org, "jira", "SKY-1")
+			got, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-1")
 			if err != nil || got == nil {
 				t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 			}
@@ -272,7 +272,7 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", ""); err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
 
@@ -281,19 +281,19 @@ func TestRefreshGitHub_StubExitsSeedModeAndDiffsNextCycle(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// Cycle 1: quiet seed — no events, and the snapshot now carries the node_id.
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
 		t.Fatalf("cycle 1 (seed) must emit no events, got %v", eventTypes(evts))
 	}
-	if seeded, _ := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7"); seeded == nil || !strings.Contains(seeded.SnapshotJSON, "PR_node7") {
+	if seeded, _ := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7"); seeded == nil || !strings.Contains(seeded.SnapshotJSON, "PR_node7") {
 		t.Fatalf("cycle 1 did not seed the node_id: %+v", seeded)
 	}
 
 	// Cycle 2: the entity has a node_id now, so it takes the normal diff path —
 	// no second GetPRBasic, and the draft→ready transition emits its event.
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRReadyForReview {

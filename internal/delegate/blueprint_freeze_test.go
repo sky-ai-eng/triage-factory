@@ -32,7 +32,7 @@ func TestBlueprintRun_StepPlanFrozenAgainstMidFlightEdit(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#freeze", "pr", "T", "https://x/freeze")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#freeze", "", "pr", "T", "https://x/freeze")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

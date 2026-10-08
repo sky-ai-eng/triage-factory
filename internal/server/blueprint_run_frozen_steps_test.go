@@ -27,7 +27,7 @@ func TestBlueprintRunGet_ProjectsFrozenStepsNotLive(t *testing.T) {
 	bpID, p0 := createWrappedBlueprint(t, s, "Frozen")
 
 	// A task for the run to hang off (blueprint_runs.task_id is NOT NULL).
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#frozen", "pr", "Frozen", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#frozen", "", "pr", "Frozen", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

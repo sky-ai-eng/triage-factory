@@ -89,7 +89,7 @@ func pollGitHub(t *testing.T, database *sql.DB, gh *fakeGitHub) {
 	t.Helper()
 	st := sqlitestore.New(database)
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), ghclient.NewClient(gh.srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 }
@@ -542,7 +542,7 @@ func TestCloseOwed_SourcePause_ClearedSnapshotIsNotTerminal(t *testing.T) {
 	t.Cleanup(srv.Close)
 	st := sqlitestore.New(database)
 	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
-	if _, _, err := tr.RefreshGitHub(context.Background(), ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -585,7 +585,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 
 	ctx := context.Background()
 	st := sqlitestore.New(database)
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-1", "issue", "Owed issue", "")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1", "", "issue", "Owed issue", "")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -607,7 +607,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 		t.Helper()
 		tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
 		rules := tracker.JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
-		if _, err := tr.RefreshJira(ctx, jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat")), srv.URL, rules); err != nil {
+		if _, err := tr.RefreshJira(ctx, "https://jira.example.com", jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat")), srv.URL, rules); err != nil {
 			t.Fatalf("RefreshJira: %v", err)
 		}
 	}

@@ -114,8 +114,8 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 			repo := fmt.Sprintf("%s-%s", suffix, id[:8])
 			sourceID := fmt.Sprintf("%s/%s#1", owner, repo)
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
 			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
@@ -285,8 +285,8 @@ func seedPgGitHubEntityRaw(t *testing.T, h *pgtest.Harness, orgID, owner, repo s
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5, 'https://github.com')
 	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC()); err != nil {
 		t.Fatalf("seed github entity %s: %v", sourceID, err)
 	}
@@ -298,8 +298,8 @@ func seedPgJiraEntityRaw(t *testing.T, h *pgtest.Harness, orgID, projectKey stri
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("%s-%d", projectKey, number)
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'jira', $3, 'issue', $4, '', '{}'::jsonb, $5, 'https://jira.example.com')
 	`, id, orgID, sourceID, "Issue "+sourceID, time.Now().UTC()); err != nil {
 		t.Fatalf("seed jira entity %s: %v", sourceID, err)
 	}
@@ -414,9 +414,19 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	orgID, _ := seedPgFactoryOrg(t, h)
 	teamID := firstTeamForOrg(t, h, orgID)
 
+	bindWorkspace := func(workspaceID string) {
+		t.Helper()
+		if _, err := h.AdminDB.Exec(`
+			INSERT INTO org_settings (org_id, linear_workspace_id) VALUES ($1, $2)
+			ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id
+		`, orgID, workspaceID); err != nil {
+			t.Fatalf("bind linear workspace: %v", err)
+		}
+	}
+	bindWorkspace("ws-test")
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO linear_team_rules (team_id, linear_team_id, linear_team_key, linear_team_name)
-		VALUES ($1, 'lt-eng', 'ENG', 'Engineering')
+		INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name)
+		VALUES ($1, 'ws-test', 'lt-eng', 'ENG', 'Engineering')
 	`, teamID); err != nil {
 		t.Fatalf("seed linear team rule: %v", err)
 	}
@@ -424,8 +434,8 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 		t.Helper()
 		id := uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5)
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES ($1, $2, 'linear', $3, 'issue', $3, '', $4::jsonb, $5, 'ws-test')
 		`, id, orgID, identifier, snapshot, time.Now().UTC()); err != nil {
 			t.Fatalf("seed linear entity %s: %v", identifier, err)
 		}
@@ -463,6 +473,13 @@ func TestFactoryReadStore_Postgres_LinearScopedToTrackedTeam(t *testing.T) {
 	}
 	if read([]string{uuid.New().String()})[tracked] {
 		t.Error("the per-team filter kept a Linear entity for a team that does not track it")
+	}
+
+	// A rule counts only while the org's credential belongs to the workspace
+	// it was saved under.
+	bindWorkspace("ws-other")
+	if read(nil)[tracked] || read([]string{teamID})[tracked] {
+		t.Error("a rule from the workspace the org moved off kept its team's issue on the belt")
 	}
 }
 

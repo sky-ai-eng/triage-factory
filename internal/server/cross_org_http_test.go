@@ -146,8 +146,8 @@ func seedTaskInOrg(t *testing.T, r *authRig, orgID, userID uuid.UUID, suffix str
 	sourceID := suffix + "-" + entityID[:8]
 
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'cross-org seed', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'cross-org seed', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, sourceID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

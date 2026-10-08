@@ -87,7 +87,7 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	// the rows a request wrote opens its own against the same connection.
 	st := sqlitestore.New(s.db)
 
-	ent, _, err := st.Entities.FindOrCreate(ctx, org, "jira", "SKY-pause-1", "issue", "Ticket", "")
+	ent, _, err := st.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-pause-1", "", "issue", "Ticket", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	if rec := doJSON(t, s, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": true}); rec.Code != http.StatusOK {
 		t.Fatalf("PATCH disable: %d: %s", rec.Code, rec.Body.String())
 	}
-	got, err := st.Entities.GetBySource(ctx, org, "jira", "SKY-pause-1")
+	got, err := st.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-pause-1")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}
@@ -114,7 +114,7 @@ func TestOrgSource_PatchClearsSnapshotsOnDisableOnly(t *testing.T) {
 	if rec := doJSON(t, s, http.MethodPatch, orgSourcePath("jira"), map[string]any{"disabled": false}); rec.Code != http.StatusOK {
 		t.Fatalf("PATCH enable: %d: %s", rec.Code, rec.Body.String())
 	}
-	got, err = st.Entities.GetBySource(ctx, org, "jira", "SKY-pause-1")
+	got, err = st.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-pause-1")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}

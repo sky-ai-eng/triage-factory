@@ -199,8 +199,8 @@ func seedSQLiteConversationForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	now := time.Now().UTC()
 	sourceID := fmt.Sprintf("task-memory-%s-%d", suffix, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES (?, 'github', ?, 'pr', 'Task Memory Conformance', 'https://example/x', '{}', ?, 'active')
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES (?, 'github', ?, 'pr', 'Task Memory Conformance', 'https://example/x', '{}', ?, 'active', 'https://github.com')
 	`, entityID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -249,8 +249,8 @@ func seedSQLiteBlueprintRunForTaskMemory(t *testing.T, conn *sql.DB, suffix stri
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("bp-run-%s-%d", suffix, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES (?, 'github', ?, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}', ?, 'active')
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES (?, 'github', ?, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}', ?, 'active', 'https://github.com')
 	`, entityID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

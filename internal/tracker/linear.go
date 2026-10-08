@@ -1,15 +1,14 @@
 package tracker
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
@@ -30,12 +29,11 @@ const (
 	linearSearchMaxPages = 100
 
 	// linearConfirmBudget caps the issues a cycle asks Linear about one at a
-	// time: tracked issues the batch read did not return, and entities with
-	// no snapshot to batch by. Each is a request on top of the batch reads,
-	// and a whole team's issues can go missing at once when a credential
-	// loses access. The rest wait for the next cycle. Candidates are asked
-	// about oldest-polled first and every attempt stamps the entity, so each
-	// cycle's budget reaches the ones the last one did not.
+	// time: tracked issues the batch read did not return. Each is a request on
+	// top of the batch reads, and a whole team's issues can go missing at once
+	// when a credential loses access. The rest wait for the next cycle.
+	// Candidates are asked about oldest-polled first and every attempt stamps
+	// the entity, so each cycle's budget reaches the ones the last one did not.
 	linearConfirmBudget = 20
 )
 
@@ -61,23 +59,6 @@ func (r LinearRules) ForTeam(id string) *LinearTeamRule {
 		}
 	}
 	return nil
-}
-
-// teamIDForKey returns the id of the armed team whose key is key, or "" when
-// no armed team has it or more than one does. A key stored at arming time can
-// be stale after a rename in Linear, so two rules can share one.
-func (r LinearRules) teamIDForKey(key string) string {
-	id := ""
-	for _, rule := range r {
-		if rule.Key != key {
-			continue
-		}
-		if id != "" {
-			return ""
-		}
-		id = rule.ID
-	}
-	return id
 }
 
 func (r LinearRules) doneForTeam(id string) []domain.LinearStateRef {
@@ -121,9 +102,16 @@ type linearIssueState struct {
 	DiscoveredAssignedToCurrentUser bool
 }
 
-// RefreshLinear runs one tracking cycle for an org's Linear issues: discovery
-// per armed team, a batched refresh of every active Linear entity, the diff,
-// and the poll-complete sentinel. It returns the number of events enqueued.
+// RefreshLinear runs one tracking cycle for an org's Linear issues: the
+// retirement of rows from another workspace, discovery per armed team, a
+// batched refresh of every active Linear entity in the workspace, the diff, and
+// the poll-complete sentinel. It returns the number of events enqueued.
+//
+// scope is the org's Linear workspace id, domain.EntityScope("linear",
+// settings). An issue's entity is matched on its UUID (external_id) in that
+// scope, never on its identifier: the identifier is a display key a team move
+// or a team key rename changes, and when a fresh read answers under a new one
+// the entity is renamed to it in the same cycle.
 //
 // A rate limit ends the cycle at once, wherever it lands: the error matching
 // linear.ErrRateLimited is returned, no further request is sent, and the
@@ -135,75 +123,22 @@ type linearIssueState struct {
 // All entity reads and writes are scoped to the Tracker's orgID. Persistence
 // calls take context.Background() for the reason RefreshGitHub gives; the
 // snapshot-with-events commits take the cycle's ctx.
-func (t *Tracker) RefreshLinear(ctx context.Context, client LinearClient, teams LinearRules) (int, error) {
+func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client LinearClient, teams LinearRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
-	terminal := func(snap domain.LinearSnapshot) bool {
-		return domain.ContainsState(teams.doneForTeam(snap.TeamID), snap.StateRef())
+	if scope == "" {
+		return 0, errors.New("linear refresh: no workspace to key issues under")
 	}
-	emitted := 0
+
+	// Phase 0: rows a previous workspace left active. Retired first, without
+	// asking Linear, so nothing below can mistake one for this workspace's.
+	emitted := t.RetireLinearOutOfScope(ctx, scope)
 
 	// Phase 1: discovery. Entities found before a failure are seeded either
 	// way; the error decides what happens after.
 	discovered, discoveryErr := t.discoverLinear(ctx, client, teams)
 	for _, state := range discovered {
-		snap := state.Snap
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "linear", snap.Identifier, "issue", snap.Title, snap.URL)
-		if err != nil {
-			trackerLog.Error("create entity failed", "source_id", snap.Identifier, "error", err)
-			continue
-		}
-		if created {
-			snapJSON, _ := json.Marshal(snap)
-			switch {
-			case terminal(snap):
-				// Done before TF saw it: snapshot and closed state in one
-				// statement, and nothing emitted.
-				if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-					trackerLog.Error("seed terminal linear snapshot failed", "source_id", snap.Identifier, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed terminal linear snapshot CAS lost race, skipping", "source_id", snap.Identifier)
-				}
-			case state.DiscoveredAssignedToCurrentUser:
-				// Assigned to someone else, the issue matched neither query,
-				// so arriving through the assigned-to-viewer query is itself
-				// the assignment. The event commits with the first snapshot;
-				// seeding first would retire it unseen.
-				evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID))
-				if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
-					trackerLog.Error("seed assigned linear snapshot+event failed", "source_id", snap.Identifier, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed assigned linear snapshot CAS lost race, skipping", "source_id", snap.Identifier)
-				} else {
-					emitted += enqueued
-				}
-			default:
-				if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-					trackerLog.Error("seed snapshot failed", "source_id", snap.Identifier, "error", err)
-				} else if !ok {
-					trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Identifier)
-				}
-			}
-			if state.Description != "" {
-				if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
-					trackerLog.Error("seed description failed", "source_id", snap.Identifier, "error", err)
-				}
-			}
-			continue
-		}
-		t.mirrorLinearText(orgID, *entity, state)
-		// A closed issue reappearing open reactivates with the discovery
-		// snapshot in the same statement; Phase 2 re-diffs from it.
-		if !terminal(snap) && entity.State == "closed" {
-			snapJSON, _ := json.Marshal(snap)
-			if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
-				trackerLog.Error("reactivate entity failed", "source_id", snap.Identifier, "error", err)
-			} else if !reactivated {
-				trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", snap.Identifier)
-			} else {
-				trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Identifier)
-			}
-		}
+		emitted += t.seedDiscoveredLinear(ctx, scope, state, teams)
 	}
 	if discoveryErr != nil {
 		// Rate limited, or every call failed on the connection: either way the
@@ -211,12 +146,27 @@ func (t *Tracker) RefreshLinear(ctx context.Context, client LinearClient, teams 
 		return emitted, discoveryErr
 	}
 
-	// Phase 2: refresh every active entity, a batch at a time, diffing each
-	// batch as it lands so a rate limit partway through keeps the batches
-	// before it.
-	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "linear")
+	// Phase 2: refresh every active entity in the workspace, a batch at a
+	// time, diffing each batch as it lands so a rate limit partway through
+	// keeps the batches before it.
+	listed, err := t.entities.ListActiveSystem(context.Background(), orgID, "linear")
 	if err != nil {
 		return emitted, fmt.Errorf("list active linear entities: %w", err)
+	}
+	entities := make([]domain.Entity, 0, len(listed))
+	for _, e := range listed {
+		switch {
+		case e.Scope != scope:
+			// Retired in phase 0; the router closes it.
+		case e.ExternalID == "":
+			// Every writer of a Linear entity sets the UUID, so this is a row
+			// nothing in TF produced. Without the UUID there is nothing to ask
+			// Linear about.
+			trackerLog.WarnContext(ctx, "linear entity has no issue UUID; it cannot be refreshed",
+				"source_id", e.SourceID, "entity_id", e.ID)
+		default:
+			entities = append(entities, e)
+		}
 	}
 	if len(entities) == 0 {
 		t.EmitPollComplete(ctx, "linear", startedAt, 0, emitted)
@@ -225,40 +175,30 @@ func (t *Tracker) RefreshLinear(ctx context.Context, client LinearClient, teams 
 
 	allDone := teams.allDone()
 	prevs := make(map[string]*domain.LinearSnapshot, len(entities))
-	var batched, individual []domain.Entity
 	for _, e := range entities {
 		if e.SnapshotJSON == "" || e.SnapshotJSON == "{}" {
-			// No snapshot: a stub created outside the poller, or one whose
-			// snapshot a source pause cleared. There is no UUID to batch by,
-			// so it is fetched by identifier and quietly seeded.
-			individual = append(individual, e)
+			// No snapshot: one a source pause cleared, or a row created
+			// outside the poller. It is read by UUID with the rest and seeded
+			// without a diff.
 			continue
 		}
 		var prev domain.LinearSnapshot
-		if err := json.Unmarshal([]byte(e.SnapshotJSON), &prev); err != nil || prev.ID == "" {
+		if err := json.Unmarshal([]byte(e.SnapshotJSON), &prev); err != nil {
 			trackerLog.Warn("corrupt linear snapshot, reseeding", "source_id", e.SourceID, "error", err)
-			individual = append(individual, e)
 			continue
 		}
 		prevs[e.ID] = &prev
-		batched = append(batched, e)
 	}
 
-	refreshed, missing, err := t.refreshLinearBatches(ctx, client, orgID, batched, prevs, teams, allDone)
+	refreshed, missing, err := t.refreshLinearBatches(ctx, client, orgID, scope, entities, prevs, teams, allDone)
 	emitted += refreshed
 	if err != nil {
 		return emitted, err
 	}
 
-	// One queue for both kinds, in the order the entities were listed,
-	// which is oldest-polled first.
-	candidates := append(individual, missing...)
-	listed := make(map[string]int, len(entities))
-	for i, e := range entities {
-		listed[e.ID] = i
-	}
-	slices.SortFunc(candidates, func(a, b domain.Entity) int { return cmp.Compare(listed[a.ID], listed[b.ID]) })
-	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, candidates, prevs, teams, allDone)
+	// The candidates arrive in the order the entities were listed, which is
+	// oldest-polled first.
+	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, missing, prevs, teams, allDone)
 	emitted += confirmed
 	if err != nil {
 		return emitted, err
@@ -269,24 +209,193 @@ func (t *Tracker) RefreshLinear(ctx context.Context, client LinearClient, teams 
 	return emitted, nil
 }
 
-// refreshLinearBatches reads the batched entities from Linear by UUID and
-// applies each answer. It returns the events enqueued and the entities Linear
-// did not return, which the caller asks about one at a time. A failed batch
-// ends the refresh: a rate limit is returned as itself, so the caller sees
-// linear.ErrRateLimited.
-func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient, orgID string, batched []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (emitted int, missing []domain.Entity, err error) {
-	if len(batched) == 0 {
-		return 0, nil, nil
+// RetireLinearOutOfScope retires every active Linear entity keyed under a
+// workspace other than scope, emitting unreachable with reason scope_changed
+// for each, and returns how many it emitted. It runs at the top of every cycle,
+// and on its own when the org has a workspace bound but nothing in it to poll.
+//
+// Linear is not asked: the org's credential belongs to the current workspace
+// and cannot see the old one, so no answer it gave would be about these
+// issues. The rows are not moved either — nothing in the new workspace has
+// their UUIDs, and an identifier they share with a new-workspace issue names a
+// different issue. They stay where they are, closed with their history, and
+// binding the old workspace again finds them by UUID.
+func (t *Tracker) RetireLinearOutOfScope(ctx context.Context, scope string) int {
+	if scope == "" {
+		return 0
 	}
+	entities, err := t.entities.ListActiveSystem(context.Background(), t.orgID, "linear")
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "list active linear entities for the workspace check failed", "error", err)
+		return 0
+	}
+	retired := 0
+	for _, e := range entities {
+		if e.Scope == scope {
+			continue
+		}
+		t.emitLinearUnreachable(ctx, t.orgID, e, nil, events.LinearUnreachableScopeChanged)
+		retired++
+	}
+	return retired
+}
+
+// seedDiscoveredLinear records one issue discovery found and returns the
+// events it enqueued. The issue's entity is the one carrying its UUID in the
+// workspace, under whatever identifier it was stored; only when none does is
+// one created, keyed by the identifier the issue has now.
+func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state linearIssueState, teams LinearRules) int {
+	orgID := t.orgID
+	snap := state.Snap
+	terminal := domain.ContainsState(teams.doneForTeam(snap.TeamID), snap.StateRef())
+
+	entity, err := t.entities.GetByExternalIDSystem(context.Background(), orgID, "linear", scope, snap.ID)
+	if err != nil {
+		trackerLog.Error("look up linear entity by issue UUID failed", "source_id", snap.Identifier, "error", err)
+		return 0
+	}
+	created := false
+	if entity == nil {
+		entity, created, err = t.entities.FindOrCreateSystem(context.Background(), orgID, "linear", scope, snap.Identifier, snap.ID, "issue", snap.Title, snap.URL)
+		if errors.Is(err, db.ErrEntityKeyOccupied) {
+			// Another tracked issue still holds the identifier: a team key
+			// freed and reused before the old holder's rename was observed.
+			// The holder's refresh renames it, and the next cycle creates
+			// this one.
+			trackerLog.Warn("linear identifier still held by another tracked issue; skipping it this cycle",
+				"source_id", snap.Identifier, "issue_id", snap.ID)
+			return 0
+		}
+		if err != nil {
+			trackerLog.Error("create entity failed", "source_id", snap.Identifier, "error", err)
+			return 0
+		}
+		if !created && entity.ExternalID != snap.ID {
+			// A row under the identifier with no UUID. Nothing that writes a
+			// Linear entity leaves one, and taking it on the identifier alone
+			// could hand this issue another issue's history.
+			trackerLog.Warn("linear entity under this identifier carries no issue UUID; not adopting it",
+				"source_id", snap.Identifier, "entity_id", entity.ID, "issue_id", snap.ID)
+			return 0
+		}
+	}
+	if created {
+		emitted := 0
+		snapJSON, _ := json.Marshal(snap)
+		switch {
+		case terminal:
+			// Done before TF saw it: snapshot and closed state in one
+			// statement, and nothing emitted.
+			if ok, err := t.entities.CloseWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+				trackerLog.Error("seed terminal linear snapshot failed", "source_id", snap.Identifier, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed terminal linear snapshot CAS lost race, skipping", "source_id", snap.Identifier)
+			}
+		case state.DiscoveredAssignedToCurrentUser:
+			// Assigned to someone else, the issue matched neither query, so
+			// arriving through the assigned-to-viewer query is itself the
+			// assignment. The event commits with the first snapshot; seeding
+			// first would retire it unseen.
+			evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID))
+			if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
+				trackerLog.Error("seed assigned linear snapshot+event failed", "source_id", snap.Identifier, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed assigned linear snapshot CAS lost race, skipping", "source_id", snap.Identifier)
+			} else {
+				emitted = enqueued
+			}
+		default:
+			if ok, err := t.entities.UpdateSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+				trackerLog.Error("seed snapshot failed", "source_id", snap.Identifier, "error", err)
+			} else if !ok {
+				trackerLog.Warn("seed snapshot CAS lost race, skipping", "source_id", snap.Identifier)
+			}
+		}
+		if state.Description != "" {
+			if _, err := t.entities.UpdateDescriptionSystem(context.Background(), orgID, entity.ID, state.Description); err != nil {
+				trackerLog.Error("seed description failed", "source_id", snap.Identifier, "error", err)
+			}
+		}
+		return emitted
+	}
+
+	// A known issue under a new identifier is renamed before anything else is
+	// written to it; the refresh below diffs the move and emits it.
+	if linearRenamed(scope, *entity, snap) {
+		renamed, ok := t.renameLinearEntity(ctx, scope, *entity, snap.Identifier, snap.URL)
+		if !ok {
+			return 0
+		}
+		entity = &renamed
+	}
+	t.mirrorLinearText(orgID, *entity, state)
+	// A closed issue reappearing open reactivates with the discovery snapshot
+	// in the same statement; Phase 2 re-diffs from it.
+	if !terminal && entity.State == "closed" {
+		snapJSON, _ := json.Marshal(snap)
+		if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
+			trackerLog.Error("reactivate entity failed", "source_id", snap.Identifier, "error", err)
+		} else if !reactivated {
+			trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", snap.Identifier)
+		} else {
+			trackerLog.Info("reactivated entity (reopened)", "source_id", snap.Identifier)
+		}
+	}
+	return 0
+}
+
+// linearRenamed reports whether an issue answers under an identifier other than
+// the one its entity is stored under: the rename condition, decided on the
+// UUID and never on the identifier alone.
+func linearRenamed(scope string, e domain.Entity, snap domain.LinearSnapshot) bool {
+	return len(domain.DetectEntityRenames(
+		[]domain.EntityRef{{Source: "linear", Scope: scope, SourceID: e.SourceID, ExternalID: e.ExternalID}},
+		[]domain.EntityRef{{Source: "linear", Scope: scope, SourceID: snap.Identifier, ExternalID: snap.ID}},
+	)) > 0
+}
+
+// renameLinearEntity moves an entity onto the identifier its issue answers
+// under now, and returns the entity as renamed. ok=false means the rename did
+// not land and the caller writes nothing to the entity this cycle: an active
+// row still holds the identifier (it clears once that row is renamed or
+// retired), or the write failed.
+func (t *Tracker) renameLinearEntity(ctx context.Context, scope string, e domain.Entity, identifier, url string) (domain.Entity, bool) {
+	out, err := t.entities.RenameSystem(context.Background(), t.orgID, "linear", scope, e.ExternalID, identifier, url)
+	if errors.Is(err, db.ErrEntityKeyOccupied) {
+		trackerLog.WarnContext(ctx, "linear issue moved onto an identifier another tracked issue still holds; renaming it next cycle",
+			"source_id", e.SourceID, "identifier", identifier, "entity_id", e.ID)
+		return e, false
+	}
+	if err != nil {
+		trackerLog.ErrorContext(ctx, "rename linear entity failed", "source_id", e.SourceID, "identifier", identifier, "entity_id", e.ID, "error", err)
+		return e, false
+	}
+	if out.Renamed {
+		trackerLog.InfoContext(ctx, "linear issue answers under a new identifier; entity renamed",
+			"from", out.From, "to", out.To, "entity_id", e.ID)
+	}
+	e.SourceID = identifier
+	if url != "" {
+		e.URL = url
+	}
+	return e, true
+}
+
+// refreshLinearBatches reads the entities from Linear by UUID, a batch at a
+// time, and applies each answer. It returns the events enqueued and the
+// entities Linear did not return, which the caller asks about one at a time. A
+// failed batch ends the refresh: a rate limit is returned as itself, so the
+// caller sees linear.ErrRateLimited.
+func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient, orgID, scope string, entities []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (emitted int, missing []domain.Entity, err error) {
 	ctx, span := tracer.Start(ctx, "tracker.linear.batch_fetch",
-		trace.WithAttributes(telemetry.Count(len(batched))))
+		trace.WithAttributes(telemetry.Count(len(entities))))
 	defer span.End()
 
-	for i := 0; i < len(batched); i += linearBatchSize {
-		batch := batched[i:min(i+linearBatchSize, len(batched))]
+	for i := 0; i < len(entities); i += linearBatchSize {
+		batch := entities[i:min(i+linearBatchSize, len(entities))]
 		ids := make([]string, len(batch))
 		for j, e := range batch {
-			ids[j] = prevs[e.ID].ID
+			ids[j] = e.ExternalID
 		}
 		issues, err := client.GetIssues(ctx, ids)
 		if err != nil {
@@ -302,12 +411,12 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 			byID[issue.ID] = issue
 		}
 		for _, e := range batch {
-			issue, ok := byID[prevs[e.ID].ID]
+			issue, ok := byID[e.ExternalID]
 			if !ok {
 				missing = append(missing, e)
 				continue
 			}
-			emitted += t.applyLinearIssue(ctx, orgID, e, prevs[e.ID], issue, teams, allDone)
+			emitted += t.applyLinearIssue(ctx, orgID, scope, e, prevs[e.ID], issue, teams, allDone)
 		}
 	}
 	if len(missing) > 0 {
@@ -316,14 +425,13 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 	return emitted, missing, nil
 }
 
-// confirmLinearIndividually asks Linear about each entity the batch read could
-// not answer for: snapshot-less entities by identifier, and tracked issues
-// absent from their batch by UUID. Absence from a batch is never proof the
-// issue is gone, so only Linear answering not-found for the issue itself emits
-// unreachable; an issue that does come back is applied like any refreshed one.
-// Any other failure is no evidence either way, and the entity is asked about
-// again on a later cycle, behind the candidates not yet asked.
-func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearClient, orgID string, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
+// confirmLinearIndividually asks Linear by UUID about each entity the batch
+// read did not return. Absence from a batch is never proof the issue is gone,
+// so only Linear answering not-found for the issue itself emits unreachable;
+// an issue that does come back is applied like any refreshed one. Any other
+// failure is no evidence either way, and the entity is asked about again on a
+// later cycle, behind the candidates not yet asked.
+func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearClient, orgID, scope string, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
 	if len(candidates) == 0 {
 		return 0, nil
 	}
@@ -339,11 +447,7 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 				"budget", linearConfirmBudget, "deferred", len(candidates)-i)
 			break
 		}
-		ref := e.SourceID
-		if prev := prevs[e.ID]; prev != nil {
-			ref = prev.ID
-		}
-		issue, err := client.GetIssue(ctx, ref)
+		issue, err := client.GetIssue(ctx, e.ExternalID)
 		if errors.Is(err, linear.ErrRateLimited) {
 			span.SetAttributes(telemetry.Outcome("rate_limited"))
 			return emitted, err
@@ -359,9 +463,9 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 		}
 		switch {
 		case err == nil:
-			emitted += t.applyLinearIssue(ctx, orgID, e, prevs[e.ID], *issue, teams, allDone)
+			emitted += t.applyLinearIssue(ctx, orgID, scope, e, prevs[e.ID], *issue, teams, allDone)
 		case errors.Is(err, linear.ErrNotFound):
-			t.emitLinearUnreachable(ctx, orgID, e, nil, teams, "not_found")
+			t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableNotFound)
 			emitted++
 			retired++
 		default:
@@ -378,13 +482,40 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 // applyLinearIssue applies one fresh read of an entity's issue and returns the
 // events it enqueued. prev is nil for an entity with no usable snapshot, which
 // is seeded without a diff.
-func (t *Tracker) applyLinearIssue(ctx context.Context, orgID string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
-	if reason := linearIssueGone(e, issue, teams); reason != "" {
-		t.emitLinearUnreachable(ctx, orgID, e, &issue, teams, reason)
+//
+// An issue that answers under a new identifier — moved to another Linear team,
+// or its team's key renamed — is the same issue: the entity is renamed first,
+// and the diff that follows emits identifier_changed ahead of everything else
+// it finds. When no rule arms the team the issue moved to, nothing here would
+// follow it any further, so it is renamed, its identifier_changed is emitted,
+// and it retires as unreachable with reason moved, naming the team it left.
+func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
+	if reason := linearIssueGone(issue, teams); reason != "" {
+		t.emitLinearUnreachable(ctx, orgID, e, &issue, reason)
 		return 1
 	}
 	state := linearIssueToState(issue, allDone)
 	snap := state.Snap
+	if linearRenamed(scope, e, snap) {
+		oldIdentifier := e.SourceID
+		renamed, ok := t.renameLinearEntity(ctx, scope, e, snap.Identifier, snap.URL)
+		if !ok {
+			return 0
+		}
+		e = renamed
+		if teams.ForTeam(snap.TeamID) == nil {
+			var was domain.LinearSnapshot
+			if prev != nil {
+				was = *prev
+			}
+			was.Identifier = oldIdentifier
+			for _, evt := range linearIdentifierChangedEvents(was, snap, e.ID) {
+				t.publish(ctx, evt)
+			}
+			t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableMoved)
+			return 2
+		}
+	}
 	done := teams.doneForTeam(snap.TeamID)
 	terminal := func(s domain.LinearSnapshot) bool { return domain.ContainsState(done, s.StateRef()) }
 	snapJSON, _ := json.Marshal(snap)
@@ -428,7 +559,8 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, orgID string, e domain.E
 }
 
 // mirrorLinearText brings the entity's title and description up to the
-// issue's. Best effort, outside the snapshot transaction, as on Jira.
+// issue's. Best effort, outside the snapshot transaction, as on Jira. The url
+// follows an identifier change through the rename, not through here.
 func (t *Tracker) mirrorLinearText(orgID string, e domain.Entity, state linearIssueState) {
 	if e.Title != state.Snap.Title {
 		_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, state.Snap.Title)
@@ -438,41 +570,39 @@ func (t *Tracker) mirrorLinearText(orgID string, e domain.Entity, state linearIs
 	}
 }
 
-// linearIssueGone reports why an entity's issue can no longer be tracked, or
-// "" when it can:
+// linearIssueGone reports why an issue Linear still answers for can no longer
+// be tracked, or "" when it can:
 //
 //   - trashed: Linear still answers for an issue in the trash, but it is
 //     deleted from every view a person works from.
-//   - moved: the issue answers under another identifier, which is what a move
-//     to another Linear team does. The entity is keyed by the identifier, so
-//     the issue becomes a new entity when discovery finds it, and this one
-//     retires.
 //   - archived: archived in a state outside its team's done set — taken out
 //     of the workflow without finishing it. Archived in a done state is the
 //     ordinary terminal path.
-func linearIssueGone(e domain.Entity, issue linear.Issue, teams LinearRules) string {
+//
+// A new identifier is not here: the issue moved or its team's key was
+// renamed, and the entity is renamed to follow it.
+func linearIssueGone(issue linear.Issue, teams LinearRules) string {
 	switch {
 	case issue.Trashed:
-		return "trashed"
-	case issue.Identifier != "" && issue.Identifier != e.SourceID:
-		return "moved"
+		return events.LinearUnreachableTrashed
 	case issue.ArchivedAt != "" && !domain.ContainsState(teams.doneForTeam(issue.Team.ID), linearStateRef(issue.State)):
-		return "archived"
+		return events.LinearUnreachableArchived
 	}
 	return ""
 }
 
-// emitLinearUnreachable publishes the terminal event for an entity whose issue
-// Linear will no longer give TF. The metadata is the stored snapshot's
-// last-known state. A field the snapshot lacks is filled from the issue when
-// there is one (a trashed, moved or archived issue still answered), and the
-// team id last of all from the armed team whose key the identifier carries,
-// which is what names the team for an entity with no snapshot that Linear
-// answers not-found for. An event that still names no team reaches no team's
-// handlers: the router's gate refuses it. Published rather than committed
-// with a snapshot, as Jira's is: there is no new snapshot, and closing the
-// entity is the router's job.
-func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e domain.Entity, issue *linear.Issue, teams LinearRules, reason string) {
+// emitLinearUnreachable publishes the terminal event for an entity TF will no
+// longer follow, with reason in its metadata. The metadata is the stored
+// snapshot's last-known state; a field the snapshot lacks is filled from the
+// issue when there is one (a trashed or archived issue still answered). The
+// team in particular comes from one of those two and never from the
+// identifier, whose prefix is a display key a move or a rename changes. An
+// event that names no team — an entity with no snapshot that Linear has no
+// answer for — reaches no team's handlers: the router's gate refuses it, and
+// the close relations still close the entity and its tasks. Published rather
+// than committed with a snapshot, as Jira's is: there is no new snapshot, and
+// closing the entity is the router's job.
+func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e domain.Entity, issue *linear.Issue, reason string) {
 	var snap domain.LinearSnapshot
 	if e.SnapshotJSON != "" && e.SnapshotJSON != "{}" {
 		if err := json.Unmarshal([]byte(e.SnapshotJSON), &snap); err != nil {
@@ -496,19 +626,16 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 			snap.State = fresh.State
 		}
 	}
-	if snap.TeamKey == "" {
-		snap.TeamKey = extractProject(e.SourceID)
+	if snap.ID == "" {
+		snap.ID = e.ExternalID
 	}
 	if snap.TeamID == "" {
-		snap.TeamID = teams.teamIDForKey(snap.TeamKey)
-	}
-	if snap.TeamID == "" {
-		trackerLog.WarnContext(ctx, "no single armed Linear team has this issue's key; its unreachable event names no team, so no team's handlers receive it",
-			"source_id", e.SourceID, "entity_id", e.ID, "team_key", snap.TeamKey)
+		trackerLog.WarnContext(ctx, "no snapshot or answer names this issue's Linear team; its unreachable event names no team, so no team's handlers receive it",
+			"source_id", e.SourceID, "entity_id", e.ID)
 	}
 	snap.Identifier = e.SourceID
 	entityID := e.ID
-	trackerLog.InfoContext(ctx, "linear will not give TF this issue any more; retiring entity",
+	trackerLog.InfoContext(ctx, "TF will not follow this linear issue any more; retiring entity",
 		"source_id", e.SourceID, "entity_id", e.ID, "reason", reason)
 	t.publish(ctx, domain.Event{
 		OrgID:     orgID,
@@ -517,9 +644,10 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 		MetadataJSON: mustJSON(events.LinearIssueUnreachableMetadata{
 			LinearIssueIdentity: linearIdentity(snap),
 			LastStatus:          snap.State.Name,
+			Reason:              reason,
 		}),
 		// No source time: Linear does not say when an issue stopped being
-		// readable, so occurred_at stays NULL. created_at is set for the bus,
+		// followable, so occurred_at stays NULL. created_at is set for the bus,
 		// which hands this struct to subscribers as-is.
 		CreatedAt: time.Now(),
 	})

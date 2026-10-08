@@ -40,7 +40,7 @@ func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	st := sqlitestore.New(database)
 	ctx := context.Background()
 
-	entityA, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "PR 1", "https://example.com/1")
+	entityA, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#1", "", "pr", "PR 1", "https://example.com/1")
 	if err != nil {
 		t.Fatalf("create entity A: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestRouter_SoftDeletedTrigger_NoLongerFires(t *testing.T) {
 	}
 	softDeleteHandler(t, database, triggerID)
 
-	entityB, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "PR 2", "https://example.com/2")
+	entityB, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#2", "", "pr", "PR 2", "https://example.com/2")
 	if err != nil {
 		t.Fatalf("create entity B: %v", err)
 	}

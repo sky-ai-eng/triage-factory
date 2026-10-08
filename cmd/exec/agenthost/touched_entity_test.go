@@ -73,7 +73,7 @@ func TestResolveTouchedEntity_MapsProviderAndTarget(t *testing.T) {
 			if id == "" {
 				t.Fatal("expected an entity id, got empty")
 			}
-			ent, err := stores.Entities.GetBySource(ctx, org, tc.wantSource, tc.act.Target)
+			ent, err := stores.Entities.GetBySource(ctx, org, tc.wantSource, testScope(tc.wantSource), tc.act.Target)
 			if err != nil || ent == nil {
 				t.Fatalf("GetBySource(%s, %s): ent=%v err=%v", tc.wantSource, tc.act.Target, ent, err)
 			}
@@ -125,7 +125,7 @@ func TestRecordTouch_LiveWiring_CreatesEntityOnOrgWrite(t *testing.T) {
 				t.Fatalf("JiraCreateIssue: %v", err)
 			}
 
-			ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-1")
+			ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1")
 			if err != nil {
 				t.Fatalf("GetBySource: %v", err)
 			}
@@ -137,4 +137,21 @@ func TestRecordTouch_LiveWiring_CreatesEntityOnOrgWrite(t *testing.T) {
 			}
 		})
 	}
+}
+
+// testScope is the scope a test keys an entity of source under: what
+// domain.EntityScope answers for an org with default settings where the
+// source has one, and a fixed stand-in where it has none.
+func testScope(source string) string {
+	switch source {
+	case "github":
+		return "https://github.com"
+	case "jira":
+		return "https://jira.example.com"
+	case "slack":
+		return "T0TEST"
+	case "linear":
+		return "ws-test"
+	}
+	return "test-scope"
 }

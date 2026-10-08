@@ -82,13 +82,18 @@ type inboundMention struct {
 // implementing db.EntityStore's entire surface; db.EntityStore satisfies
 // this structurally, so the production wiring (install.go) needs no
 // adapter.
+//
+// Every Slack entity is keyed under the workspace of the connection it came
+// through (ws.WorkspaceID): channel ids and message timestamps are only unique
+// within one workspace, and an org can connect several.
 type entityFinder interface {
-	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
-	// GetBySourceSystem resolves an entity by its natural (source, source_id)
-	// key without creating one — the engaged-thread branch's engagement gate
-	// (handleThreadMessage) needs to check a thread entity's existence, kind,
-	// and state before deciding to ingest a follow-up, never mint one.
-	GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
+	FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
+	// GetBySourceSystem resolves an entity by its natural (source, scope,
+	// source_id) key without creating one — the engaged-thread branch's
+	// engagement gate (handleThreadMessage) needs to check a thread entity's
+	// existence, kind, and state before deciding to ingest a follow-up, never
+	// mint one.
+	GetBySourceSystem(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error)
 }
 
 // ingestPipeline is the transport-neutral core both the Events API receiver
@@ -204,7 +209,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	}
 	sourceID := domain.SlackSourceID(ev.Channel, root)
 
-	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", sourceID, kind, slackThreadTitle, "")
+	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", ws.WorkspaceID, sourceID, "", kind, slackThreadTitle, "")
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
@@ -298,7 +303,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// someone else's thread), and still be active. An unknown thread, someone
 	// else's thread, or a closed one is chatter the bot doesn't listen to.
 	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
-	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", sourceID)
+	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", ws.WorkspaceID, sourceID)
 	if err != nil {
 		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}

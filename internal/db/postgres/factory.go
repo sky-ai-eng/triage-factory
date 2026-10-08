@@ -336,13 +336,14 @@ const factoryJiraProjectTrackedExists = `EXISTS (
 // the Linear teams attached to the viewer's teams. The entity's Linear team
 // is its snapshot's team_id, the UUID linear_team_rules is keyed by and the
 // router's team gate reads — not the identifier's key prefix, which a team
-// key rename in Linear changes.
+// key rename in Linear changes. Only rules saved under the org's current Linear
+// workspace count, as everywhere else rules are read: a rule from a workspace
+// the org has moved off names a team no current issue belongs to.
 //
 // A row with no snapshot matches nothing: one not yet refreshed, and every
 // active Linear entity while the source is turned off, because turning a
-// source off clears its snapshots. Those rows return as the tracker re-reads
-// them after the source is turned back on, a confirmation budget's worth per
-// cycle. Jira rows stay on the belt through the same pause because a Jira key
+// source off clears its snapshots. Those rows return on the tracker's first
+// cycle after the source is turned back on. Jira rows stay on the belt through the same pause because a Jira key
 // prefix is the project's identity. There is no fallback to the Linear key
 // prefix: a stored key can be stale after a rename and name another Linear
 // team, and the tracked-set rows of teams the viewer is not on are invisible
@@ -352,6 +353,7 @@ const factoryLinearTeamTrackedExists = `EXISTS (
 	JOIN teams tm ON tm.id = lr.team_id
 	WHERE tm.org_id = e.org_id
 	  AND lr.linear_team_id = e.snapshot_json->>'team_id'
+	  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = e.org_id)
 )`
 
 // factoryEntityTrackedExists is the combined tracked-set membership
@@ -403,6 +405,7 @@ func factoryLinearTeamTrackedForTeams(placeholders string) string {
 		WHERE tm.org_id = e.org_id
 		  AND lr.team_id IN (` + placeholders + `)
 		  AND lr.linear_team_id = e.snapshot_json->>'team_id'
+		  AND lr.linear_workspace_id = (SELECT os.linear_workspace_id FROM org_settings os WHERE os.org_id = e.org_id)
 	)`
 }
 

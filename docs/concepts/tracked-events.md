@@ -146,8 +146,9 @@ nothing is assigned to, so the second query returns nothing.
 | **Status Changed** | `linear:issue:status_changed` | The workflow state changes. A state renamed in Linear is not a change: states compare by id | new state name |
 | **Issue Completed** | `linear:issue:completed` | The state enters one of the team's done states (fires beside `status_changed`) | — |
 | **Issue Body Updated** | `linear:issue:body_updated` | The description changes, including clearing it | — |
-| **Parent Changed** | `linear:issue:parent_changed` | The issue moves under another parent, or loses its parent | new parent identifier, or `none` |
-| **Issue Unreachable** | `linear:issue:unreachable` | Linear will no longer give TF a tracked issue — see below | — |
+| **Parent Changed** | `linear:issue:parent_changed` | The issue moves under another parent, or loses its parent | new parent's UUID, or `none` |
+| **Identifier Changed** | `linear:issue:identifier_changed` | The issue answers under a new identifier: it moved to another team, or its team's key was renamed — see below | — |
+| **Issue Unreachable** | `linear:issue:unreachable` | TF will no longer follow a tracked issue — see below | — |
 
 An issue first seen through the pickup query is seeded quietly, as a Jira
 issue is: discovery records it without an event, and later changes are diffed
@@ -167,35 +168,74 @@ Every Linear event's metadata carries the issue's identity block —
 `assignee`, `assignee_user_id`, `title` — plus the fields its event adds
 (`old_status`/`new_status`, `old_priority`/`new_priority`,
 `previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
-`last_status`, `comment_id`). `linear_team_id` is what the router's team gate
-reads, and `assignee_user_id` is what assignee-centric routing joins against a
+`last_status`, `reason`, `comment_id`, `old_identifier`/`old_linear_team_id`/
+`old_linear_team_key`). `linear_team_id` is what the router's team gate reads,
+and `assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity.
+
+#### Identity
+
+An issue's identifier (`ENG-123`) is a display key: moving the issue to
+another team gives it a new one, and renaming a team's key changes every
+identifier in the team. Its UUID never changes. So a Linear entity's
+`source_id` is the identifier — what everything displays — and its
+`external_id` is the UUID, which is what TF matches it on. Entities are keyed
+within a `scope`, the org's Linear workspace id, because identifiers repeat
+across workspaces.
+
+When a tracked issue answers under a new identifier, the entity is renamed in
+the same cycle: its `source_id` and `url`, and the keys of the artifacts
+recorded against it, move to the new identifier, and it keeps its tasks,
+conversations and memory. The refresh emits `identifier_changed` first, ahead
+of anything else it found (a move to another team usually changes the issue's
+workflow state too), in the same commit as the new snapshot. Predicates can
+filter it on `linear_team_key` and `old_linear_team_key`.
+
+If no rule arms the team the issue moved to, TF has nothing to follow it with:
+the entity is renamed, `identifier_changed` is emitted, and it retires as
+`unreachable` with reason `moved`. That event names the team the issue left,
+which is the team that was tracking it.
+
+A team key that is freed and reused can briefly name two issues: a new issue
+gets `ENG-1` before TF has seen the old `ENG-1` move. The new one is skipped
+until the old one's refresh renames it, and is picked up the cycle after.
 
 #### Issue Unreachable
 
 Like Jira's, this event closes the entity and every task on it, and it is
-never inferred from an issue's absence. An issue missing from a batch read is
-asked about directly, by id, and only these answers retire it:
+never inferred from an issue's absence. Its `reason` says why:
 
-- Linear answers not-found for the issue.
-- The issue is in the trash.
-- The issue answers under another identifier. Moving an issue to another
-  Linear team gives it a new identifier, and the entity is keyed by the
-  identifier, so the issue becomes a new entity when discovery finds it in its
-  new team and the old entity retires.
-- The issue is archived in a state outside its team's done states. Archived in
-  a done state is the ordinary terminal path.
+- `not_found`: Linear answers not-found for the issue. An issue missing from a
+  batch read is asked about directly, by UUID, and only this answer retires
+  it. Any other failure to read it is not evidence either way, and it is asked
+  about again on a later cycle. At most 20 issues are asked about one at a
+  time per cycle; the rest wait for the next.
+- `trashed`: the issue is in the trash.
+- `archived`: the issue is archived in a state outside its team's done states.
+  Archived in a done state is the ordinary terminal path.
+- `moved`: the issue moved to a team no rule arms (see Identity above).
+- `scope_changed`: the org's Linear credential now belongs to another
+  workspace. Every active issue from the previous workspace retires at the
+  start of the next cycle, without Linear being asked: the credential cannot
+  see the old workspace. The rows are not moved or reused — an issue in the
+  new workspace that happens to share an old identifier is a different issue
+  and gets its own entity — and binding the old workspace again finds them by
+  UUID.
 
-Any other failure to read the issue is not evidence either way, and it is
-asked about again on a later cycle. At most 20 issues are asked about one at a
-time per cycle; the rest wait for the next.
+The event's metadata is the issue's last-known state. Its team comes from the
+stored snapshot, or from Linear's answer when there is one, never from the
+identifier's prefix. An entity with neither (no snapshot, and not found) names
+no team: the event still closes the entity and its tasks, but the team gate
+refuses it for every team, so no team's handlers receive it.
 
-The event's metadata is the issue's last-known state. An entity with no
-snapshot (one a source pause cleared) that Linear answers not-found for has
-only its identifier, so its `linear_team_id` comes from the armed team whose
-key the identifier carries. When no armed team has that key, or more than one
-does, the event names no team: it still closes the entity and its tasks, but
-the team gate refuses it for every team, so no team's handlers receive it.
+#### Team rules and the workspace
+
+A team's Linear rules name team and workflow-state ids of the workspace they
+were saved under. They apply only while the org's credential belongs to that
+workspace: after a switch, the poller does not ask about them, the team's
+settings do not list them, and the router's team gate does not read them. They
+stay stored, though, and binding the old workspace again brings them back. A
+save under the new workspace never touches them.
 
 #### Rate limits
 
@@ -278,6 +318,9 @@ The tracker stores these fields for each PR and diffs them between cycles:
 
 ### Linear Issue Snapshot
 
+The entity itself carries `source_id` (the identifier), `external_id` (the
+UUID, which it is matched on) and `scope` (the org's Linear workspace id).
+
 - `id` (UUID), `identifier` (the entity's `source_id`), `title`, `url`
 - `body_hash` — fingerprint of the raw markdown description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `state` — `{id, name, type}`; compared by id
@@ -292,9 +335,10 @@ The tracker stores these fields for each PR and diffs them between cycles:
 
 Turning Linear off for an org clears these snapshots, as it does for any
 source. The factory belt places a Linear issue by its snapshot's `team_id`, so
-while Linear is off its issues are not on the belt. They return as the tracker
-re-reads them after Linear is turned back on, up to 20 a cycle. Jira issues stay
-on the belt through a pause, because a Jira key's prefix is its project.
+while Linear is off its issues are not on the belt. They return on the first
+cycle after Linear is turned back on: an entity with no snapshot is read by
+UUID in the same batches as the rest and seeded without events. Jira issues
+stay on the belt through a pause, because a Jira key's prefix is its project.
 
 ## Event lifecycle
 

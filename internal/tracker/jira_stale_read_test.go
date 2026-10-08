@@ -74,7 +74,7 @@ func jiraRefreshFixture(t *testing.T, srv *httptest.Server) (*Tracker, *recordin
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
 	pub := &recordingPublisher{}
@@ -84,7 +84,7 @@ func jiraRefreshFixture(t *testing.T, srv *httptest.Server) (*Tracker, *recordin
 // storedJiraStatus reads back the status the entity's snapshot currently holds.
 func storedJiraStatus(t *testing.T, stores db.Stores) string {
 	t.Helper()
-	ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-1")
+	ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}
@@ -122,7 +122,7 @@ func TestRefreshJira_StaleReadNeitherEmitsNorRegressesBaseline(t *testing.T) {
 
 	runCycle := func(n int) {
 		t.Helper()
-		if _, err := tr.RefreshJira(context.Background(), client, srv.URL, nil); err != nil {
+		if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
 			t.Fatalf("RefreshJira cycle %d: %v", n, err)
 		}
 	}
@@ -167,7 +167,7 @@ func TestRefreshJira_EqualUpdatedStillDiffs(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
 	for i := 1; i <= 2; i++ {
-		if _, err := tr.RefreshJira(context.Background(), client, srv.URL, nil); err != nil {
+		if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
 			t.Fatalf("RefreshJira cycle %d: %v", i, err)
 		}
 	}
@@ -210,7 +210,7 @@ func TestRefreshJira_UncomparableUpdatedDiffsAsBefore(t *testing.T) {
 			client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 
 			for i := 1; i <= 2; i++ {
-				if _, err := tr.RefreshJira(context.Background(), client, srv.URL, nil); err != nil {
+				if _, err := tr.RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, nil); err != nil {
 					t.Fatalf("RefreshJira cycle %d: %v", i, err)
 				}
 			}

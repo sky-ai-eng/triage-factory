@@ -52,9 +52,15 @@ var _ db.EntityStore = (*entityStore)(nil)
 // snapshot_json is cast to text so the Go side gets the same string
 // shape SQLite returns; the caller pipes that through json.Unmarshal
 // when it needs structured data.
-const pgEntitySelectCols = `id, source, source_id, kind, COALESCE(title, ''), COALESCE(url, ''),
+const pgEntitySelectCols = `id, source, scope, source_id, COALESCE(external_id, ''), kind,
+       COALESCE(title, ''), COALESCE(url, ''),
        COALESCE(snapshot_json::text, ''), COALESCE(description, ''), state,
        created_at, last_polled_at, closed_at, poll_seq`
+
+// pgEntityKeyOrder is the key lookup's preference among rows sharing a key:
+// the active one (there is at most one), otherwise the most recently closed.
+// id breaks the tie so the answer is stable.
+const pgEntityKeyOrder = `ORDER BY (state = 'active') DESC, closed_at DESC NULLS LAST, created_at DESC, id DESC`
 
 // --- Lookup ---
 
@@ -139,17 +145,69 @@ func (s *entityStore) StampCommissionedByIfUnsetSystem(ctx context.Context, orgI
 	return n > 0, nil
 }
 
-func (s *entityStore) GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
-	return getEntityBySource(ctx, s.q, orgID, source, sourceID)
+func (s *entityStore) GetBySource(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error) {
+	return entityByKey(ctx, s.q, orgID, source, scope, sourceID, "")
 }
 
-func (s *entityStore) GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error) {
-	return getEntityBySource(ctx, s.admin, orgID, source, sourceID)
+func (s *entityStore) GetBySourceSystem(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error) {
+	return entityByKey(ctx, s.admin, orgID, source, scope, sourceID, "")
 }
 
-func getEntityBySource(ctx context.Context, q queryer, orgID, source, sourceID string) (*domain.Entity, error) {
-	row := q.QueryRowContext(ctx, `SELECT `+pgEntitySelectCols+` FROM entities WHERE org_id = $1 AND source = $2 AND source_id = $3`, orgID, source, sourceID)
-	return scanEntityRow(row)
+// entityByKey is the key lookup. A non-empty externalID skips a row that
+// carries a different id: that row is another object that had or has the key.
+func entityByKey(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID string) (*domain.Entity, error) {
+	return scanEntityRow(q.QueryRowContext(ctx, `
+		SELECT `+pgEntitySelectCols+` FROM entities
+		WHERE org_id = $1 AND source = $2 AND scope = $3 AND source_id = $4
+		  AND ($5 = '' OR external_id IS NULL OR external_id = $5)
+		`+pgEntityKeyOrder+` LIMIT 1`,
+		orgID, source, scope, sourceID, externalID))
+}
+
+func entityByExternalID(ctx context.Context, q queryer, orgID, source, scope, externalID string) (*domain.Entity, error) {
+	return scanEntityRow(q.QueryRowContext(ctx, `
+		SELECT `+pgEntitySelectCols+` FROM entities
+		WHERE org_id = $1 AND source = $2 AND scope = $3 AND external_id = $4
+		ORDER BY id LIMIT 1`,
+		orgID, source, scope, externalID))
+}
+
+func (s *entityStore) GetByExternalIDSystem(ctx context.Context, orgID, source, scope, externalID string) (*domain.Entity, error) {
+	if externalID == "" {
+		return nil, nil
+	}
+	return entityByExternalID(ctx, s.admin, orgID, source, scope, externalID)
+}
+
+// StampExternalIDSystem fills a NULL external_id; see the interface doc. The
+// guard admits the id the row already carries, so a repeat stamp returns the
+// row rather than reading as a decline.
+func (s *entityStore) StampExternalIDSystem(ctx context.Context, orgID, entityID, externalID string) (*domain.Entity, error) {
+	if externalID == "" {
+		return nil, errors.New("stamp external id: empty id")
+	}
+	e, err := scanEntityRow(s.admin.QueryRowContext(ctx, `
+		UPDATE entities SET external_id = $1
+		WHERE org_id = $2 AND id = $3 AND (external_id IS NULL OR external_id = $1)
+		RETURNING `+pgEntitySelectCols,
+		externalID, orgID, entityID))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return nil, fmt.Errorf("%w: %s", db.ErrEntityIdentityAmbiguous, externalID)
+		}
+		return nil, err
+	}
+	if e != nil {
+		return e, nil
+	}
+	existing, err := getEntity(ctx, s.admin, orgID, entityID)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, sql.ErrNoRows
+	}
+	return nil, nil
 }
 
 func (s *entityStore) Descriptions(ctx context.Context, orgID string, ids []string) (map[string]string, error) {
@@ -371,16 +429,27 @@ func (s *entityStore) ListActiveJiraTeamScoped(ctx context.Context, orgID, teamI
 
 // --- Mutation ---
 
-func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.q, orgID, source, sourceID, kind, title, url)
+func (s *entityStore) FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+	return findOrCreateEntity(ctx, s.q, orgID, source, scope, sourceID, externalID, kind, title, url)
 }
 
-func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
-	return findOrCreateEntity(ctx, s.admin, orgID, source, sourceID, kind, title, url)
+func (s *entityStore) FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+	return findOrCreateEntity(ctx, s.admin, orgID, source, scope, sourceID, externalID, kind, title, url)
 }
 
-func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error) {
-	existing, err := getEntityBySource(ctx, q, orgID, source, sourceID)
+func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
+	if scope == "" {
+		return nil, false, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, sourceID)
+	}
+	find := func() (*domain.Entity, error) {
+		if externalID != "" {
+			if e, err := entityByExternalID(ctx, q, orgID, source, scope, externalID); err != nil || e != nil {
+				return e, err
+			}
+		}
+		return entityByKey(ctx, q, orgID, source, scope, sourceID, externalID)
+	}
+	existing, err := find()
 	if err != nil {
 		return nil, false, err
 	}
@@ -390,26 +459,41 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID,
 
 	id := uuid.New().String()
 	now := time.Now().UTC()
-	_, err = q.ExecContext(ctx, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, state, created_at, last_polled_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active', $8, $9)
-	`, id, orgID, source, sourceID, kind, title, url, now, now)
+	// DO NOTHING rather than a raised violation: a raised one would abort a
+	// caller's enclosing transaction, and a lost race is an answer here, not
+	// an error. The re-read below decides what the loser sees.
+	res, err := q.ExecContext(ctx, `
+		INSERT INTO entities (id, org_id, source, scope, source_id, external_id, kind, title, url, state, created_at, last_polled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'active', $10, $11)
+		ON CONFLICT DO NOTHING
+	`, id, orgID, source, scope, sourceID, nullString(externalID), kind, title, url, now, now)
 	if err != nil {
-		// Concurrent first-discovery race: the unique key
-		// (org_id, source, source_id) just fired. Re-read so both
-		// callers see a populated entity. If the re-read also
-		// fails, surface the original error.
-		existing, err2 := getEntityBySource(ctx, q, orgID, source, sourceID)
-		if err2 == nil && existing != nil {
+		return nil, false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+	if n == 0 {
+		// A concurrent first discovery won, or an active row already answers
+		// to the key. The re-read finds the former; the latter carries a
+		// different id, so the key lookup skips it and the create is refused.
+		existing, err := find()
+		if err != nil {
+			return nil, false, err
+		}
+		if existing != nil {
 			return existing, false, nil
 		}
-		return nil, false, err
+		return nil, false, fmt.Errorf("%w: %s %s in %s", db.ErrEntityKeyOccupied, source, sourceID, scope)
 	}
 
 	return &domain.Entity{
 		ID:           id,
 		Source:       source,
+		Scope:        scope,
 		SourceID:     sourceID,
+		ExternalID:   externalID,
 		Kind:         kind,
 		Title:        title,
 		URL:          url,
@@ -417,6 +501,186 @@ func findOrCreateEntity(ctx context.Context, q queryer, orgID, source, sourceID,
 		CreatedAt:    now,
 		LastPolledAt: &now,
 	}, true, nil
+}
+
+// RenameSystem — see the interface doc. The FOR UPDATE on the identity row is
+// the lock: two detections of the same rename serialize there, and the second
+// re-reads the key the first committed and returns a no-op.
+func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error) {
+	if externalID == "" {
+		return domain.EntityRenameOutcome{}, nil
+	}
+	if newKey == "" {
+		return domain.EntityRenameOutcome{}, errors.New("rename entity: empty key")
+	}
+	if scope == "" {
+		return domain.EntityRenameOutcome{}, fmt.Errorf("%w: %s %s", db.ErrEntityScopeRequired, source, newKey)
+	}
+	var out domain.EntityRenameOutcome
+	err := inTx(ctx, s.admin, func(tx queryer) error {
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, source_id, COALESCE(url, '') FROM entities
+			WHERE org_id = $1 AND source = $2 AND scope = $3 AND external_id = $4
+			ORDER BY id
+			FOR UPDATE`, orgID, source, scope, externalID)
+		if err != nil {
+			return err
+		}
+		type held struct{ id, key, url string }
+		var found []held
+		for rows.Next() {
+			var h held
+			if err := rows.Scan(&h.id, &h.key, &h.url); err != nil {
+				rows.Close()
+				return err
+			}
+			found = append(found, h)
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		switch {
+		case len(found) == 0:
+			return nil
+		case len(found) > 1:
+			return fmt.Errorf("%w: %s", db.ErrEntityIdentityAmbiguous, externalID)
+		case found[0].key == newKey:
+			return nil
+		}
+		row := found[0]
+
+		var holder string
+		err = tx.QueryRowContext(ctx, `
+			SELECT id FROM entities
+			WHERE org_id = $1 AND source = $2 AND scope = $3 AND source_id = $4
+			  AND state = 'active' AND id <> $5
+			LIMIT 1`, orgID, source, scope, newKey, row.id).Scan(&holder)
+		if err == nil {
+			return fmt.Errorf("%w: %s %s in %s", db.ErrEntityKeyOccupied, source, newKey, scope)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+
+		url := row.url
+		if newURL != "" {
+			url = newURL
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE entities SET source_id = $1, url = $2 WHERE org_id = $3 AND id = $4`,
+			newKey, url, orgID, row.id); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: %s %s in %s: %v", db.ErrEntityKeyOccupied, source, newKey, scope, err)
+			}
+			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
+		}
+		if err := rewriteEntityArtifacts(ctx, tx, orgID, source, row.key, newKey); err != nil {
+			return err
+		}
+		if err := rewriteEntityActionURLs(ctx, tx, orgID, source, row.url, url); err != nil {
+			return err
+		}
+		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey}
+		return nil
+	})
+	if err != nil {
+		return domain.EntityRenameOutcome{}, err
+	}
+	return out, nil
+}
+
+// rewriteEntityArtifacts moves the source's artifacts off the old key: target
+// where it is the key itself, dedup_key where its resource segment is. The SQL
+// is a cheap over-approximation and domain.RewriteEntityArtifactKey decides.
+func rewriteEntityArtifacts(ctx context.Context, q queryer, orgID, source, from, to string) error {
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, target, dedup_key FROM artifacts
+		WHERE org_id = $1 AND provider = $2 AND (target = $3 OR strpos(dedup_key, $3) > 0)`,
+		orgID, source, from)
+	if err != nil {
+		return err
+	}
+	type pending struct{ id, target, dedupKey string }
+	var updates []pending
+	for rows.Next() {
+		var id, target, key string
+		if err := rows.Scan(&id, &target, &key); err != nil {
+			rows.Close()
+			return err
+		}
+		newTarget, targetMoved := target, false
+		if target == from {
+			newTarget, targetMoved = to, true
+		}
+		newKey, keyMoved := domain.RewriteEntityArtifactKey(key, source, from, to)
+		if targetMoved || keyMoved {
+			updates = append(updates, pending{id: id, target: newTarget, dedupKey: newKey})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, u := range updates {
+		if _, err := q.ExecContext(ctx, `
+			UPDATE artifacts SET target = $1, dedup_key = $2, updated_at = now()
+			WHERE id = $3 AND org_id = $4`,
+			u.target, u.dedupKey, u.id, orgID); err != nil {
+			if isUniqueViolation(err) {
+				return fmt.Errorf("%w: an artifact already answers to %s: %v", db.ErrEntityKeyOccupied, u.dedupKey, err)
+			}
+			return fmt.Errorf("rewrite artifact %s for %s -> %s: %w", u.id, from, to, err)
+		}
+	}
+	return nil
+}
+
+// rewriteEntityActionURLs moves the audit ledger's pointer for actions whose
+// link resolves to the entity's old url. Only current_url is written; the
+// record of the act is not. The pointer's current value is the rewrite base,
+// so consecutive renames chain.
+func rewriteEntityActionURLs(ctx context.Context, q queryer, orgID, source, from, to string) error {
+	if from == "" || to == "" || from == to {
+		return nil
+	}
+	rows, err := q.QueryContext(ctx, `
+		SELECT id, COALESCE(current_url, url) FROM external_actions
+		WHERE org_id = $1 AND provider = $2 AND starts_with(COALESCE(current_url, url, ''), $3)`,
+		orgID, source, from)
+	if err != nil {
+		return err
+	}
+	type pending struct{ id, url string }
+	var updates []pending
+	for rows.Next() {
+		var id, u string
+		if err := rows.Scan(&id, &u); err != nil {
+			rows.Close()
+			return err
+		}
+		if moved, ok := domain.RewriteEntityURL(u, from, to); ok {
+			updates = append(updates, pending{id: id, url: moved})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, u := range updates {
+		if _, err := q.ExecContext(ctx,
+			`UPDATE external_actions SET current_url = $1 WHERE id = $2 AND org_id = $3`,
+			u.url, u.id, orgID); err != nil {
+			return fmt.Errorf("rewrite external action pointer %s: %w", u.id, err)
+		}
+	}
+	return nil
 }
 
 // scanWrittenEntity decodes an id-keyed UPDATE … RETURNING. scanEntityRow maps
@@ -490,7 +754,12 @@ func (s *entityStore) RekeyOrMergeSystem(ctx context.Context, orgID, id, newSour
 	var survivor string
 	merged := false
 	err := inTx(ctx, s.admin, func(q queryer) error {
-		if err := q.QueryRowContext(ctx, `SELECT id FROM entities WHERE org_id=$1 AND source=(SELECT source FROM entities WHERE org_id=$1 AND id=$2) AND source_id=$3`, orgID, id, newSourceID).Scan(&survivor); err != nil {
+		if err := q.QueryRowContext(ctx, `
+			SELECT e.id FROM entities e
+			JOIN entities self ON self.org_id = e.org_id AND self.id = $2
+			WHERE e.org_id = $1 AND e.source = self.source AND e.scope = self.scope AND e.source_id = $3
+			ORDER BY (e.state = 'active') DESC, e.closed_at DESC NULLS LAST, e.created_at DESC, e.id DESC
+			LIMIT 1`, orgID, id, newSourceID).Scan(&survivor); err != nil {
 			if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
@@ -760,7 +1029,7 @@ func pgIntArray(ids []int) string {
 
 func scanEntityRow(row *sql.Row) (*domain.Entity, error) {
 	var e domain.Entity
-	err := row.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
+	err := row.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 		&e.SnapshotJSON, &e.Description, &e.State,
 		&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq)
 	if err == sql.ErrNoRows {
@@ -776,7 +1045,7 @@ func scanEntityList(rows *sql.Rows) ([]domain.Entity, error) {
 	out := []domain.Entity{}
 	for rows.Next() {
 		var e domain.Entity
-		if err := rows.Scan(&e.ID, &e.Source, &e.SourceID, &e.Kind, &e.Title, &e.URL,
+		if err := rows.Scan(&e.ID, &e.Source, &e.Scope, &e.SourceID, &e.ExternalID, &e.Kind, &e.Title, &e.URL,
 			&e.SnapshotJSON, &e.Description, &e.State,
 			&e.CreatedAt, &e.LastPolledAt, &e.ClosedAt, &e.PollSeq); err != nil {
 			return nil, err

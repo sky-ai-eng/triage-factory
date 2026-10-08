@@ -9,6 +9,7 @@ import (
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -110,17 +111,28 @@ func TestDiffLinearSnapshots(t *testing.T) {
 			curr: func(s *domain.LinearSnapshot) { s.BodyHash = "hash-2" }},
 		{name: "parent set",
 			curr: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-9", "ENG-9" },
-			want: []want{{domain.EventLinearIssueParentChanged, "ENG-9"}}},
+			want: []want{{domain.EventLinearIssueParentChanged, "uuid-9"}}},
 		{name: "parent changed",
 			prev: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-9", "ENG-9" },
 			curr: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-8", "ENG-8" },
-			want: []want{{domain.EventLinearIssueParentChanged, "ENG-8"}}},
+			want: []want{{domain.EventLinearIssueParentChanged, "uuid-8"}}},
 		{name: "parent cleared",
 			prev: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-9", "ENG-9" },
 			want: []want{{domain.EventLinearIssueParentChanged, linearNoParent}}},
 		{name: "parent moved team, same parent",
 			prev: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-9", "ENG-9" },
 			curr: func(s *domain.LinearSnapshot) { s.ParentID, s.ParentIdentifier = "uuid-9", "OPS-4" }},
+		{name: "moved to another team",
+			// The move comes first, then what the move itself changed: the
+			// new team's workflow state is a different state.
+			curr: func(s *domain.LinearSnapshot) {
+				s.Identifier, s.TeamID, s.TeamKey = "OPS-77", "team-ops", "OPS"
+				s.State = domain.LinearStateRef{ID: "state-ops-todo", Name: "Triage", Type: "triage"}
+			},
+			want: []want{{domain.EventLinearIssueIdentifierChanged, ""}, {domain.EventLinearIssueStatusChanged, "Triage"}}},
+		{name: "team key renamed",
+			curr: func(s *domain.LinearSnapshot) { s.Identifier, s.TeamKey = "CORE-1", "CORE" },
+			want: []want{{domain.EventLinearIssueIdentifierChanged, ""}}},
 		{name: "last sub-issue closed",
 			prev: func(s *domain.LinearSnapshot) { s.OpenChildCount = 2 },
 			want: []want{{domain.EventLinearIssueBecameAtomic, ""}}},
@@ -203,19 +215,24 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	diff(base, changed)                       // status, priority, commented, body, parent
 	diff(base, done)                          // completed
 	diff(withChildren, base)                  // became_atomic
+	moved := base
+	moved.Identifier, moved.TeamID, moved.TeamKey = "OPS-77", "team-ops", "OPS"
+	diff(base, moved) // identifier_changed
 
 	// unreachable is the one Linear event the diff does not produce. It is
-	// emitted for an entity with a snapshot and for one without, which has
-	// only its identifier and the armed teams to name the team from.
+	// emitted for an entity with a snapshot, and for one without when Linear
+	// still answered for the issue, which names the team.
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID)
 	snapJSON, _ := json.Marshal(base)
 	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
-		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, linRules(), "not_found")
+		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, events.LinearUnreachableNotFound)
+	answered := linIssue(2)
+	answered.Trashed = true
 	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
-		domain.Entity{ID: "ent-2", SourceID: "ENG-2"}, nil, linRules(), "not_found")
+		domain.Entity{ID: "ent-2", SourceID: "ENG-2", ExternalID: answered.ID}, &answered, events.LinearUnreachableTrashed)
 	all = append(all, pub.nonSystemEvents()...)
 
 	seen := map[string]bool{}

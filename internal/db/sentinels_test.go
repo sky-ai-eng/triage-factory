@@ -65,8 +65,8 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 			name: "tasks.org_id+team_id+creator_user_id",
 			setup: func(t *testing.T, tx *sql.Tx) {
 				t.Helper()
-				if _, err := tx.Exec(`INSERT INTO entities (id, source, source_id, kind)
-				                      VALUES ('probe-ent', 'github', '1', 'pr')`); err != nil {
+				if _, err := tx.Exec(`INSERT INTO entities (id, source, source_id, kind, scope)
+				                      VALUES ('probe-ent', 'github', '1', 'pr', 'https://github.com')`); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}
 				if _, err := tx.Exec(`INSERT INTO events (id, entity_id, event_type)
@@ -87,8 +87,8 @@ func TestMigrationDefaults_MatchRuntimeConstants(t *testing.T) {
 			name: "conversations.org_id+team_id",
 			setup: func(t *testing.T, tx *sql.Tx) {
 				t.Helper()
-				if _, err := tx.Exec(`INSERT INTO entities (id, source, source_id, kind)
-				                      VALUES ('probe-ent-r', 'github', '2', 'pr')`); err != nil {
+				if _, err := tx.Exec(`INSERT INTO entities (id, source, source_id, kind, scope)
+				                      VALUES ('probe-ent-r', 'github', '2', 'pr', 'https://github.com')`); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}
 				if _, err := tx.Exec(`INSERT INTO events (id, entity_id, event_type)

@@ -104,8 +104,8 @@ func newSQLitePendingFiringsSeeder(conn *sql.DB, stores db.Stores) dbtest.Pendin
 		// entity: synthetic id keeps the (source, source_id) UNIQUE happy
 		// across subtests.
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url)
-			VALUES (?, 'github', ?, 'pr', 'Test PR', '')
+			INSERT INTO entities (id, source, source_id, kind, title, url, scope)
+			VALUES (?, 'github', ?, 'pr', 'Test PR', '', 'https://github.com')
 		`, entityID, "owner/repo#"+suf); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

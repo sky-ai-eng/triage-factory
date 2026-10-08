@@ -43,7 +43,7 @@ func TestHandleEvent_EmptyOrgID_Refused(t *testing.T) {
 	var logBuf bytes.Buffer
 	t.Cleanup(logging.SetOutput(&logBuf))
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#empty-org", "pr", "PR", "https://example.com/empty")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#empty-org", "", "pr", "PR", "https://example.com/empty")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestHandleEvent_OrgIDThreaded(t *testing.T) {
 	// threading into the event row + task, not owner routing).
 	seedMatchAllCIRule(t, database, runmode.LocalDefaultTeamID)
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#thread", "pr", "PR", "https://example.com/thread")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#thread", "", "pr", "PR", "https://example.com/thread")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

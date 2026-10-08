@@ -206,8 +206,13 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   'linear:issue:unreachable': {
     label: 'Unreachable',
     description:
-      'Linear no longer gives Triage Factory this issue — deleted, trashed, archived, or moved',
+      'Triage Factory no longer follows this issue — deleted, trashed, archived, moved to an untracked team, or in another workspace',
     color: 'bg-slate-500/10 text-slate-600',
+  },
+  'linear:issue:identifier_changed': {
+    label: 'Identifier Changed',
+    description: 'Issue moved to another team, or its team key was renamed',
+    color: 'bg-violet-500/10 text-violet-600',
   },
 }
 

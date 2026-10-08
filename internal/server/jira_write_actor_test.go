@@ -61,8 +61,8 @@ func (r *recordingJiraResolver) snapshot() (calls int, orgID, userID string) {
 func seedQueuedJiraTask(t *testing.T, db *sql.DB, entityID, sourceID, taskID string) {
 	t.Helper()
 	if _, err := db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES (?, 'jira', ?, 'issue', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES (?, 'jira', ?, 'issue', 'active', 'https://jira.example.com')`,
 		entityID, sourceID,
 	); err != nil {
 		t.Fatalf("seed jira entity: %v", err)
@@ -205,8 +205,8 @@ func TestTaskClaim_GitHubTask_SkipsJiraResolver(t *testing.T) {
 
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_gh', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

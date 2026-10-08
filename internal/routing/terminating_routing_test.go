@@ -66,7 +66,7 @@ func seedTerminatingEntityWithCIFailure(t *testing.T, database *sql.DB, stub *st
 
 	st := sqlitestore.New(database)
 	ctx := context.Background()
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "PR", "https://example.com/1")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#1", "", "pr", "PR", "https://example.com/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

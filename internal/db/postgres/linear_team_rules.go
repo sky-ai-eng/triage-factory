@@ -32,34 +32,34 @@ const linearRuleCols = `r.team_id, r.linear_team_id, r.linear_team_key, r.linear
 	       r.in_progress_members::text, r.in_progress_canonical::text,
 	       r.done_members::text, r.done_canonical::text`
 
-func (s *linearTeamRulesStore) ListForTeam(ctx context.Context, teamID string) ([]domain.LinearTeamRules, error) {
-	return listLinearTeamRules(ctx, s.app, teamID)
+func (s *linearTeamRulesStore) ListForTeam(ctx context.Context, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
+	return listLinearTeamRules(ctx, s.app, teamID, workspaceID)
 }
 
-func (s *linearTeamRulesStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.LinearTeamRules, error) {
-	return listLinearTeamRules(ctx, s.admin, teamID)
+func (s *linearTeamRulesStore) ListForTeamSystem(ctx context.Context, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
+	return listLinearTeamRules(ctx, s.admin, teamID, workspaceID)
 }
 
-func (s *linearTeamRulesStore) ListForOrgSystem(ctx context.Context, orgID string) ([]domain.LinearTeamRules, error) {
+func (s *linearTeamRulesStore) ListForOrgSystem(ctx context.Context, orgID, workspaceID string) ([]domain.LinearTeamRules, error) {
 	// Admin pool: the union spans teams the caller may not belong to. The org
 	// scope rides the teams join; the table carries no org_id.
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+linearRuleCols+`
 		FROM linear_team_rules r
 		JOIN teams t ON t.id = r.team_id
-		WHERE t.org_id = $1
+		WHERE t.org_id = $1 AND r.linear_workspace_id = $2 AND r.linear_workspace_id <> ''
 		ORDER BY r.linear_team_id ASC, r.team_id ASC
-	`, orgID)
+	`, orgID, workspaceID)
 	return db.ScanLinearTeamRulesRows(rows, err)
 }
 
-func (s *linearTeamRulesStore) TracksTeamSystem(ctx context.Context, teamID, linearTeamID string) (bool, error) {
+func (s *linearTeamRulesStore) TracksTeamSystem(ctx context.Context, teamID, workspaceID, linearTeamID string) (bool, error) {
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT 1 FROM linear_team_rules
-		WHERE team_id = $1 AND linear_team_id = $2
+		WHERE team_id = $1 AND linear_workspace_id = $2 AND linear_workspace_id <> '' AND linear_team_id = $3
 		LIMIT 1
-	`, teamID, linearTeamID).Scan(&n)
+	`, teamID, workspaceID, linearTeamID).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -69,18 +69,18 @@ func (s *linearTeamRulesStore) TracksTeamSystem(ctx context.Context, teamID, lin
 	return true, nil
 }
 
-func listLinearTeamRules(ctx context.Context, q queryer, teamID string) ([]domain.LinearTeamRules, error) {
+func listLinearTeamRules(ctx context.Context, q queryer, teamID, workspaceID string) ([]domain.LinearTeamRules, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT `+linearRuleCols+`
 		FROM linear_team_rules r
-		WHERE r.team_id = $1
+		WHERE r.team_id = $1 AND r.linear_workspace_id = $2 AND r.linear_workspace_id <> ''
 		ORDER BY r.linear_team_id ASC
-	`, teamID)
+	`, teamID, workspaceID)
 	return db.ScanLinearTeamRulesRows(rows, err)
 }
 
-func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID string, rules []domain.LinearTeamRules) ([]domain.LinearTeamRules, error) {
-	if err := db.ValidateLinearTeamRulesInput(rules); err != nil {
+func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID, workspaceID string, rules []domain.LinearTeamRules) ([]domain.LinearTeamRules, error) {
+	if err := db.ValidateLinearTeamRulesInput(workspaceID, rules); err != nil {
 		return nil, err
 	}
 	var stored []domain.LinearTeamRules
@@ -93,11 +93,12 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			}
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO linear_team_rules (
-					team_id, linear_team_id, linear_team_key, linear_team_name,
+					team_id, linear_workspace_id, linear_team_id, linear_team_key, linear_team_name,
 					pickup_members, in_progress_members, in_progress_canonical,
 					done_members, done_canonical, updated_at
-				) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, now())
+				) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, now())
 				ON CONFLICT (team_id, linear_team_id) DO UPDATE SET
+					linear_workspace_id = EXCLUDED.linear_workspace_id,
 					linear_team_key = EXCLUDED.linear_team_key,
 					linear_team_name = EXCLUDED.linear_team_name,
 					pickup_members = EXCLUDED.pickup_members,
@@ -107,7 +108,7 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 					done_canonical = EXCLUDED.done_canonical,
 					updated_at = now()
 			`,
-				teamID, r.LinearTeamID, r.LinearTeamKey, r.LinearTeamName,
+				teamID, workspaceID, r.LinearTeamID, r.LinearTeamKey, r.LinearTeamName,
 				cols.Pickup,
 				cols.InProgress, nullString(cols.InProgressCanonical),
 				cols.Done, nullString(cols.DoneCanonical),
@@ -117,18 +118,19 @@ func (s *linearTeamRulesStore) ReplaceForTeam(ctx context.Context, teamID string
 			ids = append(ids, r.LinearTeamID)
 		}
 
-		// Prune the rows the input no longer names. <> ALL of an empty array
-		// is true for every row, so an empty input clears the team through the
-		// same statement.
+		// Prune the workspace's rows the input no longer names. <> ALL of an
+		// empty array is true for every row, so an empty input clears the
+		// team's rows in the workspace through the same statement. Another
+		// workspace's rows are never this save's to delete.
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM linear_team_rules WHERE team_id = $1 AND linear_team_id <> ALL($2)`,
-			teamID, ids,
+			`DELETE FROM linear_team_rules WHERE team_id = $1 AND linear_workspace_id = $2 AND linear_team_id <> ALL($3)`,
+			teamID, workspaceID, ids,
 		); err != nil {
 			return fmt.Errorf("prune linear_team_rules: %w", err)
 		}
 
 		var err error
-		stored, err = listLinearTeamRules(ctx, tx, teamID)
+		stored, err = listLinearTeamRules(ctx, tx, teamID, workspaceID)
 		return err
 	})
 	if err != nil {

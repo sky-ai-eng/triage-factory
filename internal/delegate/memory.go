@@ -636,6 +636,15 @@ func isSlugChar(r rune) bool {
 // from every entity it materially engaged. The rule itself lives in
 // internal/memoryentities, where it is reachable by anything that writes a
 // conversation's memory row; this is the spawner's stores bound to it.
+//
+// The whole bundle is handed over when the spawner has one, because resolving
+// a produced entity's scope can need an extension's stores (a Slack channel's
+// workspace); without one, the stores the spawner unpacked cover every core
+// source.
 func (s *Spawner) attachConversationMemoryEntities(ctx context.Context, orgID, conversationID, primaryEntityID string) {
-	memoryentities.Attach(ctx, s.taskMemory, s.artifacts, s.entities, orgID, conversationID, primaryEntityID)
+	stores, ok := s.getStores()
+	if !ok {
+		stores = db.Stores{TaskMemory: s.taskMemory, Artifacts: s.artifacts, Entities: s.entities, Orgs: s.orgs}
+	}
+	memoryentities.Attach(ctx, stores, orgID, conversationID, primaryEntityID)
 }

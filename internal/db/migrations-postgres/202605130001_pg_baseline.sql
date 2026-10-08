@@ -458,7 +458,17 @@ CREATE TABLE public.entities (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     source text NOT NULL,
+    -- The provider namespace source_id and external_id are unique within: the
+    -- GitHub host, the Jira site, the Linear workspace id, the Slack workspace
+    -- id. Keys and ids repeat across those, so a key is only an address inside
+    -- one of them.
+    scope text NOT NULL,
+    -- The display key: "owner/repo#18", a Jira key, a Linear identifier. It can
+    -- change upstream (a move, a key rename), which is a rename of this row.
     source_id text NOT NULL,
+    -- The provider's own id for the object, which does not change when the key
+    -- does. NULL is "not learned yet".
+    external_id text,
     kind text NOT NULL,
     title text,
     url text,
@@ -599,6 +609,11 @@ CREATE TABLE public.jira_project_status_rules (
 -- is the HTTP validator's.
 CREATE TABLE public.linear_team_rules (
     team_id uuid NOT NULL,
+    -- The Linear workspace the Linear team belongs to. A row saved under one
+    -- workspace names team and state ids no other workspace has, so every read
+    -- is confined to the org's current workspace, and binding another one
+    -- leaves these rows stored rather than deleting them.
+    linear_workspace_id text NOT NULL,
     linear_team_id text NOT NULL,
     linear_team_key text NOT NULL,
     linear_team_name text DEFAULT ''::text NOT NULL,
@@ -1465,10 +1480,6 @@ ALTER TABLE ONLY public.entities
 
 
 ALTER TABLE ONLY public.entities
-    ADD CONSTRAINT entities_org_id_source_source_id_key UNIQUE (org_id, source, source_id);
-
-
-ALTER TABLE ONLY public.entities
     ADD CONSTRAINT entities_pkey PRIMARY KEY (id);
 
 
@@ -1691,6 +1702,23 @@ CREATE INDEX agents_org_idx ON public.agents USING btree (org_id);
 
 
 CREATE INDEX idx_entities_closed_at ON public.entities USING btree (closed_at) WHERE (closed_at IS NOT NULL);
+
+
+-- An entity's identity: one row per provider id in a scope.
+
+CREATE UNIQUE INDEX entities_identity ON public.entities USING btree (org_id, source, scope, external_id) WHERE (external_id IS NOT NULL);
+
+
+-- A key names one LIVE object in a scope. Closed rows may share it, so a key a
+-- provider frees and hands to a new object (a deleted and recreated project, a
+-- team key reused) never collides with the history it used to name.
+
+CREATE UNIQUE INDEX entities_active_key ON public.entities USING btree (org_id, source, scope, source_id) WHERE (state = 'active'::text);
+
+
+-- The key lookup, which reads the active row or else the most recently closed.
+
+CREATE INDEX idx_entities_key ON public.entities USING btree (org_id, source, scope, source_id);
 
 
 -- Serves the dashboard PR list's author predicate; expression and partial predicate match it.

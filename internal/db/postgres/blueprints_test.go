@@ -1044,8 +1044,8 @@ func seedPgTask(t *testing.T, h *pgtest.Harness, orgID, userID string) string {
 	t.Helper()
 	entityID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprints Test Entity', 'https://example/x', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprints Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "blueprints-test-"+entityID[:8]); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

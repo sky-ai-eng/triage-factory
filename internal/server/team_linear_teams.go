@@ -152,10 +152,21 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 	}
 
 	// The pre-image: what an absent rule is carried from, what needs no Linear
-	// call, and what the poll re-due decision compares against.
-	prev, err := s.storedLinearTeams(r.Context(), orgID, userID, teamID)
+	// call, and what the poll re-due decision compares against. It is read in
+	// the org's current Linear workspace, which is also the one the write
+	// stamps: rows saved under another workspace are neither shown, carried
+	// nor pruned.
+	prev, workspaceID, err := s.storedLinearTeams(r.Context(), orgID, userID, teamID)
 	if err != nil {
 		internalError(w, "settings/team/linear-teams", err)
+		return
+	}
+
+	// A rule names ids of one workspace, so a set can only be saved under the
+	// one the org's credential belongs to. With none recorded there is nowhere
+	// to save it; an empty set still answers, since it asks for nothing.
+	if workspaceID == "" && len(wishes) > 0 {
+		writeNotConfigured(w, "Linear is not connected for this workspace, so a Linear team or a state mapping cannot be added")
 		return
 	}
 
@@ -181,7 +192,13 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
 		}
-		if stored, err = tx.LinearTeamRules.ReplaceForTeam(r.Context(), teamID, next); err != nil {
+		if workspaceID == "" {
+			// The empty set, with no workspace bound: no workspace's rows to
+			// clear, and rows saved under a previous one stay stored.
+			stored = []domain.LinearTeamRules{}
+			return nil
+		}
+		if stored, err = tx.LinearTeamRules.ReplaceForTeam(r.Context(), teamID, workspaceID, next); err != nil {
 			return fmt.Errorf("save linear rules: %w", err)
 		}
 		return nil
@@ -262,24 +279,33 @@ func shapeLinearStateIDs(v *httpx.Validation, ids []string, field string) {
 	}
 }
 
-// storedLinearTeams reads the team's rows in display order — the order the
-// team-settings read renders, so "already stored" means what a client that
-// just read the resource would resend.
-func (s *Server) storedLinearTeams(ctx context.Context, orgID, userID, teamID string) ([]domain.LinearTeamRules, error) {
-	var out []domain.LinearTeamRules
+// storedLinearTeams reads the team's rows in the org's current Linear
+// workspace, in display order — the order the team-settings read renders, so
+// "already stored" means what a client that just read the resource would
+// resend — and returns that workspace id ("" when none is bound).
+func (s *Server) storedLinearTeams(ctx context.Context, orgID, userID, teamID string) ([]domain.LinearTeamRules, string, error) {
+	var (
+		out         []domain.LinearTeamRules
+		workspaceID string
+	)
 	err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		workspaceID = domain.EntityScope("linear", orgSet)
 		teamSet, err := tx.Teams.GetSettings(ctx, teamID)
 		if err != nil {
 			return fmt.Errorf("load team settings: %w", err)
 		}
-		rules, err := tx.LinearTeamRules.ListForTeam(ctx, teamID)
+		rules, err := tx.LinearTeamRules.ListForTeam(ctx, teamID, workspaceID)
 		if err != nil {
 			return fmt.Errorf("load linear rules: %w", err)
 		}
 		out = orderLinearTeamRules(rules, teamSet.LinearTeams)
 		return nil
 	})
-	return out, err
+	return out, workspaceID, err
 }
 
 // orderLinearTeamRules puts rules in the display order. An id in order with no

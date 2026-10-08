@@ -101,12 +101,16 @@ func ScanLinearTeamRulesRows(rows *sql.Rows, err error) ([]domain.LinearTeamRule
 }
 
 // ValidateLinearTeamRulesInput refuses, before ReplaceForTeam writes
-// anything, an entry with no LinearTeamID or no LinearTeamKey, and a
-// LinearTeamID named twice. Dropping a malformed entry would also drop its id
-// from the prune list, so an input of only malformed entries would clear the
-// team instead of failing; and of two entries for one Linear team, the upsert
-// would keep whichever came last without saying so.
-func ValidateLinearTeamRulesInput(rules []domain.LinearTeamRules) error {
+// anything, an empty workspace id, an entry with no LinearTeamID or no
+// LinearTeamKey, and a LinearTeamID named twice. A row saved under no
+// workspace could never be read back. Dropping a malformed entry would also
+// drop its id from the prune list, so an input of only malformed entries would
+// clear the team instead of failing; and of two entries for one Linear team,
+// the upsert would keep whichever came last without saying so.
+func ValidateLinearTeamRulesInput(workspaceID string, rules []domain.LinearTeamRules) error {
+	if workspaceID == "" {
+		return fmt.Errorf("ReplaceForTeam: empty workspace id")
+	}
 	seen := make(map[string]int, len(rules))
 	for i, r := range rules {
 		if r.LinearTeamID == "" {

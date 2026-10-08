@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // Sentinel errors returned by the Resolver.
@@ -61,16 +61,11 @@ const (
 // configured") or malformed base URL. This is the single source of truth the
 // bind flow (server.resolveJiraHost) and this resolver both compose, so a
 // stored credential always reads back under the key it was written with.
+//
+// The derivation is domain.JiraHost, which is also the scope Jira entities are
+// keyed under, so a credential and the issues it reads share one site string.
 func CanonicalHost(orgBase string) (string, bool) {
-	host := strings.TrimRight(strings.TrimSpace(orgBase), "/")
-	if host == "" {
-		return "", false
-	}
-	u, err := url.Parse(host)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", false
-	}
-	return host, true
+	return domain.JiraHost(orgBase)
 }
 
 // UserTokenKey is the per-user secret key a user's Jira access token is

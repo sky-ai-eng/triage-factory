@@ -93,7 +93,7 @@ func TestStampPRCommission_DoesNotOverwriteExistingCommissioner(t *testing.T) {
 		t.Fatalf("seed first asker: %v", err)
 	}
 	ent, _, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Fix the thing", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Fix the thing", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestStampPRCommission_ReviewArtifactRecordsNothing(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, false)
 
 	ent, _, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Someone else's PR", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Someone else's PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

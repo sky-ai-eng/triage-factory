@@ -68,7 +68,7 @@ func TestRefreshGitHub_PollCompleteSentinel_OnlyOnFullWrap(t *testing.T) {
 
 	// Rate-limited (partial) cycle: octo/ok1 can seed an entity, but the poll-completed
 	// sentinel must stay silent until a later cycle fully wraps the repo list.
-	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", repos, nil); err == nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", repos, nil); err == nil {
 		t.Fatal("RefreshGitHub error = nil; want ErrRateLimited")
 	}
 	for _, evt := range pub.events {
@@ -84,7 +84,7 @@ func TestRefreshGitHub_PollCompleteSentinel_OnlyOnFullWrap(t *testing.T) {
 	// client's rate-limit memory would keep its pre-flight budget check
 	// (awaitBudget) refusing requests until the real reset time passed.
 	allow = true
-	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", repos, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", repos, nil); err != nil {
 		t.Fatalf("RefreshGitHub (full wrap): %v", err)
 	}
 	var found bool

@@ -147,8 +147,8 @@ func seedPgDashboardPR(t *testing.T, conn *sql.DB, orgID string, fx dbtest.Dashb
 	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", fx.Snapshot.Number, now.UnixNano())
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      commissioned_by_user_id, created_at, last_polled_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9)
+		                      commissioned_by_user_id, created_at, last_polled_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9, 'https://github.com')
 	`, entityID, orgID, sourceID, fx.Snapshot.Title, fx.Snapshot.URL, string(blob), state,
 		commissioned, now); err != nil {
 		t.Fatalf("seed entity for snapshot %d: %v", fx.Snapshot.Number, err)

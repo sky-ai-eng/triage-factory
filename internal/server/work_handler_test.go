@@ -174,8 +174,8 @@ func parkLocalEvent(t *testing.T, database *sql.DB, title string) int64 {
 	t.Helper()
 	entityID := uuid.NewString()
 	if _, err := database.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES (?, ?, 'github', ?, 'pr', ?, '', '{}', datetime('now'))
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES (?, ?, 'github', ?, 'pr', ?, '', '{}', datetime('now'), 'https://github.com')
 	`, entityID, runmode.LocalDefaultOrgID, "owner/repo#"+entityID[:6], title); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -682,8 +682,8 @@ func TestWorkHandler_Gate_Postgres(t *testing.T) {
 
 	entityID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Parked PR', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Parked PR', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "owner/repo#"+entityID[:8])
 	ctx := context.Background()
 	if _, err := stores.EventQueue.Enqueue(ctx, orgID, domain.Event{
@@ -812,7 +812,7 @@ func parkLocalFiring(t *testing.T, database *sql.DB, title string) int64 {
 		q    string
 		args []any
 	}{
-		{`INSERT INTO entities (id, source, source_id, kind, title, url) VALUES (?, 'github', ?, 'pr', ?, '')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com')`, []any{entityID, "owner/repo#" + suf, title}},
 		{`INSERT INTO prompts (id, name, body, source, creator_user_id, team_id) VALUES (?, 'Test', 'x', 'user', ?, ?)`, []any{promptID, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID}},
 		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
 		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
@@ -955,7 +955,7 @@ func parkLocalReEvaluation(t *testing.T, database *sql.DB, title string) int64 {
 		q    string
 		args []any
 	}{
-		{`INSERT INTO entities (id, source, source_id, kind, title, url) VALUES (?, 'github', ?, 'pr', ?, '')`, []any{entityID, "owner/repo#" + suf, title}},
+		{`INSERT INTO entities (id, source, source_id, kind, title, url, scope) VALUES (?, 'github', ?, 'pr', ?, '', 'https://github.com')`, []any{entityID, "owner/repo#" + suf, title}},
 		{`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`, []any{eventID, entityID, domain.EventGitHubPRCICheckFailed}},
 		{`INSERT INTO tasks (id, entity_id, event_type, dedup_key, primary_event_id, status, scoring_status) VALUES (?, ?, ?, '', ?, 'queued', 'pending')`, []any{taskID, entityID, domain.EventGitHubPRCICheckFailed, eventID}},
 	} {

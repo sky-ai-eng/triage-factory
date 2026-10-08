@@ -102,11 +102,11 @@ func TestRefreshGitHub_SeedCommitsItsReviewBackfill(t *testing.T) {
 	pub := &recordingPreEnqueuedPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}
@@ -166,14 +166,14 @@ func TestRefreshGitHub_SeedCASMissCommitsNothing(t *testing.T) {
 	queue := &failingBatchQueue{EventQueueStore: stores.EventQueue}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, queue, org)
 
-	if _, _, err := tr.RefreshGitHub(ctx, newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", newSeedClient(t), "", []string{"octo/repo"}, knownLogins{"bob": true, "carol": true}); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
 	if n := countQueueRows(t, tr); n != 0 {
 		t.Errorf("event_queue rows = %d, want 0 (a lost CAS writes nothing)", n)
 	}
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}
@@ -218,11 +218,11 @@ func TestRefreshGitHub_SeedBackfillsOnlyTheKnownReviewers(t *testing.T) {
 	client := newSeedClient(t, "outsider", "bob", "dependabot", "carol", "dave", "nobody")
 	known := knownLogins{"bob": true, "carol": true, "dave": true}
 
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", []string{"octo/repo"}, known); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, known); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}

@@ -42,7 +42,7 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				setJiraHost(t, database)
 				seedJiraUserOnTeam(t, database, team, "account-7", "Assignee")
 			}
-			entity, _, err := st.Entities.FindOrCreate(ctx, org, source, sourceID, kind, "", "")
+			entity, _, err := st.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", kind, "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,9 +87,9 @@ func TestBodyUpdated_PollToRule(t *testing.T) {
 				mu.Unlock()
 				var err error
 				if source == "github" {
-					_, _, err = tr.RefreshGitHub(ctx, gh, "", nil, nil)
+					_, _, err = tr.RefreshGitHub(ctx, "https://github.com", gh, "", nil, nil)
 				} else {
-					_, err = tr.RefreshJira(ctx, jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
+					_, err = tr.RefreshJira(ctx, "https://jira.example.com", jira, srv.URL, tracker.JiraRules{{Key: "PROJ"}})
 				}
 				if err != nil {
 					t.Fatal(err)

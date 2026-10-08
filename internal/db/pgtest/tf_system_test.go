@@ -403,7 +403,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	})
 
 	t.Run("entities_touched_resolution", func(t *testing.T) {
-		ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "octo/repo#999", "pr", "conformance pr", "https://example.test/pr")
+		ent, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/repo#999", "", "pr", "conformance pr", "https://example.test/pr")
 		if err != nil {
 			t.Fatalf("Entities.FindOrCreateSystem: %v", err)
 		}

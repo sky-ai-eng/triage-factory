@@ -113,8 +113,8 @@ func seedSQLiteTasks(t *testing.T, conn *sql.DB, n int) []string {
 		eventType := "github:pr:opened"
 
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
 		`, entityID, sourceID, fmt.Sprintf("Conformance PR %d", i), "https://example/pr/"+sourceID, now); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

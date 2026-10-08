@@ -41,8 +41,8 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 	// (modernc.org/sqlite multi-statement Exec is unreliable on FK
 	// chains).
 	if _, err := database.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_pa', 'github', 'owner/repo#pa', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -460,8 +460,8 @@ func TestTaskClaim_WithoutPendingApprovalIsNoOp(t *testing.T) {
 	// pendingApprovalFixture but stops short of any conversations or reviews.
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, state)
-		VALUES ('e1', 'github', 'sky/repo#1', 'pr', 'active');
+		INSERT INTO entities (id, source, source_id, kind, state, scope)
+		VALUES ('e1', 'github', 'sky/repo#1', 'pr', 'active', 'https://github.com');
 		INSERT INTO events (id, entity_id, event_type, dedup_key)
 		VALUES ('ev1', 'e1', ?, '');
 		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
@@ -503,8 +503,8 @@ func TestTaskClaim_AgainstBotClaimedIsTakeover(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_bot', 'github', 'sky/repo#bot', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -563,8 +563,8 @@ func TestTaskClaim_RefusedLeavesNoAuditRow(t *testing.T) {
 		t.Fatalf("seed other user: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_refuse', 'github', 'sky/repo#refuse', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -633,8 +633,8 @@ func TestTaskDelegate_RefusedLeavesNoAuditRow(t *testing.T) {
 		t.Fatalf("seed other user: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_drefuse', 'github', 'sky/repo#drefuse', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -701,8 +701,8 @@ func TestTaskClaim_RefusedOnTerminalTask(t *testing.T) {
 			s := newTestServer(t)
 			const eventType = "github:pr:opened"
 			if _, err := s.db.Exec(
-				`INSERT INTO entities (id, source, source_id, kind, state)
-				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active')`,
+				`INSERT INTO entities (id, source, source_id, kind, state, scope)
+				 VALUES ('e_term', 'github', 'sky/repo#term', 'pr', 'active', 'https://github.com')`,
 			); err != nil {
 				t.Fatalf("seed entity: %v", err)
 			}
@@ -780,8 +780,8 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 		s := newTestServer(t)
 		const eventType = "github:pr:opened"
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state)
-			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope)
+			 VALUES ('e_term_del', 'github', 'sky/repo#td', 'pr', 'active', 'https://github.com')`,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -820,8 +820,8 @@ func TestTaskDelegate_DifferentiatesRefusalReasons(t *testing.T) {
 			t.Fatalf("seed other user: %v", err)
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state)
-			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope)
+			 VALUES ('e_diff_del', 'github', 'sky/repo#dd', 'pr', 'active', 'https://github.com')`,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -867,8 +867,8 @@ func TestTaskDelegate_RefusedWhenBotDisabled(t *testing.T) {
 	}
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_bot_off', 'github', 'sky/repo#off', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -931,8 +931,8 @@ func TestTaskPatchSnooze_RefusesOnClaimedTask(t *testing.T) {
 	s := newTestServer(t)
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_snz_claim', 'github', 'sky/repo#sz', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1007,8 +1007,8 @@ func TestTaskDelegate_TransfersOwnUserClaim(t *testing.T) {
 	// delegate swipe.
 	const eventType = "github:pr:opened"
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_y2a', 'github', 'sky/repo#y2a', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1094,8 +1094,8 @@ func TestTaskClaim_AgainstOtherUserClaimReturns409(t *testing.T) {
 		t.Fatalf("seed other user: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_oth', 'github', 'sky/repo#oth', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1232,8 +1232,8 @@ func TestHandleUndo_NoPendingApprovalIsNoOp(t *testing.T) {
 	// this is status='queued' + claimed_by_user_id; pre-B+
 	// it was status='claimed'.
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_plain', 'github', 'owner/repo#plain', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1285,8 +1285,8 @@ func TestHandleUndo_ClearsClaimColumns(t *testing.T) {
 	// Snooze-clearing on undo is covered by /requeue's existing test
 	// against unclaimed-snoozed rows.)
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_undo_claim', 'github', 'owner/repo#u1', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -1414,7 +1414,7 @@ func runningRunFixture(t *testing.T, database *sql.DB, suffix string) (taskID, c
 	entityID, eventID, promptID := fixtureUUID("e_"+suffix), fixtureUUID("ev_"+suffix), fixtureUUID("p_"+suffix)
 	taskID, conversationID = fixtureUUID("t_"+suffix), fixtureUUID("r_"+suffix)
 	execSQL(t, database,
-		`INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', ?, 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com')`,
 		entityID, "owner/repo#"+suffix)
 	execSQL(t, database,
 		`INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES (?, ?, ?, '')`,

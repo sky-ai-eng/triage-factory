@@ -649,7 +649,7 @@ func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 
 	r.bind(t, "lin_api_ada")
 	ctx := t.Context()
-	ent, _, err := r.stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ENG-1", "issue", "An issue", "")
+	ent, _, err := r.stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-1", "", "issue", "An issue", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestLinearSource_PauseAndCreateGate(t *testing.T) {
 	if got := decodeSource(t, rec.Body.Bytes()); got.State != eventsource.StateDisabled {
 		t.Errorf("PATCH answered %q, want disabled", got.State)
 	}
-	got, err := r.stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "linear", "ENG-1")
+	got, err := r.stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "linear", "ws-test", "ENG-1")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}

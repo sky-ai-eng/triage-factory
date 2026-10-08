@@ -40,8 +40,15 @@ ALTER TABLE team_settings ADD COLUMN linear_teams TEXT NOT NULL DEFAULT '[]';
 -- move them, or the reverse, is not a configuration anything can act on. The
 -- "canonical is one of its rule's members" check stays in the HTTP handler,
 -- because a CHECK cannot subquery.
+--
+-- linear_workspace_id is the workspace the Linear team belongs to. A row saved
+-- under one workspace names team and state ids no other workspace has, so every
+-- read is confined to the org's current workspace, and binding another one
+-- leaves these rows stored rather than deleting them. Linear team ids are
+-- globally unique, so the workspace stays out of the primary key.
 CREATE TABLE linear_team_rules (
     team_id               TEXT NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    linear_workspace_id   TEXT NOT NULL,
     linear_team_id        TEXT NOT NULL,
     linear_team_key       TEXT NOT NULL,
     linear_team_name      TEXT NOT NULL DEFAULT '',

@@ -121,7 +121,7 @@ func setupAbsorbScenario(t *testing.T, database *sql.DB) (entityID string, task 
 	seedAbsorbEventCatalog(t, database, absorbTestEventType)
 
 	st := sqlitestore.New(database)
-	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "fake", "fake/thing#"+uuid.New().String()[:8], "thing",
+	entity, _, err := st.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "fake", testScope("fake"), "fake/thing#"+uuid.New().String()[:8], "", "thing",
 		"Absorption Thing", "https://example.com/absorption")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -783,7 +783,7 @@ func setupManualAbsorbScenario(t *testing.T, database *sql.DB) (entityID string,
 		t.Fatalf("add agent to team: %v", err)
 	}
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "fake", "fake/manual#"+uuid.New().String()[:8], "thing",
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "fake", testScope("fake"), "fake/manual#"+uuid.New().String()[:8], "", "thing",
 		"Manual Absorption Thing", "https://example.com/manual-absorption")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)

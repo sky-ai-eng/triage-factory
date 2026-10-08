@@ -61,10 +61,10 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}
@@ -82,10 +82,10 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	mu.Lock()
 	body = "Now with a short body."
 	mu.Unlock()
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", []string{"octo/repo"}, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
-	ent, err = stores.Entities.GetBySource(ctx, org, "github", "octo/repo#42")
+	ent, err = stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#42")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource after cycle 2: ent=%v err=%v", ent, err)
 	}
@@ -134,7 +134,7 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", ""); err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
 	pub := &recordingPublisher{}
@@ -142,10 +142,10 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// repos=nil → no discovery; the stub is reached only via Phase-2.
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub seed cycle: %v", err)
 	}
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 	}
@@ -159,10 +159,10 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	mu.Lock()
 	body = "Edited after seed"
 	mu.Unlock()
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub diff cycle: %v", err)
 	}
-	ent, err = stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7")
+	ent, err = stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
 		t.Fatalf("GetBySource after diff cycle: ent=%v err=%v", ent, err)
 	}
@@ -181,14 +181,14 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	body = ""
 	mu.Unlock()
 	failed := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, &failingBatchQueue{EventQueueStore: stores.EventQueue}, org)
-	if _, _, err := failed.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := failed.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if emitted := pub.nonSystemEvents(); len(emitted) != 1 {
 		t.Fatalf("lost CAS published a body event: %v", eventTypes(emitted))
 	}
 	for range 2 {
-		if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+		if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

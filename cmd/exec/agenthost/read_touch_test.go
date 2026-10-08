@@ -74,7 +74,7 @@ func TestFunnel_GithubWrite_RecordsEntityTouch(t *testing.T) {
 				t.Fatalf("GithubAddComment: %v", err)
 			}
 
-			ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", "octo/repo#1")
+			ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#1")
 			if err != nil || ent == nil {
 				t.Fatalf("touched entity missing: ent=%v err=%v", ent, err)
 			}
@@ -114,7 +114,7 @@ func TestReadTouch_GithubGetPR_TouchesPR(t *testing.T) {
 		t.Fatalf("GithubGetPR: pr=%v err=%v", pr, err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#5")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#5")
 	if err != nil || ent == nil {
 		t.Fatalf("read did not resolve-or-create the PR entity: ent=%v err=%v", ent, err)
 	}
@@ -140,7 +140,7 @@ func TestReadTouch_GithubGetPR_FailedRead_NoTouch(t *testing.T) {
 		t.Fatal("expected the PR read to fail against the 500 backend")
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#5")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#5")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 		t.Fatalf("JiraGetIssue: issue=%v err=%v", issue, err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-123")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-123")
 	if err != nil || ent == nil {
 		t.Fatalf("read did not resolve-or-create the issue entity: ent=%v err=%v", ent, err)
 	}
@@ -193,7 +193,7 @@ func TestReadTouch_JiraGetIssue_FailedRead_NoTouch(t *testing.T) {
 	if _, err := client.JiraGetIssue(ctx, "SKY-123"); err == nil {
 		t.Fatal("expected the Jira read to fail against the 404 backend")
 	}
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-123")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-123")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestTouch_ReadThenWrite_StaysTouched(t *testing.T) {
 		t.Fatalf("GithubAddComment: %v", err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#5")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#5")
 	if err != nil || ent == nil {
 		t.Fatalf("entity missing: ent=%v err=%v", ent, err)
 	}

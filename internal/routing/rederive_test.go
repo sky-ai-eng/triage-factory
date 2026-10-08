@@ -169,7 +169,7 @@ func setupReDeriveScenario(t *testing.T, database *sql.DB, minAutonomy float64) 
 	t.Helper()
 
 	// Create entity
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "Test PR", "https://github.com/owner/repo/pull/1")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#1", "", "pr", "Test PR", "https://github.com/owner/repo/pull/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 
 	// Entity + event + task owned by the local-default team, with NO
 	// task_teams rows, so its visibility set is just the owner.
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#novis", "pr", "No-vis PR", "https://example.com/novis")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#novis", "", "pr", "No-vis PR", "https://example.com/novis")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestReDeriveWorker_TeamNotInVisibilitySet_AdmitsNothing(t *testing.T) {
 func TestReDeriveWorker_ZeroThresholdTrigger_IsNotReDerived(t *testing.T) {
 	database := newTestDB(t)
 
-	entity2, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#2", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
+	entity2, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#2", "", "pr", "Test PR 2", "https://github.com/owner/repo/pull/2")
 	entityID := entity2.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author: "aidan", CheckName: "lint", Repo: "owner/repo",
@@ -513,7 +513,7 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	database := newTestDB(t)
 
 	// The event's author isn't in the predicate's author_in allowlist.
-	entity3, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#3", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
+	entity3, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#3", "", "pr", "Test PR 3", "https://github.com/owner/repo/pull/3")
 	entityID := entity3.ID
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author: "someone-else", CheckName: "build", Repo: "owner/repo",

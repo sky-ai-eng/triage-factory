@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -49,6 +50,19 @@ import (
 // row matches — a missing entity is a normal read outcome, not an
 // error. List* methods return an empty slice on no rows, never nil.
 //
+// # Identity: scope, key, external id
+//
+// An entity is addressed by (org, source, scope, source_id): source_id is the
+// key everything reads and displays, and scope is the provider namespace it is
+// unique within (domain.EntityScope computes it; no caller builds one). Keys
+// are unique among ACTIVE rows only, so a key lookup returns the active row,
+// otherwise the most recently closed one, and a key a provider frees and
+// reuses never collides with the history it used to name. Where the provider
+// has an id that a key change does not move, external_id holds it and is
+// unique per scope; that is the identity, and a key change is RenameSystem on
+// the row carrying it. Every key-based method takes the scope: no entity is
+// created, found or renamed without one.
+//
 // # State and snapshot are one write
 //
 // Every write that changes state or writes a terminal snapshot is one
@@ -86,7 +100,37 @@ import (
 // CloseTerminalSystem (a composition across entities and tasks that answers
 // with what it closed), and RekeyOrMergeSystem (a composition across tables
 // that answers with the surviving id). FindOrCreate / FindOrCreateSystem
-// already return the row.
+// already return the row, StampExternalIDSystem returns the row it stamped,
+// and RenameSystem is a composition across entities, artifacts and the audit
+// ledger that answers with what it moved.
+
+// Errors the identity writes refuse with. Both describe stored state a write
+// cannot be applied over without making a key or an id name two objects, so
+// the caller logs and moves on, and the same write fails the same way until
+// the conflicting row changes.
+var (
+	// ErrEntityKeyOccupied means an ACTIVE row in the scope already answers to
+	// the key a create or a rename would give a different object. A provider
+	// cannot serve two live objects under one key, so the holder is an object
+	// TF has not yet seen move or go away — a Linear team key freed and reused
+	// before the old holder's rename was observed, for one. It clears once the
+	// holder is renamed or retired.
+	ErrEntityKeyOccupied = errors.New("an active entity in this scope already holds the key")
+
+	// ErrEntityIdentityAmbiguous means more than one row carries the provider
+	// id a write keys on, or a stamp would make that true. The identity index
+	// makes the first state unreachable from any writer that ships, which is
+	// why it is refused rather than resolved by picking a row.
+	ErrEntityIdentityAmbiguous = errors.New("more than one entity carries this provider id")
+
+	// ErrEntityScopeRequired refuses a create or a rename with no scope. A key
+	// is only an address inside a scope, so a row written without one would
+	// be found by nothing that asks properly. A read with no scope is not
+	// refused: it matches nothing, which is the right answer for a source
+	// that has no scope in the org (Linear with no workspace bound).
+	ErrEntityScopeRequired = errors.New("entity scope is required")
+)
+
 // TerminalCloseResult is what EntityStore.CloseTerminalSystem committed.
 type TerminalCloseResult struct {
 	// Closed reports whether the entity flipped in this call. False means the
@@ -108,9 +152,10 @@ type EntityStore interface {
 	// matches.
 	Get(ctx context.Context, orgID, id string) (*domain.Entity, error)
 
-	// GetBySource returns the entity for (source, source_id) — the
-	// poller-side natural key — or (nil, nil) if not yet recorded.
-	GetBySource(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
+	// GetBySource returns the entity for the key (source, scope, source_id) —
+	// the active row, otherwise the most recently closed one — or (nil, nil)
+	// if none is recorded.
+	GetBySource(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error)
 
 	// Descriptions returns the flattened description body for each
 	// of the given entity IDs as a map keyed by ID. Empty
@@ -164,13 +209,23 @@ type EntityStore interface {
 
 	// --- Mutation ---
 
-	// FindOrCreate is the poller's "is this row known?" entry
-	// point: it returns the existing entity if (source, source_id)
-	// already maps to one, and inserts a new row otherwise.
-	// Returns (entity, created, error). Idempotent under a race:
-	// concurrent first-discovery callers re-read on insert
-	// failure so they each see a populated entity.
-	FindOrCreate(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
+	// FindOrCreate is the poller's "is this row known?" entry point. It
+	// returns, in order of preference:
+	//
+	//   - when externalID is given, the row carrying it in the scope, whatever
+	//     key that row is stored under (a caller that finds the key differs
+	//     renames it);
+	//   - the row the key lookup returns (active, else most recently closed),
+	//     skipping a row that carries a different external id, which is a
+	//     different object that once had or now has the key;
+	//   - a new active row, with external_id written when given.
+	//
+	// Returns (entity, created, error). Idempotent under a race: a create that
+	// loses to a concurrent one re-reads and returns the winner. A create
+	// refused because an active row holding the key carries a different id is
+	// ErrEntityKeyOccupied, and one with an empty scope ErrEntityScopeRequired.
+	// Never rewrites kind, title or url on a known row.
+	FindOrCreate(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
 	// PatchSnapshot writes the new snapshot_json **without** touching
 	// last_polled_at — deliberately distinct from the tracker's
@@ -244,7 +299,52 @@ type EntityStore interface {
 	// pipeline's future engaged-thread lookup) needs to resolve an entity
 	// by its natural key with no request JWT claims to route through the
 	// app pool.
-	GetBySourceSystem(ctx context.Context, orgID, source, sourceID string) (*domain.Entity, error)
+	GetBySourceSystem(ctx context.Context, orgID, source, scope, sourceID string) (*domain.Entity, error)
+
+	// GetByExternalIDSystem returns the entity carrying the provider id in the
+	// scope — the identity lookup, whatever key the row is stored under — or
+	// (nil, nil) when no row carries it. Admin pool: the tracker and the exec
+	// recording funnel resolve identities with no JWT claims.
+	GetByExternalIDSystem(ctx context.Context, orgID, source, scope, externalID string) (*domain.Entity, error)
+
+	// StampExternalIDSystem fills a row's external_id where it is still NULL:
+	// the learning path for a row created before its provider id was known.
+	// Returns the row carrying externalID afterwards — a second stamp of the
+	// same id is the idempotent no-op and returns it too. Returns nil when the
+	// row already carries a different id (the guard declined: that row is a
+	// different object), sql.ErrNoRows when no row has entityID, and
+	// ErrEntityIdentityAmbiguous when another row in the scope already carries
+	// externalID. Admin pool.
+	StampExternalIDSystem(ctx context.Context, orgID, entityID, externalID string) (*domain.Entity, error)
+
+	// RenameSystem makes the entity carrying (source, scope, externalID)
+	// answer to newKey, the entity analogue of RepositoryStore.RenameSystem.
+	// One transaction, under a lock on the row (SELECT … FOR UPDATE in
+	// Postgres; SQLite's single writer makes it moot), rewriting every
+	// key-derived value:
+	//
+	//   - entities.source_id, and entities.url when newURL is non-empty;
+	//   - the target and dedup_key of the source's artifacts keyed on the old
+	//     key (provider = source, dedup resource segment = the old key);
+	//   - external_actions.current_url, the audit ledger's maintained pointer,
+	//     for actions whose link resolves to the entity's old url. The record
+	//     of the act itself (target, url, detail) is never touched.
+	//
+	// Detection happens here: a candidate that went stale between the
+	// caller's read and this call is a no-op. Every no-op is a nil error with
+	// Renamed=false — no externalID, no row carrying it, or the key already
+	// newKey. Refused instead: ErrEntityKeyOccupied when an ACTIVE row in the
+	// scope already holds newKey (or an artifact already answers to the
+	// rewritten dedup key), and ErrEntityIdentityAmbiguous when more than one
+	// row carries the id. Neither writes anything. An empty scope is
+	// ErrEntityScopeRequired.
+	//
+	// The snapshot, poll_seq and last_polled_at are left alone: the caller
+	// commits the fresh snapshot through its own CAS afterwards, on the
+	// poll_seq it read. System (admin-pool) only: the rewrite spans artifacts
+	// of every team in the org.
+	RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error)
+
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
 
 	// ListActiveTerminalCandidatesSystem returns active entities whose
@@ -304,7 +404,7 @@ type EntityStore interface {
 	// as defense in depth.
 	ListActiveTerminalCandidatesSystem(ctx context.Context, orgID string, jiraDone []domain.JiraStatusRef, linearDone []domain.LinearStateRef, unpolledFor time.Duration, limit int) ([]domain.Entity, error)
 
-	FindOrCreateSystem(ctx context.Context, orgID, source, sourceID, kind, title, url string) (*domain.Entity, bool, error)
+	FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 
 	// UpdateSnapshotCASSystem writes the tracker snapshot under a
 	// compare-and-swap on poll_seq (TFAC-579): the write only lands when
@@ -456,10 +556,11 @@ type EntityStore interface {
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
 	// RekeyOrMergeSystem follows an external object's changed natural key.
-	// When newSourceID is free, the existing entity is re-keyed in place.
-	// When that key already belongs to another entity, that canonically-keyed row survives
-	// and every entity-id referent is moved to it. The operation is atomic.
-	// Returns the surviving entity id and whether a merge occurred.
+	// When newSourceID is free in the entity's own scope, the existing entity
+	// is re-keyed in place. When the key lookup in that scope returns another
+	// entity, that canonically-keyed row survives and every entity-id referent
+	// is moved to it. The operation is atomic. Returns the surviving entity id
+	// and whether a merge occurred.
 	//
 	// Exempt from the returned-row rule: it is a composition, not a single-row
 	// write — the merge arm moves every referent across tables and deletes the

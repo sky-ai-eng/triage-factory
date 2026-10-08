@@ -89,7 +89,7 @@ type EntitySeeder struct {
 // returned.
 func mustEntity(t *testing.T, s db.EntityStore, ctx context.Context, orgID, source, sourceID string) *domain.Entity {
 	t.Helper()
-	ent, err := s.GetBySource(ctx, orgID, source, sourceID)
+	ent, err := s.GetBySource(ctx, orgID, source, TestScope(source), sourceID)
 	if err != nil {
 		t.Fatalf("re-read %s/%s: %v", source, sourceID, err)
 	}
@@ -110,7 +110,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// stands in for (RETURNING semantics, RLS visibility on the update arm,
 		// column-list drift).
 		s, orgID, _ := mk(t)
-		created, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#900", "pr", "Returned", "https://example.com/900")
+		created, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#900", "", "pr", "Returned", "https://example.com/900")
 		if err != nil {
 			t.Fatalf("FindOrCreate: %v", err)
 		}
@@ -188,7 +188,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("FindOrCreate_inserts_then_returns_existing", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		first, created, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#1", "pr", "Title", "https://example.com/1")
+		first, created, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#1", "", "pr", "Title", "https://example.com/1")
 		if err != nil {
 			t.Fatalf("first FindOrCreate: %v", err)
 		}
@@ -208,7 +208,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("initial state = %q, want active", first.State)
 		}
 
-		second, created, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#1", "pr", "Other", "https://example.com/other")
+		second, created, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#1", "", "pr", "Other", "https://example.com/other")
 		if err != nil {
 			t.Fatalf("second FindOrCreate: %v", err)
 		}
@@ -235,7 +235,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		const sid = "C0125/1700000000.000100"
-		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message",
+		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message",
 			"first message text", "https://slack.example/archives/C0125/p1700000000000100")
 		if err != nil {
 			t.Fatalf("FindOrCreate(slack): %v", err)
@@ -251,7 +251,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("title = %q, want the first message text", ent.Title)
 		}
 
-		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message", "ignored", "")
+		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message", "ignored", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(slack) re-resolve: %v", err)
 		}
@@ -273,7 +273,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		const sid = "C0777/1700000000.000400"
-		first, created, err := s.FindOrCreate(ctx, orgID, "slack", sid, "thread", "root text", "")
+		first, created, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(thread): %v", err)
 		}
@@ -281,7 +281,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("expected created=true on first resolve")
 		}
 
-		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", sid, "message", "ignored", "")
+		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message", "ignored", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(message, re-resolve): %v", err)
 		}
@@ -309,7 +309,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("Get on missing id returned %+v, want nil", got)
 		}
 
-		gotBySrc, err := s.GetBySource(ctx, orgID, "github", "nonexistent/repo#999")
+		gotBySrc, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "nonexistent/repo#999")
 		if err != nil {
 			t.Fatalf("GetBySource: %v", err)
 		}
@@ -321,12 +321,12 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("GetBySourceSystem_mirrors_GetBySource", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "C0999/1700000000.000300", "thread", "root text", "")
+		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", "C0999/1700000000.000300", "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 
-		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "C0999/1700000000.000300")
+		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "T0TEST", "C0999/1700000000.000300")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem: %v", err)
 		}
@@ -334,7 +334,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("GetBySourceSystem = %+v, want the seeded entity %+v", got, want)
 		}
 
-		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "C0999/nonexistent")
+		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "T0TEST", "C0999/nonexistent")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem(miss): %v", err)
 		}
@@ -350,14 +350,14 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// the poll gate read.
 		s, orgID, _ := mk(t)
 
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#2", "pr", "T", ""); err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#2", "", "pr", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		// Re-read so the baseline matches the backend's storage
 		// precision (Postgres timestamptz truncates to microseconds;
 		// FindOrCreate's returned struct carries Go's nanosec time
 		// and wouldn't .Equal() the round-tripped value).
-		baseline, err := s.GetBySource(ctx, orgID, "github", "owner/repo#2")
+		baseline, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "owner/repo#2")
 		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
 			t.Fatalf("baseline re-read: %v", err)
 		}
@@ -395,10 +395,10 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 	t.Run("UpdateSnapshotCASSystem_stale_seq_loses_cleanly", func(t *testing.T) {
 		s, orgID, _ := mk(t)
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cas", "pr", "T", ""); err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#cas", "", "pr", "T", ""); err != nil {
 			t.Fatalf("FindOrCreate: %v", err)
 		}
-		ent, err := s.GetBySource(ctx, orgID, "github", "owner/repo#cas")
+		ent, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "owner/repo#cas")
 		if err != nil || ent == nil {
 			t.Fatalf("GetBySource: ent=%v err=%v", ent, err)
 		}
@@ -439,13 +439,13 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("PatchSnapshot_does_not_touch_last_polled_at", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#3", "pr", "T", ""); err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#3", "", "pr", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		// Re-read for a DB-precision baseline — see the
 		// UpdateSnapshotCASSystem_stamps_last_polled_at subtest above for
 		// the timestamptz-truncation rationale.
-		baseline, err := s.GetBySource(ctx, orgID, "github", "owner/repo#3")
+		baseline, err := s.GetBySource(ctx, orgID, "github", "https://github.com", "owner/repo#3")
 		if err != nil || baseline == nil || baseline.LastPolledAt == nil {
 			t.Fatalf("baseline re-read: %v", err)
 		}
@@ -474,7 +474,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("MarkPolledSystem_advances_last_polled_at_and_nothing_else", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "SKY-POLLED", "issue", "T", ""); err != nil {
+		if _, _, err := s.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "SKY-POLLED", "", "issue", "T", ""); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, mustEntity(t, s, ctx, orgID, "jira", "SKY-POLLED").ID, `{"status":"To Do"}`, 0); err != nil || !ok {
@@ -511,7 +511,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateTitle_and_UpdateDescription_round_trip", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "jira", "SKY-100", "issue", "Old Title", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "SKY-100", "", "issue", "Old Title", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -538,7 +538,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateURLSystem_round_trips_and_is_a_noop_on_missing", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "C0125/1700000000.000200", "message", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", "C0125/1700000000.000200", "", "message", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -570,7 +570,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("Close_only_fires_on_active", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#close", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#close", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -599,7 +599,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("MarkClosed_is_unconditional", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#mc", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#mc", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -615,7 +615,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("ReactivateWithSnapshotCASSystem_flips_state_and_snapshot_in_one_guarded_write", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#reac", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#reac", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -681,7 +681,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("CloseWithSnapshotCASSystem_writes_terminal_snapshot_and_closes_in_one_guarded_write", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#cws", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#cws", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -748,7 +748,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// No override → empty (the router then falls to its prior-task /
 		// author-identity tiers).
-		plain, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-plain", "pr", "T", "")
+		plain, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#owner-plain", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed plain entity: %v", err)
 		}
@@ -757,7 +757,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		// An explicit override resolves to that team.
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#owner-stamped", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#owner-stamped", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -789,7 +789,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		teamA := seed.Team(t, "Commissioning")
 		teamB := seed.Team(t, "Interloper")
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#stamp", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -816,7 +816,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// An empty team is the defensive case (a run with no team): no stamp,
 		// no error, and the entity keeps its NULL for a later writer.
-		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#stamp-noteam", "pr", "T", "")
+		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#stamp-noteam", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -844,7 +844,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		asker := seed.User(t, "Asker")
 		interloper := seed.User(t, "Interloper")
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#commissioned", "pr", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#commissioned", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -867,7 +867,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 
 		// An empty user is the event-triggered case: nobody asked, so there is
 		// nothing to record and the row keeps its NULL for no later writer.
-		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#commissioned-nobody", "pr", "T", "")
+		fresh, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#commissioned-nobody", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -893,7 +893,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		teamID := seed.Team(t, "Commissioning")
 		asker := seed.User(t, "Asker")
 
-		both, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#both", "pr", "T", "")
+		both, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#both", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -911,7 +911,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		}
 
 		// The event-triggered shape: a team, nobody to record.
-		auto, _, err := s.FindOrCreate(ctx, orgID, "github", "owner/repo#auto", "pr", "T", "")
+		auto, _, err := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#auto", "", "pr", "T", "")
 		if err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -929,9 +929,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("ListActive_filters_by_source_and_state", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#la-gh", "pr", "GH", "")
-		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-la-1", "issue", "JI", "")
-		ghClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#la-closed", "pr", "GC", "")
+		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#la-gh", "", "pr", "GH", "")
+		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "SKY-la-1", "", "issue", "JI", "")
+		ghClosed, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#la-closed", "", "pr", "GC", "")
 		if _, err := s.MarkClosed(ctx, orgID, ghClosed.ID); err != nil {
 			t.Fatalf("close: %v", err)
 		}
@@ -962,9 +962,9 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// into a burst of transitions.
 		s, orgID, _ := mk(t)
 
-		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-gh", "pr", "GH", "")
-		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "SKY-clr-1", "issue", "JI", "")
-		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#clr-closed", "pr", "GC", "")
+		gh, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#clr-gh", "", "pr", "GH", "")
+		ji, _, _ := s.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "SKY-clr-1", "", "issue", "JI", "")
+		closed, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#clr-closed", "", "pr", "GC", "")
 		for _, e := range []*domain.Entity{gh, ji, closed} {
 			if ok, err := s.UpdateSnapshotCASSystem(ctx, orgID, e.ID, `{"number":7}`, e.PollSeq); err != nil || !ok {
 				t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
@@ -1007,7 +1007,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		// no snapshot at all).
 		seedSnap := func(sourceID, source, snapshot string) string {
 			t.Helper()
-			e, _, err := s.FindOrCreate(ctx, orgID, source, sourceID, "pr", sourceID, "")
+			e, _, err := s.FindOrCreate(ctx, orgID, source, TestScope(source), sourceID, "", "pr", sourceID, "")
 			if err != nil {
 				t.Fatalf("create %s: %v", sourceID, err)
 			}
@@ -1196,11 +1196,11 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("Descriptions_dedupes_and_skips_empty", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		withDesc, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#d1", "pr", "T", "")
+		withDesc, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#d1", "", "pr", "T", "")
 		if _, err := s.UpdateDescription(ctx, orgID, withDesc.ID, "rich body"); err != nil {
 			t.Fatalf("UpdateDescription: %v", err)
 		}
-		empty, _, _ := s.FindOrCreate(ctx, orgID, "github", "owner/repo#d2", "pr", "T", "")
+		empty, _, _ := s.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#d2", "", "pr", "T", "")
 
 		missing := uuid.New().String()
 		ids := []string{withDesc.ID, withDesc.ID, "", empty.ID, missing}
@@ -1229,4 +1229,21 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("Descriptions(nil) = %v, want empty map", got)
 		}
 	})
+}
+
+// TestScope is the scope a conformance test keys an entity of source under: what
+// domain.EntityScope answers for an org with default settings where the
+// source has one, and a fixed stand-in where it has none.
+func TestScope(source string) string {
+	switch source {
+	case "github":
+		return "https://github.com"
+	case "jira":
+		return "https://jira.example.com"
+	case "slack":
+		return "T0TEST"
+	case "linear":
+		return "ws-test"
+	}
+	return "test-scope"
 }

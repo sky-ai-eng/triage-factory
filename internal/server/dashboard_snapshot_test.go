@@ -21,7 +21,7 @@ import (
 func seedPRSnapshot(t *testing.T, s *Server, owner, repo string, number int, snap domain.PRSnapshot) string {
 	t.Helper()
 	sourceID := owner + "/" + repo + "#" + itoa(number)
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", sourceID, "pr", snap.Title, snap.URL)
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", snap.Title, snap.URL)
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -60,7 +60,7 @@ func itoa(n int) string {
 // after seedPRSnapshot.
 func readPRSnapshot(t *testing.T, s *Server, sourceID string) domain.PRSnapshot {
 	t.Helper()
-	entity, err := sqlitestore.New(s.db).Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", sourceID)
+	entity, err := sqlitestore.New(s.db).Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID)
 	if err != nil {
 		t.Fatalf("read entity: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestPatchPRSnapshotDraft_FlipsIsDraft(t *testing.T) {
 	})
 
 	// Draft → ready
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, sourceID, false); err != nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", sourceID, false); err != nil {
 		t.Fatalf("patch draft=false: %v", err)
 	}
 	if got := readPRSnapshot(t, s, sourceID); got.IsDraft {
@@ -96,7 +96,7 @@ func TestPatchPRSnapshotDraft_FlipsIsDraft(t *testing.T) {
 	}
 
 	// Ready → draft
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, sourceID, true); err != nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", sourceID, true); err != nil {
 		t.Fatalf("patch draft=true: %v", err)
 	}
 	if got := readPRSnapshot(t, s, sourceID); !got.IsDraft {
@@ -129,7 +129,7 @@ func TestPatchPRSnapshotDraft_PreservesOtherFields(t *testing.T) {
 	}
 	sourceID := seedPRSnapshot(t, s, "sky-ai-eng", "triage-factory", 7, original)
 
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, sourceID, false); err != nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", sourceID, false); err != nil {
 		t.Fatalf("patch: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestPatchPRSnapshotDraft_MissingEntity_NoError(t *testing.T) {
 	// silently rather than failing the whole request.
 	s := newTestServer(t)
 
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "sky-ai-eng/triage-factory#999", false); err != nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", "sky-ai-eng/triage-factory#999", false); err != nil {
 		t.Errorf("expected nil for missing entity, got: %v", err)
 	}
 }
@@ -168,11 +168,11 @@ func TestPatchPRSnapshotDraft_EmptySnapshot_NoError(t *testing.T) {
 	// Entity exists (e.g., FindOrCreate ran but the tracker's snapshot
 	// write hasn't landed yet). Treat as missing — nothing to patch.
 	s := newTestServer(t)
-	if _, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "sky-ai-eng/triage-factory#100", "pr", "Pending", ""); err != nil {
+	if _, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "sky-ai-eng/triage-factory#100", "", "pr", "Pending", ""); err != nil {
 		t.Fatalf("seed empty entity: %v", err)
 	}
 
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "sky-ai-eng/triage-factory#100", true); err != nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", "sky-ai-eng/triage-factory#100", true); err != nil {
 		t.Errorf("expected nil for empty snapshot, got: %v", err)
 	}
 }
@@ -183,7 +183,7 @@ func TestPatchPRSnapshotDraft_MalformedSnapshot_ReturnsError(t *testing.T) {
 	// already treats the whole patch as best-effort and won't fail the
 	// request, so this doesn't hurt the user-facing path.
 	s := newTestServer(t)
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "sky-ai-eng/triage-factory#101", "pr", "Corrupt", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "sky-ai-eng/triage-factory#101", "", "pr", "Corrupt", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestPatchPRSnapshotDraft_MalformedSnapshot_ReturnsError(t *testing.T) {
 		t.Fatalf("seed malformed snapshot: ok=%v err=%v", ok, err)
 	}
 
-	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "sky-ai-eng/triage-factory#101", true); err == nil {
+	if err := patchPRSnapshotDraft(context.Background(), sqlitestore.New(s.db).Entities, runmode.LocalDefaultOrgID, "https://github.com", "sky-ai-eng/triage-factory#101", true); err == nil {
 		t.Error("expected error on malformed snapshot, got nil")
 	}
 }

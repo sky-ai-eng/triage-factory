@@ -36,8 +36,8 @@ func TestConversationStore_Postgres_CalledOffRunRefusesAnOpenWakeForANonCreator(
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Called-off wake', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Called-off wake', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "called-off-"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)

@@ -23,8 +23,8 @@ func seedMultiTeamTask(t *testing.T, h *pgtest.Harness, orgID, userID, teamID, s
 	t.Helper()
 	entityID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "mt-"+suffix+"-"+entityID[:8], "Multi-team "+suffix, "https://example/"+suffix); err != nil {
 		t.Fatalf("seed entity %s: %v", suffix, err)
 	}

@@ -8,8 +8,8 @@ import (
 // SlackSourceID builds the entities.source_id for a Slack thread:
 // "<channel_id>/<thread_ts>". It is the Slack analogue of the tracker's
 // ghSourceID ("owner/repo#N") and Jira's raw issue key — the natural-key
-// vocabulary that maps a (source, source_id) pair onto exactly one entities
-// row (source='slack', kind='thread' when the bot is the reason the thread
+// vocabulary that maps a (source, scope, source_id) key onto exactly one
+// active entities row (source='slack', kind='thread' when the bot is the reason the thread
 // exists — its root was a mention or a run's own post — else 'message' for
 // a mid-thread summons into someone else's thread; see Entity.Kind).
 //
@@ -24,8 +24,8 @@ import (
 // Exported and dependency-free (rather than living next to the unexported
 // tracker ghSourceID) precisely because the consumer lives outside the tracker
 // package — it sits beside the other entity-key builders the rest of the app
-// already shares. channel+ts is unique within a workspace; the org_id column on
-// entities (PG's UNIQUE(org_id, source, source_id)) separates workspaces.
+// already shares. channel+ts is unique within a workspace, and the entity's
+// scope — the Slack workspace id — separates workspaces.
 func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }
@@ -47,7 +47,8 @@ func NormalizeJiraKey(key string) string {
 }
 
 // EntityRefForExternal maps an external write/artifact coordinate to the
-// entity natural key it concerns: source is the entities.source column
+// entity natural key it concerns, less the scope, which the caller resolves for
+// the org (entityscope.Of): source is the entities.source column
 // (== provider for the mapped providers), sourceID is the natural key
 // (== target, except for Jira, where it is the target folded to its
 // canonical spelling), kind is the entities.kind. ok=false for anything the
@@ -97,11 +98,29 @@ func EntityRefForExternal(provider, target string) (source, sourceID, kind strin
 
 // Entity is a long-lived source object (PR, issue, epic, message). Lives from
 // first-poll until closed/merged. All events, tasks, and conversations hang off it.
-// Mirrors the `entities` table in internal/db/db.go.
+// Mirrors the `entities` table.
+//
+// Its natural key is (org, source, scope, source_id), and the key is unique
+// among ACTIVE rows only, so a key a provider frees and reuses never collides
+// with the closed history it used to name. Where the provider has an id that a
+// key change does not move, ExternalID holds it, and that is the identity:
+// (org, source, scope, external_id) is unique, and a key change is a rename of
+// the row carrying the id (db.EntityStore.RenameSystem), never a second row.
+// That is the repository model — the slug is what everything reads, the
+// provider id beside it is what a rename is detected by.
 type Entity struct {
-	ID       string `json:"id"`
-	Source   string `json:"source"`    // "github" | "jira" | "linear" | "slack"
-	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, etc.
+	ID     string `json:"id"`
+	Source string `json:"source"` // "github" | "jira" | "linear" | "slack"
+	// Scope is the provider namespace SourceID and ExternalID are unique
+	// within: the GitHub host, the Jira site, the Linear workspace id, the
+	// Slack workspace id. Computed from org settings by EntityScope, except for
+	// Slack, whose scope is the workspace of the connection the entity came
+	// through.
+	Scope    string `json:"scope"`
+	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, a Linear identifier, etc.
+	// ExternalID is the provider's stable id for the object — a Linear issue's
+	// UUID. Empty when the source has none or TF has not learned it.
+	ExternalID string `json:"external_id,omitempty"`
 	// Kind is "pr" | "issue" | "epic" for the poller-backed sources. For
 	// Slack, kind encodes thread engagement: "thread" when the bot is why
 	// the thread exists (its root message was a mention, or a conversation posted

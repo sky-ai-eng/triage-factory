@@ -3,7 +3,7 @@ package db
 import (
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // NormalizeGitHubHost trims a trailing slash so the (user_id,
@@ -31,9 +31,9 @@ func NormalizeGitHubHost(host string) string { return strings.TrimRight(host, "/
 // NOT resolve through here: that provider is github.com whatever the
 // deployment default is, so the login claim binds under ghbase.GitHubCom
 // literally.
+//
+// The derivation itself is domain.GitHubHost, which is also the scope GitHub
+// entities are keyed under; this name is the identity stores' spelling of it.
 func EffectiveGitHubHost(orgBase string) string {
-	if h := NormalizeGitHubHost(orgBase); h != "" {
-		return h
-	}
-	return ghbase.DefaultBaseURL()
+	return domain.GitHubHost(orgBase)
 }

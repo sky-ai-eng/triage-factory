@@ -15,6 +15,11 @@ const linearNoParent = "none"
 // team's done states; entering one of them emits linear:issue:completed. A
 // zero prev (no ID, no identifier) is first discovery.
 //
+// A new identifier — the issue moved to another team, or its team's key was
+// renamed — is linear:issue:identifier_changed, emitted ahead of every other
+// event the diff finds, since the others describe the issue under the name it
+// has now. The caller has already renamed the entity.
+//
 // State comparisons go through LinearStateRef.SameState, so a state renamed in
 // Linear is not a transition: the id is unchanged and the snapshot just stores
 // the new name. The assignee is compared on the Linear user id, so a person
@@ -55,6 +60,8 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		}
 		return evts
 	}
+
+	evts = append(evts, linearIdentifierChangedEvents(prev, curr, entityID)...)
 
 	if prev.BodyHash != "" && curr.BodyHash != "" && prev.BodyHash != curr.BodyHash {
 		emit(domain.EventLinearIssueBodyUpdated, "", events.LinearIssueBodyUpdatedMetadata{
@@ -104,10 +111,13 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		})
 	}
 
-	// Compared on the parent's UUID: its identifier changes when the parent
-	// moves team, which is not a change of parent.
+	// Compared, and keyed, on the parent's UUID: its identifier changes when
+	// the parent moves team, which is not a change of parent, and a dedup key
+	// that changed with it would open a second task for the same one. The
+	// metadata names the parents by identifier, which is what a reader knows
+	// them by.
 	if prev.ParentID != curr.ParentID {
-		key := curr.ParentIdentifier
+		key := curr.ParentID
 		if curr.ParentID == "" {
 			key = linearNoParent
 		}
@@ -122,6 +132,23 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		})
 	}
 
+	return evts
+}
+
+// linearIdentifierChangedEvents is identifier_changed for an issue whose
+// identifier went from prev's to curr's, or nothing when it did not change. Its
+// source time is curr's updatedAt, as for every other Linear transition.
+func linearIdentifierChangedEvents(prev, curr domain.LinearSnapshot, entityID string) []domain.Event {
+	if prev.Identifier == "" || curr.Identifier == "" || prev.Identifier == curr.Identifier {
+		return nil
+	}
+	var evts []domain.Event
+	emitWithFallback(domain.EventLinearIssueIdentifierChanged, "", curr.UpdatedAt, events.LinearIssueIdentifierChangedMetadata{
+		LinearIssueIdentity: linearIdentity(curr),
+		OldIdentifier:       prev.Identifier,
+		OldLinearTeamID:     prev.TeamID,
+		OldLinearTeamKey:    prev.TeamKey,
+	}, &entityID, time.Now(), &evts)
 	return evts
 }
 

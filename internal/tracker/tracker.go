@@ -309,7 +309,10 @@ func (t *Tracker) commitRefresh(ctx context.Context, orgID, entityID string, pre
 // (success, or a non-rate-limit failure in Phase 2/3 reached only once Phase
 // 1 already covered every entry in repos) reports "" — a full wrap of the
 // list passed in, so the poller's cursor resets rather than resuming mid-list.
-func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, string, error) {
+//
+// scope is the org's GitHub host, domain.EntityScope("github", settings): the
+// namespace every pull request this cycle discovers is keyed under.
+func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string, resolver ReviewerResolver) (int, string, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	// Phase 1: Discovery — find new PRs and register as entities.
@@ -355,7 +358,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, client *ghclient.Client, us
 		snap.NodeID = d.NodeID
 
 		sid := ghSourceID(snap.Repo, snap.Number)
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", sid, "pr", snap.Title, snap.URL)
+		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
 			continue
@@ -1336,7 +1339,11 @@ func (r JiraRules) doneMembersForKey(issueKey string) []domain.JiraStatusRef {
 // construction). In multi mode the poller's per-org loop constructs
 // one Tracker per active org per cycle; in local mode there's one
 // Tracker for the single synthetic tenant.
-func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
+//
+// scope is the org's Jira site, domain.EntityScope("jira", settings): the
+// namespace every issue this cycle discovers is keyed under. baseURL is what
+// the issues' links are built from.
+func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiraclient.Client, baseURL string, projects JiraRules) (int, error) {
 	orgID := t.orgID
 	startedAt := time.Now()
 	discoveryEventsEmitted := 0
@@ -1354,7 +1361,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 
 	for _, state := range discovered {
 		snap := state.Snap
-		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", snap.Key, "issue", snap.Summary, snap.URL)
+		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "jira", scope, snap.Key, "", "issue", snap.Summary, snap.URL)
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", snap.Key, "error", err)
 			continue
@@ -1433,6 +1440,10 @@ func (t *Tracker) RefreshJira(ctx context.Context, client *jiraclient.Client, ba
 	}
 
 	// Phase 2: Refresh
+	// TODO(TFAC-1061): active rows keyed under a previous Jira site are still
+	// refreshed here by key against the current one; they retire as
+	// unreachable with reason scope_changed once Jira follows the Linear
+	// tracker's scope-change pass.
 	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "jira")
 	if err != nil {
 		return 0, fmt.Errorf("list active jira entities: %w", err)

@@ -67,8 +67,8 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 	taskID := uuid.New().String()
 	eventID := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES (?, 'github', ?, 'pr', 'Conformance Entity', 'https://example/x', '{}', ?)
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES (?, 'github', ?, 'pr', 'Conformance Entity', 'https://example/x', '{}', ?, 'https://github.com')
 	`, entityID, fmt.Sprintf("conformance-runs-%d", now.UnixNano()), now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

@@ -123,6 +123,11 @@ const (
 	EventLinearIssueParentChanged   = "linear:issue:parent_changed"
 	EventLinearIssueBecameAtomic    = "linear:issue:became_atomic"
 	EventLinearIssueUnreachable     = "linear:issue:unreachable"
+	// EventLinearIssueIdentifierChanged is a tracked issue answering under a
+	// new identifier: a move to another Linear team, or its team's key
+	// renamed. The issue's UUID did not change, so the entity is renamed and
+	// carries on; this event is the record of that.
+	EventLinearIssueIdentifierChanged = "linear:issue:identifier_changed"
 )
 
 // Slack events. Registered from ee/slack (an out-of-core source; see
@@ -300,7 +305,8 @@ func AllEventTypes() []EventType {
 		{ID: EventLinearIssueParentChanged, Source: "linear", Category: "issue", Label: "Parent Changed", Description: "Issue was moved under another parent, or its parent was removed (uses dedup_key=new parent identifier, or none)"},
 		{ID: EventLinearIssueCompleted, Source: "linear", Category: "issue", Label: "Issue Completed", Description: "Issue entered one of its team's done states"},
 		{ID: EventLinearIssueBecameAtomic, Source: "linear", Category: "issue", Label: "Issue Became Atomic", Description: "Last open sub-issue closed — parent is now an atomic work unit"},
-		{ID: EventLinearIssueUnreachable, Source: "linear", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Linear — deleted, moved to the trash, archived outside a done state, or no longer visible to the configured credential. Confirmed by asking about the issue directly, not inferred from its absence in a batch read"},
+		{ID: EventLinearIssueUnreachable, Source: "linear", Category: "issue", Label: "Issue Unreachable", Description: "Triage Factory no longer follows a tracked issue — Linear answers not-found for it, it is in the trash, it was archived outside a done state, it moved to a team no rule arms, or the org's Linear credential now belongs to another workspace. Never inferred from its absence in a batch read"},
+		{ID: EventLinearIssueIdentifierChanged, Source: "linear", Category: "issue", Label: "Identifier Changed", Description: "A tracked issue answers under a new identifier — moved to another Linear team, or its team's key renamed. The entity follows the issue and keeps its tasks and history"},
 
 		// --- Slack (schema + ownership registered by ee/slack) ---
 		{ID: EventSlackMessage, Source: "slack", Category: "message", Label: "Message to bot", Description: "A human addressed the TF bot in a Slack channel"},

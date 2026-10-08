@@ -116,8 +116,8 @@ func (r *viewerRig) seedTask(t *testing.T) string {
 	t.Helper()
 	var entityID string
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title)
-		VALUES ($1, 'github', 'octo/repo#1', 'pr', 'test pr') RETURNING id
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
+		VALUES ($1, 'github', 'octo/repo#1', 'pr', 'test pr', 'https://github.com') RETURNING id
 	`, r.orgID).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

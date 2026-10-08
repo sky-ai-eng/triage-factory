@@ -102,7 +102,7 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "PROJ-1", "issue", "", "")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "PROJ-1", "", "issue", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 			mu.Lock()
 			description = tc.raw
 			mu.Unlock()
-			if _, err := tr.RefreshJira(ctx, client, srv.URL, JiraRules{{Key: "PROJ", DoneMembers: jiraRefs("Done")}}); err != nil {
+			if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, JiraRules{{Key: "PROJ", DoneMembers: jiraRefs("Done")}}); err != nil {
 				t.Fatal(err)
 			}
 			got, err := stores.Entities.Get(ctx, org, entity.ID)

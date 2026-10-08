@@ -342,8 +342,8 @@ func TestDelegate_ModelProviderUnavailable_SurfacesTheRemedy(t *testing.T) {
 		t.Fatalf("seed blueprint step: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_prov', 'github', 'sky/repo#prov', 'pr', 'active')`); err != nil {
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_prov', 'github', 'sky/repo#prov', 'pr', 'active', 'https://github.com')`); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := s.db.Exec(

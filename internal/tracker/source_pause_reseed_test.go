@@ -80,7 +80,7 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#9", "pr", "Paused PR", "")
+	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#9", "", "pr", "Paused PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -95,14 +95,14 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
 		t.Errorf("first cycle after re-enable emitted %d events, want 0: %v", len(evts), eventTypes(evts))
 	}
-	got, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#9")
+	got, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#9")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}
@@ -133,7 +133,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#9", "pr", "Paused PR", "")
+	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#9", "", "pr", "Paused PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) == 0 {
@@ -173,7 +173,7 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
 
-	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-9", "issue", "Paused issue", "")
+	ent, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-9", "", "issue", "Paused issue", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -193,14 +193,14 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	rules := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, rules); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, rules); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
 		t.Errorf("first cycle after re-enable emitted %d events, want 0: %v", len(evts), eventTypes(evts))
 	}
-	got, err := stores.Entities.GetBySource(ctx, org, "jira", "SKY-9")
+	got, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-9")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}
@@ -298,7 +298,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 
 	// The entity TF knew before the pause, with the snapshot a normal cycle
 	// left behind.
-	known, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#9", "pr", "Paused PR", "")
+	known, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#9", "", "pr", "Paused PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	resolver := fakeReviewerResolver{users: map[string]bool{"carol": true}}
-	if _, _, err := tr.RefreshGitHub(ctx, ghclient.NewClient(srv.URL, "tok"), "", []string{"octo/repo"}, resolver); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
 
@@ -324,7 +324,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	if evts[0].EventType != domain.EventGitHubPRReviewRequested {
 		t.Errorf("event type = %q, want %q", evts[0].EventType, domain.EventGitHubPRReviewRequested)
 	}
-	fresh, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#10")
+	fresh, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#10")
 	if err != nil || fresh == nil {
 		t.Fatalf("the PR opened during the pause was not discovered: ent=%v err=%v", fresh, err)
 	}
@@ -333,7 +333,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	}
 
 	// And the entity TF already knew re-seeded without a word, merge included.
-	got, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#9")
+	got, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#9")
 	if err != nil || got == nil {
 		t.Fatalf("GetBySource: ent=%v err=%v", got, err)
 	}

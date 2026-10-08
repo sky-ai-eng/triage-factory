@@ -126,7 +126,7 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 
 	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "")
 
-	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "octo/repo#7")
+	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {
 		t.Fatalf("relayed read touch did not resolve-or-create the entity: ent=%v err=%v", ent, err)
 	}

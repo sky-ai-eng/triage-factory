@@ -124,8 +124,8 @@ func seedPgTaskChain(t *testing.T, conn *sql.DB, orgID, userID, suffix string) (
 	eventType := "github:pr:ci_check_failed"
 
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
 	`, entityID, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -554,8 +554,8 @@ func seedPgEntityEvent(t *testing.T, conn *sql.DB, orgID, suffix string) (entity
 	sourceID := fmt.Sprintf("sentinel-%s-%d", suffix, now.UnixNano())
 
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
 	`, entityID, orgID, sourceID, "Sentinel "+suffix, "https://example/"+sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

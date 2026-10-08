@@ -707,8 +707,11 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 
 	var entity *domain.Entity
 	if err := s.tx.WithReadTx(r.Context(), b.orgID, b.userID, func(tx db.TxStores) error {
-		var e error
-		entity, e = tx.Entities.GetBySource(r.Context(), b.orgID, "jira", issueKey)
+		orgSet, e := tx.Orgs.GetSettings(r.Context(), b.orgID)
+		if e != nil {
+			return e
+		}
+		entity, e = tx.Entities.GetBySource(r.Context(), b.orgID, "jira", domain.EntityScope("jira", orgSet), issueKey)
 		return e
 	}); err != nil {
 		stockLog.Error("stock: entity lookup failed", "issue", issueKey, "error", err)

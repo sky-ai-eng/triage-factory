@@ -65,8 +65,8 @@ func seedSQLiteDashboardPR(t *testing.T, conn *sql.DB, fx dbtest.DashboardPRFixt
 	sourceID := fmt.Sprintf("dashboard-conformance-%d-%d", fx.Snapshot.Number, now.UnixNano())
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, state,
-		                      commissioned_by_user_id, created_at, last_polled_at)
-		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?)
+		                      commissioned_by_user_id, created_at, last_polled_at, scope)
+		VALUES (?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
 	`, entityID, sourceID, fx.Snapshot.Title, fx.Snapshot.URL, string(blob), state,
 		commissioned, now, now); err != nil {
 		t.Fatalf("seed entity for snapshot %d: %v", fx.Snapshot.Number, err)

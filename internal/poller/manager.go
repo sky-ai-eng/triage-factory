@@ -717,6 +717,18 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 
+	// The org's GitHub host is the scope every pull request this cycle finds
+	// is keyed under. Read once, before either credential path, and a failure
+	// skips the cycle: keying under a guessed host would mint a second entity
+	// beside every one already tracked.
+	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		span.SetStatus(codes.Error, "read org settings")
+		githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", err)
+		return
+	}
+	scope := domain.EntityScope("github", orgSet)
+
 	// TFAC-571: rotate the repo list to start at this org's round-robin
 	// cursor (the resume point saved by a prior cycle that got cut short by
 	// ErrRateLimited), so a large tracked set doesn't starve the repos at
@@ -743,7 +755,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	appActive := m.orgHasRegisteredApp(ctx, orgID)
 	if !appActive {
 		// No App, or a staged App → the PAT is the live credential.
-		refreshed = m.pollGitHubPAT(ctx, conn, orgID, repos, isLocal)
+		refreshed = m.pollGitHubPAT(ctx, conn, orgID, scope, repos, isLocal)
 		return
 	}
 
@@ -845,7 +857,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		m.recordRepoIDs(ctx, orgID, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
-		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, "", scoped, resolver)
+		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, "", scoped, resolver)
 		if rerr != nil {
 			githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "installation", inst.AccountLogin, "error", rerr)
 			m.reportError("github", orgID, rerr)
@@ -988,7 +1000,7 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 // discovery doesn't need one; dashboard history is local/PAT-only).
 //
 // It reports whether the tracker's refresh completed without error.
-func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID string, repos []string, isLocal bool) bool {
+func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgID, scope string, repos []string, isLocal bool) bool {
 	// The PAT path is the whole body of one branch of runGitHubCycleForOrg,
 	// so it records onto that caller's poll.github.org span rather than
 	// opening a child that would only ever duplicate it. A no-op span when
@@ -1042,7 +1054,7 @@ func (m *Manager) pollGitHubPAT(ctx context.Context, conn *cycleConnection, orgI
 	}
 
 	resolver := m.reviewerResolver(ctx, orgID, username, userTeams)
-	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, client, username, repos, resolver)
+	_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, username, repos, resolver)
 	if rerr != nil {
 		span.SetStatus(codes.Error, "refresh")
 		githubLog.Log(ctx, upstream.LogLevel(rerr, slog.LevelError), "tracker error", "org", orgID, "error", rerr)
@@ -1507,7 +1519,11 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	baseURL := orgSet.JiraBaseURL
 	if baseURL == "" {
 		baseURL = creds.JiraURL
+		// The issues come from the site the fallback names, so that is the
+		// site they are keyed under too.
+		orgSet.JiraBaseURL = baseURL
 	}
+	scope := domain.EntityScope("jira", orgSet)
 	// creds load above gates configuration + supplies the baseURL fallback;
 	// ForSystem (reading the same secrets, routed Cloud-vs-DC by the stored
 	// auth-method marker) builds the authenticated client. The gate
@@ -1520,7 +1536,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		m.reportError("jira", orgID, cerr)
 		return
 	}
-	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, client, baseURL, projects); err != nil {
+	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, baseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")
 		jiraLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "tracker error", "org", orgID, "error", err)
 		m.reportError("jira", orgID, err)

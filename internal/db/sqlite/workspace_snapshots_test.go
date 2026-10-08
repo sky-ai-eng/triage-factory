@@ -100,8 +100,8 @@ func seedSQLiteTaskForSnapshot(t *testing.T, conn *sql.DB, suffix string) string
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("snapshot-%s-%d", suffix, now.UnixNano())
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES (?, 'jira', ?, 'issue', 'WorkspaceSnapshot Conformance', 'https://example/x', '{}', ?, 'active')
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES (?, 'jira', ?, 'issue', 'WorkspaceSnapshot Conformance', 'https://example/x', '{}', ?, 'active', 'https://jira.example.com')
 	`, entityID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

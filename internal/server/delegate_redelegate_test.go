@@ -42,7 +42,7 @@ func redelegateFixture(t *testing.T, s *Server, tag string) (taskID, blueprintID
 		t.Fatalf("seed blueprint step: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', ?, 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', ?, 'pr', 'active', 'https://github.com')`,
 		"e_"+tag, "sky/repo#"+tag); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

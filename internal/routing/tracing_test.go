@@ -78,7 +78,7 @@ func TestRouteEventSpan_LinksTheProducer(t *testing.T) {
 	st := sqlitestore.New(database)
 
 	entity, _, err := st.Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#traced", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#traced", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestRouteEventSpan_NoTraceparentRoutesWithoutLink(t *testing.T) {
 	st := sqlitestore.New(database)
 
 	entity, _, err := st.Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#untraced", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#untraced", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestRouteEventSpan_StagesAreChildren(t *testing.T) {
 	st := sqlitestore.New(database)
 
 	entity, _, err := st.Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#stages", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#stages", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
