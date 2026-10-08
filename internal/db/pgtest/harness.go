@@ -516,7 +516,7 @@ var orgScopedTables = []string{
 	// FK (cascading via orgs, and via teams for the latter) so TRUNCATE
 	// CASCADE would reach them even unlisted; listed explicitly anyway,
 	// matching the team_github_repos / team_github_groups convention above.
-	"slack_channels", "team_slack_channels",
+	"slack_channels", "team_slack_channels", "slack_channel_id_changes",
 	// instances: carries no org_id column and no FK at all (a fleet
 	// member isn't tenant data) — TRUNCATE CASCADE from orgs would
 	// never reach it, so it must be listed explicitly or Reset would leak

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -144,6 +145,7 @@ type webhookRig struct {
 	h          *webhookHandler
 	published  *[]domain.Event
 	deliveries *fakeDeliveries
+	channels   *fakeChannelRegistry
 	// metrics reads back what the rig's ingestStats recorded — see
 	// newTestStats/sumByAttr (stats_test.go).
 	metrics *sdkmetric.ManualReader
@@ -179,10 +181,12 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 
 	published := &[]domain.Event{}
 	deliveries := newFakeDeliveries()
+	channels := newFakeChannelRegistry()
 	stats, metrics := newTestStats()
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: deliveries,
+		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 		stats:      stats,
 	}
@@ -190,6 +194,7 @@ func newWebhookRig(t *testing.T, signingSecretRef string, licensed bool) *webhoo
 		h:          &webhookHandler{stores: stores, pipeline: pipeline, stats: stats},
 		published:  published,
 		deliveries: deliveries,
+		channels:   channels,
 		metrics:    metrics,
 	}
 }
@@ -489,6 +494,24 @@ func TestHandleWebhook_EngagedThreadFollowUp_PublishesUnmentioned(t *testing.T) 
 	}
 	if meta.ThreadTS != "1600000000.000100" {
 		t.Errorf("follow-up ThreadTS = %q; want the root ts", meta.ThreadTS)
+	}
+}
+
+// TestHandleWebhook_ChannelIDChanged_MovesTheChannel: a channel_id_changed
+// delivery reaches the pipeline with both ids parsed off the inner event and
+// moves the channel for the workspace's org, publishing nothing.
+func TestHandleWebhook_ChannelIDChanged_MovesTheChannel(t *testing.T) {
+	r := newWebhookRig(t, webhookTestSigningRef, true)
+	body := []byte(`{"type":"event_callback","team_id":"` + webhookTestWorkspaceID + `","api_app_id":"` + webhookTestAppID + `","event_id":"Ev-moved","event":{"type":"channel_id_changed","old_channel_id":"G0SHARED1","new_channel_id":"C0SHARED1","event_ts":"1612206778.000000"}}`)
+	ts := nowTimestamp()
+	if rec := postSlackWebhook(t, r.h, webhookTestOrgID, body, ts, sign(webhookTestSecret, ts, body)); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if want := []string{webhookTestOrgID + "/G0SHARED1->C0SHARED1"}; !reflect.DeepEqual(r.channels.sawMoves, want) {
+		t.Errorf("moves = %v; want %v", r.channels.sawMoves, want)
+	}
+	if len(*r.published) != 0 {
+		t.Errorf("published %d events; want 0", len(*r.published))
 	}
 }
 

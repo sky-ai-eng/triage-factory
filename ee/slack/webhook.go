@@ -47,9 +47,9 @@ type slackEventEnvelope struct {
 }
 
 // slackInnerEvent is the subset of the event_callback's nested "event"
-// object app_mention ingest needs. Every other app_mention field (e.g.
-// blocks, attachments) is out of scope for this leaf — no write-back, no
-// rich rendering.
+// object the ingest pipeline reads, across the event types it handles. Every
+// other field (e.g. blocks, attachments) is out of scope for this leaf — no
+// write-back, no rich rendering.
 type slackInnerEvent struct {
 	Type string `json:"type"`
 	// Subtype discriminates message.channels / message.groups deliveries: a
@@ -65,6 +65,10 @@ type slackInnerEvent struct {
 	Text     string `json:"text"`
 	TS       string `json:"ts"`
 	ThreadTS string `json:"thread_ts"`
+	// OldChannelID / NewChannelID carry a channel_id_changed event: the id
+	// Slack retired and the one it now uses.
+	OldChannelID string `json:"old_channel_id"`
+	NewChannelID string `json:"new_channel_id"`
 }
 
 // webhookHandler serves POST /api/webhooks/slack/{org_id} — the Events API
@@ -216,6 +220,9 @@ func (h *webhookHandler) handleEventCallback(w http.ResponseWriter, r *http.Requ
 		Text:     inner.Text,
 		TS:       inner.TS,
 		ThreadTS: inner.ThreadTS,
+
+		OldChannelID: inner.OldChannelID,
+		NewChannelID: inner.NewChannelID,
 	}
 	if err := h.pipeline.handleEventCallback(r.Context(), ws, ev); err != nil {
 		httpx.InternalError(w, "slack-webhook", err)

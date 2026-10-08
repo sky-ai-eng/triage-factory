@@ -370,7 +370,8 @@ Per Slack app (`message.channels`/`message.groups` are a firehose, unlike
 mentions — watch that volume):
 
 - `tf_slack_ingest_events_total{app_id, outcome}` — every delivery reaching
-  the ingest pipeline; `outcome` is `accepted` or the drop reason
+  the ingest pipeline; `outcome` is `accepted`, `channel_moved` (a
+  `channel_id_changed` that moved a channel to its new ID), or the drop reason
   (`duplicate`, `not_engaged`, `not_thread_reply`, `unsupported_subtype`, …),
   so the sum over outcomes is the received total.
 - `tf_slack_retry_deliveries_total{app_id, transport}` — deliveries Slack

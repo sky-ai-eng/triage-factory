@@ -124,10 +124,13 @@ func buildSlackManifest(orgName, transport, publicURL, orgID string) slackManife
 			// app_mention is the explicit @-summons; message.channels /
 			// message.groups deliver the un-mentioned follow-ups in a thread
 			// the bot already owns (ingest.go's engaged-thread branch filters
-			// the firehose down to those). The history scopes both need
-			// (channels:history / groups:history) are already in
-			// slackBotScopes, so subscribing here rescopes nothing.
-			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{"app_mention", "message.channels", "message.groups"}},
+			// the firehose down to those). channel_id_changed announces a
+			// private channel's new id once it is shared through Slack
+			// Connect, which ingest follows by moving the channel's rows. The
+			// scopes these need (the history scopes for the messages, the read
+			// scopes for the id change) are already in slackBotScopes, so
+			// subscribing here rescopes nothing.
+			EventSubscriptions: slackManifestEventSubs{BotEvents: []string{"app_mention", "message.channels", "message.groups", "channel_id_changed"}},
 		},
 	}
 	switch transport {

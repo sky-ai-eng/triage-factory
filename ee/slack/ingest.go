@@ -74,6 +74,11 @@ type inboundMention struct {
 	Text     string
 	TS       string // the message's own ts
 	ThreadTS string // the parent thread's ts; "" for a root-message mention
+
+	// OldChannelID / NewChannelID carry a channel_id_changed event, the only
+	// type that sets them (and the only one that leaves Channel empty).
+	OldChannelID string
+	NewChannelID string
 }
 
 // entityFinder is the narrow slice of db.EntityStore the ingest pipeline
@@ -136,11 +141,12 @@ type ingestPipeline struct {
 // Slack event. It dispatches on the inner event type: an explicit @-mention
 // (app_mention) mints/re-derives the thread entity and always publishes; an
 // un-mentioned message.channels / message.groups delivery is an engaged-thread
-// follow-up that publishes only if it lands in a thread the bot already owns.
-// Any other type is dropped defensively. Returns an error only for a genuine
-// failure (store error, marshal failure); every "nothing to do" case is a
-// nil-error early return, logged at debug — none of those are failures the
-// caller should retry or 5xx on.
+// follow-up that publishes only if it lands in a thread the bot already owns;
+// a channel_id_changed moves the channel's rows to its new id. Any other type
+// is dropped defensively. Returns an error only for a genuine failure (store
+// error, marshal failure); every "nothing to do" case is a nil-error early
+// return, logged at debug — none of those are failures the caller should
+// retry or 5xx on.
 //
 // Exactly one outcome is recorded per call — each branch names its return
 // path (accepted, or the drop reason), and an error return overrides it as
@@ -154,10 +160,9 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 		outcome, err = p.handleAppMention(ctx, ws, ev)
 	case "message":
 		outcome, err = p.handleThreadMessage(ctx, ws, ev)
+	case "channel_id_changed":
+		outcome, err = p.handleChannelIDChanged(ctx, ws, ev)
 	default:
-		// TODO(TFAC-1063): channel_id_changed is not subscribed to or handled,
-		// so a private channel shared through Slack Connect gets a new id its
-		// thread entities, registry row and tracking rows never follow.
 		slackLog.Debug("dropping unsupported slack event type", "type", ev.Type, "workspace", ws.WorkspaceID)
 		outcome = dropUnsupportedType
 	}
@@ -169,10 +174,10 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 }
 
 // handleAppMention ingests an explicit @-mention. It is deliberately
-// synchronous: one dedup insert, one entity find-or-create, one publish — well
-// inside Slack's 3-second webhook ack budget. Publishes slack:message with
-// Mentioned=true. Returns the delivery's outcome label for
-// handleEventCallback's single recordIngest.
+// synchronous: one channel id read, one dedup insert, one entity
+// find-or-create, one publish — well inside Slack's 3-second webhook ack
+// budget. Publishes slack:message with Mentioned=true. Returns the delivery's
+// outcome label for handleEventCallback's single recordIngest.
 func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	// EventID feeds the dedup key and Channel/TS feed the entity source_id
 	// (domain.SlackSourceID) — an empty value in any of them (a malformed
@@ -187,6 +192,13 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 		slackLog.Debug("dropping self/bot-authored slack mention", "workspace", ws.WorkspaceID)
 		return dropSelfOrBot, nil
 	}
+	// Before the dedup insert, so a failed read leaves the delivery
+	// unrecorded and Slack's redelivery can still land it.
+	channel, err := p.currentChannel(ctx, ws, ev.Channel)
+	if err != nil {
+		return outcomeError, err
+	}
+	ev.Channel = channel
 
 	fresh, err := p.deliveries.MarkDeliveredSystem(ctx, ws.APIAppID, ev.EventID)
 	if err != nil {
@@ -311,6 +323,22 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	if err != nil {
 		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}
+	if entity == nil {
+		// A thread whose channel has since moved to a new id is keyed under
+		// the new one. Resolved only on a miss, so a reply in an engaged
+		// thread costs the one lookup above.
+		channel, err := p.currentChannel(ctx, ws, ev.Channel)
+		if err != nil {
+			return outcomeError, err
+		}
+		if channel != ev.Channel {
+			ev.Channel = channel
+			sourceID = domain.SlackSourceID(ev.Channel, ev.ThreadTS)
+			if entity, err = p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID); err != nil {
+				return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
+			}
+		}
+	}
 	if entity == nil || entity.Kind != "thread" || entity.State != "active" {
 		slackLog.Debug("dropping slack message: no active engaged thread", "workspace", ws.WorkspaceID, "source_id", sourceID)
 		return dropNotEngaged, nil
@@ -343,6 +371,54 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 		go p.identity.resolveSender(context.Background(), ws, ev.User)
 	}
 	return outcomeAccepted, nil
+}
+
+// handleChannelIDChanged follows Slack's change of a channel's id
+// (ChannelRegistryStore.MoveSystem has the full list of what moves). Slack
+// sends it to every app in the channel, so an org with two apps there moves
+// twice; the move is idempotent and the second finds nothing left, which is
+// also why the delivery is not deduped. An error is returned for Slack to
+// redeliver: a channel left under its old id routes every later message in
+// its threads to no entity.
+//
+// Deliveries and this change are not ordered. A delivery made under the old
+// id after the move resolves to the new id at ingest (currentChannel). One
+// made under the new id before the move has no thread to land in yet: an
+// un-mentioned follow-up is dropped, and a mention mints an entity under the
+// new key, which the move closes when the thread's original takes the key.
+func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
+	if ev.OldChannelID == "" || ev.NewChannelID == "" || ev.OldChannelID == ev.NewChannelID {
+		slackLog.Debug("dropping malformed channel_id_changed: missing or unchanged channel id", "workspace", ws.WorkspaceID)
+		return dropMalformed, nil
+	}
+	if p.channels == nil {
+		return dropUnsupportedType, nil
+	}
+	moved, err := p.channels.MoveSystem(ctx, ws.OrgID, ev.OldChannelID, ev.NewChannelID)
+	if err != nil {
+		return outcomeError, fmt.Errorf("move slack channel %s to %s: %w", ev.OldChannelID, ev.NewChannelID, err)
+	}
+	slackLog.Info("slack channel id changed",
+		"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "new_channel", ev.NewChannelID,
+		"entities", moved.Entities, "superseded", moved.Superseded, "trackers", moved.Trackers,
+		"artifacts", moved.Artifacts, "actions", moved.Actions, "handlers", moved.Handlers)
+	return outcomeChannelMoved, nil
+}
+
+// currentChannel resolves a delivered channel id to the id the channel has
+// now — the same id unless Slack changed it after generating this delivery
+// (a redelivery of an event from before the change). Nil-safe like the
+// pipeline's other optional collaborators: without a registry there is no
+// recorded change to resolve through.
+func (p *ingestPipeline) currentChannel(ctx context.Context, ws slackstore.Workspace, channelID string) (string, error) {
+	if p.channels == nil {
+		return channelID, nil
+	}
+	current, err := p.channels.CurrentIDSystem(ctx, ws.OrgID, channelID)
+	if err != nil {
+		return "", fmt.Errorf("resolve slack channel id: %w", err)
+	}
+	return current, nil
 }
 
 // publishMessage marshals the durable audit metadata and publishes the

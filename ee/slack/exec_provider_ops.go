@@ -54,6 +54,9 @@ type (
 	}
 	slackAuthorizedResult struct {
 		Authorized bool `json:"authorized"`
+		// Channel is the id the channel has now: the requested id, or the
+		// one Slack moved the channel to after the requester learned it.
+		Channel string `json:"channel,omitempty"`
 	}
 	slackWorkspaceIdentity struct {
 		WorkspaceID string `json:"workspace_id"`
@@ -72,7 +75,8 @@ type (
 )
 
 // slackOpAuthorizeChannel is the stage-1 gate: does the conversation's team track the
-// channel (mirrors exec workspace add's team-tracked-repo gate).
+// channel (mirrors exec workspace add's team-tracked-repo gate). Answers with
+// the id the channel has now, for the verb to act on.
 func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -82,14 +86,18 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, a.Channel)
+	channel, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, a.Channel)
+	if err != nil {
+		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
+	}
+	tracks, err := bundle.TeamChannels.TracksChannelSystem(ctx, info.OrgID, info.TeamID, channel)
 	if err != nil {
 		return nil, fmt.Errorf("slack: check channel authorization: %w", err)
 	}
 	if !tracks {
 		return nil, fmt.Errorf("slack: this team does not track channel %s", a.Channel)
 	}
-	return slackAuthorizedResult{Authorized: true}, nil
+	return slackAuthorizedResult{Authorized: true, Channel: channel}, nil
 }
 
 // slackOpResolveWorkspace resolves which (workspace, app) IDENTITY to act as for
@@ -98,6 +106,9 @@ func slackOpAuthorizeChannel(ctx context.Context, stores db.Stores, info agentho
 // SAME channel, that message's (workspace_id, api_app_id) is authoritative;
 // otherwise every connected workspace matching the channel's WorkspaceID is
 // listed: exactly one → use it; more than one → refuse rather than guess.
+// Both channel ids compare as the ids the channel has now, so a message
+// recorded before Slack moved its channel to a new id still names the
+// channel the verb acts on.
 func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agenthost.ConversationInfo, args json.RawMessage) (any, error) {
 	var a slackChannelArg
 	if err := json.Unmarshal(args, &a); err != nil {
@@ -107,7 +118,11 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 	if bundle == nil {
 		return nil, fmt.Errorf("slack: not available")
 	}
-	channel, err := bundle.Channels.GetSystem(ctx, info.OrgID, a.Channel)
+	channelID, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, a.Channel)
+	if err != nil {
+		return nil, fmt.Errorf("slack: resolve channel %s: %w", a.Channel, err)
+	}
+	channel, err := bundle.Channels.GetSystem(ctx, info.OrgID, channelID)
 	if err != nil {
 		return nil, fmt.Errorf("slack: look up channel %s: %w", a.Channel, err)
 	}
@@ -115,10 +130,18 @@ func slackOpResolveWorkspace(ctx context.Context, stores db.Stores, info agentho
 		return nil, fmt.Errorf("slack: channel %s is not visible to Triage Factory", a.Channel)
 	}
 
-	if ws, metaChannel, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info); err != nil {
+	ws, metaChannel, ok, err := workspaceFromConversationTaskMetadata(ctx, stores, info)
+	if err != nil {
 		return nil, err
-	} else if ok && metaChannel == a.Channel {
-		return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
+	}
+	if ok {
+		metaChannelID, err := bundle.Channels.CurrentIDSystem(ctx, info.OrgID, metaChannel)
+		if err != nil {
+			return nil, fmt.Errorf("slack: resolve channel %s: %w", metaChannel, err)
+		}
+		if metaChannelID == channelID {
+			return slackWorkspaceIdentity{WorkspaceID: ws.WorkspaceID, APIAppID: ws.APIAppID}, nil
+		}
 	}
 
 	workspaces, err := orgWorkspaces(ctx, stores, info.OrgID)

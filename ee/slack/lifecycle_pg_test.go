@@ -616,6 +616,30 @@ func TestLifecycleAdapter_ConversationStatus_RunningThenActivity_SetsDescription
 	})
 }
 
+// TestLifecycleAdapter_ConversationStatus_ChannelMovedSinceTheTasksEvent: a
+// conversation on a task whose message was recorded before Slack moved the
+// channel to a new id sets its indicator in the channel's new id, not the
+// one the immutable event metadata names.
+func TestLifecycleAdapter_ConversationStatus_ChannelMovedSinceTheTasksEvent(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMessageConversation(t, h, orgID, owner, teamID, "T1", "A1", "G0LIFE001", "1700000000.000100", "")
+	if _, err := slackstore.FromStores(stores).Channels.MoveSystem(t.Context(), orgID, "G0LIFE001", "C0LIFE001"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	convs := map[string]*conversationEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
+
+	adapter.dispatch(context.Background(), conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+	if got := fake.statusCalls()[0].Channel; got != "C0LIFE001" {
+		t.Errorf("status call channel = %q, want the channel's new id C0LIFE001", got)
+	}
+}
+
 // TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress
 // walks a conversation through queued → cloning → running and pins that the
 // indicator starts at the first setup phase's pair (on both surfaces — no

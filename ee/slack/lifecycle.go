@@ -542,13 +542,22 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 	if !ok {
 		return entry
 	}
+	// The task's primary event is immutable and outlives a change of its
+	// channel's id, and every later conversation on the task resolves through
+	// it, so the indicator and the failure note go to the id the channel has
+	// now.
+	channel, err := slackstore.FromStores(a.stores).Channels.CurrentIDSystem(ctx, orgID, meta.Channel)
+	if err != nil {
+		slackLog.Warn("slack lifecycle: resolve channel id failed", "conversation", conversationID, "error", err)
+		return entry
+	}
 
 	threadTS := meta.ThreadTS
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
 	entry.isSlack = true
-	entry.channel = meta.Channel
+	entry.channel = channel
 	entry.threadTS = threadTS
 	entry.botToken = token
 	return entry
