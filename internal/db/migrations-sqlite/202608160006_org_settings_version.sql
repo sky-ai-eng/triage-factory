@@ -10,10 +10,12 @@
 -- token it read at, the write requires it, and a write against a stale token is
 -- refused so the loser can refetch and re-apply.
 --
--- The counter belongs to the settings WRITER, not to the row's every touch:
--- UpdateSettings bumps it, SetGitHubCredentialClass (a surgical single-column
--- write owned by the credential transitions) does not, so a credential
--- transition never invalidates an admin's in-flight settings edit.
+-- The counter guards the values the settings save writes, not the row's every
+-- touch: UpdateSettings bumps it, and so does SetSourceBaseURL, the credential
+-- routes' write of a source host the save also sets. A surgical write to a
+-- value the save never touches (SetGitHubCredentialClass, SetLinearWorkspace)
+-- leaves it alone, so it never fails an admin's in-flight settings edit over a
+-- change that edit could not have undone.
 --
 -- Day one: local mode is N=1 — a single user on a single machine, with no
 -- second admin to race — so existing installs see no behavioural change beyond

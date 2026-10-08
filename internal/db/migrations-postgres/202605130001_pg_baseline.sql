@@ -727,10 +727,16 @@ CREATE TABLE public.org_settings (
     -- org_event_sources.poll_interval under kind 'linear', not a column here.
     linear_workspace_id text,
     linear_workspace_url_key text,
-    -- Optimistic-concurrency token for the whole-row settings save: the read
-    -- hands it to the client, the write requires it, a stale token gets 409, and
-    -- there is no merge. Bumped by OrgsStore.UpdateSettings alone, and it covers
-    -- org_settings only — the per-source PATCH is last-writer-wins.
+    -- Optimistic-concurrency token for the settings save: the read hands it to
+    -- the client, the write requires it, a stale token gets 409, and there is no
+    -- merge. It guards everything that save writes: this row, and base_url /
+    -- poll_interval on the org's org_event_sources rows, written in the same
+    -- transaction. Every write to one of those values bumps it —
+    -- OrgsStore.UpdateSettings, UpdateSettingsVersioned, and SetSourceBaseURL,
+    -- the credential routes' write of a source's host. Writes to values the
+    -- save never touches leave it alone: SetGitHubCredentialClass,
+    -- SetLinearWorkspace, and the per-source off switch
+    -- (OrgEventSourceStore.SetDisabled), which is last-writer-wins.
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))
