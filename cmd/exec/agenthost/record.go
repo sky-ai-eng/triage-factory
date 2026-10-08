@@ -187,14 +187,13 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 	if !ok {
 		return "", nil
 	}
-	scope, err := entityscope.Of(ctx, stores, info.OrgID, source, sourceID)
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, source)
 	if err != nil {
 		return "", err
 	}
 	if scope == "" {
-		// The source has no scope in this org — not configured, or a Slack
-		// channel no connected workspace knows — so the object has no
-		// address an entity could be keyed under.
+		// The source has no scope in this org — it is not configured — so
+		// the object has no address an entity could be keyed under.
 		return "", nil
 	}
 	// title is left empty — neither an ExternalAction nor an addressed read
@@ -388,7 +387,7 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 	if stores.Entities == nil {
 		return res, nil
 	}
-	scope, err := entityscope.Of(ctx, stores, info.OrgID, source, sourceID)
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, source)
 	if err != nil {
 		return nil, err
 	}

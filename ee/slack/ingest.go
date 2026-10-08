@@ -83,9 +83,10 @@ type inboundMention struct {
 // this structurally, so the production wiring (install.go) needs no
 // adapter.
 //
-// Every Slack entity is keyed under the workspace of the connection it came
-// through (ws.WorkspaceID): channel ids and message timestamps are only unique
-// within one workspace, and an org can connect several.
+// Every Slack entity is keyed under domain.SlackScope, never the workspace of
+// the connection an event came through: a shared channel has one id in every
+// workspace it is in, so the same thread can arrive through more than one
+// connection and must resolve to one entity.
 type entityFinder interface {
 	FindOrCreateSystem(ctx context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error)
 	// GetBySourceSystem resolves an entity by its natural (source, scope,
@@ -154,6 +155,9 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 	case "message":
 		outcome, err = p.handleThreadMessage(ctx, ws, ev)
 	default:
+		// TODO(TFAC-1063): channel_id_changed is not subscribed to or handled,
+		// so a private channel shared through Slack Connect gets a new id its
+		// thread entities, registry row and tracking rows never follow.
 		slackLog.Debug("dropping unsupported slack event type", "type", ev.Type, "workspace", ws.WorkspaceID)
 		outcome = dropUnsupportedType
 	}
@@ -209,7 +213,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	}
 	sourceID := domain.SlackSourceID(ev.Channel, root)
 
-	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", ws.WorkspaceID, sourceID, "", kind, slackThreadTitle, "")
+	entity, created, err := p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID, "", kind, slackThreadTitle, "")
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
@@ -303,7 +307,7 @@ func (p *ingestPipeline) handleThreadMessage(ctx context.Context, ws slackstore.
 	// someone else's thread), and still be active. An unknown thread, someone
 	// else's thread, or a closed one is chatter the bot doesn't listen to.
 	sourceID := domain.SlackSourceID(ev.Channel, ev.ThreadTS)
-	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", ws.WorkspaceID, sourceID)
+	entity, err := p.entities.GetBySourceSystem(ctx, ws.OrgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		return outcomeError, fmt.Errorf("get slack thread entity: %w", err)
 	}

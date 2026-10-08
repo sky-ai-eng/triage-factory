@@ -27,7 +27,7 @@ func createEntityForTest(t *testing.T, database *sql.DB, source, sourceID, kind,
 	now := time.Now()
 	_, err := database.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, state, created_at, last_polled_at, scope)
-		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'T0TEST' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
+		VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, CASE ? WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
 	`, id, source, sourceID, kind, title, url, now, now, source)
 	if err != nil {
 		t.Fatalf("createEntityForTest: %v", err)

@@ -18,10 +18,9 @@ import (
 //     credentials are keyed under. "" while no valid Jira base URL is set.
 //   - linear: the org's Linear workspace id. "" while no Linear credential is
 //     bound.
+//   - slack: SlackScope, the same for every org and every connected workspace.
 //
-// Slack is not here: an org can connect more than one Slack workspace, so a
-// Slack entity's scope is the workspace of the connection it came through, and
-// the Slack caller passes that directly. Any source not listed answers "".
+// Any source not listed answers "".
 //
 // When this changes for an org — its Linear credential rebound to another
 // workspace, its Jira base URL pointed at another site — rows keyed under the
@@ -36,9 +35,19 @@ func EntityScope(source string, s OrgSettings) string {
 		return host
 	case "linear":
 		return s.LinearWorkspaceID
+	case "slack":
+		return SlackScope
 	}
 	return ""
 }
+
+// SlackScope is the scope every Slack entity is keyed under. A Slack entity's
+// key is a channel id and a thread's root timestamp, and nothing narrower than
+// all of Slack is needed to make it unique: a shared channel keeps one channel
+// id in every workspace it is in, so keying by workspace would give one thread
+// a second entity in each workspace that saw it. Slack has one host, so there
+// is no deployment to tell apart either, as there is for GitHub.
+const SlackScope = "slack.com"
 
 // GitHubHost resolves an org's configured github_base_url to the host GitHub
 // objects and identities are keyed under: trailing slashes trimmed, and an

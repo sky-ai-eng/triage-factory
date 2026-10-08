@@ -156,7 +156,7 @@ func TestTaskStore_SQLite_SlackMessageCount(t *testing.T) {
 	taskID := uuid.New().String()
 	if _, err := conn.Exec(`
 		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES (?, 'slack', 'C1/1600000000.000100', 'thread', 'New thread messages in #general', '', '{}', ?, 'T0TEST')
+		VALUES (?, 'slack', 'C1/1600000000.000100', 'thread', 'New thread messages in #general', '', '{}', ?, 'slack.com')
 	`, entityID, now); err != nil {
 		t.Fatalf("seed slack entity: %v", err)
 	}

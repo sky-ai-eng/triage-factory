@@ -42,9 +42,8 @@ var attachLog = logging.Component("memoryentities")
 // with no '#N') maps to no entity and is skipped.
 //
 // A produced entity is keyed under its source's current scope in the org
-// (entityscope.Of); an artifact whose object has no scope there — its source
-// not configured, a Slack channel no connected workspace knows — attaches
-// nothing.
+// (entityscope.Of); an artifact whose source has no scope there, because it is
+// not configured, attaches nothing.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -77,7 +76,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		if !ok {
 			continue
 		}
-		scope, err := entityscope.Of(ctx, stores, orgID, source, sourceID)
+		scope, err := entityscope.Of(ctx, stores, orgID, source)
 		if err != nil {
 			attachLog.Warn("resolve produced entity scope for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)

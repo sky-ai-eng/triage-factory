@@ -79,7 +79,7 @@ func TestEntityScope(t *testing.T) {
 		"github": "https://ghe.example.com",
 		"jira":   "https://jira.example.com/jira",
 		"linear": "ws-a",
-		"slack":  "",
+		"slack":  SlackScope,
 	}
 	for source, want := range cases {
 		if got := EntityScope(source, s); got != want {

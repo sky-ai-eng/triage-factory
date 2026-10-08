@@ -338,7 +338,7 @@ func testScope(source string) string {
 	case "jira":
 		return "https://jira.example.com"
 	case "slack":
-		return "T0TEST"
+		return "slack.com"
 	case "linear":
 		return "ws-test"
 	}

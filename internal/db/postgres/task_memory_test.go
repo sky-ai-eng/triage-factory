@@ -564,7 +564,7 @@ func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
-		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active', CASE $3 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'T0TEST' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
+		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active', CASE $3 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
 	`, id, orgID, source, sourceID, kind, sourceID); err != nil {
 		t.Fatalf("seed shared entity %s/%s: %v", source, sourceID, err)
 	}

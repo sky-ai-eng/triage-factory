@@ -457,7 +457,7 @@ func TestSlackExecHandler_Send_RootPostMintsThreadKind(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -494,7 +494,7 @@ func TestSlackExecHandler_Send_ThreadedReplyMintsMessageKind(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", rootTS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -528,7 +528,7 @@ func TestSlackExecHandler_Send_RootPostThenEdit_PreservesThreadKind(t *testing.T
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -570,7 +570,7 @@ func TestSlackExecHandler_Send_FileOnlyRootPost_TitlesFromAttachmentName(t *test
 	}
 
 	sourceID := domain.SlackSourceID("C1", out.TS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}
@@ -1143,7 +1143,7 @@ func TestSlackExecHandler_ReadThread_RecordsTouch(t *testing.T) {
 	}
 
 	sourceID := domain.SlackSourceID("C1", rootTS)
-	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", "T1", sourceID)
+	ent, err := r.stor.Entities.GetBySourceSystem(context.Background(), orgID, "slack", domain.SlackScope, sourceID)
 	if err != nil {
 		t.Fatalf("GetBySourceSystem: %v", err)
 	}

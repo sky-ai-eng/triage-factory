@@ -51,12 +51,12 @@ func (f *fakeEntities) GetBySourceSystem(_ context.Context, orgID, source, scope
 	return f.byKey[fakeEntityKey(orgID, source, scope, sourceID)], nil
 }
 
-// seedThread inserts a pre-existing entity under (orgID, "slack", the test
-// workspace, sourceID) with the given kind and state — the fixtures the
+// seedThread inserts a pre-existing entity under (orgID, "slack",
+// domain.SlackScope, sourceID) with the given kind and state — the fixtures the
 // engaged-thread tests use to stand up (or deliberately mis-configure) the
 // thread a follow-up lands in, without routing through a root-mention first.
 func (f *fakeEntities) seedThread(orgID, sourceID, kind, state string) {
-	scope := testWorkspaceRow(orgID).WorkspaceID
+	scope := domain.SlackScope
 	key := fakeEntityKey(orgID, "slack", scope, sourceID)
 	f.byKey[key] = &domain.Entity{ID: "entity-" + key, Source: "slack", Scope: scope, SourceID: sourceID, Kind: kind, State: state}
 }
@@ -232,7 +232,7 @@ func TestHandleEventCallback_ThreadRootVsRootMessage(t *testing.T) {
 			if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
 				t.Fatalf("handleEventCallback: %v", err)
 			}
-			key := fakeEntityKey("org-1", "slack", ws.WorkspaceID, tc.wantSourceID)
+			key := fakeEntityKey("org-1", "slack", domain.SlackScope, tc.wantSourceID)
 			ent, ok := entities.byKey[key]
 			if !ok {
 				t.Fatalf("no entity created under source_id %q; entities = %v", tc.wantSourceID, entities.byKey)
@@ -291,7 +291,7 @@ const (
 	engagedThreadTS = "1500000000.000001"
 	engagedReplyTS  = "1500000000.000100"
 	engagedSourceID = "C1/" + engagedThreadTS
-	engagedEntityID = "entity-org-1/slack/T0PIPE001/" + engagedSourceID
+	engagedEntityID = "entity-org-1/slack/slack.com/" + engagedSourceID
 )
 
 // engagedFollowUp is the canonical valid engaged-thread follow-up: a plain
@@ -397,6 +397,29 @@ func TestHandleThreadMessage_AcceptPublishesFollowUpShape(t *testing.T) {
 	}
 	if meta.ThreadTS != engagedThreadTS || meta.TS != engagedReplyTS || meta.SenderID != "U1" || meta.EventID != "Ev-followup" {
 		t.Errorf("metadata = %+v; want fields carried from the follow-up", meta)
+	}
+}
+
+// TestHandleThreadMessage_FollowUpThroughAnotherWorkspace: a shared channel has
+// one id in every workspace it is in, so a thread engaged through one
+// workspace's connection takes a reply delivered through another's.
+func TestHandleThreadMessage_FollowUpThroughAnotherWorkspace(t *testing.T) {
+	p, entities, _, published := newTestPipeline()
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), inboundMention{
+		Type: "app_mention", EventID: "Ev-root", Channel: "C1", User: "U1", Text: "<@U0BOT> look", TS: engagedThreadTS,
+	}); err != nil {
+		t.Fatalf("root mention: %v", err)
+	}
+	other := testWorkspaceRow("org-1")
+	other.WorkspaceID, other.APIAppID = "T0OTHER01", "A0OTHER01"
+	if err := p.handleEventCallback(context.Background(), other, engagedFollowUp()); err != nil {
+		t.Fatalf("follow-up: %v", err)
+	}
+	if len(entities.byKey) != 1 {
+		t.Errorf("entities = %d, want the one thread", len(entities.byKey))
+	}
+	if len(*published) != 2 || (*published)[1].EntityID == nil || *(*published)[1].EntityID != engagedEntityID {
+		t.Fatalf("published %d events; want the follow-up on %s", len(*published), engagedEntityID)
 	}
 }
 
@@ -774,7 +797,7 @@ func TestHandleEventCallback_DispatchesPermalinkResolutionOnCreated(t *testing.T
 	if hits != 1 {
 		t.Errorf("chat.getPermalink hits = %d; want 1 (resolvePermalink should have called it)", hits)
 	}
-	entityID := "entity-org-1/slack/T0PIPE001/C1/1600000000.000100"
+	entityID := "entity-org-1/slack/slack.com/C1/1600000000.000100"
 	if got := entityURLs.get(entityID); got != "https://acme.slack.com/archives/C1/p1600000000000100" {
 		t.Errorf("url = %q; want the resolved permalink", got)
 	}

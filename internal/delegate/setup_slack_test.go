@@ -23,7 +23,7 @@ func slackTaskFixture(t *testing.T, suffix string) (*Spawner, *sql.DB, domain.Ta
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "slack", "T0TEST", "C1/1700000000.000100-"+suffix, "", "message", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "slack", "slack.com", "C1/1700000000.000100-"+suffix, "", "message", "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("create slack entity: %v", err)
 	}

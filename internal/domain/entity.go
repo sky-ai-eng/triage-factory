@@ -24,8 +24,9 @@ import (
 // Exported and dependency-free (rather than living next to the unexported
 // tracker ghSourceID) precisely because the consumer lives outside the tracker
 // package — it sits beside the other entity-key builders the rest of the app
-// already shares. channel+ts is unique within a workspace, and the entity's
-// scope — the Slack workspace id — separates workspaces.
+// already shares. channel+ts names one thread across all of Slack: a shared
+// channel keeps its id in every workspace it is in, so the entity's scope is
+// SlackScope, never a workspace.
 func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }
@@ -112,10 +113,9 @@ type Entity struct {
 	ID     string `json:"id"`
 	Source string `json:"source"` // "github" | "jira" | "linear" | "slack"
 	// Scope is the provider namespace SourceID and ExternalID are unique
-	// within: the GitHub host, the Jira site, the Linear workspace id, the
-	// Slack workspace id. Computed from org settings by EntityScope, except for
-	// Slack, whose scope is the workspace of the connection the entity came
-	// through.
+	// within: the GitHub host, the Jira site, the Linear workspace id, or
+	// SlackScope for every Slack entity. Computed from org settings by
+	// EntityScope.
 	Scope    string `json:"scope"`
 	SourceID string `json:"source_id"` // "owner/repo#18", a Jira issue key, a Linear identifier, etc.
 	// ExternalID is the provider's stable id for the object — a Linear issue's

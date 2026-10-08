@@ -1971,7 +1971,7 @@ func seedEntity(t *testing.T, h *Harness, orgID, source, sourceID string) string
 	var id string
 	if err := h.AdminDB.QueryRow(`
 		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
-		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'T0TEST' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END) RETURNING id
+		VALUES ($1, $2, $3, 'pr', 'test pr', CASE $2 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END) RETURNING id
 	`, orgID, source, sourceID).Scan(&id); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

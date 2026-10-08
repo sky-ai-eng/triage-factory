@@ -235,7 +235,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		const sid = "C0125/1700000000.000100"
-		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message",
+		ent, created, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message",
 			"first message text", "https://slack.example/archives/C0125/p1700000000000100")
 		if err != nil {
 			t.Fatalf("FindOrCreate(slack): %v", err)
@@ -251,7 +251,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("title = %q, want the first message text", ent.Title)
 		}
 
-		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message", "ignored", "")
+		again, created2, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message", "ignored", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(slack) re-resolve: %v", err)
 		}
@@ -273,7 +273,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 		s, orgID, _ := mk(t)
 
 		const sid = "C0777/1700000000.000400"
-		first, created, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "thread", "root text", "")
+		first, created, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(thread): %v", err)
 		}
@@ -281,7 +281,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Fatalf("expected created=true on first resolve")
 		}
 
-		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", sid, "", "message", "ignored", "")
+		second, created2, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", sid, "", "message", "ignored", "")
 		if err != nil {
 			t.Fatalf("FindOrCreate(message, re-resolve): %v", err)
 		}
@@ -321,12 +321,12 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("GetBySourceSystem_mirrors_GetBySource", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", "C0999/1700000000.000300", "", "thread", "root text", "")
+		want, _, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", "C0999/1700000000.000300", "", "thread", "root text", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 
-		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "T0TEST", "C0999/1700000000.000300")
+		got, err := s.GetBySourceSystem(ctx, orgID, "slack", "slack.com", "C0999/1700000000.000300")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem: %v", err)
 		}
@@ -334,7 +334,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 			t.Errorf("GetBySourceSystem = %+v, want the seeded entity %+v", got, want)
 		}
 
-		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "T0TEST", "C0999/nonexistent")
+		miss, err := s.GetBySourceSystem(ctx, orgID, "slack", "slack.com", "C0999/nonexistent")
 		if err != nil {
 			t.Fatalf("GetBySourceSystem(miss): %v", err)
 		}
@@ -538,7 +538,7 @@ func RunEntityStoreConformance(t *testing.T, mk EntityStoreFactory) {
 	t.Run("UpdateURLSystem_round_trips_and_is_a_noop_on_missing", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 
-		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "T0TEST", "C0125/1700000000.000200", "", "message", "T", "")
+		ent, _, err := s.FindOrCreate(ctx, orgID, "slack", "slack.com", "C0125/1700000000.000200", "", "message", "T", "")
 		if err != nil {
 			t.Fatalf("seed: %v", err)
 		}
@@ -1241,7 +1241,7 @@ func TestScope(source string) string {
 	case "jira":
 		return "https://jira.example.com"
 	case "slack":
-		return "T0TEST"
+		return "slack.com"
 	case "linear":
 		return "ws-test"
 	}

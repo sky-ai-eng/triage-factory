@@ -198,7 +198,7 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 	}
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
-		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'T0TEST')
+		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com')
 	`, entityID, orgID, domain.SlackSourceID(channel, root)); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
