@@ -89,6 +89,15 @@ func ParkIdle() Park {
 	return Park{Reason: domain.ParkReasonIdle}
 }
 
+// ParkInvalidEnvelope is a turn that ended on a completion envelope still
+// invalid after every re-prompt. Not deliberate, for the same reason idle is
+// not: nobody stopped the engagement, it ended, so its claim releases
+// 'parked'. The reason is what the blueprint reactors read to abort the
+// blueprint behind it.
+func ParkInvalidEnvelope() Park {
+	return Park{Reason: domain.ParkReasonInvalidEnvelope}
+}
+
 // ParkStopped is a deliberate stop: someone or something ended this conversation.
 // Records the reason, releases the claim 'cancelled', and re-parks an
 // already-parked row so the caller knows the stop landed and can finalize the
@@ -288,7 +297,10 @@ type ConversationStore interface {
 	// row has handed its verdict to the reactor and is moments from being
 	// advanced past or finalized; waking it makes the reactor read a
 	// successor's state where this engagement's verdict should be, and the
-	// blueprint dies on it.
+	// blueprint dies on it. A row parked on an envelope that never validated
+	// (ParkedOnInvalidEnvelopeSQL) is refused on the same terms: it has
+	// handed the reactor the abort, and woken first it would run under a
+	// blueprint the reactor is about to terminate.
 	//
 	// The second: it refuses a step whose run was called off (cancel
 	// requested, or cancelled), the run the claim gate drives nothing under.
@@ -297,7 +309,8 @@ type ConversationStore interface {
 	// called-off run is a mid-flight row the claim gate refuses, no
 	// settlement arm matches once the run is cancelled, and the stranded-run
 	// replay ignores. Otherwise a parked row with no verdict wakes
-	// unconditionally — a stopped mid-blueprint step is a paused step
+	// unconditionally (once its blueprint is not running, the envelope park
+	// above included) — a stopped mid-blueprint step is a paused step
 	// continuing, and its verdict SHOULD advance the sequence.
 	//
 	// The wake leaves the conclusion stamp where it is: a follow-up on a

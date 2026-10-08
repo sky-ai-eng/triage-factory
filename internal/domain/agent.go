@@ -68,9 +68,11 @@ const (
 	// (nonzero exit, stream failure) for any reason other than the
 	// memory ceiling.
 	ConversationFailureCrash ConversationFailureKind = "crash"
-	// ConversationFailureNoResult — the agent ended without a usable result:
-	// a clean exit that never produced a result event, or an
-	// envelope attempt that exhausted validation.
+	// ConversationFailureNoResult — the runtime ended without a usable
+	// result: a clean exit that never produced a result event, or a resume
+	// that produced no completion. An envelope that stays invalid is not
+	// this: the transcript is whole, so it parks the conversation
+	// (ParkReasonInvalidEnvelope) and aborts the blueprint instead.
 	ConversationFailureNoResult ConversationFailureKind = "no_result"
 	// ConversationFailureAgentError — the agent itself reported an error
 	// result (IsError terminal).

@@ -38,6 +38,13 @@ const (
 	blueprintStepAbort
 )
 
+// invalidEnvelopeAbortReason is the abort reason a blueprint terminates with
+// when its current step parked on a completion envelope that never validated
+// (domain.ParkReasonInvalidEnvelope). Aborted rather than failed: the runtime
+// under the agent did not die, the task stays open for a person, and a
+// message on the step re-opens the blueprint while it does.
+const invalidEnvelopeAbortReason = "invalid-envelope"
+
 // blueprintDecisionForStepConversation maps a completed step RUN's terminal outcome +
 // the step's position to the orchestrator's next move. runOutcome is the step
 // run's conversations.outcome — the step itself (a blueprint_steps row) carries
@@ -575,8 +582,10 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 	// cancel is behind the park: a cancelled resume parks `open` rather than
 	// recording a verdict of its own, so cancel_requested is what tells the
 	// two apart — the same ordering reactToStepTerminal uses, and for the same
-	// reason.
-	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() && !cr.CancelRequested {
+	// reason. Nor when the park is an envelope that never validated, which is
+	// an answer the blueprint acts on.
+	if stepConversation.Status == domain.StatusOpen && !stepConversation.Concluded() &&
+		!stepConversation.ParkedOnInvalidEnvelope() && !cr.CancelRequested {
 		return
 	}
 
@@ -617,10 +626,12 @@ func (s *Spawner) ResumeBlueprintAfterResume(orgID, stepConversationID, userID s
 // conversation's ending + position to the blueprint's terminal status.
 // Mirrors reactToStepTerminal's disposition, for the resume path: a recorded
 // verdict routes through blueprintDecisionForStepConversation
-// (finish/advance/abort), and a failure maps to the matching blueprint
-// terminal.
+// (finish/advance/abort), an envelope that never validated aborts, and a
+// failure maps to the matching blueprint terminal.
 func blueprintTerminalForResumedStepConversation(stepConversation *domain.Conversation, isFinal bool) (domain.BlueprintRunStatus, string) {
 	switch {
+	case stepConversation.ParkedOnInvalidEnvelope():
+		return domain.BlueprintRunStatusAborted, invalidEnvelopeAbortReason
 	case stepConversation.Concluded():
 		decision, abortReason := blueprintDecisionForStepConversation(stepConversation.Outcome, isFinal)
 		switch decision {

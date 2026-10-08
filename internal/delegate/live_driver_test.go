@@ -279,8 +279,9 @@ func TestDriveLiveConversation_QueuedTurnOutlivesThePause(t *testing.T) {
 // invalid conclusion is re-prompted to fix, up to maxCompletionRetries. When
 // the bound is exhausted the driver hands the (still invalid) result back —
 // keeping the totals the live process folded — rather than dropping them on a
-// bare error; processCompletion records the failure (see
-// TestProcessCompletion_InvalidEnvelopeFails). Each correction here produces
+// bare error; processCompletion parks it and the reactor aborts the blueprint
+// (see TestProcessCompletion_InvalidEnvelopeParksOpenWithNoVerdict). Each
+// correction here produces
 // another invalid turn, so the bound is exhausted.
 func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{}, nil, nil, "")
@@ -296,7 +297,7 @@ func TestDriveLiveConversation_InvalidRepromptsToBoundThenHandsBack(t *testing.T
 		t.Fatalf("expected the unfixed result handed back, got err %v", out.err)
 	}
 	if out.result != invalid {
-		t.Errorf("result = %+v, want the unfixed invalid result for processCompletion to fail", out.result)
+		t.Errorf("result = %+v, want the unfixed invalid result for processCompletion to park", out.result)
 	}
 	if proc.sends() != maxCompletionRetries {
 		t.Errorf("sends = %d, want %d (one correction per retry)", proc.sends(), maxCompletionRetries)

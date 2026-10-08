@@ -1235,6 +1235,9 @@ func pgClaimLeaseFixture(t *testing.T, h *pgtest.Harness) dbtest.ClaimLeaseFixtu
 				`UPDATE conversations SET completed_at = now() - make_interval(secs => $1) WHERE id = $2 AND completed_at IS NOT NULL`,
 				ago.Seconds(), conversationID)
 			pgtest.MustExec(t, h.AdminDB,
+				`UPDATE conversations SET parked_at = now() - make_interval(secs => $1) WHERE id = $2 AND parked_at IS NOT NULL`,
+				ago.Seconds(), conversationID)
+			pgtest.MustExec(t, h.AdminDB,
 				`UPDATE claims SET released_at = now() - make_interval(secs => $1) WHERE conversation_id = $2 AND released_at IS NOT NULL`,
 				ago.Seconds(), conversationID)
 		},

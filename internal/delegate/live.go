@@ -242,7 +242,8 @@ func processSpend(proc liveProc) float64 {
 //     orchestration (finalize / advance / fail-with-reason).
 //   - invalid conclusion attempt (envelope-shaped but malformed / missing a
 //     required field) → re-prompt the same live process to fix it, up to
-//     maxCompletionRetries; fail the run if it never corrects.
+//     maxCompletionRetries; if it never corrects, hand the result back, and
+//     processCompletion parks the conversation and aborts its blueprint.
 //   - no conclusion (prose / nothing) → the run is open: close the process
 //     and hand the result back, and processCompletion parks the conversation
 //     with a snapshot. The next message wakes a fresh claim that resumes the
@@ -323,9 +324,9 @@ func (s *Spawner) driveLiveConversation(ctx context.Context, park liveParkContex
 			case turnInvalid:
 				if invalidAttempts >= maxCompletionRetries {
 					// Exhausted the re-prompt bound — hand the unfixed result back.
-					// processCompletion records the failure (a knowable error) with
-					// the totals the live process folded across the correction turns,
-					// rather than dropping them on a bare error return.
+					// processCompletion parks it with the totals the live process
+					// folded across the correction turns, rather than dropping them
+					// on a bare error return, and the reactor aborts the blueprint.
 					_ = proc.Close()
 					return liveOutcome{result: r}
 				}
@@ -454,8 +455,9 @@ func (s *Spawner) parkConversationOpen(ctx context.Context, park liveParkContext
 	// Only the idle park toasts. A deliberate stop terminates the blueprint
 	// behind it, so "resumes on the next message" would be a promise this
 	// build cannot keep — the claim gate refuses a parked step under a
-	// finished blueprint until the resume work lands.
-	if !park.reason.Deliberate {
+	// finished blueprint until the resume work lands. An invalid envelope is
+	// news of its own, which its caller toasts.
+	if !park.reason.Deliberate && park.reason.Reason != domain.ParkReasonInvalidEnvelope {
 		toast.Info(s.wsHub, park.orgID, fmt.Sprintf("Run %s is open — resumes on the next message", shortConversationID(park.conversationID)))
 	}
 	return false

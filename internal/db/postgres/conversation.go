@@ -444,7 +444,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			WHERE org_id = $1 AND id = $2
 			  AND ended_at IS NULL
 			  AND status = 'open' AND NOT $3::boolean
-			  AND (completed_at IS NULL
+			  AND ((completed_at IS NULL AND NOT `+db.ParkedOnInvalidEnvelopeSQL("conversations")+`)
 			       OR NOT tf.blueprint_run_is_running(
 			                conversations.blueprint_run_id, conversations.org_id))
 		`, orgID, conversationID, calledOff)

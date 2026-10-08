@@ -263,6 +263,7 @@ export const PARK_REASON_LABELS: Record<string, string> = {
   model_not_enabled: 'its model is no longer one this team can pick',
   stalled: 'stalled',
   upstream_unavailable: 'Paused: provider unavailable',
+  invalid_envelope: 'its completion envelope never validated — send a message to try again',
 }
 
 // parkReasonLabel is the gloss for one park reason. An unrecognized code

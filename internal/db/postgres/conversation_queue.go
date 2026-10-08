@@ -1222,7 +1222,8 @@ func clearPreferredExecutor(ctx context.Context, q queryer, conversationIDs []st
 }
 
 // StrandedBlueprintRunsSystem measures the grace on database time, against
-// the conversation's completion stamp and its claims' releases alike.
+// the conversation's completion (or park) stamp and its claims' releases
+// alike.
 func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]db.StrandedRun, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -1232,8 +1233,8 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND `+db.SettledConversationSQL("r")+`
-		  AND COALESCE(r.completed_at, r.started_at) <= now() - make_interval(secs => $1)
+		  AND (`+db.SettledConversationSQL("r")+` OR `+db.ParkedOnInvalidEnvelopeSQL("r")+`)
+		  AND COALESCE(r.completed_at, r.parked_at, r.started_at) <= now() - make_interval(secs => $1)
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl
 		      WHERE cl.conversation_id = r.id

@@ -324,7 +324,8 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // and its budgets both start at the wake, not the mint.
 //
 // It refuses a conversation whose blueprint run was called off, as the claim
-// gate does, and a concluded one whose blueprint is still running. The IMMEDIATE transaction serializes this statement
+// gate does, and a concluded one, or one parked on an envelope that never
+// validated, whose blueprint is still running. The IMMEDIATE transaction serializes this statement
 // against the cancel and its settlement, so the guard reads the run in the
 // same statement that flips the row.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
@@ -350,7 +351,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			  AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                  WHERE br.id = conversations.blueprint_run_id
 			                    AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
-			  AND (completed_at IS NULL
+			  AND ((completed_at IS NULL AND NOT `+db.ParkedOnInvalidEnvelopeSQL("conversations")+`)
 			       OR NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                      WHERE br.id = conversations.blueprint_run_id
 			                        AND br.status = 'running'))

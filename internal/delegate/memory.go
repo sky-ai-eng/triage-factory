@@ -28,7 +28,8 @@ import (
 // maxCompletionRetries is the hard cap on how many times the live driver
 // re-prompts a run to fix an invalid completion envelope (malformed JSON, an
 // unrecognized outcome, or a recognized outcome missing its required
-// companion field) before failing it. Three gives a model that fumbled the
+// companion field) before parking it and aborting its blueprint (see
+// processCompletion). Three gives a model that fumbled the
 // contract real chances to correct without spending unbounded turns on one
 // that's ignoring it. Not a config knob because no one needs to tune it
 // per-run. A turn that ends with NO envelope attempt is not retried — the run
