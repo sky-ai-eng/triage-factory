@@ -19,24 +19,11 @@ import (
 // case-sensitive natural keys ("owner/Repo#1"), so the source='jira' predicate
 // is what keeps a repair for one provider from corrupting another's.
 func TestMigrate_CanonicalizesJiraEntityKeys(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
+	// Stop one version short of the canonicalization.
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608080001)
 	treeFS, dir, err := migrationsFor("sqlite3")
 	if err != nil {
-		gooseMu.Unlock()
 		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	// Stop one version short of the canonicalization.
-	upToErr := goose.UpTo(database, dir, 202608080001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
 	}
 
 	seed := func(id, source, sourceID string) {

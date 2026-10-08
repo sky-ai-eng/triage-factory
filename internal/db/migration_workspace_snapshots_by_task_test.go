@@ -17,25 +17,12 @@ import (
 // single run keeps its row untouched. The new key and its cascade are pinned
 // beside it, since both only exist after the rebuild.
 func TestMigrate_WorkspaceSnapshotsByTask_KeepsTheNewestRunsRowPerTask(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// One version short, so the rows below are staged the way an install
 	// keyed by the blueprint run wrote them.
-	upToErr := goose.UpTo(database, dir, beforeTaskContextModel)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeTaskContextModel)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	// events_catalog is seeded by Migrate, not by goose, and the chain below

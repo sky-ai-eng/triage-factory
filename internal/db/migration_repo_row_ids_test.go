@@ -18,25 +18,12 @@ import (
 // So this stages the pre-migration shape, migrates, and asserts that every
 // reference survived and now resolves to the same repository through its id.
 func TestMigrate_RepoRowIDsPreservesReferences(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the conversion, so the rows below are staged
 	// exactly as builds before it wrote them.
-	upToErr := goose.UpTo(database, dir, 202608160001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608160001)
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
 	}
 
 	const (

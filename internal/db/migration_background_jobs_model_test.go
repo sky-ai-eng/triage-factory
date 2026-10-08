@@ -28,23 +28,10 @@ const (
 // added, which is what makes the DEFAULT the seed. This pins that: it is the
 // whole upgrade story for a shipped install.
 func TestMigrate_SeedsExistingOrgsBackgroundJobsModel(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeBackgroundJobsModel)
 	treeFS, dir, err := migrationsFor("sqlite3")
 	if err != nil {
-		gooseMu.Unlock()
 		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, beforeBackgroundJobsModel)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
 	}
 
 	const orgID = "00000000-0000-0000-0000-000000000001"
@@ -81,10 +68,7 @@ func TestMigrate_SeedsExistingOrgsBackgroundJobsModel(t *testing.T) {
 // takes every other column from its DEFAULT. Same value, different path in, and
 // it is the one a first run actually takes.
 func TestSeedLocalTenantRows_CarriesBackgroundJobsModel(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 	if err := SeedLocalTenantRows(context.Background(), database); err != nil {
 		t.Fatalf("SeedLocalTenantRows: %v", err)
 	}

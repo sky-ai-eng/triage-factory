@@ -21,24 +21,11 @@ import (
 // on row presence rather than on active is what keeps the class and the Active
 // bit answering their two different questions.
 func TestMigrate_BackfillsGitHubCredentialClass(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
+	// Stop one version short of the credential-class migration.
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608150002)
 	treeFS, dir, err := migrationsFor("sqlite3")
 	if err != nil {
-		gooseMu.Unlock()
 		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	// Stop one version short of the credential-class migration.
-	upToErr := goose.UpTo(database, dir, 202608150002)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
 	}
 
 	seedOrg := func(id, name string) {

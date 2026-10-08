@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,27 +28,10 @@ import (
 // index, memory links and entity links against their primary keys — and a
 // colliding write that raises is, again, a process that will not start.
 func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the canonicalization fold, so the rows below
 	// are staged exactly as builds before it wrote them and BOTH migrations
 	// run over them.
-	upToErr := goose.UpTo(database, dir, 202608080001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608080001)
 	// events_catalog is seeded by Migrate, not by goose, and the seed chain
 	// below FKs into it through events / tasks / event_handlers.
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
@@ -321,24 +303,7 @@ func TestMigrate_MergesDuplicateJiraEntities(t *testing.T) {
 // deployment is in. The migration must be a no-op there — not a failure, and
 // not a rewrite of the healthy rows next to it.
 func TestMigrate_DuplicateJiraEntityMergeIsNoOpWithoutDuplicates(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, 202608080001)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608080001)
 
 	for _, stmt := range []string{
 		`INSERT INTO entities (id, source, source_id, kind, title) VALUES ('a', 'jira', 'SKY-1', 'issue', 'healthy')`,

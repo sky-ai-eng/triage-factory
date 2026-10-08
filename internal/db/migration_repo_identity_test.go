@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 )
 
@@ -19,26 +18,9 @@ import (
 // So this stages rows in the pre-migration shape, migrates, and asserts the
 // count is unchanged and every column came with them.
 func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
 	// Stop one version short of the rebuild, so the rows below are staged
 	// exactly as builds before it wrote them.
-	upToErr := goose.UpTo(database, dir, 202608150005)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608150005)
 
 	seed := []string{
 		// A fully profiled repo carrying every column a rebuild could drop:
@@ -246,24 +228,7 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 // branch needs its own test: nothing else exercises it, and the cost of it
 // being wrong is a boot failure on someone's laptop.
 func TestMigrate_RepoIdentityFoldsCaseVariantRows(t *testing.T) {
-	database := openMigrationsTestDB(t)
-
-	gooseMu.Lock()
-	treeFS, dir, err := migrationsFor("sqlite3")
-	if err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("migrationsFor: %v", err)
-	}
-	goose.SetBaseFS(treeFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		gooseMu.Unlock()
-		t.Fatalf("SetDialect: %v", err)
-	}
-	upToErr := goose.UpTo(database, dir, 202608150005)
-	gooseMu.Unlock()
-	if upToErr != nil {
-		t.Fatalf("goose.UpTo previous version: %v", upToErr)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608150005)
 
 	seed := []string{
 		// The pair the old case-sensitive UNIQUE(owner, repo) admitted. The

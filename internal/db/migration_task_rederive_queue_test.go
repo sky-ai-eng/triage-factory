@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/pressly/goose/v3"
-
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
 )
@@ -25,14 +23,7 @@ const (
 // owed nothing holds none, the owed column and its index are gone, the
 // kind's indexes are present, and a second Migrate is a no-op.
 func TestMigrate_TaskReDeriveQueue(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-	if err := goose.UpTo(database, "migrations-sqlite", taskReDeriveQueuePrior); err != nil {
-		t.Fatalf("goose UpTo %d: %v", taskReDeriveQueuePrior, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, taskReDeriveQueuePrior)
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
 		t.Fatalf("seed event types: %v", err)
 	}

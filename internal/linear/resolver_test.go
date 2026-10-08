@@ -120,10 +120,9 @@ func TestForSystem_MissingCredential(t *testing.T) {
 	}
 }
 
-// TestForSystem_KeyWithoutMarkerIsAPIKey pins the env-only setup: the
-// TRIAGE_FACTORY_LINEAR_API_KEY overlay supplies a key and nothing writes a
-// marker, and an app install cannot come from an env var, so the key alone is
-// the api_key shape.
+// TestForSystem_KeyWithoutMarkerIsAPIKey pins that a key stored with no marker
+// is the api_key shape: an app install never stores a key under
+// linear_api_key, so the key alone names the shape.
 func TestForSystem_KeyWithoutMarkerIsAPIKey(t *testing.T) {
 	r := NewResolver(&fakeSecrets{sys: map[string]string{keyLinearAPIKey: "lin_api_env"}}, &fakeOrgs{})
 

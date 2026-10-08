@@ -25,6 +25,43 @@ func openMigrationsTestDB(t *testing.T) *sql.DB {
 	return database
 }
 
+// openMigrationsTestDBAt returns a private in-memory SQLite opened with
+// dsn and holding the schema goose.UpTo(version) leaves on an empty
+// database, restored from a cached image (migratedImageAt) rather than
+// replayed. It is for the tests that seed rows the way an older build
+// wrote them and then migrate forward: the replay up to the seeding
+// version is the expensive part, and none of them is about it.
+//
+// The foreign-key pragma is the connection's, from dsn. On return goose
+// is pointed at the SQLite tree with the sqlite3 dialect, the state the
+// goose.UpTo this replaces left behind, so a test's own goose.Up or
+// goose.UpTo afterwards runs as it did.
+func openMigrationsTestDBAt(t *testing.T, dsn string, version int64) *sql.DB {
+	t.Helper()
+	image, err := migratedImageAt(version)
+	if err != nil {
+		t.Fatalf("migrated image at %d: %v", version, err)
+	}
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open sqlite memory: %v", err)
+	}
+	database.SetMaxOpenConns(1)
+	database.SetMaxIdleConns(1)
+	t.Cleanup(func() { database.Close() })
+	if err := restoreImage(database, image); err != nil {
+		t.Fatalf("restore image at %d: %v", version, err)
+	}
+
+	gooseMu.Lock()
+	defer gooseMu.Unlock()
+	goose.SetBaseFS(migrationsSQLiteFS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		t.Fatalf("set dialect: %v", err)
+	}
+	return database
+}
+
 // TestMigrate_FreshInstall pins the bootstrap path: a blank DB ends up
 // with all baseline tables and a goose_db_version row stamping the
 // v1.11.0 baseline as applied.
@@ -199,10 +236,7 @@ func TestMigrationStatus_BricksPreV1110(t *testing.T) {
 // columns errors if any is missing, so the LIMIT 0 probe is a
 // column-existence assertion without needing rows.
 func TestMigrate_MessagesAreTheOnlyAccountingLedger(t *testing.T) {
-	database := openMigrationsTestDB(t)
-	if err := Migrate(database, "sqlite3"); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
+	database := newTenantlessTestDB(t)
 	if _, err := database.Exec(
 		`SELECT input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, cost_usd FROM messages LIMIT 0`,
 	); err != nil {
@@ -236,25 +270,11 @@ func TestMigrate_BackfillsRunTokensFromRunMessages(t *testing.T) {
 	// prompt / blueprint scaffolding — the backfill is pure SQL over
 	// runs ⋈ run_messages and doesn't care about FK targets. The CHECK
 	// constraints still apply, so the run carries origin='blueprint' parents.
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
+	//
 	// Migrate up to the migration *before* the token-breakdown one, so the
 	// runs table does not yet have the token columns.
 	const priorVersion = 202606250002
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, priorVersion)
 
 	// A completed run with two token-bearing run_messages rows — history
 	// that predates the backfill.
@@ -303,25 +323,11 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 	// TestDSNMemoryNoForeignKeys so the fixture needs no projects
 	// scaffolding — the backfill is pure SQL over
 	// curator_requests ⋈ curator_messages and doesn't care about FK targets.
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
+	//
 	// Migrate up to the migration *before* the token-breakdown one, so
 	// curator_requests does not yet have the token columns.
 	const priorVersion = 202606250002
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, priorVersion)
 
 	// The conversations refactor re-parents each request under a curator
 	// conversation whose project FK is enforced mid-migration, so the
@@ -377,24 +383,9 @@ func TestMigrate_BackfillsCuratorTokensFromMessages(t *testing.T) {
 // its by-rule attribution in llm_spend. Manual step conversations (parent carries no
 // trigger) stay NULL.
 func TestMigrate_RunsTriggerIDBackfill(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
 	// Up to the migration *before* the backfill, then seed the legacy shape.
 	const priorVersion = 202607030001
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, priorVersion)
 	// events_catalog is seeded by Migrate (not by goose alone), and the seed
 	// chain below FKs into it via events / tasks / event_handlers.
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
@@ -488,21 +479,7 @@ func assertRunTriggerID(t *testing.T, database *sql.DB, query, want string) {
 // with dollars but zero messages loses the stamp by design (accepted
 // residue).
 func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
-		t.Fatalf("goose UpTo: %v", err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
 
 	seed := []string{
 		`INSERT INTO users (id) VALUES ('00000000-0000-0000-0000-000000000100')`,
@@ -585,24 +562,9 @@ func TestMigrate_StampsHistoricalCostOntoLastMessage(t *testing.T) {
 // surface as delivered=0 message rows — the exactly-once delivery contract
 // transfers to the messages table, nothing silently drops.
 func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
 	// Everything before the conversations refactor: the pending side-tables
 	// still exist and carry waiting rows.
-	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
-		t.Fatalf("goose UpTo: %v", err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
 
 	seed := []string{
 		`INSERT INTO users (id) VALUES ('u1')`,
@@ -642,24 +604,9 @@ func TestMigrate_ConvertsPendingSideTablesToUndeliveredMessages(t *testing.T) {
 // its phase — so the boot sweep still sees claimed work and the display
 // coalesce still renders the setup sub-state.
 func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemoryNoForeignKeys)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
-
 	// Everything before the conversations refactor: runs still carries the
 	// flattened claim columns and the granular setup statuses.
-	if err := goose.UpTo(database, "migrations-sqlite", 202607200002); err != nil {
-		t.Fatalf("goose UpTo: %v", err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemoryNoForeignKeys, 202607200002)
 
 	if _, err := database.Exec(`
 		INSERT INTO runs (id, task_id, prompt_id, blueprint_run_id, status,
@@ -716,23 +663,9 @@ func TestMigrate_CollapsesSetupTransientOntoClaimPhase(t *testing.T) {
 // index; a run whose pointer names a conversation that exists is ordinary work
 // at any age and must survive.
 func TestMigrate_RepairsBlueprintRunsWithNoCurrentStep(t *testing.T) {
-	database, err := sql.Open("sqlite", TestDSNMemory)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	database.SetMaxIdleConns(1)
-	t.Cleanup(func() { database.Close() })
-
-	goose.SetBaseFS(migrationsSQLiteFS)
-	if err := goose.SetDialect("sqlite3"); err != nil {
-		t.Fatalf("set dialect: %v", err)
-	}
 	// Up to the migration *before* the repair, then seed both shapes.
 	const priorVersion = 202609130001
-	if err := goose.UpTo(database, "migrations-sqlite", priorVersion); err != nil {
-		t.Fatalf("goose UpTo %d: %v", priorVersion, err)
-	}
+	database := openMigrationsTestDBAt(t, TestDSNMemory, priorVersion)
 	if err := SeedEventTypes(database, "sqlite3"); err != nil {
 		t.Fatalf("seed event types: %v", err)
 	}
