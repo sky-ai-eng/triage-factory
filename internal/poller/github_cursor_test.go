@@ -188,6 +188,7 @@ func TestPollGitHubOnce_RateLimitCursorResumesAcrossCycles(t *testing.T) {
 		tasks:    stores.Tasks,
 		entities: stores.Entities, eventQueue: stores.EventQueue,
 		repos:    stores.Repos,
+		orgs:     stores.Orgs,
 		resolver: &freshClientPerCallResolver{url: srv.URL},
 	}
 
@@ -300,6 +301,7 @@ func TestRunGitHubCycleForOrg_CursorSurvivesRepoRemoval(t *testing.T) {
 		tasks:    stores.Tasks,
 		entities: stores.Entities, eventQueue: stores.EventQueue,
 		repos:    stores.Repos,
+		orgs:     stores.Orgs,
 		resolver: &freshClientPerCallResolver{url: srv.URL},
 	}
 
