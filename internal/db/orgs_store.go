@@ -111,10 +111,18 @@ type OrgsStore interface {
 	// updates are ignored and an existing value survives every settings save.
 	// See SetGitHubCredentialClass and SetLinearWorkspace.
 	//
-	// It bumps the row's version unconditionally — an unguarded save is
-	// deliberately a last-writer-wins write, which is what every credential
-	// transition wants (it owns the fields it touches). The settings API uses
-	// UpdateSettingsVersioned instead.
+	// It is unguarded: it writes every column it owns, whatever the caller
+	// read, so a caller that loads the row, edits one field and writes the
+	// struct back puts back every other field as it was when it loaded —
+	// undoing any settings save that committed in between. A write that owns
+	// one value never goes through here; it uses a targeted method that touches
+	// nothing else (SetSourceBaseURL, SetGitHubCredentialClass,
+	// SetLinearWorkspace). It bumps the row's version, so a guarded save
+	// loaded before it conflicts rather than landing on top of it. The
+	// settings API uses UpdateSettingsVersioned.
+	//
+	// TODO(TFAC-1059): the Anthropic and Bedrock credential routes still
+	// read-modify-write the row through here to change their key refs.
 	//
 	// Returns the persisted settings, read off RETURNING on the write
 	// statement itself rather than from a follow-up SELECT, and projecting
@@ -185,4 +193,24 @@ type OrgsStore interface {
 	// Same partial-INSERT shape, pool and return contract as
 	// SetGitHubCredentialClass.
 	SetLinearWorkspace(ctx context.Context, orgID, workspaceID, urlKey string) (domain.OrgSettings, error)
+
+	// SetSourceBaseURL writes ONLY org_event_sources.base_url for kind
+	// ("github" or "jira", the sources with a host to set; any other kind is
+	// an error) — the host a credential bind validated against, or "" to
+	// clear it when the credential is unbound. poll_interval and the disabled
+	// columns on the same row are left as they are, and a row that does not
+	// exist yet is created with their schema defaults.
+	//
+	// Unlike SetLinearWorkspace it bumps org_settings.version, in the same
+	// transaction: the settings PATCH writes these hosts too, so a save loaded
+	// before the credential write must conflict rather than put the old host
+	// back. An org with no settings row gets one from schema defaults, the
+	// way SetGitHubCredentialClass materializes it, so the version still
+	// moves off what such an org reads.
+	//
+	// org_settings is written before org_event_sources, the order the
+	// settings writers take the two rows in, so concurrent writers on Postgres
+	// queue rather than deadlock. Pool and return contract as
+	// SetGitHubCredentialClass.
+	SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, error)
 }

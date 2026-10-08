@@ -42,6 +42,14 @@ func (o *SourceOverrides) Set(kind string, ov SourceOverride) {
 	}
 }
 
+// SourceHasBaseURL reports whether OrgsStore stores a base URL for kind: the
+// two sources with a self-hosted deployment. Linear is SaaS-only, and a kind
+// outside the three OrgsStore composes would be written somewhere no read
+// looks.
+func SourceHasBaseURL(kind string) bool {
+	return kind == "github" || kind == "jira"
+}
+
 // SourceOverridesOf is what a settings write stores on org_event_sources for
 // u. A zero or negative poll interval is no override rather than a stored
 // cadence: it is what a caller that never set the field passes, and the

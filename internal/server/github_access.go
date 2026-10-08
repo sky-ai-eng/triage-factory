@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -134,15 +135,23 @@ func (s *Server) invalidateInstallationTokens(orgID string, insts []domain.OrgGi
 	}
 }
 
-// teardownAppSecrets deletes the App's Vault/keychain secrets (client_secret,
-// PEM, webhook_secret) by the refs carried on the registration row. An empty
-// ref (a hookless App has no webhook secret) is skipped. Run inside the same
-// tx as DeleteForOrg so the row and its secrets go together.
-func teardownAppSecrets(ctx context.Context, tx db.TxStores, orgID string, app *domain.OrgGitHubApp) error {
+// appSecretRefs is the App's Vault/keychain secret refs (client_secret, PEM,
+// webhook_secret) carried on the registration row, without the empty ones (a
+// hookless App has no webhook secret).
+func appSecretRefs(app *domain.OrgGitHubApp) []string {
+	var refs []string
 	for _, ref := range []string{app.ClientSecretRef, app.PEMRef, app.WebhookSecretRef} {
-		if ref == "" {
-			continue
+		if ref != "" {
+			refs = append(refs, ref)
 		}
+	}
+	return refs
+}
+
+// teardownAppSecrets deletes the App's secrets (appSecretRefs). Run inside the
+// same tx as DeleteForOrg so the row and its secrets go together.
+func teardownAppSecrets(ctx context.Context, tx db.TxStores, orgID string, app *domain.OrgGitHubApp) error {
+	for _, ref := range appSecretRefs(app) {
 		if _, err := tx.Secrets.Delete(ctx, orgID, ref); err != nil {
 			return fmt.Errorf("delete app secret %s: %w", ref, err)
 		}
@@ -690,6 +699,18 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// In local mode the App's secrets and the token and host keys go to the
+	// keychain, outside the transaction, so a failure after the teardown puts
+	// them back beside the App row the rollback keeps. The guard takes no lock
+	// of its own: githubAppRegMu, held from above until after any restore, is
+	// the lock every GitHub credential write takes.
+	restore, unlock, err := s.guardLocalSecretWrite(ctx, nil, orgID, append(integrations.GitHubKeys(), appSecretRefs(app)...)...)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	defer unlock()
+
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		if err := tx.GitHubApps.DeleteForOrg(ctx, orgID); err != nil {
 			return fmt.Errorf("delete app: %w", err)
@@ -709,13 +730,11 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear github host: %w", err)
 		}
-		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		orgSet.GitHubBaseURL = ""
-		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
+		// Unconditional, unlike the PAT unbind's: a live App was removed, and
+		// a settings save clearing the host refuses while one exists, so a
+		// save loaded before this point has to conflict.
+		if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
+			return fmt.Errorf("clear github base url: %w", err)
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
@@ -723,6 +742,9 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, base, app.Slug),
 		})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "github-app", err)
 		return
 	}

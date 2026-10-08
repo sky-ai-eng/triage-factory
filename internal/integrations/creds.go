@@ -521,39 +521,42 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 	}
 }
 
+// GitHubKeys returns the org GitHub credential's keys in the order ClearGitHub
+// deletes them. A writer of these keys takes them in this order too: Postgres
+// holds each row's lock until commit, so two writers taking the same rows in
+// different orders can deadlock.
+func GitHubKeys() []string {
+	return []string{KeyGitHubURL, KeyGitHubPAT}
+}
+
+// JiraKeys returns the org Jira credential's keys in the order ClearJira
+// deletes them, legacy jira_display_name included (see legacyJiraDisplayName
+// above). Writers take them in this order, for the reason GitHubKeys gives.
+func JiraKeys() []string {
+	return []string{KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName}
+}
+
+// LinearKeys returns the org Linear credential's keys in the order ClearLinear
+// deletes them. Writers take them in this order, for the reason GitHubKeys
+// gives.
+func LinearKeys() []string {
+	return []string{KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs}
+}
+
 // ClearGitHub removes GitHub credentials for orgID.
 func ClearGitHub(ctx context.Context, secrets db.SecretStore, orgID string) error {
-	return clearKeys(ctx, secrets, orgID, KeyGitHubURL, KeyGitHubPAT)
+	return clearKeys(ctx, secrets, orgID, GitHubKeys()...)
 }
 
-// ClearJira removes Jira credentials for orgID. Also sweeps the legacy
-// jira_display_name key — see legacyJiraDisplayName above.
+// ClearJira removes Jira credentials for orgID, legacy key included.
 func ClearJira(ctx context.Context, secrets db.SecretStore, orgID string) error {
-	return clearKeys(ctx, secrets, orgID, KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName)
-}
-
-// ClearJiraOtherScheme deletes the stored credential keys for the Jira auth
-// scheme NOT in use, so switching an org between Data Center (PAT) and Cloud
-// (email + API token) doesn't leave a stale secret behind — which wastes
-// vault/keychain space and could let a later read mistake the org for the other
-// scheme. Pass the method now in use; the opposite scheme's keys are removed.
-// The shared keys (URL, marker) are left intact. A no-op for an unknown/empty
-// method (nothing to disambiguate).
-func ClearJiraOtherScheme(ctx context.Context, secrets db.SecretStore, orgID string, inUse jira.AuthMethod) error {
-	switch inUse {
-	case jira.AuthMethodCloudAPIToken:
-		return clearKeys(ctx, secrets, orgID, KeyJiraPAT)
-	case jira.AuthMethodDCPAT:
-		return clearKeys(ctx, secrets, orgID, KeyJiraEmail, KeyJiraAPIToken)
-	default:
-		return nil
-	}
+	return clearKeys(ctx, secrets, orgID, JiraKeys()...)
 }
 
 // ClearLinear removes the org's Linear service credential: both shapes, the
 // marker naming which one is in use, and the record of who it validated as.
 func ClearLinear(ctx context.Context, secrets db.SecretStore, orgID string) error {
-	return clearKeys(ctx, secrets, orgID, KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs)
+	return clearKeys(ctx, secrets, orgID, LinearKeys()...)
 }
 
 // ClearLinearOtherScheme deletes the stored credential for the Linear shape

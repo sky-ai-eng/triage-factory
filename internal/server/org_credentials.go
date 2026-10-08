@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -27,16 +28,23 @@ import (
 // remains on POST /api/settings/org is now pure config: it touches no secret,
 // makes no outbound call, and can't destroy access as a side effect.
 //
-// The host is config, not credential: github_base_url / jira_base_url are
-// written by the settings route and only there. The GitHub App path needs a
-// host with no credential in sight, and a column with two writers is a column
-// with two validation dialects. So the credential routes take no host in the
-// body — the GitHub bind resolves the org's committed one and validates
-// against that, which is what makes a successful bind mean "this token works
-// for this workspace's GitHub" rather than "this token works for whichever
-// host the caller passed". The unbind still clears the host, because a
-// workspace with no credential is not connected to a GitHub; that is the
-// disconnect's own call, not the mirror of a write the bind makes.
+// The GitHub host is config, not credential: github_base_url is set by the
+// settings route and only there. The GitHub App path needs a host with no
+// credential in sight, and a column with two setters is a column with two
+// validation dialects. So the GitHub bind takes no host in the body — it
+// resolves the org's committed one and validates against that, which is what
+// makes a successful bind mean "this token works for this workspace's GitHub"
+// rather than "this token works for whichever host the caller passed". The
+// Jira bind is the exception: its body names the host the credential is
+// validated against, and it stores that host. The unbinds clear their host,
+// because a workspace with no credential is not connected to a GitHub or a
+// Jira; that is the disconnect's own call, not the mirror of a write the bind
+// makes.
+//
+// A credential route writes a host through OrgsStore.SetSourceBaseURL and
+// nothing else on the settings row. It moves the settings version, so a
+// settings save loaded before it gets a version conflict rather than writing
+// the old host back.
 //
 // Only these routes may write the secret; that's the property that matters.
 
@@ -266,6 +274,22 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	keepHost := app != nil
 
+	// In local mode the keychain sits outside the transaction, so a failure
+	// after the clear puts the credential back: the request reports the
+	// disconnect failed, so the org must still be connected. The guard takes
+	// no lock of its own: githubAppRegMu, held from above until after any
+	// restore, is the lock every GitHub credential write takes.
+	keys := integrations.GitHubKeys()
+	if keepHost {
+		keys = []string{integrations.KeyGitHubPAT}
+	}
+	restore, unlock, err := s.guardLocalSecretWrite(ctx, nil, orgID, keys...)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	defer unlock()
+
 	// The credential class is deliberately untouched by this handler. It names
 	// which credential SYSTEM the org is in, not whether that system currently
 	// holds a token: an org that unbinds its PAT is still a PAT org with nothing
@@ -289,9 +313,13 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 			if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
 				return fmt.Errorf("clear credential: %w", err)
 			}
-			orgSet.GitHubBaseURL = ""
-			if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-				return fmt.Errorf("save org settings: %w", err)
+			// Left alone when already clear, as the Jira unbind leaves its
+			// host: clearing it again would move the settings version for a
+			// change that did not happen.
+			if prevHost != "" {
+				if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
+					return fmt.Errorf("clear github base url: %w", err)
+				}
 			}
 		}
 		if !had {
@@ -303,6 +331,9 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 			DetailJSON:  accessDetailCredential(domain.CredentialKindGitHubPAT, prevHost),
 		})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "github-access", err)
 		return
 	}
@@ -332,6 +363,16 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	}
 	ctx := r.Context()
 
+	// In local mode the keychain sits outside the transaction, so a failure
+	// after the clear puts the credential back: the request reports the
+	// disconnect failed, so the org must still be connected.
+	restore, unlock, err := s.guardLocalJiraWrite(ctx, orgID)
+	if err != nil {
+		internalError(w, "jira-access", err)
+		return
+	}
+	defer unlock()
+
 	var had bool
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		creds, _ := integrations.Load(ctx, tx.Secrets, orgID)
@@ -344,9 +385,13 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 		if err := integrations.ClearJira(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear credential: %w", err)
 		}
-		orgSet.JiraBaseURL = ""
-		if _, err := tx.Orgs.UpdateSettings(ctx, orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
+		// A host that is already clear is left alone: clearing it again would
+		// move the settings version and fail a settings save over a change
+		// that did not happen.
+		if prevHost != "" {
+			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindJira, ""); err != nil {
+				return fmt.Errorf("clear jira base url: %w", err)
+			}
 		}
 		if !had {
 			return nil
@@ -357,6 +402,9 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 			DetailJSON:  accessDetailCredential(domain.CredentialKindJiraOrg, auditJiraHost(prevHost)),
 		})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "jira-access", err)
 		return
 	}

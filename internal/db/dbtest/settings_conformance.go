@@ -278,6 +278,96 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// A source's base URL is written by the credential routes and by the
+	// settings PATCH alike. SetSourceBaseURL is the credential routes' writer:
+	// it moves only the host, and it moves the version, so a guarded save
+	// loaded before it conflicts instead of writing the old host back.
+	t.Run("OrgSettings_SetSourceBaseURL_WritesOnlyTheHostAndMovesTheVersion", func(t *testing.T) {
+		stores, ids := factory(t)
+		if stores.OrgEventSources == nil {
+			t.Skip("factory did not wire OrgEventSources")
+		}
+
+		// No settings row yet: the write materializes one, so a save that
+		// asserted "no row" (version 0) conflicts.
+		created, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "github", "https://ghe-first.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (materializes org_settings): %v", err)
+		}
+		if created.Version != 1 || created.GitHubBaseURL != "https://ghe-first.example.com" {
+			t.Errorf("SetSourceBaseURL on a missing row returned version %d host %q, want 1 and the host", created.Version, created.GitHubBaseURL)
+		}
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0); !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Errorf("create-asserting save after SetSourceBaseURL materialized the row: err = %v, want ErrOrgSettingsVersion", err)
+		}
+
+		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{
+			GitHubBaseURL:       "https://ghe.example.com",
+			GitHubPollInterval:  7 * time.Minute,
+			JiraBaseURL:         "https://jira-old.example.com",
+			JiraPollInterval:    3 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+			MaxConcurrentRuns:   4,
+		})
+		if err != nil {
+			t.Fatalf("UpdateSettings: %v", err)
+		}
+		if _, err := stores.OrgEventSources.SetDisabled(ctx, ids.OrgID, "jira", true, ids.UserID); err != nil {
+			t.Fatalf("SetDisabled: %v", err)
+		}
+
+		set, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "jira", "https://jira-new.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL: %v", err)
+		}
+		if set.Version != saved.Version+1 {
+			t.Errorf("SetSourceBaseURL version = %d, want %d", set.Version, saved.Version+1)
+		}
+		if set.JiraBaseURL != "https://jira-new.example.com" {
+			t.Errorf("SetSourceBaseURL jira host = %q, want the new one", set.JiraBaseURL)
+		}
+		if set.JiraPollInterval != 3*time.Minute || set.GitHubBaseURL != "https://ghe.example.com" ||
+			set.GitHubPollInterval != 7*time.Minute || set.MaxConcurrentRuns != 4 || set.GitHubCloneProtocol != "ssh" {
+			t.Errorf("SetSourceBaseURL moved something besides the jira host: %+v", set)
+		}
+		row, err := stores.OrgEventSources.Get(ctx, ids.OrgID, "jira")
+		if err != nil {
+			t.Fatalf("OrgEventSources.Get: %v", err)
+		}
+		if row == nil || !row.Disabled {
+			t.Errorf("SetSourceBaseURL cleared jira's disabled flag: %+v", row)
+		}
+
+		// A guarded save loaded before the write, carrying the old host,
+		// conflicts and writes nothing.
+		stale := saved
+		stale.MaxConcurrentRuns = 9
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, stale, saved.Version); !errors.Is(err, db.ErrOrgSettingsVersion) {
+			t.Fatalf("save loaded before SetSourceBaseURL: err = %v, want ErrOrgSettingsVersion", err)
+		}
+		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if after.JiraBaseURL != "https://jira-new.example.com" || after.MaxConcurrentRuns != 4 {
+			t.Errorf("the refused save landed: jira host %q, concurrent %d", after.JiraBaseURL, after.MaxConcurrentRuns)
+		}
+
+		// "" clears the host and nothing else.
+		cleared, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "jira", "")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (clear): %v", err)
+		}
+		if cleared.JiraBaseURL != "" || cleared.JiraPollInterval != 3*time.Minute || cleared.Version != set.Version+1 {
+			t.Errorf("clearing returned host %q, poll %v, version %d; want \"\", 3m, %d", cleared.JiraBaseURL, cleared.JiraPollInterval, cleared.Version, set.Version+1)
+		}
+
+		// A source with no host to set is refused and moves nothing.
+		if _, err := stores.Orgs.SetSourceBaseURL(ctx, ids.OrgID, "linear", "https://linear.example.com"); err == nil {
+			t.Error("SetSourceBaseURL accepted a host for linear")
+		}
+	})
+
 	// OrgSettings_PerSourceWriteDoesNotShareTheVersionToken pins the
 	// concurrency split base_url / poll_interval moving onto org_event_sources
 	// left behind: the org_settings.version token guards a settings-page save
