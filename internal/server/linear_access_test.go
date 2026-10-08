@@ -432,7 +432,7 @@ func TestLinearCredentialDelete_Unbinds(t *testing.T) {
 	if again.Code != http.StatusOK {
 		t.Fatalf("second DELETE: %d: %s", again.Code, again.Body.String())
 	}
-	r.expectKick(t)
+	r.expectNoKick(t)
 	if rows := r.credentialRows(t); len(rows) != 2 {
 		t.Errorf("linear credential rows = %d after an idempotent unbind, want still 2", len(rows))
 	}
@@ -598,6 +598,103 @@ func TestSnapshotLinearSecrets_Restores(t *testing.T) {
 	}
 	if v := r.secret(t, integrations.KeyLinearBoundAs); v != "" {
 		t.Errorf("bound-as = %q, want it removed — it was absent before", v)
+	}
+}
+
+// TestGuardLocalLinearWrite_SerializesLocalWrites: in local mode the guard
+// holds linearCredentialMu until its unlock runs, so a second bind or unbind
+// waits for the first to finish restoring. Multi mode keeps the secrets inside
+// the transaction, so it takes no lock and has nothing to restore.
+func TestGuardLocalLinearWrite_SerializesLocalWrites(t *testing.T) {
+	t.Run("local", func(t *testing.T) {
+		r := newLinearAccessRig(t)
+		restore, unlock, err := r.s.guardLocalLinearWrite(t.Context(), runmode.LocalDefaultOrgID)
+		if err != nil {
+			t.Fatalf("guard: %v", err)
+		}
+		if restore == nil {
+			t.Error("local guard returned no restore")
+		}
+		if r.s.linearCredentialMu.TryLock() {
+			r.s.linearCredentialMu.Unlock()
+			t.Fatal("a second writer took the lock while the first held it")
+		}
+		unlock()
+		if !r.s.linearCredentialMu.TryLock() {
+			t.Fatal("the lock is still held after unlock")
+		}
+		r.s.linearCredentialMu.Unlock()
+	})
+
+	t.Run("multi", func(t *testing.T) {
+		runmode.SetForTest(t, runmode.ModeMulti)
+		s := &Server{}
+		restore, unlock, err := s.guardLocalLinearWrite(t.Context(), "org-1")
+		if err != nil {
+			t.Fatalf("guard: %v", err)
+		}
+		if restore != nil {
+			t.Error("multi guard returned a restore; the transaction's rollback covers the secrets")
+		}
+		if !s.linearCredentialMu.TryLock() {
+			t.Fatal("multi guard took the lock")
+		}
+		s.linearCredentialMu.Unlock()
+		unlock()
+	})
+}
+
+// TestLinearCredential_MultiMode_AdminGate pins the routes' authorization
+// against the Postgres auth rig: the two credential writes are org-admin only
+// (403 to a member, 404 to a non-member), and the status read answers any
+// member.
+func TestLinearCredential_MultiMode_AdminGate(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	rig := newAuthRig(t)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "alice-org") // the org's owner, so an admin
+	sidA := rig.signIn(alice)
+
+	bob := rig.seedUser()
+	rig.seedOrg(bob, "bob-org")
+	sidB := rig.signIn(bob)
+
+	carol := rig.seedUser()
+	if _, err := rig.h.AdminDB.Exec(
+		`INSERT INTO public.org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		carol.String(), orgA.String()); err != nil {
+		t.Fatalf("seed carol membership: %v", err)
+	}
+	sidC := rig.signIn(carol)
+
+	base := "/api/orgs/" + orgA.String() + "/linear/access"
+	cred := base + "/credential"
+	// An empty key fails validation before any call to Linear, so the
+	// admin's 400 shows the request got past the gate.
+	emptyKey := map[string]any{"api_key": ""}
+
+	cases := []struct {
+		name   string
+		method string
+		path   string
+		body   any
+		sid    string
+		want   int
+	}{
+		{"member PUT", http.MethodPut, cred, emptyKey, sidC, http.StatusForbidden},
+		{"member DELETE", http.MethodDelete, cred, nil, sidC, http.StatusForbidden},
+		{"non-member PUT", http.MethodPut, cred, emptyKey, sidB, http.StatusNotFound},
+		{"non-member DELETE", http.MethodDelete, cred, nil, sidB, http.StatusNotFound},
+		{"non-member GET", http.MethodGet, base, nil, sidB, http.StatusNotFound},
+		{"admin PUT", http.MethodPut, cred, emptyKey, sidA, http.StatusBadRequest},
+		{"admin DELETE", http.MethodDelete, cred, nil, sidA, http.StatusOK},
+		{"member GET", http.MethodGet, base, nil, sidC, http.StatusOK},
+	}
+	for _, tc := range cases {
+		if rec := rig.tokensJSON(tc.method, tc.path, tc.body, tc.sid, ""); rec.Code != tc.want {
+			t.Errorf("%s = %d, want %d: %s", tc.name, rec.Code, tc.want, rec.Body.String())
+		}
 	}
 }
 

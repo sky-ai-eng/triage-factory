@@ -22,12 +22,14 @@
 // GitHubAppPanel via the GitHub bodies, JiraAccessGroup via the Jira bodies,
 // LinearAccessGroup via the Linear body, PollerTimingGroup, ModelGroup, the
 // RepoPickerModal, GitHubTeamGroup, JiraProjectRulesGroup,
-// LinearTeamRulesGroup, and the shared ModelPicker) — no parallel field UIs. Org persistence rides the single PATCH /api/orgs/{org}/settings; team
-// persistence rides the existing per-team repos / github-groups / jira-projects
-// PUTs and the team-settings PATCH — no wizard-only persistence path to drift. The URL
-// steps persist on Continue (reachability probe + base-URL save); the access
-// steps connect on Continue (PAT) or via an external launch (App register), so
-// their per-step persist either performs the connect or is a no-op advance.
+// LinearTeamRulesGroup, and the shared ModelPicker) — no parallel field UIs.
+// Org persistence rides the single PATCH /api/orgs/{org}/settings; team
+// persistence rides the existing per-team repos / github-groups /
+// jira-projects / linear-teams PUTs and the team-settings PATCH — no
+// wizard-only persistence path to drift. The URL steps persist on Continue
+// (reachability probe + base-URL save); the access steps connect on Continue
+// (PAT) or via an external launch (App register), so their per-step persist
+// either performs the connect or is a no-op advance.
 
 import {
   GitHubUrlStep,
@@ -84,12 +86,7 @@ import {
   type OrgSettingsPatch,
 } from '../settings/orgConfig'
 import { connectJira, type JiraDeployment } from '../settings/jiraConnect'
-import {
-  boundAsName,
-  connectLinear,
-  disconnectedLinearAccess,
-  fetchLinearAccess,
-} from '../settings/linearConnect'
+import { boundAsName, connectLinear, fetchLinearAccess } from '../settings/linearConnect'
 import { connectGitHubPAT } from '../settings/orgCredentials'
 import { connectAnthropic, disconnectLLM } from '../settings/anthropicConnect'
 import { connectBedrock, bedrockPayloadFromForm } from '../settings/bedrockConnect'
@@ -224,9 +221,11 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
   const [org, integrations, linear] = await Promise.all([
     fetchOrgSettings(ctx.orgId),
     fetchIntegrationsState(),
-    // Best-effort like the integrations read: a failure reads as "not
-    // connected" rather than blocking the load.
-    fetchLinearAccess(ctx.orgId).catch(() => disconnectedLinearAccess),
+    // Not best-effort: a failure here would read as "not connected", which
+    // hides a working connection, seeds the wrong tracker, and offers a
+    // Connect form that binds over the stored key. Failing the load shows the
+    // retry instead.
+    fetchLinearAccess(ctx.orgId),
   ])
   if (!org) throw new Error('Could not load organization settings')
   const orgForm = orgConfigFromSettings(org)

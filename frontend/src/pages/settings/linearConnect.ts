@@ -26,15 +26,6 @@ export interface LinearAccess {
   using_deployment_default: boolean
 }
 
-export const disconnectedLinearAccess: LinearAccess = {
-  connected: false,
-  auth_method: '',
-  workspace_url_key: '',
-  bound_as: null,
-  connect_available: false,
-  using_deployment_default: false,
-}
-
 export async function fetchLinearAccess(orgId: string): Promise<LinearAccess> {
   return apiJSON<LinearAccess>(`/api/orgs/${encodeURIComponent(orgId)}/linear/access`)
 }

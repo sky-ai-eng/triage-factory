@@ -486,4 +486,22 @@ describe('setup — the Linear tracker', () => {
     answer(false, false)
     expect((await loadOrg(ctx)).tracker).toBe('none')
   })
+
+  // An unreadable Linear status is not "not connected": reading it that way
+  // would hide a working connection and offer a form that binds over it.
+  it('fails the load when the Linear status cannot be read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/linear/access')) {
+          return { ok: false, status: 503, ...jsonBody({}) }
+        }
+        if (url === '/api/integrations/status') {
+          return { ok: true, status: 200, ...jsonBody({ jira: false }) }
+        }
+        return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
+      }),
+    )
+    await expect(loadOrg({ orgId: ORG_ID, teamId: 'default', isLocal: true })).rejects.toThrow()
+  })
 })

@@ -159,11 +159,12 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if err := tx.Secrets.Put(ctx, orgID, integrations.KeyLinearBoundAs, string(binding), ""); err != nil {
 			return fmt.Errorf("store %s: %w", integrations.KeyLinearBoundAs, err)
 		}
-		// TODO(TFAC-1060): a key from a different workspace is accepted here,
-		// and the tracker then matches the new workspace's issues to the old
-		// rows by identifier alone, overwriting their text and giving them the
-		// old rows' tasks and history. Matching on the issue UUID, plus an
-		// explicit answer for a workspace switch, closes it.
+		// TODO(TFAC-1060): a key from a different workspace is accepted here.
+		// The tracker then matches the new workspace's issues to the old rows
+		// by identifier alone, overwriting their text and giving them the old
+		// rows' tasks and history, and every team's Linear team rules keep
+		// naming the old workspace's teams and states. Scoping entities and
+		// team rules by workspace closes both.
 		if _, err := tx.Orgs.SetLinearWorkspace(ctx, orgID, org.ID, org.URLKey); err != nil {
 			return fmt.Errorf("save linear workspace: %w", err)
 		}
@@ -220,6 +221,7 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 	}
 	defer unlock()
 
+	var had bool
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		method, err := tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAuthMethod)
 		if err != nil {
@@ -229,7 +231,7 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		if err != nil {
 			return fmt.Errorf("read linear api key: %w", err)
 		}
-		had := method != "" || key != ""
+		had = method != "" || key != ""
 		// TODO(TFAC-1022): when method is app_install, revoke the install's
 		// refresh token in Linear and mark its org_linear_installs row removed
 		// before the clear below — this route is that app's disconnect too.
@@ -262,7 +264,10 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.kickLinearChanged(r, orgID)
+	// Nothing was polling under a credential that was not there.
+	if had {
+		s.kickLinearChanged(r, orgID)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
@@ -339,28 +344,29 @@ func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (li
 // transaction and so survive its rollback. Any key that cannot be read fails
 // the snapshot, since the restore could not put that key back. The restore
 // outlives the request's context: a client that disconnects mid-write is
-// exactly when it has to run.
+// exactly when it has to run. It writes the keys in a fixed order and carries
+// on past a key it cannot write, so one keychain failure costs that key alone.
 func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) (func(), error) {
 	keys := []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs}
-	prior := make(map[string]string, len(keys))
-	for _, k := range keys {
+	prior := make([]string, len(keys))
+	for i, k := range keys {
 		v, err := s.secrets.Get(ctx, orgID, k)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot %s: %w", k, err)
 		}
-		prior[k] = v
+		prior[i] = v
 	}
 	ctx = context.WithoutCancel(ctx)
 	return func() {
-		for k, v := range prior {
+		for i, k := range keys {
 			var err error
-			if v == "" {
+			if prior[i] == "" {
 				_, err = s.secrets.Delete(ctx, orgID, k)
 			} else {
-				err = s.secrets.Put(ctx, orgID, k, v, "")
+				err = s.secrets.Put(ctx, orgID, k, prior[i], "")
 			}
 			if err != nil {
-				serverLog.Warn("restore linear secret failed", "org", orgID, "key", k, "error", err)
+				serverLog.Error("restore linear secret failed; the stored Linear credential may not match what the org had", "org", orgID, "key", k, "error", err)
 			}
 		}
 	}, nil

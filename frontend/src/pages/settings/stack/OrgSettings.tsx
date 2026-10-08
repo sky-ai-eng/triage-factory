@@ -506,11 +506,20 @@ export default function OrgSettings({
             deployment={draft.jiraDeployment ?? 'data_center'}
             onReplace={() => setJiraRebinding(true)}
             onDisconnected={() => {
+              // The polling section hides with the connection, so an unsaved
+              // cadence edit goes with it rather than resurfacing on reconnect.
               setDraft((d) => ({
                 ...d,
                 jiraConnected: false,
                 jiraDeployment: null,
-                org: { ...d.org, jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' },
+                org: {
+                  ...d.org,
+                  jira_url: '',
+                  jira_pat: '',
+                  jira_email: '',
+                  jira_api_token: '',
+                  jira_poll_interval: baseline.org.jira_poll_interval,
+                },
               }))
               setBaseline((b) => ({
                 ...b,
@@ -665,7 +674,17 @@ export default function OrgSettings({
                 linearWorkspaceUrlKey: '',
                 linearBoundAs: '',
               }
-              setDraft((d) => ({ ...d, ...cleared, org: { ...d.org, linear_api_key: '' } }))
+              // As with Jira, an unsaved cadence edit hides with the polling
+              // section, so it is dropped here.
+              setDraft((d) => ({
+                ...d,
+                ...cleared,
+                org: {
+                  ...d.org,
+                  linear_api_key: '',
+                  linear_poll_interval: baseline.org.linear_poll_interval,
+                },
+              }))
               setBaseline((b) => ({ ...b, ...cleared }))
             }}
             bare
