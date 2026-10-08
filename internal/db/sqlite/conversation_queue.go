@@ -1488,8 +1488,8 @@ func (s *conversationQueueStore) CountDeferredSystem(ctx context.Context) (map[s
 }
 
 // StrandedBlueprintRunsSystem measures the grace on this process's clock,
-// bound as a time the way completed_at and released_at are written, so each
-// comparison is one layout against itself.
+// bound as a time the way completed_at, parked_at and released_at are
+// written, so each comparison is one layout against itself.
 func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]db.StrandedRun, error) {
 	if limit <= 0 {
 		return nil, nil
@@ -1500,8 +1500,8 @@ func (s *conversationQueueStore) StrandedBlueprintRunsSystem(ctx context.Context
 		FROM blueprint_runs br
 		JOIN conversations r ON r.blueprint_run_id = br.id AND r.blueprint_step_index = br.current_step_index
 		WHERE br.status = 'running'
-		  AND `+db.SettledConversationSQL("r")+`
-		  AND COALESCE(r.completed_at, r.started_at) <= ?
+		  AND (`+db.SettledConversationSQL("r")+` OR `+db.ParkedOnInvalidEnvelopeSQL("r")+`)
+		  AND COALESCE(r.completed_at, r.parked_at, r.started_at) <= ?
 		  AND NOT EXISTS (
 		      SELECT 1 FROM claims cl
 		      WHERE cl.conversation_id = r.id

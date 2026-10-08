@@ -879,10 +879,16 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 //     Every backend hands its no-conclusion turn here with the process
 //     already closed — the live driver included, which is what lets the flip
 //     land after the process is gone rather than under it.
-//   - invalid attempt / IsError → record failed (a knowable error) with the
-//     totals already folded onto the result. runAgent hands an IsError result
-//     whose provider was unavailable (sdkProviderUnavailable) back to the
-//     queue before calling this; the resume path does not, and fails it here.
+//   - invalid attempt (an envelope the driver could not get corrected, or
+//     one a backend with no re-prompt produced) → park it open with no
+//     verdict and the invalid_envelope reason. The transcript is whole, so
+//     nothing failed: the agent broke the workflow's contract, and the
+//     blueprint reactor reads the reason and aborts the blueprint, leaving
+//     the conversation for a person to ask again.
+//   - IsError → record failed (a knowable error) with the totals already
+//     folded onto the result. runAgent hands an IsError result whose
+//     provider was unavailable (sdkProviderUnavailable) back to the queue
+//     before calling this; the resume path does not, and fails it here.
 //
 // Keeping the disposition here — rather than in the live driver — is what makes
 // the non-live backends honest: a one-shot/resume turn that ends open or with a
@@ -901,11 +907,13 @@ func openingContentBlocks(rows []domain.Message) ([]agentproc.ContentBlock, erro
 // the file after its last tool call, and it carries the inherited fingerprint
 // that keeps content the agent never wrote from being ingested as its work.
 //
-// Returns parked: true when the turn ended without a verdict (dormant, open),
-// which is what keeps the session JSONL on disk as the warm resume cache. A
-// verdict or a failure (including a verdict that produced a draft PR / pending
-// review) returns false — the step has given its answer, and the artifact is a
-// resolvable sidecar, not a reason to keep the tree warm.
+// Returns parked: true when the turn ended dormant (open, no verdict, nothing
+// for the blueprint to act on), which is what keeps the session JSONL on disk
+// as the warm resume cache. A verdict, a failure or an invalid envelope
+// (including a verdict that produced a draft PR / pending review) returns
+// false — the step has given the only answer it is going to, the blueprint
+// acts on it, and the artifact is a resolvable sidecar, not a reason to keep
+// the tree warm.
 //
 // claimID names the engagement that produced this result, so its terminal
 // write goes through the claim fence. Empty on paths with no claimed run in
@@ -1004,6 +1012,41 @@ func (s *Spawner) processCompletion(
 		return true, fencedOut
 	}
 
+	// An envelope attempt that never validated. The live driver re-prompts it
+	// in place up to maxCompletionRetries; a backend that can't (one-shot,
+	// resume) or that exhausted the bound lands here. The transcript is whole,
+	// so this is not the runtime failing: it parks `open` with no verdict,
+	// snapshot first, like the no-conclusion turn above, and the reason it
+	// records is what the blueprint reactor aborts the blueprint on. Never a
+	// NULL-outcome conclusion, which the reactor would read as a clean finish
+	// on a final step. "No verdict" includes one an earlier engagement left:
+	// a follow-up on a step whose blueprint did not re-open still carries it,
+	// and the park withdraws it rather than letting the row read concluded on
+	// an outcome this turn never gave.
+	//
+	// parked comes back false: the step has given the only answer it will,
+	// and the blueprint acts on it (the resume path finalizes only on a
+	// non-park). The snapshot the park writes is the resume path.
+	if !completion.IsError && class == turnInvalid {
+		terminal = "invalid_envelope"
+		fencedOut := s.parkConversationOpen(ctx, liveParkContext{
+			orgID:          orgID,
+			conversationID: conversationID,
+			namespace:      namespace,
+			claudeCwd:      claudeCwd,
+			claimID:        claimID,
+			reason:         db.ParkInvalidEnvelope(),
+			runtime:        domain.ConversationRuntimeSDK,
+			costUSD:        completion.CostUSD,
+			mirror:         mirror,
+		}, sessionID)
+		if fencedOut {
+			return true, true
+		}
+		toast.Error(s.wsHub, orgID, fmt.Sprintf("Run %s stopped: its completion envelope never validated. Send a message to try again.", shortConversationID(conversationID)))
+		return false, false
+	}
+
 	// The agent's own memory file, one last time — the mirror has been filing
 	// it all run, and this catches a conclusion turn that wrote after its last
 	// tool call. Nothing is written when there is no usable file: the row's
@@ -1047,26 +1090,12 @@ func (s *Spawner) processCompletion(
 		status = domain.StatusFailed
 		failureKind = domain.ConversationFailureAgentError
 		resultSummary = errorResultSummary(completion.Result, completion.Subtype)
-	case class == turnValid:
+	default: // turnValid — every other non-error turn parked above
 		resultSummary = parsed.Summary
 		outcome = parsed.Outcome
 		if domain.ConversationOutcome(parsed.Outcome) == domain.ConversationOutcomeAbort {
 			outcomeReason = parsed.Reason
 		}
-	default: // turnInvalid
-		// An envelope attempt that never validated. The live driver re-prompts
-		// this in place; a backend that can't (one-shot) or that exhausted the
-		// bound lands here, where it's a knowable error → failed, recorded with
-		// the totals folded onto the result. NOT a NULL-outcome completion, which
-		// the orchestrator would read as a clean finish on a final step. Same
-		// no-usable-result kind as the never-produced-a-result-event failure.
-		//
-		// TODO(TFAC-1053): an envelope that stays invalid is the workflow's
-		// fault, not the runtime's; it belongs on the blueprint, with this
-		// conversation left `open` so a person can ask again.
-		status = domain.StatusFailed
-		failureKind = domain.ConversationFailureNoResult
-		resultSummary = "agent did not return a valid completion envelope"
 	}
 
 	// The classification is settled; carry it onto the terminal span. A

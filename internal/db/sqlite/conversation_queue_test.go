@@ -942,6 +942,9 @@ func sqliteClaimLeaseFixture(t *testing.T) dbtest.ClaimLeaseFixture {
 			if _, err := conn.Exec(`UPDATE conversations SET completed_at = ? WHERE id = ? AND completed_at IS NOT NULL`, at, conversationID); err != nil {
 				t.Fatalf("backdate completed_at on %s: %v", conversationID, err)
 			}
+			if _, err := conn.Exec(`UPDATE conversations SET parked_at = ? WHERE id = ? AND parked_at IS NOT NULL`, at, conversationID); err != nil {
+				t.Fatalf("backdate parked_at on %s: %v", conversationID, err)
+			}
 			if _, err := conn.Exec(`UPDATE claims SET released_at = ? WHERE conversation_id = ? AND released_at IS NOT NULL`, at, conversationID); err != nil {
 				t.Fatalf("backdate claim releases on %s: %v", conversationID, err)
 			}

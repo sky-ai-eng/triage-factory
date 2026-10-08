@@ -554,4 +554,37 @@ func RunClaimTakeoverConformance(t *testing.T, mk ClaimLeaseFactory) {
 			t.Errorf("StrandedBlueprintRunsSystem with limit 1 = (%d runs, %v), want 1", len(limited), err)
 		}
 	})
+
+	// A step parked on an envelope that never validated has handed its
+	// reactor the abort, so a run still running on it is stranded once the
+	// grace has passed, measured from the park. An idle park beside it is not:
+	// that run stays running on purpose.
+	t.Run("Stranded_FindsAStepParkedOnAnInvalidEnvelopePastTheGraceOnly", func(t *testing.T) {
+		f := mk(t)
+		const grace = time.Minute
+		park := func(t *testing.T, p db.Park) *domain.Conversation {
+			t.Helper()
+			c := stageClaimed(t, f, claimLeaseExecutor, claimLeaseBootEpoch)
+			if ok, err := HolderPark(f.Stores.Conversations, ctx, f.OrgID, c.ID, p); err != nil || !ok {
+				t.Fatalf("HolderPark = (%v, %v)", ok, err)
+			}
+			return c
+		}
+		stranded := park(t, db.ParkInvalidEnvelope())
+		f.BackdateConclusion(t, stranded.ID, 2*grace)
+		park(t, db.ParkInvalidEnvelope()) // inside the grace
+		idle := park(t, db.ParkIdle())
+		f.BackdateConclusion(t, idle.ID, 2*grace)
+
+		got, err := f.Stores.ConversationQueue.StrandedBlueprintRunsSystem(ctx, grace, 100)
+		if err != nil {
+			t.Fatalf("StrandedBlueprintRunsSystem: %v", err)
+		}
+		if len(got) != 1 || got[0].ConversationID != stranded.ID {
+			t.Fatalf("stranded = %+v, want only %s (neither the park inside the grace nor the idle one)", got, stranded.ID)
+		}
+		if got[0].OrgID != f.OrgID || got[0].BlueprintRunID != runOf(t, f, stranded.ID).ID {
+			t.Errorf("stranded run = %+v, want org %s and its own run", got[0], f.OrgID)
+		}
+	})
 }

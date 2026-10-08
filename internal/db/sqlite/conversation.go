@@ -274,8 +274,10 @@ func (s *conversationStore) parkAndRelease(ctx context.Context, orgID, conversat
 //
 // COALESCE on park_reason / result_summary rather than a bare assignment: a
 // park that carries neither must not blank what an earlier one recorded. A
-// pending stop decides the reason whatever the caller passed — see the
-// Postgres twin.
+// pending stop decides the reason whatever the caller passed, and cancels a
+// verdict withdrawal — see the Postgres twin. Every SET expression reads the
+// row as it stood before the write, so the stop columns cleared below are
+// still the pending intent where the withdrawal reads them.
 func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Park) (bool, error) {
 	// A deliberate stop re-parks an already-parked row; an idle turn-end does
 	// not. Spelled as an extra clause rather than two queries.
@@ -293,12 +295,16 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 		        WHEN stop_requested_at IS NOT NULL THEN 'user_cancelled'
 		        ELSE COALESCE(NULLIF(?, ''), park_reason) END,
 		    result_summary = COALESCE(NULLIF(?, ''), result_summary),
+		    outcome = CASE WHEN ? AND stop_requested_at IS NULL THEN NULL ELSE outcome END,
+		    outcome_reason = CASE WHEN ? AND stop_requested_at IS NULL THEN NULL ELSE outcome_reason END,
+		    completed_at = CASE WHEN ? AND stop_requested_at IS NULL THEN NULL ELSE completed_at END,
 		    stop_requested_at = NULL,
 		    stop_requested_by = NULL,
 		    stop_requested_reason = NULL
 		WHERE id = ?
 		  AND `+db.UnsettledConversationSQL("conversations")+reparkGuard+`
-	`, time.Now().UTC(), string(park.Reason), park.ResultSummary, conversationID)
+	`, time.Now().UTC(), string(park.Reason), park.ResultSummary,
+		park.WithdrawVerdict, park.WithdrawVerdict, park.WithdrawVerdict, conversationID)
 	if err != nil {
 		return false, err
 	}
@@ -324,7 +330,8 @@ func parkOpen(ctx context.Context, q queryer, conversationID string, park db.Par
 // and its budgets both start at the wake, not the mint.
 //
 // It refuses a conversation whose blueprint run was called off, as the claim
-// gate does, and a concluded one whose blueprint is still running. The IMMEDIATE transaction serializes this statement
+// gate does, and a concluded one, or one parked on an envelope that never
+// validated, whose blueprint is still running. The IMMEDIATE transaction serializes this statement
 // against the cancel and its settlement, so the guard reads the run in the
 // same statement that flips the row.
 func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conversationID string) (bool, error) {
@@ -350,7 +357,7 @@ func (s *conversationStore) MarkQueuedForResume(ctx context.Context, orgID, conv
 			  AND NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                  WHERE br.id = conversations.blueprint_run_id
 			                    AND (br.cancel_requested = 1 OR br.status = 'cancelled'))
-			  AND (completed_at IS NULL
+			  AND ((completed_at IS NULL AND NOT `+db.ParkedOnInvalidEnvelopeSQL("conversations")+`)
 			       OR NOT EXISTS (SELECT 1 FROM blueprint_runs br
 			                      WHERE br.id = conversations.blueprint_run_id
 			                        AND br.status = 'running'))

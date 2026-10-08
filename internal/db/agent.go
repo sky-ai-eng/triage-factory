@@ -76,6 +76,14 @@ type Park struct {
 	// in place. The field stays because a future deliberate park with an
 	// actual conclusion to state would want it.
 	ResultSummary string
+	// WithdrawVerdict clears the verdict the row still carries from an
+	// earlier engagement (outcome, outcome_reason and the conclusion stamp,
+	// the set BlueprintStore.ReopenRunForResume withdraws). A follow-up on a
+	// step whose blueprint does not re-open keeps that verdict through its
+	// wake, and every other park leaves it standing. Ignored when a pending
+	// stop decides the park, as it decides the reason: the park is then a
+	// stop, and a stop never withdraws a verdict.
+	WithdrawVerdict bool
 }
 
 // ParkIdle is the turn simply ending — the live driver's no-conclusion turn or
@@ -87,6 +95,16 @@ type Park struct {
 // above is what says so.
 func ParkIdle() Park {
 	return Park{Reason: domain.ParkReasonIdle}
+}
+
+// ParkInvalidEnvelope is a turn that ended on a completion envelope still
+// invalid after every re-prompt. Not deliberate, for the same reason idle is
+// not: nobody stopped the engagement, it ended, so its claim releases
+// 'parked'. The reason is what the blueprint reactors read to abort the
+// blueprint behind it. It withdraws any verdict an earlier engagement left on
+// the row, so the conversation parks with none whatever came before it.
+func ParkInvalidEnvelope() Park {
+	return Park{Reason: domain.ParkReasonInvalidEnvelope, WithdrawVerdict: true}
 }
 
 // ParkStopped is a deliberate stop: someone or something ended this conversation.
@@ -288,7 +306,10 @@ type ConversationStore interface {
 	// row has handed its verdict to the reactor and is moments from being
 	// advanced past or finalized; waking it makes the reactor read a
 	// successor's state where this engagement's verdict should be, and the
-	// blueprint dies on it.
+	// blueprint dies on it. A row parked on an envelope that never validated
+	// (ParkedOnInvalidEnvelopeSQL) is refused on the same terms: it has
+	// handed the reactor the abort, and woken first it would run under a
+	// blueprint the reactor is about to terminate.
 	//
 	// The second: it refuses a step whose run was called off (cancel
 	// requested, or cancelled), the run the claim gate drives nothing under.
@@ -297,7 +318,8 @@ type ConversationStore interface {
 	// called-off run is a mid-flight row the claim gate refuses, no
 	// settlement arm matches once the run is cancelled, and the stranded-run
 	// replay ignores. Otherwise a parked row with no verdict wakes
-	// unconditionally — a stopped mid-blueprint step is a paused step
+	// unconditionally (once its blueprint is not running, the envelope park
+	// above included) — a stopped mid-blueprint step is a paused step
 	// continuing, and its verdict SHOULD advance the sequence.
 	//
 	// The wake leaves the conclusion stamp where it is: a follow-up on a
@@ -1232,11 +1254,15 @@ type ConversationStore interface {
 	//     blueprint); an idle park does not, because the live driver parks on
 	//     every no-conclusion turn and each one would otherwise re-broadcast.
 	//
+	// Park.WithdrawVerdict is a fourth, read in the same write: it clears the
+	// verdict an earlier engagement left on the row.
+	//
 	// A pending stop intent overrides the reason: the row records
 	// user_cancelled when a person asked and system_cancelled when the system
 	// did, and the intent is cleared in the same write. An idle park that lands
 	// while a stop is pending records the stop, which is right — someone asked
-	// for it, and the turn ending is how it was honored.
+	// for it, and the turn ending is how it was honored. The same intent
+	// cancels WithdrawVerdict, so the row reads as the stop it records.
 	//
 	// Refused (ErrClaimReleased) once the engagement has been fenced out.
 	// Every park comes through here, deliberate or not: the self-park on the

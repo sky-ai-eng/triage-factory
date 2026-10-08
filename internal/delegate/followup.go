@@ -99,8 +99,9 @@ const (
 	// this follows ran on. The least permanent rung on the ladder — an admin
 	// re-enables it in a click — which is why it is asked last.
 	ResumeBlockedModelNotEnabled = "model_not_enabled"
-	// ResumeBlockedStepHandedOff — the step concluded and its blueprint has
-	// not reacted yet. The one rung about TIMING rather than about the
+	// ResumeBlockedStepHandedOff — the step gave its blueprint an answer (a
+	// verdict, or an envelope that never validated) and the blueprint has not
+	// reacted yet. The one rung about TIMING rather than about the
 	// conversation: a beat later the answer changes.
 	ResumeBlockedStepHandedOff = "step_handed_off"
 	// The boundary rungs: the task moved on and this conversation is no longer
@@ -244,7 +245,7 @@ func (s *Spawner) blueprintFollowUpBlock(ctx context.Context, orgID string, conv
 		}
 		return ResumeBlockedBlueprintConcluded, br
 	}
-	if br != nil && br.Status == domain.BlueprintRunStatusRunning && conv.Concluded() {
+	if br != nil && br.Status == domain.BlueprintRunStatusRunning && (conv.Concluded() || conv.ParkedOnInvalidEnvelope()) {
 		return ResumeBlockedStepHandedOff, br
 	}
 	// The run travels back so the model rung can ask modelForClaim without a
@@ -786,9 +787,11 @@ var errWakeRefused = errors.New("wake refused")
 func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, conv domain.Conversation) (flipped bool, err error) {
 	// A follow-up can change the blueprint only while its task is still open.
 	// An aborted blueprint terminated when its step stopped, and the step it
-	// stopped on is this conversation. Re-open it to running in the same tx as
-	// the flip, withdrawing the verdict that aborted it, so the resumed step's
-	// next verdict finalizes it through the normal post-resume disposition.
+	// stopped on is this conversation: on an abort verdict, or parked on an
+	// envelope that never validated. Re-open it to running in the same tx as
+	// the flip, withdrawing the verdict that aborted it (there is none to
+	// withdraw for the envelope), so the resumed step's next verdict finalizes
+	// it through the normal post-resume disposition.
 	// Not for claimability — an abort leaves current_step_index on the step
 	// that aborted, so the finished-blueprint arm of the claim gate would take
 	// it either way — but for disposition: an abort is work that paused
@@ -797,7 +800,7 @@ func (s *Spawner) wakeParked(ctx context.Context, ts db.TxStores, orgID string, 
 	// as-is. ReopenRunForResume's CAS is what decides: status 'aborted' and a
 	// task still open, so it is a no-op on a finished or still-running
 	// blueprint and on a task a person has since closed.
-	reopenAbortedBlueprint := conv.Concluded()
+	reopenAbortedBlueprint := conv.Concluded() || conv.ParkedOnInvalidEnvelope()
 
 	f, err := ts.Conversations.MarkQueuedForResume(ctx, orgID, conv.ID)
 	if err != nil {

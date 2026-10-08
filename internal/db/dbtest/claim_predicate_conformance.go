@@ -1070,4 +1070,134 @@ func RunClaimPredicateConformance(t *testing.T, mk ClaimPredicateFactory) {
 			})
 		}
 	})
+
+	// A follow-up on a step whose blueprint does not re-open wakes with the
+	// earlier engagement's verdict still on the row. An invalid-envelope park
+	// at the end of that follow-up withdraws it, so the row reads as parked
+	// with no verdict rather than concluded on an outcome the follow-up never
+	// gave. An idle park leaves it standing, and so does a stop pending when
+	// the envelope park lands: the stop decides the park, as it decides the
+	// reason.
+	t.Run("AnInvalidEnvelopeParkWithdrawsAFollowUpsEarlierVerdict", func(t *testing.T) {
+		for _, tc := range []struct {
+			name         string
+			park         db.Park
+			pendingStop  bool
+			wantWithdraw bool
+			wantReason   domain.ParkReason
+		}{
+			{"invalid envelope", db.ParkInvalidEnvelope(), false, true, domain.ParkReasonInvalidEnvelope},
+			{"idle", db.ParkIdle(), false, false, domain.ParkReasonIdle},
+			{"invalid envelope under a pending stop", db.ParkInvalidEnvelope(), true, false, domain.ParkReasonSystemCancelled},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				convID := h.StageDelegation(t, "sdk")
+				mustClaim(t, h, convID)
+				if _, err := HolderComplete(h.Stores.Conversations, ctx, h.OrgID, convID, domain.StatusOpen, 0, 0, 0, "looked", "abort", "needs a human", ""); err != nil {
+					t.Fatalf("record verdict: %v", err)
+				}
+				h.SetBlueprintState(t, "completed", 0)
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+					t.Fatalf("MarkQueuedForResume = (%v, %v), want (true, nil)", ok, err)
+				}
+				mustClaim(t, h, convID)
+				if tc.pendingStop {
+					if ok, err := h.Stores.Conversations.RequestStopSystem(ctx, h.OrgID, convID, "", "", ""); err != nil || !ok {
+						t.Fatalf("RequestStopSystem = (%v, %v), want (true, nil)", ok, err)
+					}
+				}
+				if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, tc.park); err != nil || !ok {
+					t.Fatalf("park = (%v, %v), want (true, nil)", ok, err)
+				}
+
+				got, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+				if err != nil || got == nil {
+					t.Fatalf("Get: err=%v conv=%v", err, got)
+				}
+				if got.Status != domain.StatusOpen || got.ParkReason != tc.wantReason {
+					t.Errorf("parked row = (status %q, park_reason %q), want (open, %q)", got.Status, got.ParkReason, tc.wantReason)
+				}
+				withdrawn := got.Outcome == "" && got.OutcomeReason == "" && got.CompletedAt == nil
+				kept := got.Outcome == "abort" && got.OutcomeReason == "needs a human" && got.CompletedAt != nil
+				if tc.wantWithdraw && !withdrawn {
+					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want withdrawn", got.Outcome, got.OutcomeReason, got.CompletedAt)
+				}
+				if !tc.wantWithdraw && !kept {
+					t.Errorf("verdict = (outcome %q, reason %q, completed_at %v), want the earlier abort standing", got.Outcome, got.OutcomeReason, got.CompletedAt)
+				}
+				if got.ParkedOnInvalidEnvelope() && got.Concluded() {
+					t.Error("the row reads both parked on an invalid envelope and concluded")
+				}
+			})
+		}
+	})
+
+	// A step parked on an envelope that never validated records no verdict
+	// and is still the task's live conversation: it waits on a person, as a
+	// stopped step does. While its blueprint is running the wake is refused,
+	// because the reactor owes the step its abort. Once the blueprint is
+	// aborted the reopen rule applies as it does to an abort verdict.
+	t.Run("AStepParkedOnAnInvalidEnvelopeWakesOnlyOnceItsBlueprintAborted", func(t *testing.T) {
+		for _, tc := range []struct {
+			name       string
+			closeTask  bool
+			wantReopen bool
+		}{
+			{"task open", false, true},
+			{"task closed", true, false},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				h := mk(t)
+				convID := h.StageDelegation(t, "sdk")
+				taskID := mustClaim(t, h, convID).TaskID
+				if ok, err := HolderPark(h.Stores.Conversations, ctx, h.OrgID, convID, db.ParkInvalidEnvelope()); err != nil || !ok {
+					t.Fatalf("park on the invalid envelope = (%v, %v), want (true, nil)", ok, err)
+				}
+				conv, err := h.Stores.Conversations.Get(ctx, h.OrgID, convID)
+				if err != nil || conv == nil {
+					t.Fatalf("Get: err=%v conv=%v", err, conv)
+				}
+				if !conv.ParkedOnInvalidEnvelope() || conv.Concluded() || conv.Outcome != "" {
+					t.Fatalf("parked row = (status %q, park_reason %q, outcome %q, completed_at %v), want open on invalid_envelope with no verdict",
+						conv.Status, conv.ParkReason, conv.Outcome, conv.CompletedAt)
+				}
+				if live, err := h.Stores.Conversations.HasLiveConversationForTask(ctx, h.OrgID, taskID); err != nil || !live {
+					t.Errorf("HasLiveConversationForTask = (%v, %v), want (true, nil): the step waits on a person", live, err)
+				}
+
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || ok {
+					t.Fatalf("MarkQueuedForResume under a running blueprint = (%v, %v), want (false, nil)", ok, err)
+				}
+				if st := h.StoredStatus(t, convID); st != domain.StatusOpen {
+					t.Errorf("stored status = %q, want open — a refused CAS writes nothing", st)
+				}
+
+				h.SetBlueprintState(t, "aborted", 0)
+				if tc.closeTask {
+					if _, err := h.Stores.Tasks.CloseSystem(ctx, h.OrgID, taskID, "user_done", ""); err != nil {
+						t.Fatalf("close task: %v", err)
+					}
+				}
+				if ok, err := h.Stores.Conversations.MarkQueuedForResume(ctx, h.OrgID, convID); err != nil || !ok {
+					t.Fatalf("MarkQueuedForResume under the aborted blueprint = (%v, %v), want (true, nil)", ok, err)
+				}
+				reopened, err := h.Stores.Blueprints.ReopenRunForResume(ctx, h.OrgID, conv.BlueprintRunID, convID)
+				if err != nil || reopened != tc.wantReopen {
+					t.Fatalf("ReopenRunForResume = (%v, %v), want (%v, nil)", reopened, err, tc.wantReopen)
+				}
+				br, err := h.Stores.Blueprints.GetRunSystem(ctx, h.OrgID, conv.BlueprintRunID)
+				if err != nil || br == nil {
+					t.Fatalf("GetRunSystem: err=%v br=%v", err, br)
+				}
+				wantRun := domain.BlueprintRunStatusAborted
+				if tc.wantReopen {
+					wantRun = domain.BlueprintRunStatusRunning
+				}
+				if br.Status != wantRun {
+					t.Errorf("blueprint run = %q, want %q", br.Status, wantRun)
+				}
+			})
+		}
+	})
 }

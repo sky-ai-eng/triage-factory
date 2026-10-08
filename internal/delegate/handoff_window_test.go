@@ -90,6 +90,48 @@ func TestFollowUp_ConcludedStepOfARunningBlueprintIsRefused(t *testing.T) {
 	}
 }
 
+// TestFollowUp_InvalidEnvelopeParkWaitsForItsAbortThenReopensTheBlueprint: a
+// step parked on an envelope that never validated has handed its reactor the
+// abort, so a follow-up in the window before the reactor runs is refused like
+// one on a concluded step — woken first, it would run under a blueprint the
+// reactor is about to terminate. Once the blueprint has aborted, the task is
+// still open, so the follow-up lands and re-opens it.
+func TestFollowUp_InvalidEnvelopeParkWaitsForItsAbortThenReopensTheBlueprint(t *testing.T) {
+	org := runmode.LocalDefaultOrgID
+	ctx := context.Background()
+	s, database, brID, _, step0ConversationID := reactorFixture(t, "handoff-invalid", 1, "open", "")
+	parkOnInvalidEnvelope(t, database, step0ConversationID)
+	giveConversationResumeState(t, database, step0ConversationID)
+
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); ok || reason != ResumeBlockedStepHandedOff {
+		t.Errorf("before the reactor: ResumabilityFor = (%v, %q), want (false, %q)", ok, reason, ResumeBlockedStepHandedOff)
+	}
+	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "try that again"); !errors.Is(err, ErrStepHandedOff) {
+		t.Fatalf("before the reactor: SendMessage = %v, want ErrStepHandedOff", err)
+	}
+
+	stepConversation := loadConversation(t, s, step0ConversationID)
+	stepConversation.TriggerType = "manual"
+	stepConversation.CreatorUserID = runmode.LocalDefaultUserID
+	s.reactToStepTerminal(ctx, org, mustGetRun(t, s, org, brID), *stepConversation, runConfig{orgID: org}, time.Now())
+	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusAborted {
+		t.Fatalf("blueprint status = %q, want aborted before the follow-up", br.Status)
+	}
+
+	if ok, reason := s.ResumabilityFor(ctx, org, loadConversation(t, s, step0ConversationID)); !ok {
+		t.Errorf("after the abort: ResumabilityFor = (false, %q), want resumable", reason)
+	}
+	if err := s.SendMessage(ctx, org, step0ConversationID, runmode.LocalDefaultUserID, "try that again"); err != nil {
+		t.Fatalf("after the abort: SendMessage = %v", err)
+	}
+	if br := mustGetRun(t, s, org, brID); br.Status != domain.BlueprintRunStatusRunning || br.AbortReason != "" {
+		t.Errorf("blueprint = (%q, reason %q), want re-opened to running with the abort cleared", br.Status, br.AbortReason)
+	}
+	if st := storedStatus(t, database, step0ConversationID); st != "" {
+		t.Errorf("stored status = %q, want none — the wake queued the row", st)
+	}
+}
+
 // TestFollowUp_FinalStepAfterTheBlueprintFinishesStillLands is the regression
 // the refusal above could have introduced: refusing during the window must not
 // refuse after it.

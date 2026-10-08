@@ -272,6 +272,21 @@ func ConcludedConversationSQL(alias string) string {
 	return `(` + alias + `.status = 'open' AND ` + alias + `.completed_at IS NOT NULL)`
 }
 
+// ParkedOnInvalidEnvelopeSQL is a conversation parked on a completion envelope
+// that never validated, over the alias the caller names. Neither concluded
+// (the park withdraws any earlier verdict, see ParkInvalidEnvelope) nor
+// settled, but like a concluded step it has handed its blueprint an answer
+// (the abort the reactor writes off this reason), so the two readers that ask
+// whether a running blueprint still owes a step its decision — the wake
+// guard and the stranded-run replay — take it beside the concluded set.
+// Definite (never NULL) for every row, so it composes under NOT. The Go
+// spelling is domain.Conversation.ParkedOnInvalidEnvelope. One text for both
+// dialects.
+func ParkedOnInvalidEnvelopeSQL(alias string) string {
+	return `(COALESCE(` + alias + `.status, '') = 'open' AND COALESCE(` + alias + `.park_reason, '') = '` +
+		string(domain.ParkReasonInvalidEnvelope) + `')`
+}
+
 // SettledConversationSQL is a conversation that takes no more work on its own:
 // failed, or concluded. A follow-up may still wake a concluded one, and the
 // wake is what takes it out of this set.
@@ -672,13 +687,15 @@ type ConversationQueueStore interface {
 	CountDeferredSystem(ctx context.Context) (map[string]int, error)
 
 	// StrandedBlueprintRunsSystem returns running blueprint runs whose current
-	// step's conversation reached completed or failed more than grace ago and
-	// holds no unreleased claim. The reactor that should have advanced or ended
-	// each one never ran. A claim released inside the grace keeps its run out
-	// too, so a conversation resumed and concluded again is measured from its
-	// latest engagement, not from a completion stamp an earlier one left.
-	// `open` steps are never stranded: a plain stop leaves the run running on
-	// purpose. Cross-org system read, oldest run first.
+	// step's conversation settled (concluded or failed), or parked on an
+	// envelope that never validated (ParkedOnInvalidEnvelopeSQL), more than
+	// grace ago and holds no unreleased claim. The reactor that should have
+	// advanced or ended each one never ran. A claim released inside the grace
+	// keeps its run out too, so a conversation resumed and concluded again is
+	// measured from its latest engagement, not from a completion stamp an
+	// earlier one left. Any other `open` step is never stranded: a plain stop
+	// leaves the run running on purpose. Cross-org system read, oldest run
+	// first.
 	StrandedBlueprintRunsSystem(ctx context.Context, grace time.Duration, limit int) ([]StrandedRun, error)
 
 	// RequeueConversation hands a claimed conversation back after a transient
