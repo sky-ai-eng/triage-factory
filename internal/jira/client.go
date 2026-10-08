@@ -756,6 +756,22 @@ func (c *Client) listProjectsDataCenter(ctx context.Context, query string, start
 	return page, nil
 }
 
+// GetProject reads one project by key. Both deployments serve /project/{key}
+// with the same key and name fields, so there is no Cloud-vs-Data-Center arm.
+// A project this credential cannot see is a 404 (IsNotFound), the same answer
+// Jira gives for one that does not exist.
+func (c *Client) GetProject(ctx context.Context, projectKey string) (Project, error) {
+	body, err := c.get(ctx, c.apiURL("project/%s", projectKey))
+	if err != nil {
+		return Project{}, err
+	}
+	var p Project
+	if err := json.Unmarshal(body, &p); err != nil {
+		return Project{}, fmt.Errorf("parse project: %w", err)
+	}
+	return p, nil
+}
+
 // GetIssue fetches a single issue by key.
 func (c *Client) GetIssue(ctx context.Context, issueKey string) (*Issue, error) {
 	url := c.apiURL("issue/%s", issueKey)

@@ -7,8 +7,6 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -560,125 +558,6 @@ func decodeJiraDeployment(w http.ResponseWriter, body []byte) (jira.Deployment, 
 		Field: "deployment",
 	})
 	return "", false
-}
-
-// handleJiraStatuses returns available statuses for given Jira projects.
-// Query params: ?project=PROJ1&project=PROJ2 (or uses configured projects if omitted).
-//
-// TODO(TFAC-1055): the org comes from the session and membership is never
-// checked — org_secrets RLS matches org_id alone — so a member removed from
-// the org, whose session still names it, can read its statuses. The answer is
-// also a bare array with a default-team fallback. Replace with POST
-// /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list, a paged list
-// for one project behind RequireOrgMember.
-func (se *settingsHandler) handleJiraStatuses(w http.ResponseWriter, r *http.Request) {
-	orgID := OrgIDFrom(r.Context())
-	userID := ClaimsFrom(r.Context()).Subject
-	projects := r.URL.Query()["project"]
-	// Validate every requested key against the same grammar the write path
-	// enforces. Unvalidated, a garbage key reached Jira and came back as a
-	// 502 — an upstream failure standing in for a malformed request.
-	for _, p := range projects {
-		if !jiraProjectKeyRe.MatchString(normalizeJiraProjectKey(p)) {
-			httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-				Reason:  httpx.ReasonInvalidParam,
-				Message: "project " + strconv.Quote(p) + " is not a valid Jira project key",
-				Field:   "project",
-			})
-			return
-		}
-	}
-	// Read creds + (if needed) the team's tracked-projects fallback
-	// through the app pool inside WithTx so the org_secrets read and
-	// team_settings_select run under the user's claims.
-	var creds auth.Credentials
-	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		// A failed credential read is a 500, not "Jira not configured" —
-		// telling a configured org to re-enter its credentials is the
-		// swallowed-error failure mode this sweep closes.
-		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
-		if lerr != nil {
-			return fmt.Errorf("load integration credentials: %w", lerr)
-		}
-		if len(projects) > 0 {
-			return nil
-		}
-		teamID, e := tx.Teams.GetDefaultForOrg(r.Context(), orgID)
-		if e != nil || teamID == "" {
-			return nil
-		}
-		teamSet, te := tx.Teams.GetSettings(r.Context(), teamID)
-		if te != nil {
-			return nil
-		}
-		projects = append(projects, teamSet.JiraProjects...)
-		return nil
-	}); err != nil {
-		internalError(w, "settings", err)
-		return
-	}
-	// Build the system client from the loaded creds, routed Cloud-vs-DC by the
-	// stored auth-method marker (the request-path analog of the resolver's
-	// ForSystem) — a Cloud org has no PAT, so gating/constructing on JiraPAT
-	// alone would 400 a configured Cloud org here.
-	cfg, ok := integrations.JiraSystemConfig(creds)
-	if !ok {
-		writeNotConfigured(w, "Jira is not connected for this workspace")
-		return
-	}
-	if len(projects) == 0 {
-		httpx.WriteErrors(w, http.StatusBadRequest, httpx.ErrorItem{
-			Reason:  httpx.ReasonInvalidParam,
-			Message: "no projects specified, and this workspace's team tracks none",
-			Field:   "project",
-		})
-		return
-	}
-
-	client := jira.NewClient(cfg).WithOrg(orgID)
-
-	// Intersect statuses across all projects — only return statuses that
-	// exist in every project. A union would let users pick a status that
-	// fails on some projects (TransitionTo can't find the transition).
-	var counts map[string]int            // status name → number of projects it appears in
-	var canonical map[string]jira.Status // status name → first-seen Status object
-	for i, proj := range projects {
-		projectStatuses, err := client.ProjectStatuses(r.Context(), proj)
-		if err != nil {
-			httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{
-				Reason:  httpx.ReasonUpstreamUnavailable,
-				Message: "failed to fetch statuses for " + proj + " from Jira" + httpx.LocalDetail(err),
-			})
-			return
-		}
-		if i == 0 {
-			counts = make(map[string]int, len(projectStatuses))
-			canonical = make(map[string]jira.Status, len(projectStatuses))
-		}
-		seen := map[string]bool{}
-		for _, st := range projectStatuses {
-			if !seen[st.Name] {
-				seen[st.Name] = true
-				counts[st.Name]++
-				if _, ok := canonical[st.Name]; !ok {
-					canonical[st.Name] = st
-				}
-			}
-		}
-	}
-
-	var statuses []jira.Status
-	for name, count := range counts {
-		if count == len(projects) {
-			statuses = append(statuses, canonical[name])
-		}
-	}
-	sort.Slice(statuses, func(i, j int) bool {
-		return statuses[i].Name < statuses[j].Name
-	})
-
-	writeJSON(w, http.StatusOK, statuses)
 }
 
 // handleGitHubPreflightSSH probes whether the user's machine can

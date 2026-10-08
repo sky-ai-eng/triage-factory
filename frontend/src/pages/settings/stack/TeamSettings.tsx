@@ -165,7 +165,7 @@ export default function TeamSettings({
 }: {
   isLocal: boolean
   // The org the team belongs to, which addresses org-scoped reads such as the
-  // Linear catalog.
+  // Jira and Linear catalogs.
   orgId: string
   // The team these sections configure. The page-level switcher resolves it and
   // remounts this component (key={teamId}) on a switch, so it's stable for the
@@ -598,6 +598,7 @@ export default function TeamSettings({
         onCancel={() => setProjects(baseline.jira_projects ?? [])}
       >
         <JiraProjectRulesGroup
+          orgId={orgId}
           value={projects}
           onChange={setProjects}
           connected={jiraConnected}

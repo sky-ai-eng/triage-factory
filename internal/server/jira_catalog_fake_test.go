@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -40,16 +41,17 @@ type fakeJiraStatus struct {
 	Name string `json:"name"`
 }
 
-// jiraCatalogFake stands in for a Data Center instance's two read endpoints:
+// jiraCatalogFake stands in for a Data Center instance's three read endpoints:
 // /project, which serves the whole project catalog in one unpaged, unfiltered
-// response, and /project/{key}/statuses, which serves one project's workflow
-// statuses grouped by issue type.
+// response; /project/{key}, which serves one project of it; and
+// /project/{key}/statuses, which serves one project's workflow statuses
+// grouped by issue type.
 //
-// It is the right fixture for every reader under test — the picker's list
-// route and both halves of the PUT's write gate — because each page or lookup
-// they produce is windowed and filtered from these answers, so a paging,
-// filtering or resolution bug shows up as wrong rows rather than as a stub that
-// ran out of scripted responses.
+// It is the right fixture for every reader under test — the catalog routes and
+// both halves of the PUT's write gate — because each page or lookup they
+// produce is windowed and filtered from these answers, so a paging, filtering
+// or resolution bug shows up as wrong rows rather than as a stub that ran out
+// of scripted responses.
 type jiraCatalogFake struct {
 	URL string
 
@@ -58,6 +60,7 @@ type jiraCatalogFake struct {
 	statuses map[string][]fakeJiraStatus
 	failing  bool
 	failFor  map[string]bool
+	hidden   map[string]bool
 	calls    int
 }
 
@@ -65,14 +68,17 @@ type jiraCatalogFake struct {
 // the fixture workflow.
 func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 	t.Helper()
-	f := &jiraCatalogFake{keys: keys, statuses: map[string][]fakeJiraStatus{}, failFor: map[string]bool{}}
+	f := &jiraCatalogFake{keys: keys, statuses: map[string][]fakeJiraStatus{}, failFor: map[string]bool{}, hidden: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.calls++
 		failing, keys := f.failing, append([]string(nil), f.keys...)
 		project, isStatuses := projectFromStatusesPath(r.URL.Path)
+		single, isProject := projectFromProjectPath(r.URL.Path)
 		statuses, custom := f.statuses[project]
 		failing = failing || (isStatuses && f.failFor[project])
+		hidden := (isStatuses && f.hidden[project]) ||
+			(isProject && (f.hidden[single] || !slices.Contains(keys, single)))
 		f.mu.Unlock()
 
 		if failing {
@@ -84,7 +90,16 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 			_, _ = io.WriteString(w, `{"errorMessages":["Client must be authenticated"]}`)
 			return
 		}
+		if hidden {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"errorMessages":["No project could be found."]}`)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
+		if isProject {
+			_, _ = io.WriteString(w, `{"key": "`+single+`", "name": "`+single+` Project", "lead": {"name": "admin"}}`)
+			return
+		}
 		if isStatuses {
 			if !custom {
 				statuses = jiraFixtureStatuses
@@ -110,6 +125,15 @@ func newJiraCatalogFake(t *testing.T, keys ...string) *jiraCatalogFake {
 func projectFromStatusesPath(path string) (string, bool) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
 	if len(parts) == 6 && parts[3] == "project" && parts[5] == "statuses" {
+		return parts[4], true
+	}
+	return "", false
+}
+
+// projectFromProjectPath recognizes /rest/api/{v}/project/{key}.
+func projectFromProjectPath(path string) (string, bool) {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) == 5 && parts[3] == "project" {
 		return parts[4], true
 	}
 	return "", false
@@ -146,6 +170,19 @@ func (f *jiraCatalogFake) SetStatusesFailing(project string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failFor[project] = true
+}
+
+// Hide makes Jira answer 404 for every read addressed at these projects, which
+// is how it answers for a key the credential cannot see without saying whether
+// the project exists. The single-project read also 404s for a key outside the
+// catalog; the statuses read does not, because the write gate reads a stored
+// project's statuses whether or not the catalog still offers it.
+func (f *jiraCatalogFake) Hide(projects ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, p := range projects {
+		f.hidden[p] = true
+	}
 }
 
 // SetFailing makes every later read fail, standing in for an unreachable Jira.

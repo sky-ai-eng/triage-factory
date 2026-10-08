@@ -230,6 +230,15 @@ describe('GitHub source page', () => {
 })
 
 describe('Jira source page', () => {
+  const JIRA = '/api/orgs/org-1/jira/projects'
+  const STATUSES = [
+    { id: '1', name: 'Ready' },
+    { id: '2', name: 'In Progress' },
+    { id: '3', name: 'Done' },
+    { id: '4', name: 'QA' },
+    { id: '5', name: 'Blocked' },
+  ]
+  const isStatusRead = (u: string) => u.startsWith(JIRA) && u.endsWith('/statuses/list')
   const SETTINGS = {
     '/api/teams/t1/settings': {
       team_settings: {
@@ -269,21 +278,15 @@ describe('Jira source page', () => {
       role: 'admin',
     },
     // The org credential's live catalog: both watched projects plus one the
-    // team could watch. The stub matches by path, so every project's status
-    // read answers the same list — per-project routing is asserted on the
-    // fetch calls instead.
-    '/api/jira/projects/list': [
+    // team could watch. Both watched projects' status reads answer the same
+    // list — per-project routing is asserted on the fetch calls instead.
+    [`${JIRA}/list`]: [
       { key: 'PLAT', name: 'Platform Core' },
       { key: 'SKY', name: 'Skyworks' },
       { key: 'OPS', name: 'Operations' },
     ],
-    '/api/jira/statuses': [
-      { id: '1', name: 'Ready' },
-      { id: '2', name: 'In Progress' },
-      { id: '3', name: 'Done' },
-      { id: '4', name: 'QA' },
-      { id: '5', name: 'Blocked' },
-    ],
+    [`${JIRA}/PLAT/statuses/list`]: STATUSES,
+    [`${JIRA}/SKY/statuses/list`]: STATUSES,
   }
 
   /** The fixture with a single watched project — the no-strip shape. */
@@ -322,10 +325,8 @@ describe('Jira source page', () => {
 
     // The vocabulary is the shown project's own, never an intersection
     // across the watched set — two workflows differ the moment they can.
-    const statusReads = fetchMock.mock.calls
-      .map((c) => String(c[0]))
-      .filter((u) => u.includes('/api/jira/statuses'))
-    expect(statusReads).toEqual(['/api/jira/statuses?project=PLAT'])
+    const statusReads = fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)
+    expect(statusReads).toEqual([`${JIRA}/PLAT/statuses/list`])
   })
 
   it('names the project it shows when there is no strip to', async () => {
@@ -359,13 +360,8 @@ describe('Jira source page', () => {
     // board re-keys on the switch, so it is empty until SKY's own read
     // resolves — which is the read the assertion below is about.
     await waitFor(() => expect(screen.getByText('Blocked')).toBeInTheDocument())
-    const statusReads = fetchMock.mock.calls
-      .map((c) => String(c[0]))
-      .filter((u) => u.includes('/api/jira/statuses'))
-    expect(statusReads).toEqual([
-      '/api/jira/statuses?project=PLAT',
-      '/api/jira/statuses?project=SKY',
-    ])
+    const statusReads = fetchMock.mock.calls.map((c) => String(c[0])).filter(isStatusRead)
+    expect(statusReads).toEqual([`${JIRA}/PLAT/statuses/list`, `${JIRA}/SKY/statuses/list`])
   })
 
   it('lists the catalog with names, the watched projects first', async () => {
@@ -401,8 +397,7 @@ describe('Jira source page', () => {
     // No catalog page, no status vocabulary: both reads would just collect
     // refusals while the source is off.
     const urls = fetchMock.mock.calls.map((c) => String(c[0]))
-    expect(urls.some((u) => u.includes('/api/jira/projects/list'))).toBe(false)
-    expect(urls.some((u) => u.includes('/api/jira/statuses'))).toBe(false)
+    expect(urls.some((u) => u.startsWith(JIRA))).toBe(false)
     // And with no catalog there is nothing to offer Watch on: only the
     // watched rows are listed.
     expect(screen.queryByText('Operations')).not.toBeInTheDocument()

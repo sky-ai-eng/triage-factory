@@ -1177,13 +1177,15 @@ func (s *Server) routes() {
 	// External ID — a state change that needs CSRF protection, per the
 	// mutating-verb convention (route_auth_test enforces GET ≠ apiMutating).
 	s.apiMutating("POST /api/bedrock/role-setup", se.handleBedrockRoleSetup)
-	// The Jira project picker's candidates. A proxy list — the rows come from
-	// Jira live, which is what a catalog of dozens behind one org credential
-	// is worth — so total_count is null and page_token wraps the upstream
-	// offset. Its GitHub sibling reads a mirror instead; see the handler for
-	// why the two differ.
-	s.apiMutating("POST /api/jira/projects/list", s.handleJiraProjectsList)
-	s.api("GET /api/jira/statuses", se.handleJiraStatuses)
+	// The org's Jira catalog — its projects, and each project's workflow
+	// statuses — proxied live under the org's Jira service credential and
+	// addressed at the org, so a caller in several orgs reads each without
+	// moving their active org. Member-gated; both lists are proxy lists, so
+	// total_count is null. Its GitHub sibling reads a mirror instead; see the
+	// handler file for why the two differ.
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/list", s.handleJiraProjectsList)
+	s.api("GET /api/orgs/{org_id}/jira/projects/{project_key}", s.handleJiraProjectGet)
+	s.apiMutating("POST /api/orgs/{org_id}/jira/projects/{project_key}/statuses/list", s.handleJiraStatusesList)
 	// The org's Linear catalog — its teams, and each team's workflow states —
 	// proxied live under the org's Linear service credential and addressed at
 	// the org, so a caller in several orgs reads each without moving their

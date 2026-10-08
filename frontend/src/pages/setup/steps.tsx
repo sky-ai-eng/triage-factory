@@ -1499,14 +1499,16 @@ const jiraProjectsStep: WizardStep = {
   },
   collapsedSummary: (s) =>
     `Tracked Jira projects: ${s.team.jira_projects.filter((p) => p.key.trim() !== '').length}`,
-  render: ({ state, patch }) => (
-    <JiraProjectRulesGroup
-      value={state.team.jira_projects}
-      onChange={(jira_projects) => patch({ team: { ...state.team, jira_projects } })}
-      connected={state.jiraConnected}
-      bare
-    />
-  ),
+  render: ({ state, patch, orgId }) =>
+    orgId ? (
+      <JiraProjectRulesGroup
+        orgId={orgId}
+        value={state.team.jira_projects}
+        onChange={(jira_projects) => patch({ team: { ...state.team, jira_projects } })}
+        connected={state.jiraConnected}
+        bare
+      />
+    ) : null,
 }
 
 // Step · Linear teams. The shared LinearTeamRulesGroup — which Linear teams

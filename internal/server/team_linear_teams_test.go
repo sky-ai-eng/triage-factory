@@ -206,7 +206,7 @@ func TestLinearTeamsPut_ShapeFaults(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			rec := doJSON(t, s, http.MethodPut, teamLinearTeamsPath("default"), c.body)
-			assertLinearFault(t, rec, http.StatusBadRequest, c.reason, c.field)
+			assertOneFault(t, rec, http.StatusBadRequest, c.reason, c.field)
 		})
 	}
 	if fake.Calls() != 0 {
@@ -223,7 +223,7 @@ func TestLinearTeamsPut_ShapeFaults(t *testing.T) {
 func TestLinearTeamsPut_TeamNotVisible(t *testing.T) {
 	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
 	rec := putLinearTeams(t, s, armedLinearTeam(linearTeamEng), map[string]any{"id": linearTeamGhost})
-	assertLinearFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[1].id")
+	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[1].id")
 	if got := storedLinearTeamsRead(t, s); len(got) != 0 {
 		t.Errorf("a refused write stored %+v", got)
 	}
@@ -236,7 +236,7 @@ func TestLinearTeamsPut_StateFromAnotherWorkflow(t *testing.T) {
 	e := armedLinearTeam(linearTeamEng)
 	e["in_progress"] = map[string]any{"member_ids": []string{linearStateDoing, linearStateUnknown}, "canonical_id": linearStateDoing}
 	rec := putLinearTeams(t, s, e)
-	assertLinearFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0].in_progress.member_ids")
+	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0].in_progress.member_ids")
 	if !strings.Contains(decodeErrorItems(t, rec)[0].Message, linearStateUnknown) {
 		t.Errorf("message does not name the unknown state: %s", rec.Body.String())
 	}
@@ -261,7 +261,7 @@ func TestLinearTeamsPut_RuleFaults(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			e := armedLinearTeam(linearTeamEng)
 			e[c.rule] = c.value
-			assertLinearFault(t, putLinearTeams(t, s, e), http.StatusUnprocessableEntity, "INVALID_FIELD", c.field)
+			assertOneFault(t, putLinearTeams(t, s, e), http.StatusUnprocessableEntity, "INVALID_FIELD", c.field)
 		})
 	}
 	if fake.Calls() != 0 {
@@ -276,11 +276,11 @@ func TestLinearTeamsPut_HalfAMappingRefused(t *testing.T) {
 	full := armedLinearTeam(linearTeamEng)
 
 	pickupOnly := map[string]any{"id": linearTeamEng, "pickup": full["pickup"]}
-	assertLinearFault(t, putLinearTeams(t, s, pickupOnly), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
+	assertOneFault(t, putLinearTeams(t, s, pickupOnly), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
 
 	noDone := map[string]any{"id": linearTeamEng, "pickup": full["pickup"], "in_progress": full["in_progress"]}
 	rec := putLinearTeams(t, s, noDone)
-	assertLinearFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
+	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
 	if msg := decodeErrorItems(t, rec)[0].Message; !strings.Contains(msg, "done") {
 		t.Errorf("message %q does not name the unmapped rule", msg)
 	}
@@ -289,7 +289,7 @@ func TestLinearTeamsPut_HalfAMappingRefused(t *testing.T) {
 	// from the other side.
 	mustPutLinearTeams(t, s, full)
 	clearDone := map[string]any{"id": linearTeamEng, "done": map[string]any{"member_ids": []string{}, "canonical_id": ""}}
-	assertLinearFault(t, putLinearTeams(t, s, clearDone), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
+	assertOneFault(t, putLinearTeams(t, s, clearDone), http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0]")
 	if read := storedLinearTeamsRead(t, s); len(read) != 1 || !read[0].Armed {
 		t.Errorf("a refused write changed the stored team: %+v", read)
 	}
@@ -459,7 +459,7 @@ func TestLinearTeamsPut_ChangedRuleRefreshesTheTeam(t *testing.T) {
 func TestLinearTeamsPut_UpstreamFailureStoresNothing(t *testing.T) {
 	s, fake := newServerWithLinearCatalog(t, linearFixtureEng)
 	fake.SetFailing(true)
-	assertLinearFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
+	assertOneFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusBadGateway, "UPSTREAM_UNAVAILABLE", "")
 	if got := storedLinearTeamsRead(t, s); len(got) != 0 {
 		t.Errorf("an unverified write stored %+v", got)
 	}
@@ -476,7 +476,7 @@ func TestLinearTeamsPut_FieldFaultSurvivesALaterUpstreamFailure(t *testing.T) {
 	e["pickup"] = map[string]any{"member_ids": []string{linearStateUnknown}}
 	fake.SetTeamFailing(linearTeamOps)
 	rec := putLinearTeams(t, s, e, map[string]any{"id": linearTeamOps})
-	assertLinearFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0].pickup.member_ids")
+	assertOneFault(t, rec, http.StatusUnprocessableEntity, "INVALID_FIELD", "linear_teams[0].pickup.member_ids")
 }
 
 // TestLinearTeamsPut_UnconnectedWorkspace: with no Linear credential nothing
@@ -487,7 +487,7 @@ func TestLinearTeamsPut_UnconnectedWorkspace(t *testing.T) {
 	if _, err := s.secrets.Delete(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyLinearAPIKey); err != nil {
 		t.Fatalf("unbind: %v", err)
 	}
-	assertLinearFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng), map[string]any{"id": linearTeamOps}),
+	assertOneFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng), map[string]any{"id": linearTeamOps}),
 		http.StatusConflict, "NOT_CONFIGURED", "")
 	if got := mustPutLinearTeams(t, s); len(got) != 0 {
 		t.Errorf("removal on an unconnected workspace left %+v", got)

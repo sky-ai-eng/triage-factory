@@ -272,3 +272,33 @@ func TestListProjects_DataCenterPastTheEnd(t *testing.T) {
 		t.Errorf("page = %+v, want an empty last page", page)
 	}
 }
+
+// TestGetProject reads one project from /project/{key}, at the deployment's
+// REST version, and keeps only the key and the name.
+func TestGetProject(t *testing.T) {
+	srv, seen := projectServer(t, `{"key":"SKY","name":"Sky","lead":{"name":"aidan"},"avatarUrls":{}}`)
+	got, err := dcClient(srv.URL).GetProject(t.Context(), "SKY")
+	if err != nil {
+		t.Fatalf("GetProject: %v", err)
+	}
+	if got != (Project{Key: "SKY", Name: "Sky"}) {
+		t.Errorf("project = %+v, want SKY / Sky", got)
+	}
+	if path := seen()[0].Path; path != "/rest/api/2/project/SKY" {
+		t.Errorf("path = %q, want the v2 project read", path)
+	}
+}
+
+// TestGetProject_NotFound: Jira's 404 for a project the credential cannot see
+// comes back as IsNotFound, which is what a caller turns into its own 404.
+func TestGetProject_NotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"errorMessages":["No project could be found with key 'NOPE'."]}`)
+	}))
+	t.Cleanup(srv.Close)
+	_, err := dcClient(srv.URL).GetProject(t.Context(), "NOPE")
+	if !IsNotFound(err) {
+		t.Fatalf("err = %v, want a 404 IsNotFound recognizes", err)
+	}
+}

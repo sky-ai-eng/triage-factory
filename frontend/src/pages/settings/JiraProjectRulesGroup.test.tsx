@@ -17,6 +17,10 @@ import {
 } from './teamConfig'
 import { jsonBody } from '../../test/apiResponse'
 
+const ORG = 'org-1'
+const PROJECTS_LIST = `/api/orgs/${ORG}/jira/projects/list`
+const statusesList = (key: string) => `/api/orgs/${ORG}/jira/projects/${key}/statuses/list`
+
 const CATALOG = [
   { key: 'SKY', name: 'Sky Platform' },
   { key: 'OPS', name: 'Operations' },
@@ -28,16 +32,16 @@ const STATUSES = [
   { id: '10002', name: 'Done' },
 ]
 
-// stubFetch answers the two reads this surface makes: the project catalog
-// (a proxy list, so no total_count) and one project's statuses.
+// stubFetch answers the two reads this surface makes, both proxy lists (so no
+// total_count): the org's project catalog and one project's statuses.
 function stubFetch() {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input)
-    if (url.startsWith('/api/jira/projects/list')) {
+    if (url === PROJECTS_LIST) {
       return { ok: true, status: 200, ...jsonBody({ items: CATALOG, next_page_token: '' }) }
     }
-    if (url.startsWith('/api/jira/statuses')) {
-      return { ok: true, status: 200, ...jsonBody(STATUSES) }
+    if (url.startsWith(`/api/orgs/${ORG}/jira/projects/`) && url.endsWith('/statuses/list')) {
+      return { ok: true, status: 200, ...jsonBody({ items: STATUSES, next_page_token: '' }) }
     }
     // Nothing else on this surface reads; anything that appears is a mistake
     // in the test rather than a shape the component handles.
@@ -53,7 +57,7 @@ function Harness({ seed = [] as JiraProjectConfig[] }) {
   const [value, setValue] = useState<JiraProjectConfig[]>(seed)
   return (
     <>
-      <JiraProjectRulesGroup value={value} onChange={setValue} connected bare />
+      <JiraProjectRulesGroup orgId={ORG} value={value} onChange={setValue} connected bare />
       <output data-testid="armed">
         {value
           .filter(projectIsArmed)
@@ -152,7 +156,10 @@ describe('JiraProjectRulesGroup · arming', () => {
 
     await user.click(screen.getByRole('button', { name: 'Expand project' }))
     await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith('/api/jira/statuses?project=SKY', expect.anything()),
+      expect(fetchMock).toHaveBeenCalledWith(
+        statusesList('SKY'),
+        expect.objectContaining({ method: 'POST' }),
+      ),
     )
     expect(await screen.findByText('3 statuses available')).toBeInTheDocument()
   })

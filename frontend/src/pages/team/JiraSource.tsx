@@ -5,9 +5,9 @@ import StatusRules from '../../ui/statusrules/StatusRules'
 import type { StatusItem, StatusMap, StatusRule } from '../../ui/statusrules/StatusRules'
 import { SourceFrame, FilterField } from './SourceFrame'
 import type { SourceBodyProps } from './SourceFrame'
-import { apiJSON } from '../../lib/apiClient'
 import { useTeamActivity, activitySource, sinceLabel } from '../../hooks/useTeamActivity'
 import { useEventSources } from '../../hooks/useEventSources'
+import { useActiveOrgId } from '../../contexts/OrgContext'
 import { sourceUnavailableReason } from '../../lib/eventSources'
 import {
   fetchTeamSettings,
@@ -17,7 +17,11 @@ import {
 } from '../settings/teamConfig'
 import type { JiraProjectConfig } from '../settings/teamConfig'
 import type { JiraStatusRef, JiraStatusRuleValue } from '../../components/JiraStatusRule'
-import { listJiraProjects, type JiraProjectCandidate } from '../../lib/jiraProjects'
+import {
+  listJiraProjects,
+  listJiraStatuses,
+  type JiraProjectCandidate,
+} from '../../lib/jiraProjects'
 
 // Jira, as this team's event source.
 //
@@ -96,6 +100,9 @@ function mapFor(p: JiraProjectConfig | undefined): StatusMap | null {
 }
 
 export default function JiraSource({ teamId, teamName, isAdmin, onBack }: SourceBodyProps) {
+  // The org whose Jira catalog the live reads address; null while it is still
+  // resolving, which holds them.
+  const orgId = useActiveOrgId()
   const [projects, setProjects] = useState<JiraProjectConfig[] | null>(null)
   // The live catalog page for the current filter. `null` means the read
   // failed or has not landed — the table still shows what is watched, and
@@ -104,8 +111,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const [truncated, setTruncated] = useState(false)
   // Each watched project's own status vocabulary, fetched when its board is
   // first shown. Per project because statuses come from a project's workflow
-  // scheme: querying several keys returns their intersection, which hides
-  // statuses a project genuinely has the moment two watched projects differ.
+  // scheme, so two watched projects can offer different ones.
   const [statusesByKey, setStatusesByKey] = useState<Record<string, JiraStatusRef[]>>({})
   const [error, setError] = useState('')
   const [filter, setFilter] = useState('')
@@ -149,12 +155,12 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   // and the filter runs server-side for the same reason: the page holds one
   // page of a proxied list, so a client-side scan would silently miss.
   useEffect(() => {
-    if (offReason) return
+    if (offReason || !orgId) return
     const q = filter.trim()
     let live = true
     const controller = new AbortController()
     const run = () =>
-      listJiraProjects(q, { signal: controller.signal })
+      listJiraProjects(orgId, q, { signal: controller.signal })
         .then((page) => {
           if (!live) return
           setCandidates(page.items)
@@ -171,7 +177,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
       controller.abort()
       clearTimeout(timer)
     }
-  }, [filter, offReason])
+  }, [filter, offReason, orgId])
 
   // While off, the catalog is derived-empty rather than reset: the last
   // fetch's leftovers must not render, and the effect above refetches the
@@ -192,9 +198,9 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
   const shownK = shown ? normKey(shown.key) : ''
 
   useEffect(() => {
-    if (!shownK || offReason || statusesByKey[shownK]) return
+    if (!shownK || offReason || !orgId || statusesByKey[shownK]) return
     let live = true
-    void apiJSON<JiraStatusRef[]>('/api/jira/statuses?project=' + encodeURIComponent(shownK))
+    void listJiraStatuses(orgId, shownK)
       .then((list) => {
         if (live) setStatusesByKey((m) => ({ ...m, [shownK]: list }))
       })
@@ -205,7 +211,7 @@ export default function JiraSource({ teamId, teamName, isAdmin, onBack }: Source
     return () => {
       live = false
     }
-  }, [shownK, offReason, statusesByKey])
+  }, [shownK, offReason, orgId, statusesByKey])
 
   const board = useMemo(() => mapFor(shown ?? undefined), [shown])
   // Never null into the board: StatusRules falls back to a demo status list

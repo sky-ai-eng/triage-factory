@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -304,17 +303,7 @@ func TestJiraProjectsPut_ShapeFaultsPrecedeTheGate(t *testing.T) {
 func TestJiraStatusesRead_ForwardsIDs(t *testing.T) {
 	s, _ := newServerWithJiraCatalog(t, "SKY")
 
-	rec := doJSON(t, s, http.MethodGet, "/api/jira/statuses?project=SKY", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET statuses = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	var got []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
-		t.Fatalf("decode statuses: %v (body=%s)", err, rec.Body.String())
-	}
+	got := decodeList[jiraStatusJSON](t, doJSON(t, s, http.MethodPost, jiraStatusesListPath("SKY"), map[string]any{})).Items
 	if len(got) != len(jiraFixtureStatuses) {
 		t.Fatalf("statuses = %+v, want the project's whole workflow", got)
 	}
