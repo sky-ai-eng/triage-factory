@@ -194,7 +194,9 @@ same identifier is a different row that the rename does not touch.
 The refresh emits `identifier_changed` first, ahead of anything else it found
 (a move to another team usually changes the issue's workflow state too), in the
 same commit as the new snapshot. Predicates can filter it on `linear_team_key`
-and `old_linear_team_key`. It is the one Linear event the team gate passes for
+and `old_linear_team_key`. It is always the difference from the stored
+snapshot, so an entity with no snapshot (one a source pause cleared) is renamed
+without it, the way it is seeded without every other event. It is the one Linear event the team gate passes for
 a team that tracks either the issue's current Linear team or the one it left,
 so a team still hears about an issue that moved to a team it does not track.
 Its tasks stay on the entity after such a move, and every later event goes

@@ -309,6 +309,22 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
+	t.Run("RenameSystem_moves_a_non_ascii_link", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		const oldURL = "https://linear.app/acme/issue/ENG-9/café-menu"
+		const newURL = "https://linear.app/acme/issue/OPS-9/café-menu"
+		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-9", "uuid-9", "issue", "Café", oldURL); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
+		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-9", "OPS-9", newURL); err != nil || !out.Renamed {
+			t.Fatalf("rename = %+v err=%v", out, err)
+		}
+		if _, cur := seed.RawActionURL(t, "rename-non-ascii"); cur != newURL+"#comment-c9" {
+			t.Errorf("current_url = %q, want the pointer moved", cur)
+		}
+	})
+
 	t.Run("RekeyOrMergeSystem_merges_only_into_an_active_holder", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const jiraScope = "https://jira.example.com"

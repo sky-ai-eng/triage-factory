@@ -36,6 +36,8 @@ func TestMigrate_EntityScopeBackfillMatchesGo(t *testing.T) {
 		{name: "jira trailing slash", source: "jira", base: ptr("https://jira.example.com/"), url: jiraBrowseURL},
 		{name: "jira context path", source: "jira", base: ptr("https://jira.example.com/jira/"), url: jiraBrowseURL},
 		{name: "jira stub falls back to the base url", source: "jira", base: ptr("https://jira.example.com/jira/")},
+		{name: "jira stub with a schemeless base url", source: "jira", base: ptr("jira.example.com")},
+		{name: "jira stub with no base url", source: "jira", base: nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

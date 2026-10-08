@@ -62,7 +62,8 @@ CREATE TABLE entities_new (
 --           tracker built it from — the site the issue actually came from,
 --           even if the org has since been pointed at another one. A stub with
 --           no such url falls back to the org's current Jira base URL with
---           domain.JiraHost's trim.
+--           domain.JiraHost's trim and its http(s) check. A stub with neither
+--           names no site, and its scope is empty, which no lookup asks for.
 --
 -- Slack rows cannot exist here (Slack is multi-only) and Linear rows have
 -- never shipped, so neither has an arm.
@@ -81,8 +82,10 @@ SELECT
         WHEN 'jira' THEN COALESCE(
             CASE WHEN instr(COALESCE(e.url, ''), '/browse/') > 1
                  THEN substr(e.url, 1, instr(e.url, '/browse/') - 1) END,
-            rtrim(trim((SELECT s.base_url FROM org_event_sources s
-                         WHERE s.org_id = e.org_id AND s.kind = 'jira')), '/'),
+            (SELECT rtrim(trim(s.base_url), '/') FROM org_event_sources s
+              WHERE s.org_id = e.org_id AND s.kind = 'jira'
+                AND (lower(trim(s.base_url)) LIKE 'http://_%'
+                     OR lower(trim(s.base_url)) LIKE 'https://_%')),
             '')
         ELSE ''
     END,

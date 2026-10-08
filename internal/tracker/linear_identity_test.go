@@ -268,6 +268,91 @@ func TestRefreshLinear_ReopensUnderANewIdentifier(t *testing.T) {
 	}
 }
 
+// TestRefreshLinear_RetiresAMoveAnEarlierCycleRenamed: a cycle that renamed an
+// entity for a move to an unarmed team and stopped before retiring it leaves
+// the entity under its new identifier with its old snapshot. The next cycle
+// still sees the move in that snapshot, reports it and retires the entity.
+func TestRefreshLinear_RetiresAMoveAnEarlierCycleRenamed(t *testing.T) {
+	fx := newLinearFixture(t)
+	is := linIssue(5)
+	fx.seed(t, is)
+	before := fx.entity(t, "ENG-5")
+	moved := movedToOps(is, 78)
+	if _, err := fx.stores.Entities.RenameSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, is.ID, moved.Identifier, moved.URL); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	fx.client.put(moved)
+
+	evts, err := fx.cycle(t, linRules())
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueIdentifierChanged, domain.EventLinearIssueUnreachable}) {
+		t.Fatalf("events = %v, want identifier_changed then unreachable", got)
+	}
+	var changed events.LinearIssueIdentifierChangedMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &changed); err != nil {
+		t.Fatal(err)
+	}
+	if changed.OldIdentifier != "ENG-5" || changed.IssueIdentifier != "OPS-78" {
+		t.Errorf("identifier_changed metadata = %+v", changed)
+	}
+	var gone events.LinearIssueUnreachableMetadata
+	if err := json.Unmarshal([]byte(evts[1].MetadataJSON), &gone); err != nil {
+		t.Fatal(err)
+	}
+	if gone.Reason != events.LinearUnreachableMoved || gone.LinearTeamID != linTeamID {
+		t.Errorf("unreachable metadata = %+v, want reason moved naming the old team", gone)
+	}
+	if evts[1].EntityID == nil || *evts[1].EntityID != before.ID {
+		t.Errorf("unreachable entity = %v, want %s", evts[1].EntityID, before.ID)
+	}
+}
+
+// TestRefreshLinear_KeyRenameOfAnUnarmedTeamIsNotAMove: an issue whose team no
+// rule arms any more stays tracked when that team's key is renamed. The issue
+// stayed in its team, and removing a team's rules never retires its issues.
+func TestRefreshLinear_KeyRenameOfAnUnarmedTeamIsNotAMove(t *testing.T) {
+	fx := newLinearFixture(t)
+	is := linIssue(6)
+	fx.seed(t, is)
+	before := fx.entity(t, "ENG-6")
+	is.Identifier, is.Team.Key = "CORE-6", "CORE"
+	fx.client.put(is)
+
+	opsOnly := LinearRules{linRulesWithOps()[1]}
+	evts, err := fx.cycle(t, opsOnly)
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueIdentifierChanged}) {
+		t.Fatalf("events = %v, want only identifier_changed", got)
+	}
+	if after := fx.entity(t, "CORE-6"); after.ID != before.ID || after.State != "active" {
+		t.Errorf("entity = %+v, want %s renamed and still active", after, before.ID)
+	}
+}
+
+// TestRefreshLinear_SnapshotlessRenameIsQuiet: an entity with no snapshot, one
+// a source pause cleared, is renamed with nothing emitted. identifier_changed
+// is the difference from the stored snapshot, and there is none to diff from.
+func TestRefreshLinear_SnapshotlessRenameIsQuiet(t *testing.T) {
+	fx := newLinearFixture(t)
+	stub, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-7", "uuid-7", "issue", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fx.client.put(movedToOps(linIssue(7), 79))
+
+	evts, err := fx.cycle(t, linRulesWithOps())
+	if err != nil || len(evts) != 0 {
+		t.Fatalf("events = %v err=%v, want a quiet rename", eventTypes(evts), err)
+	}
+	if after := fx.entity(t, "OPS-79"); after.ID != stub.ID {
+		t.Errorf("entity = %s, want %s renamed", after.ID, stub.ID)
+	}
+}
+
 // TestRefreshLinear_TeamKeyRenameRenamesEveryIssue: renaming a team's key
 // changes every identifier in it, and every entity follows its issue.
 func TestRefreshLinear_TeamKeyRenameRenamesEveryIssue(t *testing.T) {

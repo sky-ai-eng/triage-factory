@@ -520,8 +520,8 @@ func rewriteEntityActionURLs(ctx context.Context, q queryer, source, from, to st
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE provider = ? AND substr(COALESCE(current_url, url, ''), 1, ?) = ?`,
-		source, len(from), from)
+		WHERE provider = ? AND substr(COALESCE(current_url, url, ''), 1, length(?)) = ?`,
+		source, from, from)
 	if err != nil {
 		return err
 	}

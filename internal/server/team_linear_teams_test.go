@@ -519,12 +519,26 @@ func TestLinearTeams_WorkspaceSwitch(t *testing.T) {
 
 // TestLinearTeamsPut_NoWorkspaceRecorded: with a credential stored but no
 // workspace recorded for it, nothing can be saved — there is no workspace to
-// save a rule under — while the empty set still answers.
+// save a rule under — while the empty set still answers and writes nothing, so
+// the previous workspace's rules and display order come back on its rebind.
 func TestLinearTeamsPut_NoWorkspaceRecorded(t *testing.T) {
-	s, _ := newServerWithLinearCatalog(t, linearFixtureEng)
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	// Saved against id order, so a display order lost on the way shows up as
+	// the rows coming back sorted.
+	first, second := linearTeamEng, linearTeamOps
+	if first < second {
+		first, second = second, first
+	}
+	saved := mustPutLinearTeams(t, s, map[string]any{"id": first}, map[string]any{"id": second})
+
 	bindLinearWorkspaceForTest(t, s, "")
 	assertLinearFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusConflict, "NOT_CONFIGURED", "")
 	if got := mustPutLinearTeams(t, s); len(got) != 0 {
 		t.Errorf("empty PUT = %+v, want an empty set", got)
+	}
+
+	bindLinearWorkspaceForTest(t, s, linearTestWorkspaceID)
+	if read := storedLinearTeamsRead(t, s); !reflect.DeepEqual(read, saved) {
+		t.Errorf("rules after the rebind =\n%+v\nwant what was saved, in its order\n%+v", read, saved)
 	}
 }

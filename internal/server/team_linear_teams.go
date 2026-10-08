@@ -164,9 +164,15 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 
 	// A rule names ids of one workspace, so a set can only be saved under the
 	// one the org's credential belongs to. With none recorded there is nowhere
-	// to save it; an empty set still answers, since it asks for nothing.
-	if workspaceID == "" && len(wishes) > 0 {
-		writeNotConfigured(w, "Linear is not connected for this workspace, so a Linear team or a state mapping cannot be added")
+	// to save it. An empty set still answers, since it asks for nothing, and
+	// writes nothing: rows and the display order saved under a previous
+	// workspace stay stored for its rebind.
+	if workspaceID == "" {
+		if len(wishes) > 0 {
+			writeNotConfigured(w, "Linear is not connected for this workspace, so a Linear team or a state mapping cannot be added")
+			return
+		}
+		writeJSON(w, http.StatusOK, teamLinearTeamsResponse{LinearTeams: toLinearTeamSettings(nil)})
 		return
 	}
 
@@ -191,12 +197,6 @@ func (s *Server) handleTeamLinearTeamsPut(w http.ResponseWriter, r *http.Request
 		teamSet.LinearTeams = order
 		if _, err := tx.Teams.UpdateSettings(r.Context(), teamID, teamSet); err != nil {
 			return fmt.Errorf("save team settings: %w", err)
-		}
-		if workspaceID == "" {
-			// The empty set, with no workspace bound: no workspace's rows to
-			// clear, and rows saved under a previous one stay stored.
-			stored = []domain.LinearTeamRules{}
-			return nil
 		}
 		if stored, err = tx.LinearTeamRules.ReplaceForTeam(r.Context(), teamID, workspaceID, next); err != nil {
 			return fmt.Errorf("save linear rules: %w", err)

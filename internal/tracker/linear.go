@@ -511,40 +511,47 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 // before anything decides whether it can still be tracked, and the diff that
 // follows emits identifier_changed ahead of everything else it finds. When the
 // issue is retiring instead — trashed, archived outside a done state, or moved
-// to a team no rule arms — no later diff will report the move, so it is
-// renamed, its identifier_changed is published, and then its unreachable. A
-// move to an unarmed team retires with reason moved, naming the team it left.
+// to a team no rule arms — no later diff will report the change, so its
+// identifier_changed is published here, ahead of its unreachable. A move to an
+// unarmed team retires with reason moved, naming the team it left.
+//
+// identifier_changed is always the difference from the stored snapshot, so an
+// entity with no snapshot (one a source pause cleared) is renamed without one,
+// as it is seeded without every other event.
 func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
 	state := linearIssueToState(issue, allDone)
 	snap := state.Snap
-	gone := linearIssueGone(issue, teams)
+	renamed := false
 	if linearRenamed(scope, e, snap) {
-		oldIdentifier := e.SourceID
-		renamed, ok := t.renameLinearEntity(ctx, scope, e, snap.Identifier, snap.URL)
+		next, ok := t.renameLinearEntity(ctx, scope, e, snap.Identifier, snap.URL)
 		if !ok {
 			return 0
 		}
-		e = renamed
-		if gone != "" || teams.ForTeam(snap.TeamID) == nil {
-			var was domain.LinearSnapshot
-			if prev != nil {
-				was = *prev
-			}
-			was.Identifier = oldIdentifier
-			for _, evt := range linearIdentifierChangedEvents(was, snap, e.ID) {
-				t.publish(ctx, evt)
-			}
-			if gone != "" {
-				t.emitLinearUnreachable(ctx, orgID, e, &issue, gone)
-			} else {
-				t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableMoved)
-			}
-			return 2
-		}
+		e, renamed = next, true
 	}
-	if gone != "" {
-		t.emitLinearUnreachable(ctx, orgID, e, &issue, gone)
-		return 1
+	// Whether the issue left the Linear team it was tracked in comes from the
+	// snapshot, not from this call's rename: a cycle that renamed the entity
+	// and stopped before retiring it is finished by the next one, and a team
+	// key rename keeps the team, so it is not a move. With no snapshot, this
+	// call's rename is the only evidence.
+	moved := renamed
+	if prev != nil {
+		moved = prev.TeamID != snap.TeamID
+	}
+	reason, answer := linearIssueGone(issue, teams), &issue
+	if reason == "" && moved && teams.ForTeam(snap.TeamID) == nil {
+		reason, answer = events.LinearUnreachableMoved, nil
+	}
+	if reason != "" {
+		emitted := 1
+		if prev != nil {
+			for _, evt := range linearIdentifierChangedEvents(*prev, snap, e.ID) {
+				t.publish(ctx, evt)
+				emitted++
+			}
+		}
+		t.emitLinearUnreachable(ctx, orgID, e, answer, reason)
+		return emitted
 	}
 	done := teams.doneForTeam(snap.TeamID)
 	terminal := func(s domain.LinearSnapshot) bool { return domain.ContainsState(done, s.StateRef()) }
