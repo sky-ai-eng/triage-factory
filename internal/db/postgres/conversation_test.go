@@ -124,8 +124,8 @@ func newPgConversationSeeder(conn *sql.DB, orgID, userID, agentID, promptID stri
 			id := uuid.New().String()
 			sourceID := fmt.Sprintf("conv-%s-%s", suffix, id[:8])
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+				INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+				VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
 			`, id, orgID, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
@@ -466,8 +466,8 @@ func TestConversationStore_Postgres_CrossOrgLeakage(t *testing.T) {
 		eventID := uuid.New().String()
 		taskID = uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Cross-org test', '', '{}'::jsonb, now())
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Cross-org test', '', '{}'::jsonb, now(), 'https://github.com')
 		`, entityID, orgID, "xleak-"+orgID[:8]); err != nil {
 			t.Fatalf("entity: %v", err)
 		}
@@ -546,8 +546,8 @@ func TestConversationStore_Postgres_QueuePositionIsOrgLocal(t *testing.T) {
 		eventID := uuid.New().String()
 		taskID := uuid.New().String()
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Queue position test', '', '{}'::jsonb, now())
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Queue position test', '', '{}'::jsonb, now(), 'https://github.com')
 		`, entityID, orgID, "qpos-"+orgID[:8]); err != nil {
 			t.Fatalf("entity: %v", err)
 		}
@@ -674,8 +674,8 @@ func TestConversationStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	taskA := uuid.New().String()
 	convA := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Cross-org', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'RLS Cross-org', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityA, orgA, "rls-cross-"+orgA[:8]); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -796,8 +796,8 @@ func TestConversationStore_Postgres_LifecycleWrites_UnderSyntheticClaims(t *test
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'LC Test', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'LC Test', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "lc-"+orgID[:8]); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -1020,8 +1020,8 @@ func TestConversationStore_Postgres_RuntimeDefaultsToSDK(t *testing.T) {
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Runtime Test', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Runtime Test', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "runtime-"+orgID[:8]); err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -1096,8 +1096,8 @@ func TestConversationStore_Postgres_HandOffGuardHoldsForANonCreator(t *testing.T
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Handoff RLS', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Handoff RLS', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "handoff-"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
@@ -1198,8 +1198,8 @@ func TestConversationStore_Postgres_ResumeStampsTheWarmExecutorForANonCreator(t 
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Resume Affinity RLS', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Resume Affinity RLS', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "resume-affinity-"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
@@ -1353,8 +1353,8 @@ func TestConversationStore_Postgres_ClearNextAttemptUnderTheSendersClaims(t *tes
 
 	entityID, eventID, taskID := uuid.New().String(), uuid.New().String(), uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Next attempt RLS', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Next attempt RLS', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "next-attempt-"+orgID[:8])
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)

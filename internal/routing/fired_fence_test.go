@@ -63,7 +63,7 @@ func setupFenceScenario(t *testing.T, database *sql.DB) (entityID string) {
 	// it as the owner — the owner's automation (the trigger below) then fires.
 	setReviewHost(t, database)
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#fence", "pr",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#fence", "", "pr",
 		"Fence PR", "https://github.com/owner/repo/pull/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)

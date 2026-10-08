@@ -61,7 +61,7 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 	// The team admin writes, and reads back what it wrote.
 	if err := h.WithUser(t, adminID, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules
-		stored, err := store.ReplaceForTeam(ctx, teamID, []domain.LinearTeamRules{armed})
+		stored, err := store.ReplaceForTeam(ctx, teamID, "ws-test", []domain.LinearTeamRules{armed})
 		if err != nil {
 			t.Fatalf("admin ReplaceForTeam: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 
 	// A member of a different team sees nothing of this team's rows.
 	if err := h.WithUser(t, outsider, orgID, func(tx *sql.Tx) error {
-		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules.ListForTeam(ctx, teamID)
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules.ListForTeam(ctx, teamID, "ws-test")
 		if err != nil {
 			t.Fatalf("outsider ListForTeam: %v", err)
 		}
@@ -90,7 +90,7 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 	// A plain member reads them, and cannot rewrite them.
 	if err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
 		store := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules
-		got, err := store.ListForTeam(ctx, teamID)
+		got, err := store.ListForTeam(ctx, teamID, "ws-test")
 		if err != nil {
 			t.Fatalf("member ListForTeam: %v", err)
 		}
@@ -104,14 +104,14 @@ func TestLinearTeamRulesStore_Postgres_RLS(t *testing.T) {
 	err := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
 		changed := armed
 		changed.LinearTeamID = "lt-b"
-		_, err := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules.ReplaceForTeam(ctx, teamID, []domain.LinearTeamRules{changed})
+		_, err := pgstore.NewForTx(tx, pgtest.SecretKey).LinearTeamRules.ReplaceForTeam(ctx, teamID, "ws-test", []domain.LinearTeamRules{changed})
 		return err
 	})
 	if err == nil {
 		t.Error("a non-admin member rewrote the team's Linear rules")
 	}
 
-	stored, err := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).LinearTeamRules.ListForTeamSystem(ctx, teamID)
+	stored, err := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey).LinearTeamRules.ListForTeamSystem(ctx, teamID, "ws-test")
 	if err != nil {
 		t.Fatalf("ListForTeamSystem: %v", err)
 	}
@@ -131,9 +131,9 @@ func TestLinearTeamRules_Postgres_ChecksRefuseMalformedRows(t *testing.T) {
 	const arr = "[" + ref + "]"
 	insert := func(pickup, inProgress string, inProgressCanonical any, done string, doneCanonical any) error {
 		_, err := h.AdminDB.Exec(`
-			INSERT INTO linear_team_rules (team_id, linear_team_id, linear_team_key,
+			INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key,
 				pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-			VALUES ($1, gen_random_uuid()::text, 'KEY', $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)`,
+			VALUES ($1, 'ws-test', gen_random_uuid()::text, 'KEY', $2::jsonb, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb)`,
 			teamID, pickup, inProgress, inProgressCanonical, done, doneCanonical)
 		return err
 	}

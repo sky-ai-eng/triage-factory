@@ -35,8 +35,8 @@ func seedCommissionedPR(t *testing.T, s *Server, snap domain.PRSnapshot, commiss
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
 	if _, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      commissioned_by_user_id, created_at, last_polled_at)
-		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?)
+		                      commissioned_by_user_id, created_at, last_polled_at, scope)
+		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
 	`, "ent-"+sourceID, runmode.LocalDefaultOrgID, sourceID, snap.Title, snap.URL, string(blob),
 		entityState, commissioner, now, now); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)

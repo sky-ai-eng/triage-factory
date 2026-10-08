@@ -2,6 +2,7 @@ package poller
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -114,14 +116,30 @@ func (s linearSecrets) GetSystem(_ context.Context, _ string, key string) (strin
 	return "", nil
 }
 
-// linearRulesStore answers the org union with a fixed set.
+// linearTestWorkspace is the Linear workspace the poller tests bind.
+const linearTestWorkspace = "ws-test"
+
+// linearRulesStore answers the org union with a fixed set, saved under the
+// test workspace: a read for any other workspace finds nothing.
 type linearRulesStore struct {
 	dbpkg.LinearTeamRulesStore
 	rules []domain.LinearTeamRules
 }
 
-func (s linearRulesStore) ListForOrgSystem(context.Context, string) ([]domain.LinearTeamRules, error) {
+func (s linearRulesStore) ListForOrgSystem(_ context.Context, _, workspaceID string) ([]domain.LinearTeamRules, error) {
+	if workspaceID != linearTestWorkspace {
+		return []domain.LinearTeamRules{}, nil
+	}
 	return s.rules, nil
+}
+
+// bindLinearWorkspace records the test workspace as the org's, which the
+// credential bind does in production.
+func bindLinearWorkspace(t *testing.T, database *sql.DB) {
+	t.Helper()
+	if _, err := database.Exec(`UPDATE org_settings SET linear_workspace_id = ? WHERE org_id = ?`, linearTestWorkspace, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("bind linear workspace: %v", err)
+	}
 }
 
 // stubLinearResolver hands back one client for every org.
@@ -196,6 +214,7 @@ func (r *recordingErrors) record(_, _ string, err error) {
 func linearManager(t *testing.T, stub *linearStub) (*Manager, *recordingErrors) {
 	t.Helper()
 	database := newMigratedSQLiteForPoller(t)
+	bindLinearWorkspace(t, database)
 	stores := sqlitestore.New(database)
 	srv := stub.serve(t)
 	errs := &recordingErrors{}
@@ -272,6 +291,9 @@ func TestRunLinearCycleForOrg_Skips(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database := newMigratedSQLiteForPoller(t)
+			if tc.key != "" {
+				bindLinearWorkspace(t, database)
+			}
 			stores := sqlitestore.New(database)
 			m := &Manager{
 				database: database, pub: busPublisher{bus: newTestBus(t)},
@@ -285,6 +307,75 @@ func TestRunLinearCycleForOrg_Skips(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRunLinearCycleForOrg_AnotherWorkspacesRulesDoNotApply: once the org's
+// credential belongs to another workspace, the rules saved under the old one
+// are not asked about — there is nothing in this workspace to poll — and the
+// issues the old workspace left tracked retire with scope_changed, without a
+// Linear call. The resolver is nil, so reaching it would panic.
+func TestRunLinearCycleForOrg_AnotherWorkspacesRulesDoNotApply(t *testing.T) {
+	recorder := recordSpans(t)
+	database := newMigratedSQLiteForPoller(t)
+	if _, err := database.Exec(`UPDATE org_settings SET linear_workspace_id = 'ws-other' WHERE org_id = ?`, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("bind other workspace: %v", err)
+	}
+	stores := sqlitestore.New(database)
+	stale, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linearTestWorkspace, "ENG-1", "uuid-1", "issue", "Old", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := &capturingPublisher{}
+	m := &Manager{
+		database: database, pub: published,
+		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
+		orgs: stores.Orgs, users: stores.Users, secrets: linearSecrets{key: "lin_api_test"},
+		linearRules:  linearRulesStore{rules: []domain.LinearTeamRules{armedLinear("team-a", "eng", []string{"Todo"}, []string{"Done"})}},
+		EventSources: stores.OrgEventSources,
+	}
+	m.runLinearCycleForOrg(context.Background(), runmode.LocalDefaultOrgID, time.Now())
+	if got := spanOutcome(t, recorder, "poll.linear.org"); got != "unconfigured" {
+		t.Errorf("span outcome = %q, want unconfigured: the old workspace's rules were read", got)
+	}
+	evts := published.ofType(domain.EventLinearIssueUnreachable)
+	if len(evts) != 1 || evts[0].EntityID == nil || *evts[0].EntityID != stale.ID {
+		t.Fatalf("unreachable events = %+v, want one for the old workspace's issue", evts)
+	}
+	var meta events.LinearIssueUnreachableMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.Reason != events.LinearUnreachableScopeChanged {
+		t.Errorf("reason = %q, want scope_changed", meta.Reason)
+	}
+}
+
+// capturingPublisher records every event a cycle publishes.
+type capturingPublisher struct {
+	mu   sync.Mutex
+	evts []domain.Event
+}
+
+func (p *capturingPublisher) Publish(_ context.Context, evt domain.Event) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.evts = append(p.evts, evt)
+}
+
+func (p *capturingPublisher) PublishPreEnqueued(ctx context.Context, evt domain.Event) {
+	p.Publish(ctx, evt)
+}
+
+func (p *capturingPublisher) ofType(eventType string) []domain.Event {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var out []domain.Event
+	for _, e := range p.evts {
+		if e.EventType == eventType {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // TestRunLinearCycleForOrg_CompletesAndStamps: a cycle Linear answered stamps

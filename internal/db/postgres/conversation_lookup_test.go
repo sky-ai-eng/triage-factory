@@ -34,8 +34,8 @@ func TestConversationStore_Postgres_LookupOrgForConversationSystem_ReturnsRealOr
 	taskID := uuid.New().String()
 	conversationID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Lookup probe', '', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Lookup probe', '', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "lookup-"+orgID[:8]); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

@@ -79,7 +79,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	n, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
+	n, err := tr.BackfillDashboardHistory(ctx, "https://github.com", client, "octocat", []string{"octo/repo"})
 	if err != nil {
 		t.Fatalf("BackfillDashboardHistory: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 		t.Errorf("graphql calls = %d; want 4 (one per base query for a single repo)", got)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, org, "github", "octo/repo#7")
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", "https://github.com", "octo/repo#7")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestBackfillDashboardHistory_SeedsTerminalEntity_NoEvents(t *testing.T) {
 	}
 
 	// Idempotent: a second pass finds the entity already present and seeds none.
-	n2, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
+	n2, err := tr.BackfillDashboardHistory(ctx, "https://github.com", client, "octocat", []string{"octo/repo"})
 	if err != nil {
 		t.Fatalf("BackfillDashboardHistory (2nd pass): %v", err)
 	}
@@ -148,7 +148,7 @@ func TestBackfillDashboardHistory_HonorsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled — the loop must bail before the first query
 
-	n, err := tr.BackfillDashboardHistory(ctx, client, "octocat", []string{"octo/repo"})
+	n, err := tr.BackfillDashboardHistory(ctx, "https://github.com", client, "octocat", []string{"octo/repo"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v; want context.Canceled", err)
 	}

@@ -120,7 +120,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			org := runmode.LocalDefaultOrgID
 			client := ghclient.NewClient(srv.URL, "tok")
 
-			entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", "")
+			entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", "")
 			if err != nil {
 				t.Fatalf("seed stub: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			// Cycle 1 against the REAL store: quiet-seeds the draft snapshot.
 			pub := &recordingPublisher{}
 			tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-			if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+			if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 1: %v", err)
 			}
 			if evts := pub.nonSystemEvents(); len(evts) != 0 {
@@ -142,7 +142,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			failing := &failingBatchQueue{EventQueueStore: stores.EventQueue, err: tc.err}
 			losingPub := &recordingPublisher{}
 			loser := New(database, losingPub, stores.Tasks, stores.Entities, stores.Repos, failing, org)
-			if _, _, err := loser.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+			if _, _, err := loser.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 2 (loser): %v", err)
 			}
 			if atomic.LoadInt32(&failing.calls) == 0 {
@@ -163,7 +163,7 @@ func TestRefreshGitHub_FailedCommitSuppressesTransitions(t *testing.T) {
 			// event_id index).
 			winnerPub := &recordingPublisher{}
 			winner := New(database, winnerPub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-			if _, _, err := winner.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+			if _, _, err := winner.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 				t.Fatalf("RefreshGitHub cycle 3: %v", err)
 			}
 			evts := winnerPub.nonSystemEvents()
@@ -206,7 +206,7 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "octo/repo#7", "pr", "", "")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "octo/repo#7", "", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
@@ -214,10 +214,10 @@ func TestRefreshGitHub_CommittedEventsRouteWithoutTheBus(t *testing.T) {
 	// Cycle 1 seeds the draft snapshot; cycle 2 diffs draft→ready. Both run
 	// against a publisher that never delivers anything.
 	tr := New(database, droppingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 1: %v", err)
 	}
-	if _, _, err := tr.RefreshGitHub(ctx, client, "", nil, nil); err != nil {
+	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub cycle 2: %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", "")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", "")
 	if err != nil {
 		t.Fatalf("seed stub: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	// Cycle 1 against the REAL store: quiet-seeds the In Progress snapshot.
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira cycle 1: %v", err)
 	}
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
@@ -290,7 +290,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	failing := &failingBatchQueue{EventQueueStore: stores.EventQueue}
 	losingPub := &recordingPublisher{}
 	loser := New(database, losingPub, stores.Tasks, stores.Entities, stores.Repos, failing, org)
-	if _, err := loser.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := loser.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira cycle 2 (loser): %v", err)
 	}
 	if atomic.LoadInt32(&failing.calls) == 0 {
@@ -307,7 +307,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 	// events commit — once each.
 	winnerPub := &recordingPublisher{}
 	winner := New(database, winnerPub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := winner.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := winner.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira cycle 3: %v", err)
 	}
 	evts := winnerPub.nonSystemEvents()

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -98,6 +99,14 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 // and not-configured orgs are tolerated.
 func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string, repos []string) error {
 	tr := m.trackerForOrg(orgID)
+	// The seeded pull requests are keyed under the org's GitHub host, the
+	// scope the poll cycle keys them under, so the cycle finds what this
+	// seeds instead of minting a second row beside it.
+	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	scope := domain.EntityScope("github", orgSet)
 
 	// PAT path (org PAT in multi mode, or any non-App org): one client over the
 	// full configured set. orgHasRegisteredApp mirrors runGitHubCycleForOrg's
@@ -113,7 +122,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 			}
 			return err
 		}
-		_, err = tr.BackfillDashboardHistory(ctx, client, login, repos)
+		_, err = tr.BackfillDashboardHistory(ctx, scope, client, login, repos)
 		return err
 	}
 
@@ -143,7 +152,7 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string,
 		if len(scoped) == 0 {
 			continue
 		}
-		if _, berr := tr.BackfillDashboardHistory(ctx, client, login, scoped); berr != nil {
+		if _, berr := tr.BackfillDashboardHistory(ctx, scope, client, login, scoped); berr != nil {
 			lastErr = berr
 			log.Printf("[dashboard-backfill] org %s installation %s: %v", orgID, inst.AccountLogin, berr)
 			continue

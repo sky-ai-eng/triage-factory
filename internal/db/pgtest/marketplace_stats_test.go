@@ -50,8 +50,8 @@ func seedMarketplaceStatsTask(t *testing.T, h *Harness, orgID, userID, teamID st
 	eventID := uuid.New().String()
 	taskID := uuid.New().String()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Stats Fixture Entity', 'https://example/x', '{}'::jsonb, $4)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Stats Fixture Entity', 'https://example/x', '{}'::jsonb, $4, 'https://github.com')
 	`, entityID, orgID, "stats-fixture-"+entityID, now)
 	MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)

@@ -493,3 +493,52 @@ func TestLinearTeamsPut_UnconnectedWorkspace(t *testing.T) {
 		t.Errorf("removal on an unconnected workspace left %+v", got)
 	}
 }
+
+// TestLinearTeams_WorkspaceSwitch: a team's Linear rules belong to the
+// workspace they were saved under. Once the org's credential belongs to
+// another workspace, the team-settings read shows none of them, a save under
+// the new workspace leaves them stored, and binding the old workspace again
+// brings them back.
+func TestLinearTeams_WorkspaceSwitch(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	saved := mustPutLinearTeams(t, s, armedLinearTeam(linearTeamEng))
+
+	bindLinearWorkspaceForTest(t, s, "ws-other")
+	if read := storedLinearTeamsRead(t, s); len(read) != 0 {
+		t.Fatalf("settings read under another workspace = %+v, want none of the old rules", read)
+	}
+	if got := mustPutLinearTeams(t, s, map[string]any{"id": linearTeamOps}); len(got) != 1 || got[0].ID != linearTeamOps {
+		t.Fatalf("PUT under the new workspace = %+v, want only OPS", got)
+	}
+
+	bindLinearWorkspaceForTest(t, s, linearTestWorkspaceID)
+	if read := storedLinearTeamsRead(t, s); !reflect.DeepEqual(read, saved) {
+		t.Errorf("settings read back in the old workspace =\n%+v\nwant what was saved there\n%+v", read, saved)
+	}
+}
+
+// TestLinearTeamsPut_NoWorkspaceRecorded: with a credential stored but no
+// workspace recorded for it, nothing can be saved — there is no workspace to
+// save a rule under — while the empty set still answers and writes nothing, so
+// the previous workspace's rules and display order come back on its rebind.
+func TestLinearTeamsPut_NoWorkspaceRecorded(t *testing.T) {
+	s, _ := newServerWithLinearCatalog(t, linearFixtureEng, linearFixtureOps)
+	// Saved against id order, so a display order lost on the way shows up as
+	// the rows coming back sorted.
+	first, second := linearTeamEng, linearTeamOps
+	if first < second {
+		first, second = second, first
+	}
+	saved := mustPutLinearTeams(t, s, map[string]any{"id": first}, map[string]any{"id": second})
+
+	bindLinearWorkspaceForTest(t, s, "")
+	assertOneFault(t, putLinearTeams(t, s, armedLinearTeam(linearTeamEng)), http.StatusConflict, "NOT_CONFIGURED", "")
+	if got := mustPutLinearTeams(t, s); len(got) != 0 {
+		t.Errorf("empty PUT = %+v, want an empty set", got)
+	}
+
+	bindLinearWorkspaceForTest(t, s, linearTestWorkspaceID)
+	if read := storedLinearTeamsRead(t, s); !reflect.DeepEqual(read, saved) {
+		t.Errorf("rules after the rebind =\n%+v\nwant what was saved, in its order\n%+v", read, saved)
+	}
+}

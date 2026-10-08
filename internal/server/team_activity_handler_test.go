@@ -125,7 +125,7 @@ func TestTeamActivity_MergedAndFailedAreWindowedByTheAsk(t *testing.T) {
 	before, after := day+"T08:00:00Z", day+"T15:00:00Z"
 
 	entityID := fixtureUUID("e_conv")
-	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES (?, 'github', 'owner/repo#77', 'pr', 'active')`, entityID)
+	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES (?, 'github', 'owner/repo#77', 'pr', 'active', 'https://github.com')`, entityID)
 	for i, at := range []string{before, after} {
 		execSQL(t, s.db,
 			`INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at) VALUES (?, ?, ?, '', '{}', ?)`,

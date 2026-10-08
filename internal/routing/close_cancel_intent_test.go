@@ -124,7 +124,7 @@ func claimNext(t *testing.T, database *sql.DB) *domain.Conversation {
 func seedCIFailedTaskOnEntity(t *testing.T, r *Router, database *sql.DB, sourceID string) (entityID, taskID string) {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", sourceID, "pr", "PR", "https://example.com")
+		"github", "https://github.com", sourceID, "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestCloseCancelIntent_ReplayedCloseStampsNothing(t *testing.T) {
 	r.spawner = sp
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#replayed-close", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#replayed-close", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

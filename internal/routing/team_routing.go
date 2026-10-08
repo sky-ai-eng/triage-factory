@@ -150,33 +150,60 @@ func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, t
 }
 
 // teamTracksEventLinearTeam reads the Linear team id off an event's metadata
-// and asks the store whether teamID tracks it. The gate keys on the UUID
-// rather than the team key, because a key can be renamed in Linear and the id
-// cannot. Fail-open on malformed metadata or a store error, the posture
-// teamTracksEventRepo documents.
+// and asks the store whether teamID tracks it in the org's current Linear
+// workspace. The gate keys on the UUID rather than the team key, because a key
+// can be renamed in Linear and the id cannot; and it reads only the current
+// workspace's rules, because a rule saved under another workspace names a team
+// no event from this one can carry. Fail-open on malformed metadata or a store
+// error, the posture teamTracksEventRepo documents.
+//
+// identifier_changed is the one event about two Linear teams, the one the
+// issue is in now and the one it left (old_linear_team_id), and it passes for a
+// team that tracks either. A team whose issue moved to a Linear team it does
+// not track keeps its tasks on the entity, and this event is the only thing
+// that tells it the issue left; a handler filtered on old_linear_team_key
+// could never fire otherwise.
 //
 // Metadata that parses but names no team is refused rather than allowed. The
-// tracker sets linear_team_id on every Linear event whenever anything knows
-// the team, and leaves it empty only on an unreachable issue that has no
-// snapshot and whose key names no single armed team, so no team can be shown
-// to track it. The event still closes the entity's tasks; the close relations do not
-// read this gate.
+// tracker sets linear_team_id on every Linear event from the stored snapshot or
+// a fresh read of the issue, and leaves it empty only on an unreachable issue
+// that has neither, so no team can be shown to track it. The event still
+// closes the entity's tasks; the close relations do not read this gate.
 func (r *Router) teamTracksEventLinearTeam(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
-		LinearTeamID string `json:"linear_team_id"`
+		LinearTeamID    string `json:"linear_team_id"`
+		OldLinearTeamID string `json:"old_linear_team_id"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil {
 		return true
 	}
-	if m.LinearTeamID == "" {
+	linearTeams := make([]string, 0, 2)
+	if m.LinearTeamID != "" {
+		linearTeams = append(linearTeams, m.LinearTeamID)
+	}
+	if evt.EventType == domain.EventLinearIssueIdentifierChanged && m.OldLinearTeamID != "" && m.OldLinearTeamID != m.LinearTeamID {
+		linearTeams = append(linearTeams, m.OldLinearTeamID)
+	}
+	if len(linearTeams) == 0 {
 		return false
 	}
-	tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, m.LinearTeamID)
+	settings, err := r.orgs.GetSettingsSystem(ctx, evt.OrgID)
 	if err != nil {
-		routerLog.Warn("team-linear-team gate lookup failed, allowing", "team_id", teamID, "linear_team_id", m.LinearTeamID, "error", err)
+		routerLog.Warn("team-linear-team gate: org settings read failed, allowing", "team_id", teamID, "linear_team_id", m.LinearTeamID, "error", err)
 		return true
 	}
-	return tracks
+	scope := domain.EntityScope("linear", settings)
+	for _, linearTeamID := range linearTeams {
+		tracks, err := r.linearRules.TracksTeamSystem(ctx, teamID, scope, linearTeamID)
+		if err != nil {
+			routerLog.Warn("team-linear-team gate lookup failed, allowing", "team_id", teamID, "linear_team_id", linearTeamID, "error", err)
+			return true
+		}
+		if tracks {
+			return true
+		}
+	}
+	return false
 }
 
 // trackingTeams filters an identity-derived team set — the owner ladder's

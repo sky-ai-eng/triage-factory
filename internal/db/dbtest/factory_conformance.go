@@ -27,7 +27,7 @@ type FactoryStoreFactory func(t *testing.T) (store db.FactoryReadStore, orgID st
 type FactorySeeder struct {
 	// Entity inserts an active GitHub PR entity and returns its ID.
 	// suffix is appended to source_id so multiple seeds per subtest
-	// don't collide on the (source, source_id) unique index. The seeder
+	// don't collide on the active-key unique index. The seeder
 	// also makes the entity *visible* on the factory belt for its
 	// backend: in multi-mode (Postgres) that means registering its repo
 	// in the team's tracked set; in local mode (SQLite) every entity is

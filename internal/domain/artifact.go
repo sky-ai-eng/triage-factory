@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Artifact is one row in the artifacts table — the single durable,
 // conversation-attributed, polymorphic record of something a conversation
@@ -209,7 +212,12 @@ func ArtifactProviders() []string {
 //
 //   - resource: the stable resource key — 'owner/repo' for a branch or a
 //     branch-anchored PR, 'owner/repo#123' for a PR keyed on its number,
-//     the Jira issue key for a Jira issue.
+//     the Jira issue key for a Jira issue, and the issue's UUID for anything
+//     on a Linear issue. Never a Linear identifier: a team move or a team key
+//     rename changes it, and another workspace in the same org can have an
+//     issue under the same one. The UUID is unique across workspaces, so the
+//     org-wide key cannot merge two workspaces' artifacts, and an entity
+//     rename moves the row's Target without touching its key.
 //   - anchor: an optional stable sub-discriminator appended when resource
 //     alone isn't unique — a branch ref for a branch, or for a PR whose
 //     number isn't known yet (see below). Empty when resource is already
@@ -220,6 +228,7 @@ func ArtifactProviders() []string {
 //	ArtifactDedupKey("github", "pull_request", "owner/repo#123", "")          => "github:pull_request:owner/repo#123"
 //	ArtifactDedupKey("git",    "branch",       "owner/repo", "refs/heads/x")  => "git:branch:owner/repo:refs/heads/x"
 //	ArtifactDedupKey("jira",   "issue",        "PROJ-123", "")                 => "jira:issue:PROJ-123"
+//	ArtifactDedupKey("linear", "comment",      "<issue uuid>", "<comment id>") => "linear:comment:<issue uuid>:<comment id>"
 //
 // Pending→real PR — why resource/anchor are NOT the struct fields: a
 // 'pending' PR has no number yet, so the writer keys it on the branch ref
@@ -235,6 +244,22 @@ func ArtifactDedupKey(provider, kind, resource, anchor string) string {
 		key += ":" + anchor
 	}
 	return key
+}
+
+// ArtifactKeyHasResource reports whether key, as ArtifactDedupKey builds it,
+// is under provider and has resource as its resource segment, whole: the
+// resource "uuid-4" never matches "uuid-41".
+func ArtifactKeyHasResource(key, provider, resource string) bool {
+	p, rest, ok := strings.Cut(key, ":")
+	if !ok || p != provider || resource == "" {
+		return false
+	}
+	_, rest, ok = strings.Cut(rest, ":")
+	if !ok {
+		return false
+	}
+	got, _, _ := strings.Cut(rest, ":")
+	return got == resource
 }
 
 // reconcilableNonTerminal lists, per Kind, the states the reconciler

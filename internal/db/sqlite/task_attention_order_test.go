@@ -41,8 +41,8 @@ func TestTaskStore_AttentionOrder_SQLite(t *testing.T) {
 				sourceID := fmt.Sprintf("attn-%s-%d", f.Suffix, now.UnixNano())
 				eventType := domain.EventGitHubPRCICheckFailed
 				if _, err := conn.Exec(`
-					INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-					VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+					INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+					VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
 				`, entityID, sourceID, f.Title, "https://example/"+sourceID, now); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}

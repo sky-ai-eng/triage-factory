@@ -71,7 +71,7 @@ func seedConversation(t *testing.T, database *sql.DB, conversationID string) {
 	stores := sqlitestore.New(database)
 	org, team := runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#"+conversationID, "pr", "T", "https://example.com/"+conversationID)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#"+conversationID, "", "pr", "T", "https://example.com/"+conversationID)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -108,7 +108,7 @@ func primaryEntity(t *testing.T, database *sql.DB, conversationID string) *domai
 
 func entityBySource(t *testing.T, database *sql.DB, source, sourceID string) *domain.Entity {
 	t.Helper()
-	ent, err := sqlitestore.New(database).Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, source, sourceID)
+	ent, err := sqlitestore.New(database).Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, source, testScope(source), sourceID)
 	if err != nil {
 		t.Fatalf("GetBySource(%s,%s): %v", source, sourceID, err)
 	}
@@ -117,7 +117,7 @@ func entityBySource(t *testing.T, database *sql.DB, source, sourceID string) *do
 
 func makeEntity(t *testing.T, database *sql.DB, source, sourceID, kind string) *domain.Entity {
 	t.Helper()
-	ent, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, sourceID, kind, "", "")
+	ent, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, source, testScope(source), sourceID, "", kind, "", "")
 	if err != nil {
 		t.Fatalf("FindOrCreate(%s,%s): %v", source, sourceID, err)
 	}
@@ -182,7 +182,7 @@ func seedProducedPR(t *testing.T, database *sql.DB, conversationID, repoPath str
 func attachAll(t *testing.T, database *sql.DB, orgID, conversationID, primaryEntityID string) {
 	t.Helper()
 	stores := sqlitestore.New(database)
-	Attach(context.Background(), stores.TaskMemory, stores.Artifacts, stores.Entities, orgID, conversationID, primaryEntityID)
+	Attach(context.Background(), stores, orgID, conversationID, primaryEntityID)
 }
 
 // --- tests ---
@@ -322,8 +322,9 @@ func TestAttach_ListFailureLeavesPrimaryIntact(t *testing.T) {
 		t.Fatalf("upsert memory: %v", err)
 	}
 
-	Attach(ctx, stores.TaskMemory, failingArtifactStore{ArtifactStore: stores.Artifacts}, stores.Entities,
-		runmode.LocalDefaultOrgID, "r-fail", entA.ID)
+	failing := stores
+	failing.Artifacts = failingArtifactStore{ArtifactStore: stores.Artifacts}
+	Attach(ctx, failing, runmode.LocalDefaultOrgID, "r-fail", entA.ID)
 
 	if role := roleFor(t, database, "r-fail", entA.ID); role != domain.MemoryRolePrimary {
 		t.Errorf("primary role = %q, want %q despite the listing failure", role, domain.MemoryRolePrimary)
@@ -369,14 +370,14 @@ func TestAttach_AbsentStoresSkipProducedPass(t *testing.T) {
 			// An artifact that WOULD mint a produced entity had both stores been present.
 			seedProducedPR(t, database, "r-nil", "o/r", 9, "https://github.com/o/r/pull/9")
 
-			artifacts, entities := stores.Artifacts, stores.Entities
+			partial := stores
 			if tc.absent == "artifacts" || tc.absent == "both" {
-				artifacts = nil
+				partial.Artifacts = nil
 			}
 			if tc.absent == "entities" || tc.absent == "both" {
-				entities = nil
+				partial.Entities = nil
 			}
-			Attach(ctx, stores.TaskMemory, artifacts, entities, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
+			Attach(ctx, partial, runmode.LocalDefaultOrgID, "r-nil", entA.ID)
 
 			if role := roleFor(t, database, "r-nil", entA.ID); role != domain.MemoryRolePrimary {
 				t.Errorf("primary role = %q, want %q", role, domain.MemoryRolePrimary)
@@ -404,7 +405,9 @@ func TestAttach_NilTaskMemoryWritesNothing(t *testing.T) {
 	entA := primaryEntity(t, database, "r-nomem")
 	seedProducedPR(t, database, "r-nomem", "o/r", 11, "https://github.com/o/r/pull/11")
 
-	Attach(context.Background(), nil, stores.Artifacts, stores.Entities, runmode.LocalDefaultOrgID, "r-nomem", entA.ID)
+	noMemory := stores
+	noMemory.TaskMemory = nil
+	Attach(context.Background(), noMemory, runmode.LocalDefaultOrgID, "r-nomem", entA.ID)
 
 	var n int
 	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-nomem").Scan(&n); err != nil {
@@ -551,4 +554,21 @@ func TestAttach_MultiStepPrimaryPerStep(t *testing.T) {
 	if !conversationIDs["r-step1"] || !conversationIDs["r-step2"] {
 		t.Errorf("entity should reach both step conversations, got %v", conversationIDs)
 	}
+}
+
+// testScope is the scope a test keys an entity of source under: what
+// domain.EntityScope answers for an org with default settings where the
+// source has one, and a fixed stand-in where it has none.
+func testScope(source string) string {
+	switch source {
+	case "github":
+		return "https://github.com"
+	case "jira":
+		return "https://jira.example.com"
+	case "slack":
+		return "slack.com"
+	case "linear":
+		return "ws-test"
+	}
+	return "test-scope"
 }

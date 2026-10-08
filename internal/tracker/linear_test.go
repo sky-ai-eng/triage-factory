@@ -22,7 +22,7 @@ import (
 
 // fakeLinear is an in-memory LinearClient. Issues live in byID; a search
 // returns whatever the test put under the query's kind and team; GetIssues
-// and GetIssue answer from byID. fail lets a test make a call return an
+// and GetIssue answer from byID, by UUID. fail lets a test make a call return an
 // error; notFound makes both reads answer not-found for an id, and batchOmits
 // makes only the batch read leave it out.
 type fakeLinear struct {
@@ -104,13 +104,10 @@ func (f *fakeLinear) GetIssue(_ context.Context, ref string) (*linear.Issue, err
 	if f.notFound[ref] {
 		return nil, fmt.Errorf("%w: issue %s", linear.ErrNotFound, ref)
 	}
+	// By UUID only: the tracker never asks by identifier, so a fake that
+	// answered one would hide a regression to it.
 	if is, ok := f.byID[ref]; ok {
 		return &is, nil
-	}
-	for _, is := range f.byID {
-		if is.Identifier == ref {
-			return &is, nil
-		}
 	}
 	return nil, fmt.Errorf("%w: issue %s", linear.ErrNotFound, ref)
 }
@@ -164,11 +161,16 @@ func linRules() LinearRules {
 	}}
 }
 
+// linWorkspace is the Linear workspace a fixture's cycles run in unless a test
+// switches it.
+const linWorkspace = "ws-test"
+
 type linearFixture struct {
-	tr     *Tracker
-	pub    *recordingPublisher
-	stores db.Stores
-	client *fakeLinear
+	tr        *Tracker
+	pub       *recordingPublisher
+	stores    db.Stores
+	client    *fakeLinear
+	workspace string
 }
 
 func newLinearFixture(t *testing.T) *linearFixture {
@@ -177,7 +179,7 @@ func newLinearFixture(t *testing.T) *linearFixture {
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID)
-	return &linearFixture{tr: tr, pub: pub, stores: stores, client: newFakeLinear()}
+	return &linearFixture{tr: tr, pub: pub, stores: stores, client: newFakeLinear(), workspace: linWorkspace}
 }
 
 // cycle runs one RefreshLinear with a fresh publisher, so each cycle's events
@@ -186,7 +188,7 @@ func (fx *linearFixture) cycle(t *testing.T, teams LinearRules) ([]domain.Event,
 	t.Helper()
 	fx.pub = &recordingPublisher{}
 	fx.tr.pub = fx.pub
-	_, err := fx.tr.RefreshLinear(context.Background(), fx.client, teams)
+	_, err := fx.tr.RefreshLinear(context.Background(), fx.workspace, fx.client, teams)
 	return fx.pub.nonSystemEvents(), err
 }
 
@@ -203,9 +205,14 @@ func (fx *linearFixture) pollCompleted() bool {
 
 func (fx *linearFixture) entity(t *testing.T, identifier string) *domain.Entity {
 	t.Helper()
-	e, err := fx.stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "linear", identifier)
+	return fx.entityIn(t, fx.workspace, identifier)
+}
+
+func (fx *linearFixture) entityIn(t *testing.T, workspace, identifier string) *domain.Entity {
+	t.Helper()
+	e, err := fx.stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "linear", workspace, identifier)
 	if err != nil || e == nil {
-		t.Fatalf("GetBySource(%s): entity=%v err=%v", identifier, e, err)
+		t.Fatalf("GetBySource(%s, %s): entity=%v err=%v", workspace, identifier, e, err)
 	}
 	return e
 }
@@ -389,25 +396,21 @@ func TestRefreshLinear_RefreshBatchesByFifty(t *testing.T) {
 // state, and nothing else.
 func TestRefreshLinear_Unreachable(t *testing.T) {
 	cases := []struct {
-		name   string
-		mutate func(fx *linearFixture, is linear.Issue)
+		name       string
+		mutate     func(fx *linearFixture, is linear.Issue)
+		wantReason string
 	}{
 		{"missing from the batch and not found", func(fx *linearFixture, is linear.Issue) {
 			fx.client.notFound = map[string]bool{is.ID: true}
-		}},
+		}, events.LinearUnreachableNotFound},
 		{"trashed", func(fx *linearFixture, is linear.Issue) {
 			is.Trashed, is.ArchivedAt = true, "2026-10-01T12:00:00Z"
 			fx.client.put(is)
-		}},
+		}, events.LinearUnreachableTrashed},
 		{"archived outside a done state", func(fx *linearFixture, is linear.Issue) {
 			is.ArchivedAt = "2026-10-01T12:00:00Z"
 			fx.client.put(is)
-		}},
-		{"moved to another team", func(fx *linearFixture, is linear.Issue) {
-			is.Identifier = "OPS-77"
-			is.Team = linear.Team{ID: "team-ops", Key: "OPS"}
-			fx.client.put(is)
-		}},
+		}, events.LinearUnreachableArchived},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,6 +433,9 @@ func TestRefreshLinear_Unreachable(t *testing.T) {
 			}
 			if meta.IssueIdentifier != "ENG-4" || meta.LinearTeamID != linTeamID || meta.AssigneeUserID != "u-alice" || meta.LastStatus != "Todo" {
 				t.Errorf("metadata = %+v, want the entity's last-known state", meta)
+			}
+			if meta.Reason != tc.wantReason {
+				t.Errorf("reason = %q, want %q", meta.Reason, tc.wantReason)
 			}
 			if evts[0].EntityID == nil || *evts[0].EntityID != fx.entity(t, "ENG-4").ID {
 				t.Errorf("event entity = %v", evts[0].EntityID)
@@ -481,11 +487,11 @@ func TestRefreshLinear_ArchivedDoneIsTheTerminalPath(t *testing.T) {
 }
 
 // TestRefreshLinear_SnapshotlessEntitySeedsQuietly: an entity with no snapshot
-// (a stub created outside the poller, or one a source pause cleared) has no
-// UUID to batch by, so it is read by identifier and seeded without a diff.
+// (one a source pause cleared) is read by its UUID with the rest of the batch
+// and seeded without a diff.
 func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	fx := newLinearFixture(t)
-	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-7", "issue", "", ""); err != nil {
+	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-7", "uuid-7", "issue", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	is := linIssue(7)
@@ -499,8 +505,8 @@ func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 	if len(evts) != 0 {
 		t.Fatalf("events = %v, want a quiet seed", eventTypes(evts))
 	}
-	if !slices.Contains(fx.client.callLog(), "getIssue:ENG-7") {
-		t.Errorf("calls = %v, want the stub read by identifier", fx.client.callLog())
+	if !slices.Equal(fx.client.callLog(), []string{"viewer", "search:pickup:" + linTeamID, "search:assigned:" + linTeamID, "getIssues:1"}) {
+		t.Errorf("calls = %v, want the entity read in the batch by UUID and nothing by identifier", fx.client.callLog())
 	}
 	if snap := fx.snapshot(t, "ENG-7"); snap.ID != "uuid-7" || snap.AssigneeUserID != "u-alice" {
 		t.Errorf("snapshot = %+v", snap)
@@ -512,44 +518,31 @@ func TestRefreshLinear_SnapshotlessEntitySeedsQuietly(t *testing.T) {
 
 // TestRefreshLinear_SnapshotlessUnreachable: an entity with no snapshot that
 // Linear answers not-found for has no stored team and no issue to read one
-// from, so its unreachable names the armed team whose key its identifier
-// carries. It names none when no armed team has the key, or when two do
-// because one's stored key is stale.
+// from. Its unreachable names no team rather than one parsed out of its
+// identifier, whose prefix can name a team the issue no longer belongs to.
 func TestRefreshLinear_SnapshotlessUnreachable(t *testing.T) {
-	stale := LinearTeamRule{ID: "team-old", Key: "ENG", Done: linDoneSet}
-	ops := LinearRules{{ID: "team-ops", Key: "OPS", Done: linDoneSet}}
-	cases := []struct {
-		name     string
-		teams    LinearRules
-		wantTeam string
-	}{
-		{"key armed", linRules(), linTeamID},
-		{"key not armed", ops, ""},
-		{"key armed twice", append(linRules(), stale), ""},
+	fx := newLinearFixture(t)
+	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-9", "uuid-9", "issue", "", ""); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			fx := newLinearFixture(t)
-			if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-9", "issue", "", ""); err != nil {
-				t.Fatal(err)
-			}
-			fx.client.notFound = map[string]bool{"ENG-9": true}
+	fx.client.notFound = map[string]bool{"uuid-9": true}
 
-			evts, err := fx.cycle(t, tc.teams)
-			if err != nil {
-				t.Fatalf("RefreshLinear: %v", err)
-			}
-			if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
-				t.Fatalf("events = %v, want [unreachable]", got)
-			}
-			var meta events.LinearIssueUnreachableMetadata
-			if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
-				t.Fatal(err)
-			}
-			if meta.LinearTeamID != tc.wantTeam || meta.IssueIdentifier != "ENG-9" || meta.LinearTeamKey != "ENG" {
-				t.Errorf("metadata = %+v, want linear_team_id %q", meta, tc.wantTeam)
-			}
-		})
+	evts, err := fx.cycle(t, linRules())
+	if err != nil {
+		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueUnreachable}) {
+		t.Fatalf("events = %v, want [unreachable]", got)
+	}
+	var meta events.LinearIssueUnreachableMetadata
+	if err := json.Unmarshal([]byte(evts[0].MetadataJSON), &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.LinearTeamID != "" || meta.LinearTeamKey != "" || meta.IssueIdentifier != "ENG-9" || meta.IssueID != "uuid-9" {
+		t.Errorf("metadata = %+v, want the identity and no team", meta)
+	}
+	if meta.Reason != events.LinearUnreachableNotFound {
+		t.Errorf("reason = %q, want not_found", meta.Reason)
 	}
 }
 
@@ -794,23 +787,23 @@ func TestRefreshLinear_FailingConfirmationsRotate(t *testing.T) {
 	}
 }
 
-// TestRefreshLinear_ConfirmationQueueIsOldestFirst: entities with no snapshot
-// and tracked issues missing from their batch share one queue, ordered by how
-// long since each was polled, so neither kind waits behind the other.
+// TestRefreshLinear_ConfirmationQueueIsOldestFirst: entities missing from
+// their batch, a snapshot-less one among them, share one queue, ordered by how
+// long since each was polled, so none waits behind a newer one.
 func TestRefreshLinear_ConfirmationQueueIsOldestFirst(t *testing.T) {
 	fx := newLinearFixture(t)
 	fx.seed(t, linIssue(1))
-	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", "ENG-2", "issue", "", ""); err != nil {
+	if _, _, err := fx.stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "linear", linWorkspace, "ENG-2", "uuid-2", "issue", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	fx.client.put(linIssue(2))
-	fx.client.batchOmits = map[string]bool{"uuid-1": true}
+	fx.client.batchOmits = map[string]bool{"uuid-1": true, "uuid-2": true}
 
 	if _, err := fx.cycle(t, linRules()); err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
 	}
-	if got, want := getIssueCalls(fx.client), []string{"getIssue:uuid-1", "getIssue:ENG-2"}; !slices.Equal(got, want) {
-		t.Errorf("confirmations = %v, want the longer-unpolled missing issue before the newer stub: %v", got, want)
+	if got, want := getIssueCalls(fx.client), []string{"getIssue:uuid-1", "getIssue:uuid-2"}; !slices.Equal(got, want) {
+		t.Errorf("confirmations = %v, want the longer-unpolled issue before the newer row: %v", got, want)
 	}
 }
 

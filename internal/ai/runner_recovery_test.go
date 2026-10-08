@@ -304,8 +304,8 @@ func seedScoringTasks(t *testing.T, database *sql.DB, n int) []string {
 		const eventType = "github:pr:opened" // seeded in events_catalog
 
 		if _, err := database.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+			INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
 		`, entityID, sourceID, fmt.Sprintf("Scoring PR %d", i), "https://example/pr/"+sourceID, now); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

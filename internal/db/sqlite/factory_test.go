@@ -64,8 +64,8 @@ func newSQLiteFactorySeeder(conn *sql.DB) dbtest.FactorySeeder {
 			id := uuid.New().String()
 			sourceID := fmt.Sprintf("factory-%s-%s", suffix, id[:8])
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
 			`, id, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
@@ -227,8 +227,8 @@ func TestFactoryReadStore_SQLite_ShowsUntaskedEntities(t *testing.T) {
 	// An active entity with an event but no task at all.
 	id := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES (?, 'github', ?, 'pr', 'Untriaged PR', 'https://example/u', '{}', ?)
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES (?, 'github', ?, 'pr', 'Untriaged PR', 'https://example/u', '{}', ?, 'https://github.com')
 	`, id, "untasked-"+id[:8], time.Now().UTC()); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -275,8 +275,8 @@ func TestFactoryReadStore_SQLite_CountersUnscoped(t *testing.T) {
 
 	id := uuid.New().String()
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES (?, 'github', ?, 'pr', 'Untriaged', 'https://example/u', '{}', ?)
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES (?, 'github', ?, 'pr', 'Untriaged', 'https://example/u', '{}', ?, 'https://github.com')
 	`, id, "ctr-"+id[:8], time.Now().UTC()); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

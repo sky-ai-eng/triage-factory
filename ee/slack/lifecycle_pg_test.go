@@ -197,8 +197,8 @@ func seedSlackMessageEvent(t *testing.T, h *pgtest.Harness, orgID, workspaceID, 
 		root = ts
 	}
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title)
-		VALUES ($1, $2, 'slack', $3, 'message', 'test thread')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
+		VALUES ($1, $2, 'slack', $3, 'message', 'test thread', 'slack.com')
 	`, entityID, orgID, domain.SlackSourceID(channel, root)); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -280,8 +280,8 @@ func seedGitHubTaskAndConversation(t *testing.T, h *pgtest.Harness, orgID, creat
 	entityID := uuid.New().String()
 	sourceID := "octo/repo#" + uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title)
-		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, scope)
+		VALUES ($1, $2, 'github', $3, 'pull_request', 'test pr', 'https://github.com')
 	`, entityID, orgID, sourceID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

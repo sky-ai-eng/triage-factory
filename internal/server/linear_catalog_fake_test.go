@@ -278,7 +278,21 @@ func newServerWithLinearCatalog(t *testing.T, teams ...linear.Team) (*Server, *l
 	if err := s.secrets.Put(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyLinearAPIKey, "lin_api_test", ""); err != nil {
 		t.Fatalf("seed linear api key: %v", err)
 	}
+	bindLinearWorkspaceForTest(t, s, linearTestWorkspaceID)
 	return s, fake
+}
+
+// linearTestWorkspaceID is the workspace the bound test credential belongs to.
+const linearTestWorkspaceID = "ws-test"
+
+// bindLinearWorkspaceForTest records workspaceID as the org's Linear
+// workspace, which the credential bind does in production. Rules are read and
+// written only in the org's current workspace.
+func bindLinearWorkspaceForTest(t *testing.T, s *Server, workspaceID string) {
+	t.Helper()
+	if _, err := s.db.Exec(`UPDATE org_settings SET linear_workspace_id = ? WHERE org_id = ?`, workspaceID, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("bind linear workspace: %v", err)
+	}
 }
 
 // newServerWithUnconnectedLinear is newServerWithLinearCatalog before anyone

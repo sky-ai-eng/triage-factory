@@ -193,8 +193,8 @@ func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, prom
 	eventID := uuid.New().String()
 
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Conformance Entity', 'https://example/x', '{}'::jsonb, $4)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Conformance Entity', 'https://example/x', '{}'::jsonb, $4, 'https://github.com')
 	`, entityID, orgID, fmt.Sprintf("conformance-runs-%d", now.UnixNano()), now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

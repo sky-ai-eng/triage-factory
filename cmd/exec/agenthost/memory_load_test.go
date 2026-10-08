@@ -52,7 +52,7 @@ func seedAuthoringMemory(t *testing.T, conn *sql.DB, orgID, entityID, conversati
 // admin-pool path and returns its id.
 func seedEntity(t *testing.T, stores db.Stores, orgID, source, sourceID, title string) string {
 	t.Helper()
-	ent, _, err := stores.Entities.FindOrCreateSystem(context.Background(), orgID, source, sourceID, "pr", title, "")
+	ent, _, err := stores.Entities.FindOrCreateSystem(context.Background(), orgID, source, testScope(source), sourceID, "", "pr", title, "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestLocalClient_MemoryLoad_Miss_NoEntityNoTouch(t *testing.T) {
 	}
 
 	// No entity minted (unlike the touch resolver's FindOrCreate).
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#404")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#404")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}

@@ -229,8 +229,8 @@ func newPgPendingFiringsSeeder(h *pgtest.Harness, stores db.Stores, orgID, userI
 		sourceID := fmt.Sprintf("owner/repo#%s", entityID[:8])
 
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-			VALUES ($1, $2, 'github', $3, 'pr', 'Test PR', '', '{}'::jsonb, now())
+			INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+			VALUES ($1, $2, 'github', $3, 'pr', 'Test PR', '', '{}'::jsonb, now(), 'https://github.com')
 		`, entityID, orgID, sourceID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -40,12 +41,17 @@ var attachLog = logging.Component("memoryentities")
 // links it out). A repo-level artifact target (a branch push, or owner/repo
 // with no '#N') maps to no entity and is skipped.
 //
+// A produced entity is keyed under its source's current scope in the org
+// (entityscope.Of); an artifact whose source has no scope there, because it is
+// not configured, attaches nothing.
+//
 // A nil store is an absent capability, not an error, and the two cases are not
-// the same: a nil taskMemory is nowhere to write, so nothing is attached at all
-// — not even the primary row. A nil artifacts or entities store costs only the
+// the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
+// — not even the primary row. A nil Artifacts or Entities store costs only the
 // produced pass, which cannot resolve anything without them; the primary row
 // still lands.
-func Attach(ctx context.Context, taskMemory db.TaskMemoryStore, artifacts db.ArtifactStore, entities db.EntityStore, orgID, conversationID, primaryEntityID string) {
+func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primaryEntityID string) {
+	taskMemory, artifacts, entities := stores.TaskMemory, stores.Artifacts, stores.Entities
 	if taskMemory == nil {
 		return
 	}
@@ -70,7 +76,16 @@ func Attach(ctx context.Context, taskMemory db.TaskMemoryStore, artifacts db.Art
 		if !ok {
 			continue
 		}
-		ent, _, err := entities.FindOrCreateSystem(ctx, orgID, source, sourceID, kind, "", a.URL)
+		scope, err := entityscope.Of(ctx, stores, orgID, source)
+		if err != nil {
+			attachLog.Warn("resolve produced entity scope for conversation memory failed",
+				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
+			continue
+		}
+		if scope == "" {
+			continue
+		}
+		ent, _, err := entities.FindOrCreateSystem(ctx, orgID, source, scope, sourceID, "", kind, "", a.URL)
 		if err != nil || ent == nil {
 			attachLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)

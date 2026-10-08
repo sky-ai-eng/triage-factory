@@ -47,7 +47,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	emitted, err := tr.RefreshJira(ctx, client, srv.URL, projects)
+	emitted, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects)
 	if err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 		t.Errorf("event org = %q, want %q", events[0].OrgID, org)
 	}
 
-	entity, err := stores.Entities.GetBySource(ctx, org, "jira", "SKY-852")
+	entity, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-852")
 	if err != nil || entity == nil {
 		t.Fatalf("GetBySource: entity=%v err=%v", entity, err)
 	}
@@ -86,7 +86,7 @@ func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testi
 	// cycle must not create a second assignment event.
 	secondPub := &recordingPublisher{}
 	second := New(database, secondPub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	emitted, err = second.RefreshJira(ctx, client, srv.URL, projects)
+	emitted, err = second.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects)
 	if err != nil {
 		t.Fatalf("RefreshJira cycle 2: %v", err)
 	}

@@ -155,7 +155,7 @@ func TestProcessQueuedEvent_ObligationFailure_RequeuesThenRoutesOnRecovery(t *te
 			tc.disrupt(r, database, o)
 
 			entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-				"github", "owner/repo#obligation", "pr", "PR", "https://example.com")
+				"github", "https://github.com", "owner/repo#obligation", "", "pr", "PR", "https://example.com")
 			if err != nil {
 				t.Fatalf("create entity: %v", err)
 			}
@@ -303,7 +303,7 @@ func TestProcessQueuedEvent_PersistentObligationFailure_ParksAfterBudget(t *test
 	r.entities = outageEntityStore{EntityStore: sqlitestore.New(database).Entities, o: o}
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#poison", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#poison", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestHandleEvent_BestEffortTailFailure_ConsumesTheEvent(t *testing.T) {
 	r.tasks = visibilityFailingTaskStore{TaskStore: testTaskStore(database)}
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#tail", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#tail", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestFireMatchedTriggers_OneTriggerFails_SiblingsStillCommit(t *testing.T) {
 	seedImmediateTrigger(t, database, teamB, domain.EventJiraIssueAvailable, "oblig-b")
 
 	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID,
-		"jira", "SKY-oblig", "issue", "Obligation", "https://example.com/oblig")
+		"jira", "https://jira.example.com", "SKY-oblig", "", "issue", "Obligation", "https://example.com/oblig")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

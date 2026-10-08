@@ -888,7 +888,7 @@ func assertAgentMemoryUntouched(t *testing.T, s *Server, conversationID string) 
 func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, number int) (taskID, conversationID, artifactID string) {
 	t.Helper()
 	const eventType = "github:pr:ci_check_passed"
-	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state) VALUES ('e_ab', 'github', ?, 'pr', 'active')`, fmt.Sprintf("%s/%s#%d", owner, repo, number))
+	execSQL(t, s.db, `INSERT INTO entities (id, source, source_id, kind, state, scope) VALUES ('e_ab', 'github', ?, 'pr', 'active', 'https://github.com')`, fmt.Sprintf("%s/%s#%d", owner, repo, number))
 	execSQL(t, s.db, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev_ab', 'e_ab', ?, '')`, eventType)
 	execSQL(t, s.db, `INSERT INTO prompts (id, name, body, creator_user_id, team_id) VALUES ('p_ab', 'P', 'b', ?, ?)`, runmode.LocalDefaultUserID, runmode.LocalDefaultTeamID)
 	execSQL(t, s.db, `INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status, claimed_by_agent_id) VALUES ('00000000-0000-4000-8000-000000000023', 'e_ab', ?, 'ev_ab', 'in_progress', ?)`, eventType, runmode.LocalDefaultAgentID)

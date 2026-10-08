@@ -351,7 +351,11 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// when I dragged the card."
 	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, sourceID, draft)
+		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return err
+		}
+		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, domain.EntityScope("github", orgSet), sourceID, draft)
 	}); patchErr != nil {
 		dashboardLog.Warn("failed to patch snapshot after draft toggle", "source_id", sourceID, "error", patchErr)
 	}
@@ -367,8 +371,8 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 // its pre-mutation snapshot. Acceptable for beta — the next poll corrects
 // it, and the window is small. PatchSnapshot intentionally does NOT bump
 // last_polled_at so the next poll still refreshes the row.
-func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID, sourceID string, draft bool) error {
-	entity, err := entities.GetBySource(ctx, orgID, "github", sourceID)
+func patchPRSnapshotDraft(ctx context.Context, entities db.EntityStore, orgID, scope, sourceID string, draft bool) error {
+	entity, err := entities.GetBySource(ctx, orgID, "github", scope, sourceID)
 	if err != nil {
 		return err
 	}

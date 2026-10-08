@@ -120,7 +120,7 @@ func getBlueprintRunSteps(t *testing.T, s *Server, blueprintRunID string) []blue
 func seedBlueprintRunTask(t *testing.T, s *Server, sourceID string) string {
 	t.Helper()
 	ctx := context.Background()
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", sourceID, "pr", sourceID, "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", sourceID, "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

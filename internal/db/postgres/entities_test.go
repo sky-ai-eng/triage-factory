@@ -51,7 +51,7 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	orgB, _ := seedPgEntityOrg(t, h)
 
 	ctx := context.Background()
-	ent, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "owner/repo#cross", "pr", "T", "")
+	ent, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "https://github.com", "owner/repo#cross", "", "pr", "T", "")
 	if err != nil {
 		t.Fatalf("seed entity in orgA: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestEntityStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// GetBySource cross-org returns nil.
-	gotSrc, err := stores.Entities.GetBySource(ctx, orgB, "github", "owner/repo#cross")
+	gotSrc, err := stores.Entities.GetBySource(ctx, orgB, "github", "https://github.com", "owner/repo#cross")
 	if err != nil {
 		t.Fatalf("GetBySource(orgB): %v", err)
 	}
@@ -125,7 +125,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	// Seed an entity in orgA via admin so the row exists.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
-	entA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgA, "github", "owner/repo#rls", "pr", "RLS Entity", "https://example/rls")
+	entA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgA, "github", "https://github.com", "owner/repo#rls", "", "pr", "RLS Entity", "https://example/rls")
 	if err != nil {
 		t.Fatalf("seed entity in orgA: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestEntityStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			_, _, e := pgstore.NewForTx(tx, pgtest.SecretKey).Entities.FindOrCreate(
-				ctx, orgA, "github", "owner/repo#rls-write", "pr", "Cross-org write", "",
+				ctx, orgA, "github", "https://github.com", "owner/repo#rls-write", "", "pr", "Cross-org write", "",
 			)
 			return e
 		})
@@ -224,21 +224,21 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped(t *testing.T) {
 	_ = otherOwner
 	seedPgJiraRule(t, h, otherTeam, "CCC")
 
-	inA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "AAA-1", "issue", "A", "")
+	inA, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "AAA-1", "", "issue", "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	inB, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "BBB-2", "issue", "B", "")
+	inB, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "BBB-2", "", "issue", "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}
-	unattached, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "CCC-3", "issue", "C", "")
+	unattached, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "CCC-3", "", "issue", "C", "")
 	if err != nil {
 		t.Fatalf("seed CCC-3: %v", err)
 	}
 	// GitHub entity whose "project key" prefix could coincidentally match
 	// — the source='jira' filter must keep it out regardless.
-	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "AAA/repo#9", "pr", "GH", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "AAA/repo#9", "", "pr", "GH", ""); err != nil {
 		t.Fatalf("seed github: %v", err)
 	}
 	_ = ownerID
@@ -306,11 +306,11 @@ func TestEntityStore_Postgres_ListActiveJiraTeamScoped_RLS(t *testing.T) {
 	seedPgJiraRule(t, h, teamB, "BBB")
 
 	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	entA, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "AAA-1", "issue", "A", "")
+	entA, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "AAA-1", "", "issue", "A", "")
 	if err != nil {
 		t.Fatalf("seed AAA-1: %v", err)
 	}
-	entB, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "BBB-2", "issue", "B", "")
+	entB, _, err := admin.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://jira.example.com", "BBB-2", "", "issue", "B", "")
 	if err != nil {
 		t.Fatalf("seed BBB-2: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestEntityStore_Postgres_UpdateSnapshotCASSystem_StaleMissIsNoOp(t *testing
 	ctx := context.Background()
 
 	orgID, _ := seedPgEntityOrg(t, h)
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cas1", "pr", "T", "")
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "owner/repo#cas1", "", "pr", "T", "")
 	if err != nil {
 		t.Fatalf("FindOrCreate: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestEntityStore_Postgres_SnapshotCAS_ConcurrentWriters_ExactlyOneWins(t *te
 	ctx := context.Background()
 
 	orgID, _ := seedPgEntityOrg(t, h)
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "owner/repo#cas2", "pr", "T", "")
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "owner/repo#cas2", "", "pr", "T", "")
 	if err != nil {
 		t.Fatalf("FindOrCreate: %v", err)
 	}
@@ -587,11 +587,11 @@ func TestEntityStore_Postgres_ClearSnapshotsForSourceIsOrgScoped(t *testing.T) {
 	orgA, _ := seedPgEntityOrg(t, h)
 	orgB, _ := seedPgEntityOrg(t, h)
 
-	entA, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "owner/repo#clr-a", "pr", "A", "")
+	entA, _, err := stores.Entities.FindOrCreate(ctx, orgA, "github", "https://github.com", "owner/repo#clr-a", "", "pr", "A", "")
 	if err != nil {
 		t.Fatalf("seed orgA entity: %v", err)
 	}
-	entB, _, err := stores.Entities.FindOrCreate(ctx, orgB, "github", "owner/repo#clr-b", "pr", "B", "")
+	entB, _, err := stores.Entities.FindOrCreate(ctx, orgB, "github", "https://github.com", "owner/repo#clr-b", "", "pr", "B", "")
 	if err != nil {
 		t.Fatalf("seed orgB entity: %v", err)
 	}

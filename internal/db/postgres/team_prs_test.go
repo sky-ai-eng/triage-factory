@@ -188,8 +188,8 @@ func seedPgTeamPREntity(t *testing.T, h *pgtest.Harness, orgID string, fx dbtest
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      owning_team_id, created_at, last_polled_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9)
+		                      owning_team_id, created_at, last_polled_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, $5, $6::jsonb, $7, $8, $9, $9, 'https://github.com')
 	`, entityID, orgID, sourceID, snap.Title, snap.URL, string(blob), state, owning, now); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)
 	}

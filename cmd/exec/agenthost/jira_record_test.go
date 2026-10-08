@@ -82,6 +82,7 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordJiraSiteForTest(t, conn)
 
 	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(

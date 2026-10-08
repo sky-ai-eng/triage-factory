@@ -94,8 +94,8 @@ func seedTaskFixture(t *testing.T, database *sql.DB, f taskFixture) string {
 	}
 
 	execSQL(t, database, `
-		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)`,
+		INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')`,
 		entityID, sourceID, "List fixture "+f.name, "https://example/"+sourceID, now)
 	execSQL(t, database, `
 		INSERT INTO events (id, entity_id, event_type, dedup_key, metadata_json, created_at)

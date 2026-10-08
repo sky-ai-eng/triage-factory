@@ -98,7 +98,7 @@ func TestCloseObligation_TerminatingCloseFails_RequeuesThenClosesOnRetry(t *test
 	r.entities = closeTerminalOutageStore{EntityStore: sqlitestore.New(database).Entities, o: o}
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#close-obligation", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#close-obligation", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestCloseObligation_TerminatingCloseIsAllOrNothing(t *testing.T) {
 	r := newQueueWorkerRouter(t, database)
 
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(t.Context(), runmode.LocalDefaultOrgID,
-		"github", "owner/repo#sibling-close", "pr", "PR", "https://example.com")
+		"github", "https://github.com", "owner/repo#sibling-close", "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

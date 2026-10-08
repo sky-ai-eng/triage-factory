@@ -56,6 +56,9 @@ func TestLinearTeamsPut_Postgres_RoundTrips(t *testing.T) {
 	rig := newAuthRig(t)
 	alice := rig.seedUser()
 	org, team := rig.seedOrg(alice, "linear-"+uuid.NewString()[:8])
+	pgtest.MustExec(t, rig.h.AdminDB,
+		`INSERT INTO org_settings (org_id, linear_workspace_id) VALUES ($1, 'ws-test')
+		 ON CONFLICT (org_id) DO UPDATE SET linear_workspace_id = EXCLUDED.linear_workspace_id`, org)
 	fake := newLinearCatalogFake(t, linearFixtureEng, linearFixtureOps)
 	rig.srv.linearResolver = fixedLinearResolver{Resolver: rig.srv.linearResolver, endpoint: fake.URL}
 	sid := rig.signIn(alice)

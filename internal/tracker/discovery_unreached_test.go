@@ -100,7 +100,7 @@ func TestRefreshJira_EveryQueryFailingIsAnError(t *testing.T) {
 	failing.Store(true)
 	pub := &recordingPublisher{}
 	_, err := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org).
-		RefreshJira(context.Background(), client, srv.URL, rules)
+		RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, rules)
 	if err == nil {
 		t.Fatal("RefreshJira returned nil with every discovery query failing")
 	}
@@ -114,7 +114,7 @@ func TestRefreshJira_EveryQueryFailingIsAnError(t *testing.T) {
 	failing.Store(false)
 	pub = &recordingPublisher{}
 	if _, err := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org).
-		RefreshJira(context.Background(), client, srv.URL, rules); err != nil {
+		RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, rules); err != nil {
 		t.Fatalf("RefreshJira against a Jira that answers: %v", err)
 	}
 	if n := completions(pub); n != 1 {
@@ -153,7 +153,7 @@ func TestRefreshJira_EveryQueryRateLimitedIsAnError(t *testing.T) {
 	pub := &recordingPublisher{}
 
 	_, err := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID).
-		RefreshJira(context.Background(), client, srv.URL, rules)
+		RefreshJira(context.Background(), "https://jira.example.com", client, srv.URL, rules)
 	if err == nil {
 		t.Fatal("RefreshJira returned nil with every discovery query rate-limited")
 	}

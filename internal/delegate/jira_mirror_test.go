@@ -628,7 +628,7 @@ func delegatableJiraFixture(t *testing.T, database *sql.DB, suffix string) (doma
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-"+suffix, "issue", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-"+suffix, "", "issue", "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

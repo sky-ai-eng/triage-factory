@@ -104,8 +104,8 @@ func newSQLiteEventQueueSeeder(conn *sql.DB) dbtest.EventQueueSeeder {
 		suf := uuid.New().String()[:8]
 		entityID := "e-" + suf
 		if _, err := conn.Exec(`
-			INSERT INTO entities (id, source, source_id, kind, title, url)
-			VALUES (?, 'github', ?, 'pr', 'Test PR', '')
+			INSERT INTO entities (id, source, source_id, kind, title, url, scope)
+			VALUES (?, 'github', ?, 'pr', 'Test PR', '', 'https://github.com')
 		`, entityID, "owner/repo#"+suf); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

@@ -49,7 +49,7 @@ func ownerOf(t *testing.T, stores db.Stores, entityID string) string {
 func prEntity(t *testing.T, stores db.Stores) *domain.Entity {
 	t.Helper()
 	ent, err := stores.Entities.GetBySource(
-		context.Background(), runmode.LocalDefaultOrgID, "github", "octo/repo#42")
+		context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestStampPROwnership_EntityFirst(t *testing.T) {
 
 	// Stand in for the poller: same natural key, no owner.
 	discovered, created, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Fix the thing", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Fix the thing", "")
 	if err != nil || !created {
 		t.Fatalf("seed discovered entity: created=%v err=%v", created, err)
 	}
@@ -113,7 +113,7 @@ func TestStampPROwnership_DoesNotOverwriteExistingOwner(t *testing.T) {
 	_, stores, info, otherTeam := prOwnershipFixture(t)
 
 	ent, _, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Fix the thing", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Fix the thing", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestStampPROwnership_NoTeamOnConversation(t *testing.T) {
 	_, stores, info, _ := prOwnershipFixture(t)
 
 	ent, _, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Fix the thing", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Fix the thing", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestStampPROwnership_ActionTargetsElsewhere(t *testing.T) {
 		t.Errorf("artifact's PR owner = %q, want %q", got, info.TeamID)
 	}
 
-	other, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#7")
+	other, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || other == nil {
 		t.Fatalf("the action's own entity was not resolved: ent=%v err=%v", other, err)
 	}
@@ -236,7 +236,7 @@ func TestStampPROwnership_ReviewArtifactDoesNotClaimOwnership(t *testing.T) {
 	_, stores, info, _ := prOwnershipFixture(t)
 
 	ent, _, err := stores.Entities.FindOrCreateSystem(
-		ctx, runmode.LocalDefaultOrgID, "github", "octo/repo#42", "pr", "Someone else's PR", "")
+		ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "octo/repo#42", "", "pr", "Someone else's PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

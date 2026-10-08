@@ -49,7 +49,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -61,7 +61,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -106,7 +106,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 
@@ -116,7 +116,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	if evts := pub.nonSystemEvents(); len(evts) != 0 {
 		t.Fatalf("emitted %v, want nothing — the issue resolves, so its absence from search proves nothing", eventTypes(evts))
 	}
-	ent, err := stores.Entities.GetBySource(ctx, org, "jira", "SKY-1")
+	ent, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "SKY-1")
 	if err != nil || ent == nil {
 		t.Fatalf("read entity back: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	if ent.LastPolledAt == nil || time.Since(*ent.LastPolledAt) >= jiraUnreachableGrace {
 		t.Fatalf("last_polled_at = %v, want freshly stamped", ent.LastPolledAt)
 	}
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira cycle 2: %v", err)
 	}
 	if got := atomic.LoadInt32(probes); got != 1 {
@@ -146,7 +146,7 @@ func TestRefreshJira_MovedIssueIsRekeyedInPlace(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	old, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "OLD-7", "issue", "History stays here", "")
+	old, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "OLD-7", "", "issue", "History stays here", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -157,16 +157,16 @@ func TestRefreshJira_MovedIssueIsRekeyedInPlace(t *testing.T) {
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
 	// NEW is intentionally not configured: durable entities follow Jira even
 	// when a move leaves the discovery set.
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, JiraRules{{Key: "OLD"}}); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, JiraRules{{Key: "OLD"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 	if got := atomic.LoadInt32(probes); got != 1 {
 		t.Fatalf("probes = %d, want 1", got)
 	}
-	if got, _ := stores.Entities.GetBySource(ctx, org, "jira", "OLD-7"); got != nil {
+	if got, _ := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "OLD-7"); got != nil {
 		t.Fatal("old key still resolves to an entity")
 	}
-	got, err := stores.Entities.GetBySource(ctx, org, "jira", "NEW-7")
+	got, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "NEW-7")
 	if err != nil || got == nil {
 		t.Fatalf("new key entity: %v", err)
 	}
@@ -185,20 +185,20 @@ func TestRefreshJira_MovedIssueMergesIntoCurrentKey(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	old, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "OLD-9", "issue", "old", "")
-	current, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "NEW-9", "issue", "current", "")
+	old, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "OLD-9", "", "issue", "old", "")
+	current, _, _ := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "NEW-9", "", "issue", "current", "")
 	if _, err := database.Exec(`UPDATE entities SET last_polled_at=? WHERE id=?`, time.Now().Add(-2*jiraUnreachableGrace), old.ID); err != nil {
 		t.Fatal(err)
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 	if got, _ := stores.Entities.Get(ctx, org, old.ID); got != nil {
 		t.Fatal("obsolete entity survived merge")
 	}
-	got, err := stores.Entities.GetBySource(ctx, org, "jira", "NEW-9")
+	got, err := stores.Entities.GetBySource(ctx, org, "jira", "https://jira.example.com", "NEW-9")
 	if err != nil || got == nil || got.ID != current.ID {
 		t.Fatalf("survivor = %#v, err=%v; want %s", got, err, current.ID)
 	}
@@ -219,13 +219,13 @@ func TestRefreshJira_RecentlyAnsweredKeyIsNotConfirmed(t *testing.T) {
 
 	// FindOrCreate stamps last_polled_at at creation, so this entity reads as
 	// freshly answered — no backdating.
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 
@@ -248,7 +248,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	projects := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 
-	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "SKY-1", "issue", "", ""); err != nil {
+	if _, _, err := stores.Entities.FindOrCreate(ctx, org, "jira", "https://jira.example.com", "SKY-1", "", "issue", "", ""); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
 	if _, err := database.Exec(
@@ -260,7 +260,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 
 	pub := &recordingPublisher{}
 	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
-	if _, err := tr.RefreshJira(ctx, client, srv.URL, projects); err != nil {
+	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
 

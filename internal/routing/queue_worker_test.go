@@ -61,7 +61,7 @@ func enqueueCIFailed(t *testing.T, database *sql.DB, entityID string) {
 func newEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	t.Helper()
 	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID,
-		"github", sourceID, "pr", "PR", "https://example.com")
+		"github", "https://github.com", sourceID, "", "pr", "PR", "https://example.com")
 	if err != nil {
 		t.Fatalf("create entity %s: %v", sourceID, err)
 	}

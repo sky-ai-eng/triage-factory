@@ -115,7 +115,7 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	seedMatchAllCIRule(t, dbh, teamA)
 	seedMatchAllCIRule(t, dbh, teamB)
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo-b#1", "pr", "B PR", "https://example.com/b")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo-b#1", "", "pr", "B PR", "https://example.com/b")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	seedMatchAllCIRule(t, dbh, teamA)
 	seedMatchAllCIRule(t, dbh, teamB)
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/shared#1", "pr", "Shared PR", "https://example.com/s")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/shared#1", "", "pr", "Shared PR", "https://example.com/s")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestJiraGate_DisjointProjects_DropsUntrackingTeam(t *testing.T) {
 	setJiraHost(t, dbh)
 	seedJiraUserOnTeam(t, dbh, teamA, "acct-aidan", "aidan")
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "SKY-1", "issue", "An issue", "https://example.com/SKY-1")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1", "", "issue", "An issue", "https://example.com/SKY-1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder(t *testing.T) {
 	seedMatchAllCIRule(t, dbh, teamA)
 	seedMatchAllCIRule(t, dbh, teamB)
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo-a#1", "pr", "A PR", "https://example.com/a")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo-a#1", "", "pr", "A PR", "https://example.com/a")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -429,7 +429,7 @@ func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
 	seedMatchAllCIRule(t, dbh, teamA)
 	seedMatchAllCIRule(t, dbh, teamB)
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/shared#1", "pr", "Shared PR", "https://example.com/s")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/shared#1", "", "pr", "Shared PR", "https://example.com/s")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -468,7 +468,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	seedUserOnTeam(t, dbh, teamA, "aidan")
 	seedMatchAllCIRule(t, dbh, teamA)
 
-	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "owner/repo#1", "pr", "PR", "https://example.com/1")
+	entity, _, err := st.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#1", "", "pr", "PR", "https://example.com/1")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

@@ -281,8 +281,10 @@ func (s JiraSnapshot) StatusRef() JiraStatusRef {
 
 // LinearSnapshot is the extracted state of a Linear issue that each poll
 // diffs against, the Linear sibling of JiraSnapshot. The entity's source_id is
-// the issue's identifier ("ENG-123"); the UUID rides here because it is the
-// one value a team move does not change.
+// the issue's identifier ("ENG-123") and its external_id is the UUID, which is
+// what the entity is matched on: a team move or a team key rename changes the
+// identifier and leaves the UUID alone, and the entity is renamed to follow
+// it. ID repeats the UUID so a stored snapshot is self-describing.
 type LinearSnapshot struct {
 	ID         string `json:"id"`
 	Identifier string `json:"identifier"`

@@ -62,8 +62,8 @@ func seedStockTicket(t *testing.T, s *Server, issueKey string) {
 		issueKey, issueKey,
 	)
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json)
-		 VALUES (?, 'jira', ?, 'issue', 'Carry over me', ?, 'active', ?)`,
+		`INSERT INTO entities (id, source, source_id, kind, title, url, state, snapshot_json, scope)
+		 VALUES (?, 'jira', ?, 'issue', 'Carry over me', ?, 'active', ?, 'https://jira.example.com')`,
 		"e_stock_"+issueKey, issueKey, "https://jira.example.com/browse/"+issueKey, snapshot,
 	); err != nil {
 		t.Fatalf("seed jira entity %s: %v", issueKey, err)

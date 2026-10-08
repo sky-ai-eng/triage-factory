@@ -51,7 +51,7 @@ type EventStoreFactory func(t *testing.T) (store db.EventStore, orgID string, se
 type EventStoreSeeder struct {
 	// Entity inserts an active GitHub PR entity and returns its ID.
 	// suffix is appended to source_id so multiple seeds per subtest
-	// don't collide on the (source, source_id) unique index.
+	// don't collide on the active-key unique index.
 	Entity func(t *testing.T, suffix string) string
 }
 

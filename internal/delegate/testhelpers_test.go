@@ -84,7 +84,7 @@ func seedConversationBlueprint(t *testing.T, database *sql.DB, suffix, taskID st
 // blueprint_run and links the run to it.
 func seedConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+conversationID, "pr", "T", "https://example.com/"+conversationID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#"+conversationID, "", "pr", "T", "https://example.com/"+conversationID)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -153,7 +153,7 @@ func settleConversationBlueprint(t *testing.T, database *sql.DB, conversationID,
 // GitHub PR run.
 func seedJiraConversation(t *testing.T, database *sql.DB, conversationID, sessionID, worktreePath string) {
 	t.Helper()
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-"+conversationID, "issue", "T-"+conversationID, "https://x/"+conversationID)
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-"+conversationID, "", "issue", "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("create jira entity: %v", err)
 	}

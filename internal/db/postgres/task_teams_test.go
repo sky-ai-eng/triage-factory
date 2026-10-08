@@ -212,8 +212,8 @@ func seedSharedTask(t *testing.T, h *pgtest.Harness, orgID, creatorUserID, owner
 	sourceID := fmt.Sprintf("shared-%d", now.UnixNano())
 
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Shared PR', $4, '{}'::jsonb, $5)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Shared PR', $4, '{}'::jsonb, $5, 'https://github.com')
 	`, entityID, orgID, sourceID, "https://example/"+sourceID, now)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)
@@ -245,8 +245,8 @@ func seedUnownedTask(t *testing.T, h *pgtest.Harness, orgID, creatorUserID strin
 	sourceID := fmt.Sprintf("unowned-%d", now.UnixNano())
 
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Unowned PR', $4, '{}'::jsonb, $5)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Unowned PR', $4, '{}'::jsonb, $5, 'https://github.com')
 	`, entityID, orgID, sourceID, "https://example/"+sourceID, now)
 	pgtest.MustExec(t, h.AdminDB, `
 		INSERT INTO events (id, org_id, entity_id, event_type, dedup_key, metadata_json, created_at)

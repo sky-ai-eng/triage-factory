@@ -5,6 +5,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/entityscope"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -186,10 +187,19 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 	if !ok {
 		return "", nil
 	}
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, source)
+	if err != nil {
+		return "", err
+	}
+	if scope == "" {
+		// The source has no scope in this org — it is not configured — so
+		// the object has no address an entity could be keyed under.
+		return "", nil
+	}
 	// title is left empty — neither an ExternalAction nor an addressed read
 	// carries a human title, and the poll cycle (or, for Slack, the ingest
 	// pipeline) seeds it from context. url rides through when present.
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, source, sourceID, kind, "", url)
+	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, source, scope, sourceID, "", kind, "", url)
 	if err != nil {
 		return "", err
 	}
@@ -353,7 +363,8 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 }
 
 // loadEntityMemory is the host side of `exec memory load`: it looks up the
-// entity for (source, sourceID) by its natural key — LOOKUP ONLY, never
+// entity for (source, sourceID) by its natural key in the org's current scope
+// for the source — LOOKUP ONLY, never
 // FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
 // on a hit returns that entity's prior conversation memory scoped to the conversation's team,
 // plus records a best-effort conversation→entity 'touched' row (loading IS an address).
@@ -376,7 +387,11 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 	if stores.Entities == nil {
 		return res, nil
 	}
-	entity, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, source, sourceID)
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, source)
+	if err != nil {
+		return nil, err
+	}
+	entity, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, source, scope, sourceID)
 	if err != nil {
 		return nil, err
 	}

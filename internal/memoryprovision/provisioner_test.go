@@ -110,7 +110,7 @@ func newFixture(t *testing.T) *fixture {
 	orgID := runmode.LocalDefaultOrgID
 	ctx := t.Context()
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "github", "owner/repo#7", "pr", "Fix the build", "https://example.com/7")
+	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "github", "https://github.com", "owner/repo#7", "", "pr", "Fix the build", "https://example.com/7")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

@@ -57,7 +57,7 @@ func seedStepFixture(t *testing.T, source, suffix string, steps int, sharedWT st
 		t.Fatalf("unknown task source %q", source)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, source, sourceID, entityKind, "T", "https://example.com/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, source, testScope(source), sourceID, "", entityKind, "T", "https://example.com/"+suffix)
 	if err != nil {
 		t.Fatalf("create %s entity: %v", source, err)
 	}
@@ -529,4 +529,21 @@ func TestAssertResumeCoordinates_UnreadableRowIsNotAFinding(t *testing.T) {
 	if got := logs.warnedFields(t); len(got) != 0 {
 		t.Errorf("warned fields = %v, want none for a row that could not be read", got)
 	}
+}
+
+// testScope is the scope a test keys an entity of source under: what
+// domain.EntityScope answers for an org with default settings where the
+// source has one, and a fixed stand-in where it has none.
+func testScope(source string) string {
+	switch source {
+	case "github":
+		return "https://github.com"
+	case "jira":
+		return "https://jira.example.com"
+	case "slack":
+		return "slack.com"
+	case "linear":
+		return "ws-test"
+	}
+	return "test-scope"
 }

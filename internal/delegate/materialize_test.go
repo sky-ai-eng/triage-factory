@@ -25,7 +25,7 @@ func TestMaterializeEntityMemories_CreatesDirsEvenWithNoPriors(t *testing.T) {
 	cwd := t.TempDir()
 
 	stores := sqlitestore.New(database)
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-100", "issue", "T", "https://x/100")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-100", "", "issue", "T", "https://x/100")
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}
@@ -292,7 +292,7 @@ func TestMemorySlug(t *testing.T) {
 func seedMemoryFixture(t *testing.T, database *sql.DB, stores db.Stores, sourceID string) (domain.Entity, domain.Task) {
 	t.Helper()
 	ctx := context.Background()
-	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", sourceID, "pr", "T", "https://x/"+sourceID)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", "T", "https://x/"+sourceID)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

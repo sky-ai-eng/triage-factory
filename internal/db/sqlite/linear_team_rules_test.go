@@ -42,9 +42,9 @@ func TestLinearTeamRules_SQLite_ChecksRefuseMalformedRows(t *testing.T) {
 	const arr = "[" + ref + "]"
 	insert := func(pickup, inProgress string, inProgressCanonical any, done string, doneCanonical any) error {
 		_, err := conn.Exec(`
-			INSERT INTO linear_team_rules (team_id, linear_team_id, linear_team_key,
+			INSERT INTO linear_team_rules (team_id, linear_workspace_id, linear_team_id, linear_team_key,
 				pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)
-			VALUES (?, ?, 'KEY', ?, ?, ?, ?, ?)`,
+			VALUES (?, 'ws-test', ?, 'KEY', ?, ?, ?, ?, ?)`,
 			runmode.LocalDefaultTeamID, uuid.NewString(), pickup, inProgress, inProgressCanonical, done, doneCanonical)
 		return err
 	}

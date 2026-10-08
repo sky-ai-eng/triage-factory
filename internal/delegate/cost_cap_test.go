@@ -235,7 +235,7 @@ func delegatableFixture(t *testing.T, database *sql.DB, suffix string) (domain.T
 	org := runmode.LocalDefaultOrgID
 	stores := sqlitestore.New(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#"+suffix, "pr", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#"+suffix, "", "pr", "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

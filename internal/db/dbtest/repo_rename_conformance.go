@@ -123,10 +123,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The entity's composite source id — same row, new name.
-		if stale, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameOldSlug+"#18"); stale != nil {
+		if stale, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18"); stale != nil {
 			t.Errorf("entity still resolves under the old source id: %+v", stale)
 		}
-		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNewSlug+"#18")
+		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#18")
 		if err != nil || ent == nil {
 			t.Fatalf("entity by new source id = %v, %v; want the same row", ent, err)
 		}
@@ -135,7 +135,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		// The neighbour shares the old slug as a prefix. If the rewrite had
 		// matched on substring instead of on a boundary, this would have moved.
-		if neighbour, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNeighbourSlug+"#4"); neighbour == nil {
+		if neighbour, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4"); neighbour == nil {
 			t.Errorf("entity for %s was rewritten; the slug boundary is what stops that", renameNeighbourSlug)
 		}
 
@@ -207,14 +207,14 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// The entity's link resolves under the new slug; the neighbour's —
 		// which shares the old slug as a string prefix, in the URL too — is
 		// untouched.
-		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNewSlug+"#18")
+		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#18")
 		if err != nil || ent == nil {
 			t.Fatalf("entity by new source id = %v, %v", ent, err)
 		}
 		if want := "https://github.com/" + renameNewSlug + "/pull/18"; ent.URL != want {
 			t.Errorf("entity url = %q, want %q", ent.URL, want)
 		}
-		neighbour, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNeighbourSlug+"#4")
+		neighbour, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4")
 		if neighbour == nil || neighbour.URL != "https://github.com/"+renameNeighbourSlug+"/pull/4" {
 			t.Errorf("neighbour entity = %+v, want its url untouched", neighbour)
 		}
@@ -287,7 +287,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameNewSlug)); got == nil {
 			t.Errorf("the repository moved away on the second run")
 		}
-		ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameNewSlug+"#18")
+		ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameNewSlug+"#18")
 		if ent == nil {
 			t.Errorf("the entity's source id was rewritten twice")
 		}
@@ -335,7 +335,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil || got.ExternalID != fx.externalID {
 			t.Errorf("repository row = %+v, want the stored identity untouched", got)
 		}
-		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameOldSlug+"#18"); ent == nil {
+		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18"); ent == nil {
 			t.Errorf("the entity was rewritten; nothing about this observation is a rename")
 		}
 
@@ -442,7 +442,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef(renameOldSlug)); got == nil {
 			t.Errorf("the repository row moved despite the refusal")
 		}
-		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", renameOldSlug+"#18"); ent == nil {
+		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18"); ent == nil {
 			t.Errorf("the entity's source id moved despite the refusal")
 		}
 		tracked, _ := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
@@ -468,7 +468,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 		// A PR of a repository no registry row answers to any more. The entity
 		// is durable and was never keyed on the row.
-		orphan, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "octo/api#18", "pr", "the untracked repo's PR", "")
+		orphan, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/api#18", "", "pr", "the untracked repo's PR", "")
 		if err != nil {
 			t.Fatalf("seed the orphaned entity: %v", err)
 		}
@@ -480,7 +480,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}); err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
 		}
-		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "octo/legacy#18", "pr", "the live repo's PR", ""); err != nil {
+		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", "octo/legacy#18", "", "pr", "the live repo's PR", ""); err != nil {
 			t.Fatalf("seed the live entity: %v", err)
 		}
 
@@ -495,10 +495,10 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("octo/legacy")); got == nil {
 			t.Error("the repository row moved despite the refusal")
 		}
-		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "octo/legacy#18"); got == nil {
+		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", "octo/legacy#18"); got == nil {
 			t.Error("the live entity's source id moved despite the refusal")
 		}
-		kept, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "octo/api#18")
+		kept, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", "octo/api#18")
 		if kept == nil || kept.ID != orphan.ID {
 			t.Errorf("the orphaned entity = %+v, want it untouched — a rename never destroys durable work", kept)
 		}
@@ -736,12 +736,12 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed worktree: %v", err)
 	}
 
-	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameOldSlug+"#18", "pr", "A pull request",
+	entity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18", "", "pr", "A pull request",
 		"https://github.com/"+renameOldSlug+"/pull/18")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
-	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", renameNeighbourSlug+"#4", "pr", "Neighbour PR",
+	if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", "https://github.com", renameNeighbourSlug+"#4", "", "pr", "Neighbour PR",
 		"https://github.com/"+renameNeighbourSlug+"/pull/4"); err != nil {
 		t.Fatalf("seed neighbour entity: %v", err)
 	}

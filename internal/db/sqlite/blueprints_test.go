@@ -155,8 +155,8 @@ func insertBlueprintForTest(t *testing.T, conn *sql.DB, id, name string) {
 // ID. suffix scopes the seeded source_id so subtests don't collide.
 func seedEntityEventTask(t *testing.T, conn *sql.DB, suffix string) *domain.Task {
 	t.Helper()
-	entity, _, err := sqlitestore.New(conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github",
-		"owner/repo#"+suffix, "pr", "Blueprint Test "+suffix, "https://example.com/"+suffix)
+	entity, _, err := sqlitestore.New(conn).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com",
+		"owner/repo#"+suffix, "", "pr", "Blueprint Test "+suffix, "https://example.com/"+suffix)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

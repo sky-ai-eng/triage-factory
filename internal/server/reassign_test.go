@@ -24,8 +24,8 @@ func TestTaskUndo_RefusesAGestureAnotherUserHasActedPast(t *testing.T) {
 
 	var entityID string
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title)
-		VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
+		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
 	`, r.orgID, "octo/undo#"+t.Name()).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -113,8 +113,8 @@ func TestTaskClaim_ReassignHappyPath(t *testing.T) {
 		t.Fatalf("seed toUser membership: %v", err)
 	}
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_re', 'github', 'sky/repo#re', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_re', 'github', 'sky/repo#re', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -189,8 +189,8 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 			t.Fatalf("seed user: %v", err)
 		}
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state)
-			 VALUES ('e_ret', 'github', 'sky/repo#ret', 'pr', 'active')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope)
+			 VALUES ('e_ret', 'github', 'sky/repo#ret', 'pr', 'active', 'https://github.com')`,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -216,8 +216,8 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 	t.Run("unclaimed_task_409", func(t *testing.T) {
 		s := newTestServer(t)
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state)
-			 VALUES ('e_reu', 'github', 'sky/repo#reu', 'pr', 'active')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope)
+			 VALUES ('e_reu', 'github', 'sky/repo#reu', 'pr', 'active', 'https://github.com')`,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -242,8 +242,8 @@ func TestTaskClaim_ReassignRefusalReasons(t *testing.T) {
 	t.Run("bot_claimed_task_409", func(t *testing.T) {
 		s := newTestServer(t)
 		if _, err := s.db.Exec(
-			`INSERT INTO entities (id, source, source_id, kind, state)
-			 VALUES ('e_reb', 'github', 'sky/repo#reb', 'pr', 'active')`,
+			`INSERT INTO entities (id, source, source_id, kind, state, scope)
+			 VALUES ('e_reb', 'github', 'sky/repo#reb', 'pr', 'active', 'https://github.com')`,
 		); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}
@@ -295,8 +295,8 @@ func TestTaskClaim_RejectsBlankTarget(t *testing.T) {
 func TestTaskClaim_ReassignIdempotentToCurrentClaimant(t *testing.T) {
 	s := newTestServer(t)
 	if _, err := s.db.Exec(
-		`INSERT INTO entities (id, source, source_id, kind, state)
-		 VALUES ('e_rei', 'github', 'sky/repo#rei', 'pr', 'active')`,
+		`INSERT INTO entities (id, source, source_id, kind, state, scope)
+		 VALUES ('e_rei', 'github', 'sky/repo#rei', 'pr', 'active', 'https://github.com')`,
 	); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -352,8 +352,8 @@ func TestTaskClaimReassign_PermissionModel(t *testing.T) {
 		t.Helper()
 		var entityID string
 		if err := r.h.AdminDB.QueryRow(`
-			INSERT INTO entities (org_id, source, source_id, kind, title)
-			VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+			INSERT INTO entities (org_id, source, source_id, kind, title, scope)
+			VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
 		`, r.orgID, "octo/reassign#"+t.Name()).Scan(&entityID); err != nil {
 			t.Fatalf("seed entity: %v", err)
 		}

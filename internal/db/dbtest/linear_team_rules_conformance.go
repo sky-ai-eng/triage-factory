@@ -22,6 +22,10 @@ type LinearTeamRulesFixture struct {
 // LinearTeamRulesFactory builds a fresh fixture per subtest.
 type LinearTeamRulesFactory func(t *testing.T) LinearTeamRulesFixture
 
+// linearWorkspace is the Linear workspace every subtest saves its rows under,
+// except the one about workspaces.
+const linearWorkspace = "ws-a"
+
 // linearState builds a state ref whose id is derived from its name, so a test
 // names a state once and gets the same ref wherever it appears.
 func linearState(name, typ string) domain.LinearStateRef {
@@ -77,19 +81,20 @@ func linearTeamIDs(rules []domain.LinearTeamRules) []string {
 // RunLinearTeamRulesConformance is the shared suite for
 // db.LinearTeamRulesStore: replace-set semantics (an absent id's row is
 // deleted, a present one upserted, another team's rows untouched), ordering,
-// the stored set ReplaceForTeam returns, the org union, TracksTeamSystem, and
-// the armed-or-unarmed CHECK. RLS is the Postgres backend's own test.
+// the stored set ReplaceForTeam returns, the org union, TracksTeamSystem, the
+// armed-or-unarmed CHECK, and every read and write confined to the workspace
+// it is given. RLS is the Postgres backend's own test.
 func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory) {
 	t.Helper()
 	ctx := context.Background()
 
 	t.Run("EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
 		f := factory(t)
-		for name, list := range map[string]func(context.Context, string) ([]domain.LinearTeamRules, error){
+		for name, list := range map[string]func(context.Context, string, string) ([]domain.LinearTeamRules, error){
 			"ListForTeam":       f.Store.ListForTeam,
 			"ListForTeamSystem": f.Store.ListForTeamSystem,
 		} {
-			got, err := list(ctx, f.TeamID)
+			got, err := list(ctx, f.TeamID, linearWorkspace)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -108,7 +113,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			unarmedLinearRules("lt-a", "AAA"),
 			armedLinearRules("lt-b", "BBB"),
 		}
-		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, input)
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, input)
 		if err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
@@ -116,11 +121,11 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("ReplaceForTeam returned\n%#v\nwant\n%#v", got, want)
 		}
-		for name, list := range map[string]func(context.Context, string) ([]domain.LinearTeamRules, error){
+		for name, list := range map[string]func(context.Context, string, string) ([]domain.LinearTeamRules, error){
 			"ListForTeam":       f.Store.ListForTeam,
 			"ListForTeamSystem": f.Store.ListForTeamSystem,
 		} {
-			read, err := list(ctx, f.TeamID)
+			read, err := list(ctx, f.TeamID, linearWorkspace)
 			if err != nil {
 				t.Fatalf("%s: %v", name, err)
 			}
@@ -132,7 +137,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("ReplaceForTeam_IsAReplaceSet", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{
 			armedLinearRules("lt-a", "AAA"),
 			armedLinearRules("lt-b", "BBB"),
 			unarmedLinearRules("lt-c", "CCC"),
@@ -140,7 +145,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			t.Fatalf("seed: %v", err)
 		}
 		other := []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA"), armedLinearRules("lt-z", "ZZZ")}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, other); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, linearWorkspace, other); err != nil {
 			t.Fatalf("seed other team: %v", err)
 		}
 
@@ -149,7 +154,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		// new.
 		renamed := unarmedLinearRules("lt-b", "BB2")
 		renamed.LinearTeamName = "Renamed"
-		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{renamed, armedLinearRules("lt-d", "DDD")})
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{renamed, armedLinearRules("lt-d", "DDD")})
 		if err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
@@ -158,7 +163,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			t.Errorf("after replace =\n%#v\nwant\n%#v", got, want)
 		}
 
-		otherGot, err := f.Store.ListForTeamSystem(ctx, f.OtherTeamID)
+		otherGot, err := f.Store.ListForTeamSystem(ctx, f.OtherTeamID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem(other): %v", err)
 		}
@@ -169,20 +174,20 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("ReplaceForTeam_EmptyClearsOnlyThatTeam", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
 			t.Fatalf("seed other team: %v", err)
 		}
-		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, nil)
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, nil)
 		if err != nil {
 			t.Fatalf("ReplaceForTeam(nil): %v", err)
 		}
 		if got == nil || len(got) != 0 {
 			t.Errorf("ReplaceForTeam(nil) returned %#v, want an empty non-nil slice", got)
 		}
-		otherGot, err := f.Store.ListForTeamSystem(ctx, f.OtherTeamID)
+		otherGot, err := f.Store.ListForTeamSystem(ctx, f.OtherTeamID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem(other): %v", err)
 		}
@@ -193,13 +198,13 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("ReplaceForTeam_RefusesAnEntryWithNoID", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{armedLinearRules("", "AAA")}); err == nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("", "AAA")}); err == nil {
 			t.Fatal("ReplaceForTeam accepted an entry with no LinearTeamID")
 		}
-		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID)
+		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -210,14 +215,14 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("ReplaceForTeam_RefusesARepeatedID", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA")}); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
 		twice := []domain.LinearTeamRules{armedLinearRules("lt-b", "BBB"), armedLinearRules("lt-b", "BB2")}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, twice); err == nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, twice); err == nil {
 			t.Fatal("ReplaceForTeam accepted one Linear team twice")
 		}
-		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID)
+		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -241,11 +246,11 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			"pickup only":            onlyPickup,
 			"in_progress, no target": noCanonical,
 		} {
-			if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{r}); err == nil {
+			if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{r}); err == nil {
 				t.Errorf("%s: ReplaceForTeam stored half a mapping", name)
 			}
 		}
-		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID)
+		got, err := f.Store.ListForTeamSystem(ctx, f.TeamID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -256,17 +261,17 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("ListForOrgSystem_UnionOrderedByLinearTeamThenTeam", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{
 			armedLinearRules("lt-b", "BBB"), armedLinearRules("lt-a", "AAA"),
 		}); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, []domain.LinearTeamRules{
+		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, linearWorkspace, []domain.LinearTeamRules{
 			armedLinearRules("lt-a", "AAA"), unarmedLinearRules("lt-c", "CCC"),
 		}); err != nil {
 			t.Fatalf("seed other team: %v", err)
 		}
-		got, err := f.Store.ListForOrgSystem(ctx, f.OrgID)
+		got, err := f.Store.ListForOrgSystem(ctx, f.OrgID, linearWorkspace)
 		if err != nil {
 			t.Fatalf("ListForOrgSystem: %v", err)
 		}
@@ -287,12 +292,12 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 
 	t.Run("TracksTeamSystem", func(t *testing.T) {
 		f := factory(t)
-		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, []domain.LinearTeamRules{
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, []domain.LinearTeamRules{
 			armedLinearRules("lt-a", "AAA"), unarmedLinearRules("lt-b", "BBB"),
 		}); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, []domain.LinearTeamRules{armedLinearRules("lt-z", "ZZZ")}); err != nil {
+		if _, err := f.Store.ReplaceForTeam(ctx, f.OtherTeamID, linearWorkspace, []domain.LinearTeamRules{armedLinearRules("lt-z", "ZZZ")}); err != nil {
 			t.Fatalf("seed other team: %v", err)
 		}
 		for _, c := range []struct {
@@ -308,7 +313,7 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 			{f.OtherTeamID, "lt-z", true},
 			{f.OtherTeamID, "lt-a", false},
 		} {
-			got, err := f.Store.TracksTeamSystem(ctx, c.teamID, c.linearTeamID)
+			got, err := f.Store.TracksTeamSystem(ctx, c.teamID, linearWorkspace, c.linearTeamID)
 			if err != nil {
 				t.Fatalf("TracksTeamSystem(%s, %s): %v", c.teamID, c.linearTeamID, err)
 			}
@@ -318,14 +323,85 @@ func RunLinearTeamRulesConformance(t *testing.T, factory LinearTeamRulesFactory)
 		}
 	})
 
+	t.Run("Workspace_ConfinesEveryReadAndTheReplace", func(t *testing.T) {
+		// The org's credential moved from ws-a to ws-b: the team's ws-a rows
+		// stop applying, a save under ws-b leaves them stored, and reading
+		// ws-a again — the old workspace bound once more — brings them back.
+		f := factory(t)
+		old := []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA"), unarmedLinearRules("lt-b", "BBB")}
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, "ws-a", old); err != nil {
+			t.Fatalf("seed ws-a: %v", err)
+		}
+		next := []domain.LinearTeamRules{armedLinearRules("lt-x", "XXX")}
+		got, err := f.Store.ReplaceForTeam(ctx, f.TeamID, "ws-b", next)
+		if err != nil {
+			t.Fatalf("ReplaceForTeam(ws-b): %v", err)
+		}
+		if !reflect.DeepEqual(got, withTeam(next, f.TeamID)) {
+			t.Errorf("ReplaceForTeam(ws-b) returned %#v, want only ws-b's rows", got)
+		}
+
+		for _, c := range []struct {
+			workspace string
+			want      []string
+		}{{"ws-a", []string{"lt-a", "lt-b"}}, {"ws-b", []string{"lt-x"}}, {"ws-c", []string{}}, {"", []string{}}} {
+			for name, list := range map[string]func(context.Context, string, string) ([]domain.LinearTeamRules, error){
+				"ListForTeam":       f.Store.ListForTeam,
+				"ListForTeamSystem": f.Store.ListForTeamSystem,
+			} {
+				rows, err := list(ctx, f.TeamID, c.workspace)
+				if err != nil {
+					t.Fatalf("%s(%q): %v", name, c.workspace, err)
+				}
+				if ids := linearTeamIDs(rows); !reflect.DeepEqual(ids, c.want) {
+					t.Errorf("%s(%q) = %v, want %v", name, c.workspace, ids, c.want)
+				}
+			}
+			union, err := f.Store.ListForOrgSystem(ctx, f.OrgID, c.workspace)
+			if err != nil {
+				t.Fatalf("ListForOrgSystem(%q): %v", c.workspace, err)
+			}
+			if ids := linearTeamIDs(union); !reflect.DeepEqual(ids, c.want) {
+				t.Errorf("ListForOrgSystem(%q) = %v, want %v", c.workspace, ids, c.want)
+			}
+		}
+		for _, c := range []struct {
+			workspace, linearTeamID string
+			want                    bool
+		}{{"ws-a", "lt-a", true}, {"ws-b", "lt-a", false}, {"ws-b", "lt-x", true}, {"", "lt-a", false}} {
+			got, err := f.Store.TracksTeamSystem(ctx, f.TeamID, c.workspace, c.linearTeamID)
+			if err != nil {
+				t.Fatalf("TracksTeamSystem(%q, %s): %v", c.workspace, c.linearTeamID, err)
+			}
+			if got != c.want {
+				t.Errorf("TracksTeamSystem(%q, %s) = %v, want %v", c.workspace, c.linearTeamID, got, c.want)
+			}
+		}
+
+		// Clearing the team under ws-b leaves its ws-a rows stored.
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, "ws-b", nil); err != nil {
+			t.Fatalf("ReplaceForTeam(ws-b, nil): %v", err)
+		}
+		kept, err := f.Store.ListForTeamSystem(ctx, f.TeamID, "ws-a")
+		if err != nil {
+			t.Fatalf("ListForTeamSystem(ws-a): %v", err)
+		}
+		if !reflect.DeepEqual(kept, withTeam(old, f.TeamID)) {
+			t.Errorf("a ws-b save changed ws-a's rows:\n%#v\nwant\n%#v", kept, withTeam(old, f.TeamID))
+		}
+		if _, err := f.Store.ReplaceForTeam(ctx, f.TeamID, "", next); err == nil {
+			t.Error("ReplaceForTeam accepted an empty workspace id")
+		}
+	})
+
 	t.Run("ReplaceForTeam_ResendIsIdempotent", func(t *testing.T) {
 		f := factory(t)
 		input := []domain.LinearTeamRules{armedLinearRules("lt-a", "AAA"), unarmedLinearRules("lt-b", "BBB")}
-		first, err := f.Store.ReplaceForTeam(ctx, f.TeamID, input)
+		first, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, input)
 		if err != nil {
 			t.Fatalf("first ReplaceForTeam: %v", err)
 		}
-		second, err := f.Store.ReplaceForTeam(ctx, f.TeamID, input)
+		second, err := f.Store.ReplaceForTeam(ctx, f.TeamID, linearWorkspace, input)
 		if err != nil {
 			t.Fatalf("second ReplaceForTeam: %v", err)
 		}

@@ -40,7 +40,21 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
+	recordJiraSiteForTest(t, conn)
 	return sqlitestore.New(conn), conn
+}
+
+// recordJiraSiteForTest records the org's Jira site, which binding a Jira
+// credential does in production. A Jira entity is keyed under that site, so an
+// org without one has nowhere to record a Jira issue the exec verbs touch.
+func recordJiraSiteForTest(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, runmode.LocalDefaultOrgID, testScope("jira")); err != nil {
+		t.Fatalf("record jira site: %v", err)
+	}
 }
 
 // seedBlueprintRun mints a fresh blueprint + blueprint_run for taskID
@@ -74,7 +88,7 @@ func seedConversation(t *testing.T, stores db.Stores, conn *sql.DB, conversation
 	t.Helper()
 	ctx := context.Background()
 	orgID := runmode.LocalDefaultOrgID
-	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "jira", "TEST-"+conversationID, "issue", "T-"+conversationID, "https://x/"+conversationID)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, orgID, "jira", "https://jira.example.com", "TEST-"+conversationID, "", "issue", "T-"+conversationID, "https://x/"+conversationID)
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

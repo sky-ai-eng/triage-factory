@@ -50,7 +50,7 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "owner/repo#"+suffix, "pr", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#"+suffix, "", "pr", "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
 	}

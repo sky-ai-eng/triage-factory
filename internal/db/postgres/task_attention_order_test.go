@@ -38,8 +38,8 @@ func TestTaskStore_AttentionOrder_Postgres(t *testing.T) {
 				// re-seeding it inline.
 				eventType := "github:pr:ci_check_failed"
 				if _, err := conn.Exec(`
-					INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-					VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6)
+					INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+					VALUES ($1, $2, 'github', $3, 'pr', $4, $5, '{}'::jsonb, $6, 'https://github.com')
 				`, entityID, orgID, sourceID, f.Title, "https://example/"+sourceID, now); err != nil {
 					t.Fatalf("seed entity: %v", err)
 				}

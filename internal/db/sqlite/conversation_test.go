@@ -166,8 +166,8 @@ func newSQLiteConversationSeeder(conn *sql.DB) dbtest.ConversationSeeder {
 			id := uuid.New().String()
 			sourceID := fmt.Sprintf("conv-%s-%s", suffix, id[:8])
 			if _, err := conn.Exec(`
-				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at)
-				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?)
+				INSERT INTO entities (id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+				VALUES (?, 'github', ?, 'pr', ?, ?, '{}', ?, 'https://github.com')
 			`, id, sourceID, "Conformance "+suffix, "https://example/"+sourceID, time.Now().UTC()); err != nil {
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}

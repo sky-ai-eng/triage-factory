@@ -42,8 +42,8 @@ func setupClaimScenario(t *testing.T, suffix string) claimScenario {
 		t.Fatalf("add agent to team: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github",
-		"owner/repo#"+suffix, "pr", "Claim PR "+suffix, "https://example.com/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", "https://github.com",
+		"owner/repo#"+suffix, "", "pr", "Claim PR "+suffix, "https://example.com/"+suffix)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

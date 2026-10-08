@@ -50,8 +50,8 @@ func seedFleetFixture(t *testing.T, h *pgtest.Harness) fleetFixture {
 
 	entityID := uuid.New().String()
 	pgtest.MustExec(t, h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Fleet Test Entity', 'https://example/x', '{}'::jsonb, now())
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Fleet Test Entity', 'https://example/x', '{}'::jsonb, now(), 'https://github.com')
 	`, entityID, orgID, "fleet-test-"+entityID[:8])
 
 	eventID := uuid.New().String()

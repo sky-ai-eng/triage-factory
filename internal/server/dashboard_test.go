@@ -166,8 +166,8 @@ func seedDashboardSnapshot(t *testing.T, s *Server, snap domain.PRSnapshot) {
 	now := time.Now().UTC()
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
 	if _, err := s.db.ExecContext(context.Background(), `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at)
-		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at, scope)
+		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, 'https://github.com')
 	`, "ent-"+sourceID, runmode.LocalDefaultOrgID, sourceID, snap.Title, snap.URL, string(blob), now, now); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)
 	}

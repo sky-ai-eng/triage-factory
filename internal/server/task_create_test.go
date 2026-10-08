@@ -27,7 +27,7 @@ import (
 // station chip represents, and the minimum POST /api/tasks needs to resolve.
 func seedStation(t *testing.T, s *Server, sourceID, eventType string) *domain.Entity {
 	t.Helper()
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", sourceID, "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestTaskCreate_404OnMissingEntity(t *testing.T) {
 // exist for this entity.
 func TestTaskCreate_422OnNoMatchingEvent(t *testing.T) {
 	s := newTestServer(t)
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#400e", "pr", "", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#400e", "", "pr", "", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestFactoryDropGesture_BotDisabledLeavesTaskUnclaimed(t *testing.T) {
 func TestFactorySnapshot_PendingTasksRoundtrip(t *testing.T) {
 	s := newTestServer(t)
 
-	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#7", "pr", "test PR", "")
+	entity, _, err := sqlitestore.New(s.db).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#7", "", "pr", "test PR", "")
 	if err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

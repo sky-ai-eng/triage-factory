@@ -295,14 +295,20 @@ func (r *Router) jiraDoneStatusesByProject(ctx context.Context, orgID string) ma
 
 // linearDoneStatesByTeam is jiraDoneStatusesByProject for Linear: each Linear
 // team's done states, set-unioned across every TF team that tracks it, in the
-// order the poller's toTrackerLinearRules merges them. Nil store or a read
-// failure yields an empty map, so no Linear entity reads as terminal that pass.
+// order the poller's toTrackerLinearRules merges them, read from the org's
+// current Linear workspace. Nil store or a read failure yields an empty map, so
+// no Linear entity reads as terminal that pass.
 func (r *Router) linearDoneStatesByTeam(ctx context.Context, orgID string) map[string][]domain.LinearStateRef {
 	out := map[string][]domain.LinearStateRef{}
 	if r.linearRules == nil {
 		return out
 	}
-	rules, err := r.linearRules.ListForOrgSystem(ctx, orgID)
+	settings, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		lifecycleLog.Error("terminal checker: read org settings for the linear workspace failed, skipping linear this pass", "org", orgID, "error", err)
+		return out
+	}
+	rules, err := r.linearRules.ListForOrgSystem(ctx, orgID, domain.EntityScope("linear", settings))
 	if err != nil {
 		lifecycleLog.Error("terminal checker: list linear team rules failed, skipping linear this pass", "org", orgID, "error", err)
 		return out

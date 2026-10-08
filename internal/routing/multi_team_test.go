@@ -38,7 +38,7 @@ func TestHandleEvent_MultipleTeams_OneTask(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#multi", "pr", "Multi-team PR", "https://example.com/multi")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#multi", "", "pr", "Multi-team PR", "https://example.com/multi")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestHandleEvent_BackfillCreatedAt_PreservesOccurredAt(t *testing.T) {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#backfill", "pr", "Stale PR", "https://example.com/backfill")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#backfill", "", "pr", "Stale PR", "https://example.com/backfill")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -175,7 +175,7 @@ func TestHandleEvent_NoOccurredAt_FallsBackToNow(t *testing.T) {
 	setReviewHost(t, database)
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#now", "pr", "Now PR", "https://example.com/now")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#now", "", "pr", "Now PR", "https://example.com/now")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestHandleEvent_BecameAtomic_Suppressed(t *testing.T) {
 		t.Fatalf("seed team B: %v", err)
 	}
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-700", "issue", "Cross-team atomic", "https://jira.example.com/browse/SKY-700")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-700", "", "issue", "Cross-team atomic", "https://jira.example.com/browse/SKY-700")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -330,7 +330,7 @@ func TestTryAutoDelegate_PerTeamBotGate(t *testing.T) {
 	dbtest.SetTeamAgentEnabledDirect(t, database, teamB, runmode.LocalDefaultAgentID, false)
 
 	// One entity, one event, ONE task — shared across both teams.
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#gate", "pr", "Gate PR", "https://example.com/gate")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#gate", "", "pr", "Gate PR", "https://example.com/gate")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -443,7 +443,7 @@ func TestHandleEvent_MultipleTeams_OneBotRun(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-onerun", "issue", "One-run issue", "https://example.com/onerun")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-onerun", "", "issue", "One-run issue", "https://example.com/onerun")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestHandleEvent_OwnerDisabled_RunAttributedToActingTeam(t *testing.T) {
 		t.Fatalf("add agent to team B: %v", err)
 	}
 
-	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-attr", "issue", "Attr issue", "https://example.com/attr")
+	entity, _, err := stores.Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-attr", "", "issue", "Attr issue", "https://example.com/attr")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestHandleEvent_SingleTeam_OneTask(t *testing.T) {
 	setReviewHost(t, database)
 	seedUserOnTeam(t, database, runmode.LocalDefaultTeamID, "aidan")
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#single", "pr", "Single team PR", "https://example.com/single")
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#single", "", "pr", "Single team PR", "https://example.com/single")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

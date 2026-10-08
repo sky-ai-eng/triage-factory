@@ -86,8 +86,8 @@ func (r *teamPRsRig) seedTrackedPR(t *testing.T, orgID, teamID, login string, nu
 	}
 	now := time.Now().UTC()
 	pgtest.MustExec(t, r.h.AdminDB, `
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, '', $5::jsonb, $6, $6)
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, last_polled_at, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', $5::jsonb, $6, $6, 'https://github.com')
 	`, uuid.New().String(), orgID, fmt.Sprintf("%s/%s#%d", owner, repo, number), snap.Title, string(blob), now)
 	pgtest.MustExec(t, r.h.AdminDB, `
 		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)

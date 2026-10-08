@@ -40,8 +40,8 @@ func seedIngestEntity(t *testing.T, conn *sql.DB) string {
 	t.Helper()
 	id := "e-" + uuid.New().String()[:8]
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, source, source_id, kind, title, url)
-		VALUES (?, 'github', ?, 'pr', 'PR', '')
+		INSERT INTO entities (id, source, source_id, kind, title, url, scope)
+		VALUES (?, 'github', ?, 'pr', 'PR', '', 'https://github.com')
 	`, id, "owner/repo#"+id); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

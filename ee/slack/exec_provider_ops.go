@@ -213,7 +213,7 @@ func slackOpRecordThreadRoot(ctx context.Context, stores db.Stores, info agentho
 		return nil, fmt.Errorf("slack: record_thread_root requires channel and ts")
 	}
 	sourceID := domain.SlackSourceID(a.Channel, a.TS)
-	entity, created, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "slack", sourceID, "thread", mentionTitle(a.Text), "")
+	entity, created, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, "slack", domain.SlackScope, sourceID, "", "thread", mentionTitle(a.Text), "")
 	if err != nil {
 		return nil, fmt.Errorf("slack: record thread root entity: %w", err)
 	}

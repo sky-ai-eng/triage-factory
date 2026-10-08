@@ -176,7 +176,7 @@ func setupDrainScenario(t *testing.T, database *sql.DB) (entityID, taskID, trigg
 func setupDrainScenarioN(t *testing.T, database *sql.DB, suffix string) (entityID, taskID, triggerID, eventID string) {
 	t.Helper()
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "owner/repo#"+suffix, "pr",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#"+suffix, "", "pr",
 		"Test PR "+suffix, "https://github.com/owner/repo/pull/"+suffix)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)

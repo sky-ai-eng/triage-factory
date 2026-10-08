@@ -101,8 +101,8 @@ func TestTaskReassign_StampsNothing(t *testing.T) {
 
 	var entityID, evtID, taskID string
 	if err := r.h.AdminDB.QueryRow(`
-		INSERT INTO entities (org_id, source, source_id, kind, title)
-		VALUES ($1, 'github', $2, 'pr', 'test pr') RETURNING id
+		INSERT INTO entities (org_id, source, source_id, kind, title, scope)
+		VALUES ($1, 'github', $2, 'pr', 'test pr', 'https://github.com') RETURNING id
 	`, r.orgID, "octo/reassign#"+t.Name()).Scan(&entityID); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

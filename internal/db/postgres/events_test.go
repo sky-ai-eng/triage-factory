@@ -219,8 +219,8 @@ func seedPgEntityForEvents(t *testing.T, h *pgtest.Harness, orgID, suffix string
 	now := time.Now().UTC()
 	sourceID := fmt.Sprintf("events-conf-%s-%s-%d", orgID[:8], suffix, now.UnixNano())
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Events Conformance', 'https://example/x', '{}'::jsonb, $4, 'active')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Events Conformance', 'https://example/x', '{}'::jsonb, $4, 'active', 'https://github.com')
 	`, id, orgID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

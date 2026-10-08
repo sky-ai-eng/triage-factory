@@ -393,8 +393,8 @@ func TestTaskMemoryStore_Postgres_SystemReadTeamScoped(t *testing.T) {
 	// One entity, shared by both teams (entities are org-wide).
 	entityID := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Shared Entity', 'https://example/shared', '{}'::jsonb, now(), 'active')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Shared Entity', 'https://example/shared', '{}'::jsonb, now(), 'active', 'https://github.com')
 	`, entityID, orgID, "shared-"+entityID[:8]); err != nil {
 		t.Fatalf("seed shared entity: %v", err)
 	}
@@ -563,8 +563,8 @@ func seedPgSharedEntity(t *testing.T, h *pgtest.Harness, orgID, source, sourceID
 	t.Helper()
 	id := uuid.New().String()
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES ($1, $2, $3, $4, $5, $6, 'https://example/x', '{}'::jsonb, now(), 'active', CASE $3 WHEN 'github' THEN 'https://github.com' WHEN 'jira' THEN 'https://jira.example.com' WHEN 'slack' THEN 'slack.com' WHEN 'linear' THEN 'ws-test' ELSE 'test-scope' END)
 	`, id, orgID, source, sourceID, kind, sourceID); err != nil {
 		t.Fatalf("seed shared entity %s/%s: %v", source, sourceID, err)
 	}
@@ -690,8 +690,8 @@ func seedPgConversationForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("task-memory-%s-%s", suffix, entityID[:8])
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Task Memory Conformance', 'https://example/x', '{}'::jsonb, $4, 'active')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Task Memory Conformance', 'https://example/x', '{}'::jsonb, $4, 'active', 'https://github.com')
 	`, entityID, orgID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}
@@ -769,8 +769,8 @@ func seedPgBlueprintRunForTaskMemory(t *testing.T, h *pgtest.Harness, orgID, use
 	entityID := uuid.New().String()
 	sourceID := fmt.Sprintf("bp-run-%s-%s", suffix, entityID[:8])
 	if _, err := conn.Exec(`
-		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state)
-		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}'::jsonb, $4, 'active')
+		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, state, scope)
+		VALUES ($1, $2, 'github', $3, 'pr', 'Blueprint Run Conformance', 'https://example/bp', '{}'::jsonb, $4, 'active', 'https://github.com')
 	`, entityID, orgID, sourceID, now); err != nil {
 		t.Fatalf("seed entity: %v", err)
 	}

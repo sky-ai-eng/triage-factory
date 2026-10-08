@@ -96,7 +96,7 @@ func seedReviewRule(t *testing.T, database *sql.DB, teamID string) {
 
 func reviewEntity(t *testing.T, database *sql.DB, sourceID string) string {
 	t.Helper()
-	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", sourceID, "pr", "Review PR", "https://example.com/"+sourceID)
+	e, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", sourceID, "", "pr", "Review PR", "https://example.com/"+sourceID)
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
 	}

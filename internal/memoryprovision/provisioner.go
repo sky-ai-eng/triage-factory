@@ -387,7 +387,7 @@ func (m *Manager) file(ctx context.Context, orgID string, conv *domain.Conversat
 	if primaryEntityID == "" {
 		return nil
 	}
-	memoryentities.Attach(ctx, m.stores.TaskMemory, m.stores.Artifacts, m.stores.Entities, orgID, conv.ID, primaryEntityID)
+	memoryentities.Attach(ctx, m.stores, orgID, conv.ID, primaryEntityID)
 	return nil
 }
 

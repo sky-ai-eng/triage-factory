@@ -43,8 +43,8 @@ func seedTeamPR(t *testing.T, s *Server, snap domain.PRSnapshot, owningTeam, ent
 	sourceID := fmt.Sprintf("%s#%d", snap.Repo, snap.Number)
 	if _, err := s.db.ExecContext(context.Background(), `
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, state,
-		                      owning_team_id, created_at, last_polled_at)
-		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?)
+		                      owning_team_id, created_at, last_polled_at, scope)
+		VALUES (?, ?, 'github', ?, 'pr', ?, ?, ?, ?, ?, ?, ?, 'https://github.com')
 	`, "ent-"+sourceID, runmode.LocalDefaultOrgID, sourceID, snap.Title, snap.URL, string(blob),
 		entityState, owning, now, now); err != nil {
 		t.Fatalf("seed entity %s: %v", sourceID, err)

@@ -26,7 +26,7 @@ func TestHandleEvent_BecameAtomic_ExistingTask_NoDuplicate(t *testing.T) {
 		t.Fatalf("seed event handlers: %v", err)
 	}
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-500", "issue",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-500", "", "issue",
 		"Epic that went atomic-subtasks-atomic", "https://jira.example.com/browse/SKY-500")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
@@ -112,7 +112,7 @@ func TestHandleEvent_BecameAtomic_NoExistingTask_CreatesTask(t *testing.T) {
 	setJiraHost(t, database)
 	seedJiraUserOnTeam(t, database, runmode.LocalDefaultTeamID, "557058:abc-aidan", "aidan")
 
-	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "SKY-501", "issue",
+	entity, _, err := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-501", "", "issue",
 		"Epic decomposed then atomic", "https://jira.example.com/browse/SKY-501")
 	if err != nil {
 		t.Fatalf("create entity: %v", err)
