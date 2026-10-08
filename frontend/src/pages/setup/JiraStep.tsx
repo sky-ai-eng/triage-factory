@@ -24,6 +24,7 @@
 // step uses; the picker is the shared ChoiceCards the GitHub mode step uses.
 
 import JiraAccessGroup from '../settings/JiraAccessGroup'
+import { fetchOrgSettings } from '../settings/orgConfig'
 import {
   isJiraCloudHost,
   JIRA_DEPLOYMENT_OPTIONS,
@@ -92,9 +93,11 @@ export function JiraModeStep({ state, patch, advance }: StepContext) {
 // JiraAccessStep body — the credential fields (base URL suppressed). The connect
 // is the step's Continue (steps.tsx calls connectJira and patches jiraConnected
 // on success), so there's no Connect button here. A disconnect clears the
-// connection and re-opens the URL step (jiraUrlConfirmed drops). The deployment
-// chosen in JiraModeStep selects which fields render.
-export function JiraAccessStep({ state, patch, isLocal, orgId }: StepContext) {
+// connection and re-opens the URL step (jiraUrlConfirmed drops). It runs under
+// the wizard's hold, so Continue cannot see jiraConnected, skip the bind, and
+// advance past this step while the unbind is still removing the credential.
+// The deployment chosen in JiraModeStep selects which fields render.
+export function JiraAccessStep({ state, patch, isLocal, orgId, hold }: StepContext) {
   const deployment = state.jiraDeployment ?? 'data_center'
   return (
     <div className="space-y-5">
@@ -109,7 +112,13 @@ export function JiraAccessStep({ state, patch, isLocal, orgId }: StepContext) {
         connected={state.jiraConnected}
         orgId={orgId}
         deployment={deployment}
-        onDisconnected={() =>
+        hold={hold}
+        onDisconnected={async () => {
+          // The unbind cleared the Jira URL on the settings row, which moved its
+          // concurrency token: pick up the fresh one, or the next org save
+          // conflicts with this disconnect. On a failed re-read the held token
+          // stands, and the save path's conflict recovery covers it.
+          const fresh = orgId ? await fetchOrgSettings(orgId) : null
           // JiraAccessGroup blanks the credential fields via its onChange immediately
           // before this fires; rebuild org from this render's state (which still holds
           // the URL) and drop only the secrets, so a same-session reconnect keeps the
@@ -122,9 +131,15 @@ export function JiraAccessStep({ state, patch, isLocal, orgId }: StepContext) {
             jiraConnected: false,
             jiraUrlConfirmed: false,
             jiraDeployment: null,
-            org: { ...state.org, jira_pat: '', jira_email: '', jira_api_token: '' },
+            org: {
+              ...state.org,
+              jira_pat: '',
+              jira_email: '',
+              jira_api_token: '',
+              version: fresh?.version ?? state.org.version,
+            },
           })
-        }
+        }}
         showBaseUrl={false}
         bare
       />

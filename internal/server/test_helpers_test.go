@@ -32,6 +32,15 @@ import (
 // test file.
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newTestServerWithTx(t, nil)
+}
+
+// newTestServerWithTx is newTestServer with its TxRunner passed through wrap
+// before the server is built, so a wrapper reaches every handler — including
+// the handler groups that capture the runner when their routes register,
+// where replacing s.tx afterwards would not. A nil wrap is newTestServer.
+func newTestServerWithTx(t *testing.T, wrap func(db.TxRunner) db.TxRunner) *Server {
+	t.Helper()
 
 	database, err := sql.Open("sqlite", db.TestDSNMemory)
 	if err != nil {
@@ -66,6 +75,9 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
 	stores := sqlitestore.New(database)
+	if wrap != nil {
+		stores.Tx = wrap(stores.Tx)
+	}
 	s := New(database, stores)
 	// The team knowledge base, rooted in a per-test temp dir: the real
 	// local-mode backend rather than a stub, so the KB routes are exercised

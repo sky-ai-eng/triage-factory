@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -336,60 +335,6 @@ func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (li
 		}
 	}
 	return status, nil
-}
-
-// snapshotLinearSecrets reads the org's stored Linear keys and returns a func
-// that writes them back as they were — deleting a key that was absent. Local
-// mode only, where secret writes land in the keychain outside the SQLite
-// transaction and so survive its rollback. Any key that cannot be read fails
-// the snapshot, since the restore could not put that key back. The restore
-// outlives the request's context: a client that disconnects mid-write is
-// exactly when it has to run. It writes the keys in a fixed order and carries
-// on past a key it cannot write, so one keychain failure costs that key alone.
-func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) (func(), error) {
-	keys := []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs}
-	prior := make([]string, len(keys))
-	for i, k := range keys {
-		v, err := s.secrets.Get(ctx, orgID, k)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot %s: %w", k, err)
-		}
-		prior[i] = v
-	}
-	ctx = context.WithoutCancel(ctx)
-	return func() {
-		for i, k := range keys {
-			var err error
-			if prior[i] == "" {
-				_, err = s.secrets.Delete(ctx, orgID, k)
-			} else {
-				err = s.secrets.Put(ctx, orgID, k, prior[i], "")
-			}
-			if err != nil {
-				serverLog.Error("restore linear secret failed; the stored Linear credential may not match what the org had", "org", orgID, "key", k, "error", err)
-			}
-		}
-	}, nil
-}
-
-// guardLocalLinearWrite prepares a Linear credential write in local mode, where
-// the keychain sits outside the SQLite transaction: it takes
-// linearCredentialMu and snapshots the stored keys. It returns the snapshot's
-// restore, for the caller to run when the transaction fails, and the unlock to
-// defer. A snapshot that cannot be taken refuses the write: a key it could not
-// read is one it could not put back. Multi mode keeps secrets inside the
-// transaction, so it returns a nil restore and a no-op unlock.
-func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
-	if runmode.Current() != runmode.ModeLocal {
-		return nil, func() {}, nil
-	}
-	s.linearCredentialMu.Lock()
-	restore, err = s.snapshotLinearSecrets(ctx, orgID)
-	if err != nil {
-		s.linearCredentialMu.Unlock()
-		return nil, nil, err
-	}
-	return restore, s.linearCredentialMu.Unlock, nil
 }
 
 // kickLinearChanged re-dues the org's Linear poll under a changed credential

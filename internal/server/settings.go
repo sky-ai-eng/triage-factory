@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -42,6 +43,10 @@ type settingsHandler struct {
 	// construction site in routes() hands this handler the one method rather
 	// than a back-reference to the whole server.
 	kickJira func(r *http.Request, orgID string)
+	// guardJiraWrite prepares the Jira bind's keychain writes in local mode,
+	// taking the lock the unbind takes too: the Server's guardLocalJiraWrite,
+	// wired from routes() like kickJira.
+	guardJiraWrite func(ctx context.Context, orgID string) (restore, unlock func(), err error)
 	// kickMemoryBacklog rings the org-wide memory doorbell after this handler
 	// binds an LLM credential: a generation that failed because the org's
 	// background-jobs model resolved to nothing may succeed now, and the
@@ -451,12 +456,26 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// One WithTx for the whole read + write window: credentials go
-	// through tx.Secrets (Postgres vault writes need claims set) and
-	// org_settings goes through tx.Orgs (org_settings_update RLS gates on
-	// admin). All-or-nothing so creds + settings can't land in a partial
-	// state. The earlier "manual rollback via ClearJira" pattern collapses
-	// to plain tx rollback semantics.
+	method := jira.AuthMethodDCPAT
+	if cloud {
+		method = jira.AuthMethodCloudAPIToken
+	}
+
+	// In local mode the keys land in the keychain, outside the transaction, so
+	// a failure later in it puts the prior keys back rather than leaving the
+	// new credential half-bound — or, on a rotation, the working one replaced
+	// by a credential the org never committed to.
+	restore, unlock, err := se.guardJiraWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "settings", err)
+		return
+	}
+	defer unlock()
+
+	// One transaction for the credential, the host and the audit row:
+	// credentials go through tx.Secrets (Postgres vault writes need claims
+	// set) and the host through tx.Orgs (the org_settings and
+	// org_event_sources RLS policies gate writes on admin).
 	//
 	// This is org-level Jira ACCESS (PAT_1) only — it deliberately does NOT
 	// write the caller's per-user Jira identity. That is captured solely by
@@ -464,36 +483,30 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	// and user identity stay independent even when the same token connects
 	// the org.
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		creds, err := integrations.Load(r.Context(), tx.Secrets, orgID)
-		if err != nil {
-			return fmt.Errorf("load credentials: %w", err)
+		// The keys are written in the order ClearJira deletes them, the
+		// unbind's order (integrations.JiraKeys). A key the chosen deployment
+		// does not use is deleted, so switching between Cloud and Data Center
+		// leaves no stale secret for a later read to mistake for the org's
+		// auth.
+		for _, kv := range [][2]string{
+			{integrations.KeyJiraURL, url},
+			{integrations.KeyJiraPAT, pat},
+			{integrations.KeyJiraEmail, email},
+			{integrations.KeyJiraAPIToken, token},
+			{integrations.KeyJiraAuthMethod, string(method)},
+		} {
+			if kv[1] == "" {
+				if _, err := tx.Secrets.Delete(r.Context(), orgID, kv[0]); err != nil {
+					return fmt.Errorf("clear %s: %w", kv[0], err)
+				}
+				continue
+			}
+			if err := tx.Secrets.Put(r.Context(), orgID, kv[0], kv[1], ""); err != nil {
+				return fmt.Errorf("store %s: %w", kv[0], err)
+			}
 		}
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
-		creds.JiraURL = url
-		if cloud {
-			creds.JiraEmail = email
-			creds.JiraAPIToken = token
-			creds.JiraAuthMethod = string(jira.AuthMethodCloudAPIToken)
-		} else {
-			creds.JiraPAT = pat
-			creds.JiraAuthMethod = string(jira.AuthMethodDCPAT)
-		}
-		orgSet.JiraBaseURL = url
-		if err := integrations.Save(r.Context(), tx.Secrets, orgID, creds); err != nil {
-			return fmt.Errorf("store credentials: %w", err)
-		}
-		// Save skips empty values (never deletes), so switching schemes (DC↔Cloud)
-		// would otherwise leave the prior scheme's secret behind — a stale
-		// credential a later read could mistake for the org's auth. Drop the
-		// scheme not in use so the stored set matches the marker exactly.
-		if err := integrations.ClearJiraOtherScheme(r.Context(), tx.Secrets, orgID, jira.AuthMethod(creds.JiraAuthMethod)); err != nil {
-			return fmt.Errorf("clear stale jira credential: %w", err)
-		}
-		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return fmt.Errorf("save org settings: %w", err)
+		if _, err := tx.Orgs.SetSourceBaseURL(r.Context(), orgID, eventsource.KindJira, url); err != nil {
+			return fmt.Errorf("save jira base url: %w", err)
 		}
 		// Audit the org Jira credential bind/rotate in the same tx,
 		// against the canonicalized host (see auditJiraHost).
@@ -506,6 +519,9 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		}
 		return nil
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.

@@ -17,7 +17,7 @@ import (
 type OrgsStoreFactory func(t *testing.T) (store db.OrgsStore, orgID string)
 
 // RunOrgsReturnedRowConformance pins the returned-row standard on OrgsStore's
-// three org_settings writers: what each write hands back is what a follow-up
+// settings writers: what each write hands back is what a follow-up
 // GetSettings finds. Intended for a claims-carrying connection (the Postgres
 // app pool) in addition to the admin pool — see
 // TestOrgsStore_Postgres_ReturnedRowConformance's doc for why the admin pool
@@ -126,6 +126,41 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 		AssertWriteReturnedStoredRow(t, "SetGitHubCredentialClass", got, read)
 		if got.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
 			t.Errorf("SetGitHubCredentialClass returned class %q, want %q", got.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
+		}
+	})
+
+	t.Run("SetSourceBaseURL_returns_the_stored_row", func(t *testing.T) {
+		before, err := read()
+		if err != nil {
+			t.Fatalf("read before SetSourceBaseURL: %v", err)
+		}
+		got, err := store.SetSourceBaseURL(ctx, orgID, "jira", "https://sret.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSourceBaseURL", got, read)
+		if got.JiraBaseURL != "https://sret.example.com" || got.Version != before.Version+1 {
+			t.Errorf("SetSourceBaseURL returned host %q version %d, want the new host and version %d", got.JiraBaseURL, got.Version, before.Version+1)
+		}
+
+		// The same host again writes nothing; what it hands back is still the
+		// stored row.
+		same, err := store.SetSourceBaseURL(ctx, orgID, "jira", "https://sret.example.com")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (same host): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSourceBaseURL (same host)", same, read)
+		if same.Version != got.Version {
+			t.Errorf("same-host SetSourceBaseURL moved the version %d -> %d", got.Version, same.Version)
+		}
+
+		cleared, err := store.SetSourceBaseURL(ctx, orgID, "jira", "")
+		if err != nil {
+			t.Fatalf("SetSourceBaseURL (clear): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetSourceBaseURL (clear)", cleared, read)
+		if cleared.JiraBaseURL != "" {
+			t.Errorf("SetSourceBaseURL (clear) returned host %q, want it cleared", cleared.JiraBaseURL)
 		}
 	})
 }

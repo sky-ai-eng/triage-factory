@@ -199,11 +199,10 @@ func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind string, ov
 // struct's zero value on every bulk settings save, silently converting a
 // BYO-App org to PAT. u.GitHubCredentialClass is read-only; it is ignored here.
 func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) (domain.OrgSettings, error) {
-	// No version guard: an unguarded save is last-writer-wins on purpose. Its
-	// callers are the credential transitions, which own the specific fields
-	// they touch and have nothing to lose a race about. It still bumps the
-	// token, so an admin's in-flight settings edit conflicts rather than
-	// landing on top of a credential change it never saw.
+	// No version guard: see the interface doc for why a write that owns one
+	// value must not come through here. It still bumps the token, so an
+	// admin's in-flight settings edit conflicts rather than landing on top of
+	// a write it never saw.
 	stored, err := s.upsertSettings(ctx, orgID, u, orgSettingsConflictUpdate)
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("upsert org_settings: %w", err)
@@ -449,6 +448,49 @@ func (s *orgsStore) SetLinearWorkspace(ctx context.Context, orgID, workspaceID, 
 		orgID, nullStringValue(workspaceID), nullStringValue(urlKey)).Scan)
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("set org linear workspace: %w", err)
+	}
+	overrides, err := readSourceOverrides(ctx, s.q, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
+	}
+	db.ApplyOrgSourceOverrides(&stored, overrides)
+	return stored, nil
+}
+
+// SetSourceBaseURL upserts ONLY org_event_sources.base_url for kind and bumps
+// org_settings.version, unless the host is already stored. See the OrgsStore
+// interface doc for why it bumps the version where SetLinearWorkspace does not.
+func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, error) {
+	if !db.SourceHasBaseURL(kind) {
+		return domain.OrgSettings{}, fmt.Errorf("set source base url: %q has no host to set", kind)
+	}
+	var cur sql.NullString
+	if err := s.q.QueryRowContext(ctx, `
+		SELECT base_url FROM org_event_sources WHERE org_id = ? AND kind = ?`,
+		orgID, kind).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return domain.OrgSettings{}, fmt.Errorf("read %s base url: %w", kind, err)
+	}
+	if cur.String == baseURL {
+		return getOrgSettings(ctx, s.q, orgID)
+	}
+	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
+		INSERT INTO org_settings (org_id, updated_at)
+		VALUES (?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id) DO UPDATE SET
+			version = org_settings.version + 1,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING `+orgSettingsColumns,
+		orgID).Scan)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("bump org_settings version: %w", err)
+	}
+	if _, err := s.q.ExecContext(ctx, `
+		INSERT INTO org_event_sources (org_id, kind, base_url)
+		VALUES (?, ?, ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET
+			base_url = excluded.base_url`,
+		orgID, kind, nullStringValue(baseURL)); err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("set %s base url: %w", kind, err)
 	}
 	overrides, err := readSourceOverrides(ctx, s.q, orgID)
 	if err != nil {

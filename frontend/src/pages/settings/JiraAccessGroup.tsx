@@ -59,6 +59,7 @@ export default function JiraAccessGroup({
   orgId,
   onReplace,
   onDisconnected,
+  hold,
   showBaseUrl = true,
   bare = false,
 }: {
@@ -79,7 +80,12 @@ export default function JiraAccessGroup({
   // connected org (see the note above). Omit on surfaces with no form to
   // re-open — the control simply doesn't render.
   onReplace?: () => void
-  onDisconnected?: () => void
+  /** Runs after a successful disconnect, inside `hold` when one is given. */
+  onDisconnected?: () => void | Promise<void>
+  /** Runs the whole disconnect under the container's busy guard — the setup
+   *  wizard's, so Continue cannot skip the bind on a connection this click is
+   *  removing. */
+  hold?: (work: () => Promise<void>) => Promise<void>
   showBaseUrl?: boolean
   bare?: boolean
 }) {
@@ -96,13 +102,16 @@ export default function JiraAccessGroup({
       toast.error('No organization context — reload and try again.')
       return
     }
-    const res = await disconnectJira(orgId)
-    if (!res.ok) {
-      toast.error(res.error)
-      return
+    const work = async () => {
+      const res = await disconnectJira(orgId)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      onChange({ jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' })
+      await onDisconnected?.()
     }
-    onChange({ jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' })
-    onDisconnected?.()
+    await (hold ? hold(work) : work())
   }
 
   const body = (
