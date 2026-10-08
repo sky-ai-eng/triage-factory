@@ -10,7 +10,7 @@ describe('LinearAccessStep — disconnecting', () => {
   // The unbind clears the workspace columns on the settings row, which moves
   // its version. Holding the old one would make the next org step's save
   // conflict with the wizard's own disconnect.
-  it('carries the settings version the unbind produced', async () => {
+  it('holds the wizard and carries the settings version the unbind produced', async () => {
     const orgPath = `/api/orgs/${LOCAL_DEFAULT_ORG_ID}`
     vi.stubGlobal(
       'fetch',
@@ -27,6 +27,7 @@ describe('LinearAccessStep — disconnecting', () => {
     )
     const base = initialWizardState()
     const patch = vi.fn()
+    const hold = vi.fn((work: () => Promise<void>) => work())
     render(
       <LinearAccessStep
         state={{
@@ -41,18 +42,20 @@ describe('LinearAccessStep — disconnecting', () => {
         teamId="default"
         isLocal
         advance={() => {}}
+        hold={hold}
       />,
     )
 
     await userEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
 
+    // The whole disconnect runs under the wizard's busy guard, so Continue
+    // cannot skip the bind on a connection this click is removing.
+    expect(hold).toHaveBeenCalledTimes(1)
     await waitFor(() =>
-      expect(patch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          linearConnected: false,
-          org: expect.objectContaining({ version: 8, linear_api_key: '' }),
-        }),
-      ),
+      expect(patch).toHaveBeenLastCalledWith({
+        org: expect.objectContaining({ version: 8, linear_api_key: '' }),
+      }),
     )
+    expect(patch).toHaveBeenCalledWith(expect.objectContaining({ linearConnected: false }))
   })
 })

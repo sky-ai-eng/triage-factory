@@ -518,6 +518,32 @@ func TestLinearCredential_SettingsRace(t *testing.T) {
 	}
 }
 
+// TestLinearCredential_UnreadableSnapshotRefuses: a key the local snapshot
+// cannot read is one a failed write could not put back, so both the bind and
+// the unbind refuse before touching anything.
+func TestLinearCredential_UnreadableSnapshotRefuses(t *testing.T) {
+	r := newLinearAccessRig(t)
+	r.bind(t, "lin_api_ada")
+	r.s.secrets = getFailingSecrets{SecretStore: r.s.secrets}
+
+	for _, tc := range []struct {
+		method string
+		body   any
+	}{
+		{http.MethodPut, map[string]any{"api_key": "lin_api_bea"}},
+		{http.MethodDelete, nil},
+	} {
+		rec := doJSON(t, r.s, tc.method, linearCredentialPath(), tc.body)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s with an unreadable snapshot: %d %s, want 500", tc.method, rec.Code, rec.Body.String())
+		}
+		r.expectNoKick(t)
+		if v := r.secret(t, integrations.KeyLinearAPIKey); v != "lin_api_ada" {
+			t.Errorf("%s: key = %q, want the bound key untouched", tc.method, v)
+		}
+	}
+}
+
 // TestSnapshotLinearSecrets_Restores pins the local-mode rollback the bind
 // relies on: keys put back as they were, and keys that were absent removed.
 func TestSnapshotLinearSecrets_Restores(t *testing.T) {
@@ -525,7 +551,10 @@ func TestSnapshotLinearSecrets_Restores(t *testing.T) {
 	r.putSecret(t, integrations.KeyLinearAPIKey, "lin_api_old")
 	r.putSecret(t, integrations.KeyLinearAuthMethod, "api_key")
 
-	restore := r.s.snapshotLinearSecrets(t.Context(), runmode.LocalDefaultOrgID)
+	restore, err := r.s.snapshotLinearSecrets(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
 	r.putSecret(t, integrations.KeyLinearAPIKey, "lin_api_new")
 	r.putSecret(t, integrations.KeyLinearBoundAs, `{"name":"ada"}`)
 	restore()

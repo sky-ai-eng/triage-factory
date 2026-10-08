@@ -58,6 +58,11 @@ export interface WizardController {
   goTo: (index: number) => boolean
   // Re-run loads after a failure.
   retry: () => void
+  // Run an in-step action (a disconnect) under the guard a persist holds:
+  // Continue, Back and goTo refuse until it settles, so the wizard can't move
+  // on state the action is about to change. A no-op while a persist or another
+  // held action is in flight.
+  hold: (work: () => Promise<void>) => Promise<void>
 }
 
 export function useWizard(
@@ -232,6 +237,18 @@ export function useWizard(
 
   const retry = useCallback(() => setReloadNonce((n) => n + 1), [])
 
+  const hold = useCallback(async (work: () => Promise<void>) => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy(true)
+    try {
+      await work()
+    } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }, [])
+
   const isStepComplete = useCallback(
     (index: number) => !!steps[index]?.isComplete(state),
     [steps, state],
@@ -258,5 +275,6 @@ export function useWizard(
     back,
     goTo,
     retry,
+    hold,
   }
 }

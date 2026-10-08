@@ -325,6 +325,10 @@ export interface StepContext extends WizardIdentity {
   // both records the choice and moves on — no Continue button. Absent on the
   // persist path.
   advance?: () => void
+  // Run an in-body action under the wizard's busy guard, so Continue can't
+  // advance while it is changing what the step's state describes (a
+  // disconnect). Threaded in for render only; absent on the persist path.
+  hold?: (work: () => Promise<void>) => Promise<void>
 }
 
 // The step contract. Trivial or real, every step implements this so the host

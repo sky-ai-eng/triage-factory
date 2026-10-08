@@ -126,7 +126,11 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 	// A failure later in the transaction puts the prior keys back rather than
 	// leaving the new key half-bound — or, on a rotation, deleting the key
 	// that was working.
-	restore, unlock := s.guardLocalLinearWrite(ctx, orgID)
+	restore, unlock, err := s.guardLocalLinearWrite(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-access", err)
+		return
+	}
 	defer unlock()
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -137,17 +141,23 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if linear.AuthMethod(method) == linear.AuthMethodAppInstall {
 			return errLinearAppInstalled
 		}
-		for k, v := range map[string]string{
-			integrations.KeyLinearAPIKey:     key,
-			integrations.KeyLinearAuthMethod: string(linear.AuthMethodAPIKey),
-			integrations.KeyLinearBoundAs:    string(binding),
+		// The keys are written in the order ClearLinear deletes them, the
+		// unbind's order. Postgres holds each row's lock until commit, so two
+		// writers taking the same rows in different orders can deadlock, and
+		// one of them fails.
+		for _, kv := range [][2]string{
+			{integrations.KeyLinearAPIKey, key},
+			{integrations.KeyLinearAuthMethod, string(linear.AuthMethodAPIKey)},
 		} {
-			if err := tx.Secrets.Put(ctx, orgID, k, v, ""); err != nil {
-				return fmt.Errorf("store %s: %w", k, err)
+			if err := tx.Secrets.Put(ctx, orgID, kv[0], kv[1], ""); err != nil {
+				return fmt.Errorf("store %s: %w", kv[0], err)
 			}
 		}
 		if err := integrations.ClearLinearOtherScheme(ctx, tx.Secrets, orgID, linear.AuthMethodAPIKey); err != nil {
 			return fmt.Errorf("clear stale linear credential: %w", err)
+		}
+		if err := tx.Secrets.Put(ctx, orgID, integrations.KeyLinearBoundAs, string(binding), ""); err != nil {
+			return fmt.Errorf("store %s: %w", integrations.KeyLinearBoundAs, err)
 		}
 		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
 		if err != nil {
@@ -207,7 +217,11 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 
 	// A failure after the clear puts the credential back: the request reports
 	// the disconnect failed, so the org must still be connected.
-	restore, unlock := s.guardLocalLinearWrite(ctx, orgID)
+	restore, unlock, err := s.guardLocalLinearWrite(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-access", err)
+		return
+	}
 	defer unlock()
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
@@ -332,19 +346,21 @@ func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (li
 // snapshotLinearSecrets reads the org's stored Linear keys and returns a func
 // that writes them back as they were — deleting a key that was absent. Local
 // mode only, where secret writes land in the keychain outside the SQLite
-// transaction and so survive its rollback. A key that cannot be read is left
-// out of the restore rather than guessed at.
-func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) func() {
+// transaction and so survive its rollback. Any key that cannot be read fails
+// the snapshot, since the restore could not put that key back. The restore
+// outlives the request's context: a client that disconnects mid-write is
+// exactly when it has to run.
+func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) (func(), error) {
 	keys := []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs}
 	prior := make(map[string]string, len(keys))
 	for _, k := range keys {
 		v, err := s.secrets.Get(ctx, orgID, k)
 		if err != nil {
-			serverLog.Warn("snapshot linear secret failed", "org", orgID, "key", k, "error", err)
-			continue
+			return nil, fmt.Errorf("snapshot %s: %w", k, err)
 		}
 		prior[k] = v
 	}
+	ctx = context.WithoutCancel(ctx)
 	return func() {
 		for k, v := range prior {
 			var err error
@@ -357,21 +373,27 @@ func (s *Server) snapshotLinearSecrets(ctx context.Context, orgID string) func()
 				serverLog.Warn("restore linear secret failed", "org", orgID, "key", k, "error", err)
 			}
 		}
-	}
+	}, nil
 }
 
 // guardLocalLinearWrite prepares a Linear credential write in local mode, where
 // the keychain sits outside the SQLite transaction: it takes
 // linearCredentialMu and snapshots the stored keys. It returns the snapshot's
 // restore, for the caller to run when the transaction fails, and the unlock to
-// defer. Multi mode keeps secrets inside the transaction, so it returns a nil
-// restore and a no-op unlock.
-func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (restore, unlock func()) {
+// defer. A snapshot that cannot be taken refuses the write: a key it could not
+// read is one it could not put back. Multi mode keeps secrets inside the
+// transaction, so it returns a nil restore and a no-op unlock.
+func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
 	if runmode.Current() != runmode.ModeLocal {
-		return nil, func() {}
+		return nil, func() {}, nil
 	}
 	s.linearCredentialMu.Lock()
-	return s.snapshotLinearSecrets(ctx, orgID), s.linearCredentialMu.Unlock
+	restore, err = s.snapshotLinearSecrets(ctx, orgID)
+	if err != nil {
+		s.linearCredentialMu.Unlock()
+		return nil, nil, err
+	}
+	return restore, s.linearCredentialMu.Unlock, nil
 }
 
 // saveLinearWorkspace writes the org settings row carrying the Linear workspace

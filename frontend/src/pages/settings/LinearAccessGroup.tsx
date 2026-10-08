@@ -34,6 +34,7 @@ export default function LinearAccessGroup({
   orgId,
   onReplace,
   onDisconnected,
+  hold,
   bare = false,
 }: {
   value: { linear_api_key: string }
@@ -46,7 +47,12 @@ export default function LinearAccessGroup({
   /** Org the credential belongs to — the DELETE is org-scoped by path. */
   orgId: string | null
   onReplace?: () => void
-  onDisconnected?: () => void
+  /** Runs after a successful disconnect, inside `hold` when one is given. */
+  onDisconnected?: () => void | Promise<void>
+  /** Runs the whole disconnect under the container's busy guard — the setup
+   *  wizard's, so Continue cannot skip the bind on a connection this click is
+   *  removing. */
+  hold?: (work: () => Promise<void>) => Promise<void>
   bare?: boolean
 }) {
   const field = bare ? glassInputClass : inputClass
@@ -56,13 +62,16 @@ export default function LinearAccessGroup({
       toast.error('No organization context — reload and try again.')
       return
     }
-    const res = await disconnectLinear(orgId)
-    if (!res.ok) {
-      toast.error(res.error)
-      return
+    const work = async () => {
+      const res = await disconnectLinear(orgId)
+      if (!res.ok) {
+        toast.error(res.error)
+        return
+      }
+      onChange({ linear_api_key: '' })
+      await onDisconnected?.()
     }
-    onChange({ linear_api_key: '' })
-    onDisconnected?.()
+    await (hold ? hold(work) : work())
   }
 
   const statusLine = [
