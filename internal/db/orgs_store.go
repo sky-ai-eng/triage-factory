@@ -232,19 +232,26 @@ type OrgsStore interface {
 	// but it validates against it — it refuses llm_auth_method "system" while
 	// either ref is set — and it writes llm_auth_method, so a save that ran
 	// that check before the bind landed must conflict rather than store
-	// "system" beside a credential. A call that would change neither column
-	// writes nothing and moves nothing, so rotating a key under the same ref,
-	// or clearing a ref that is already clear, never fails an open settings
-	// edit; the returned row is then the current one.
+	// "system" beside a credential.
 	//
-	// A row that does not exist yet is created from schema defaults, as
-	// SetGitHubCredentialClass creates it. Pool and return contract as
-	// SetGitHubCredentialClass.
+	// A call that would change neither column writes nothing and moves
+	// nothing, so it never fails an open settings edit: rotating a key under
+	// the same ref, clearing a ref that is already clear, and clearing on an
+	// org with no settings row. A bind onto an org with no settings row
+	// creates the row from schema defaults, as SetGitHubCredentialClass does.
+	// A clear never creates one. A missing row already reads as having no ref,
+	// and creating it would move the version and replace what GetSettings
+	// reports for a missing row (domain.DefaultOrgSettings) with the column
+	// defaults, which differ from it in both dialects.
+	//
+	// Pool as SetGitHubCredentialClass. A call that writes returns the stored
+	// row from RETURNING, projecting GetSettings' column list and scanner; a
+	// call that writes nothing returns what GetSettings returns.
 	SetAnthropicKeyRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error)
 
 	// SetBedrockCredentialsRef is SetAnthropicKeyRef for
 	// org_settings.bedrock_credentials_ref — the key of the Bedrock shape the
 	// org has bound, which also names that shape. Same llm_auth_method rule,
-	// version rule and contract.
+	// version rule, missing-row rule and return contract.
 	SetBedrockCredentialsRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error)
 }

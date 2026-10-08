@@ -528,7 +528,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// A clear on an org with no settings row has nothing to clear, so it
-		// creates no row: a save asserting "no row" still lands.
+		// creates no row: the read still reports the missing-row defaults
+		// rather than the column defaults a created row would take, and a save
+		// asserting "no row" still lands.
 		t.Run("clear on a missing row", func(t *testing.T) {
 			stores, ids := factory(t)
 			for _, w := range []refWriter{anthropic, bedrock} {
@@ -538,6 +540,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				}
 				if !reflect.DeepEqual(got, domain.DefaultOrgSettings()) {
 					t.Errorf("clear %s on a missing row returned %+v, want the defaults a read finds", w.name, got)
+				}
+				read, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+				if err != nil {
+					t.Fatalf("GetSettingsSystem: %v", err)
+				}
+				if !reflect.DeepEqual(read, domain.DefaultOrgSettings()) {
+					t.Errorf("read after clear %s on a missing row = %+v, want the missing-row defaults", w.name, read)
 				}
 			}
 			if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0); err != nil {
