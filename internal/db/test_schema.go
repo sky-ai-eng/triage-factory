@@ -133,6 +133,16 @@ func openTemplate(base []byte) (*sql.DB, error) {
 	return template, nil
 }
 
+// checkpointEvery is the spacing, in migrations, of the images a build
+// leaves behind on its way to the version it was asked for: every
+// checkpointEvery-th migration of the tree. Tests ask for versions in no
+// particular order, and the first build is usually head, so without them
+// every request below the highest cached image would replay from empty.
+// With them a request applies at most checkpointEvery-1 migrations
+// beyond an image already cached, for about 1MB of memory per
+// checkpoint.
+const checkpointEvery = 8
+
 var (
 	migratedImagesMu sync.Mutex
 	migratedImages   = map[int64][]byte{}
@@ -145,10 +155,10 @@ var (
 // version they seed at.
 //
 // Images are cached by version and built lazily: a build restores the
-// highest cached image at or below version and applies only the
-// migrations after it. The image carries goose_db_version, so goose
-// continues from the restored version exactly as it would on the
-// database the image was taken from.
+// highest cached image below version, applies only the migrations after
+// it, and caches the checkpoints it passes (see checkpointEvery). The
+// image carries goose_db_version, so goose continues from the restored
+// version exactly as it would on the database the image was taken from.
 //
 // Every image is built under TestDSNMemory, foreign keys on. A restore
 // keeps the target connection's own pragmas, so a connection opened
@@ -179,22 +189,33 @@ func migratedImageAt(version int64) ([]byte, error) {
 		return nil, err
 	}
 	gooseMu.Lock()
+	defer gooseMu.Unlock()
 	goose.SetBaseFS(treeFS)
-	upErr := goose.SetDialect("sqlite3")
-	if upErr == nil {
-		upErr = goose.UpTo(template, dir, version)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return nil, fmt.Errorf("set dialect: %w", err)
 	}
-	gooseMu.Unlock()
-	if upErr != nil {
-		return nil, fmt.Errorf("goose.UpTo(%d) on template: %w", version, upErr)
+	tree, err := goose.CollectMigrations(dir, 0, goose.MaxVersion)
+	if err != nil {
+		return nil, fmt.Errorf("collect migrations: %w", err)
 	}
 
-	image, err := serializeImage(template)
-	if err != nil {
-		return nil, fmt.Errorf("image at %d: %w", version, err)
+	var stops []int64
+	for i, m := range tree {
+		if (i+1)%checkpointEvery == 0 && m.Version > baseVersion && m.Version < version {
+			stops = append(stops, m.Version)
+		}
 	}
-	migratedImages[version] = image
-	return image, nil
+	for _, stop := range append(stops, version) {
+		if err := goose.UpTo(template, dir, stop); err != nil {
+			return nil, fmt.Errorf("goose.UpTo(%d) on template: %w", stop, err)
+		}
+		image, err := serializeImage(template)
+		if err != nil {
+			return nil, fmt.Errorf("image at %d: %w", stop, err)
+		}
+		migratedImages[stop] = image
+	}
+	return migratedImages[version], nil
 }
 
 // sqliteHeadVersion is the highest version in the embedded SQLite
