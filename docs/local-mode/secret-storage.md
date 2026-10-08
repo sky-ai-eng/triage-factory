@@ -1,9 +1,12 @@
 # Secret storage (local mode)
 
-All credentials Triage Factory uses (GitHub PAT, Jira PAT, the Anthropic key,
-GitHub App private keys) are entered in the UI and stored outside the database.
-Local mode does not read GitHub or Jira credentials from environment variables.
-The secret backend is selected automatically:
+Credentials Triage Factory stores (the GitHub PAT, the Jira credential, an
+Anthropic or Bedrock key, GitHub App private keys) are entered in the UI and
+kept outside the database. Local mode does not read GitHub or Jira credentials
+from environment variables; Claude can instead run on the host's own
+credentials, which are never stored (see
+[configuration](configuration.md#credentials)). The secret backend is selected
+automatically:
 
 - **Desktop / keychain present** (macOS, or Linux with a working Secret Service):
   the OS keychain. No extra configuration.

@@ -7,9 +7,11 @@ Postgres, GoTrue, or Docker.
 
 A server changes two things: there is no OS keychain to hold credentials, and
 there is no browser on the machine. The first is handled by an encrypted file,
-the second by reaching the UI from your own machine. Everything else, including
-all credentials and configuration, is entered in the UI exactly as on a desktop.
-Local mode does not read GitHub or Jira credentials from environment variables.
+the second by reaching the UI from your own machine. Everything else is
+configured in the UI exactly as on a desktop. GitHub and Jira credentials can
+only be entered there; local mode does not read them from environment variables.
+Claude is the one credential that can come from the environment, covered
+[below](#claude-credentials).
 
 1. **Install the binary** (Homebrew or `go build` — see the
    [README](../../README.md)). `$HOME` must be set; state lands in
@@ -53,10 +55,13 @@ Local mode does not read GitHub or Jira credentials from environment variables.
 
 ## Claude credentials
 
-Claude can authenticate with a key you enter in Settings, or with the host's own
-credentials: under that option the agent inherits the server process's
-environment, so an exported `ANTHROPIC_API_KEY` (or Bedrock / Vertex variables)
-works without being entered anywhere.
+Either enter an Anthropic or Bedrock key under **Claude credentials**, or choose
+*Use system Claude Code credentials* and give the server process the credentials
+Claude Code reads itself: export `ANTHROPIC_API_KEY` (or the Bedrock / Vertex
+variables) where the process gets its environment, as with
+`TF_SECRET_ENCRYPTION_KEY`. Triage Factory passes that environment through to
+the agent untouched and never reads the variables itself; see
+[configuration](configuration.md#credentials) for how the two options interact.
 
 ## Cloning
 
