@@ -163,6 +163,11 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if err != nil {
 			return fmt.Errorf("load org settings: %w", err)
 		}
+		// TODO(TFAC-1060): a key from a different workspace is accepted here,
+		// and the tracker then matches the new workspace's issues to the old
+		// rows by identifier alone, overwriting their text and giving them the
+		// old rows' tasks and history. Matching on the issue UUID, plus an
+		// explicit answer for a workspace switch, closes it.
 		orgSet.LinearWorkspaceID = org.ID
 		orgSet.LinearWorkspaceURLKey = org.URLKey
 		if err := saveLinearWorkspace(ctx, tx, orgID, orgSet); err != nil {
