@@ -1140,15 +1140,11 @@ const linearAccessStep: WizardStep = {
     if (!orgId) throw new Error('No organization context.')
     const result = await connectLinear(orgId, state.org.linear_api_key)
     if (!result.ok) throw new Error(result.error)
-    // The bind wrote the workspace onto the settings row, so the concurrency
-    // token moved — pick up the fresh one, or the Linear poll interval's save
-    // right after conflicts with this connect.
-    const version = await freshOrgVersion(orgId, state.org.version)
     patch({
       linearConnected: true,
       linearWorkspaceUrlKey: result.access.workspace_url_key,
       linearBoundAs: boundAsName(result.access),
-      org: { ...state.org, linear_api_key: '', version },
+      org: { ...state.org, linear_api_key: '' },
     })
   },
   collapsedSummary: (s) =>

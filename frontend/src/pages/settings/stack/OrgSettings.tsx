@@ -674,8 +674,6 @@ export default function OrgSettings({
               }
               setDraft((d) => ({ ...d, ...cleared, org: { ...d.org, linear_api_key: '' } }))
               setBaseline((b) => ({ ...b, ...cleared }))
-              // The disconnect also cleared the workspace on the settings row.
-              void refreshOrgVersion()
             }}
             bare
           />
@@ -707,8 +705,6 @@ export default function OrgSettings({
                 toast.error(result.error)
                 return false
               }
-              // The bind also wrote the workspace onto the settings row.
-              await refreshOrgVersion()
               const connected = {
                 linearConnected: true,
                 linearWorkspaceUrlKey: result.access.workspace_url_key,

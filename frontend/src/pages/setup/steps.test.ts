@@ -433,11 +433,14 @@ describe('setup — the Linear tracker', () => {
       method: 'PUT',
       body: { api_key: 'lin_api_x' },
     })
+    // The bind writes no column the settings page saves, so the version the
+    // wizard holds stays current and nothing re-reads it.
+    expect(calls).toHaveLength(1)
     expect(patched.at(-1)).toMatchObject({
       linearConnected: true,
       linearWorkspaceUrlKey: 'acme',
       linearBoundAs: 'Ada',
-      org: { linear_api_key: '', version: 12 },
+      org: { linear_api_key: '', version: 11 },
     })
   })
 

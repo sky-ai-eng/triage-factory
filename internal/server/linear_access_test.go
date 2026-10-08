@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +19,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 func linearCredentialPath() string {
@@ -460,27 +459,28 @@ func TestLinearCredentialDelete_LeavesUserCredentials(t *testing.T) {
 	}
 }
 
-// settingsRaceTx makes every versioned settings write lose, as one does when a
-// concurrent settings save commits between the handler's read and its write.
-type settingsRaceTx struct{ db.TxRunner }
+// failingWorkspaceTx fails the Linear workspace write, the last write the
+// bind and the unbind make before their audit row, so every keychain write
+// before it has already landed when the transaction rolls back.
+type failingWorkspaceTx struct{ db.TxRunner }
 
-func (w settingsRaceTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+func (w failingWorkspaceTx) WithTx(ctx context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	return w.TxRunner.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		tx.Orgs = settingsRaceOrgs{OrgsStore: tx.Orgs}
+		tx.Orgs = failingWorkspaceOrgs{OrgsStore: tx.Orgs}
 		return fn(tx)
 	})
 }
 
-type settingsRaceOrgs struct{ db.OrgsStore }
+type failingWorkspaceOrgs struct{ db.OrgsStore }
 
-func (settingsRaceOrgs) UpdateSettingsVersioned(context.Context, string, domain.OrgSettings, int) (domain.OrgSettings, error) {
-	return domain.OrgSettings{}, db.ErrOrgSettingsVersion
+func (failingWorkspaceOrgs) SetLinearWorkspace(context.Context, string, string, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, errors.New("workspace write failed")
 }
 
-// TestLinearCredential_SettingsRace: a bind or unbind whose settings write
-// loses to a concurrent save answers 409 and leaves the org exactly as it
-// was — the keychain writes that landed before the loss are put back.
-func TestLinearCredential_SettingsRace(t *testing.T) {
+// TestLinearCredential_FailedWriteRestoresKeys: a bind or unbind whose
+// transaction fails after its keychain writes answers 500 and leaves the org
+// exactly as it was — the keys are put back, and no audit row or re-due lands.
+func TestLinearCredential_FailedWriteRestoresKeys(t *testing.T) {
 	r := newLinearAccessRig(t)
 	r.bind(t, "lin_api_ada")
 	keys := []string{integrations.KeyLinearAPIKey, integrations.KeyLinearAuthMethod, integrations.KeyLinearAppInstall, integrations.KeyLinearBoundAs}
@@ -489,7 +489,7 @@ func TestLinearCredential_SettingsRace(t *testing.T) {
 		before[k] = r.secret(t, k)
 	}
 	rows := len(r.credentialRows(t))
-	r.s.tx = settingsRaceTx{TxRunner: r.s.tx}
+	r.s.tx = failingWorkspaceTx{TxRunner: r.s.tx}
 	r.fake.setWorkspace(linear.Organization{ID: "org-beta", Name: "Beta", URLKey: "beta"})
 
 	for _, tc := range []struct {
@@ -500,21 +500,52 @@ func TestLinearCredential_SettingsRace(t *testing.T) {
 		{http.MethodDelete, nil},
 	} {
 		rec := doJSON(t, r.s, tc.method, linearCredentialPath(), tc.body)
-		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), httpx.ReasonVersionConflict) {
-			t.Errorf("%s: %d %s, want 409 %s", tc.method, rec.Code, rec.Body.String(), httpx.ReasonVersionConflict)
+		if rec.Code != http.StatusInternalServerError {
+			t.Errorf("%s with a failing write: %d %s, want 500", tc.method, rec.Code, rec.Body.String())
 		}
 		r.expectNoKick(t)
 		for _, k := range keys {
 			if v := r.secret(t, k); v != before[k] {
-				t.Errorf("%s: %s = %q after the lost race, want %q", tc.method, k, v, before[k])
+				t.Errorf("%s: %s = %q after the failed write, want %q", tc.method, k, v, before[k])
 			}
 		}
 		if set := r.orgSettings(t); set.LinearWorkspaceURLKey != "acme" {
-			t.Errorf("%s: workspace = %q after the lost race, want acme", tc.method, set.LinearWorkspaceURLKey)
+			t.Errorf("%s: workspace = %q after the failed write, want acme", tc.method, set.LinearWorkspaceURLKey)
 		}
 	}
 	if got := len(r.credentialRows(t)); got != rows {
-		t.Errorf("linear credential rows = %d after two lost races, want still %d", got, rows)
+		t.Errorf("linear credential rows = %d after two failed writes, want still %d", got, rows)
+	}
+}
+
+// TestLinearCredential_LeavesSettingsVersion: the workspace columns are the
+// credential's, not the settings page's, so a bind or unbind leaves the
+// settings version alone. A settings save loaded before the bind still lands,
+// and it cannot put the old workspace back.
+func TestLinearCredential_LeavesSettingsVersion(t *testing.T) {
+	r := newLinearAccessRig(t)
+	loaded := orgSettingsVersion(t, r.s)
+
+	r.bind(t, "lin_api_ada")
+	if v := orgSettingsVersion(t, r.s); v != loaded {
+		t.Fatalf("settings version = %d after the bind, want %d unchanged", v, loaded)
+	}
+
+	rec := doJSON(t, r.s, http.MethodPatch, orgSettingsPath(), map[string]any{"version": loaded, "linear_poll_interval": "20m"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH loaded before the bind: %d: %s", rec.Code, rec.Body.String())
+	}
+	if set := r.orgSettings(t); set.LinearWorkspaceID != "org-acme" || set.LinearWorkspaceURLKey != "acme" {
+		t.Errorf("workspace = (%q, %q) after the settings save, want the bound one kept", set.LinearWorkspaceID, set.LinearWorkspaceURLKey)
+	}
+
+	loaded = orgSettingsVersion(t, r.s)
+	if rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
+	}
+	r.expectKick(t)
+	if v := orgSettingsVersion(t, r.s); v != loaded {
+		t.Errorf("settings version = %d after the unbind, want %d unchanged", v, loaded)
 	}
 }
 

@@ -11,7 +11,6 @@
 // Reuse rule: composes the shared LinearAccessGroup — no parallel field UI.
 
 import LinearAccessGroup from '../settings/LinearAccessGroup'
-import { fetchOrgSettings } from '../settings/orgConfig'
 import type { StepContext } from './types'
 
 export function LinearAccessStep({ state, patch, orgId, hold }: StepContext) {
@@ -25,17 +24,14 @@ export function LinearAccessStep({ state, patch, orgId, hold }: StepContext) {
         workspaceUrlKey={state.linearWorkspaceUrlKey}
         orgId={orgId}
         hold={hold}
-        onDisconnected={async () => {
-          const org = { ...state.org, linear_api_key: '' }
-          patch({ linearConnected: false, linearWorkspaceUrlKey: '', linearBoundAs: '', org })
-          // The unbind clears the workspace columns on the settings row, which
-          // moves its version; re-read it before the hold releases so the next
-          // org step's save doesn't conflict with this write. On a failed
-          // re-read the held version stands and the save's conflict recovery
-          // covers it.
-          const fresh = orgId ? await fetchOrgSettings(orgId) : null
-          if (fresh) patch({ org: { ...org, version: fresh.version } })
-        }}
+        onDisconnected={() =>
+          patch({
+            linearConnected: false,
+            linearWorkspaceUrlKey: '',
+            linearBoundAs: '',
+            org: { ...state.org, linear_api_key: '' },
+          })
+        }
         bare
       />
       {/* TODO(TFAC-1023): render the local-mode ReuseCredentialCheckbox for

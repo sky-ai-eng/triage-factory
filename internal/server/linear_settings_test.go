@@ -79,12 +79,7 @@ func TestOrgSettingsPatch_LinearWorkspaceIsNotASetting(t *testing.T) {
 	ctx := t.Context()
 
 	// What a credential bind would have written.
-	set, err := s.orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read settings: %v", err)
-	}
-	set.LinearWorkspaceID, set.LinearWorkspaceURLKey = "workspace-uuid", "acme"
-	if _, err := s.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.orgs.SetLinearWorkspace(ctx, runmode.LocalDefaultOrgID, "workspace-uuid", "acme"); err != nil {
 		t.Fatalf("seed workspace: %v", err)
 	}
 

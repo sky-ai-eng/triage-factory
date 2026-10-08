@@ -159,19 +159,13 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if err := tx.Secrets.Put(ctx, orgID, integrations.KeyLinearBoundAs, string(binding), ""); err != nil {
 			return fmt.Errorf("store %s: %w", integrations.KeyLinearBoundAs, err)
 		}
-		orgSet, err := tx.Orgs.GetSettings(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
 		// TODO(TFAC-1060): a key from a different workspace is accepted here,
 		// and the tracker then matches the new workspace's issues to the old
 		// rows by identifier alone, overwriting their text and giving them the
 		// old rows' tasks and history. Matching on the issue UUID, plus an
 		// explicit answer for a workspace switch, closes it.
-		orgSet.LinearWorkspaceID = org.ID
-		orgSet.LinearWorkspaceURLKey = org.URLKey
-		if err := saveLinearWorkspace(ctx, tx, orgID, orgSet); err != nil {
-			return err
+		if _, err := tx.Orgs.SetLinearWorkspace(ctx, orgID, org.ID, org.URLKey); err != nil {
+			return fmt.Errorf("save linear workspace: %w", err)
 		}
 		return tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
 			ActorUserID: userID,
@@ -182,14 +176,11 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		if restore != nil {
 			restore()
 		}
-		switch {
-		case errors.Is(err, errLinearAppInstalled):
+		if errors.Is(err, errLinearAppInstalled) {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: "this workspace's Linear access is an installed app — disconnect the installed app first", Field: "api_key"})
-		case errors.Is(err, db.ErrOrgSettingsVersion):
-			writeLinearSettingsRace(w)
-		default:
-			internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
+			return
 		}
+		internalError(w, "linear-access", fmt.Errorf("persist linear credential: %w", err))
 		return
 	}
 
@@ -251,10 +242,8 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		}
 		prevWorkspace := orgSet.LinearWorkspaceURLKey
 		if orgSet.LinearWorkspaceID != "" || prevWorkspace != "" {
-			orgSet.LinearWorkspaceID = ""
-			orgSet.LinearWorkspaceURLKey = ""
-			if err := saveLinearWorkspace(ctx, tx, orgID, orgSet); err != nil {
-				return err
+			if _, err := tx.Orgs.SetLinearWorkspace(ctx, orgID, "", ""); err != nil {
+				return fmt.Errorf("clear linear workspace: %w", err)
 			}
 		}
 		if !had {
@@ -268,10 +257,6 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 	}); err != nil {
 		if restore != nil {
 			restore()
-		}
-		if errors.Is(err, db.ErrOrgSettingsVersion) {
-			writeLinearSettingsRace(w)
-			return
 		}
 		internalError(w, "linear-access", err)
 		return
@@ -399,24 +384,6 @@ func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (resto
 		return nil, nil, err
 	}
 	return restore, s.linearCredentialMu.Unlock, nil
-}
-
-// saveLinearWorkspace writes the org settings row carrying the Linear workspace
-// columns, guarded by the version the caller read inside the same
-// transaction. The row holds every other org setting too, and an unguarded
-// write would put back whatever a concurrent settings save just changed.
-func saveLinearWorkspace(ctx context.Context, tx db.TxStores, orgID string, orgSet domain.OrgSettings) error {
-	if _, err := tx.Orgs.UpdateSettingsVersioned(ctx, orgID, orgSet, orgSet.Version); err != nil {
-		return fmt.Errorf("save org settings: %w", err)
-	}
-	return nil
-}
-
-// writeLinearSettingsRace answers a bind or unbind whose settings write lost
-// to a concurrent settings save. Nothing was written, so the call is safe to
-// repeat as is.
-func writeLinearSettingsRace(w http.ResponseWriter) {
-	httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonVersionConflict, Message: "the organization's settings changed during this request and nothing was saved — try again"})
 }
 
 // kickLinearChanged re-dues the org's Linear poll under a changed credential

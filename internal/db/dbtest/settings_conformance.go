@@ -220,6 +220,64 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// linear_workspace_id / linear_workspace_url_key are the workspace the
+	// org's Linear credential belongs to, written by the credential bind and
+	// cleared by the unbind. Like github_credential_class they are not the
+	// settings writer's: SetLinearWorkspace round-trips them and leaves the
+	// version alone, and no bulk save — guarded or not, carrying the fields
+	// or not — changes them.
+	t.Run("OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave", func(t *testing.T) {
+		stores, ids := factory(t)
+
+		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"})
+		if err != nil {
+			t.Fatalf("UpdateSettings (materialize): %v", err)
+		}
+		set, err := stores.Orgs.SetLinearWorkspace(ctx, ids.OrgID, "linear-workspace-uuid", "acme")
+		if err != nil {
+			t.Fatalf("SetLinearWorkspace: %v", err)
+		}
+		if set.LinearWorkspaceID != "linear-workspace-uuid" || set.LinearWorkspaceURLKey != "acme" {
+			t.Errorf("SetLinearWorkspace returned (%q, %q), want (linear-workspace-uuid, acme)", set.LinearWorkspaceID, set.LinearWorkspaceURLKey)
+		}
+		if set.Version != saved.Version {
+			t.Errorf("SetLinearWorkspace moved the version %d -> %d; the settings writer can't reach these columns, so there is nothing for it to guard", saved.Version, set.Version)
+		}
+
+		// A guarded save loaded before the bind still lands, and neither it
+		// nor an unguarded save carrying other values moves the workspace.
+		save := set
+		save.LinearWorkspaceID, save.LinearWorkspaceURLKey = "", ""
+		save.MaxConcurrentRuns = 4
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, saved.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (loaded before the bind): %v", err)
+		}
+		save.LinearWorkspaceID, save.LinearWorkspaceURLKey = "someone-elses", "other"
+		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
+			t.Fatalf("UpdateSettings (workspace in struct): %v", err)
+		}
+		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if after.LinearWorkspaceID != "linear-workspace-uuid" || after.LinearWorkspaceURLKey != "acme" {
+			t.Errorf("a settings save moved the workspace to (%q, %q); want it kept — the columns belong to the credential, not to UpdateSettings",
+				after.LinearWorkspaceID, after.LinearWorkspaceURLKey)
+		}
+		if after.MaxConcurrentRuns != 4 {
+			t.Errorf("the settings save didn't apply its own field: concurrent=%d", after.MaxConcurrentRuns)
+		}
+
+		// "" clears both columns, which is what the unbind writes.
+		cleared, err := stores.Orgs.SetLinearWorkspace(ctx, ids.OrgID, "", "")
+		if err != nil {
+			t.Fatalf("SetLinearWorkspace (clear): %v", err)
+		}
+		if cleared.LinearWorkspaceID != "" || cleared.LinearWorkspaceURLKey != "" {
+			t.Errorf("cleared workspace = (%q, %q), want both empty", cleared.LinearWorkspaceID, cleared.LinearWorkspaceURLKey)
+		}
+	})
+
 	// OrgSettings_PerSourceWriteDoesNotShareTheVersionToken pins the
 	// concurrency split base_url / poll_interval moving onto org_event_sources
 	// left behind: the org_settings.version token guards a settings-page save
@@ -304,13 +362,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	t.Run("OrgSettings_RoundTripsEveryField", func(t *testing.T) {
 		stores, ids := factory(t)
 		want := domain.OrgSettings{
-			GitHubBaseURL:         "https://ghe.example.com",
-			GitHubPollInterval:    7 * time.Minute,
-			GitHubCloneProtocol:   "https",
-			JiraBaseURL:           "https://acme.atlassian.net",
-			JiraPollInterval:      3 * time.Minute,
-			LinearWorkspaceID:     "linear-workspace-uuid",
-			LinearWorkspaceURLKey: "acme",
+			GitHubBaseURL:       "https://ghe.example.com",
+			GitHubPollInterval:  7 * time.Minute,
+			GitHubCloneProtocol: "https",
+			JiraBaseURL:         "https://acme.atlassian.net",
+			JiraPollInterval:    3 * time.Minute,
+			// LinearWorkspaceID / LinearWorkspaceURLKey are left empty: like
+			// the class below, UpdateSettings doesn't own them (see
+			// OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave).
 			LinearPollInterval:    11 * time.Minute,
 			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
 			BedrockCredentialsRef: "vault://orgs/A/bedrock",

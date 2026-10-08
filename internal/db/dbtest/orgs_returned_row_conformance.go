@@ -107,6 +107,17 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 		}
 	})
 
+	t.Run("SetLinearWorkspace_returns_the_stored_row", func(t *testing.T) {
+		got, err := store.SetLinearWorkspace(ctx, orgID, "ret-workspace", "ret")
+		if err != nil {
+			t.Fatalf("SetLinearWorkspace: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "SetLinearWorkspace", got, read)
+		if got.LinearWorkspaceID != "ret-workspace" || got.LinearWorkspaceURLKey != "ret" {
+			t.Errorf("SetLinearWorkspace returned (%q, %q), want (ret-workspace, ret)", got.LinearWorkspaceID, got.LinearWorkspaceURLKey)
+		}
+	})
+
 	t.Run("SetGitHubCredentialClass_returns_the_stored_row", func(t *testing.T) {
 		got, err := store.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassBYOApp)
 		if err != nil {

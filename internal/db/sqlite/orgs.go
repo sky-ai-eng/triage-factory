@@ -271,8 +271,6 @@ const orgSettingsConflictUpdate = `
 			max_concurrent_runs = excluded.max_concurrent_runs,
 			marketplace_enabled = excluded.marketplace_enabled,
 			api_token_max_age_days = excluded.api_token_max_age_days,
-			linear_workspace_id = excluded.linear_workspace_id,
-			linear_workspace_url_key = excluded.linear_workspace_url_key,
 			version = org_settings.version + 1,
 			updated_at = CURRENT_TIMESTAMP`
 
@@ -310,9 +308,6 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 		// are a multi-mode credential — but it is written here all the same, so
 		// the two dialects keep one column list and one read shape.
 		nullIntValue(u.APITokenMaxAgeDays),
-		// "" is no Linear credential bound, which the column holds as NULL.
-		nullStringValue(u.LinearWorkspaceID),
-		nullStringValue(u.LinearWorkspaceURLKey),
 	}
 }
 
@@ -339,9 +334,8 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-			api_token_max_age_days, linear_workspace_id, linear_workspace_url_key,
-			version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
+			api_token_max_age_days, version, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
@@ -354,8 +348,8 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 //
 // Its SET list must stay in step with orgSettingsConflictUpdate above — same
 // columns, in the same order (the placeholders are positional), same
-// exclusions. github_credential_class is absent from both for the reason
-// UpdateSettings' doc gives.
+// exclusions. github_credential_class and the Linear workspace columns are
+// absent from both for the reason UpdateSettings' doc gives.
 func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	args := append(orgSettingsValues(u), orgID, expected)
 	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
@@ -370,8 +364,6 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 			max_concurrent_runs = ?,
 			marketplace_enabled = ?,
 			api_token_max_age_days = ?,
-			linear_workspace_id = ?,
-			linear_workspace_url_key = ?,
 			version = version + 1,
 			updated_at = CURRENT_TIMESTAMP
 		WHERE org_id = ? AND version = ?
@@ -434,6 +426,30 @@ func (s *orgsStore) SetGitHubCredentialClass(ctx context.Context, orgID string, 
 	// This writer doesn't touch org_event_sources — read the org's current
 	// base_url / poll_interval rather than leave them zero, so the row this
 	// hands back still matches what a follow-up GetSettings finds.
+	overrides, err := readSourceOverrides(ctx, s.q, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
+	}
+	db.ApplyOrgSourceOverrides(&stored, overrides)
+	return stored, nil
+}
+
+// SetLinearWorkspace upserts ONLY org_settings.linear_workspace_id and
+// linear_workspace_url_key. See the OrgsStore interface doc for why it is a
+// separate writer and why it leaves the version alone.
+func (s *orgsStore) SetLinearWorkspace(ctx context.Context, orgID, workspaceID, urlKey string) (domain.OrgSettings, error) {
+	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
+		INSERT INTO org_settings (org_id, linear_workspace_id, linear_workspace_url_key, updated_at)
+		VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id) DO UPDATE SET
+			linear_workspace_id = excluded.linear_workspace_id,
+			linear_workspace_url_key = excluded.linear_workspace_url_key,
+			updated_at = CURRENT_TIMESTAMP
+		RETURNING `+orgSettingsColumns,
+		orgID, nullStringValue(workspaceID), nullStringValue(urlKey)).Scan)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("set org linear workspace: %w", err)
+	}
 	overrides, err := readSourceOverrides(ctx, s.q, orgID)
 	if err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
