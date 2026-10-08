@@ -1165,8 +1165,9 @@ func (r JiraProjectStatusRules) Armed() bool {
 // The membership tests take a full ref and compare through SameStatus,
 // so the id decides whenever both sides carry one and a status renamed in Jira
 // keeps matching. The name is the fallback, and it is not a transitional one:
-// a rule seeded from the headless env vars is name-only by contract, and so is
-// any snapshot captured before status ids were recorded.
+// a stored rule can be name-only until its team next saves the rules, which
+// may be never, and so is any snapshot captured before status ids were
+// recorded.
 
 // PickupContains reports whether status is a member of the Pickup rule.
 func (r JiraProjectStatusRules) PickupContains(status JiraStatusRef) bool {

@@ -129,7 +129,6 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 			"jira":           false,
 			"linear":         false,
 			"github_repos":   0,
-			"env_provided":   auth.EnvProvided(),
 			"setup_complete": false,
 			"setup_step":     "org",
 		})
@@ -187,11 +186,11 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	}
 
 	// Setup is complete once GitHub access is configured (PAT or registered
-	// App; the env overlay folds into creds.GitHubPAT), the org has brought at
-	// least one repo into the registry, and — in multi mode, where nothing is
-	// pre-filled — both model picks are made. ReplaceForTeam writes the registry
-	// row in the same tx it records the team's tracked repos, so repoCount is a
-	// durable signal here — it doesn't lag behind the (async) profiling pass.
+	// App), the org has brought at least one repo into the registry, and — in
+	// multi mode, where nothing is pre-filled — both model picks are made.
+	// ReplaceForTeam writes the registry row in the same tx it records the
+	// team's tracked repos, so repoCount is a durable signal here — it doesn't
+	// lag behind the (async) profiling pass.
 	// It counts the registry rather than the tracked set on purpose: a founder
 	// who has finished setup and later untracks everything has still finished
 	// setup, and bouncing them back through it would be a regression, not a
@@ -225,7 +224,6 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		"jira":           jiraConnected,
 		"linear":         integrations.LinearSystemConfigured(creds),
 		"github_repos":   repoCount,
-		"env_provided":   auth.EnvProvided(),
 		"setup_complete": setupComplete,
 		"setup_step":     setupStep,
 	}
@@ -251,9 +249,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 // ensureLocalOrgProvisioned idempotently provisions the local-mode tenant —
 // the runmode.LocalDefault* sentinel rows plus the shipped
 // agent/prompts/blueprints/handlers — by running the shared
-// db.BootstrapLocalOrg chain when needed. It is the common core of the
-// "Start your factory" action (createLocalOrg) and the headless bootstrap
-// (RunHeadlessBootstrap), so the two share one provisioning path.
+// db.BootstrapLocalOrg chain when needed. The "Start your factory" action
+// (createLocalOrg) calls it.
 //
 // Returns alreadyProvisioned=true when the org AND its agents row already
 // exist: BootstrapNewOrg got at least through its first step, so the user may
@@ -287,10 +284,7 @@ func (s *Server) ensureLocalOrgProvisioned(ctx context.Context) (alreadyProvisio
 // localOrgProvisioned reports whether the local tenant is *fully* provisioned —
 // the org row AND its agents row both exist (the same condition
 // ensureLocalOrgProvisioned treats as "already provisioned"). A read-only probe
-// with no provisioning side effect, so a caller can branch on it before
-// deciding whether to do work that should only happen on a real provision
-// (e.g. the headless bootstrap skips its bot-credential network call and its
-// seed when this is already true). Org row but no agents row reads as
+// with no provisioning side effect. Org row but no agents row reads as
 // not-provisioned: that's a crash-mid-provision state the caller should
 // complete. System (admin-pool) reads; SQLite collapses the pool split.
 func (s *Server) localOrgProvisioned(ctx context.Context) (bool, error) {

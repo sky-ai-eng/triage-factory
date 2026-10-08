@@ -263,7 +263,7 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 	}
 
 	s.kickLinearChanged(r, orgID)
-	writeJSON(w, http.StatusOK, disconnectedResponse("linear"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
 // handleLinearAccessGet reports the org's Linear connection. Any org member

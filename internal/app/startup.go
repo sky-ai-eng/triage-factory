@@ -13,7 +13,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"github.com/sky-ai-eng/triage-factory/internal/skills"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 	"github.com/sky-ai-eng/triage-factory/internal/wsbackplane"
@@ -35,19 +34,6 @@ func (a *App) runStartupTasks(ctx context.Context) {
 	}
 	if a.local() {
 		a.wireCloneStatusCallback()
-		// Headless env-driven provisioning (TFAC-411): when TF_HEADLESS is set,
-		// provision the local tenant and seed repos / Jira / identity from env so
-		// a keychain-less, browser-less install reaches setup_complete. Runs
-		// before startBrain → bootstrapBareClones so the seeded repos clone on
-		// the first cycle. Local-mode only; if the seed vars are set without the
-		// trigger, warn rather than silently ignore them.
-		if server.HeadlessEnabled() {
-			if err := a.srv.RunHeadlessBootstrap(ctx); err != nil {
-				bootstrapLog.Error("headless bootstrap failed", "error", err)
-			}
-		} else {
-			server.WarnIfHeadlessSeedVarsOrphaned()
-		}
 	}
 	a.cleanupWorktrees(ctx)
 	if a.local() {
@@ -357,7 +343,7 @@ func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
 	// Load the org bot PAT once so HTTPS clones of private repos authenticate.
 	// CloneAuthFor (applied per-target in BootstrapBareClones) no-ops on an SSH
 	// CloneURL or an empty token, so the SSH default and public-repo paths are
-	// unaffected — this only matters for the https-pinned headless install.
+	// unaffected — this only matters for an org whose clone protocol is https.
 	// Best-effort: a load failure leaves the token empty and falls back to the
 	// prior unauthenticated behavior rather than blocking the warm pass.
 	creds, cerr := integrations.LoadSystem(context.Background(), secrets, runmode.LocalDefaultOrgID)

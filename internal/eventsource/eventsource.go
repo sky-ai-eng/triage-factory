@@ -488,8 +488,7 @@ func (r *resolver) credentials(ctx context.Context) (auth.Credentials, error) {
 }
 
 // githubState is available exactly when a GitHub credential resolves — a
-// stored PAT (the local env overlay folded in by the loader) or a registered,
-// active App. It is the same derivation the setup gate reads, so the two
+// stored PAT or a registered, active App. It is the same derivation the setup gate reads, so the two
 // cannot drift into disagreeing about whether GitHub is connected.
 func githubState(ctx context.Context, r *resolver) (State, error) {
 	creds, err := r.credentials(ctx)

@@ -447,10 +447,9 @@ func recordGitHubIdentityBind(ctx context.Context, tx db.TxStores, orgID, userID
 
 // validateGitHubIdentityPAT proves a PAT against the org's resolved GitHub host
 // (GET /user) and returns the account it authenticates as — the @login and the
-// numeric id that binding records together — WITHOUT storing the token. It is
-// the shared validation core of the PAT-capture HTTP handler and the headless
-// bootstrap; each caller writes user_github_identities in its own tx (the tx
-// context differs). Errors wrap auth.CaptureGitHubIdentity's (callers can
+// numeric id that binding records together — WITHOUT storing the token, so the
+// network call happens before the caller opens the tx that writes
+// user_github_identities. Errors wrap auth.CaptureGitHubIdentity's (callers can
 // errors.Is auth.ErrGitHubHostUnreachable) or are errGitHubNoLogin. The login
 // is what proves the token; a host that answers with no id still binds, and the
 // id fills in on a later capture.

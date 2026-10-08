@@ -337,30 +337,6 @@ func TestJiraSystemConfig(t *testing.T) {
 	}
 }
 
-func TestLoad_EnvOverlayWins(t *testing.T) {
-	stores := openStores(t)
-	ctx := context.Background()
-	org := runmode.LocalDefaultOrgID
-
-	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://kept-keychain.example.com",
-		GitHubPAT: "keychain-pat",
-	}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "env-overrides")
-	got, err := integrations.Load(ctx, stores.Secrets, org)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got.GitHubPAT != "env-overrides" {
-		t.Errorf("env overlay not honored: got=%q want=env-overrides", got.GitHubPAT)
-	}
-	if got.GitHubURL != "https://kept-keychain.example.com" {
-		t.Errorf("non-env field changed: got=%q", got.GitHubURL)
-	}
-}
-
 // TestLoadSystem_Roundtrip pins that LoadSystem reads back what Save wrote and
 // returns the same bundle Load does in local mode (GetSystem → keychain, same
 // as Get) — the "local mode unchanged" half of the multi-mode poller fix.

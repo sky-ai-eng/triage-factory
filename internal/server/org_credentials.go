@@ -10,7 +10,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -310,7 +309,7 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	release() // idempotent; the defer stays as the early-return safety net
 
 	s.kickGitHubChanged(r, orgID)
-	writeJSON(w, http.StatusOK, disconnectedResponse("github"))
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
 // handleJiraCredentialDelete unbinds the org's Jira service credential — the
@@ -368,28 +367,7 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 		s.MarkJiraRestarted(ctx, orgID)
 		go s.onJiraChanged(orgID)
 	}
-	writeJSON(w, http.StatusOK, disconnectedResponse("jira"))
-}
-
-// disconnectedResponse is the unbind reply, carrying the local-mode env-overlay
-// caveat when it applies: TRIAGE_FACTORY_* vars shadow the stored credential on
-// read, so the delete genuinely succeeded but the value keeps surfacing until
-// the operator unsets the var. Saying so beats reporting a clean disconnect the
-// user can see isn't one. Multi mode has no overlay.
-func disconnectedResponse(integration string) map[string]any {
-	resp := map[string]any{"status": "disconnected"}
-	if runmode.Current() != runmode.ModeLocal {
-		return resp
-	}
-	for _, e := range auth.EnvProvided() {
-		if e != integration {
-			continue
-		}
-		resp["warning"] = "env vars still supply this credential — unset them in your shell to fully disconnect"
-		resp["env_provided"] = []string{integration}
-		break
-	}
-	return resp
+	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
 // kickGitHubChanged re-dues polling under a changed GitHub credential. Jira is

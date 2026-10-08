@@ -71,16 +71,21 @@ func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// The auth secret helpers (keychain or encrypted-file backend) don't
-	// report whether a row was actually removed, so probe before deleting
-	// to give callers the (ok bool) contract the interface promises. Use
-	// HasStoredSecret rather than GetSecret so the probe bypasses the
-	// TRIAGE_FACTORY_* env overlay — DeleteSecret can't remove env vars, so reporting
-	// ok=true based on an env-supplied value would lie to the caller
-	// (subsequent Get would still return the env value). Matches the
-	// Postgres impl's behavior of returning ok=false when no row was
-	// removed.
-	if !auth.HasStoredSecret(key) {
+	return deleteStoredSecret(key)
+}
+
+// deleteStoredSecret deletes key and reports whether an entry was there. The
+// auth secret helpers (keychain or encrypted-file backend) don't report
+// whether a row was actually removed, so it probes before deleting to give
+// callers the (ok bool) contract the interface promises — ok=false when
+// nothing was stored, matching the Postgres impl. An empty value reads as
+// absent: nothing stores empty except to mean unset.
+func deleteStoredSecret(key string) (bool, error) {
+	cur, err := auth.GetSecret(key)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" {
 		return false, nil
 	}
 	if err := auth.DeleteSecret(key); err != nil {
@@ -145,21 +150,9 @@ func (*secretStore) DeleteUser(_ context.Context, orgID, userID, key string) (bo
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	// Same env-overlay-aware probe as Delete: HasStoredSecret bypasses
-	// the TRIAGE_FACTORY_* overlay so DeleteUser reports ok=false when
-	// only an env-supplied value exists (DeleteSecret can't remove env
-	// vars). Per-user keys aren't in the well-known envKeys set today,
-	// but routing through the same probe keeps the contract identical.
-	uk := userKeychainKey(userID, key)
 	userSecretsMu.Lock()
 	defer userSecretsMu.Unlock()
-	if !auth.HasStoredSecret(uk) {
-		return false, nil
-	}
-	if err := auth.DeleteSecret(uk); err != nil {
-		return false, err
-	}
-	return true, nil
+	return deleteStoredSecret(userKeychainKey(userID, key))
 }
 
 // userSecretsMu makes DeleteUserSystemIfValue's read and delete one step
@@ -175,12 +168,12 @@ func (*secretStore) DeleteUserSystemIfValue(_ context.Context, orgID, userID, ke
 	uk := userKeychainKey(userID, key)
 	userSecretsMu.Lock()
 	defer userSecretsMu.Unlock()
-	if !auth.HasStoredSecret(uk) {
-		return false, nil
-	}
 	cur, err := auth.GetSecret(uk)
 	if err != nil {
 		return false, err
+	}
+	if cur == "" {
+		return false, nil
 	}
 	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
 		return false, nil

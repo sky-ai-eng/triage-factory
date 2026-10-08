@@ -135,11 +135,6 @@ export default function GitHubAccessControl({
   const staged = s.githubAppStaged
   const liveApp = registered && !staged
   const slug = s.githubAppSlug
-  // The live token is env-supplied, so this workspace can report GitHub access
-  // but not change it (see the idle branch below). Ranked under the App states:
-  // a registered App is its own credential tier, and the overlay only shadows
-  // the PAT the App path doesn't read.
-  const envPat = s.githubPatEnvProvided
 
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' })
   const [busy, setBusy] = useState(false)
@@ -899,23 +894,6 @@ export default function GitHubAccessControl({
               </button>
             </div>
           )}
-        </>
-      ) : envPat ? (
-        // Env-supplied token: reported, not managed. TRIAGE_FACTORY_* wins on
-        // read, so a replacement written here would be stored in the keychain
-        // and then ignored on every subsequent read — the operator would rotate,
-        // see a success, and keep polling with the old token. There's also no
-        // honest identity to show: the agents row records the last token bound
-        // through a route, which by definition isn't the one in use. So the
-        // section states the fact and points at the only control that actually
-        // changes anything, which is the shell the process was started from.
-        <>
-          <p className="text-body leading-relaxed text-ink-3">
-            Triage Factory connects to GitHub with the token in{' '}
-            <code className="text-ink-2">TRIAGE_FACTORY_GITHUB_BOT_PAT</code>. Environment variables
-            take precedence over anything stored here, so this token is managed where the server is
-            started — unset that variable to manage GitHub access from Settings.
-          </p>
         </>
       ) : s.hasGitHubPat ? (
         <>
