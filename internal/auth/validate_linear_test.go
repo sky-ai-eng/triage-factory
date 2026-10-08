@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 	"time"
 
@@ -87,19 +86,5 @@ func TestValidateLinear_TransportFailureIsUnreachable(t *testing.T) {
 	}
 	if errors.Is(err, linear.ErrUnauthorized) {
 		t.Errorf("an unreachable host must not read as a refused credential: %v", err)
-	}
-}
-
-func TestEnvProvided_Linear(t *testing.T) {
-	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "")
-	if slices.Contains(EnvProvided(), "linear") {
-		t.Error("EnvProvided reports linear with no key in the environment")
-	}
-	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "lin_api_env")
-	if !slices.Contains(EnvProvided(), "linear") {
-		t.Error("EnvProvided does not report linear with the key in the environment")
-	}
-	if !EnvProvidesKey("linear_api_key") {
-		t.Error("EnvProvidesKey(linear_api_key) = false with the key in the environment")
 	}
 }

@@ -42,9 +42,7 @@ const (
 // PAT (Bearer), so the Cloud halves are stored under their own keys; the
 // auth-method marker records which scheme the org uses so the resolver reads
 // the right pair. These mirror jira.resolver's (unexported, cycle-dodging)
-// copies — keep them in sync; keys_drift_test pins the agreement. The email and
-// API token are in the env overlay too (envKeys in internal/auth/keychain.go);
-// the marker is not, so an env-only org resolves its deployment from the host.
+// copies — keep them in sync; keys_drift_test pins the agreement.
 const (
 	KeyJiraEmail      = "jira_email"
 	KeyJiraAPIToken   = "jira_api_token"
@@ -54,8 +52,8 @@ const (
 // Linear service-credential keys. KeyLinearAuthMethod is the linear.AuthMethod
 // marker naming the shape the org's credential takes: an API key stored under
 // KeyLinearAPIKey, or an app install whose refresh-token envelope is stored
-// under KeyLinearAppInstall. An absent marker reads as the API key shape, which
-// is the only one the TRIAGE_FACTORY_LINEAR_API_KEY overlay can supply.
+// under KeyLinearAppInstall. An absent marker with a key reads as the API key
+// shape: an app install stores its envelope under its own key, never this one.
 // internal/linear's resolver keeps its own copies of the keys it reads (it
 // cannot import this package); its keys_drift_test pins the agreement.
 const (

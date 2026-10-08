@@ -130,9 +130,9 @@ func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error)
 
 // ResolveSystemCredential reads the org's service credential, dispatched on
 // the stored auth-method marker. An absent marker reads as api_key: the marker
-// only tells the two shapes apart, and a key with no marker is the shape the
-// TRIAGE_FACTORY_LINEAR_API_KEY overlay supplies, since an app install cannot
-// come from an env var. No key under api_key is ErrNoLinearSystemCredential; a
+// only tells the two shapes apart, and a key under linear_api_key can only be
+// the api_key shape, since an app install stores an envelope under its own key.
+// No key under api_key is ErrNoLinearSystemCredential; a
 // marker this build does not know is an error of its own, because rebinding is
 // not what fixes it.
 func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {

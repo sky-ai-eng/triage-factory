@@ -124,9 +124,8 @@ export interface OrgSettingsData {
   // specifically, so a Cloud org reports true despite having no PAT.
   has_jira_credential: boolean
   // The Jira half of github_pat_env_provided — true when the env supplies the
-  // Jira host or any part of the service credential (the Data Center PAT, or
-  // the Cloud email + API token), any of which makes an in-place rebind partly
-  // or wholly unobservable.
+  // Jira host and/or service token, either of which makes an in-place rebind
+  // partly or wholly unobservable.
   jira_credential_env_provided?: boolean
   // The org's stored model enable-set — the catalog keys its teams may pick
   // from — or null when it has expressed no preference, in which case every
