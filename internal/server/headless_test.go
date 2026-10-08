@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -171,10 +169,6 @@ func TestHeadlessConfig_JiraCompleteAndIntent(t *testing.T) {
 	onlyPAT := headlessConfig{jiraUserPAT: "x"}
 	if !onlyPAT.jiraIntent() || onlyPAT.jiraComplete() {
 		t.Errorf("user-PAT-only should show intent but not be complete")
-	}
-	onlyEmail := headlessConfig{jiraUserEmail: "me@acme.example"}
-	if !onlyEmail.jiraIntent() || onlyEmail.jiraComplete() {
-		t.Errorf("user-email-only should show intent but not be complete")
 	}
 }
 
@@ -516,230 +510,6 @@ func TestRunHeadlessBootstrap_JiraBotCredsWithoutConfigWarns(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "Jira config is incomplete") {
 		t.Errorf("expected an incomplete-Jira WARN when bot creds are set without config; logs:\n%s", logs.String())
-	}
-}
-
-// headlessGitHubStub stands up the GitHub host the bootstrap validates the bot
-// and user PATs against, answering as octocat.
-func headlessGitHubStub(t *testing.T) *httptest.Server {
-	t.Helper()
-	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v3/user/emails" {
-			writeGitHubPrimaryEmail(w, "octocat@example.com")
-			return
-		}
-		if r.URL.Path != "/api/v3/user" {
-			http.NotFound(w, r)
-			return
-		}
-		_, _ = w.Write([]byte(`{"login":"octocat"}`))
-	}))
-	t.Cleanup(gh.Close)
-	return gh
-}
-
-// setHeadlessJiraStatusEnv sets the project + status seed vars, so a test
-// varies only the Jira credential.
-func setHeadlessJiraStatusEnv(t *testing.T) {
-	t.Helper()
-	t.Setenv(envJiraProjects, "SKY")
-	t.Setenv(envJiraPickupStatuses, "To Do")
-	t.Setenv(envJiraInProgressStatus, "In Progress")
-	t.Setenv(envJiraDoneStatus, "Done")
-}
-
-// TestRunHeadlessBootstrap_JiraCloudFromEnv is the env-only Cloud setup: an
-// *.atlassian.net host with the org email + API token and no stored marker
-// seeds the Jira config, because the host shape resolves Cloud and the Cloud
-// credential is present. The identity token is set without its email, which a
-// Cloud token cannot authenticate without, so the identity stays unbound with a
-// WARN naming the missing var — before any request to the host.
-func TestRunHeadlessBootstrap_JiraCloudFromEnv(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	auth.ResetSecretBackendForTest(t)
-	gh := headlessGitHubStub(t)
-
-	t.Setenv(envHeadless, "1")
-	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
-	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
-	t.Setenv(envGitHubUserPAT, "user-token")
-	t.Setenv(envRepos, "acme/api")
-	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://acme.atlassian.net")
-	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "")
-	t.Setenv("TRIAGE_FACTORY_JIRA_EMAIL", "bot@acme.example")
-	t.Setenv("TRIAGE_FACTORY_JIRA_API_TOKEN", "cloud-bot-token")
-	t.Setenv(envJiraUserPAT, "cloud-user-token")
-	setHeadlessJiraStatusEnv(t)
-
-	var logs bytes.Buffer
-	restore := logging.SetOutput(&logs)
-	t.Cleanup(restore)
-
-	s := newTestServer(t)
-	ctx := t.Context()
-	clearLocalProvisioningSeed(t, s)
-
-	if err := s.RunHeadlessBootstrap(ctx); err != nil {
-		t.Fatalf("RunHeadlessBootstrap: %v", err)
-	}
-
-	rules, err := s.allStores.JiraStatusRules.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
-	if err != nil {
-		t.Fatalf("JiraStatusRules.ListForTeamSystem: %v", err)
-	}
-	if len(rules) != 1 {
-		t.Errorf("want Jira rules seeded from the Cloud credential, got %d", len(rules))
-	}
-	orgSet, err := s.orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("GetSettingsSystem: %v", err)
-	}
-	if orgSet.JiraBaseURL != "https://acme.atlassian.net" {
-		t.Errorf("JiraBaseURL = %q, want the env host", orgSet.JiraBaseURL)
-	}
-	if acct, _, _ := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://acme.atlassian.net"); acct != "" {
-		t.Errorf("Jira identity bound without TRIAGE_FACTORY_JIRA_USER_EMAIL: %q", acct)
-	}
-	if out := logs.String(); !strings.Contains(out, "TRIAGE_FACTORY_JIRA_USER_EMAIL is unset") {
-		t.Errorf("expected a WARN about the unset Jira identity email; logs:\n%s", out)
-	}
-}
-
-// TestRunHeadlessBootstrap_JiraCloudHostWithPATSkips pins the other side: a
-// Data Center PAT is not a Cloud credential, so an *.atlassian.net host with
-// only _JIRA_BOT_PAT skips Jira, and the WARN names the deployment the host
-// resolved to.
-func TestRunHeadlessBootstrap_JiraCloudHostWithPATSkips(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	auth.ResetSecretBackendForTest(t)
-	gh := headlessGitHubStub(t)
-
-	t.Setenv(envHeadless, "1")
-	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
-	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
-	t.Setenv(envRepos, "acme/api")
-	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://acme.atlassian.net")
-	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "dc-pat")
-	t.Setenv("TRIAGE_FACTORY_JIRA_EMAIL", "")
-	t.Setenv("TRIAGE_FACTORY_JIRA_API_TOKEN", "")
-	setHeadlessJiraStatusEnv(t)
-
-	var logs bytes.Buffer
-	restore := logging.SetOutput(&logs)
-	t.Cleanup(restore)
-
-	s := newTestServer(t)
-	ctx := t.Context()
-	clearLocalProvisioningSeed(t, s)
-
-	if err := s.RunHeadlessBootstrap(ctx); err != nil {
-		t.Fatalf("RunHeadlessBootstrap: %v", err)
-	}
-	rules, err := s.allStores.JiraStatusRules.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
-	if err != nil {
-		t.Fatalf("JiraStatusRules.ListForTeamSystem: %v", err)
-	}
-	if len(rules) != 0 {
-		t.Errorf("Jira should be skipped for a Cloud host with only a PAT, got %d rules", len(rules))
-	}
-	out := logs.String()
-	if !strings.Contains(out, "Jira config is incomplete") || !strings.Contains(out, "deployment=cloud") {
-		t.Errorf("expected an incomplete-Jira WARN naming the cloud deployment; logs:\n%s", out)
-	}
-}
-
-// TestRunHeadlessBootstrap_JiraCloudIdentity drives the Cloud identity through
-// the bootstrap against a stub host: the user email + token validate as Basic
-// over REST v3, the stored envelope is a cloud_api_token, and ForUser resolves
-// it. The stub isn't an *.atlassian.net host, so the org's marker is seeded to
-// make it Cloud — the same resolution a real Cloud host gets from its shape.
-func TestRunHeadlessBootstrap_JiraCloudIdentity(t *testing.T) {
-	runmode.SetForTest(t, runmode.ModeLocal)
-	keyring.MockInit()
-	auth.ResetSecretBackendForTest(t)
-	gh := headlessGitHubStub(t)
-	var gotAuth string
-	jiraStub := jiraCloudMyselfStub(t, `{"accountId":"acc-cloud","displayName":"Cloud User"}`, &gotAuth)
-
-	t.Setenv(envHeadless, "1")
-	t.Setenv("TRIAGE_FACTORY_GITHUB_URL", gh.URL)
-	t.Setenv("TRIAGE_FACTORY_GITHUB_BOT_PAT", "bot-token")
-	t.Setenv(envGitHubUserPAT, "user-token")
-	t.Setenv(envRepos, "acme/api")
-	t.Setenv("TRIAGE_FACTORY_JIRA_URL", jiraStub.URL)
-	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "")
-	t.Setenv("TRIAGE_FACTORY_JIRA_EMAIL", "bot@acme.example")
-	t.Setenv("TRIAGE_FACTORY_JIRA_API_TOKEN", "cloud-bot-token")
-	t.Setenv(envJiraUserEmail, "me@acme.example")
-	t.Setenv(envJiraUserPAT, "cloud-user-token")
-	setHeadlessJiraStatusEnv(t)
-
-	s := newTestServer(t)
-	ctx := t.Context()
-	clearLocalProvisioningSeed(t, s)
-	seedLocalOrgJiraAuthMethod(t, s, string(jira.AuthMethodCloudAPIToken))
-
-	if err := s.RunHeadlessBootstrap(ctx); err != nil {
-		t.Fatalf("RunHeadlessBootstrap: %v", err)
-	}
-
-	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("me@acme.example:cloud-user-token"))
-	if gotAuth != wantAuth {
-		t.Errorf("myself Authorization = %q, want %q (Basic user email:token)", gotAuth, wantAuth)
-	}
-	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, jiraStub.URL)
-	if err != nil {
-		t.Fatalf("GetJiraIdentity: %v", err)
-	}
-	if accountID != "acc-cloud" || displayName != "Cloud User" {
-		t.Errorf("identity = (%q, %q), want (acc-cloud, Cloud User)", accountID, displayName)
-	}
-	stored, err := s.secrets.GetUserSystem(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, jira.UserTokenKey(jiraStub.URL))
-	if err != nil {
-		t.Fatalf("GetUserSystem: %v", err)
-	}
-	cred, err := jira.ParseUserCredential(stored)
-	if err != nil {
-		t.Fatalf("ParseUserCredential(%q): %v", stored, err)
-	}
-	if cred.Method != jira.AuthMethodCloudAPIToken || cred.Email != "me@acme.example" || cred.Token != "cloud-user-token" {
-		t.Errorf("stored credential = %+v, want a cloud_api_token envelope", cred)
-	}
-	if _, err := jira.NewResolver(s.secrets, s.orgs).ForUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
-		t.Errorf("ForUser on the seeded Cloud identity: %v", err)
-	}
-}
-
-// A Data Center host takes the identity token as a PAT on its own; a stray
-// _USER_EMAIL is reported and does not change the scheme.
-func TestValidateJiraIdentity_DataCenterIgnoresEmail(t *testing.T) {
-	var logs bytes.Buffer
-	restore := logging.SetOutput(&logs)
-	t.Cleanup(restore)
-	var gotAuth string
-	stub := jiraMyselfStub(t, `{"key":"jdoe","displayName":"J Doe"}`, &gotAuth)
-
-	seed := (&Server{}).validateJiraIdentity(t.Context(), stub.URL, jira.DeploymentDataCenter, "me@acme.example", "dc-user-pat")
-	if seed == nil {
-		t.Fatalf("validateJiraIdentity = nil; logs:\n%s", logs.String())
-	}
-	if gotAuth != "Bearer dc-user-pat" {
-		t.Errorf("myself Authorization = %q, want the PAT as a Bearer token", gotAuth)
-	}
-	cred, err := jira.ParseUserCredential(seed.envelope)
-	if err != nil {
-		t.Fatalf("ParseUserCredential: %v", err)
-	}
-	if cred.Method != jira.AuthMethodDCPAT || cred.Email != "" || cred.Token != "dc-user-pat" {
-		t.Errorf("credential = %+v, want a dc_pat envelope with no email", cred)
-	}
-	if seed.source != "pat" || seed.accountID != "jdoe" {
-		t.Errorf("seed = %+v, want source pat and account jdoe", seed)
-	}
-	if !strings.Contains(logs.String(), "ignoring TRIAGE_FACTORY_JIRA_USER_EMAIL") {
-		t.Errorf("expected a WARN that the email is ignored; logs:\n%s", logs.String())
 	}
 }
 
