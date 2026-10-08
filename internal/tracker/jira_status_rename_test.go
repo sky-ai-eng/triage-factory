@@ -62,8 +62,8 @@ func TestDiffJira_TerminalMatchesRenamedDoneStatus(t *testing.T) {
 	}
 }
 
-// The name fallback is not a transitional state — a rule seeded from the
-// headless env vars carries no ids at all, permanently.
+// The name fallback is not a transitional state — a stored rule can carry no
+// ids at all until its team next saves the rules, which may be never.
 func TestDiffJira_TerminalMatchesNameOnlyRule(t *testing.T) {
 	done := []domain.JiraStatusRef{{Name: "Done"}}
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress", StatusID: "10005"}
@@ -71,6 +71,6 @@ func TestDiffJira_TerminalMatchesNameOnlyRule(t *testing.T) {
 
 	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, done),
 		domain.EventJiraIssueCompleted) == nil {
-		t.Error("no completed event for a name-only rule; headless deployments have nothing else")
+		t.Error("no completed event for a name-only rule")
 	}
 }

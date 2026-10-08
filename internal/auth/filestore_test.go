@@ -13,6 +13,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
 )
 
+// keyGitHubPAT is the org GitHub token's secret key, as integrations stores it.
+const keyGitHubPAT = "github_pat"
+
 // Two valid 64-char hex (32-byte) keys for the file backend.
 const (
 	testKeyHex  = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
@@ -86,8 +89,8 @@ func TestFileBackend_RoundTripAndPersistence(t *testing.T) {
 	if got, _ := GetSecret(keyGitHubPAT); got != "ghp_filevalue" {
 		t.Errorf("GetSecret org = %q, want ghp_filevalue", got)
 	}
-	if !HasStoredSecret(userKey) {
-		t.Error("HasStoredSecret(userKey) = false, want true")
+	if got, _ := GetSecret(userKey); got != "jira-user-token" {
+		t.Errorf("GetSecret(userKey) = %q, want jira-user-token", got)
 	}
 
 	// Simulate a restart: drop the cached backend, re-resolve from disk.
@@ -100,9 +103,6 @@ func TestFileBackend_RoundTripAndPersistence(t *testing.T) {
 	if err := DeleteSecret(keyGitHubPAT); err != nil {
 		t.Fatalf("DeleteSecret: %v", err)
 	}
-	if HasStoredSecret(keyGitHubPAT) {
-		t.Error("HasStoredSecret after delete = true, want false")
-	}
 	if got, _ := GetSecret(keyGitHubPAT); got != "" {
 		t.Errorf("GetSecret after delete = %q, want empty", got)
 	}
@@ -110,15 +110,12 @@ func TestFileBackend_RoundTripAndPersistence(t *testing.T) {
 
 func TestFileBackend_MissingKeyAndDeleteAbsent(t *testing.T) {
 	useFileBackend(t, testKeyHex)
-	// Absent key: empty, not error; delete + has are no-ops.
+	// Absent key: empty, not error; delete is a no-op.
 	if got, err := GetSecret("never_set"); got != "" || err != nil {
 		t.Errorf("GetSecret(absent) = (%q, %v), want (\"\", nil)", got, err)
 	}
 	if err := DeleteSecret("never_set"); err != nil {
 		t.Errorf("DeleteSecret(absent) = %v, want nil", err)
-	}
-	if HasStoredSecret("never_set") {
-		t.Error("HasStoredSecret(absent) = true, want false")
 	}
 }
 
@@ -173,19 +170,6 @@ func TestFileBackend_WrongKeyFailsDecrypt(t *testing.T) {
 	t.Setenv(EnvSecretEncryptionKey, testKeyHex2)
 	if err := InitLocalSecretBackend(); err == nil {
 		t.Fatal("InitLocalSecretBackend with wrong key = nil, want decrypt error")
-	}
-}
-
-func TestFileBackend_EnvOverlayWins(t *testing.T) {
-	useFileBackend(t, testKeyHex)
-	if err := PutSecret(keyGitHubPAT, "file-value"); err != nil {
-		t.Fatalf("PutSecret: %v", err)
-	}
-	// The TRIAGE_FACTORY_* overlay shadows the stored value for the 4 well-known
-	// keys, file backend or not.
-	t.Setenv(envKeys[keyGitHubPAT], "env-value")
-	if got, _ := GetSecret(keyGitHubPAT); got != "env-value" {
-		t.Errorf("GetSecret with env overlay = %q, want env-value", got)
 	}
 }
 

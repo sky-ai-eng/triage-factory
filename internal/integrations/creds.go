@@ -27,9 +27,7 @@ import (
 var credsLog = logging.Component("integrations")
 
 // The four well-known integration secret keys. The local SQLite shim
-// uses these names verbatim as keychain entry keys, and the env
-// overlay (TRIAGE_FACTORY_*) is keyed off them — keep in sync with
-// envKeys in internal/auth/keychain.go.
+// uses these names verbatim as keychain entry keys.
 const (
 	KeyGitHubURL = "github_url"
 	KeyGitHubPAT = "github_pat"
@@ -255,7 +253,7 @@ func (k SlackWorkspaceKeyset) All() []string {
 // SecretStore.Get path hits the Postgres vault wrapper which refuses
 // if the claim's org_id doesn't match. In local mode orgID is
 // runmode.LocalDefaultOrgID and the SecretStore reads from the
-// keychain — env-overlay semantics preserved by auth.GetSecret.
+// keychain, or the encrypted file when no keychain is available.
 func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Credentials, error) {
 	var (
 		creds auth.Credentials

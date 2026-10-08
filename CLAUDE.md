@@ -277,7 +277,7 @@ Two tiers, and the default is the cheap one. The push economics are the opposite
 ## Reference docs
 
 - `docs/concepts/tracked-events.md` — GitHub/Jira event taxonomy + snapshot field list.
-- `docs/local-mode/` — local-mode usage: CLI flags, configuration, secret storage, headless, polling.
+- `docs/local-mode/` — local-mode usage: CLI flags, configuration, secret storage, running on a server, polling.
 - `docs/self-hosting/` — multi-mode operator guides (install, scaling, SSO, monitoring).
 - `docs/security/` — isolation tiers, security overview, privilege separation, sandbox egress lanes, seccomp, release verification.
 - `docs/for-agents/auto-delegation-briefing.md` — briefing for delegated agents.

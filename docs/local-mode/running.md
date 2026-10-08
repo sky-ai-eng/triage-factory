@@ -16,15 +16,16 @@ triagefactory --port 8080 --no-browser
 
 # Bind to all interfaces (default is 127.0.0.1 — loopback only).
 # Only do this on a trusted network: the HTTP API is unauthenticated
-# and the server holds keychain-backed credentials.
-triagefactory --host 0.0.0.0
+# and the server holds keychain-backed credentials, so a non-loopback
+# bind refuses to start without TF_ALLOW_PUBLIC_LOCAL=true.
+TF_ALLOW_PUBLIC_LOCAL=true triagefactory --host 0.0.0.0
 
 # Top-level help — points humans at the user commands and agents at exec.
 triagefactory --help
 ```
 
-To reach a headless box's UI without exposing the API, keep the default loopback
-bind and tunnel to it — see [Running headless](headless.md).
+To reach a server's UI without exposing the API, keep the default loopback
+bind and tunnel to it — see [Running on a server](headless.md).
 
 ## CLI subcommands
 

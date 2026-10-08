@@ -22,7 +22,7 @@ type BootstrapTarget struct {
 	// token is consumed only for HTTPS clones of private repos. Without it,
 	// an HTTPS warm clone of a private repo fails with git prompting for a
 	// username (terminal prompts are disabled), which is exactly the failure
-	// a headless install (clone protocol pinned to https) would hit.
+	// an org whose clone protocol is https would hit.
 	Token string
 }
 

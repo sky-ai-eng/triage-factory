@@ -116,15 +116,6 @@ func (fb *fileBackend) get(key string) (string, error) {
 	return fb.data[key], nil // "" when absent — not an error, mirrors the keychain backend
 }
 
-func (fb *fileBackend) has(key string) bool {
-	fb.mu.RLock()
-	defer fb.mu.RUnlock()
-	// Treat an empty stored value as absent, matching keychainBackend.has — so
-	// the two backends agree on the secretBackend contract regardless of which
-	// is active. (The system never stores empty strings; empty means absent.)
-	return fb.data[key] != ""
-}
-
 func (fb *fileBackend) put(key, value string) error {
 	fb.mu.Lock()
 	defer fb.mu.Unlock()

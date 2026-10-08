@@ -15,42 +15,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestJiraCredentialDelete_SurfacesJiraOnlyWarning pins the Jira unbind's
-// env-overlay behavior: the delete succeeds, but a TRIAGE_FACTORY_JIRA_* pair
-// keeps supplying the credential on read, so the response has to say so rather
-// than report a clean disconnect the operator can see isn't one.
-func TestJiraCredentialDelete_SurfacesJiraOnlyWarning(t *testing.T) {
-	keyring.MockInit()
-	s := newTestServer(t)
-	ctx := t.Context()
-	org := runmode.LocalDefaultOrgID
-
-	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
-		JiraURL: "https://jira.example.com",
-		JiraPAT: "jira-test",
-	}); err != nil {
-		t.Fatalf("Save: %v", err)
-	}
-	t.Setenv("TRIAGE_FACTORY_JIRA_URL", "https://env.example.com")
-	t.Setenv("TRIAGE_FACTORY_JIRA_BOT_PAT", "env-jira-pat")
-
-	req := httptest.NewRequest(http.MethodDelete,
-		"/api/orgs/"+runmode.LocalDefaultOrgID+"/jira/access/credential", nil)
-	rec := httptest.NewRecorder()
-	s.mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got=%d want=200, body=%s", rec.Code, rec.Body.String())
-	}
-	var body map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if _, ok := body["warning"]; !ok {
-		t.Errorf("expected warning on env-overlay Jira clear, body=%+v", body)
-	}
-}
-
 // TestIntegrationsStatus_SetupCompleteGate pins the mandatory-configuration
 // gate the AuthGate keys on: a provisioned-but-unconfigured org is NOT
 // setup_complete, and setup_step walks org → team → done as GitHub access
