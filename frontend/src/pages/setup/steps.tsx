@@ -138,7 +138,6 @@ export const initialWizardState = (): WizardState => ({
   linearConnected: false,
   linearWorkspaceUrlKey: '',
   linearBoundAs: '',
-  linearCredentialEnvProvided: false,
   anthropicKeySource: null,
   anthropicConnected: false,
   claudeProvider: 'anthropic',
@@ -180,25 +179,17 @@ async function fetchIntegrationsState(): Promise<{
   githubReady: boolean
   jiraConnected: boolean
   jiraDeployment: JiraDeployment | null
-  linearEnvProvided: boolean
 }> {
-  const empty = {
-    githubReady: false,
-    jiraConnected: false,
-    jiraDeployment: null,
-    linearEnvProvided: false,
-  }
+  const empty = { githubReady: false, jiraConnected: false, jiraDeployment: null }
   try {
     const data = await apiJSON<{
       github_ready?: boolean
       jira?: boolean
       jira_url?: string
       jira_deployment?: string
-      env_provided?: string[]
     }>('/api/integrations/status')
     return {
       githubReady: !!data.github_ready,
-      linearEnvProvided: (data.env_provided ?? []).includes('linear'),
       jiraConnected: !!data.jira && !!data.jira_url,
       // The backend's authoritative deployment (from the auth-method marker);
       // null when not connected or an unexpected value.
@@ -284,7 +275,6 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     linearConnected: linear.connected,
     linearWorkspaceUrlKey: linear.workspace_url_key,
     linearBoundAs: boundAsName(linear),
-    linearCredentialEnvProvided: integrations.linearEnvProvided,
     // Claude credentials: the source resumes from the org's STORED selection,
     // not from whether a credential happens to be bound — an org that chose to
     // bring its own key and has not bound one yet is a different state from one

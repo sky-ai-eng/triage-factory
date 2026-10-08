@@ -42,10 +42,3 @@ The org's Linear connection lives under these keys:
   here so it is written and removed with the key.
 
 Disconnecting Linear in Settings removes all four.
-
-`TRIAGE_FACTORY_LINEAR_API_KEY` supplies the key from the environment instead,
-like the other `TRIAGE_FACTORY_*` overlays: it takes precedence over the stored
-key on every read, so Settings reports the connection but won't replace it, and
-disconnecting leaves it in effect until the variable is unset. A key supplied
-this way was never validated by a connect, so Settings can't show who it belongs
-to or which workspace it is in.

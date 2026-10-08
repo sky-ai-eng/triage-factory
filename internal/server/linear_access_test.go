@@ -101,7 +101,6 @@ type linearAccessRig struct {
 func newLinearAccessRig(t *testing.T) *linearAccessRig {
 	t.Helper()
 	runmode.SetForTest(t, runmode.ModeLocal)
-	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "")
 	linear.SetRetryBackoffForTest(t, time.Millisecond)
 	s := newTestServer(t)
 	unconfigureEventSources(t)
@@ -456,30 +455,6 @@ func TestLinearCredentialDelete_LeavesUserCredentials(t *testing.T) {
 	v, err := r.stores.Secrets.GetUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, userKey)
 	if err != nil || v == "" {
 		t.Errorf("user credential = %q (err %v) after the org unbind, want it kept", v, err)
-	}
-}
-
-// TestLinearAccess_EnvProvidedKey: a key the local env overlay supplies is
-// connected under the api_key shape, with no workspace or bound-as since no
-// bind learned them, and the unbind says the overlay still supplies it.
-func TestLinearAccess_EnvProvidedKey(t *testing.T) {
-	r := newLinearAccessRig(t)
-	t.Setenv("TRIAGE_FACTORY_LINEAR_API_KEY", "lin_api_env")
-
-	got := r.access(t)
-	if !got.Connected || got.AuthMethod != "api_key" || got.BoundAs != nil || got.WorkspaceURLKey != "" {
-		t.Errorf("GET with an env key = %+v, want connected api_key with nothing learned", got)
-	}
-
-	rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
-	}
-	r.expectKick(t)
-	var body map[string]any
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["warning"] == nil {
-		t.Errorf("DELETE with an env key = %v, want the env-overlay warning", body)
 	}
 }
 

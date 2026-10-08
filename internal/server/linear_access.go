@@ -270,9 +270,8 @@ func (s *Server) handleLinearAccessGet(w http.ResponseWriter, r *http.Request) {
 
 // readLinearAccess derives the status body. connected is the same derivation
 // the event-source probe reads (integrations.LinearSystemConfigured), so the
-// card and Settings → Event sources cannot disagree. A key the local env
-// overlay supplies is connected under the api_key shape with no workspace or
-// bound-as record, since no bind ran to learn either.
+// card and Settings → Event sources cannot disagree. A stored key with no
+// auth-method marker reads as api_key, the default the resolver applies.
 func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (linearAccessStatus, error) {
 	var (
 		creds   auth.Credentials

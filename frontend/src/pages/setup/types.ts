@@ -178,12 +178,9 @@ export interface WizardState {
   linearConnected: boolean
   // The workspace the credential belongs to (linear.app/<key>) and who the
   // key validated as, both learned by the bind — for the connected line and
-  // the collapsed summary. Empty for a key the local environment supplies.
+  // the collapsed summary.
   linearWorkspaceUrlKey: string
   linearBoundAs: string
-  // TRIAGE_FACTORY_LINEAR_API_KEY supplies the key (local mode only) — the
-  // Linear half of jiraCredentialEnvProvided.
-  linearCredentialEnvProvided: boolean
 
   // ── Org Claude credentials ──
   // How the org's delegated runs (and the scorer) authenticate with Claude —

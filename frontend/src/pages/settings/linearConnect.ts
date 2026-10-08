@@ -17,8 +17,7 @@ export interface LinearAccess {
   connected: boolean
   /** The credential's shape: 'api_key' or 'app_install', '' when not connected. */
   auth_method: '' | 'api_key' | 'app_install'
-  /** The workspace the credential belongs to, as in linear.app/<key>. Empty
-   *  for a key the local environment supplies, since no bind learned it. */
+  /** The workspace the credential belongs to, as in linear.app/<key>. */
   workspace_url_key: string
   workspace_name?: string
   /** Who the credential validated as when it was bound. */

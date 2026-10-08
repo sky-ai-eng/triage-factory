@@ -666,7 +666,6 @@ export default function OrgSettings({
             workspaceUrlKey={draft.linearWorkspaceUrlKey}
             orgId={orgId}
             onReplace={() => setLinearRebinding(true)}
-            envProvided={draft.linearCredentialEnvProvided}
             onDisconnected={() => {
               const cleared = {
                 linearConnected: false,

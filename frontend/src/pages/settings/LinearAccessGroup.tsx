@@ -33,7 +33,6 @@ export default function LinearAccessGroup({
   workspaceUrlKey = '',
   orgId,
   onReplace,
-  envProvided = false,
   onDisconnected,
   bare = false,
 }: {
@@ -41,23 +40,16 @@ export default function LinearAccessGroup({
   onChange: (patch: { linear_api_key: string }) => void
   connected: boolean
   /** Who the bound key validated as, and the url key of its workspace — the
-   *  connected line. Either may be empty: a key the local environment
-   *  supplies was never bound, so neither was learned. */
+   *  connected line. */
   boundAs?: string
   workspaceUrlKey?: string
   /** Org the credential belongs to — the DELETE is org-scoped by path. */
   orgId: string | null
   onReplace?: () => void
-  /** TRIAGE_FACTORY_LINEAR_API_KEY supplies the key (local mode only). It wins
-   *  on read, so a key typed here would be stored and then ignored — the group
-   *  says so and withholds the rebind rather than offering a control that
-   *  appears to work and doesn't. */
-  envProvided?: boolean
   onDisconnected?: () => void
   bare?: boolean
 }) {
   const field = bare ? glassInputClass : inputClass
-  const canReplace = !!onReplace && !envProvided
 
   const disconnect = async () => {
     if (!orgId) {
@@ -69,9 +61,6 @@ export default function LinearAccessGroup({
       toast.error(res.error)
       return
     }
-    // Local mode only: the env overlay keeps supplying the key after the
-    // stored one is gone.
-    if (res.warning) toast.error(res.warning)
     onChange({ linear_api_key: '' })
     onDisconnected?.()
   }
@@ -85,7 +74,7 @@ export default function LinearAccessGroup({
 
   const actions = (
     <div className="flex items-center gap-3">
-      {canReplace && (
+      {onReplace && (
         <button
           type="button"
           onClick={onReplace}
@@ -140,19 +129,10 @@ export default function LinearAccessGroup({
           </Field>
         </div>
       ) : (
-        <div className="space-y-2">
-          <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
-            <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm" />
-            <span className="text-ui text-ink-2">{statusLine}</span>
-            {bare && <div className="ml-auto">{actions}</div>}
-          </div>
-          {envProvided && (
-            <p className="text-reported leading-relaxed text-ink-3">
-              This key comes from the <code>TRIAGE_FACTORY_LINEAR_API_KEY</code> environment
-              variable, which takes precedence over anything stored here — change it where the
-              server is started, or unset it to manage the key from Settings.
-            </p>
-          )}
+        <div className="flex items-center gap-2 rounded-xl border border-line-1 bg-tint-2 px-4 py-2.5">
+          <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-warm" />
+          <span className="text-ui text-ink-2">{statusLine}</span>
+          {bare && <div className="ml-auto">{actions}</div>}
         </div>
       )}
     </>

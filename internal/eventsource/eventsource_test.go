@@ -155,7 +155,7 @@ func TestResolve_StatePerSource(t *testing.T) {
 				eventsource.KindJira:   eventsource.StateUnconfigured,
 			},
 		},
-		// No marker is the env overlay's shape: a key with nothing naming it.
+		// A key with no marker naming its shape reads as api_key.
 		"linear key with no marker": {
 			setup: func(t *testing.T, r *rig) { r.bindLinear(t, "", "lin_api_x") },
 			want:  map[string]eventsource.State{eventsource.KindLinear: eventsource.StateAvailable},

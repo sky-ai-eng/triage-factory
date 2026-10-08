@@ -22,7 +22,6 @@ export function LinearAccessStep({ state, patch, orgId }: StepContext) {
         connected={state.linearConnected}
         boundAs={state.linearBoundAs}
         workspaceUrlKey={state.linearWorkspaceUrlKey}
-        envProvided={state.linearCredentialEnvProvided}
         orgId={orgId}
         onDisconnected={() =>
           patch({
