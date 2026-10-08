@@ -35,92 +35,40 @@ func TestCatalog_EmbeddedFileJoins(t *testing.T) {
 	}
 }
 
-// Prices are pinned exactly, not asserted to be "reasonable": the daily
-// datasheet refresh rewrites the upstream snapshot wholesale, and a rate that
-// silently moves is the failure this catalog exists to make visible. A refresh
-// that legitimately changes a price changes these numbers in the same commit.
-func TestCatalog_PinnedAgainstCommittedSnapshot(t *testing.T) {
-	want := []Entry{
-		{
-			Key: "claude-haiku-4-5-20251001", DisplayName: "Claude Haiku 4.5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 1, Output: 5, CacheRead: 0.1, CacheWrite: 1.25},
-			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 0,
-		},
-		{
-			Key: "claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 2, Output: 10, CacheRead: 0.2, CacheWrite: 2.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 1,
-		},
-		{
-			Key: "claude-opus-5-5", DisplayName: "Claude Opus 5.5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 4, Output: 20, CacheRead: 0.2, CacheWrite: 5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 2,
-		},
-		{
-			Key: "claude-fable-5-1", DisplayName: "Claude Fable 5.1", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 10, Output: 50, CacheRead: 0.25, CacheWrite: 12.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 3,
-		},
-		{
-			Key: "claude-sonnet-5", DisplayName: "Claude Sonnet 5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 2, Output: 10, CacheRead: 0.2, CacheWrite: 2.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 4,
-		},
-		{
-			Key: "claude-opus-5", DisplayName: "Claude Opus 5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 5, Output: 25, CacheRead: 0.5, CacheWrite: 6.25},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 5,
-		},
-		{
-			Key: "claude-fable-5", DisplayName: "Claude Fable 5", Provider: "anthropic",
-			Prices:        PricesPerMTok{Input: 10, Output: 50, CacheRead: 1, CacheWrite: 12.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 6,
-		},
-		{
-			Key: "us.anthropic.claude-haiku-4-5-20251001-v1:0", DisplayName: "Claude Haiku 4.5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 1.1, Output: 5.5, CacheRead: 0.11, CacheWrite: 1.375},
-			ContextWindow: 200_000, SupportsPromptCaching: true, DisplayOrder: 7,
-		},
-		{
-			Key: "us.anthropic.claude-sonnet-5-5", DisplayName: "Claude Sonnet 5.5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 2.2, Output: 11, CacheRead: 0.22, CacheWrite: 2.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 8,
-		},
-		{
-			Key: "us.anthropic.claude-opus-5-5", DisplayName: "Claude Opus 5.5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 4.4, Output: 22, CacheRead: 0.22, CacheWrite: 5.5},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 9,
-		},
-		{
-			Key: "us.anthropic.claude-fable-5-1", DisplayName: "Claude Fable 5.1 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 11, Output: 55, CacheRead: 0.275, CacheWrite: 13.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 10,
-		},
-		{
-			Key: "us.anthropic.claude-sonnet-5", DisplayName: "Claude Sonnet 5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 2.2, Output: 11, CacheRead: 0.22, CacheWrite: 2.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 11,
-		},
-		{
-			Key: "us.anthropic.claude-opus-5", DisplayName: "Claude Opus 5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 5.5, Output: 27.5, CacheRead: 0.55, CacheWrite: 6.875},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 12,
-		},
-		{
-			Key: "us.anthropic.claude-fable-5", DisplayName: "Claude Fable 5 (Bedrock, US)", Provider: "bedrock",
-			Prices:        PricesPerMTok{Input: 11, Output: 55, CacheRead: 1.1, CacheWrite: 13.75},
-			ContextWindow: 1_000_000, SupportsPromptCaching: true, DisplayOrder: 13,
-		},
+// The join copies each datasheet fact onto the field that names it, restated
+// per million tokens. It runs against a stand-in row rather than the embedded
+// datasheet: the daily refresh rewrites that file from upstream, so a test
+// pinned to its numbers fails on every legitimate price change and passes on a
+// wrong one. Each rate is distinct so a swapped field cannot pass, and the
+// cache-read rate is one that scaling alone leaves at 0.09999999999999999.
+func TestLoad_CarriesTheDatasheetRow(t *testing.T) {
+	const key = "stand-in-model"
+	lookup := func(k string) (inference.Info, bool) {
+		if k != key {
+			return inference.Info{}, false
+		}
+		return inference.Info{
+			Provider:               "bedrock_converse",
+			MaxInputTokens:         123_456,
+			SupportsPromptCaching:  true,
+			InputCostPerToken:      3e-6,
+			OutputCostPerToken:     1.5e-5,
+			CacheReadCostPerToken:  1e-7,
+			CacheWriteCostPerToken: 3.75e-6,
+		}, true
 	}
 
-	got := Entries()
-	if len(got) != len(want) {
-		t.Fatalf("catalog has %d entries, want %d: %+v", len(got), len(want), got)
+	got, err := load([]byte(fmt.Sprintf(`[{"key": %q, "display_name": "Stand-in"}]`, key)), lookup)
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-	for i, w := range want {
-		if got[i] != w {
-			t.Errorf("entry %d:\n got %+v\nwant %+v", i, got[i], w)
-		}
+	want := Entry{
+		Key: key, DisplayName: "Stand-in", Provider: ProviderBedrock,
+		Prices:        PricesPerMTok{Input: 3, Output: 15, CacheRead: 0.1, CacheWrite: 3.75},
+		ContextWindow: 123_456, SupportsPromptCaching: true, DisplayOrder: 0,
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Errorf("entries = %+v, want [%+v]", got, want)
 	}
 }
 
