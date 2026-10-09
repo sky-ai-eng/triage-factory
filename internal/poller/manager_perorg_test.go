@@ -17,8 +17,9 @@ import (
 //
 // To keep the test free of GitHub network round-trips, every fake
 // org's RepositoryStore returns an empty configured-names list — that path
-// short-circuits before the tracker is invoked, so the assertion is
-// strictly "per-org loop visited every active org," not "tracker did
+// short-circuits before discovery (the only tracker work ahead of it is the
+// out-of-host retirement, which finds no active rows here), so the assertion
+// is strictly "per-org loop visited every active org," not "tracker did
 // the right thing." Tracker behavior is covered by the tracker
 // package's own per-org tests.
 func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
@@ -26,7 +27,7 @@ func TestManager_RunGitHubCycle_IteratesActiveOrgs(t *testing.T) {
 	repos := &recordingRepositoryStore{}
 	users := &emptyUsersStore{} // GetGitHubLoginSystem unused — repo path exits first
 
-	m := &Manager{orgs: orgs, repos: repos, users: users}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: users}
 	m.runGitHubCycle(nil)
 
 	if got := orgs.callCount(); got != 1 {
@@ -52,7 +53,7 @@ func TestManager_RunGitHubCycle_StopHaltsMidCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
 	repos := &recordingRepositoryStore{}
 	users := &emptyUsersStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: users}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: users}
 
 	stop := make(chan struct{})
 	close(stop) // torn down before the loop starts
@@ -96,7 +97,7 @@ func TestManager_RunJiraCycle_OrgsStoreError(t *testing.T) {
 func TestManager_RunGitHubCycle_OrgsStoreErrorAbortsCycle(t *testing.T) {
 	orgs := &fakeOrgsStore{err: errOrgsDown}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}}
 	m.runGitHubCycle(nil)
 
 	repos.mu.Lock()
@@ -177,7 +178,7 @@ func TestManager_RunGitHubCycle_SkipsOrgNotYetDue(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // org-a due → polled, scheduled ~5m out
 	m.runGitHubCycle(nil) // immediately again → not due → skipped
@@ -197,7 +198,7 @@ func TestManager_RunGitHubCycle_RepollsAfterSlotElapses(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil)
 	m.schedulePoll("github", "org-a", time.Now().Add(-time.Second)) // pretend the interval elapsed
@@ -220,7 +221,7 @@ func TestManager_PollSoon_ReduesOnlyTargetOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b"}}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // both due → polled once each, both scheduled ~5m out
 	m.PollSoon("github", "org-a")
@@ -280,7 +281,7 @@ func TestManager_StartGitHub_DoesNotRepollScheduledOrg(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
 	orgs := &fakeOrgsStore{ids: []string{"org-a"}}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // org-a polled, scheduled ~5m out
 
@@ -305,7 +306,7 @@ func TestManager_PollSoon_AppliesConfigChangeImmediately(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	orgs := &fakeOrgsStore{ids: []string{runmode.LocalDefaultOrgID}}
 	repos := &recordingRepositoryStore{}
-	m := &Manager{orgs: orgs, repos: repos, users: &emptyUsersStore{}}
+	m := &Manager{orgs: orgs, repos: repos, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 
 	m.runGitHubCycle(nil) // polled, scheduled ~5m out
 	m.runGitHubCycle(nil) // still on cadence → skipped (proves the slot gates)
@@ -369,10 +370,27 @@ type recordingRepositoryStore struct {
 	visited []string
 }
 
-func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
+	return nil, nil
+}
+
+// activeEntityStore answers the one entity read every GitHub cycle makes before
+// its tracked-set gate — the active pull requests, so the ones polled from
+// another host can be retired — with no rows, and records which orgs asked.
+// Every other EntityStore method panics through the nil embedded interface.
+type activeEntityStore struct {
+	db.EntityStore
+	mu     sync.Mutex
+	listed []string
+}
+
+func (s *activeEntityStore) ListActiveSystem(_ context.Context, orgID, source string) ([]domain.Entity, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.listed = append(s.listed, orgID+"/"+source)
 	return nil, nil
 }
 
@@ -391,5 +409,6 @@ var errOrgsDown = stubErr("simulated orgs-store outage")
 var (
 	_ db.OrgsStore       = (*fakeOrgsStore)(nil)
 	_ db.RepositoryStore = (*recordingRepositoryStore)(nil)
+	_ db.EntityStore     = (*activeEntityStore)(nil)
 	_ db.UsersStore      = emptyUsersStore{}
 )

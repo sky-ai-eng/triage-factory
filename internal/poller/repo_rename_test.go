@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -21,13 +22,13 @@ import (
 func TestApplyRepoRenames_ReadsTheWholeGrant(t *testing.T) {
 	repos := &renamePollStore{
 		stored: []domain.RepoRef{
-			{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"},
-			{Source: "github", Owner: "octo", Repo: "web", ExternalID: "2"},
+			{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: "1"},
+			{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "web", ExternalID: "2"},
 		},
 	}
 	m := &Manager{repos: repos}
 
-	n := m.applyRepoRenames(context.Background(), "org-1", []ghclient.UserRepo{
+	n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost, []ghclient.UserRepo{
 		{ID: 1, FullName: "octo/platform-api"}, // renamed — TF still tracks octo/api
 		{ID: 2, FullName: "octo/web"},          // unchanged
 		{ID: 3, FullName: "octo/untracked"},    // granted, no row
@@ -45,15 +46,18 @@ func TestApplyRepoRenames_ReadsTheWholeGrant(t *testing.T) {
 	if repos.renamed[0].Source != domain.RepoSourceGitHub {
 		t.Errorf("source = %q, want %q", repos.renamed[0].Source, domain.RepoSourceGitHub)
 	}
+	if repos.renamed[0].Host != dbtest.TestGitHubHost {
+		t.Errorf("host = %q, want %q — the host the grant was read from", repos.renamed[0].Host, dbtest.TestGitHubHost)
+	}
 }
 
 // A grant with nothing renamed in it is the steady state, which is every cycle
 // after the first. It must not open a transaction.
 func TestApplyRepoRenames_SteadyStateWritesNothing(t *testing.T) {
-	repos := &renamePollStore{stored: []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}}}
+	repos := &renamePollStore{stored: []domain.RepoRef{{Source: "github", Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: "1"}}}
 	m := &Manager{repos: repos}
 
-	if n := m.applyRepoRenames(context.Background(), "org-1",
+	if n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/api"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -66,7 +70,7 @@ func TestApplyRepoRenames_SteadyStateWritesNothing(t *testing.T) {
 // panic on the way through.
 func TestApplyRepoRenames_NilStore(t *testing.T) {
 	m := &Manager{}
-	if n := m.applyRepoRenames(context.Background(), "org-1",
+	if n := m.applyRepoRenames(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/api"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -79,14 +83,14 @@ func TestReloadConfiguredRepos(t *testing.T) {
 	repos := &renamePollStore{configured: []string{"octo/platform-api", "octo/web"}}
 	m := &Manager{repos: repos}
 
-	got := m.reloadConfiguredRepos(context.Background(), "org-1", []string{"octo/api", "octo/web"})
+	got := m.reloadConfiguredRepos(context.Background(), "org-1", dbtest.TestGitHubHost, []string{"octo/api", "octo/web"})
 	if len(got) != 2 || got[0] != "octo/platform-api" {
 		t.Errorf("reloaded = %v, want the refreshed tracked set", got)
 	}
 
 	repos.configuredErr = context.DeadlineExceeded
 	current := []string{"octo/api", "octo/web"}
-	if got := m.reloadConfiguredRepos(context.Background(), "org-1", current); len(got) != 2 || got[0] != "octo/api" {
+	if got := m.reloadConfiguredRepos(context.Background(), "org-1", dbtest.TestGitHubHost, current); len(got) != 2 || got[0] != "octo/api" {
 		t.Errorf("reloaded = %v on a read failure, want the caller's list unchanged", got)
 	}
 }
@@ -101,7 +105,7 @@ type renamePollStore struct {
 	configuredErr error
 }
 
-func (s *renamePollStore) ListIdentitiesSystem(context.Context, string) ([]domain.RepoRef, error) {
+func (s *renamePollStore) ListIdentitiesSystem(context.Context, string, string) ([]domain.RepoRef, error) {
 	return s.stored, nil
 }
 
@@ -110,7 +114,7 @@ func (s *renamePollStore) RenameSystem(_ context.Context, _ string, observed dom
 	return domain.RepoRenameOutcome{Renamed: true, From: "octo/api", To: observed.Slug()}, nil
 }
 
-func (s *renamePollStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+func (s *renamePollStore) ListTrackedNamesSystem(context.Context, string, string) ([]string, error) {
 	if s.configuredErr != nil {
 		return nil, s.configuredErr
 	}

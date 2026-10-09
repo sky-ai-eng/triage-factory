@@ -19,7 +19,7 @@ type fakeRateLimitResolver struct {
 	states map[string]ghclient.RateLimitState
 }
 
-func (f *fakeRateLimitResolver) RateLimitFor(orgID string) (ghclient.RateLimitState, bool) {
+func (f *fakeRateLimitResolver) RateLimitFor(orgID, host string) (ghclient.RateLimitState, bool) {
 	s, ok := f.states[orgID]
 	return s, ok
 }

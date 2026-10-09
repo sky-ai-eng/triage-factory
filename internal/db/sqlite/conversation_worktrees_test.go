@@ -92,13 +92,13 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 func trackRepoForTest(t *testing.T, stores db.Stores, slug string) {
 	t.Helper()
 	ctx := context.Background()
-	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("list tracked repos: %v", err)
 	}
-	ref := domain.RepoRefFromSlug(slug)
+	ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, tracked); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
 		t.Fatalf("track repository %s: %v", slug, err)
 	}
 }

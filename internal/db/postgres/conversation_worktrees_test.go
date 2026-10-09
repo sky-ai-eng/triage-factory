@@ -237,7 +237,7 @@ func TestConversationWorktreeStore_Postgres_Conformance(t *testing.T) {
 			},
 			Repo: func(t *testing.T, slug string) {
 				t.Helper()
-				ref := domain.RepoRefFromSlug(slug)
+				ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
 				var exists bool
 				if err := h.AdminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM repositories WHERE org_id = $1 AND owner = $2 AND repo = $3)`,
 					orgID, ref.Owner, ref.Repo).Scan(&exists); err != nil {

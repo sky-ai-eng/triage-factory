@@ -29,9 +29,10 @@ func TestRunGitHubCycle_RefreshesManagedInstallationsOnceAheadOfTheFirstPoll(t *
 		sequence = append(sequence, step)
 	}
 	m := &Manager{
-		orgs:  orgs,
-		repos: repos,
-		users: &emptyUsersStore{},
+		orgs:     orgs,
+		repos:    repos,
+		entities: &activeEntityStore{},
+		users:    &emptyUsersStore{},
 		RefreshManagedInstallations: func(context.Context) error {
 			record("managed")
 			return nil
@@ -64,9 +65,10 @@ func TestRunGitHubCycle_NoDueOrgSpendsNoManagedRefresh(t *testing.T) {
 
 	var refreshes int
 	m := &Manager{
-		orgs:  orgs,
-		repos: repos,
-		users: &emptyUsersStore{},
+		orgs:     orgs,
+		repos:    repos,
+		entities: &activeEntityStore{},
+		users:    &emptyUsersStore{},
 		RefreshManagedInstallations: func(context.Context) error {
 			refreshes++
 			return nil
@@ -88,9 +90,10 @@ func TestRunGitHubCycle_ManagedRefreshFailureDoesNotSkipThePolls(t *testing.T) {
 	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b"}}
 	repos := &recordingRepositoryStore{}
 	m := &Manager{
-		orgs:  orgs,
-		repos: repos,
-		users: &emptyUsersStore{},
+		orgs:     orgs,
+		repos:    repos,
+		entities: &activeEntityStore{},
+		users:    &emptyUsersStore{},
 		RefreshManagedInstallations: func(context.Context) error {
 			return errors.New("github unreachable")
 		},

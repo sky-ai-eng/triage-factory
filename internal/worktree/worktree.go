@@ -100,17 +100,6 @@ func lockRepo(repositoryID string) *sync.Mutex {
 	return mu
 }
 
-// WithRepoLock serializes a callback against the per-repo bare-clone
-// mutex. Used by callers outside the worktree package — the
-// pending-PR live-diff path in particular runs `git fetch` against
-// the bare to sync the agent's pushed branch, which races with
-// bootstrap / worktree creation if those are happening concurrently
-// for the same repo. Concurrent fetches on a
-// single bare can fail with "fatal: Unable to create
-// '<bare>/refs/remotes/origin/<branch>.lock'" or otherwise corrupt
-// the ref, hence the lock.
-//
-
 // runsDir is the basename for ephemeral run worktrees under
 // os.TempDir() (/tmp/triagefactory-runs/{rootKey}). Ephemeral and
 // unique-by-rootKey, so it is deliberately NOT routed through

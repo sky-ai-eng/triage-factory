@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -79,13 +80,54 @@ func (f *fakeScopedResolver) TokenForReposScoped(_ context.Context, _, owner str
 	return f.token, nil
 }
 
+// fakeTeamRepos is a team's tracked set on one GitHub host: host, or
+// dbtest.TestGitHubHost when unset. A read on any other host answers as the
+// store does for a host the team tracks nothing on.
 type fakeTeamRepos struct {
 	db.TeamGitHubReposStore
+	host    string
 	tracked map[string]bool // key: lowercased "owner/repo"
+	hosts   []string        // the host of every TracksRepoSystem call
 }
 
-func (f *fakeTeamRepos) TracksRepoSystem(_ context.Context, _, owner, repo string) (bool, error) {
+func (f *fakeTeamRepos) trackedHost() string {
+	if f.host != "" {
+		return f.host
+	}
+	return dbtest.TestGitHubHost
+}
+
+func (f *fakeTeamRepos) TracksRepoSystem(_ context.Context, _, host, owner, repo string) (bool, error) {
+	f.hosts = append(f.hosts, host)
+	if host != f.trackedHost() {
+		return false, nil
+	}
 	return f.tracked[strings.ToLower(owner+"/"+repo)], nil
+}
+
+func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]domain.TeamGitHubRepo, error) {
+	f.hosts = append(f.hosts, host)
+	if host != f.trackedHost() {
+		return nil, nil
+	}
+	var out []domain.TeamGitHubRepo
+	for slug := range f.tracked {
+		owner, repo, _ := strings.Cut(slug, "/")
+		out = append(out, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Slug() < out[j].Slug() })
+	return out, nil
+}
+
+// fakeOrgs answers an org's settings with one GitHub base URL; the zero value
+// is an org on the default host.
+type fakeOrgs struct {
+	db.OrgsStore
+	githubBaseURL string
+}
+
+func (f *fakeOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{GitHubBaseURL: f.githubBaseURL}, nil
 }
 
 type fakeTasks struct {
@@ -133,6 +175,7 @@ func TestManager_resolveGitHub_MintsScopedTokensForAuthorizedRepos(t *testing.T)
 	}
 	m := &Manager{
 		stores: db.Stores{
+			Orgs:            &fakeOrgs{},
 			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			// A repo the conversation touched but the team does NOT track — must be
@@ -205,6 +248,7 @@ func TestManager_resolveGitHub_CoversTheTasksCheckouts(t *testing.T) {
 	}
 	m := &Manager{
 		stores: db.Stores{
+			Orgs:            &fakeOrgs{},
 			TeamGitHubRepos: &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "acme/gears": true}},
 			Tasks:           &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			ConversationWorktrees: &fakeConversationWorktrees{
@@ -219,6 +263,128 @@ func TestManager_resolveGitHub_CoversTheTasksCheckouts(t *testing.T) {
 	}
 	if _, ok := gh.RepoTokens["acme/gears"]; !ok {
 		t.Errorf("RepoTokens = %v, want the sibling conversation's checkout repo minted for", gh.RepoTokens)
+	}
+}
+
+// TestManager_resolveGitHub_GatesTrackingOnTheOrgsCurrentHost: the authorized
+// set is the team's tracking on the org's current GitHub host, the host every
+// token in the bundle is minted on. Tracking the team holds on a host the org
+// has left authorizes nothing — not the task's repo, not a checkout's repo, and
+// not the unanchored fallback's tracked set — even when the owner/repo name is
+// the same.
+func TestManager_resolveGitHub_GatesTrackingOnTheOrgsCurrentHost(t *testing.T) {
+	const ghe = "https://ghe.example.com"
+	cases := []struct {
+		name        string
+		orgBaseURL  string
+		trackedOn   string
+		task        *domain.Task
+		wantMinted  []string
+		wantOneHost string
+	}{
+		{
+			name:        "tracked on the current host",
+			orgBaseURL:  ghe + "/",
+			trackedOn:   ghe,
+			task:        &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"},
+			wantMinted:  []string{"acme/gears", "acme/widgets"},
+			wantOneHost: ghe,
+		},
+		{
+			name:        "tracked only on the host the org left",
+			orgBaseURL:  ghe,
+			trackedOn:   dbtest.TestGitHubHost,
+			task:        &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"},
+			wantMinted:  nil,
+			wantOneHost: ghe,
+		},
+		{
+			name:        "unanchored conversation falls back to the current host's tracked set",
+			orgBaseURL:  ghe,
+			trackedOn:   ghe,
+			task:        &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-1"},
+			wantMinted:  []string{"acme/gears", "acme/widgets"},
+			wantOneHost: ghe,
+		},
+		{
+			name:        "unanchored conversation, tracked set on the host the org left",
+			orgBaseURL:  ghe,
+			trackedOn:   dbtest.TestGitHubHost,
+			task:        &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-1"},
+			wantMinted:  nil,
+			wantOneHost: ghe,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &fakeScopedResolver{
+				base:    tc.orgBaseURL,
+				hasCred: true,
+				token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+			}
+			teamRepos := &fakeTeamRepos{host: tc.trackedOn, tracked: map[string]bool{"acme/widgets": true, "acme/gears": true}}
+			var rows []domain.ConversationWorktree
+			if tc.task.EntitySource == "github" {
+				rows = []domain.ConversationWorktree{{RepoID: "acme/gears"}}
+			}
+			m := &Manager{
+				stores: db.Stores{
+					Orgs:                  &fakeOrgs{githubBaseURL: tc.orgBaseURL},
+					TeamGitHubRepos:       teamRepos,
+					Tasks:                 &fakeTasks{task: tc.task},
+					ConversationWorktrees: &fakeConversationWorktrees{rows: rows},
+				},
+				ghResolver: res,
+			}
+
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+			if err != nil {
+				t.Fatalf("resolveGitHub: %v", err)
+			}
+			var minted []string
+			for repoID := range gh.RepoTokens {
+				minted = append(minted, repoID)
+			}
+			sort.Strings(minted)
+			if strings.Join(minted, ",") != strings.Join(tc.wantMinted, ",") {
+				t.Errorf("RepoTokens minted for %v, want %v", minted, tc.wantMinted)
+			}
+			if len(teamRepos.hosts) == 0 {
+				t.Fatal("the authorized set was resolved without a single tracking read")
+			}
+			for _, h := range teamRepos.hosts {
+				if h != tc.wantOneHost {
+					t.Errorf("tracking read on host %q, want every read on the org's current host %q", h, tc.wantOneHost)
+				}
+			}
+		})
+	}
+}
+
+// TestManager_resolveGitHub_UnreadableHostFailsTheBundle: the host decides
+// which tracking authorizes a repo, so a settings read that fails leaves the
+// authorized set unknowable, and the bundle is refused rather than sealed on a
+// guess.
+func TestManager_resolveGitHub_UnreadableHostFailsTheBundle(t *testing.T) {
+	res := &fakeScopedResolver{
+		base:    "https://github.com",
+		hasCred: true,
+		token:   githubapp.Token{Value: "ghs_scoped", ExpiresAt: time.Now().Add(time.Hour)},
+	}
+	m := &Manager{
+		stores: db.Stores{
+			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
+			ConversationWorktrees: &fakeConversationWorktrees{},
+		},
+		ghResolver: res,
+	}
+	gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+	if err == nil {
+		t.Fatalf("resolveGitHub = %+v with no org store to read the GitHub host from, want an error", gh)
+	}
+	if len(res.calls) != 0 {
+		t.Errorf("TokenForRepoScoped called %d times, want 0 when the host is unreadable", len(res.calls))
 	}
 }
 
@@ -268,6 +434,7 @@ func TestManager_resolveGitHub_PATFallback(t *testing.T) {
 	}
 	m := &Manager{
 		stores: db.Stores{
+			Orgs:                  &fakeOrgs{},
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			ConversationWorktrees: &fakeConversationWorktrees{},
@@ -309,6 +476,7 @@ func TestManager_resolveGitHub_SkipsUnmintableRepoInAuthorizedSet(t *testing.T) 
 	}
 	m := &Manager{
 		stores: db.Stores{
+			Orgs:                  &fakeOrgs{},
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true, "globex/gadgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			ConversationWorktrees: &fakeConversationWorktrees{rows: []domain.ConversationWorktree{{RepoID: "globex/gadgets"}}},
@@ -356,6 +524,7 @@ func TestManager_resolveGitHub_HardMintErrorFailsBundle(t *testing.T) {
 	}
 	m := &Manager{
 		stores: db.Stores{
+			Orgs:                  &fakeOrgs{},
 			TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 			Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 			ConversationWorktrees: &fakeConversationWorktrees{},
@@ -418,6 +587,7 @@ func TestManager_resolveGitHub_GHChannelMintFailureIsNonFatal(t *testing.T) {
 			}
 			m := &Manager{
 				stores: db.Stores{
+					Orgs:                  &fakeOrgs{},
 					TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
 					Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "github", EntitySourceID: "acme/widgets#42"}},
 					ConversationWorktrees: &fakeConversationWorktrees{},

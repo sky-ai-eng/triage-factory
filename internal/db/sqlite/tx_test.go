@@ -33,7 +33,7 @@ func TestSyntheticClaimsWithTx_SQLite_AcceptsLocalOrg(t *testing.T) {
 		func(tx db.TxStores) error {
 			called = true
 			// Sanity: the bound stores are usable inside the closure.
-			if _, _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrgID, db.ListOpts{}); err != nil {
+			if _, _, err := tx.Repos.List(context.Background(), runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{}); err != nil {
 				return err
 			}
 			return nil
@@ -78,7 +78,7 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed a repo via the non-tx path so we have a baseline row count.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 		[]domain.TeamGitHubRepo{{Owner: "baseline", Repo: "repo"}}); err != nil {
 		t.Fatalf("seed baseline: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 	err := stores.Tx.SyntheticClaimsWithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
 			// Track a repository whose registry row should roll back.
-			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 				[]domain.TeamGitHubRepo{{Owner: "baseline", Repo: "repo"}, {Owner: "rolled", Repo: "back"}}); err != nil {
 				return err
 			}
@@ -97,7 +97,7 @@ func TestSyntheticClaimsWithTx_SQLite_RollsBackOnError(t *testing.T) {
 		t.Fatalf("expected sentinel error, got %v", err)
 	}
 
-	got, err := stores.Repos.ListSystem(ctx, runmode.LocalDefaultOrgID)
+	got, err := stores.Repos.ListSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListSystem: %v", err)
 	}
@@ -139,13 +139,13 @@ func TestWithTx_SQLite_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	defer cancel()
 	err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID,
 		func(tx db.TxStores) error {
-			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+			if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 				[]domain.TeamGitHubRepo{{Owner: "gone", Repo: "client"}}); err != nil {
 				return err
 			}
 			cancel()
 			return dbtest.WaitTxDone(t, func(live context.Context) error {
-				_, _, err := tx.Repos.List(live, runmode.LocalDefaultOrgID, db.ListOpts{})
+				_, _, err := tx.Repos.List(live, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{})
 				return err
 			})
 		})
@@ -176,7 +176,7 @@ func TestWithReadTx_SQLite_RefusesWriteAndReads(t *testing.T) {
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			err := door(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 					[]domain.TeamGitHubRepo{{Owner: "read", Repo: "door"}})
 			})
 			if err == nil {
@@ -187,14 +187,14 @@ func TestWithReadTx_SQLite_RefusesWriteAndReads(t *testing.T) {
 			}
 
 			if err := door(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-				_, _, err := tx.Repos.List(ctx, runmode.LocalDefaultOrgID, db.ListOpts{})
+				_, _, err := tx.Repos.List(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{})
 				return err
 			}); err != nil {
 				t.Fatalf("%s refused a read: %v", name, err)
 			}
 
 			if err := stores.Tx.WithTx(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, func(tx db.TxStores) error {
-				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 					[]domain.TeamGitHubRepo{{Owner: "write", Repo: "door"}})
 			}); err != nil {
 				t.Fatalf("WithTx refuses a write after %s: %v", name, err)

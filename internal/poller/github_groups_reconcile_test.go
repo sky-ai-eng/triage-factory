@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -39,7 +40,7 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "octo", TeamSlug: "backend"},
 		{OrgLogin: "octo", TeamSlug: "legacy"},
 	}); err != nil {
@@ -56,9 +57,9 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
 
-	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
+	m.reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeam: %v", err)
 	}
@@ -85,7 +86,7 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "octo", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("seed mappings: %v", err)
@@ -101,9 +102,9 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
 
-	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
+	m.reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeam: %v", err)
 	}

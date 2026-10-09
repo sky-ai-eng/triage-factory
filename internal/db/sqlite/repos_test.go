@@ -54,10 +54,10 @@ func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.Repos.Upsert(t.Context(), bogusOrg, anyRepository()); err == nil {
 		t.Errorf("Upsert with non-local orgID should error")
 	}
-	if _, err := stores.Repos.GetByRef(t.Context(), bogusOrg, domain.RepoRefFromSlug("any/repo")); err == nil {
+	if _, err := stores.Repos.GetByRef(t.Context(), bogusOrg, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "any/repo")); err == nil {
 		t.Errorf("Get with non-local orgID should error")
 	}
-	if _, _, err := stores.Repos.List(t.Context(), bogusOrg, db.ListOpts{}); err == nil {
+	if _, _, err := stores.Repos.List(t.Context(), bogusOrg, dbtest.TestGitHubHost, db.ListOpts{}); err == nil {
 		t.Errorf("List with non-local orgID should error")
 	}
 }
@@ -71,18 +71,18 @@ func TestRepositoryStore_SQLite_ListTeamScoped_MirrorsList(t *testing.T) {
 	stores := sqlitestore.New(conn)
 	ctx := t.Context()
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "a", Repo: "one"},
 		{Owner: "b", Repo: "two"},
 	}); err != nil {
 		t.Fatalf("track repos: %v", err)
 	}
 
-	all, _, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
+	all, _, err := stores.Repos.List(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	scoped, _, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID, db.ListOpts{Limit: 50})
+	scoped, _, err := stores.Repos.ListTeamScoped(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("ListTeamScoped: %v", err)
 	}

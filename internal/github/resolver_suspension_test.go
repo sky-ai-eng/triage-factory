@@ -45,7 +45,7 @@ func suspendedInstall(login string) domain.OrgGitHubAppInstallation {
 func TestInstallationToken_SuspendedIsNeverServedFromCache(t *testing.T) {
 	inst := suspendedInstall("acme")
 	r, cache, gh := suspensionResolver(t, inst)
-	cache.Set("org-1", inst.InstallationID, githubapp.Token{
+	cache.Set("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID, githubapp.Token{
 		Value:     "ghs_minted_before_the_suspension",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -62,7 +62,7 @@ func TestInstallationToken_SuspendedIsNeverServedFromCache(t *testing.T) {
 	}
 	// The stale entry is gone, not merely stepped over — a caller that reaches
 	// the cache by another path must not find it either.
-	if cached, ok := cache.Get("org-1", inst.InstallationID); ok && cached.Value == "ghs_minted_before_the_suspension" {
+	if cached, ok := cache.Get("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID); ok && cached.Value == "ghs_minted_before_the_suspension" {
 		t.Error("the pre-suspension token is still in the cache; want it invalidated")
 	}
 }
@@ -75,7 +75,7 @@ func TestInstallationToken_SuspendedIsNeverServedFromCache(t *testing.T) {
 func TestInstallationToken_UnsuspendedStillServesFromCache(t *testing.T) {
 	inst := installOn("acme")
 	r, cache, gh := suspensionResolver(t, inst)
-	cache.Set("org-1", inst.InstallationID, githubapp.Token{
+	cache.Set("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID, githubapp.Token{
 		Value:     "ghs_cached",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -89,5 +89,35 @@ func TestInstallationToken_UnsuspendedStillServesFromCache(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&gh.mintCalls); got != 0 {
 		t.Errorf("mint calls = %d; want 0 (served from cache)", got)
+	}
+}
+
+// TestInstallationToken_CachedOnAnotherHostIsNotServed pins the host in the
+// resolver's cache key: a token minted on the host an org used to point at is
+// a credential for that deployment, so a resolution against the org's current
+// host mints its own rather than reuse the old host's same-numbered entry.
+func TestInstallationToken_CachedOnAnotherHostIsNotServed(t *testing.T) {
+	inst := installOn("acme")
+	r, cache, gh := suspensionResolver(t, inst)
+	cache.Set("org-1", "https://ghe.old.example.com", inst.InstallationID, githubapp.Token{
+		Value:     "ghs_minted_on_the_old_host",
+		ExpiresAt: time.Now().Add(time.Hour),
+	})
+
+	tok, err := r.installationToken(context.Background(), "org-1", resolvedApp{org: activeApp()}, inst, gh.srv.URL)
+	if err != nil {
+		t.Fatalf("installationToken: %v", err)
+	}
+	if tok.Value == "ghs_minted_on_the_old_host" {
+		t.Fatal("served the token cached for another host")
+	}
+	if got := atomic.LoadInt32(&gh.mintCalls); got != 1 {
+		t.Errorf("mint calls = %d; want 1 (minted on the current host)", got)
+	}
+	if cached, ok := cache.Get("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID); !ok || cached.Value != tok.Value {
+		t.Errorf("current host's entry = (%q, %v); want the freshly minted %q", cached.Value, ok, tok.Value)
+	}
+	if cached, ok := cache.Get("org-1", "https://ghe.old.example.com", inst.InstallationID); !ok || cached.Value != "ghs_minted_on_the_old_host" {
+		t.Errorf("old host's entry = (%q, %v); the mint must not overwrite another host's key", cached.Value, ok)
 	}
 }
