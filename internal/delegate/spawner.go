@@ -1091,7 +1091,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		// still rejected by the receive-pack gate: read-only bootstrap, push
 		// authority is earned once the checkout's branch resolves through a real
 		// ledger row.
-		if agenthost.IsTaskOwnRepo(ctx, stores, info, owner, repo) {
+		if agenthost.IsTaskOwnRepo(ctx, stores, info, host, owner, repo) {
 			return gitproxy.Decision{Allowed: true, ProtectedRefs: pushpolicy.Refs(protected)}, nil
 		}
 		return gitDenyNotMaterialized(repoID), nil

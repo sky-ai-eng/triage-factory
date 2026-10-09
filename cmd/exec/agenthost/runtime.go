@@ -417,7 +417,11 @@ func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) 
 }
 
 func (r *directRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return IsTaskOwnRepo(ctx, r.stores, r.info, owner, repo), nil
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return false, err
+	}
+	return IsTaskOwnRepo(ctx, r.stores, r.info, host, owner, repo), nil
 }
 
 func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {

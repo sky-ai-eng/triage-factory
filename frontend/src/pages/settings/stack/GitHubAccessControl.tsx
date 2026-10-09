@@ -912,8 +912,8 @@ export default function GitHubAccessControl({
           {s.githubPatRebindHost && (
             <p className="text-body leading-relaxed text-alarm">
               This token was connected on {s.githubPatRebindHost}, not on{' '}
-              {s.org.github_url || 'https://github.com'}. It is not used on another
-              host, so GitHub polling and agent runs have no credential until you replace it.
+              {s.org.github_url || 'https://github.com'}. It is not used on another host, so GitHub
+              polling and agent runs have no credential until you replace it.
             </p>
           )}
           <div className="flex flex-wrap items-center gap-2">

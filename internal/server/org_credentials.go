@@ -419,12 +419,9 @@ func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 	go s.onGitHubChanged(orgID)
 }
 
-// kickJiraChanged re-dues Jira polling under a changed Jira credential — the
-// Jira half of the pair above, and the half a credential BIND owed and did not
-// pay. The unbind has always kicked; the bind used to get its restart
-// second-hand, from the fused setup route that carried the Jira credential
-// alongside the GitHub one and kicked the GitHub path (which rebuilds both
-// pollers). With that route gone, an org connecting Jira has to kick here or it
+// kickJiraChanged re-dues Jira polling under a changed Jira credential and
+// clears Jira's readiness until that poll completes — the Jira half of the pair
+// above. A bind kicks as well as an unbind: an org connecting Jira otherwise
 // polls nothing until the next scheduled cycle.
 func (s *Server) kickJiraChanged(r *http.Request, orgID string) {
 	if s.onJiraChanged == nil {
