@@ -230,7 +230,17 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
-	ev.Channel = p.settleChannel(ctx, ws, ev.Channel)
+	if settled := p.settleChannel(ctx, ws, ev.Channel); settled != ev.Channel {
+		// The settle moved this delivery's writes onto the current id, and an
+		// entity the thread already had there kept the key over the one
+		// minted above; the event hangs off whichever holds it now.
+		ev.Channel = settled
+		minted := entity.ID
+		if entity, _, err = p.entities.FindOrCreateSystem(ctx, ws.OrgID, "slack", domain.SlackScope, domain.SlackSourceID(ev.Channel, root), "", kind, slackThreadTitle, ""); err != nil {
+			return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
+		}
+		created = created && entity.ID == minted
+	}
 	// Only on create: the thread-root permalink is stable once minted, and
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
 	if created && p.permalink != nil {

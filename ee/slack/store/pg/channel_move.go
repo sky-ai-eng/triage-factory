@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -205,11 +206,13 @@ func moveTrackingRows(ctx context.Context, q db.Execer, orgID, oldID, newID stri
 
 // moveThreadEntities rekeys every Slack entity under oldID, in any state.
 // Only an active row can collide (keys are unique among active rows), and
-// only with an active row the new id minted first — which is closed so the
-// original can take the key.
+// only with another active row for the same thread: one the new id minted
+// before the change arrived, or one a writer the move overtook left under the
+// old id after it. The older is the thread's original and keeps the key; the
+// newer is closed, and moves with it.
 func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, []string, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, source_id, COALESCE(url, ''), state FROM entities
+		SELECT id, source_id, COALESCE(url, ''), state, created_at FROM entities
 		WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND starts_with(source_id, $3)
 		ORDER BY id
 		FOR UPDATE
@@ -217,11 +220,14 @@ func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID st
 	if err != nil {
 		return 0, nil, fmt.Errorf("list slack entities to move: %w", err)
 	}
-	type held struct{ id, key, url, state string }
+	type held struct {
+		id, key, url, state string
+		created             time.Time
+	}
 	var found []held
 	for rows.Next() {
 		var h held
-		if err := rows.Scan(&h.id, &h.key, &h.url, &h.state); err != nil {
+		if err := rows.Scan(&h.id, &h.key, &h.url, &h.state, &h.created); err != nil {
 			rows.Close()
 			return 0, nil, err
 		}
@@ -242,17 +248,28 @@ func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID st
 		}
 		if h.state == "active" {
 			var holder string
+			var holderCreated time.Time
 			err := q.QueryRowContext(ctx, `
-				UPDATE entities SET state = 'closed', closed_at = now()
+				SELECT id, created_at FROM entities
 				WHERE org_id = $1 AND source = 'slack' AND scope = $2 AND source_id = $3
 				  AND state = 'active' AND id <> $4
-				RETURNING id
-			`, orgID, domain.SlackScope, newKey, h.id).Scan(&holder)
+				FOR UPDATE
+			`, orgID, domain.SlackScope, newKey, h.id).Scan(&holder, &holderCreated)
 			switch {
-			case err == nil:
-				superseded = append(superseded, holder)
-			case !errors.Is(err, sql.ErrNoRows):
-				return 0, nil, fmt.Errorf("close slack entity minted under %s: %w", newKey, err)
+			case errors.Is(err, sql.ErrNoRows):
+			case err != nil:
+				return 0, nil, fmt.Errorf("find slack entity holding %s: %w", newKey, err)
+			default:
+				closed := holder
+				if holderCreated.Before(h.created) {
+					closed = h.id
+				}
+				if _, err := q.ExecContext(ctx, `
+					UPDATE entities SET state = 'closed', closed_at = now() WHERE org_id = $1 AND id = $2
+				`, orgID, closed); err != nil {
+					return 0, nil, fmt.Errorf("close superseded slack entity %s: %w", closed, err)
+				}
+				superseded = append(superseded, closed)
 			}
 		}
 		url := h.url

@@ -550,6 +550,43 @@ func TestChannelMove_Postgres_SettleMovesWhatLandedUnderARetiredID(t *testing.T)
 	}
 }
 
+// TestChannelMove_Postgres_SettleKeepsTheThreadsOriginal: a writer the move
+// overtook mints a second entity for a thread under the old key; the settle
+// closes that one, and the original, already under the new key, keeps it.
+func TestChannelMove_Postgres_SettleKeepsTheThreadsOriginal(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-settle-original")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	const root = "1700000000.000100"
+	original := seedThreadEntity(t, stores, orgID, moveOld+"/"+root, "thread", "")
+	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	late := seedThreadEntity(t, stores, orgID, moveOld+"/"+root, "message", "")
+	if late.ID == original.ID {
+		t.Fatal("late writer found the original under the old key; want a second entity")
+	}
+
+	if got, err := channels.SettleSystem(ctx, orgID, moveOld); err != nil || got != moveNew {
+		t.Fatalf("SettleSystem = %q, %v; want %q", got, err, moveNew)
+	}
+	holder, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/"+root)
+	if err != nil || holder == nil || holder.ID != original.ID || holder.Kind != "thread" {
+		t.Errorf("active entity under the new key = %+v, %v; want the original %s", holder, err, original.ID)
+	}
+	var state, key string
+	if err := h.AdminDB.QueryRow(`SELECT state, source_id FROM entities WHERE id = $1`, late.ID).Scan(&state, &key); err != nil {
+		t.Fatalf("read late entity: %v", err)
+	}
+	if state != "closed" || key != moveNew+"/"+root {
+		t.Errorf("late entity = %s under %s; want closed under %s", state, key, moveNew+"/"+root)
+	}
+}
+
 // TestChannelMove_Postgres_SettleWaitsForAMoveInProgress: a settle that starts
 // while a move holds its lock waits for the commit and reads the change, so a
 // write made before the settle cannot fall between the move's reads and its

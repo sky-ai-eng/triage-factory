@@ -13,8 +13,8 @@ type ChannelMove struct {
 	To string
 	// Entities is how many thread entities moved.
 	Entities int
-	// Superseded are the ids of the entities closed because the thread's
-	// original took their key; see MoveSystem.
+	// Superseded are the ids of the entities closed because an older entity
+	// for the same thread kept the key; see MoveSystem.
 	Superseded []string
 	// Trackers is how many team tracking rows named the old id.
 	Trackers int

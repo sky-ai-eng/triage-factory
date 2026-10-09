@@ -313,12 +313,13 @@ type ChannelRegistryStore interface {
 	//   - the team tracking rows. A team tracking both ids keeps one row, with
 	//     the older created_at. The old id's primary team stays primary, and a
 	//     primary the new id gained in the meantime is demoted;
-	//   - every Slack thread entity keyed "<oldID>/…", with its permalink. An
-	//     active entity already under the new key was minted by a mention
-	//     delivered through the new id before the change arrived: it is closed
-	//     (ChannelMove.Superseded), and the thread's original, which carries
-	//     its tasks, conversations, memory and kind, takes the key. The closed
-	//     row keeps what it collected;
+	//   - every Slack thread entity keyed "<oldID>/…", with its permalink. Two
+	//     active entities for one thread — one the new id minted for a mention
+	//     delivered before the change arrived, or one a writer the move
+	//     overtook left under oldID (SettleSystem) — resolve to the older,
+	//     the thread's original, which carries its tasks, conversations,
+	//     memory and kind and keeps the key. The newer is closed
+	//     (ChannelMove.Superseded) and keeps what it collected;
 	//   - the Slack artifacts naming the channel: target, dedup key and
 	//     permalink. A key the new id already has is left as it is;
 	//   - external_actions.current_url, the audit ledger's pointer, for

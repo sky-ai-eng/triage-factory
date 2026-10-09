@@ -438,7 +438,8 @@ func TestHandleEventCallback_MentionUnderARetiredChannelID(t *testing.T) {
 
 // TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve: a move that
 // commits after the mention resolved its channel is settled once the entity
-// is written, and the event publishes under the new id.
+// is written, and the event publishes under the new id, on the entity that
+// holds the thread's key there.
 func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
 	p, entities, _, published := newTestPipeline()
 	channels := newFakeChannelRegistry()
@@ -446,7 +447,9 @@ func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
 	entities.afterFindOrCreate = func() {
 		channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
 	}
-	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+	const thread = "C1/1599999999.000001"
+	entities.seedThread("org-1", thread, "thread", "active")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100", ThreadTS: "1599999999.000001"}
 
 	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
 		t.Fatalf("handleEventCallback: %v", err)
@@ -463,6 +466,9 @@ func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
 	}
 	if meta.Channel != "C1" {
 		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+	if got, want := (*published)[0].EntityID, entities.byKey[fakeEntityKey("org-1", "slack", domain.SlackScope, thread)].ID; got == nil || *got != want {
+		t.Errorf("EntityID = %v; want the thread's entity %s", got, want)
 	}
 }
 
