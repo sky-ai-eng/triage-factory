@@ -176,14 +176,15 @@ type Server struct {
 	// otherwise snapshot the same prior key and the one that fails would
 	// restore it over the one that committed. GitHub and Linear need no mutex
 	// of their own: every GitHub credential transition holds githubAppRegMu
-	// for the org, and every Linear one holds linearCredentialLock.
+	// for the org, and every Linear writer, the token cache's rotation
+	// included, holds linearCredentialLock.
 	jiraCredentialMu      sync.Mutex
 	anthropicCredentialMu sync.Mutex
 	bedrockCredentialMu   sync.Mutex
-	// linearCredentialLock is lockLinearCredential's local-mode keyspace,
-	// map[orgID]*sync.Mutex. In multi mode the lock is a Postgres advisory
-	// lock instead, so it holds across pods.
-	linearCredentialLock sync.Map
+	// linearCredentialLock is the per-org lock every writer of an org's
+	// Linear credential holds, this server's handlers and every token cache
+	// alike (lockLinearCredential).
+	linearCredentialLock *linearoauth.CredentialLock
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve
@@ -596,8 +597,9 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.linearOAuthApps = linear.NewOAuthAppResolver(stores.LinearApps, stores.Secrets, linear.DeploymentOAuthAppFromEnv())
 	s.linearOAuthMinter = linearoauth.NewMinter()
 	s.linearInstalls = stores.LinearInstalls
+	s.linearCredentialLock = linearoauth.NewCredentialLock(database)
 	s.linearResolver = linear.NewResolverWithInstall(stores.Secrets, stores.Orgs,
-		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls))
+		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls, s.linearCredentialLock))
 	s.validateLinear = auth.ValidateLinear
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)

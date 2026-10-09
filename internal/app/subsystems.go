@@ -483,9 +483,11 @@ func (a *App) newPollerManager() *poller.Manager {
 	// The Linear resolver serves both org credential shapes. An installed org
 	// polls as its app user, through an access token this cache refreshes and
 	// rotates; the server holds a cache of its own, and the two converge (see
-	// linearoauth.TokenCache).
+	// linearoauth.TokenCache). The cache writes under the same credential lock
+	// as the server's handlers.
 	linearApps := linear.NewOAuthAppResolver(a.stores.LinearApps, a.stores.Secrets, linear.DeploymentOAuthAppFromEnv())
-	linearTokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), linearApps, a.stores.Secrets, a.stores.LinearInstalls)
+	linearTokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), linearApps, a.stores.Secrets, a.stores.LinearInstalls,
+		linearoauth.NewCredentialLock(a.database))
 	linearResolver := linear.NewResolverWithInstall(a.stores.Secrets, a.stores.Orgs, linearTokens)
 	m := poller.NewManager(a.database, a.ingestor, a.stores.Users, a.stores.Tasks, a.stores.Entities, a.stores.Repos, a.stores.EventQueue, a.stores.Orgs, a.stores.JiraStatusRules, a.stores.LinearTeamRules, a.stores.TeamGitHubGroups, a.stores.Secrets, a.stores.GitHubApps, a.stores.PollReadiness, a.ghResolver, linearResolver)
 	// The App-installation grant mirror, refreshed by pull at the head of every

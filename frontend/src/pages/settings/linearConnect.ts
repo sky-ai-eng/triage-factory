@@ -88,6 +88,18 @@ export function linearInstallStartURL(orgId: string, returnTo: string): string {
   )
 }
 
+// linearInstallReturnTo is the page the install ceremony comes back to: the
+// one at href as it is now, query included, because the query carries the
+// routing state (the Settings tab) that shows the Linear section again. A
+// previous ceremony's outcome is dropped so it does not come back with this
+// one.
+export function linearInstallReturnTo(href: string): string {
+  const url = new URL(href)
+  url.searchParams.delete('linear')
+  url.searchParams.delete('linear_error')
+  return url.pathname + url.search
+}
+
 // linearInstallErrorText maps an install's ?linear_error= code, or the access
 // read's last_error, to the banner copy. null for no error.
 export function linearInstallErrorText(code: string | null | undefined): string | null {

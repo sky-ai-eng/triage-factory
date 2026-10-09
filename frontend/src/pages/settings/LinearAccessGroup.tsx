@@ -1,7 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Section, Field, inputClass, glassInputClass } from './primitives'
 import { toast } from '../../components/Toast/toastStore'
-import { disconnectLinear, linearInstallErrorText, linearInstallStartURL } from './linearConnect'
+import {
+  disconnectLinear,
+  linearInstallErrorText,
+  linearInstallReturnTo,
+  linearInstallStartURL,
+} from './linearConnect'
 
 /**
  * LinearAccessGroup is the org-level Linear credential field group — the
@@ -88,7 +93,7 @@ export default function LinearAccessGroup({
       toast.error('No organization context — reload and try again.')
       return
     }
-    window.location.href = linearInstallStartURL(orgId, window.location.pathname)
+    window.location.href = linearInstallStartURL(orgId, linearInstallReturnTo(window.location.href))
   }
 
   const disconnect = async () => {

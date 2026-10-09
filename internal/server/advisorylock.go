@@ -2,75 +2,18 @@ package server
 
 import (
 	"context"
-	"database/sql/driver"
 	"sync"
 
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // acquireKeyedLock serializes a read-merge-write critical section keyed on
 // key (an org id, ...) across the whole deployment, not just this process
-// (TFAC-579).
-//
-// In multi mode (Postgres) it takes a session-scoped pg_advisory_lock on a
-// dedicated connection checked out from s.db for the duration of the
-// critical section — closing the gap githubAppRegMu can't: two control
-// pods, each with their own in-process sync.Map, can freely interleave the
-// same org's read-merge-write. The lock is
-// session- not transaction-scoped because the guarded sections here span
-// several independent s.tx.WithTx calls (and, for the knowledge-upload
-// handler, file I/O in between) rather than one transaction — a
-// pg_advisory_xact_lock would release at the first call's commit and stop
-// covering the rest. Release runs the unlock and returns the connection to
-// the pool on success; on unlock FAILURE it forces a physical close via
-// conn.Raw + driver.ErrBadConn instead — (*sql.Conn).Close alone only
-// pools the connection, and a pooled session that still holds the lock
-// blocks every other acquirer of that key deployment-wide until the pool
-// happens to evict it (up to ConnMaxLifetime). A failed unlock with a
-// healthy session is real (e.g. a server-side statement_timeout cancel),
-// so "unlock failed ⇒ session is dying anyway" is not a safe assumption —
-// same discipline as db/migrations.go's migration lock.
-//
-// In local mode (SQLite has no advisory-lock primitive, and there's no
-// second process to race at N=1 anyway) it falls back to the existing
-// per-process keyed mutex — the same protection this RMW had before,
-// unchanged.
-//
-// Returns a release func the caller must call at least once (typically via
-// defer) to end the critical section — it's safe to call earlier and let a
-// deferred call fire again as a no-op (e.g. to narrow the held window: release
-// as soon as the guarded work is done, keep the defer as the safety net for
-// every other early-return path), since the returned func is idempotent in
-// both modes.
+// (TFAC-579): a Postgres advisory lock on s.db in multi mode, so two control
+// pods cannot interleave the same org's read-merge-write, and the key's mutex
+// in mu in local mode. See db.AcquireKeyedLock.
 func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64, key string) (release func(), err error) {
-	if runmode.Current() != runmode.ModeMulti {
-		v, _ := mu.LoadOrStore(key, &sync.Mutex{})
-		m := v.(*sync.Mutex)
-		m.Lock()
-		var once sync.Once
-		return func() { once.Do(m.Unlock) }, nil
-	}
-
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtextextended($1, $2))`, key, salt); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			if _, uerr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, key, salt); uerr != nil {
-				// See the doc comment: a pooled connection still holding
-				// the lock wedges this key for every pod; force the
-				// backend session closed so the lock dies with it.
-				_ = conn.Raw(func(driverConn any) error { return driver.ErrBadConn })
-			}
-			_ = conn.Close()
-		})
-	}, nil
+	return db.AcquireKeyedLock(ctx, s.db, mu, salt, key)
 }
 
 // Advisory-lock salts (TFAC-579). hashtextextended's salt is a global
@@ -93,8 +36,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	8 — this file                                 (org id, session)
 //	9 — this file                                 (github host + installation
 //	    id, session; githubInstallationBindLockSalt)
-//	10 — this file                                (org id, session;
-//	    linearCredentialLockSalt)
+//	10 — internal/linearoauth                     (org id, session;
+//	    credentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
 //	    exclusive to move, shared to settle; channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
@@ -119,21 +62,12 @@ const (
 	// the org lock, and nothing waits on an org lock while holding this one, so
 	// no cycle can form.
 	githubInstallationBindLockSalt int64 = 9
-
-	// linearCredentialLockSalt namespaces the per-org Linear credential lock
-	// (lockLinearCredential). Every writer of an org's Linear credential, its
-	// install row, or its OAuth app holds it, so a check one of them makes —
-	// is an install live, which app minted it, what did the row say before
-	// this ceremony replaced it — still holds when its write lands, on every
-	// pod. It is its own keyspace because the GitHub org lock's critical
-	// sections are GitHub's, and sharing one would serialize two
-	// integrations for no reason.
-	linearCredentialLockSalt int64 = 10
 )
 
-// lockLinearCredential takes orgID's Linear credential lock. Callers hold it
-// across the reads their write depends on and the write itself, and take it
-// before guardLocalLinearWrite, which relies on it.
+// lockLinearCredential takes orgID's Linear credential lock (see
+// linearoauth.CredentialLock). Callers hold it across the reads their write
+// depends on and the write itself, and take it before guardLocalLinearWrite,
+// which relies on it.
 func (s *Server) lockLinearCredential(ctx context.Context, orgID string) (release func(), err error) {
-	return s.acquireKeyedLock(ctx, &s.linearCredentialLock, linearCredentialLockSalt, orgID)
+	return s.linearCredentialLock.Lock(ctx, orgID)
 }

@@ -46,17 +46,21 @@ var errEnvelopeMoved = errors.New("linearoauth: refused refresh token is no long
 // therefore seen on the next read, with no invalidation message to deliver.
 //
 // A singleflight keyed by org coalesces one process's concurrent refreshes.
-// Across processes, every write is a compare-and-swap against the envelope
-// the refresh read: a rotation lands only over the token it rotated, so it
-// can neither resurrect a disconnected install nor overwrite a newer one.
-// Linear answers a refresh token replayed within its grace window with the
-// identical new pair, so two processes refreshing the same token at once
+// Every write — the rotation write-back and a revoke — holds the org's
+// CredentialLock, so it is one step against the credential handlers and
+// against another process's write, and is a compare-and-swap against the
+// envelope its refresh read: a rotation lands only over the token it
+// rotated, so it can neither resurrect a disconnected install nor overwrite
+// a newer one. The refresh itself, a request to Linear, runs outside the
+// lock. Linear answers a refresh token replayed within its grace window with
+// the identical new pair, so two processes refreshing the same token at once
 // converge on one pair whichever of them stores it.
 type TokenCache struct {
 	minter   refresher
 	apps     linear.OAuthAppResolver
 	secrets  db.SecretStore
 	installs db.LinearInstallsStore
+	lock     *CredentialLock
 
 	// now is injectable for tests; nil is time.Now.
 	now func() time.Time
@@ -75,18 +79,19 @@ type cachedToken struct {
 
 // NewTokenCache builds a TokenCache over a minter, the org's OAuth-app
 // resolver (the client credentials a refresh authenticates with), the secret
-// store (the envelope) and the installs store (marking a revoked install
-// removed).
-func NewTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore) *TokenCache {
-	return newTokenCache(minter, apps, secrets, installs)
+// store (the envelope), the installs store (marking a revoked install
+// removed) and the lock the org's other credential writers hold.
+func NewTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock) *TokenCache {
+	return newTokenCache(minter, apps, secrets, installs, lock)
 }
 
-func newTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore) *TokenCache {
+func newTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock) *TokenCache {
 	return &TokenCache{
 		minter:   minter,
 		apps:     apps,
 		secrets:  secrets,
 		installs: installs,
+		lock:     lock,
 		cache:    make(map[string]cachedToken),
 	}
 }
@@ -188,13 +193,19 @@ func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, er
 }
 
 // revokeInstall answers Linear refusing the install's refresh token, refused.
-// The install is marked removed first and the envelope deleted after, so a
-// failure between them leaves a removed row and a dead envelope, which the
-// next read refuses and removes again; the other order could leave the
-// envelope gone and the row live, holding the workspace with nothing left to
-// retry. Both writes name what this refresh read, the install by its id and
-// the envelope by its value, so neither can land on a newer install.
+// It holds the org's credential lock from the check that the stored envelope
+// is still the refused one through both writes, so no rotation, new install
+// or disconnect lands between them. The install is marked removed first and
+// the envelope deleted after, so a failure between them leaves a removed row
+// and a dead envelope, which the next read refuses and removes again; the
+// other order could leave the envelope gone and the row live, holding the
+// workspace with nothing left to retry.
 func (c *TokenCache) revokeInstall(ctx context.Context, orgID string, cred linear.InstallCredential, raw string, refused error) error {
+	release, err := c.lock.Lock(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("linearoauth: lock org %s's linear credential: %w", orgID, err)
+	}
+	defer release()
 	_, current, err := c.readEnvelope(ctx, orgID)
 	switch {
 	case errors.Is(err, linear.ErrNoLinearSystemCredential):
@@ -251,6 +262,11 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID string) (_ cachedTok
 	if err != nil {
 		return cachedToken{}, cred, raw, err
 	}
+	release, err := c.lock.Lock(ctx, orgID)
+	if err != nil {
+		return cachedToken{}, cred, raw, fmt.Errorf("linearoauth: lock org %s's linear credential: %w", orgID, err)
+	}
+	defer release()
 	swapped, err := c.secrets.PutSystemIfValue(ctx, orgID, integrations.KeyLinearAppInstall, raw, env, "Linear app install")
 	if err != nil {
 		return cachedToken{}, cred, raw, fmt.Errorf("linearoauth: persist rotated refresh token for org %s: %w", orgID, err)

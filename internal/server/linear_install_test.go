@@ -106,7 +106,7 @@ func newLinearInstallRig(t *testing.T) *linearInstallRig {
 	r.s.SetDeployConfig("http://localhost:3000", r.key)
 	r.s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(r.oauth.URL+"/token", r.oauth.URL+"/revoke")
 	r.s.linearResolver = linear.NewResolverWithInstall(r.stores.Secrets, r.stores.Orgs,
-		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls))
+		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls, r.s.linearCredentialLock))
 	r.registerApp(t, "lin-client-1")
 	return r
 }
@@ -792,15 +792,13 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 	}
 
 	// The store waits on org B's Linear credential lock however it is held:
-	// here by another session, the way another pod would hold it.
-	other, err := rig.h.AdminDB.Conn(t.Context())
+	// here by another session, the way another pod's handler or token cache
+	// would hold it.
+	releaseOther, err := linearoauth.NewCredentialLock(rig.h.AdminDB).Lock(t.Context(), orgB.String())
 	if err != nil {
-		t.Fatalf("conn: %v", err)
-	}
-	defer other.Close()
-	if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_lock(hashtextextended($1, $2))`, orgB.String(), linearCredentialLockSalt); err != nil {
 		t.Fatalf("take the lock: %v", err)
 	}
+	defer releaseOther()
 	cookie, state = start(orgB, sidB)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- get(callback(state), sidB, "", cookie) }()
@@ -809,9 +807,7 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 		t.Fatalf("the callback completed (%d) while another session held the org's lock", rec.Code)
 	case <-time.After(300 * time.Millisecond):
 	}
-	if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, orgB.String(), linearCredentialLockSalt); err != nil {
-		t.Fatalf("release the lock: %v", err)
-	}
+	releaseOther()
 	select {
 	case rec := <-done:
 		expectRedirect(t, rec, "linear", "installed")
@@ -827,6 +823,8 @@ func TestLinearInstallReturn(t *testing.T) {
 	}{
 		{"o-1", "", "/orgs/o-1/settings?linear_error=state"},
 		{"o-1", "/setup?step=2", "/setup?linear_error=state&step=2"},
+		{"o-1", "/orgs/o-1/org?tab=settings", "/orgs/o-1/org?linear_error=state&tab=settings"},
+		{"o-1", "/orgs/o-1/org?linear_error=denied&tab=settings", "/orgs/o-1/org?linear_error=state&tab=settings"},
 		{"o-1", "https://evil.example/x", "/orgs/o-1/settings?linear_error=state"},
 		{"", "", "/?linear_error=state"},
 	} {

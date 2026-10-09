@@ -184,7 +184,7 @@ func newRig(t *testing.T) *rig {
 func (r *rig) now() time.Time { return r.clock }
 
 func (r *rig) cache() *TokenCache {
-	c := newTokenCache(r.ref, fakeAppResolver{}, r.secrets, r.installs)
+	c := newTokenCache(r.ref, fakeAppResolver{}, r.secrets, r.installs, NewCredentialLock(nil))
 	c.now = r.now
 	return c
 }
@@ -443,7 +443,7 @@ func TestTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 
 func TestTokenCache_AppMismatchDoesNotRefresh(t *testing.T) {
 	r := newRig(t)
-	c := newTokenCache(r.ref, fakeAppResolver{clientID: "client-2"}, r.secrets, r.installs)
+	c := newTokenCache(r.ref, fakeAppResolver{clientID: "client-2"}, r.secrets, r.installs, NewCredentialLock(nil))
 	c.now = r.now
 
 	_, _, err := c.AccessTokenForOrg(context.Background(), cOrg)
@@ -508,4 +508,74 @@ func TestTokenCache_WriteBackNeverOverwritesANewerRotation(t *testing.T) {
 	if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-9" {
 		t.Errorf("stored refresh token = %q, want the newer ref-9 kept", stored.RefreshToken)
 	}
+}
+
+// TestTokenCache_WritesWaitOnTheCredentialLock pins that the cache's writes
+// hold the org's credential lock, the one the credential handlers hold, so
+// neither lands inside a handler's check-and-write or between its write and
+// local mode's restore. The refresh itself, a request to Linear, does not
+// wait.
+func TestTokenCache_WritesWaitOnTheCredentialLock(t *testing.T) {
+	held := func(t *testing.T, r *rig, during func()) {
+		t.Helper()
+		release, err := NewCredentialLock(nil).Lock(context.Background(), cOrg)
+		if err != nil {
+			t.Fatalf("lock: %v", err)
+		}
+		t.Cleanup(release)
+		done := make(chan error, 1)
+		go func() {
+			_, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
+			done <- err
+		}()
+		deadline := time.Now().Add(5 * time.Second)
+		for r.ref.calls.Load() == 0 {
+			if time.Now().After(deadline) {
+				t.Fatal("the refresh waited on the lock")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the read completed (err=%v) while the lock was held", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+		during()
+		release()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the read did not complete after the lock was released")
+		}
+	}
+
+	t.Run("write-back", func(t *testing.T) {
+		r := newRig(t)
+		held(t, r, func() {
+			if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-0" {
+				t.Errorf("stored = %q while the lock was held, want ref-0", stored.RefreshToken)
+			}
+		})
+		if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-1" {
+			t.Errorf("stored = %q after the release, want ref-1", stored.RefreshToken)
+		}
+	})
+	t.Run("revoke", func(t *testing.T) {
+		r := newRig(t)
+		r.ref.refuse = map[string]bool{"ref-0": true}
+		held(t, r, func() {
+			if got := r.installs.Removed(); len(got) != 0 {
+				t.Errorf("install marked removed while the lock was held: %v", got)
+			}
+			if _, ok := storedInstall(t, r.secrets); !ok {
+				t.Error("envelope deleted while the lock was held")
+			}
+		})
+		if got := r.installs.Removed(); len(got) != 1 {
+			t.Errorf("installs removed = %v after the release, want the refused install", got)
+		}
+		if _, ok := storedInstall(t, r.secrets); ok {
+			t.Error("the refused envelope is still stored after the release")
+		}
+	})
 }

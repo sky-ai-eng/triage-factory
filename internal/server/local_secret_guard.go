@@ -43,7 +43,8 @@ func (s *Server) guardLocalSecretWrite(ctx context.Context, mu *sync.Mutex, orgI
 // guardLocalLinearWrite is guardLocalSecretWrite over the Linear credential's
 // keys, for the Linear bind, unbind and install. Its callers hold the org's
 // Linear credential lock (lockLinearCredential), which every writer of these
-// keys takes, so it takes no mutex of its own.
+// keys takes — the token caches' rotation write-back and revoke included — so
+// it takes no mutex of its own.
 func (s *Server) guardLocalLinearWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
 	return s.guardLocalSecretWrite(ctx, nil, orgID, integrations.LinearKeys()...)
 }
