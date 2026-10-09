@@ -56,7 +56,26 @@ var (
 	//     callers already render it. So the *ByRef* lookups keep returning
 	//     (nil, nil) and say so in their own docs.
 	ErrNoSuchRepository = errors.New("no repository with that id")
+
+	// ErrRepoHostRequired means a ref-keyed or listing method was called
+	// without the GitHub host the repository lives on. A name and a provider
+	// id are each unique only within one host, so a lookup without one names
+	// no repository, and a write without one would key a row under a host no
+	// read asks for. GitHub always has a host (domain.GitHubHost answers the
+	// deployment default for an empty setting), so this is a caller that
+	// forgot to pass it, never an org state.
+	ErrRepoHostRequired = errors.New("repository host is required")
 )
+
+// RequireRepoHost refuses an empty GitHub host with ErrRepoHostRequired. Both
+// dialects call it at the door of every host-scoped method, so the refusal and
+// its wording cannot differ between them.
+func RequireRepoHost(host string) error {
+	if host == "" {
+		return ErrRepoHostRequired
+	}
+	return nil
+}
 
 // RepositoryStore owns the repositories table — the registry of repositories
 // TF works with, each carrying the provider identity a rename does not move,
@@ -70,6 +89,18 @@ var (
 // this row by id and a reference must not outlive what it names.
 // ListTrackedNamesSystem is the read that means "what does TF poll".
 //
+// # Scoped by GitHub host
+//
+// A repository's identity is (org, source, host, owner/repo), and its provider
+// id is unique per (org, source, host). host is db.EffectiveGitHubHost of the
+// org's GitHub base URL — the scope GitHub entities are keyed under too. An org
+// that moves to another host keeps its old rows; every ref-keyed and listing
+// method takes the host it asks about, so those rows are invisible to the new
+// host's reads, polls and renames, and come back if the org moves back. A
+// same-named repository on the new host is another row. The id-keyed methods
+// (Get, UpdateBaseBranch) take none: a row id names one repository on one host
+// already. A missing host is ErrRepoHostRequired.
+//
 // All methods take orgID; local mode passes runmode.LocalDefaultOrgID.
 // Postgres impl filters on org_id alongside the
 // (org_id = current_org_id()) RLS policy as defense in depth; SQLite
@@ -79,7 +110,7 @@ var (
 // # A slug is an edge format; the row id is the handle
 //
 // Both dialects key the row on a uuid plus a folded
-// UNIQUE(org_id, source, owner, repo) natural key, and that uuid is what
+// UNIQUE(org_id, source, host, owner, repo) natural key, and that uuid is what
 // domain.Repository.ID carries and what every table referencing a repository
 // stores. It is the handle: a rename moves owner/repo and leaves it alone.
 //
@@ -91,9 +122,10 @@ var (
 //     error's doc for why the two halves differ.
 //   - ref-keyed (…ByRef) takes a domain.RepoRef, the provider's own name
 //     for the repository. Matching folds case on owner/repo (GitHub
-//     identifiers are case-insensitive) and pins ref.Source, so a ref names
-//     one repository rather than merely matching one. A miss is (nil, nil) or
-//     a no-op, because a name that resolves to nothing is an answer.
+//     identifiers are case-insensitive) and pins ref.Source and ref.Host, so
+//     a ref names one repository rather than merely matching one. A miss is
+//     (nil, nil) or a no-op, because a name that resolves to nothing is an
+//     answer.
 //
 // No method takes a bare "owner/repo" string. domain.RepoRefFromSlug is the
 // edge parser for the surfaces that still speak one — HTTP path segments, an
@@ -135,11 +167,16 @@ type RepositoryStore interface {
 	// dedicated methods and shouldn't be clobbered by a re-profile.
 	//
 	// p.Source normalizes through domain.NormalizeRepoSource (empty means
-	// GitHub) and is a create-time identity column: a conflicting write
-	// leaves it alone. p.ExternalID refreshes the stored id when non-empty
-	// and leaves it alone when empty — the profiler reads the id off the
-	// same /repos/{owner}/{repo} response it takes default_branch and
-	// clone_url from, and a caller with no id has learned nothing to write.
+	// GitHub) and, with p.Host (required), is a create-time identity column:
+	// the conflict target is (source, host, folded owner/repo), so a
+	// same-named repository on another host is another row and never this
+	// one. p.ExternalID refreshes the stored id when non-empty and leaves it
+	// alone when empty — the profiler reads the id off the same
+	// /repos/{owner}/{repo} response it takes default_branch and clone_url
+	// from, and a caller with no id has learned nothing to write. An id
+	// another row on the host already carries is not written either: that is
+	// a rename the poller has not applied yet (or one it refused), and moving
+	// the id onto this row would leave two rows claiming one repository.
 	//
 	// Returns the persisted row, which is the only way to see any of the
 	// above: p is an input, and every rule in this doc is a rule about how
@@ -148,13 +185,13 @@ type RepositoryStore interface {
 	// to it.
 	Upsert(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
 
-	// List returns one page of the org's configured repos plus the unpaged
-	// total, including repos without profile text. Ordered by (owner, repo)
-	// with an id tiebreaker, so the order is total and the pages partition
-	// it. A zero ListOpts.Limit (db.Unwindowed) means "no window" — the
-	// internal callers that need the whole registry to resolve a ref pass
+	// List returns one page of the org's configured repos on host plus the
+	// unpaged total, including repos without profile text. Ordered by
+	// (owner, repo) with an id tiebreaker, so the order is total and the pages
+	// partition it. A zero ListOpts.Limit (db.Unwindowed) means "no window" —
+	// the internal callers that need the whole registry to resolve a ref pass
 	// that; a list route never does.
-	List(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
+	List(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
 	// ListTeamScoped is the non-admin discovery read (TFAC-559): it
 	// returns only the configured repos tracked by at least one of the
@@ -173,12 +210,14 @@ type RepositoryStore interface {
 	// Local mode (SQLite, N=1): returns the same set as List — there is
 	// no other team to scope away, mirroring the local-mode asymmetry of
 	// ListActiveJiraTeamScoped / FactoryReadStore.Entities.
-	ListTeamScoped(ctx context.Context, orgID string, opts ListOpts) ([]domain.Repository, int, error)
+	//
+	// Confined to host, like List.
+	ListTeamScoped(ctx context.Context, orgID, host string, opts ListOpts) ([]domain.Repository, int, error)
 
-	// CountConfigured returns the number of configured repos. Used
+	// CountConfigured returns the number of configured repos on host. Used
 	// by the settings endpoint to short-circuit a "no repos
 	// configured yet" UI state without paying the full SELECT cost.
-	CountConfigured(ctx context.Context, orgID string) (int, error)
+	CountConfigured(ctx context.Context, orgID, host string) (int, error)
 
 	// UpdateBaseBranch sets the user-configured base branch for the
 	// repository with this registry id and returns the updated row. Empty
@@ -240,12 +279,20 @@ type RepositoryStore interface {
 	// before any request can have arrived). Behavior is identical
 	// to the non-System variants — same SQL, same return shape.
 
-	ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error)
+	ListSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error)
 
-	// ListTrackedNamesSystem returns the "owner/repo" of every repository at
-	// least one team in the org tracks, ordered and deduplicated — the set the
-	// GitHub poller enumerates, the profiler profiles, and the dashboard
-	// backfill scopes a search to.
+	// GetSystem is Get on the admin pool, for the claims-free callers that
+	// hold a registry id: a workspace restore resolves the checkouts a
+	// snapshot recorded by id, whatever host the org is on now.
+	GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error)
+
+	// ListTrackedNamesSystem returns the "owner/repo" of every repository on
+	// host at least one team in the org tracks, ordered and deduplicated — the
+	// set the GitHub poller enumerates, the profiler profiles, and the
+	// dashboard backfill scopes a search to. Callers pass the org's current
+	// host: a repository tracked on a host the org has since moved away from is
+	// not asked about on the new one, where its name may belong to another
+	// repository.
 	//
 	// It reads through team_github_repos rather than listing the registry,
 	// because the two are no longer the same set. A registry row is durable: it
@@ -261,7 +308,7 @@ type RepositoryStore interface {
 	// a `repo:` search qualifier from it; the round-robin resume cursor stores
 	// one. Handing back ids would make all four resolve straight back to the
 	// name, and the ids would be dead weight in the poll loop's hot path.
-	ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error)
+	ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error)
 	UpdateCloneStatusByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef, status, errMsg, errKind string) (*domain.Repository, error)
 	GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error)
 	UpsertSystem(ctx context.Context, orgID string, p domain.Repository) (domain.Repository, error)
@@ -287,10 +334,15 @@ type RepositoryStore interface {
 	// what its caller reports. Returning the rows would hand a poll cycle every
 	// repository it filled, which nothing reads and the steady state makes
 	// empty anyway.
+	//
+	// Each ref names its host, and a row is filled only on that host, and only
+	// with an id no other row on the host carries — the same rule Upsert
+	// follows, for the same reason.
 	FillMissingExternalIDsSystem(ctx context.Context, orgID string, refs []domain.RepoRef) (int, error)
 
-	// ListIdentitiesSystem returns the provider identity — source, slug, and
-	// the provider's own id — of every repository row that carries an id.
+	// ListIdentitiesSystem returns the provider identity — source, host, slug,
+	// and the provider's own id — of every repository row on host that carries
+	// an id.
 	// Rows without one are omitted rather than returned with an empty
 	// ExternalID: a repository TF has not learned an id for is not renamable
 	// in either direction, so it is not part of the comparison at all.
@@ -300,13 +352,20 @@ type RepositoryStore interface {
 	// thousands, so the caller reads this once and matches the provider's
 	// enumeration against it in memory (domain.DetectRepoRenames) instead of
 	// asking the database once per observed repository.
-	ListIdentitiesSystem(ctx context.Context, orgID string) ([]domain.RepoRef, error)
+	ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoRef, error)
 
 	// RenameSystem makes TF's stored slug for one repository match the slug
 	// the provider currently reports for it, rewriting every stored reference
 	// to the old slug in ONE transaction. observed carries the identity a
-	// rename does not move (Source + ExternalID) alongside the slug the
+	// rename does not move (Source + Host + ExternalID) alongside the slug the
 	// provider now uses.
+	//
+	// Everything it rewrites belongs to that host: the repository row is
+	// matched on (source, host, external_id), entities only within the host's
+	// entity scope, and artifacts and audit-ledger links only where their link
+	// is on the host (an artifact with no link carries nothing naming a host
+	// and is matched by its key alone). A repository on another host with the
+	// same name or id is never touched.
 	//
 	// Detection happens here, not in the caller: the method re-reads the
 	// repository row under a lock (SELECT … FOR UPDATE in Postgres; SQLite's
@@ -319,7 +378,8 @@ type RepositoryStore interface {
 	// Every no-op is a nil error, never a sentinel:
 	//
 	//   - observed carries no ExternalID — nothing to key on.
-	//   - no repository row carries that (source, id) — nothing to rename.
+	//   - no repository row carries that (source, host, id) — nothing to
+	//     rename.
 	//   - the stored slug already matches, case-insensitively — the second run
 	//     of a rename that already applied, which is the steady state.
 	//

@@ -1754,6 +1754,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		           FROM conversation_worktrees w
 		           JOIN repositories repo ON repo.org_id = $1 AND repo.id = w.repository_id
 		           WHERE w.org_id = $1 AND w.conversation_id = r.id
+		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
 		             AND (
 		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER($4) AND w.ref = $9)
 		                  OR (w.ref = $10 AND (

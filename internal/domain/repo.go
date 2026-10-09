@@ -30,12 +30,16 @@ func NormalizeRepoSource(source string) (string, error) {
 }
 
 // RepoRef names one repository by provider identity — the argument shape of
-// RepositoryStore's get-or-create. Owner/Repo is the slug the rest of the product
-// carries; ExternalID is the provider's own id for that repository, which is
-// what survives a rename, and is empty whenever the caller has no id to hand
-// (nothing fetches one just to fill it in).
+// RepositoryStore's ref-keyed methods. Host is the GitHub deployment the
+// repository lives on (GitHubHost of the org's base URL), and every ref-keyed
+// store method requires it: a name and a provider id are each unique only
+// within one host, so a ref without one names no repository. Owner/Repo is the
+// slug the rest of the product carries; ExternalID is the provider's own id for
+// that repository, which is what survives a rename, and is empty whenever the
+// caller has no id to hand (nothing fetches one just to fill it in).
 type RepoRef struct {
 	Source     string // "" → RepoSourceGitHub
+	Host       string
 	Owner      string
 	Repo       string
 	ExternalID string // "" = unknown
@@ -46,12 +50,12 @@ type RepoRef struct {
 func (r RepoRef) Slug() string { return r.Owner + "/" + r.Repo }
 
 // RepoRefFromSlug is Slug's inverse: it splits "owner/repo" at the first
-// slash. A string with no slash yields an empty Repo, which every caller reads
-// as "not a repository reference" rather than as a repository named by half a
-// slug.
-func RepoRefFromSlug(slug string) RepoRef {
+// slash, on host. A string with no slash yields an empty Repo, which every
+// caller reads as "not a repository reference" rather than as a repository
+// named by half a slug.
+func RepoRefFromSlug(host, slug string) RepoRef {
 	owner, repo, _ := strings.Cut(slug, "/")
-	return RepoRef{Owner: owner, Repo: repo}
+	return RepoRef{Host: host, Owner: owner, Repo: repo}
 }
 
 // Repository is one row of the repository registry: the repositories TF works
@@ -75,11 +79,16 @@ type Repository struct {
 
 	// Source is the provider that issued this repository (RepoSourceGitHub
 	// today); empty on a struct the caller built without one, which the
-	// stores normalize on write. ExternalID is that provider's own id for
-	// the repository — the identity a rename or transfer does not move —
-	// and is empty when TF has not learned it yet, which is a supported
-	// state everywhere rather than a gap to backfill.
+	// stores normalize on write. Host is the GitHub deployment it lives on
+	// (GitHubHost), a create-time identity column like Source: an org that
+	// moves to another host meets other repositories under the same names,
+	// so this row stays where it is and the new host's repository is another
+	// row. ExternalID is that provider's own id for the repository on that
+	// host — the identity a rename or transfer does not move — and is empty
+	// when TF has not learned it yet, which is a supported state everywhere
+	// rather than a gap to backfill.
 	Source     string
+	Host       string
 	ExternalID string
 
 	Description    string
@@ -115,7 +124,7 @@ func (r Repository) Slug() string { return r.Owner + "/" + r.Repo }
 // Ref is the repository's provider identity as a RepoRef — what to hand a
 // *ByRef* store lookup when all you have is a row you already read.
 func (r Repository) Ref() RepoRef {
-	return RepoRef{Source: r.Source, Owner: r.Owner, Repo: r.Repo, ExternalID: r.ExternalID}
+	return RepoRef{Source: r.Source, Host: r.Host, Owner: r.Owner, Repo: r.Repo, ExternalID: r.ExternalID}
 }
 
 // SplitGitHubEntitySourceID splits a GitHub entity's source id into its parts:

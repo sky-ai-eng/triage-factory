@@ -645,14 +645,19 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, github_org_login, github_team_slug): a team routing a
--- GitHub team's review requests to itself. Dumb string labels, no membership
+-- One row per (team, host, github_org_login, github_team_slug): a team routing
+-- a GitHub team's review requests to itself. Dumb string labels, no membership
 -- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
+-- login names a different organization on another host, so every read and the
+-- deletion reconcile see only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
+    host text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tgg_host_populated CHECK (host <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -887,15 +892,19 @@ CREATE TABLE public.prompts (
 
 
 -- The registry of the repositories TF works with, and the target every
--- repository reference in this schema points at. (source, external_id) is the
--- half of a repository identity a rename does not move; source is app-validated.
--- Durable: untracking never deletes it, since a worktree or task may name it.
+-- repository reference in this schema points at. (source, host, external_id) is
+-- the half of a repository identity a rename does not move; source is
+-- app-validated. host is the GitHub host (domain.GitHubHost) the repository
+-- lives on: repository ids are per-deployment sequences and names repeat across
+-- deployments, so nothing matches across hosts. Durable: untracking never
+-- deletes it, since a worktree or task may name it.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
     source text DEFAULT 'github'::text NOT NULL,
+    host text NOT NULL,
     external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
@@ -1527,7 +1536,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -1781,10 +1790,15 @@ CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, ev
 
 
 -- Repository natural key. source distinguishes providers issuing the same
--- owner/repo; lower() folds case, since GitHub identifiers are case-insensitive,
--- so a racing writer conflicts instead of inserting a twin. An expression key
--- must be an index, not a UNIQUE constraint; the store infers it in ON CONFLICT.
-CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
+-- owner/repo and host the deployments of one provider; lower() folds case, since
+-- GitHub identifiers are case-insensitive, so a racing writer conflicts instead
+-- of inserting a twin. An expression key must be an index, not a UNIQUE
+-- constraint; the store infers it in ON CONFLICT.
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, host, lower(owner), lower(repo));
+
+
+-- One row per provider id on a host: what a rename keys on.
+CREATE UNIQUE INDEX repositories_external_identity ON public.repositories USING btree (org_id, source, host, external_id) WHERE (external_id IS NOT NULL);
 
 
 -- Serves the ordered org-wide list the folded key cannot: ORDER BY owner, repo.
@@ -3871,7 +3885,8 @@ CREATE TABLE public.reachable_scopes (
         CONSTRAINT reachable_scopes_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
     -- The credential instance one refresh replaces: the installation id for the
-    -- App classes, the host for pat. Opaque text, never joined on.
+    -- App classes, the host for pat. Reads join it to the installation to place
+    -- an App scope on its GitHub host.
     scope text NOT NULL,
     refreshed_at timestamp with time zone DEFAULT now() NOT NULL
 );

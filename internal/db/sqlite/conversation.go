@@ -1175,6 +1175,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		           FROM conversation_worktrees w
 		           JOIN repositories repo ON repo.id = w.repository_id
 		           WHERE w.conversation_id = r.id
+		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.id = ?)
 		             AND (
 		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER(?) AND w.ref = ?)
 		                  OR (w.ref = ? AND (
@@ -1189,7 +1190,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		      WHERE te.task_id = r.task_id AND te.event_id = ? AND te.kind = 'injected'
 		  )
 		ORDER BY r.started_at ASC, r.id ASC
-	`, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
+	`, query.EntityID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, query.ReviewTarget, query.EntityID, query.BaseRepo, query.PRRef, query.BranchRef, query.BaseRepo, query.HeadRepo, query.EventID)
 	if err != nil {
 		return nil, err
 	}

@@ -42,21 +42,27 @@ import (
 // What stays put entirely: history (events.payload_json; external_actions'
 // target and detail_json record an act under the name in force at the time),
 // and a name for something outside the database that did not itself move (a
-// worktree's path, as against the repository it holds). The directories the
-// old slug named are disposed of AFTER this transaction commits — best-effort,
-// guarded against live worktrees — by the rename applier (internal/reporename),
-// never in here: a directory removal cannot join a transaction.
+// worktree's path, as against the repository it holds). The bare clone cache
+// is keyed by the repository row id, so a rename does not move it either.
+//
+// The rewrite stays on the renamed repository's host: entities are matched in
+// that host's entity scope, and artifacts and audit-ledger links only where
+// their link is on the host. A repository on another host under the same name
+// is a different repository, and nothing of its is touched.
 
-func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID string) ([]domain.RepoRef, error) {
+func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID, host string) ([]domain.RepoRef, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT source, owner, repo, external_id
+		SELECT source, host, owner, repo, external_id
 		  FROM repositories
-		 WHERE external_id IS NOT NULL AND external_id <> ''
+		 WHERE host = ? AND external_id IS NOT NULL AND external_id <> ''
 		 ORDER BY owner, repo
-	`)
+	`, host)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +71,7 @@ func (s *repoStore) ListIdentitiesSystem(ctx context.Context, orgID string) ([]d
 	out := []domain.RepoRef{}
 	for rows.Next() {
 		var ref domain.RepoRef
-		if err := rows.Scan(&ref.Source, &ref.Owner, &ref.Repo, &ref.ExternalID); err != nil {
+		if err := rows.Scan(&ref.Source, &ref.Host, &ref.Owner, &ref.Repo, &ref.ExternalID); err != nil {
 			return nil, err
 		}
 		out = append(out, ref)
@@ -79,6 +85,9 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 	}
 	source, err := domain.NormalizeRepoSource(observed.Source)
 	if err != nil {
+		return domain.RepoRenameOutcome{}, err
+	}
+	if err := db.RequireRepoHost(observed.Host); err != nil {
 		return domain.RepoRenameOutcome{}, err
 	}
 	// No id, no rename. Stated first so the rest of this function may assume
@@ -96,7 +105,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		// Postgres impl takes explicitly. A second detection of the same
 		// rename runs after the first commits, re-reads the slug it wrote,
 		// and finds nothing to do.
-		stored, err := storedSlugsForIdentity(ctx, tx, source, observed.ExternalID)
+		stored, err := storedSlugsForIdentity(ctx, tx, source, observed.Host, observed.ExternalID)
 		if err != nil {
 			return err
 		}
@@ -124,7 +133,7 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 		if err := renameRepositoryRow(ctx, tx, source, from, observed); err != nil {
 			return err
 		}
-		if err := rewriteSlugDerivedKeys(ctx, tx, source, from, to); err != nil {
+		if err := rewriteSlugDerivedKeys(ctx, tx, source, observed.Host, from, to); err != nil {
 			return err
 		}
 		out = domain.RepoRenameOutcome{Renamed: true, From: from, To: to}
@@ -140,12 +149,12 @@ func (s *repoStore) RenameSystem(ctx context.Context, orgID string, observed dom
 // provider identity. More than one is a corrupt state rather than a shape the
 // caller handles, so the plural return exists to let the caller SAY that
 // instead of silently picking a row.
-func storedSlugsForIdentity(ctx context.Context, q queryer, source, externalID string) ([]string, error) {
+func storedSlugsForIdentity(ctx context.Context, q queryer, source, host, externalID string) ([]string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT owner, repo FROM repositories
-		 WHERE source = ? AND external_id = ?
+		 WHERE source = ? AND host = ? AND external_id = ?
 		 ORDER BY owner, repo
-	`, source, externalID)
+	`, source, host, externalID)
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +176,11 @@ func slugHeldByAnotherRepository(ctx context.Context, q queryer, source string, 
 	var found int
 	err := q.QueryRowContext(ctx, `
 		SELECT 1 FROM repositories
-		 WHERE source = ?
+		 WHERE source = ? AND host = ?
 		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 		   AND (external_id IS NULL OR external_id <> ?)
 		 LIMIT 1
-	`, source, observed.Owner, observed.Repo, observed.ExternalID).Scan(&found)
+	`, source, observed.Host, observed.Owner, observed.Repo, observed.ExternalID).Scan(&found)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -191,8 +200,8 @@ func renameRepositoryRow(ctx context.Context, q queryer, source, from string, to
 	if _, err := q.ExecContext(ctx, `
 		UPDATE repositories
 		   SET owner = ?, repo = ?, updated_at = datetime('now')
-		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, to.Owner, to.Repo, source, fromOwner, fromRepo); err != nil {
+		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, to.Owner, to.Repo, source, to.Host, fromOwner, fromRepo); err != nil {
 		return fmt.Errorf("rename repositories %s -> %s: %w", from, to.Slug(), err)
 	}
 	return nil
@@ -201,11 +210,11 @@ func renameRepositoryRow(ctx context.Context, q queryer, source, from string, to
 // rewriteSlugDerivedKeys moves the text keys that embed a slug — the group
 // referencing a repository by row id cannot remove — and the stored links
 // whose only job is to resolve to the object those keys name.
-func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to string) error {
+func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, host, from, to string) error {
 	// entities.url first, while source_id still spells the old slug: the URL
 	// pass selects its rows by the same positional source_id predicate the
 	// UPDATE below is about to rewrite.
-	if err := rewriteEntityURLs(ctx, q, source, from, to); err != nil {
+	if err := rewriteEntityURLs(ctx, q, source, host, from, to); err != nil {
 		return err
 	}
 
@@ -224,12 +233,12 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to str
 	if _, err := q.ExecContext(ctx, `
 		UPDATE entities
 		   SET source_id = ? || SUBSTR(source_id, ?)
-		 WHERE source = ?
+		 WHERE source = ? AND scope = ?
 		   AND (LOWER(source_id) = LOWER(?)
 		        OR LOWER(SUBSTR(source_id, 1, ?)) = LOWER(?))
 	`,
 		to, len(from)+1,
-		source,
+		source, host,
 		from,
 		len(from)+1, from+"#",
 	); err != nil {
@@ -260,12 +269,12 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to str
 	// the conflict target every capture writer upserts on. Leaving it behind
 	// is what turns one pull request into two rows the first time anything
 	// records it under the new name.
-	if err := rewriteArtifactSlugs(ctx, q, from, to); err != nil {
+	if err := rewriteArtifactSlugs(ctx, q, host, from, to); err != nil {
 		return err
 	}
 
 	// external_actions — the audit ledger's pointer column, and only that.
-	return rewriteExternalActionURLs(ctx, q, from, to)
+	return rewriteExternalActionURLs(ctx, q, host, from, to)
 }
 
 // rewriteEntityURLs moves the slug inside the stored links of the renamed
@@ -278,17 +287,17 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, source, from, to str
 // replace would move a host or branch segment that merely spells the name. A
 // row whose URL does not lead with the old slug — empty because TF never
 // learned one, or already pointing elsewhere — is left exactly as it stands.
-func rewriteEntityURLs(ctx context.Context, q queryer, source, from, to string) error {
+func rewriteEntityURLs(ctx context.Context, q queryer, source, host, from, to string) error {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, url FROM entities
-		 WHERE source = ? AND url IS NOT NULL AND url <> ''
+		 WHERE source = ? AND scope = ? AND url IS NOT NULL AND url <> ''
 		   AND (LOWER(source_id) = LOWER(?)
 		        OR LOWER(SUBSTR(source_id, 1, ?)) = LOWER(?))
-	`, source, from, len(from)+1, from+"#")
+	`, source, host, from, len(from)+1, from+"#")
 	if err != nil {
 		return err
 	}
-	updates, err := collectURLRewrites(rows, from, to)
+	updates, err := collectURLRewrites(rows, "", from, to)
 	if err != nil {
 		return err
 	}
@@ -308,7 +317,7 @@ func rewriteEntityURLs(ctx context.Context, q queryer, source, from, to string) 
 // it, else url), so consecutive renames chain instead of re-deriving from a
 // stale link. No provider filter: the Go matcher is positional on the URL's
 // leading path segments, which no other provider's link shape can spell.
-func rewriteExternalActionURLs(ctx context.Context, q queryer, from, to string) error {
+func rewriteExternalActionURLs(ctx context.Context, q queryer, host, from, to string) error {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
 		 WHERE COALESCE(current_url, url) IS NOT NULL
@@ -317,7 +326,7 @@ func rewriteExternalActionURLs(ctx context.Context, q queryer, from, to string) 
 	if err != nil {
 		return err
 	}
-	updates, err := collectURLRewrites(rows, from, to)
+	updates, err := collectURLRewrites(rows, host, from, to)
 	if err != nil {
 		return err
 	}
@@ -335,14 +344,19 @@ type urlRewrite struct{ id, url string }
 // collectURLRewrites drains rows of (id, url) pairs and returns the ones
 // domain.RewriteRepoURL actually moves. The SQL side over-approximates (any
 // mention of the slug, or the whole per-repo row set); the boundary decision
-// is Go's.
-func collectURLRewrites(rows *sql.Rows, from, to string) ([]urlRewrite, error) {
+// is Go's. A non-empty host also skips every link not on it — the rows that
+// carry no scope column of their own; entity rows pass "" because the query
+// already scoped them.
+func collectURLRewrites(rows *sql.Rows, host, from, to string) ([]urlRewrite, error) {
 	defer rows.Close()
 	var out []urlRewrite
 	for rows.Next() {
 		var id, u string
 		if err := rows.Scan(&id, &u); err != nil {
 			return nil, err
+		}
+		if host != "" && !domain.GitHubURLOnHost(u, host) {
+			continue
 		}
 		rewritten, changed := domain.RewriteRepoURL(u, from, to)
 		if !changed {
@@ -353,12 +367,14 @@ func collectURLRewrites(rows *sql.Rows, from, to string) ([]urlRewrite, error) {
 	return out, rows.Err()
 }
 
-func rewriteArtifactSlugs(ctx context.Context, q queryer, from, to string) error {
+func rewriteArtifactSlugs(ctx context.Context, q queryer, host, from, to string) error {
 	// The SQL filter is a cheap over-approximation — any row whose key or
 	// target so much as mentions the old slug — and the precise decision is
 	// made in Go, where the segment boundaries of a dedup key are expressible.
+	// An artifact whose link is on another host is another host's object under
+	// the same name, and is left alone; one with no link names no host.
 	rows, err := q.QueryContext(ctx, `
-		SELECT id, target, dedup_key FROM artifacts
+		SELECT id, target, dedup_key, COALESCE(url, '') FROM artifacts
 		 WHERE INSTR(LOWER(dedup_key), LOWER(?)) > 0 OR INSTR(LOWER(target), LOWER(?)) > 0
 	`, from, from)
 	if err != nil {
@@ -367,10 +383,13 @@ func rewriteArtifactSlugs(ctx context.Context, q queryer, from, to string) error
 	type pending struct{ id, target, dedupKey string }
 	var updates []pending
 	for rows.Next() {
-		var id, target, dedupKey string
-		if err := rows.Scan(&id, &target, &dedupKey); err != nil {
+		var id, target, dedupKey, link string
+		if err := rows.Scan(&id, &target, &dedupKey, &link); err != nil {
 			rows.Close()
 			return err
+		}
+		if link != "" && !domain.GitHubURLOnHost(link, host) {
+			continue
 		}
 		newTarget, targetChanged := domain.RewriteRepoSlugPrefix(target, from, to)
 		newKey, keyChanged := domain.RewriteArtifactDedupKey(dedupKey, from, to)

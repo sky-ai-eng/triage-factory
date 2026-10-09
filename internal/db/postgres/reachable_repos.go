@@ -23,6 +23,19 @@ func newReachableReposStore(admin queryer) db.ReachableReposStore {
 
 var _ db.ReachableReposStore = (*reachableReposStore)(nil)
 
+// reachableOnHost is the predicate placing a reachable_repositories row (alias
+// alias) on the GitHub host bound at param: a PAT row carries its host, and an
+// App row is on the host of the installation it was observed through. Every
+// read here is confined to the org's current host, so the rows an earlier host
+// left behind — a PAT refresh replaces only its own host's rows, and an App's
+// installations keep theirs — are never offered, admitted or counted.
+func reachableOnHost(alias, param string) string {
+	return `(` + alias + `.host = ` + param + ` OR EXISTS (
+		SELECT 1 FROM org_github_app_installations hi
+		 WHERE hi.org_id = ` + alias + `.org_id AND hi.installation_id = ` + alias + `.installation_id
+		   AND hi.github_host = ` + param + `))`
+}
+
 // reachableColumns is the projection every row-returning read here shares, so a
 // column added to the table lands in one place rather than in five SELECTs that
 // then disagree about what a reachable row is.
@@ -123,8 +136,11 @@ func (s *reachableReposStore) ReplaceForPATSystem(ctx context.Context, orgID, ho
 // Tracking crosses every team in the org, so the semi-join goes through teams
 // on the admin pool: an org-level fact about the org's own App cannot be
 // rendered from one viewer's team memberships.
-func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
+func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	if err := db.RequireGrantClass("list reach without purpose", class); err != nil {
+		return nil, 0, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return nil, 0, err
 	}
 	if !isValidUUID(orgID) {
@@ -137,15 +153,17 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 		 WHERE r.org_id = $1
 		   AND r.credential_class = $2
 		   AND i.removed_at IS NULL
+		   AND i.github_host = $3
 		   AND NOT EXISTS (
 		       SELECT 1
 		         FROM team_github_repos g
 		         JOIN teams t ON t.id = g.team_id
 		         JOIN repositories reg ON reg.id = g.repository_id
 		        WHERE t.org_id = r.org_id
+		          AND reg.host = i.github_host
 		          AND lower(reg.owner) = lower(r.owner)
 		          AND lower(reg.repo) = lower(r.repo))`
-	args := []any{orgID, string(class)}
+	args := []any{orgID, string(class), host}
 
 	var total int
 	if err := s.admin.QueryRowContext(ctx, `SELECT COUNT(*)`+from, args...).Scan(&total); err != nil {
@@ -186,8 +204,11 @@ func (s *reachableReposStore) ListReachWithoutPurposeSystem(ctx context.Context,
 // grant of unknown width cannot be said to have been. Only a selective grant, or
 // no live installation on the account at all, leaves a tracked repository
 // reportable.
-func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
+func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
 	if err := db.RequireGrantClass("list scope drift", class); err != nil {
+		return nil, 0, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return nil, 0, err
 	}
 	if !isValidUUID(orgID) {
@@ -206,12 +227,15 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID st
 		  JOIN teams t ON t.id = g.team_id
 		  JOIN repositories reg ON reg.id = g.repository_id
 		  LEFT JOIN org_github_app_installations cov
-		    ON cov.org_id = $1 AND cov.removed_at IS NULL
+		    ON cov.org_id = $1 AND cov.removed_at IS NULL AND cov.github_host = $4
 		   AND lower(cov.account_login) = lower(reg.owner)
 		 WHERE t.org_id = $1
+		   AND reg.host = $4
 		   AND EXISTS (
 		       SELECT 1 FROM reachable_scopes sc
-		        WHERE sc.org_id = $1 AND sc.credential_class = $2)
+		        JOIN org_github_app_installations si
+		          ON si.org_id = sc.org_id AND si.installation_id = sc.scope
+		        WHERE sc.org_id = $1 AND sc.credential_class = $2 AND si.github_host = $4)
 		   AND NOT EXISTS (
 		       SELECT 1
 		         FROM reachable_repositories m
@@ -220,15 +244,16 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID st
 		        WHERE m.org_id = $1
 		          AND m.credential_class = $2
 		          AND i.removed_at IS NULL
+		          AND i.github_host = $4
 		          AND lower(m.owner) = lower(reg.owner)
 		          AND lower(m.repo) = lower(reg.repo))
 		   AND NOT EXISTS (
 		       SELECT 1 FROM org_github_app_installations w
-		        WHERE w.org_id = $1 AND w.removed_at IS NULL
+		        WHERE w.org_id = $1 AND w.removed_at IS NULL AND w.github_host = $4
 		          AND lower(w.account_login) = lower(reg.owner)
 		          AND (w.repository_selection IS NULL OR w.repository_selection = $3))
 		 GROUP BY lower(reg.owner), lower(reg.repo)`
-	args := []any{orgID, string(class), domain.RepositorySelectionAll}
+	args := []any{orgID, string(class), domain.RepositorySelectionAll, host}
 
 	var total int
 	if err := s.admin.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT 1`+from+`) AS drift`, args...).Scan(&total); err != nil {
@@ -263,15 +288,18 @@ func (s *reachableReposStore) ListScopeDriftSystem(ctx context.Context, orgID st
 	return out, total, rows.Err()
 }
 
-func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
+func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	if !class.Known() {
 		return nil, 0, fmt.Errorf("list reachable repositories: unknown credential class %q", class)
+	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, 0, err
 	}
 	if !isValidUUID(orgID) {
 		return []domain.ReachableRepository{}, 0, nil
 	}
-	where := ` WHERE r.org_id = $1 AND r.credential_class = $2`
-	args := []any{orgID, string(class)}
+	where := ` WHERE r.org_id = $1 AND r.credential_class = $2 AND ` + reachableOnHost("r", "$3")
+	args := []any{orgID, string(class), host}
 	if term := strings.TrimSpace(q); term != "" {
 		args = append(args, "%"+db.LikeEscape(strings.ToLower(term))+"%")
 		p := fmt.Sprintf("$%d", len(args))
@@ -306,9 +334,12 @@ func (s *reachableReposStore) ListReachableSystem(ctx context.Context, orgID str
 	return rows, total, nil
 }
 
-func (s *reachableReposStore) ReachableStateSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
+func (s *reachableReposStore) ReachableStateSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
 	if !class.Known() {
 		return domain.ReachableCacheState{}, fmt.Errorf("read reachable cache state: unknown credential class %q", class)
+	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return domain.ReachableCacheState{}, err
 	}
 	if !isValidUUID(orgID) {
 		return domain.ReachableCacheState{}, nil
@@ -326,26 +357,36 @@ func (s *reachableReposStore) ReachableStateSystem(ctx context.Context, orgID st
 		scopes    int
 		refreshed sql.NullTime
 	)
+	//
+	// A scope is on host when it is the host (a PAT scope) or names an
+	// installation on it (an App scope).
 	if err := s.admin.QueryRowContext(ctx, `
-		SELECT COUNT(*), MIN(refreshed_at)
-		  FROM reachable_scopes
-		 WHERE org_id = $1 AND credential_class = $2
-	`, orgID, string(class)).Scan(&scopes, &refreshed); err != nil {
+		SELECT COUNT(*), MIN(sc.refreshed_at)
+		  FROM reachable_scopes sc
+		 WHERE sc.org_id = $1 AND sc.credential_class = $2
+		   AND (sc.scope = $3 OR EXISTS (
+		       SELECT 1 FROM org_github_app_installations hi
+		        WHERE hi.org_id = sc.org_id AND hi.installation_id = sc.scope
+		          AND hi.github_host = $3))
+	`, orgID, string(class), host).Scan(&scopes, &refreshed); err != nil {
 		return domain.ReachableCacheState{}, fmt.Errorf("read reachable scope state: %w", err)
 	}
 	var count int
 	if err := s.admin.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM reachable_repositories
-		 WHERE org_id = $1 AND credential_class = $2
-	`, orgID, string(class)).Scan(&count); err != nil {
+		SELECT COUNT(*) FROM reachable_repositories r
+		 WHERE r.org_id = $1 AND r.credential_class = $2 AND `+reachableOnHost("r", "$3")+`
+	`, orgID, string(class), host).Scan(&count); err != nil {
 		return domain.ReachableCacheState{}, fmt.Errorf("read reachable cache state: %w", err)
 	}
 	return domain.ReachableCacheState{Refreshed: scopes > 0, Count: count, ObservedAt: refreshed.Time}, nil
 }
 
-func (s *reachableReposStore) ReachableSlugsSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error) {
+func (s *reachableReposStore) ReachableSlugsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error) {
 	if !class.Known() {
 		return nil, fmt.Errorf("read reachable slugs: unknown credential class %q", class)
+	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
 	}
 	out := map[string]struct{}{}
 	if !isValidUUID(orgID) || len(slugs) == 0 {
@@ -355,17 +396,17 @@ func (s *reachableReposStore) ReachableSlugsSystem(ctx context.Context, orgID st
 	// slugs originate in a request body, and there is no array-literal helper in
 	// this package that quotes them — one bound parameter per slug cannot be
 	// mis-escaped at all. The list is bounded by the caller's selection.
-	args := []any{orgID, string(class)}
+	args := []any{orgID, string(class), host}
 	placeholders := make([]string, 0, len(slugs))
 	for _, slug := range slugs {
 		args = append(args, strings.ToLower(slug))
 		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
 	}
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT lower(owner || '/' || repo)
-		  FROM reachable_repositories
-		 WHERE org_id = $1 AND credential_class = $2
-		   AND lower(owner || '/' || repo) IN (`+strings.Join(placeholders, ",")+`)
+		SELECT lower(r.owner || '/' || r.repo)
+		  FROM reachable_repositories r
+		 WHERE r.org_id = $1 AND r.credential_class = $2 AND `+reachableOnHost("r", "$3")+`
+		   AND lower(r.owner || '/' || r.repo) IN (`+strings.Join(placeholders, ",")+`)
 	`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("read reachable slugs: %w", err)

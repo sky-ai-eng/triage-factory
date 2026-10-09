@@ -312,12 +312,15 @@ const pgFactoryEntitySelectColumns = `
 // it is not a repository reference and never becomes one — so the slug it
 // carries is matched against the registry, and the registry row is what the
 // tracking row points at. The extra join is what keeps the two ends agreeing
-// on identity: the fold lives in the registry, once.
+// on identity: the fold lives in the registry, once. The entity's scope is the
+// GitHub host it was polled from and the registry row's host is the one it
+// lives on, so a pull request matches tracking only on its own host.
 const factoryGitHubRepoTrackedExists = `EXISTS (
 	SELECT 1 FROM team_github_repos g
 	JOIN teams tm ON tm.id = g.team_id
 	JOIN repositories r ON r.id = g.repository_id
 	WHERE tm.org_id = e.org_id
+	  AND r.host = e.scope
 	  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
 	  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
 )`
@@ -383,6 +386,7 @@ func factoryGitHubRepoTrackedForTeams(placeholders string) string {
 		JOIN repositories r ON r.id = g.repository_id
 		WHERE tm.org_id = e.org_id
 		  AND g.team_id IN (` + placeholders + `)
+		  AND r.host = e.scope
 		  AND lower(r.owner) = lower(split_part(e.source_id, '/', 1))
 		  AND lower(r.repo) = lower(split_part(split_part(e.source_id, '/', 2), '#', 1))
 	)`

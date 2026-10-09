@@ -56,6 +56,13 @@ import (
 // never served the reach it used to have; the previous tier's rows are inert
 // until their next refresh replaces them, and they cost a row apiece until then.
 //
+// Reads also take the org's CURRENT GitHub host, for the same reason one level
+// down: a PAT refresh replaces only its own host's rows, and an App's
+// installations keep theirs, so after the org moves to another host the old
+// host's reach is still stored. A PAT row is on the host it carries, an App row
+// on its installation's github_host; rows on any other host are never offered
+// to the picker, admitted by the write gate, counted, or reported.
+//
 // # Pool split (Postgres)
 //
 // Admin pool for every method. The RLS policies mirror the installation rows the
@@ -142,7 +149,7 @@ type ReachableReposStore interface {
 	// Ordered by (installation, folded owner, folded repo), which the per-class
 	// unique index makes a total order, so offset paging cannot drop or repeat a
 	// row.
-	ListReachWithoutPurposeSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ReachableRepository, int, error)
+	ListReachWithoutPurposeSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ReachableRepository, int, error)
 
 	// ListScopeDriftSystem returns one page of the repositories some team tracks
 	// that no live installation's grant contains — tracked, unreachable, and
@@ -169,7 +176,7 @@ type ReachableReposStore interface {
 	// contain it, or on an account no live installation covers at all — each
 	// naming the covering installation when there is one, so the finding can
 	// point at the page where the grant is widened. Ordered by folded slug.
-	ListScopeDriftSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
+	ListScopeDriftSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, opts ListOpts) ([]domain.ScopeDriftRepository, int, error)
 
 	// ListReachableSystem is the picker's read: one page of the org's reachable
 	// set for class, ordered by folded slug, with the filtered total.
@@ -185,7 +192,7 @@ type ReachableReposStore interface {
 	// which is what the PAT proxy inherited from GET /user/repos: that order ties
 	// freely, needs a tiebreaker anyway, and is the wrong affordance for a list
 	// with a search box over it.
-	ListReachableSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, q string, opts ListOpts) ([]domain.ReachableRepository, int, error)
+	ListReachableSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, q string, opts ListOpts) ([]domain.ReachableRepository, int, error)
 
 	// ReachableStateSystem reports whether the org's cache for class has ever been
 	// refreshed, how many entries it holds, and how old its stalest scope is —
@@ -199,7 +206,7 @@ type ReachableReposStore interface {
 	// with an empty grant reading as un-looked-at forever — discovering in the
 	// picker, and re-enumerating on every open. That is what the scope rows
 	// (reachable_scopes) record, and it is the only thing they record.
-	ReachableStateSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass) (domain.ReachableCacheState, error)
+	ReachableStateSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass) (domain.ReachableCacheState, error)
 
 	// ReachableSlugsSystem returns which of slugs the org can reach under class,
 	// as a set keyed by the LOWERCASED "owner/repo" — the shape the write gate's
@@ -208,7 +215,7 @@ type ReachableReposStore interface {
 	// Bounded by the caller's selection rather than by org size: it asks about
 	// the slugs it holds instead of enumerating the org to intersect afterwards.
 	// An empty slugs argument returns an empty set without a query.
-	ReachableSlugsSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error)
+	ReachableSlugsSystem(ctx context.Context, orgID, host string, class domain.GitHubCredentialClass, slugs []string) (map[string]struct{}, error)
 }
 
 // RequireGrantClass is the guard every App-tier read of the mirror runs first:

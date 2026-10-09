@@ -31,22 +31,25 @@ func newTeamGitHubReposStore(q, _ queryer) db.TeamGitHubReposStore {
 
 var _ db.TeamGitHubReposStore = (*teamGitHubReposStore)(nil)
 
-func (s *teamGitHubReposStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
-	return listTeamGitHubRepos(ctx, s.q, teamID)
+func (s *teamGitHubReposStore) ListForTeam(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	return listTeamGitHubRepos(ctx, s.q, teamID, host)
 }
 
-func (s *teamGitHubReposStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
-	return listTeamGitHubRepos(ctx, s.q, teamID)
+func (s *teamGitHubReposStore) ListForTeamSystem(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	return listTeamGitHubRepos(ctx, s.q, teamID, host)
 }
 
-func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domain.TeamGitHubRepo, error) {
+func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.owner, r.repo
 		FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = ?
+		WHERE g.team_id = ? AND r.host = ?
 		ORDER BY r.owner ASC, r.repo ASC
-	`, teamID)
+	`, teamID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos: %w", err)
 	}
@@ -62,8 +65,11 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domai
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
+func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID, host string) ([]domain.TrackedRepoTeams, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
@@ -71,8 +77,9 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
+		WHERE r.host = ?
 		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
-	`)
+	`, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
 	}
@@ -103,12 +110,15 @@ func scanTrackedRepoTeams(rows *sql.Rows) ([]domain.TrackedRepoTeams, error) {
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error {
+func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repos []domain.TeamGitHubRepo) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
 	norm, err := domain.NormalizeTeamGitHubRepos(repos)
 	if err != nil {
+		return err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return err
 	}
 	return inTx(ctx, s.q, func(tx queryer) error {
@@ -129,7 +139,7 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		// team already tracked.
 		ids := make([]string, 0, len(norm))
 		for _, r := range norm {
-			id, err := getOrCreateRepositoryID(ctx, tx, domain.RepoRef{Owner: r.Owner, Repo: r.Repo})
+			id, err := getOrCreateRepositoryID(ctx, tx, domain.RepoRef{Host: host, Owner: r.Owner, Repo: r.Repo})
 			if err != nil {
 				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
 			}
@@ -149,24 +159,27 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		//
 		// Untracking stops here. The registry row survives — a worktree
 		// ledger entry, a pinned project or a task may still name the
-		// repository, and tracking is forward-only in both directions.
+		// repository, and tracking is forward-only in both directions. The
+		// prune reaches only repositories on host: the team's tracking on
+		// another host is not this save's to change.
+		onHost := `repository_id IN (SELECT id FROM repositories WHERE host = ?)`
 		if len(ids) == 0 {
 			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM team_github_repos WHERE team_id = ?`, teamID,
+				`DELETE FROM team_github_repos WHERE team_id = ? AND `+onHost, teamID, host,
 			); err != nil {
 				return fmt.Errorf("clear team_github_repos: %w", err)
 			}
 			return nil
 		}
 		placeholders := make([]string, len(ids))
-		args := make([]any, 0, len(ids)+1)
-		args = append(args, teamID)
+		args := make([]any, 0, len(ids)+2)
+		args = append(args, teamID, host)
 		for i, id := range ids {
 			placeholders[i] = "?"
 			args = append(args, id)
 		}
 		query := fmt.Sprintf(
-			`DELETE FROM team_github_repos WHERE team_id = ? AND repository_id NOT IN (%s)`,
+			`DELETE FROM team_github_repos WHERE team_id = ? AND `+onHost+` AND repository_id NOT IN (%s)`,
 			strings.Join(placeholders, ", "),
 		)
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
@@ -176,14 +189,17 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 	})
 }
 
-func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	var n int
 	err := s.q.QueryRowContext(ctx, `
 		SELECT 1 FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = ? AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
+		WHERE g.team_id = ? AND r.host = ? AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
 		LIMIT 1
-	`, teamID, owner, repo).Scan(&n)
+	`, teamID, host, owner, repo).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -199,7 +215,10 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 // calls it — the repoevent.Notifier is built without a RecipientsFunc
 // there and broadcasts org-wide — but the shared conformance suite
 // exercises it, so N=1 must not be assumed here.
-func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. No teams.deleted_at filter, deliberately —
 	// see the Postgres impl's comment: the tracking arm mirrors the REST
@@ -215,11 +234,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN teams t ON t.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
-			WHERE t.org_id = ?
+			WHERE t.org_id = ? AND r.host = ?
 			  AND LOWER(r.owner) = LOWER(?) AND LOWER(r.repo) = LOWER(?)
 		)
 		ORDER BY user_id ASC
-	`, orgID, orgID, owner, repo)
+	`, orgID, orgID, host, owner, repo)
 	if err != nil {
 		return nil, fmt.Errorf("repo update recipients: %w", err)
 	}
@@ -244,8 +263,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 // local before any store call, and multi-mode resolves against the Postgres
 // implementation instead. It exists for interface conformance, and for
 // store-level callers (tests) that address it directly.
-func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -260,8 +282,11 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 // in local before any store call, and multi-mode resolves against the
 // Postgres implementation instead. It exists for interface conformance,
 // and for store-level callers (tests) that address it directly.
-func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return false, err
 	}
 	return true, nil
