@@ -142,7 +142,12 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 		return
 	}
 	ctx := r.Context()
-	rows, total, err := s.reachableRepos.ListReachWithoutPurposeSystem(ctx, orgID, class,
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-grant", err)
+		return
+	}
+	rows, total, err := s.reachableRepos.ListReachWithoutPurposeSystem(ctx, orgID, host, class,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		internalError(w, "github-grant", err)
@@ -196,7 +201,12 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		return
 	}
 	ctx := r.Context()
-	rows, total, err := s.reachableRepos.ListScopeDriftSystem(ctx, orgID, class,
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-grant", err)
+		return
+	}
+	rows, total, err := s.reachableRepos.ListScopeDriftSystem(ctx, orgID, host, class,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		internalError(w, "github-grant", err)

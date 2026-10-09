@@ -64,10 +64,16 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "teams/github-repos", err)
+		return
+	}
+
 	var repos []domain.TeamGitHubRepo
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
+		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
 		return e
 	}); err != nil {
 		internalError(w, "teams/github-repos", err)
@@ -126,23 +132,28 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	// option list to uncheck, yet every Save re-submits it, so the user
 	// could never save a corrected set. Only *newly added* unreachable
 	// repos are a user error worth blocking.
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "teams/github-repos", err)
+		return
+	}
 	var existing []domain.TeamGitHubRepo
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID)
+		existing, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
 		return e
 	}); err != nil {
 		internalError(w, "teams/github-repos", err)
 		return
 	}
 	added := newlyAddedRepos(existing, repos)
-	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, added); reject {
+	if slug, reject := s.rejectUnreachableRepo(r.Context(), orgID, userID, host, added); reject {
 		badRequest(w, "repo "+slug+" is not reachable by this org's GitHub credentials — install the GitHub App on it or grant the PAT access first")
 		return
 	}
 
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, repos)
+		return tx.TeamGitHubRepos.ReplaceForTeam(r.Context(), orgID, teamID, host, repos)
 	}); err != nil {
 		internalError(w, "teams/github-repos", err)
 		return
@@ -232,11 +243,11 @@ const reachableGateMaxAge = reachcache.TTL
 // avoid coupling our write availability to GitHub's uptime. The residual
 // (a write accepted while GitHub was unreachable) is caught by the poller,
 // which no-ops on a repo it can't reach.
-func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID string, repos []domain.TeamGitHubRepo) (string, bool) {
+func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID, host string, repos []domain.TeamGitHubRepo) (string, bool) {
 	if len(repos) == 0 {
 		return "", false
 	}
-	if set, ok := s.reachableMirrorSet(ctx, orgID, repos); ok {
+	if set, ok := s.reachableMirrorSet(ctx, orgID, host, repos); ok {
 		return firstUnreachableRepo(set, true, repos)
 	}
 	// Tier 2: cold path. Probe only the selected slugs.
@@ -251,13 +262,13 @@ func (s *Server) rejectUnreachableRepo(ctx context.Context, orgID, userID string
 // reachableGateMaxAge all mean "we don't know from here", and the per-slug probe
 // is the thing that knows. Rejecting on any of them would turn a store hiccup
 // into a user-facing "that repo doesn't exist".
-func (s *Server) reachableMirrorSet(ctx context.Context, orgID string, repos []domain.TeamGitHubRepo) (map[string]struct{}, bool) {
+func (s *Server) reachableMirrorSet(ctx context.Context, orgID, host string, repos []domain.TeamGitHubRepo) (map[string]struct{}, bool) {
 	class, err := s.reachableCredentialClass(ctx, orgID)
 	if err != nil {
 		reposLog.Warn("resolve reachable credential class failed; probing per repo instead", "org", orgID, "error", err)
 		return nil, false
 	}
-	state, err := s.reachableRepos.ReachableStateSystem(ctx, orgID, class)
+	state, err := s.reachableRepos.ReachableStateSystem(ctx, orgID, host, class)
 	if err != nil {
 		reposLog.Warn("read reachable cache state failed; probing per repo instead", "org", orgID, "error", err)
 		return nil, false
@@ -273,7 +284,7 @@ func (s *Server) reachableMirrorSet(ctx context.Context, orgID string, repos []d
 	for _, r := range repos {
 		slugs = append(slugs, r.Slug())
 	}
-	set, err := s.reachableRepos.ReachableSlugsSystem(ctx, orgID, class, slugs)
+	set, err := s.reachableRepos.ReachableSlugsSystem(ctx, orgID, host, class, slugs)
 	if err != nil {
 		reposLog.Warn("read reachable slugs failed; probing per repo instead", "org", orgID, "error", err)
 		return nil, false

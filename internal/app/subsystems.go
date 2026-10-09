@@ -99,7 +99,7 @@ func (a *App) buildAI() {
 	// clones per-run inside the sandbox, so there's nothing to warm here.
 	if a.local() {
 		a.profiler.SetOnCycleComplete(func(orgID string) {
-			bootstrapBareClones(a.stores.Repos, a.stores.Secrets)
+			bootstrapBareClones(a.stores.Repos, a.stores.Orgs, a.stores.Secrets)
 		})
 	}
 	// SetProfilerTrigger: same relay-wrapper reasoning as SetScorerTrigger

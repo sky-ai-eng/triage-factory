@@ -92,7 +92,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	// is the one a person would.
 	grant := func(t *testing.T, b ReachableReposBackend, class domain.GitHubCredentialClass) []domain.ReachableRepository {
 		t.Helper()
-		rows, _, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, class, "", db.Unwindowed)
+		rows, _, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, TestGitHubHost, class, "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachableSystem(%q): %v", class, err)
 		}
@@ -373,7 +373,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -392,7 +392,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -416,7 +416,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -440,7 +440,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -461,7 +461,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -480,7 +480,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "web")
 
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -502,7 +502,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
+		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		} else if len(drift) != 1 {
 			t.Fatalf("scope drift = %v before removal; want [acme/legacy]", trackedSlugs(drift))
@@ -511,7 +511,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -543,7 +543,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			}
 		}
 
-		got, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -570,7 +570,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -592,7 +592,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", nil); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed)
+		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -619,7 +619,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		reach, total, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2})
+		reach, total, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
 		}
@@ -627,12 +627,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if total != 3 {
 			t.Errorf("reach without purpose total = %d; want 3", total)
 		}
-		reach, _, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2, Offset: 2})
+		reach, _, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{Limit: 2, Offset: 2})
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem (page 2): %v", err)
 		}
 		equal(t, "reach without purpose, page 2", slugs(t, reach), []string{"acme/r3"})
-		reach, total, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.ListOpts{CountOnly: true})
+		reach, total, err = b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{CountOnly: true})
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem (count only): %v", err)
 		}
@@ -640,7 +640,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Errorf("count-only reach = %v total %d; want no rows and 3", slugs(t, reach), total)
 		}
 
-		drift, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2})
+		drift, total, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem: %v", err)
 		}
@@ -648,12 +648,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if total != 3 {
 			t.Errorf("scope drift total = %d; want 3", total)
 		}
-		drift, _, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{Limit: 2, Offset: 2})
+		drift, _, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{Limit: 2, Offset: 2})
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem (page 2): %v", err)
 		}
 		equal(t, "scope drift, page 2", trackedSlugs(drift), []string{"acme/d3"})
-		drift, total, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.ListOpts{CountOnly: true})
+		drift, total, err = b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.ListOpts{CountOnly: true})
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem (count only): %v", err)
 		}
@@ -679,12 +679,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, managed, db.Unwindowed)
+		reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, managed, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem(managed): %v", err)
 		}
 		equal(t, "managed reach without purpose", slugs(t, reach), []string{"acme/secrets"})
-		drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, managed, db.Unwindowed)
+		drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, managed, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListScopeDriftSystem(managed): %v", err)
 		}
@@ -694,12 +694,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 
 		// The other App class sees none of it: no reach, and no refreshed
 		// scope, so no drift either.
-		if reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
+		if reach, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListReachWithoutPurposeSystem(byo): %v", err)
 		} else if len(reach) != 0 {
 			t.Errorf("byo_app reach without purpose = %v for a managed workspace; want none", slugs(t, reach))
 		}
-		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, byoApp, db.Unwindowed); err != nil {
+		if drift, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed); err != nil {
 			t.Fatalf("ListScopeDriftSystem(byo): %v", err)
 		} else if len(drift) != 0 {
 			t.Errorf("byo_app scope drift = %v for a managed workspace; want none", trackedSlugs(drift))
@@ -709,10 +709,10 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// finding, which would read as an all-clear about a grant that does
 		// not exist.
 		const pat = domain.GitHubCredentialClassPAT
-		if _, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, pat, db.Unwindowed); err == nil {
+		if _, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, pat, db.Unwindowed); err == nil {
 			t.Error("ListReachWithoutPurposeSystem(pat) = nil error; want a refusal")
 		}
-		if _, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, pat, db.Unwindowed); err == nil {
+		if _, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, pat, db.Unwindowed); err == nil {
 			t.Error("ListScopeDriftSystem(pat) = nil error; want a refusal")
 		}
 	})
@@ -734,7 +734,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 
 	listSlugs := func(t *testing.T, b ReachableReposBackend, class domain.GitHubCredentialClass, q string, opts db.ListOpts) ([]string, int) {
 		t.Helper()
-		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, class, q, opts)
+		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, TestGitHubHost, class, q, opts)
 		if err != nil {
 			t.Fatalf("ListReachableSystem(%q, %q): %v", class, q, err)
 		}
@@ -779,6 +779,70 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		equal(t, "pat list after host change", got, []string{"new/repo"})
 		if total != 1 {
 			t.Errorf("total = %d after a host change; want 1", total)
+		}
+	})
+
+	t.Run("ReadsAnswerOnlyForTheHostAsked", func(t *testing.T) {
+		// One owner/repo name on two GitHub deployments is two repositories. A
+		// read answers for the host the org names now: an installation on
+		// another host, or PAT rows written under one, are another deployment's
+		// reach and never merge into this one's.
+		b := mk(t)
+		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
+		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID:      "2",
+			OrgID:               b.OrgID,
+			AccountType:         "Organization",
+			AccountLogin:        "acme",
+			GitHubHost:          "https://ghe.internal",
+			RepositorySelection: domain.RepositorySelectionSelected,
+		}); err != nil {
+			t.Fatalf("UpsertInstallation(ghe): %v", err)
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+			entry(b, "1", "acme", "dotcom", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(github.com): %v", err)
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
+			entry(b, "2", "acme", "enterprise", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(ghe): %v", err)
+		}
+
+		read := func(host string) []string {
+			t.Helper()
+			rows, _, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, host, byoApp, "", db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListReachableSystem(%s): %v", host, err)
+			}
+			return slugs(t, rows)
+		}
+		equal(t, "github.com reach", read(TestGitHubHost), []string{"acme/dotcom"})
+		equal(t, "ghe reach", read("https://ghe.internal"), []string{"acme/enterprise"})
+
+		set, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, byoApp, []string{"acme/dotcom", "acme/enterprise"})
+		if err != nil {
+			t.Fatalf("ReachableSlugsSystem: %v", err)
+		}
+		if _, ok := set["acme/enterprise"]; ok || len(set) != 1 {
+			t.Errorf("ReachableSlugsSystem(github.com) = %v; want only acme/dotcom", set)
+		}
+
+		if err := b.Mirror.ReplaceForPATSystem(ctx, b.OrgID, "https://ghe.internal", []domain.ReachableRepository{
+			patEntry(b, "acme", "enterprise-pat", "", ""),
+		}); err != nil {
+			t.Fatalf("ReplaceForPATSystem: %v", err)
+		}
+		if got, _ := listSlugs(t, b, domain.GitHubCredentialClassPAT, "", db.Unwindowed); len(got) != 0 {
+			t.Errorf("PAT reach on github.com = %v; want none — the rows were written under another host", got)
+		}
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassPAT)
+		if err != nil {
+			t.Fatalf("ReachableStateSystem: %v", err)
+		}
+		if state.Refreshed || state.Count != 0 {
+			t.Errorf("PAT state on github.com = %+v; want unrefreshed and empty — the only refresh was of another host", state)
 		}
 	})
 
@@ -883,7 +947,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		install(t, b, "2", "beta", domain.RepositorySelectionSelected)
 
-		empty, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		empty, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem(empty): %v", err)
 		}
@@ -896,7 +960,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(1): %v", err)
 		}
-		afterFirst, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		afterFirst, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem(after first): %v", err)
 		}
@@ -909,7 +973,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(2): %v", err)
 		}
-		afterSecond, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		afterSecond, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem(after second): %v", err)
 		}
@@ -932,7 +996,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", nil); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(empty): %v", err)
 		}
-		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem: %v", err)
 		}
@@ -961,7 +1025,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp)
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem: %v", err)
 		}
@@ -981,7 +1045,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForPATSystem: %v", err)
 		}
-		got, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassPAT,
+		got, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassPAT,
 			[]string{"acme/api", "acme/ghost"})
 		if err != nil {
 			t.Fatalf("ReachableSlugsSystem: %v", err)
@@ -995,7 +1059,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 
 		// The other class holds nothing, so the same selection comes back empty
 		// rather than borrowing the PAT tier's answer.
-		other, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassBYOApp,
+		other, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp,
 			[]string{"acme/api"})
 		if err != nil {
 			t.Fatalf("ReachableSlugsSystem(other class): %v", err)
@@ -1005,7 +1069,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}
 
 		// An empty selection is an empty answer, not an error and not the world.
-		if none, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, domain.GitHubCredentialClassPAT, nil); err != nil {
+		if none, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassPAT, nil); err != nil {
 			t.Fatalf("ReachableSlugsSystem(nil): %v", err)
 		} else if len(none) != 0 {
 			t.Errorf("empty selection returned %v; want nothing", none)
@@ -1027,7 +1091,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, managed, "", db.Unwindowed)
+		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, TestGitHubHost, managed, "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachableSystem: %v", err)
 		}
@@ -1045,7 +1109,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			}
 		}
 
-		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, managed)
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, managed)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem: %v", err)
 		}
@@ -1055,7 +1119,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 
 		// The other App class answers nothing: an org holds one class at a time,
 		// and every read filters on the one it holds now.
-		byo, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, byoApp)
+		byo, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, byoApp)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem(byo_app): %v", err)
 		}
@@ -1081,7 +1145,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, managed, "", db.Unwindowed)
+		rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, TestGitHubHost, managed, "", db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListReachableSystem: %v", err)
 		}
@@ -1107,7 +1171,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
-		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, managed)
+		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, managed)
 		if err != nil {
 			t.Fatalf("ReachableStateSystem: %v", err)
 		}
@@ -1148,14 +1212,14 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 					t.Fatalf("no write path stores class %q; a class the domain accepts and nothing can write is one that resolves everywhere and mirrors nowhere", class)
 				}
 
-				state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, class)
+				state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, class)
 				if err != nil {
 					t.Fatalf("ReachableStateSystem(%s): %v", class, err)
 				}
 				if !state.Known() {
 					t.Errorf("%s: the scope marker did not land; reachable_scopes has not been taught this class", class)
 				}
-				rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, class, "", db.Unwindowed)
+				rows, total, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, TestGitHubHost, class, "", db.Unwindowed)
 				if err != nil {
 					t.Fatalf("ListReachableSystem(%s): %v", class, err)
 				}

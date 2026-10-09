@@ -303,7 +303,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				t.Fatalf("Upsert %s: %v", id, err)
 			}
 		}
-		got, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 50})
+		got, total, err := s.List(ctx, orgID, TestGitHubHost, db.ListOpts{Limit: 50})
 		if err != nil {
 			t.Fatalf("List: %v", err)
 		}
@@ -319,7 +319,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("total = %d, want 3", total)
 		}
 
-		coRows, coTotal, err := s.List(ctx, orgID, db.ListOpts{CountOnly: true})
+		coRows, coTotal, err := s.List(ctx, orgID, TestGitHubHost, db.ListOpts{CountOnly: true})
 		if err != nil {
 			t.Fatalf("List count-only: %v", err)
 		}
@@ -328,11 +328,11 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// The pages partition that order: a two-row window then a one-row
 		// window covers the set exactly once, and each page reports the
 		// filtered total rather than its own length.
-		first, total, err := s.List(ctx, orgID, db.ListOpts{Limit: 2})
+		first, total, err := s.List(ctx, orgID, TestGitHubHost, db.ListOpts{Limit: 2})
 		if err != nil {
 			t.Fatalf("List page 1: %v", err)
 		}
-		second, total2, err := s.List(ctx, orgID, db.ListOpts{Limit: 2, Offset: 2})
+		second, total2, err := s.List(ctx, orgID, TestGitHubHost, db.ListOpts{Limit: 2, Offset: 2})
 		if err != nil {
 			t.Fatalf("List page 2: %v", err)
 		}
@@ -350,7 +350,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// The unwindowed read (Limit 0) is the internal callers' escape
 		// hatch and must return everything rather than an empty page.
-		if all, _, err := s.List(ctx, orgID, db.Unwindowed); err != nil || len(all) != 3 {
+		if all, _, err := s.List(ctx, orgID, TestGitHubHost, db.Unwindowed); err != nil || len(all) != 3 {
 			t.Errorf("unwindowed List = %d rows, %v; want all 3", len(all), err)
 		}
 	})
@@ -398,7 +398,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// resolves.
 		trackRepos(t, seed, orgID, seed.TeamID, "acme/api", "octo/new")
 
-		if n, _ := s.CountConfigured(ctx, orgID); n != 2 {
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 2 {
 			t.Fatalf("rows = %d, want 2 — a casing difference is not a second repository", n)
 		}
 		got, err := s.GetByRef(ctx, orgID, repoRef("acme/api"))
@@ -440,7 +440,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 	t.Run("CountConfigured_reflects_table_size", func(t *testing.T) {
 		s, orgID, seed := mk(t)
-		n, err := s.CountConfigured(ctx, orgID)
+		n, err := s.CountConfigured(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("CountConfigured initial: %v", err)
 		}
@@ -448,7 +448,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("initial CountConfigured = %d, want 0", n)
 		}
 		trackRepos(t, seed, orgID, seed.TeamID, "a/b", "c/d", "e/f")
-		n, _ = s.CountConfigured(ctx, orgID)
+		n, _ = s.CountConfigured(ctx, orgID, TestGitHubHost)
 		if n != 3 {
 			t.Errorf("CountConfigured after tracking 3 = %d, want 3", n)
 		}
@@ -679,7 +679,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				t.Errorf("repeat %d resolved to id %q, want %q", i, again.ID, first.ID)
 			}
 		}
-		if n, err := s.CountConfigured(ctx, orgID); err != nil {
+		if n, err := s.CountConfigured(ctx, orgID, TestGitHubHost); err != nil {
 			t.Fatalf("CountConfigured: %v", err)
 		} else if n != 1 {
 			t.Errorf("rows after 5 saves by 2 teams = %d, want 1", n)
@@ -710,7 +710,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if got.Slug() != "Acme/Api" {
 			t.Errorf("slug = %q, want Acme/Api — stored casing is sticky", got.Slug())
 		}
-		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
 			t.Errorf("rows = %d, want 1 — a casing difference is not a second repository", n)
 		}
 	})
@@ -766,7 +766,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if ghost, _ := s.GetByRef(ctx, orgID, repoRef("ghost/repo")); ghost != nil {
 			t.Errorf("fill created a row for an untracked repo: %+v — it writes, never creates", ghost)
 		}
-		if n, _ := s.CountConfigured(ctx, orgID); n != 3 {
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 3 {
 			t.Errorf("rows = %d, want 3 — a fill adds none", n)
 		}
 
@@ -856,7 +856,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Fatalf("differently-cased Upsert: %v", err)
 		}
 
-		if n, _ := s.CountConfigured(ctx, orgID); n != 1 {
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
 			t.Fatalf("rows = %d, want 1 — a differently-cased upsert must not mint a second repository", n)
 		}
 		got, _ := s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -881,7 +881,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}); err == nil {
 			t.Error("Upsert accepted an unknown source; want an error")
 		}
-		if n, _ := s.CountConfigured(ctx, orgID); n != 0 {
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 0 {
 			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
 		}
 	})
@@ -954,7 +954,7 @@ func trackRepos(t *testing.T, seed RepositorySeeder, orgID, teamID string, slugs
 		ref := repoRef(slug)
 		repos = append(repos, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
 	}
-	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, repos); err != nil {
+	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, TestGitHubHost, repos); err != nil {
 		t.Fatalf("track %v for team %s: %v", slugs, teamID, err)
 	}
 }
@@ -968,7 +968,7 @@ const unknownRepoID = "3f2b1c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
 // repoRef is the suite's edge parser. These cases are written in the
 // "owner/repo" a person or an agent would type, because that is the form the
 // behaviour under test is about; the ref-keyed store methods take it parsed.
-func repoRef(slug string) domain.RepoRef { return domain.RepoRefFromSlug(slug) }
+func repoRef(slug string) domain.RepoRef { return domain.RepoRefFromSlug(TestGitHubHost, slug) }
 
 // setBaseBranch is the two-step every caller of the id-keyed writer performs:
 // resolve the name to a row, then write by that row's id. The suite goes

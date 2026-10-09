@@ -106,7 +106,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		}
 		// Unwindowed for the same reason as the group candidates: this
 		// derives a set from the whole registry rather than browsing it.
-		repos, _, lerr = tx.Repos.List(ctx, orgID, db.Unwindowed)
+		repos, _, lerr = tx.Repos.List(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL), db.Unwindowed)
 		return lerr
 	}); err != nil {
 		return nil, err

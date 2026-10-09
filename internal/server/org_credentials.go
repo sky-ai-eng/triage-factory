@@ -408,14 +408,14 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
-// kickGitHubChanged re-dues polling under a changed GitHub credential. Jira is
-// marked restarted alongside it because the GitHub restart path rebuilds both
-// pollers; skipping the mark would let Jira carry over a stale snapshot.
+// kickGitHubChanged re-dues GitHub polling under a changed GitHub credential
+// and clears GitHub's readiness until that poll completes. Jira's poller is
+// not touched by it, so its readiness is left alone.
 func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 	if s.onGitHubChanged == nil {
 		return
 	}
-	s.MarkJiraRestarted(r.Context(), orgID)
+	s.MarkGitHubRestarted(r.Context(), orgID)
 	go s.onGitHubChanged(orgID)
 }
 

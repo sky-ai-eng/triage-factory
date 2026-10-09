@@ -52,7 +52,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		// worked and nothing would be tracked or polled. Refused instead.
 		s, orgID, _, _ := mk(t)
 		const foreignTeam = "00000000-0000-0000-0000-0000000000ff"
-		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, []domain.TeamGitHubRepo{
+		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		})
 		if !errors.Is(err, db.ErrTeamNotInOrg) {
@@ -67,7 +67,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Tracking_brings_the_repository_into_the_registry", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -76,7 +76,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if err != nil || got == nil {
 			t.Fatalf("Get after tracking = %v, %v; want the row tracking minted", got, err)
 		}
-		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID)
+		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListTrackedNamesSystem: %v", err)
 		}
@@ -87,7 +87,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Untracking_keeps_the_registry_row_and_everything_referencing_it", func(t *testing.T) {
 		s, orgID, teamID, conversation := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 			{Owner: "octo", Repo: "dropped"},
 		}); err != nil {
@@ -104,7 +104,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 
 		// The untrack.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam (untrack): %v", err)
@@ -112,14 +112,14 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 		// It leaves the tracked set — this is the part that must change, and
 		// it is what stops the poller and the profiler working on it.
-		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID)
+		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListTrackedNamesSystem: %v", err)
 		}
 		if len(names) != 1 || names[0] != keptSlug {
 			t.Errorf("tracked names = %v, want [%s] — untracking must remove it from the polled set", names, keptSlug)
 		}
-		if tracked, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, "octo", "dropped"); err != nil || tracked {
+		if tracked, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, TestGitHubHost, "octo", "dropped"); err != nil || tracked {
 			t.Errorf("TracksRepoSystem(dropped) = %v, %v; want false", tracked, err)
 		}
 

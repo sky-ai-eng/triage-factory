@@ -200,7 +200,13 @@ func Run(cfg RunConfig) (*Result, error) {
 		}
 		tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, runmode.LocalDefaultTeamID, tracked); err != nil {
+	// On the org's GitHub host, which is the host the poller reads the tracked
+	// set on.
+	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("read github host: %w", err)
+	}
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
 		return nil, fmt.Errorf("configure repos: %w", err)
 	}
 

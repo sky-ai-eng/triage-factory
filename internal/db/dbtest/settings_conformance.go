@@ -1859,10 +1859,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{OrgLogin: "acme", TeamSlug: "backend"},
 			{OrgLogin: "acme", TeamSlug: "frontend"},
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, input); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, input); err != nil {
 			t.Fatalf("SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1881,10 +1881,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{OrgLogin: "Acme", TeamSlug: "Backend"},
 			{OrgLogin: " acme ", TeamSlug: " backend "},
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, input); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, input); err != nil {
 			t.Fatalf("SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1893,7 +1893,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("normalized groups = %+v; want %+v", got, want)
 		}
 		// Case-insensitive routing lookup resolves the team.
-		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, "ACME", "BACKEND")
+		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, ids.OrgID, TestGitHubHost, "ACME", "BACKEND")
 		if err != nil {
 			t.Fatalf("TeamsForGroupSystem: %v", err)
 		}
@@ -1908,13 +1908,13 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{OrgLogin: "acme", TeamSlug: "backend"},
 			{OrgLogin: "acme", TeamSlug: "frontend"},
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, two); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, two); err != nil {
 			t.Fatalf("seed SetForTeam: %v", err)
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, two[:1]); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, two[:1]); err != nil {
 			t.Fatalf("replace SetForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1922,10 +1922,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("after replace-set, got=%+v; want one row slug=backend", got)
 		}
 		// Empty clears all.
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, nil); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, nil); err != nil {
 			t.Fatalf("clear SetForTeam: %v", err)
 		}
-		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1941,20 +1941,20 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{OrgLogin: "acme", TeamSlug: "frontend"},
 			{OrgLogin: "beta", TeamSlug: "platform"},
 		}
-		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, seed); err != nil {
+		if err := stores.TeamGitHubGroups.SetForTeam(ctx, ids.TeamID, TestGitHubHost, seed); err != nil {
 			t.Fatalf("seed SetForTeam: %v", err)
 		}
 		// "frontend" was deleted on GitHub — only "backend" remains under
 		// acme. The prune is scoped to the acme login, so beta/platform
 		// is untouched.
-		n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, "acme", []string{"backend"})
+		n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, TestGitHubHost, "acme", []string{"backend"})
 		if err != nil {
 			t.Fatalf("PruneMissingSystem: %v", err)
 		}
 		if n != 1 {
 			t.Errorf("PruneMissingSystem removed %d rows; want 1", n)
 		}
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1969,10 +1969,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		// Empty present-set clears every acme mapping (org has no acme
 		// teams left); beta survives.
-		if _, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, "acme", nil); err != nil {
+		if _, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, ids.OrgID, TestGitHubHost, "acme", nil); err != nil {
 			t.Fatalf("PruneMissingSystem (clear): %v", err)
 		}
-		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err = stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1983,7 +1983,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubGroups_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
 		stores, ids := factory(t)
-		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubGroups.ListForTeam(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeam: %v", err)
 		}
@@ -1998,10 +1998,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{Owner: "acme", Repo: "api"},
 			{Owner: "acme", Repo: "web"},
 		}
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, input); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, input); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
 		}
-		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -2012,10 +2012,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// Replace-set prunes the missing one.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, input[:1]); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, input[:1]); err != nil {
 			t.Fatalf("replace ReplaceForTeam: %v", err)
 		}
-		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -2024,10 +2024,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 
 		// Empty clears all.
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, nil); err != nil {
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, nil); err != nil {
 			t.Fatalf("clear ReplaceForTeam: %v", err)
 		}
-		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		got, err = stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -2038,7 +2038,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubRepos_TracksRepoSystem_OwnerCaseInsensitive", func(t *testing.T) {
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, []domain.TeamGitHubRepo{
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -2052,7 +2052,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{"acme", "web", false},
 			{"other", "api", false},
 		} {
-			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, c.owner, c.repo)
+			got, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, ids.TeamID, TestGitHubHost, c.owner, c.repo)
 			if err != nil {
 				t.Fatalf("TracksRepoSystem(%s/%s): %v", c.owner, c.repo, err)
 			}
@@ -2075,7 +2075,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// drops or mis-joins the team-admin predicate and ends up matching
 		// rows the membership-scoped read doesn't.
 		stores, ids := factory(t)
-		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, []domain.TeamGitHubRepo{
+		if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, ids.OrgID, ids.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "Acme", Repo: "api"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -2086,11 +2086,11 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			{"acme", "web"},  // same owner, untracked repo
 			{"other", "api"}, // untracked owner
 		} {
-			scoped, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, ids.OrgID, c.owner, c.repo)
+			scoped, err := stores.TeamGitHubRepos.TracksRepoViewerScoped(ctx, ids.OrgID, TestGitHubHost, c.owner, c.repo)
 			if err != nil {
 				t.Fatalf("TracksRepoViewerScoped(%s/%s): %v", c.owner, c.repo, err)
 			}
-			adminScoped, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, ids.OrgID, c.owner, c.repo)
+			adminScoped, err := stores.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, ids.OrgID, TestGitHubHost, c.owner, c.repo)
 			if err != nil {
 				t.Fatalf("TracksRepoViewerAdminScoped(%s/%s): %v", c.owner, c.repo, err)
 			}
@@ -2102,7 +2102,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 
 	t.Run("TeamGitHubRepos_EmptyTeam_ReturnsEmptySlice", func(t *testing.T) {
 		stores, ids := factory(t)
-		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID)
+		got, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, ids.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}

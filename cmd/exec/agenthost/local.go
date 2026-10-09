@@ -752,8 +752,8 @@ func (c *LocalClient) AvailableSources(ctx context.Context) ([]string, error) {
 	return c.rt.AvailableSources(ctx)
 }
 
-func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return c.rt.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
+func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return c.rt.GetConversationWorktreeByRepoRef(ctx, repositoryID, ref)
 }
 
 func (c *LocalClient) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
@@ -764,8 +764,8 @@ func (c *LocalClient) InsertConversationWorktree(ctx context.Context, row domain
 	return c.rt.InsertConversationWorktree(ctx, row)
 }
 
-func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.rt.DeleteConversationWorktree(ctx, repoID, ref)
+func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) error {
+	return c.rt.DeleteConversationWorktree(ctx, repositoryID, ref)
 }
 
 // --- disclosure footer ---

@@ -105,7 +105,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The tracked set.
-		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
+		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -352,7 +352,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		s, orgID, seed := mk(t)
 		// Tracking mints the row and learns no id, which is exactly the
 		// id-less state under test.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "unidentified"},
 		}); err != nil {
 			t.Fatalf("seed id-less repository: %v", err)
@@ -445,7 +445,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", "https://github.com", renameOldSlug+"#18"); ent == nil {
 			t.Errorf("the entity's source id moved despite the refusal")
 		}
-		tracked, _ := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
+		tracked, _ := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
 		if !sameSet(trackedSlugs(tracked), []string{renameOldSlug, renameNeighbourSlug}) {
 			t.Errorf("the tracked set moved despite the refusal: %v", trackedSlugs(tracked))
 		}
@@ -633,7 +633,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 		// And the references still resolve — to the new name, without having
 		// been touched.
-		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID)
+		tracked, err := s.TeamGitHubRepos.ListForTeamSystem(ctx, seed.TeamID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListForTeamSystem: %v", err)
 		}
@@ -662,7 +662,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		s, orgID, seed := mk(t)
 		// Both tracked, so both are bare rows to begin with; the poller's
 		// grant enumeration then records an id for exactly one of them.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "identified"},
 			{Owner: "octo", Repo: "bare"},
 		}); err != nil {
@@ -674,7 +674,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed identified: filled=%d err=%v", filled, err)
 		}
 
-		got, err := s.Repos.ListIdentitiesSystem(ctx, orgID)
+		got, err := s.Repos.ListIdentitiesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListIdentitiesSystem: %v", err)
 		}
@@ -711,7 +711,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	const externalID = "1296269"
 	branchRef := "refs/heads/octo/api-fix"
 
-	if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, []domain.TeamGitHubRepo{
+	if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "octo", Repo: "api"},
 		{Owner: "octo", Repo: "api-gateway"},
 	}); err != nil {

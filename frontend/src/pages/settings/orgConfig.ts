@@ -116,6 +116,12 @@ export interface OrgSettingsData {
   // predates the login being recorded. Settings shows it beside the "Replace
   // token" control so a rotation names the account it's swapping out.
   github_pat_login?: string
+  // The GitHub host the stored org PAT was validated on, and whether that is a
+  // host other than github_base_url. A PAT is only ever sent to the host it was
+  // validated on, so a token left behind by a host change is unusable until it
+  // is replaced.
+  github_pat_host?: string
+  github_pat_needs_rebind: boolean
   jira_base_url: string
   jira_poll_interval: string
   // True when a Jira service credential is stored for the org's auth-method

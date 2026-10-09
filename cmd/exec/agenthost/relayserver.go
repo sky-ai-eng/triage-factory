@@ -277,7 +277,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		w, err := s.rt.GetConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		w, err := s.rt.GetConversationWorktreeByRepoRef(ctx, a.RepositoryID, a.Ref)
 		if err != nil {
 			return nil, err
 		}
@@ -317,7 +317,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		if err := s.rt.DeleteConversationWorktree(ctx, a.RepoID, a.Ref); err != nil {
+		if err := s.rt.DeleteConversationWorktree(ctx, a.RepositoryID, a.Ref); err != nil {
 			return nil, err
 		}
 		return nil, nil

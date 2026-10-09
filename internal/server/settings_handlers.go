@@ -1168,9 +1168,10 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 	linearChanged := orgSet.LinearPollInterval != prevOrgSet.LinearPollInterval
 
 	if ghChanged && s.onGitHubChanged != nil {
-		s.MarkJiraRestarted(r.Context(), orgID)
+		s.MarkGitHubRestarted(r.Context(), orgID)
 		go s.onGitHubChanged(orgID)
-	} else if jiraChanged && s.onJiraChanged != nil {
+	}
+	if jiraChanged && s.onJiraChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}

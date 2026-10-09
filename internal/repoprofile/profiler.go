@@ -368,6 +368,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			// the stored casing, and an id this pass never read.
 			p.notify.Publish(ctx, orgID, repoevent.Update{
 				ID:          stored.ID,
+				Host:        stored.Host,
 				Slug:        stored.Slug(),
 				HasReadme:   repoevent.Ptr(stored.HasReadme),
 				HasClaudeMd: repoevent.Ptr(stored.HasClaudeMd),
@@ -458,6 +459,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 				profiled++
 				p.notify.Publish(ctx, orgID, repoevent.Update{
 					ID:          stored.ID,
+					Host:        stored.Host,
 					Slug:        stored.Slug(),
 					ProfileText: repoevent.Ptr(stored.ProfileText),
 				})

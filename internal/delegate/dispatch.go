@@ -1369,7 +1369,7 @@ func (s *Spawner) dispatchResumeClaim(ctx context.Context, conv *domain.Conversa
 	// is dropped here rather than threaded on to nothing. No fresh-workspace
 	// builder either, for the same reason: that session file lived in the
 	// snapshot, so a tree built without one has nothing to reconnect to.
-	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, sidecar, localGit), nil)
+	resumeCwd, _, _, werr := s.ensureWorkspace(stepCtx, orgID, conv, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit), nil)
 	if werr != nil {
 		// A rehydrate that failed is the resume runtime failing to come up,
 		// and it fails for the same passing reasons the native path's jail
@@ -1994,7 +1994,7 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 	// credential path — the sandbox is already up (dispatchClaimedConversation
 	// brings it up before calling here), so the proxy is live by the time the
 	// rebuild fetches.
-	root, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.checkoutRestorerFor(orgID, sidecar, localGit),
+	root, prov, asOf, err := s.ensureWorkspace(ctx, orgID, convForWS, s.checkoutRestorerFor(orgID, task.EntityID, sidecar, localGit),
 		func(ctx context.Context) (string, error) {
 			return s.freshStepWorkspace(ctx, orgID, br, task, conv, gh, sidecar, localGit)
 		})
@@ -2026,12 +2026,18 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// store stuck on a lock costs a denied push, never the step's start.
 		if s.conversationWorktrees != nil {
 			ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-			if werr := s.recordCheckout(ledgerCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
-				ConversationID: conv.ID,
-				RepoID:         cfg.owner + "/" + cfg.repo,
-				Path:           cfg.prCheckout,
-				Ref:            worktree.PRRefSlug(cfg.prNumber),
-			}); werr != nil && !errors.Is(werr, db.ErrClaimReleased) {
+			var werr error
+			if repoRow, rerr := s.taskRepository(ledgerCtx, orgID, task, cfg.owner, cfg.repo); rerr != nil {
+				werr = rerr
+			} else {
+				werr = s.recordCheckout(ledgerCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
+					ConversationID: conv.ID,
+					RepositoryID:   repoRow.ID,
+					Path:           cfg.prCheckout,
+					Ref:            worktree.PRRefSlug(cfg.prNumber),
+				})
+			}
+			if werr != nil && !errors.Is(werr, db.ErrClaimReleased) {
 				dispatchLog.Warn("record the PR checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
 					"path", cfg.prCheckout,
 					"conversation", conv.ID, "repo", cfg.owner+"/"+cfg.repo, "error", werr)

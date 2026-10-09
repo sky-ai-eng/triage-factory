@@ -299,7 +299,11 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// inside the `staleReservationAge` window; killed-mid-create rows
 	// outlive it. Pre-staleness, trust the row. Past staleness with
 	// the path still missing, drop the row and re-reserve.
-	existing, err := host.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
+	//
+	// The ledger is keyed on the repository's registry id, which GetRepo just
+	// resolved on the org's GitHub host: the same slug on another host is
+	// another repository, and its checkout is not this one.
+	existing, err := host.GetConversationWorktreeByRepoRef(ctx, profile.ID, ref)
 	if err != nil {
 		return "", fmt.Errorf("workspace add: lookup existing worktree: %w", err)
 	}
@@ -327,7 +331,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 			// Stale: reservation outlived its creator without a
 			// completed worktree. Drop and fall through to re-reserve.
 			workspaceLog.Warn("dropping stale reservation; path missing and row age exceeds threshold", "conversation", info.ConversationID, "repo", repoID, "ref", ref, "path", existing.Path, "age", age, "threshold", staleReservationAge)
-			if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+			if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, profile.ID, ref); delErr != nil {
 				return "", fmt.Errorf("workspace add: delete stale reservation: %w", delErr)
 			}
 		default:
@@ -375,7 +379,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 	// never this row.
 	row := domain.ConversationWorktree{
 		ConversationID: info.ConversationID,
-		RepoID:         repoID,
+		RepositoryID:   profile.ID,
 		Path:           wtPath,
 		Ref:            ref,
 	}
@@ -404,7 +408,7 @@ func materializeWorkspace(host agenthost.Client, ownerRepoArg string, spec check
 		// Release the reservation so the next attempt can retry.
 		// Delete failures are logged but don't shadow the create error
 		// the caller actually needs.
-		if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, repoID, ref); delErr != nil {
+		if delErr := host.DeleteConversationWorktreeByRepoRef(ctx, profile.ID, ref); delErr != nil {
 			workspaceLog.Warn("release reservation after create failure failed", "error", delErr)
 		}
 		return "", fmt.Errorf("workspace add: create worktree: %w", err)

@@ -835,7 +835,12 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		}
 	}
 
-	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID)
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -943,7 +948,12 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID)
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-access", err)
 		return

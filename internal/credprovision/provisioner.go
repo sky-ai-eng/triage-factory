@@ -466,9 +466,17 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
 // conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
+//
+// Every repo is checked against the team's tracking on the org's current GitHub
+// host, the host the bundle's tokens are minted on: a repository the team
+// tracked on a host the org has left is not one this bundle can reach.
 func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
+	}
+	host, err := db.OrgGitHubHostSystem(ctx, m.stores.Orgs, orgID)
+	if err != nil {
+		return nil, err
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -481,7 +489,7 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		if !ok {
 			return
 		}
-		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, owner, repo)
+		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, host, owner, repo)
 		if err != nil || !tracks {
 			return
 		}
@@ -517,7 +525,7 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 	// (already the tracking source of truth, so no per-repo TracksRepoSystem
 	// re-check) rather than shipping a bundle with no GitHub credential at all.
 	if len(out) == 0 {
-		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID)
+		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, host)
 		if err != nil {
 			return nil, fmt.Errorf("list team tracked repos: %w", err)
 		}

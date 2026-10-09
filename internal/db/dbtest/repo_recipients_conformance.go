@@ -56,7 +56,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 
 	recipients := func(t *testing.T, s db.TeamGitHubReposStore, orgID, owner, repo string) []string {
 		t.Helper()
-		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, owner, repo)
+		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, TestGitHubHost, owner, repo)
 		if err != nil {
 			t.Fatalf("RepoUpdateRecipientsSystem(%s, %s/%s): %v", orgID, owner, repo, err)
 		}
