@@ -202,7 +202,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		// transaction as the token itself, so the class can never outlive or
 		// precede the credential it describes — a crash between two separate
 		// writes would leave the class lying. It is its own store call because
-		// UpdateSettings deliberately doesn't own the column.
+		// the settings writer deliberately doesn't own the column.
 		if _, err := tx.Orgs.SetGitHubCredentialClass(ctx, orgID, domain.GitHubCredentialClassPAT); err != nil {
 			return fmt.Errorf("set github credential class: %w", err)
 		}

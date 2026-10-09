@@ -146,7 +146,7 @@ func TestOrgSettingsPatch_LLMAuthMethod_UnchangedValueIsNotRechecked(t *testing.
 		t.Fatalf("seed ref: %v", err)
 	}
 	set.LLMAuthMethod = domain.LLMAuthSystem
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
 

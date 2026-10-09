@@ -14,6 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -285,11 +286,9 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
-	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{
 		JiraBaseURL: "https://acme.atlassian.net",
-	}); err != nil {
-		t.Fatalf("set site URL: %v", err)
-	}
+	})
 	client := NewLocal(stores, info)
 	ctx := context.Background()
 

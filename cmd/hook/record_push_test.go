@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -175,10 +176,8 @@ func TestRecordPush_SkipsNonBranchRef(t *testing.T) {
 // github.com-only gate silently dropped before an artifact was ever written.
 func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 	stores, conversationID := newTestStores(t)
-	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
-		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
-		t.Fatalf("seed org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
+		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"})
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{
@@ -206,10 +205,8 @@ func TestRecordPush_GHESHostRecordsAndAnchorsURL(t *testing.T) {
 // host).
 func TestRecordPush_GHESOrgSkipsForeignHost(t *testing.T) {
 	stores, conversationID := newTestStores(t)
-	if _, err := stores.Orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID,
-		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"}); err != nil {
-		t.Fatalf("seed org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID,
+		domain.OrgSettings{GitHubBaseURL: "https://github.corp.example.com"})
 	host := hostFor(stores, conversationID, false)
 
 	runRecordPush(host, []string{"--remote", "https://github.com/octo/repo", "--ref", "refs/heads/main", "--sha", "xyz", "--new=true"})

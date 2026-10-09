@@ -155,9 +155,10 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("org_settings_writes_return_the_stored_row", func(t *testing.T) {
-		// The returned-row standard on OrgsStore's three settings writes,
-		// mirroring the team_settings arm above: what each write hands back is
-		// what a point read finds.
+		// The returned-row standard on OrgsStore's settings writes — both arms
+		// of UpdateSettingsVersioned and SetGitHubCredentialClass — mirroring
+		// the team_settings arm above: what each write hands back is what a
+		// point read finds.
 		stores, ids := factory(t)
 		read := func() (*domain.OrgSettings, error) {
 			set, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
@@ -172,16 +173,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 		}
 
-		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base)
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, 0)
 		if err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+			t.Fatalf("UpdateSettingsVersioned (create): %v", err)
 		}
-		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings", saved, read)
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettingsVersioned (create)", saved, read)
 
-		// UpdateSettingsVersioned's update arm — the case it is for: the new
-		// version is the one thing a successful caller most needs and cannot
-		// compute (expected+1 is a guess), so it rides the returned row rather
-		// than a follow-up read.
+		// The update arm: the new version is the one thing a successful caller
+		// most needs and cannot compute (expected+1 is a guess), so it rides
+		// the returned row rather than a follow-up read.
 		versioned := base
 		versioned.GitHubBaseURL = "https://versioned-ret.example.com"
 		verSaved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, versioned, saved.Version)
@@ -224,14 +224,14 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	// org's Linear credential belongs to, written by the credential bind and
 	// cleared by the unbind. Like github_credential_class they are not the
 	// settings writer's: SetLinearWorkspace round-trips them and leaves the
-	// version alone, and no bulk save — guarded or not, carrying the fields
-	// or not — changes them.
+	// version alone, and no settings save — carrying the fields or not —
+	// changes them.
 	t.Run("OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave", func(t *testing.T) {
 		stores, ids := factory(t)
 
-		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"})
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0)
 		if err != nil {
-			t.Fatalf("UpdateSettings (materialize): %v", err)
+			t.Fatalf("UpdateSettingsVersioned (materialize): %v", err)
 		}
 		set, err := stores.Orgs.SetLinearWorkspace(ctx, ids.OrgID, "linear-workspace-uuid", "acme")
 		if err != nil {
@@ -244,24 +244,25 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("SetLinearWorkspace moved the version %d -> %d; the settings writer can't reach these columns, so there is nothing for it to guard", saved.Version, set.Version)
 		}
 
-		// A guarded save loaded before the bind still lands, and neither it
-		// nor an unguarded save carrying other values moves the workspace.
+		// A save loaded before the bind still lands, and neither it nor a
+		// later save carrying another workspace moves the workspace.
 		save := set
 		save.LinearWorkspaceID, save.LinearWorkspaceURLKey = "", ""
 		save.MaxConcurrentRuns = 4
-		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, saved.Version); err != nil {
+		resaved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, saved.Version)
+		if err != nil {
 			t.Fatalf("UpdateSettingsVersioned (loaded before the bind): %v", err)
 		}
 		save.LinearWorkspaceID, save.LinearWorkspaceURLKey = "someone-elses", "other"
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
-			t.Fatalf("UpdateSettings (workspace in struct): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, resaved.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (workspace in struct): %v", err)
 		}
 		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
 		if after.LinearWorkspaceID != "linear-workspace-uuid" || after.LinearWorkspaceURLKey != "acme" {
-			t.Errorf("a settings save moved the workspace to (%q, %q); want it kept — the columns belong to the credential, not to UpdateSettings",
+			t.Errorf("a settings save moved the workspace to (%q, %q); want it kept — the columns belong to the credential, not to the settings writer",
 				after.LinearWorkspaceID, after.LinearWorkspaceURLKey)
 		}
 		if after.MaxConcurrentRuns != 4 {
@@ -301,16 +302,16 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("create-asserting save after SetSourceBaseURL materialized the row: err = %v, want ErrOrgSettingsVersion", err)
 		}
 
-		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{
 			GitHubBaseURL:       "https://ghe.example.com",
 			GitHubPollInterval:  7 * time.Minute,
 			JiraBaseURL:         "https://jira-old.example.com",
 			JiraPollInterval:    3 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 			MaxConcurrentRuns:   4,
-		})
+		}, created.Version)
 		if err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		if _, err := stores.OrgEventSources.SetDisabled(ctx, ids.OrgID, "jira", true, ids.UserID); err != nil {
 			t.Fatalf("SetDisabled: %v", err)
@@ -385,24 +386,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	// OrgSettings_PerSourceWriteDoesNotShareTheVersionToken pins the
-	// concurrency split base_url / poll_interval moving onto org_event_sources
-	// left behind: the org_settings.version token guards a settings-page save
-	// (UpdateSettingsVersioned, covering that route's own base_url /
-	// poll_interval writes too — they land in the same transaction as the
-	// guarded org_settings row), but it says nothing about the admin-only
-	// per-source route (OrgEventSourceStore.SetDisabled), which is an
-	// unguarded, last-writer-wins upsert on a disjoint set of columns on the
-	// SAME org_event_sources row.
-	//
-	// Two admins racing on genuinely different resources (the settings-page
-	// save; the per-source disable switch) must not spuriously block or
-	// unwind each other, and each must leave the other's columns alone —
-	// that's the whole point of the split. This test plays out both
-	// directions of that on one shared row.
 	// anthropic_api_key_ref / bedrock_credentials_ref name the LLM material
 	// the org has bound. Like the Linear workspace they belong to the
-	// credential routes, so no bulk save, guarded or not, moves them. Unlike
+	// credential routes, so no settings save moves them. Unlike
 	// it, their writers move the version: the settings save validates
 	// llm_auth_method against them, and a bind writes llm_auth_method too.
 	t.Run("OrgSettings_LLMCredentialRefs_OwnedByCredentialRoutes", func(t *testing.T) {
@@ -471,21 +457,23 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 					t.Errorf("an unchanged bind moved the version %d -> %d", rebound.Version, same.Version)
 				}
 
-				// Neither bulk writer moves either ref, whatever its struct
+				// No settings save moves either ref, whatever its struct
 				// carries; each still applies its own fields.
 				save := same
 				save.AnthropicAPIKeyRef, save.BedrockCredentialsRef = "", ""
 				save.MaxConcurrentRuns = 4
-				if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, same.Version); err != nil {
+				blanked, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, same.Version)
+				if err != nil {
 					t.Fatalf("UpdateSettingsVersioned (refs blank in struct): %v", err)
 				}
 				save.AnthropicAPIKeyRef, save.BedrockCredentialsRef = "someone-elses", "someone-elses"
-				// The bulk save can still put the org on the host's credentials;
-				// refusing that beside a bound ref is the settings route's rule.
+				// The settings save can still put the org on the host's
+				// credentials; refusing that beside a bound ref is the settings
+				// route's rule.
 				save.LLMAuthMethod = domain.LLMAuthSystem
-				saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save)
+				saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, blanked.Version)
 				if err != nil {
-					t.Fatalf("UpdateSettings (refs in struct): %v", err)
+					t.Fatalf("UpdateSettingsVersioned (refs in struct): %v", err)
 				}
 				if c.this.ref(saved) != "ref-2" || c.other.ref(saved) != "other-ref" {
 					t.Errorf("a settings save moved the refs to (%s %q, %s %q); want them kept",
@@ -555,6 +543,21 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		})
 	})
 
+	// OrgSettings_PerSourceWriteDoesNotShareTheVersionToken pins the
+	// concurrency split base_url / poll_interval moving onto org_event_sources
+	// left behind: the org_settings.version token guards a settings-page save
+	// (UpdateSettingsVersioned, covering that route's own base_url /
+	// poll_interval writes too — they land in the same transaction as the
+	// guarded org_settings row), but it says nothing about the admin-only
+	// per-source route (OrgEventSourceStore.SetDisabled), which is an
+	// unguarded, last-writer-wins upsert on a disjoint set of columns on the
+	// SAME org_event_sources row.
+	//
+	// Two admins racing on genuinely different resources (the settings-page
+	// save; the per-source disable switch) must not spuriously block or
+	// unwind each other, and each must leave the other's columns alone —
+	// that's the whole point of the split. This test plays out both
+	// directions of that on one shared row.
 	t.Run("OrgSettings_PerSourceWriteDoesNotShareTheVersionToken", func(t *testing.T) {
 		stores, ids := factory(t)
 		if stores.OrgEventSources == nil {
@@ -630,8 +633,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraBaseURL:         "https://acme.atlassian.net",
 			JiraPollInterval:    3 * time.Minute,
 			// LinearWorkspaceID / LinearWorkspaceURLKey, AnthropicAPIKeyRef and
-			// BedrockCredentialsRef are left empty: like the class below,
-			// UpdateSettings doesn't own them (see
+			// BedrockCredentialsRef are left empty: like the class below, the
+			// settings writer doesn't own them (see
 			// OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave and
 			// OrgSettings_LLMCredentialRefs_OwnedByCredentialRoutes).
 			LinearPollInterval:  11 * time.Minute,
@@ -642,7 +645,7 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			MaxConcurrentRuns:   8,
 			MarketplaceEnabled:  true,
 			APITokenMaxAgeDays:  30,
-			// Read-only through this struct: UpdateSettings doesn't own
+			// Read-only through this struct: the settings writer doesn't own
 			// github_credential_class, so the row keeps its schema default and
 			// the read hands it back. Stated as the expected value rather than
 			// left zero, because "" is not something the store can return.
@@ -652,8 +655,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			// version 1.
 			Version: 1,
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, want); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, want, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -677,8 +680,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		on := base
 		on.MarketplaceEnabled = true
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, on); err != nil {
-			t.Fatalf("UpdateSettings (on): %v", err)
+		enabled, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, on, 0)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (on): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -687,8 +691,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if !got.MarketplaceEnabled {
 			t.Errorf("MarketplaceEnabled = false after enabling, want true")
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (off): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, enabled.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (off): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -704,8 +708,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	// settings writer, and this case pins both halves of that: the dedicated
 	// writer round-trips, and a bulk settings save leaves what it wrote alone.
 	//
-	// The second half is the one that matters. Adding the column to
-	// UpdateSettings' upsert lists looks like tidiness and would instead reset
+	// The second half is the one that matters. Adding the column to the
+	// settings writer's column lists looks like tidiness and would instead reset
 	// the class to the struct's zero value on every settings save — silently
 	// converting a BYO-App org to PAT, with no error and nothing in the log.
 	// That is the specific regression this case exists to catch, on both
@@ -743,15 +747,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		save := got
 		save.GitHubBaseURL = "https://ghe.example.com"
 		save.MaxConcurrentRuns = 4
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
-			t.Fatalf("UpdateSettings (bulk save): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, got.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (bulk save): %v", err)
 		}
 		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem (after bulk save): %v", err)
 		}
 		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
-			t.Errorf("a settings save reset the credential class to %q; want %q preserved — the column belongs to the credential transitions, not to UpdateSettings",
+			t.Errorf("a settings save reset the credential class to %q; want %q preserved — the column belongs to the credential transitions, not to the settings writer",
 				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
 		}
 		if after.GitHubBaseURL != "https://ghe.example.com" || after.MaxConcurrentRuns != 4 {
@@ -764,15 +768,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		// settings. This is the same assertion from the attacker's side.
 		save = after
 		save.GitHubCredentialClass = domain.GitHubCredentialClassPAT
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save); err != nil {
-			t.Fatalf("UpdateSettings (class in struct): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, after.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (class in struct): %v", err)
 		}
 		after, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
 			t.Fatalf("GetSettingsSystem (after class in struct): %v", err)
 		}
 		if after.GitHubCredentialClass != domain.GitHubCredentialClassBYOApp {
-			t.Errorf("UpdateSettings honoured the struct's class (%q); want %q — the column must be unreachable through the settings writer",
+			t.Errorf("UpdateSettingsVersioned honoured the struct's class (%q); want %q — the column must be unreachable through the settings writer",
 				after.GitHubCredentialClass, domain.GitHubCredentialClassBYOApp)
 		}
 
@@ -827,33 +831,33 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		want := intervals(def)
 
-		saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"})
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0)
 		if err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		if got := intervals(saved); got != want {
 			t.Errorf("returned intervals (github, jira, linear) = %v, want the defaults %v", got, want)
 		}
-		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (no cadence)", saved, read)
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettingsVersioned (no cadence)", saved, read)
 
 		set := saved
 		set.LinearPollInterval = 15 * time.Minute
-		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
-			t.Fatalf("UpdateSettings (15m): %v", err)
+		if saved, err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, set, saved.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (15m): %v", err)
 		}
 		if saved.LinearPollInterval != 15*time.Minute {
 			t.Errorf("LinearPollInterval = %v, want 15m", saved.LinearPollInterval)
 		}
-		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (15m)", saved, read)
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettingsVersioned (15m)", saved, read)
 
 		set.LinearPollInterval = 0
-		if saved, err = stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
-			t.Fatalf("UpdateSettings (back to zero): %v", err)
+		if saved, err = stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, set, saved.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (back to zero): %v", err)
 		}
 		if saved.LinearPollInterval != def.LinearPollInterval {
 			t.Errorf("LinearPollInterval after a zero = %v, want the default %v", saved.LinearPollInterval, def.LinearPollInterval)
 		}
-		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettings (back to zero)", saved, read)
+		AssertWriteReturnedStoredRow(t, "Orgs.UpdateSettingsVersioned (back to zero)", saved, read)
 	})
 
 	// Two settings columns default to a MODEL, and each dialect spells its
@@ -913,8 +917,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	})
 
 	t.Run("OrgSettings_EmptyCloneProtocol_DefaultsToHTTPS", func(t *testing.T) {
-		// The github_clone_protocol column CHECK rejects empty string —
-		// UpdateSettings substitutes the package default so a fresh-mutate
+		// The github_clone_protocol column CHECK rejects empty string — the
+		// settings writer substitutes the package default so a fresh-mutate
 		// caller doesn't have to know the column constraint.
 		stores, ids := factory(t)
 		in := domain.OrgSettings{
@@ -922,8 +926,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:   5 * time.Minute,
 			// GitHubCloneProtocol intentionally empty.
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, in, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -951,8 +955,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, in, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -978,8 +982,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		set := base
 		set.MaxDailyCostUSD = 25
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
-			t.Fatalf("UpdateSettings (set cap): %v", err)
+		capped, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, set, 0)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (set cap): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -989,8 +994,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("after set, MaxDailyCostUSD = %v; want 25", got.MaxDailyCostUSD)
 		}
 		// Clear: 0 writes NULL, reads back 0.
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (clear cap): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, capped.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (clear cap): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1014,8 +1019,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		set := base
 		set.MaxConcurrentRuns = 12
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
-			t.Fatalf("UpdateSettings (set limit): %v", err)
+		limited, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, set, 0)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (set limit): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1025,8 +1031,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			t.Errorf("after set, MaxConcurrentRuns = %v; want 12", got.MaxConcurrentRuns)
 		}
 		// Clear: 0 writes NULL, reads back 0.
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (clear limit): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, limited.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (clear limit): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1049,8 +1055,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "ssh",
 			MaxConcurrentRuns:   -7,
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in); err != nil {
-			t.Fatalf("UpdateSettings (negative): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, in, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (negative): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1075,8 +1081,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 		set := base
 		set.APITokenMaxAgeDays = domain.APITokenMaxAgeDaysMax
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, set); err != nil {
-			t.Fatalf("UpdateSettings (set cap): %v", err)
+		capped, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, set, 0)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned (set cap): %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1085,8 +1092,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		if got.APITokenMaxAgeDays != domain.APITokenMaxAgeDaysMax {
 			t.Errorf("after set, APITokenMaxAgeDays = %v; want %v", got.APITokenMaxAgeDays, domain.APITokenMaxAgeDaysMax)
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (clear cap): %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, capped.Version); err != nil {
+			t.Fatalf("UpdateSettingsVersioned (clear cap): %v", err)
 		}
 		got, err = stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1111,13 +1118,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 		}
+		version := 0
 		for _, want := range []string{domain.ModelOpus, "", domain.ModelHaiku} {
 			in := base
 			in.BackgroundJobsModel = want
-			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			stored, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, in, version)
 			if err != nil {
-				t.Fatalf("UpdateSettings(%q): %v", want, err)
+				t.Fatalf("UpdateSettingsVersioned(%q): %v", want, err)
 			}
+			version = stored.Version
 			if stored.BackgroundJobsModel != want {
 				t.Errorf("write returned BackgroundJobsModel %q, want %q", stored.BackgroundJobsModel, want)
 			}
@@ -1145,13 +1154,15 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 		}
+		version := 0
 		for _, want := range []string{domain.LLMAuthBYOK, domain.LLMAuthSystem, domain.LLMAuthBYOK} {
 			in := base
 			in.LLMAuthMethod = want
-			stored, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, in)
+			stored, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, in, version)
 			if err != nil {
-				t.Fatalf("UpdateSettings(%q): %v", want, err)
+				t.Fatalf("UpdateSettingsVersioned(%q): %v", want, err)
 			}
+			version = stored.Version
 			if stored.LLMAuthMethod != want {
 				t.Errorf("write returned LLMAuthMethod %q, want %q", stored.LLMAuthMethod, want)
 			}
@@ -1163,9 +1174,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 				t.Errorf("read back LLMAuthMethod %q, want %q", got.LLMAuthMethod, want)
 			}
 		}
-		blank, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base)
+		blank, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, version)
 		if err != nil {
-			t.Fatalf("UpdateSettings(unset): %v", err)
+			t.Fatalf("UpdateSettingsVersioned(unset): %v", err)
 		}
 		if blank.LLMAuthMethod != domain.LLMAuthSystem && blank.LLMAuthMethod != domain.LLMAuthBYOK {
 			t.Errorf("an unset LLMAuthMethod stored %q, want this dialect's column default", blank.LLMAuthMethod)
@@ -1184,23 +1195,24 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			LLMAuthMethod:       domain.LLMAuthBYOK,
 			MaxDailyCostUSD:     5,
 			MaxConcurrentRuns:   3,
-			// Not written by UpdateSettings; the row's default reads back.
+			// Not written by the settings writer; the row's default reads back.
 			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, first); err != nil {
-			t.Fatalf("first UpdateSettings: %v", err)
+		created, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, first, 0)
+		if err != nil {
+			t.Fatalf("first UpdateSettingsVersioned: %v", err)
 		}
 		second := first
 		second.GitHubBaseURL = "https://second.example.com"
 		second.EnabledModels = []string{domain.ModelOpus}
 		second.MaxDailyCostUSD = 10
 		second.MaxConcurrentRuns = 20
-		// Two saves, so the row's concurrency token has been bumped twice. The
-		// struct's own Version is ignored on the way in — stating it here
-		// describes what the read must hand back.
+		// Two saves: the first created the row at version 1 and the second
+		// moved it to 2. The struct's own Version is ignored on the way in —
+		// stating it here describes what the read must hand back.
 		second.Version = 2
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, second); err != nil {
-			t.Fatalf("second UpdateSettings: %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, second, created.Version); err != nil {
+			t.Fatalf("second UpdateSettingsVersioned: %v", err)
 		}
 		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
 		if err != nil {
@@ -1317,37 +1329,9 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
-	// The unguarded writer is the credential transitions' path and stays
-	// last-writer-wins — but it must still move the token, or an admin's stale
-	// settings edit would land on top of a credential change it never saw.
-	t.Run("OrgSettings_UnversionedWrite_StillBumpsTheToken", func(t *testing.T) {
-		stores, ids := factory(t)
-		base := domain.OrgSettings{
-			GitHubPollInterval:  5 * time.Minute,
-			JiraPollInterval:    5 * time.Minute,
-			GitHubCloneProtocol: "ssh",
-		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (first): %v", err)
-		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings (second): %v", err)
-		}
-		got, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
-		if err != nil {
-			t.Fatalf("GetSettingsSystem: %v", err)
-		}
-		if got.Version != 2 {
-			t.Errorf("version after two unguarded saves = %d; want 2", got.Version)
-		}
-		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, 1); !errors.Is(err, db.ErrOrgSettingsVersion) {
-			t.Errorf("a settings write at the pre-transition version = %v; want ErrOrgSettingsVersion", err)
-		}
-	})
-
-	// SetGitHubCredentialClass is the counter-example: a surgical single-column
-	// write that does NOT move the token, so a credential transition can't
-	// invalidate an admin's in-flight settings edit.
+	// SetGitHubCredentialClass is a surgical single-column write that does NOT
+	// move the token, so a credential transition can't invalidate an admin's
+	// in-flight settings edit.
 	t.Run("OrgSettings_CredentialClassWrite_LeavesTheTokenAlone", func(t *testing.T) {
 		stores, ids := factory(t)
 		base := domain.OrgSettings{
@@ -1355,8 +1339,8 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			JiraPollInterval:    5 * time.Minute,
 			GitHubCloneProtocol: "ssh",
 		}
-		if _, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, base); err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
+		if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, base, 0); err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
 		}
 		if _, err := stores.Orgs.SetGitHubCredentialClass(ctx, ids.OrgID, domain.GitHubCredentialClassBYOApp); err != nil {
 			t.Fatalf("SetGitHubCredentialClass: %v", err)

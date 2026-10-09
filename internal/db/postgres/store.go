@@ -271,7 +271,7 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// Orgs holds both pools: admin for ListActiveSystem +
 		// GetSettingsSystem (background services iterating the active
 		// org set / reading per-org settings without JWT claims) and
-		// app for GetSettings + UpdateSettings (request-handler
+		// app for GetSettings + UpdateSettingsVersioned (request-handler
 		// reads/writes gated by org_settings_* RLS policies).
 		Orgs: newOrgsStore(app, admin),
 		// OrgMemberships holds both pools: app for the RLS-gated roster read +

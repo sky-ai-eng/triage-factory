@@ -42,7 +42,7 @@ func setAuthMethod(t *testing.T, database *sql.DB, method string) {
 		t.Fatalf("get org settings: %v", err)
 	}
 	set.LLMAuthMethod = method
-	if _, err := store.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := store.UpdateSettingsVersioned(context.Background(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("set auth method: %v", err)
 	}
 }

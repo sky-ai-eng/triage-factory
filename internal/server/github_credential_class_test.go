@@ -302,10 +302,10 @@ func TestCredentialClass_PATDisconnectKeepsClass(t *testing.T) {
 //
 // This is the product-level half of the guarantee, and it is deliberately not
 // the only half. The handler is read-modify-write, so the class survives here
-// even if someone folded the column into UpdateSettings' upsert lists — that
-// store-level mistake is caught instead by the dbtest conformance case
-// (OrgSettings_GitHubCredentialClass_OwnedByTransitionsNotSettingsSave, which
-// writes a struct whose class differs from the stored one). What this test
+// even if someone folded the column into UpdateSettingsVersioned's column
+// lists — that store-level mistake is caught instead by the dbtest conformance
+// case (OrgSettings_GitHubCredentialClass_OwnedByTransitionsNotSettingsSave,
+// which writes a struct whose class differs from the stored one). What this test
 // catches is the other direction: a handler that stops round-tripping, grows a
 // github_credential_class field, or otherwise lets an org change credential
 // systems by saving settings.

@@ -58,7 +58,7 @@ func seedLocalOrgJiraHost(t *testing.T, s *Server, host string) {
 			return err
 		}
 		set.JiraBaseURL = host
-		_, err = tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		_, err = tx.Orgs.UpdateSettingsVersioned(ctx, runmode.LocalDefaultOrgID, set, set.Version)
 		return err
 	}); err != nil {
 		t.Fatalf("seed org jira host: %v", err)

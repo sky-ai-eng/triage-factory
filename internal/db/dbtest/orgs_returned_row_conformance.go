@@ -93,20 +93,6 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 		}
 	})
 
-	t.Run("UpdateSettings_returns_the_stored_row", func(t *testing.T) {
-		saved, err := store.UpdateSettings(ctx, orgID, domain.OrgSettings{
-			GitHubBaseURL: "https://uret.example.com", GitHubPollInterval: 6 * time.Minute,
-			JiraPollInterval: 6 * time.Minute, GitHubCloneProtocol: "ssh",
-		})
-		if err != nil {
-			t.Fatalf("UpdateSettings: %v", err)
-		}
-		AssertWriteReturnedStoredRow(t, "UpdateSettings", saved, read)
-		if saved.GitHubBaseURL != "https://uret.example.com" {
-			t.Errorf("UpdateSettings returned %+v, want the new URL", saved)
-		}
-	})
-
 	t.Run("SetLinearWorkspace_returns_the_stored_row", func(t *testing.T) {
 		got, err := store.SetLinearWorkspace(ctx, orgID, "ret-workspace", "ret")
 		if err != nil {
