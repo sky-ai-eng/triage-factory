@@ -345,8 +345,14 @@ func TestRunJiraMirror_ConcurrentInProgressAndDone_EndsInDone(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, false) }()
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, true) }()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, false)
+	}()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, true)
+	}()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
@@ -365,8 +371,14 @@ func TestRunJiraMirror_ConcurrentMirrorsUnderOldAndNewKeysEndInDone(t *testing.T
 
 	var wg sync.WaitGroup
 	wg.Add(2)
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, false) }()
-	go func() { defer wg.Done(); s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "OPS-7", "", rule, true) }()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "SKY-1", "", rule, false)
+	}()
+	go func() {
+		defer wg.Done()
+		s.runJiraMirror(runmode.LocalDefaultOrgID, "ent-sky-1", "OPS-7", "", rule, true)
+	}()
 	wg.Wait()
 
 	if got := fake.currentStatus(); got != "Done" {
