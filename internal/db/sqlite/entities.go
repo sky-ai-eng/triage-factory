@@ -479,7 +479,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 // does not move. The SQL over-approximates and domain.ArtifactKeyHasResource
 // decides.
 func rewriteEntityArtifacts(ctx context.Context, q queryer, source, resource, from, to string) error {
-	if resource == "" {
+	if resource == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
@@ -806,11 +806,16 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 		if _, err := q.ExecContext(ctx, `DELETE FROM entities WHERE id = ?`, loser.ID); err != nil {
 			return fmt.Errorf("delete merged entity: %w", err)
 		}
+		// poll_seq is bumped whichever row's live state the survivor ends up
+		// with: the merge is a new version of the row, so a poll cycle that
+		// read the survivor before it misses its snapshot CAS, as it would
+		// after a rename.
 		if _, err := q.ExecContext(ctx, `
 			UPDATE entities SET
 			  external_id             = COALESCE(external_id, ?),
 			  owning_team_id          = COALESCE(owning_team_id, ?),
-			  commissioned_by_user_id = COALESCE(commissioned_by_user_id, ?)
+			  commissioned_by_user_id = COALESCE(commissioned_by_user_id, ?),
+			  poll_seq                = poll_seq + 1
 			WHERE id = ?`,
 			nullStringValue(loser.ExternalID), loserTeam, loserCommissioner, survivor.ID); err != nil {
 			return fmt.Errorf("fold identity into survivor: %w", err)
@@ -827,7 +832,12 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 				return fmt.Errorf("survivor takes live state: %w", err)
 			}
 		}
-		return nil
+		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
+		if err := rewriteEntityArtifacts(ctx, q, survivor.Source,
+			domain.EntityArtifactResource(survivor.Source, survivor.Scope, kept.ExternalID), dropped.SourceID, kept.SourceID); err != nil {
+			return err
+		}
+		return rewriteEntityActionURLs(ctx, q, survivor.Source, dropped.URL, kept.URL)
 	})
 	if err != nil {
 		return "", err

@@ -37,6 +37,7 @@ type recordingJiraServer struct {
 	assignee    string
 	assigns     int
 	transitions []string
+	paths       []string // every request's path, in arrival order
 
 	// failClaimState / failAssign inject transient HTTP failures so a test can
 	// exercise the mirror's read-failure and assign-failure paths.
@@ -75,6 +76,9 @@ func newRecordingJiraServer(t *testing.T, status, assignee string) *recordingJir
 func (r *recordingJiraServer) handle(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := req.URL.Path
+	r.mu.Lock()
+	r.paths = append(r.paths, path)
+	r.mu.Unlock()
 	switch {
 	case req.Method == http.MethodGet && strings.HasSuffix(path, "/myself"):
 		_, _ = io.WriteString(w, `{"name":"`+r.myselfName+`"}`)
@@ -383,6 +387,56 @@ func TestRunJiraMirror_ConcurrentMirrorsUnderOldAndNewKeysEndInDone(t *testing.T
 
 	if got := fake.currentStatus(); got != "Done" {
 		t.Errorf("final status = %q, want Done", got)
+	}
+}
+
+// The mirror addresses the ticket by the key its entity carries when the
+// mirror runs, not the one the caller read off the task: an issue that moved in
+// between is transitioned and audited under its new key and its issue id.
+func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	const site = "https://jira.example.com"
+	e, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID,
+		"jira", site, "OPS-7", "10007", "issue", "Moved", site+"/browse/OPS-7")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	fake := newRecordingJiraServer(t, "To Do", "")
+	s := NewSpawner(database, stores, nil, nil, "")
+	s.SetJiraResolver(&fakeJiraResolver{client: fake.client()})
+
+	s.runJiraMirror(runmode.LocalDefaultOrgID, e.ID, "SKY-1", "", mirrorRule(), false)
+
+	fake.mu.Lock()
+	paths := append([]string(nil), fake.paths...)
+	fake.mu.Unlock()
+	for _, p := range paths {
+		if strings.Contains(p, "SKY-1") {
+			t.Errorf("request %s addresses the key the caller read, want OPS-7", p)
+		}
+	}
+	rows, err := database.Query(`SELECT target, external_id FROM external_actions WHERE provider = 'jira'`)
+	if err != nil {
+		t.Fatalf("read actions: %v", err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var target, externalID string
+		if err := rows.Scan(&target, &externalID); err != nil {
+			t.Fatalf("scan action: %v", err)
+		}
+		n++
+		if target != "OPS-7" || externalID != "10007" {
+			t.Errorf("action target=%q external_id=%q, want OPS-7 / 10007", target, externalID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read actions: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("recorded %d actions, want the assign and the transition", n)
 	}
 }
 

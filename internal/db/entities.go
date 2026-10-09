@@ -591,11 +591,17 @@ type EntityStore interface {
 	//     user, and takes the newer row's where it has none;
 	//   - when the newer row is active, the survivor takes its live state: the
 	//     active state, its key and url, snapshot, title, description and
-	//     last_polled_at, with poll_seq bumped past both rows' so an in-flight
-	//     cycle's CAS misses. Otherwise the newer row's active tasks would land
-	//     on a closed entity, whose close has already run and which is never
-	//     refreshed, so they would never close; and the active row is the one
-	//     the provider was still answering for, under the key it has now.
+	//     last_polled_at, with poll_seq bumped past both rows'. Otherwise the
+	//     newer row's active tasks would land on a closed entity, whose close
+	//     has already run and which is never refreshed, so they would never
+	//     close; and the active row is the one the provider was still
+	//     answering for, under the key it has now;
+	//   - the survivor's poll_seq is bumped either way, so a cycle that read
+	//     either row before the merge misses its CAS;
+	//   - artifacts keyed on the pair's id that target the key the survivor
+	//     no longer answers to, and audit-ledger links under its url, move
+	//     onto the key and url it keeps (DuplicateEntityMergedKeys), as a
+	//     rename moves them.
 	//
 	// Refused, writing nothing: the two ids are the same, either row is
 	// missing (sql.ErrNoRows), the rows differ in source or scope, or both
@@ -711,4 +717,21 @@ func DuplicateEntityPair(a, b domain.Entity) (survivor, loser domain.Entity, err
 		return b, a, nil
 	}
 	return a, b, nil
+}
+
+// DuplicateEntityMergedKeys names, for a pair DuplicateEntityPair returned,
+// the row whose key and link the merged row keeps and the row whose key and
+// link it stops answering to: the newer row's are kept when it is active (the
+// survivor takes its live state), the survivor's own otherwise. kept carries
+// the pair's external id, whichever row held it. Both dialects move artifact
+// targets and audit-ledger links from dropped onto kept, as a rename does.
+func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped domain.Entity) {
+	kept, dropped = survivor, loser
+	if loser.State == "active" {
+		kept, dropped = loser, survivor
+	}
+	if kept.ExternalID == "" {
+		kept.ExternalID = dropped.ExternalID
+	}
+	return kept, dropped
 }

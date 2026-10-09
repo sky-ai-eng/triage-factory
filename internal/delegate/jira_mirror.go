@@ -162,7 +162,8 @@ func (s *Spawner) mirrorJiraInProgressForTask(ctx context.Context, orgID, taskID
 //     ticket can't interleave or reorder their writes. The lock is keyed on
 //     the ticket's entity, not its key: a ticket that moved answers to both
 //     its old key and its new one, and a mirror holding each would not
-//     serialize. issueKey is only what the Jira calls address the ticket by.
+//     serialize. issueKey is the caller's read of the key; under the lock
+//     the mirror takes the entity's current key and issue id instead.
 //   - Forward-only in-progress: under that lock it re-reads state and, if the
 //     ticket is already in the Done bucket, makes no in-progress move — so a
 //     terminal Done is never dragged back to In Progress, whichever goroutine
@@ -189,6 +190,17 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 
 	ctx, cancel := context.WithTimeout(context.Background(), jiraMirrorTimeout)
 	defer cancel()
+
+	// The key is read again under the lock: the issue may have moved since the
+	// caller read its task, and the Jira calls and the audit row name the key
+	// it answers to now. A failed read keeps the caller's key, which Jira
+	// still resolves.
+	issueID := ""
+	if s.entities != nil {
+		if e, err := s.entities.GetSystem(ctx, orgID, entityID); err == nil && e != nil && e.SourceID != "" {
+			issueKey, issueID = e.SourceID, e.ExternalID
+		}
+	}
 
 	client, err := resolver.ForSystem(ctx, orgID)
 	if err != nil {
@@ -220,7 +232,7 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		if state != nil {
 			from = state.StatusName
 		}
-		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical.Name)
+		s.recordMirrorAction(ctx, orgID, issueKey, issueID, teamID, domain.ActionIssueTransitioned, from, rule.DoneCanonical.Name)
 		return
 	}
 
@@ -250,14 +262,14 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 			jiraLog.Warn("mirror: assign to service account failed", "issue", issueKey, "error", err)
 			return
 		}
-		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueAssigned, "", "")
+		s.recordMirrorAction(ctx, orgID, issueKey, issueID, teamID, domain.ActionIssueAssigned, "", "")
 	}
 	if !rule.InProgressContains(claimStatusRef(state)) {
 		if err := client.TransitionTo(ctx, issueKey, jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name}); err != nil {
 			jiraLog.Warn("mirror: transition to in-progress failed", "issue", issueKey, "target", rule.InProgressCanonical.Name, "error", err)
 			return
 		}
-		s.recordMirrorAction(ctx, orgID, issueKey, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
+		s.recordMirrorAction(ctx, orgID, issueKey, issueID, teamID, domain.ActionIssueTransitioned, state.StatusName, rule.InProgressCanonical.Name)
 	}
 }
 
@@ -265,20 +277,25 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 // write (TFAC-483): a system/bot action under the org Jira service-account
 // credential, with no human actor (actor_user_id NULL). team_id scopes it to the
 // bot-owned task's team. The detached mirror holds no conversation handle, so conversation_id is
-// left NULL, and it doesn't resolve the issue's browse URL (the issue key is the
-// target). Admin pool (RecordSystem — no JWT claims). Best-effort: a recording
-// failure is logged and swallowed so it never unwinds the Jira move it observed,
-// and nil-safe for a partial test Stores.
-func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, issueKey, teamID, action, from, to string) {
+// left NULL. The issue key is the target and the issue id the external id, as
+// on an agent's Jira write; an entity that has not learned its id yet records
+// the key there instead. Admin pool (RecordSystem — no JWT claims). Best-effort:
+// a recording failure is logged and swallowed so it never unwinds the Jira move
+// it observed, and nil-safe for a partial test Stores.
+func (s *Spawner) recordMirrorAction(ctx context.Context, orgID, issueKey, issueID, teamID, action, from, to string) {
 	if s.externalActions == nil {
 		return
+	}
+	externalID := issueID
+	if externalID == "" {
+		externalID = issueKey
 	}
 	err := s.externalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
 		TeamID:     teamID,
 		Provider:   domain.ArtifactProviderJira,
 		Action:     action,
 		Target:     issueKey,
-		ExternalID: issueKey,
+		ExternalID: externalID,
 		URL:        s.jiraBrowseURL(ctx, orgID, issueKey),
 		FromState:  from,
 		ToState:    to,

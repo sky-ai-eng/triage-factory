@@ -52,8 +52,9 @@ type ExternalAction struct {
 	// Target is the resource key: owner/repo#123, owner/repo, or a Jira issue key.
 	Target string `json:"target"`
 	// ExternalID is the provider-native id of the backing object (PR number /
-	// review node id / comment id / Jira issue id — the issue key on the board
-	// mirror's rows / branch ref). Empty → SQL NULL.
+	// review node id / comment id / Jira issue id — the issue key on a board
+	// mirror row for an entity that has not learned its id / branch ref).
+	// Empty → SQL NULL.
 	ExternalID string `json:"external_id,omitempty"`
 	// URL links to the object. On a read this is the maintained pointer —
 	// COALESCE(current_url, url), so it resolves under the object's current
