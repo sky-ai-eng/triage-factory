@@ -327,8 +327,14 @@ type ChannelRegistryStore interface {
 	//   - the channel_in filter of every slack:message handler naming oldID.
 	//
 	// It also records the change, so CurrentIDSystem resolves oldID — and any
-	// id that earlier moved to oldID — to newID from then on. Idempotent: a
-	// redelivery finds nothing left under oldID. oldID == newID is a no-op.
+	// id that earlier moved to oldID — to newID from then on. Slack changes a
+	// channel's id only from the one it has now, so an oldID already recorded
+	// as changed is a redelivery, or a change a later one has overtaken: it
+	// records nothing, and anything left under oldID moves to the id the
+	// record names. A newID recorded as changed was overtaken the same way,
+	// and the rows move past it — unless it changed to oldID, which puts the
+	// channel back on newID. ChannelMove.To is the id the rows moved to.
+	// oldID == newID is a no-op.
 	MoveSystem(ctx context.Context, orgID, oldID, newID string) (ChannelMove, error)
 
 	// CurrentIDSystem returns the id channelID goes by now: the id a recorded
@@ -336,6 +342,14 @@ type ChannelRegistryStore interface {
 	// before a change — event metadata is immutable, and Slack may redeliver
 	// an event generated before the change after it — and is about to act on.
 	CurrentIDSystem(ctx context.Context, orgID, channelID string) (string, error)
+
+	// SettleSystem returns the id channelID goes by now, after moving onto it
+	// anything still under channelID once Slack has retired it. A caller that
+	// resolved an id (CurrentIDSystem) and then wrote rows naming it calls
+	// this when the writes are done: a move committing between the resolve
+	// and the writes leaves them under the retired id. It waits for a move in
+	// progress, so either it sees the change or the move saw the rows.
+	SettleSystem(ctx context.Context, orgID, channelID string) (string, error)
 }
 
 // TeamChannel is one row of team_slack_channels — a team's tracking claim on

@@ -21,6 +21,10 @@ import (
 type fakeEntities struct {
 	byKey map[string]*domain.Entity
 	err   error
+	// afterFindOrCreate, if set, runs after each FindOrCreateSystem — the
+	// point where a channel move can commit between the pipeline's resolve
+	// and its settle.
+	afterFindOrCreate func()
 }
 
 func newFakeEntities() *fakeEntities { return &fakeEntities{byKey: map[string]*domain.Entity{}} }
@@ -32,6 +36,9 @@ func fakeEntityKey(orgID, source, scope, sourceID string) string {
 func (f *fakeEntities) FindOrCreateSystem(_ context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err
+	}
+	if f.afterFindOrCreate != nil {
+		defer f.afterFindOrCreate()
 	}
 	key := fakeEntityKey(orgID, source, scope, sourceID)
 	if e, ok := f.byKey[key]; ok {
@@ -101,6 +108,10 @@ type fakeChannelRegistry struct {
 	sawMoves   []string
 	moveErr    error
 	currentErr error
+	// sawSettles records each SettleSystem call's channelKey; settleErr fails
+	// it.
+	sawSettles []string
+	settleErr  error
 
 	// done, if non-nil, receives whenever SetNameSystem completes — the
 	// same deterministic "the detached resolver goroutine finished" signal
@@ -187,6 +198,19 @@ func (f *fakeChannelRegistry) CurrentIDSystem(_ context.Context, orgID, channelI
 		return moved, nil
 	}
 	return channelID, nil
+}
+
+// SettleSystem resolves like CurrentIDSystem; the real store's sweep of rows
+// left under a retired id has no fake rows to act on.
+func (f *fakeChannelRegistry) SettleSystem(ctx context.Context, orgID, channelID string) (string, error) {
+	f.mu.Lock()
+	f.sawSettles = append(f.sawSettles, channelKey(orgID, channelID))
+	err := f.settleErr
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return f.CurrentIDSystem(ctx, orgID, channelID)
 }
 
 var _ slackstore.ChannelRegistryStore = (*fakeChannelRegistry)(nil)
@@ -409,6 +433,54 @@ func TestHandleEventCallback_MentionUnderARetiredChannelID(t *testing.T) {
 	}
 	if meta.Channel != "C1" {
 		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+}
+
+// TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve: a move that
+// commits after the mention resolved its channel is settled once the entity
+// is written, and the event publishes under the new id.
+func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
+	p, entities, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	p.channels = channels
+	entities.afterFindOrCreate = func() {
+		channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
+	}
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if want := []string{channelKey("org-1", "G1")}; !reflect.DeepEqual(channels.sawSettles, want) {
+		t.Errorf("settles = %v; want %v", channels.sawSettles, want)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+}
+
+// TestHandleEventCallback_MentionSettleErrorStillPublishes: the delivery is
+// already recorded when the settle runs, so a failed settle publishes under
+// the id the mention resolved rather than failing into a dropped redelivery.
+func TestHandleEventCallback_MentionSettleErrorStillPublishes(t *testing.T) {
+	p, _, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.settleErr = errors.New("db down")
+	p.channels = channels
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
 	}
 }
 

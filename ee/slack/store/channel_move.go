@@ -8,7 +8,10 @@ import (
 // ChannelMove is what ChannelRegistryStore.MoveSystem rewrote. Every count is
 // zero on a redelivery of a change already applied.
 type ChannelMove struct {
-	// Entities is how many thread entities moved to the new id.
+	// To is the id the rows moved to: newID, or the id a recorded change
+	// names when one has overtaken this one (see MoveSystem).
+	To string
+	// Entities is how many thread entities moved.
 	Entities int
 	// Superseded are the ids of the entities closed because the thread's
 	// original took their key; see MoveSystem.

@@ -94,7 +94,7 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	9 — this file                                 (github host + installation
 //	    id, session; githubInstallationBindLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
-//	    channelMoveLockSalt)
+//	    exclusive to move, shared to settle; channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
 //	0x544f4b4e ("TOKN") — internal/apitokens                  (user:org, xact)
 //

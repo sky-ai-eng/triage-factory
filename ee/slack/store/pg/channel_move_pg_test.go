@@ -197,7 +197,7 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem: %v", err)
 	}
-	want := slackstore.ChannelMove{Entities: 2, Trackers: 2, Artifacts: 1, Actions: 1, Handlers: 1}
+	want := slackstore.ChannelMove{To: moveNew, Entities: 2, Trackers: 2, Artifacts: 1, Actions: 1, Handlers: 1}
 	if !reflect.DeepEqual(move, want) {
 		t.Errorf("MoveSystem = %+v, want %+v", move, want)
 	}
@@ -300,7 +300,7 @@ func TestChannelMove_Postgres_MovesEveryRowNamingTheChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MoveSystem (redelivery): %v", err)
 	}
-	if !reflect.DeepEqual(again, slackstore.ChannelMove{}) {
+	if !reflect.DeepEqual(again, slackstore.ChannelMove{To: moveNew}) {
 		t.Errorf("MoveSystem (redelivery) = %+v, want nothing moved", again)
 	}
 }
@@ -437,7 +437,7 @@ func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 	if _, err := channels.MoveSystem(ctx, orgID, "", "C0CHAIN01"); err == nil {
 		t.Error("MoveSystem with an empty old id succeeded; want an error")
 	}
-	if move, err := channels.MoveSystem(ctx, orgID, "C0CHAIN01", "C0CHAIN01"); err != nil || !reflect.DeepEqual(move, slackstore.ChannelMove{}) {
+	if move, err := channels.MoveSystem(ctx, orgID, "C0CHAIN01", "C0CHAIN01"); err != nil || !reflect.DeepEqual(move, slackstore.ChannelMove{To: "C0CHAIN01"}) {
 		t.Errorf("MoveSystem onto the same id = %+v, %v; want a no-op", move, err)
 	}
 
@@ -447,5 +447,158 @@ func TestChannelMove_Postgres_ChainsAndReversals(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("recorded changes = %d, want 2 (G0CHAIN01 and C0CHAIN02, both to C0CHAIN01)", n)
+	}
+}
+
+// TestChannelMove_Postgres_StaleChangesDoNotRegress: a change that arrives
+// after a later one — a redelivery, or the two processed out of order —
+// leaves every recorded change pointing at the id the channel has now, and
+// moves what it finds to that id.
+func TestChannelMove_Postgres_StaleChangesDoNotRegress(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-stale")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	resolves := func(step string, want map[string]string) {
+		t.Helper()
+		for from, to := range want {
+			if got, err := channels.CurrentIDSystem(ctx, orgID, from); err != nil || got != to {
+				t.Errorf("%s: CurrentIDSystem(%s) = %q, %v; want %q", step, from, got, err, to)
+			}
+		}
+	}
+	move := func(oldID, newID, wantTo string) {
+		t.Helper()
+		got, err := channels.MoveSystem(ctx, orgID, oldID, newID)
+		if err != nil {
+			t.Fatalf("move %s -> %s: %v", oldID, newID, err)
+		}
+		if got.To != wantTo {
+			t.Errorf("move %s -> %s: To = %q, want %q", oldID, newID, got.To, wantTo)
+		}
+	}
+
+	move("G0STALE01", "C0STALE01", "C0STALE01")
+	move("C0STALE01", "C0STALE02", "C0STALE02")
+	move("G0STALE01", "C0STALE01", "C0STALE02")
+	resolves("after a redelivered first change", map[string]string{"G0STALE01": "C0STALE02", "C0STALE01": "C0STALE02"})
+
+	// Out of order: the second change first. A thread minted under the first
+	// id goes straight to the id the channel has now.
+	thread := seedThreadEntity(t, stores, orgID, "G0STALE11/1700000000.000100", "thread", "")
+	move("C0STALE11", "C0STALE12", "C0STALE12")
+	move("G0STALE11", "C0STALE11", "C0STALE12")
+	resolves("after changes processed out of order", map[string]string{"G0STALE11": "C0STALE12", "C0STALE11": "C0STALE12"})
+	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, "C0STALE12/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
+		t.Errorf("thread under the current id = %+v, %v; want entity %s", got, err, thread.ID)
+	}
+
+	var n int
+	if err := h.AdminDB.QueryRow(`SELECT count(*) FROM slack_channel_id_changes WHERE org_id = $1`, orgID).Scan(&n); err != nil {
+		t.Fatalf("count changes: %v", err)
+	}
+	if n != 4 {
+		t.Errorf("recorded changes = %d, want 4", n)
+	}
+}
+
+// TestChannelMove_Postgres_SettleMovesWhatLandedUnderARetiredID: rows written
+// under an id after its move committed — a writer that resolved the id just
+// before — move on when the writer settles, and settling a current id is a
+// no-op.
+func TestChannelMove_Postgres_SettleMovesWhatLandedUnderARetiredID(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "chan-settle")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	if _, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if _, err := channels.UpsertSightingSystem(ctx, orgID, "T0SETTLE1", moveOld, time.Now()); err != nil {
+		t.Fatalf("late sighting: %v", err)
+	}
+	thread := seedThreadEntity(t, stores, orgID, moveOld+"/1700000000.000100", "thread", "")
+	seedTracker(t, h, orgID, teamID, moveOld, true, time.Now())
+
+	if got, err := channels.SettleSystem(ctx, orgID, moveNew); err != nil || got != moveNew {
+		t.Fatalf("SettleSystem(current id) = %q, %v; want %q", got, err, moveNew)
+	}
+	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveOld+"/1700000000.000100"); err != nil || got == nil {
+		t.Fatalf("settling the current id moved the late thread: %+v, %v", got, err)
+	}
+
+	if got, err := channels.SettleSystem(ctx, orgID, moveOld); err != nil || got != moveNew {
+		t.Fatalf("SettleSystem(retired id) = %q, %v; want %q", got, err, moveNew)
+	}
+	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
+		t.Errorf("late thread under the current id = %+v, %v; want entity %s", got, err, thread.ID)
+	}
+	if row, err := channels.GetSystem(ctx, orgID, moveOld); err != nil || row != nil {
+		t.Errorf("registry row under the retired id = %+v, %v; want none", row, err)
+	}
+	if row, err := channels.GetSystem(ctx, orgID, moveNew); err != nil || row == nil {
+		t.Errorf("registry row under the current id = %+v, %v; want one", row, err)
+	}
+	if got := trackersOf(t, h, orgID, moveNew); !got[teamID].IsPrimary {
+		t.Errorf("trackers of the current id = %+v; want team %s primary", got, teamID)
+	}
+}
+
+// TestChannelMove_Postgres_SettleWaitsForAMoveInProgress: a settle that starts
+// while a move holds its lock waits for the commit and reads the change, so a
+// write made before the settle cannot fall between the move's reads and its
+// record.
+func TestChannelMove_Postgres_SettleWaitsForAMoveInProgress(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _, _ := pgtest.SeedOrgWithUser(t, h, "chan-settle-wait")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	move, err := h.AdminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin move: %v", err)
+	}
+	defer func() { _ = move.Rollback() }()
+	if _, err := move.Exec(`SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, orgID, int64(0x43484944)); err != nil {
+		t.Fatalf("take move lock: %v", err)
+	}
+	if _, err := move.Exec(`
+		INSERT INTO slack_channel_id_changes (org_id, old_channel_id, new_channel_id) VALUES ($1, $2, $3)
+	`, orgID, moveOld, moveNew); err != nil {
+		t.Fatalf("record change: %v", err)
+	}
+
+	type result struct {
+		id  string
+		err error
+	}
+	settled := make(chan result, 1)
+	go func() {
+		id, err := channels.SettleSystem(ctx, orgID, moveOld)
+		settled <- result{id, err}
+	}()
+	select {
+	case r := <-settled:
+		t.Fatalf("SettleSystem returned %q, %v while the move held its lock; want it to wait", r.id, r.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := move.Commit(); err != nil {
+		t.Fatalf("commit move: %v", err)
+	}
+	select {
+	case r := <-settled:
+		if r.err != nil || r.id != moveNew {
+			t.Errorf("SettleSystem = %q, %v; want %q", r.id, r.err, moveNew)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("SettleSystem still waiting after the move committed")
 	}
 }

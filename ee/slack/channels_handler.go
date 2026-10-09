@@ -228,6 +228,15 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	if len(added) > 0 {
 		joinWarnings = h.ensureAndAutoJoin(r.Context(), orgID, userID, added)
 	}
+	// A change committing after currentChannelIDs resolved the set leaves
+	// this save's rows under the retired id; settling moves them on before
+	// the response reads them back.
+	for _, channelID := range desired {
+		if _, err := admin.Channels.SettleSystem(r.Context(), orgID, channelID); err != nil {
+			httpx.InternalError(w, "slack/channels", err)
+			return
+		}
+	}
 
 	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, "admin")
 	if err != nil {

@@ -175,9 +175,10 @@ func (p *ingestPipeline) handleEventCallback(ctx context.Context, ws slackstore.
 
 // handleAppMention ingests an explicit @-mention. It is deliberately
 // synchronous: one channel id read, one dedup insert, one entity
-// find-or-create, one publish — well inside Slack's 3-second webhook ack
-// budget. Publishes slack:message with Mentioned=true. Returns the delivery's
-// outcome label for handleEventCallback's single recordIngest.
+// find-or-create, one channel settle, one publish — well inside Slack's
+// 3-second webhook ack budget. Publishes slack:message with Mentioned=true.
+// Returns the delivery's outcome label for handleEventCallback's single
+// recordIngest.
 func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Workspace, ev inboundMention) (string, error) {
 	// EventID feeds the dedup key and Channel/TS feed the entity source_id
 	// (domain.SlackSourceID) — an empty value in any of them (a malformed
@@ -229,6 +230,7 @@ func (p *ingestPipeline) handleAppMention(ctx context.Context, ws slackstore.Wor
 	if err != nil {
 		return outcomeError, fmt.Errorf("find or create slack entity: %w", err)
 	}
+	ev.Channel = p.settleChannel(ctx, ws, ev.Channel)
 	// Only on create: the thread-root permalink is stable once minted, and
 	// repeat mentions on an already-known thread shouldn't re-resolve it.
 	if created && p.permalink != nil {
@@ -399,7 +401,7 @@ func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slacksto
 		return outcomeError, fmt.Errorf("move slack channel %s to %s: %w", ev.OldChannelID, ev.NewChannelID, err)
 	}
 	slackLog.Info("slack channel id changed",
-		"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "new_channel", ev.NewChannelID,
+		"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "new_channel", ev.NewChannelID, "moved_to", moved.To,
 		"entities", moved.Entities, "superseded", moved.Superseded, "trackers", moved.Trackers,
 		"artifacts", moved.Artifacts, "actions", moved.Actions, "handlers", moved.Handlers)
 	return outcomeChannelMoved, nil
@@ -419,6 +421,24 @@ func (p *ingestPipeline) currentChannel(ctx context.Context, ws slackstore.Works
 		return "", fmt.Errorf("resolve slack channel id: %w", err)
 	}
 	return current, nil
+}
+
+// settleChannel returns the id channelID's channel has now, after moving onto
+// it the sighting and entity this delivery wrote under channelID — a change
+// that committed after currentChannel resolved the id left them under the
+// retired one (ChannelRegistryStore.SettleSystem). Best-effort: the delivery
+// is already recorded, so a failure is logged and the delivery carries on
+// under channelID rather than failing into a redelivery the dedup drops.
+func (p *ingestPipeline) settleChannel(ctx context.Context, ws slackstore.Workspace, channelID string) string {
+	if p.channels == nil {
+		return channelID
+	}
+	settled, err := p.channels.SettleSystem(ctx, ws.OrgID, channelID)
+	if err != nil {
+		slackLog.Warn("settle slack channel id failed", "workspace", ws.WorkspaceID, "channel", channelID, "error", err)
+		return channelID
+	}
+	return settled
 }
 
 // publishMessage marshals the durable audit metadata and publishes the

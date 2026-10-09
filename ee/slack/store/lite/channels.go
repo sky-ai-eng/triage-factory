@@ -48,3 +48,7 @@ func (s *channelRegistryStore) MoveSystem(context.Context, string, string, strin
 func (s *channelRegistryStore) CurrentIDSystem(context.Context, string, string) (string, error) {
 	return "", db.ErrNotApplicableInLocal
 }
+
+func (s *channelRegistryStore) SettleSystem(context.Context, string, string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
+}

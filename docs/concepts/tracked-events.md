@@ -300,7 +300,7 @@ A thread's entity is keyed by its channel's ID and its root message's timestamp.
 
 TF also records the change, because event metadata is immutable: a message recorded before the share names the old ID for good. Everything that acts on a recorded message reads its channel as the current ID — handler filters, the team gate and owner resolution, a run's task context and injected follow-ups, the exec verbs, and the bot's own reactions, replies and working indicator — and so does ingest, for a message Slack generated before the change but delivered after it.
 
-Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention starts a new thread entity. When the change arrives, the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation.
+Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention starts a new thread entity. When the change arrives, the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
 
 ## System Events
 

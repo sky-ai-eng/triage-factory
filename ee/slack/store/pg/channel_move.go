@@ -18,7 +18,7 @@ const channelMoveLockSalt int64 = 0x43484944
 
 // MoveSystem — see the interface doc. The per-org advisory lock serializes
 // two deliveries of the same change (each app the org has in the channel
-// receives its own); the second finds nothing left under oldID.
+// receives its own) and holds off SettleSystem until the move commits.
 //
 // The rows live in tables core owns as well as in the Slack ones, and they
 // move in one transaction because a half-moved channel routes a thread's
@@ -31,33 +31,34 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 		return slackstore.ChannelMove{}, errors.New("move slack channel: empty channel id")
 	}
 	if oldID == newID {
-		return slackstore.ChannelMove{}, nil
+		return slackstore.ChannelMove{To: newID}, nil
 	}
 	var out slackstore.ChannelMove
 	err := inTx(ctx, s.admin, func(q db.Execer) error {
 		if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
 			return fmt.Errorf("lock channel move: %w", err)
 		}
-		if err := recordChannelIDChange(ctx, q, orgID, oldID, newID); err != nil {
+		to, err := recordChannelIDChange(ctx, q, orgID, oldID, newID)
+		if err != nil {
 			return err
 		}
-		if err := moveRegistryRow(ctx, q, orgID, oldID, newID); err != nil {
+		out.To = to
+		if err := moveRegistryRow(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		var err error
-		if out.Trackers, err = moveTrackingRows(ctx, q, orgID, oldID, newID); err != nil {
+		if out.Trackers, err = moveTrackingRows(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		if out.Entities, out.Superseded, err = moveThreadEntities(ctx, q, orgID, oldID, newID); err != nil {
+		if out.Entities, out.Superseded, err = moveThreadEntities(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		if out.Artifacts, err = moveArtifacts(ctx, q, orgID, oldID, newID); err != nil {
+		if out.Artifacts, err = moveArtifacts(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, newID); err != nil {
+		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		if out.Handlers, err = moveHandlerFilters(ctx, q, orgID, oldID, newID); err != nil {
+		if out.Handlers, err = moveHandlerFilters(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
 		return nil
@@ -68,34 +69,59 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 	return out, nil
 }
 
-// recordChannelIDChange records oldID → newID, keeping every recorded change
-// one hop from the id the channel has now. A record of newID having moved to
-// oldID is dropped first: newID is current again, and re-pointing that record
-// would map an id onto itself.
-func recordChannelIDChange(ctx context.Context, q db.Execer, orgID, oldID, newID string) error {
-	if _, err := q.ExecContext(ctx, `
-		DELETE FROM slack_channel_id_changes
-		WHERE org_id = $1 AND old_channel_id = $2 AND new_channel_id = $3
-	`, orgID, newID, oldID); err != nil {
-		return fmt.Errorf("drop reversed slack channel id change: %w", err)
+// recordChannelIDChange records oldID's change and returns the id its rows
+// move to (the cases are on the interface doc). Every recorded change keeps
+// naming the id the channel has now: changes recorded onto oldID are
+// re-pointed at the returned id, and a reversal drops newID's record first,
+// so the re-pointing never maps an id onto itself.
+func recordChannelIDChange(ctx context.Context, q db.Execer, orgID, oldID, newID string) (string, error) {
+	if to, changed, err := recordedChange(ctx, q, orgID, oldID); err != nil || changed {
+		return to, err
+	}
+	target := newID
+	to, changed, err := recordedChange(ctx, q, orgID, newID)
+	switch {
+	case err != nil:
+		return "", err
+	case changed && to == oldID:
+		if _, err := q.ExecContext(ctx, `
+			DELETE FROM slack_channel_id_changes WHERE org_id = $1 AND old_channel_id = $2
+		`, orgID, newID); err != nil {
+			return "", fmt.Errorf("drop reversed slack channel id change: %w", err)
+		}
+	case changed:
+		target = to
 	}
 	if _, err := q.ExecContext(ctx, `
 		UPDATE slack_channel_id_changes SET new_channel_id = $3
 		WHERE org_id = $1 AND new_channel_id = $2
-	`, orgID, oldID, newID); err != nil {
-		return fmt.Errorf("re-point earlier slack channel id changes: %w", err)
+	`, orgID, oldID, target); err != nil {
+		return "", fmt.Errorf("re-point earlier slack channel id changes: %w", err)
 	}
 	if _, err := q.ExecContext(ctx, `
 		INSERT INTO slack_channel_id_changes (org_id, old_channel_id, new_channel_id)
 		VALUES ($1, $2, $3)
-		ON CONFLICT (org_id, old_channel_id) DO UPDATE SET
-			new_channel_id = EXCLUDED.new_channel_id,
-			changed_at     = EXCLUDED.changed_at
-		WHERE slack_channel_id_changes.new_channel_id <> EXCLUDED.new_channel_id
-	`, orgID, oldID, newID); err != nil {
-		return fmt.Errorf("record slack channel id change: %w", err)
+	`, orgID, oldID, target); err != nil {
+		return "", fmt.Errorf("record slack channel id change: %w", err)
 	}
-	return nil
+	return target, nil
+}
+
+// recordedChange returns the id a recorded change moved channelID to, and
+// whether one is recorded.
+func recordedChange(ctx context.Context, q db.Execer, orgID, channelID string) (string, bool, error) {
+	var to string
+	err := q.QueryRowContext(ctx, `
+		SELECT new_channel_id FROM slack_channel_id_changes
+		WHERE org_id = $1 AND old_channel_id = $2
+	`, orgID, channelID).Scan(&to)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read slack channel id change for %s: %w", channelID, err)
+	}
+	return to, true, nil
 }
 
 // moveRegistryRow moves the slack_channels row, merging it into the row newID
@@ -424,16 +450,41 @@ func moveChannelInPredicate(raw, oldID, newID string) (string, bool, error) {
 // CurrentIDSystem — see the interface doc. Every recorded change points at
 // the id the channel has now, so one read answers.
 func (s *channelRegistryStore) CurrentIDSystem(ctx context.Context, orgID, channelID string) (string, error) {
-	var current string
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT new_channel_id FROM slack_channel_id_changes
-		WHERE org_id = $1 AND old_channel_id = $2
-	`, orgID, channelID).Scan(&current)
-	if errors.Is(err, sql.ErrNoRows) {
+	to, changed, err := recordedChange(ctx, s.admin, orgID, channelID)
+	switch {
+	case err != nil:
+		return "", err
+	case !changed:
 		return channelID, nil
 	}
+	return to, nil
+}
+
+// SettleSystem — see the interface doc. The shared lock is the barrier: it
+// waits for a move holding the exclusive one to commit, and a move that takes
+// the exclusive one after it reads every row the caller committed first.
+func (s *channelRegistryStore) SettleSystem(ctx context.Context, orgID, channelID string) (string, error) {
+	var to string
+	var changed bool
+	err := inTx(ctx, s.admin, func(q db.Execer) error {
+		if _, err := q.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended($1, $2))`, orgID, channelMoveLockSalt); err != nil {
+			return fmt.Errorf("lock channel move: %w", err)
+		}
+		var err error
+		to, changed, err = recordedChange(ctx, q, orgID, channelID)
+		return err
+	})
 	if err != nil {
-		return "", fmt.Errorf("resolve slack channel id %s: %w", channelID, err)
+		return "", err
 	}
-	return current, nil
+	if !changed {
+		return channelID, nil
+	}
+	// channelID is retired, so the move records nothing and takes its rows
+	// to whatever its record names when the move runs.
+	moved, err := s.MoveSystem(ctx, orgID, channelID, to)
+	if err != nil {
+		return "", err
+	}
+	return moved.To, nil
 }
