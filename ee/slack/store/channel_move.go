@@ -24,6 +24,10 @@ type ChannelMove struct {
 	Artifacts int
 	Actions   int
 	Handlers  int
+	// SkippedHandlers are the slack:message handlers naming the old id whose
+	// stored filter could not be decoded. They are left as stored, still
+	// naming it.
+	SkippedHandlers []string
 }
 
 // MoveThreadKey moves a key of the form "<channel>/<rest>" — a thread

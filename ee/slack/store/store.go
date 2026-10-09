@@ -326,6 +326,8 @@ type ChannelRegistryStore interface {
 	//     actions whose link points into the channel. The record of the act
 	//     is not touched;
 	//   - the channel_in filter of every slack:message handler naming oldID.
+	//     One whose filter cannot be decoded is left as stored and reported
+	//     (ChannelMove.SkippedHandlers) rather than failing the move.
 	//
 	// It also records the change, so CurrentIDSystem resolves oldID — and any
 	// id that earlier moved to oldID — to newID from then on. Slack changes a
@@ -335,6 +337,9 @@ type ChannelRegistryStore interface {
 	// record names. A newID recorded as changed was overtaken the same way,
 	// and the rows move past it — unless it changed to oldID, which puts the
 	// channel back on newID. ChannelMove.To is the id the rows moved to.
+	// That last case cannot tell a real move back from a late redelivery of
+	// the change it reverses (A→B, B→A, then A→B again): both are applied,
+	// and the redelivery moves the channel back to newID.
 	// oldID == newID is a no-op.
 	MoveSystem(ctx context.Context, orgID, oldID, newID string) (ChannelMove, error)
 

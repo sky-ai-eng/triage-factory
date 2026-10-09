@@ -414,6 +414,10 @@ func (p *ingestPipeline) handleChannelIDChanged(ctx context.Context, ws slacksto
 		"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "new_channel", ev.NewChannelID, "moved_to", moved.To,
 		"entities", moved.Entities, "superseded", moved.Superseded, "trackers", moved.Trackers,
 		"artifacts", moved.Artifacts, "actions", moved.Actions, "handlers", moved.Handlers)
+	if len(moved.SkippedHandlers) > 0 {
+		slackLog.Warn("slack channel id changed: handler channel filters left naming the old id (stored filter unreadable)",
+			"workspace", ws.WorkspaceID, "org_id", ws.OrgID, "old_channel", ev.OldChannelID, "handlers", moved.SkippedHandlers)
+	}
 	return outcomeChannelMoved, nil
 }
 

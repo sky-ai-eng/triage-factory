@@ -59,7 +59,7 @@ func (s *channelRegistryStore) MoveSystem(ctx context.Context, orgID, oldID, new
 		if out.Actions, err = moveActionPointers(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
-		if out.Handlers, err = moveHandlerFilters(ctx, q, orgID, oldID, to); err != nil {
+		if out.Handlers, out.SkippedHandlers, err = moveHandlerFilters(ctx, q, orgID, oldID, to); err != nil {
 			return err
 		}
 		return nil
@@ -209,7 +209,8 @@ func moveTrackingRows(ctx context.Context, q db.Execer, orgID, oldID, newID stri
 // only with another active row for the same thread: one the new id minted
 // before the change arrived, or one a writer the move overtook left under the
 // old id after it. The older is the thread's original and keeps the key; the
-// newer is closed, and moves with it.
+// newer is closed, and moves with it. A tie keeps the entity under the old
+// key, the original in the first case.
 func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, []string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, source_id, COALESCE(url, ''), state, created_at FROM entities
@@ -391,8 +392,10 @@ func moveActionPointers(ctx context.Context, q db.Execer, orgID, oldID, newID st
 
 // moveHandlerFilters rewrites the channel_in filter of every slack:message
 // handler naming oldID. Only that key changes; every other predicate field is
-// carried through as stored.
-func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
+// carried through as stored. A handler whose filter cannot be decoded is
+// skipped and reported rather than failing the move: the rest of the
+// channel's rows do not wait on one bad row.
+func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, []string, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, scope_predicate_json::text FROM event_handlers
 		WHERE org_id = $1 AND event_type = $2
@@ -401,39 +404,39 @@ func moveHandlerFilters(ctx context.Context, q db.Execer, orgID, oldID, newID st
 		FOR UPDATE
 	`, orgID, domain.EventSlackMessage, oldID)
 	if err != nil {
-		return 0, fmt.Errorf("list slack handlers to move: %w", err)
+		return 0, nil, fmt.Errorf("list slack handlers to move: %w", err)
 	}
 	type pending struct{ id, predicate string }
 	var updates []pending
+	var skipped []string
 	for rows.Next() {
 		var id, raw string
 		if err := rows.Scan(&id, &raw); err != nil {
 			rows.Close()
-			return 0, err
+			return 0, nil, err
 		}
 		predicate, ok, err := moveChannelInPredicate(raw, oldID, newID)
-		if err != nil {
-			rows.Close()
-			return 0, fmt.Errorf("slack handler %s: %w", id, err)
-		}
-		if ok {
+		switch {
+		case err != nil:
+			skipped = append(skipped, id)
+		case ok:
 			updates = append(updates, pending{id: id, predicate: predicate})
 		}
 	}
 	if err := rows.Close(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, nil, err
 	}
 	for _, u := range updates {
 		if _, err := q.ExecContext(ctx, `
 			UPDATE event_handlers SET scope_predicate_json = $1::jsonb WHERE org_id = $2 AND id = $3
 		`, u.predicate, orgID, u.id); err != nil {
-			return 0, fmt.Errorf("move slack handler %s channel filter: %w", u.id, err)
+			return 0, nil, fmt.Errorf("move slack handler %s channel filter: %w", u.id, err)
 		}
 	}
-	return len(updates), nil
+	return len(updates), skipped, nil
 }
 
 // moveChannelInPredicate rewrites the channel_in list of one stored predicate.

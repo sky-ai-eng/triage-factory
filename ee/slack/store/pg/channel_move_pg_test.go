@@ -639,3 +639,36 @@ func TestChannelMove_Postgres_SettleWaitsForAMoveInProgress(t *testing.T) {
 		t.Fatal("SettleSystem still waiting after the move committed")
 	}
 }
+
+// TestChannelMove_Postgres_UnreadableHandlerFilterIsSkipped: a handler whose
+// channel_in cannot be decoded is reported and left as stored, and the move
+// still lands — including the readable handler beside it.
+func TestChannelMove_Postgres_UnreadableHandlerFilterIsSkipped(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "chan-bad-filter")
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+	channels := slackstore.FromStores(stores).Channels
+	ctx := context.Background()
+
+	thread := seedThreadEntity(t, stores, orgID, moveOld+"/1700000000.000100", "thread", "")
+	bad := seedSlackHandler(t, h, orgID, teamID, userID, "bad", `{"channel_in": ["`+moveOld+`", 7]}`)
+	good := seedSlackHandler(t, h, orgID, teamID, userID, "good", `{"channel_in": ["`+moveOld+`"]}`)
+
+	move, err := channels.MoveSystem(ctx, orgID, moveOld, moveNew)
+	if err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+	if !reflect.DeepEqual(move.SkippedHandlers, []string{bad}) || move.Handlers != 1 {
+		t.Errorf("handlers moved %d, skipped %v; want 1 moved and %s skipped", move.Handlers, move.SkippedHandlers, bad)
+	}
+	if got := readPredicate(t, h, bad)["channel_in"]; !reflect.DeepEqual(got, []any{moveOld, float64(7)}) {
+		t.Errorf("skipped handler's channel_in = %v; want it as stored", got)
+	}
+	if got := readPredicate(t, h, good)["channel_in"]; !reflect.DeepEqual(got, []any{moveNew}) {
+		t.Errorf("readable handler's channel_in = %v; want [%s]", got, moveNew)
+	}
+	if got, err := stores.Entities.GetBySourceSystem(ctx, orgID, "slack", domain.SlackScope, moveNew+"/1700000000.000100"); err != nil || got == nil || got.ID != thread.ID {
+		t.Errorf("thread under the new id = %+v, %v; want entity %s", got, err, thread.ID)
+	}
+}
