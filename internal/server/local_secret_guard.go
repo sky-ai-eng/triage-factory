@@ -52,6 +52,18 @@ func (s *Server) guardLocalJiraWrite(ctx context.Context, orgID string) (restore
 	return s.guardLocalSecretWrite(ctx, &s.jiraCredentialMu, orgID, integrations.JiraKeys()...)
 }
 
+// guardLocalAnthropicWrite is guardLocalSecretWrite over the org's Anthropic
+// API key, for the Anthropic bind and unbind.
+func (s *Server) guardLocalAnthropicWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
+	return s.guardLocalSecretWrite(ctx, &s.anthropicCredentialMu, orgID, secretKeyAnthropicAPIKey)
+}
+
+// guardLocalBedrockWrite is guardLocalSecretWrite over every Bedrock key, for
+// the three Bedrock binds and the unbind.
+func (s *Server) guardLocalBedrockWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
+	return s.guardLocalSecretWrite(ctx, &s.bedrockCredentialMu, orgID, integrations.BedrockKeys()...)
+}
+
 // snapshotSecrets reads the org's stored keys and returns a func that writes
 // them back as they were — deleting a key that was absent. Any key that cannot
 // be read fails the snapshot. The restore outlives the request's context: a

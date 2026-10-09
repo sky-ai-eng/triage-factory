@@ -47,6 +47,11 @@ type settingsHandler struct {
 	// taking the lock the unbind takes too: the Server's guardLocalJiraWrite,
 	// wired from routes() like kickJira.
 	guardJiraWrite func(ctx context.Context, orgID string) (restore, unlock func(), err error)
+	// guardAnthropicWrite and guardBedrockWrite do the same for the LLM
+	// credential binds and unbinds: the Server's guardLocalAnthropicWrite and
+	// guardLocalBedrockWrite.
+	guardAnthropicWrite func(ctx context.Context, orgID string) (restore, unlock func(), err error)
+	guardBedrockWrite   func(ctx context.Context, orgID string) (restore, unlock func(), err error)
 	// kickMemoryBacklog rings the org-wide memory doorbell after this handler
 	// binds an LLM credential: a generation that failed because the org's
 	// background-jobs model resolved to nothing may succeed now, and the

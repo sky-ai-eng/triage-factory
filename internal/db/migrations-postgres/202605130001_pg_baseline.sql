@@ -694,6 +694,8 @@ CREATE TABLE public.org_settings (
     github_clone_protocol text DEFAULT 'https'::text NOT NULL,
     -- org_secrets key refs, not raw secrets. NULL = the deployment default or
     -- not configured yet (self-host); rotation never touches this row.
+    -- UpdateSettings omits both; SetAnthropicKeyRef / SetBedrockCredentialsRef
+    -- write them, from the LLM credential routes.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
     -- 'system' (host credentials, resolved by the SDK from the environment) or
@@ -749,10 +751,13 @@ CREATE TABLE public.org_settings (
     -- transaction. Every change to one of those values bumps it —
     -- OrgsStore.UpdateSettings, UpdateSettingsVersioned, and SetSourceBaseURL,
     -- the credential routes' write of a source's host, which bumps it only
-    -- when the host differs from the stored one. Writes to values the save
-    -- never touches leave it alone: SetGitHubCredentialClass,
-    -- SetLinearWorkspace, and the per-source off switch
-    -- (OrgEventSourceStore.SetDisabled), which is last-writer-wins.
+    -- when the host differs from the stored one. SetAnthropicKeyRef and
+    -- SetBedrockCredentialsRef bump it too, when they change a ref or
+    -- llm_auth_method: the save cannot write the refs, but it validates
+    -- llm_auth_method against them. Writes to values the save never touches
+    -- or checks leave it alone: SetGitHubCredentialClass, SetLinearWorkspace,
+    -- and the per-source off switch (OrgEventSourceStore.SetDisabled), which
+    -- is last-writer-wins.
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))

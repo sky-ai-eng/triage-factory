@@ -215,6 +215,11 @@ func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind string, ov
 // here would look like tidiness and would instead reset the class to the
 // struct's zero value on every bulk settings save, silently converting a
 // BYO-App org to PAT. u.GitHubCredentialClass is read-only; it is ignored here.
+//
+// anthropic_api_key_ref and bedrock_credentials_ref are absent from both lists
+// for the same reason: the LLM credential routes own them (SetAnthropicKeyRef,
+// SetBedrockCredentialsRef). A bulk save that wrote them would put back a ref
+// that a bind or unbind committed after the save's caller read the row.
 func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) (domain.OrgSettings, error) {
 	// No version guard: see the interface doc for why a write that owns one
 	// value must not come through here. It still bumps the token, so an
@@ -274,8 +279,6 @@ func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u
 const orgSettingsConflictUpdate = `
 		ON CONFLICT (org_id) DO UPDATE SET
 			github_clone_protocol = EXCLUDED.github_clone_protocol,
-			anthropic_api_key_ref = EXCLUDED.anthropic_api_key_ref,
-			bedrock_credentials_ref = EXCLUDED.bedrock_credentials_ref,
 			enabled_models = EXCLUDED.enabled_models,
 			background_jobs_model = EXCLUDED.background_jobs_model,
 			llm_auth_method = EXCLUDED.llm_auth_method,
@@ -300,8 +303,6 @@ func orgSettingsWriteArgs(orgID string, u domain.OrgSettings) []any {
 	return []any{
 		orgID,
 		cloneProto,
-		nullString(u.AnthropicAPIKeyRef),
-		nullString(u.BedrockCredentialsRef),
 		db.ModelSetColumnValue(u.EnabledModels),
 		// Plain string, not nullString: the column is NOT NULL and "" is the
 		// org's own "not picked yet" rather than an absent value.
@@ -341,13 +342,12 @@ func authMethodOrDefault(method string) string {
 func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (domain.OrgSettings, error) {
 	stored, err := db.ScanOrgSettingsCore(s.app.QueryRowContext(ctx, `
 		INSERT INTO org_settings (
-			org_id, github_clone_protocol,
-			anthropic_api_key_ref, bedrock_credentials_ref, enabled_models,
+			org_id, github_clone_protocol, enabled_models,
 			background_jobs_model, llm_auth_method,
 			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
 			api_token_max_age_days, version, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 1, now()
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, 1, now()
 		)`+conflict+`
 		RETURNING `+orgSettingsColumns, orgSettingsWriteArgs(orgID, u)...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
@@ -360,25 +360,24 @@ func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.O
 // gets — WHERE matches nothing, so RETURNING produces nothing.
 //
 // Its SET list must stay in step with orgSettingsConflictUpdate above — same
-// columns, same exclusions. github_credential_class and the Linear workspace
-// columns are absent from both for the reason UpdateSettings' doc gives.
+// columns, same exclusions. github_credential_class, the Linear workspace
+// columns and the LLM credential refs are absent from both for the reasons
+// UpdateSettings' doc gives.
 func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	args := append(orgSettingsWriteArgs(orgID, u), expected)
 	stored, err := db.ScanOrgSettingsCore(s.app.QueryRowContext(ctx, `
 		UPDATE org_settings SET
 			github_clone_protocol = $2,
-			anthropic_api_key_ref = $3,
-			bedrock_credentials_ref = $4,
-			enabled_models = $5,
-			background_jobs_model = $6,
-			llm_auth_method = $7,
-			max_daily_cost_usd = $8,
-			max_concurrent_runs = $9,
-			marketplace_enabled = $10,
-			api_token_max_age_days = $11,
+			enabled_models = $3,
+			background_jobs_model = $4,
+			llm_auth_method = $5,
+			max_daily_cost_usd = $6,
+			max_concurrent_runs = $7,
+			marketplace_enabled = $8,
+			api_token_max_age_days = $9,
 			version = version + 1,
 			updated_at = now()
-		WHERE org_id = $1 AND version = $12
+		WHERE org_id = $1 AND version = $10
 		RETURNING `+orgSettingsColumns, args...).Scan)
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
@@ -517,6 +516,68 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 			base_url = EXCLUDED.base_url`,
 		orgID, kind, nullString(baseURL)); err != nil {
 		return domain.OrgSettings{}, fmt.Errorf("set %s base url: %w", kind, err)
+	}
+	overrides, err := readSourceOverrides(ctx, s.app, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("read org_event_sources overrides: %w", err)
+	}
+	db.ApplyOrgSourceOverrides(&stored, overrides)
+	return stored, nil
+}
+
+// SetAnthropicKeyRef writes ONLY org_settings.anthropic_api_key_ref, and
+// llm_auth_method when binding. See the OrgsStore interface doc.
+func (s *orgsStore) SetAnthropicKeyRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error) {
+	return s.setLLMCredentialRef(ctx, orgID, "anthropic_api_key_ref", ref)
+}
+
+// SetBedrockCredentialsRef writes ONLY org_settings.bedrock_credentials_ref,
+// and llm_auth_method when binding. See the OrgsStore interface doc.
+func (s *orgsStore) SetBedrockCredentialsRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error) {
+	return s.setLLMCredentialRef(ctx, orgID, "bedrock_credentials_ref", ref)
+}
+
+// setLLMCredentialRef is the write behind SetAnthropicKeyRef and
+// SetBedrockCredentialsRef; column is one of their two column names, never
+// caller input. The pool follows SetGitHubCredentialClass above.
+//
+// A bind is an upsert whose conflict arm runs only when the ref or the auth
+// method would change. A clear is an UPDATE that runs only when a ref is
+// stored, so a row that does not exist stays absent: it has no ref to clear.
+// Both conditions are evaluated against the row the statement locks, so no
+// concurrent write lands between the check and the write. A statement that
+// changed nothing returns no row, and the current row is read instead.
+func (s *orgsStore) setLLMCredentialRef(ctx context.Context, orgID, column, ref string) (domain.OrgSettings, error) {
+	var row *sql.Row
+	if ref == "" {
+		row = s.app.QueryRowContext(ctx, `
+			UPDATE org_settings SET
+				`+column+` = NULL,
+				version = version + 1,
+				updated_at = now()
+			WHERE org_id = $1 AND `+column+` IS NOT NULL
+			RETURNING `+orgSettingsColumns,
+			orgID)
+	} else {
+		row = s.app.QueryRowContext(ctx, `
+			INSERT INTO org_settings (org_id, `+column+`, llm_auth_method, updated_at)
+			VALUES ($1, $2, $3, now())
+			ON CONFLICT (org_id) DO UPDATE SET
+				`+column+` = EXCLUDED.`+column+`,
+				llm_auth_method = EXCLUDED.llm_auth_method,
+				version = org_settings.version + 1,
+				updated_at = now()
+			WHERE org_settings.`+column+` IS DISTINCT FROM EXCLUDED.`+column+`
+			   OR org_settings.llm_auth_method IS DISTINCT FROM EXCLUDED.llm_auth_method
+			RETURNING `+orgSettingsColumns,
+			orgID, ref, domain.LLMAuthBYOK)
+	}
+	stored, err := db.ScanOrgSettingsCore(row.Scan)
+	if errors.Is(err, sql.ErrNoRows) {
+		return getOrgSettings(ctx, s.app, orgID)
+	}
+	if err != nil {
+		return domain.OrgSettings{}, fmt.Errorf("set org %s: %w", column, err)
 	}
 	overrides, err := readSourceOverrides(ctx, s.app, orgID)
 	if err != nil {

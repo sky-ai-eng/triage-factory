@@ -30,18 +30,12 @@ func orgLLMAuthMethod(t *testing.T, s *Server) string {
 	return out.LLMAuthMethod
 }
 
-// bindAnthropicRef stores the Anthropic ref the way the bind route does — the
-// ref AND the credential source — without the live key validation that route
-// performs.
+// bindAnthropicRefWithMethod stores the Anthropic ref the way the bind route
+// does — the ref AND the credential source — without the live key validation
+// that route performs.
 func bindAnthropicRefWithMethod(t *testing.T, s *Server) {
 	t.Helper()
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read org settings: %v", err)
-	}
-	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, secretKeyAnthropicAPIKey); err != nil {
 		t.Fatalf("bind anthropic: %v", err)
 	}
 }
@@ -126,12 +120,7 @@ func TestOrgSettingsPatch_LLMAuthMethod_RefusesSystemWhileCredentialsBound(t *te
 	}
 	// And it is the bound material that refuses, not the value: removing it
 	// makes the same write succeed.
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("read org settings: %v", err)
-	}
-	set.AnthropicAPIKeyRef = ""
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, ""); err != nil {
 		t.Fatalf("unbind anthropic: %v", err)
 	}
 	patchOrgSettingsOK(t, s, map[string]any{"llm_auth_method": domain.LLMAuthSystem})
@@ -150,11 +139,12 @@ func TestOrgSettingsPatch_LLMAuthMethod_UnchangedValueIsNotRechecked(t *testing.
 
 	// An org on host credentials that acquired a ref some other way: the
 	// combination the PATCH refuses to CREATE, re-sent rather than requested.
-	set, err := s.allStores.Orgs.GetSettingsSystem(t.Context(), runmode.LocalDefaultOrgID)
+	// The ref write sets the org's own credentials, so the method is put back
+	// to the host's by a bulk save, which can write the method but not the ref.
+	set, err := s.allStores.Orgs.SetAnthropicKeyRef(t.Context(), runmode.LocalDefaultOrgID, secretKeyAnthropicAPIKey)
 	if err != nil {
-		t.Fatalf("read org settings: %v", err)
+		t.Fatalf("seed ref: %v", err)
 	}
-	set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
 	set.LLMAuthMethod = domain.LLMAuthSystem
 	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
 		t.Fatalf("seed settings: %v", err)

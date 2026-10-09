@@ -163,4 +163,57 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 			t.Errorf("SetSourceBaseURL (clear) returned host %q, want it cleared", cleared.JiraBaseURL)
 		}
 	})
+
+	for _, c := range []struct {
+		name  string
+		write func(db.OrgsStore, context.Context, string, string) (domain.OrgSettings, error)
+		ref   func(domain.OrgSettings) string
+	}{
+		{"SetAnthropicKeyRef", db.OrgsStore.SetAnthropicKeyRef,
+			func(o domain.OrgSettings) string { return o.AnthropicAPIKeyRef }},
+		{"SetBedrockCredentialsRef", db.OrgsStore.SetBedrockCredentialsRef,
+			func(o domain.OrgSettings) string { return o.BedrockCredentialsRef }},
+	} {
+		t.Run(c.name+"_returns_the_stored_row", func(t *testing.T) {
+			before, err := read()
+			if err != nil {
+				t.Fatalf("read before %s: %v", c.name, err)
+			}
+			bound, err := c.write(store, ctx, orgID, "ret-ref")
+			if err != nil {
+				t.Fatalf("%s: %v", c.name, err)
+			}
+			AssertWriteReturnedStoredRow(t, c.name, bound, read)
+			if c.ref(bound) != "ret-ref" || bound.LLMAuthMethod != domain.LLMAuthBYOK || bound.Version != before.Version+1 {
+				t.Errorf("%s returned ref %q method %q version %d, want ret-ref, %q, %d",
+					c.name, c.ref(bound), bound.LLMAuthMethod, bound.Version, domain.LLMAuthBYOK, before.Version+1)
+			}
+
+			// An unchanged ref writes nothing; what it hands back is still the
+			// stored row.
+			same, err := c.write(store, ctx, orgID, "ret-ref")
+			if err != nil {
+				t.Fatalf("%s (unchanged): %v", c.name, err)
+			}
+			AssertWriteReturnedStoredRow(t, c.name+" (unchanged)", same, read)
+			if same.Version != bound.Version {
+				t.Errorf("unchanged %s moved the version %d -> %d", c.name, bound.Version, same.Version)
+			}
+
+			cleared, err := c.write(store, ctx, orgID, "")
+			if err != nil {
+				t.Fatalf("%s (clear): %v", c.name, err)
+			}
+			AssertWriteReturnedStoredRow(t, c.name+" (clear)", cleared, read)
+			if c.ref(cleared) != "" || cleared.Version != bound.Version+1 {
+				t.Errorf("%s (clear) returned ref %q version %d, want it cleared at %d", c.name, c.ref(cleared), cleared.Version, bound.Version+1)
+			}
+
+			again, err := c.write(store, ctx, orgID, "")
+			if err != nil {
+				t.Fatalf("%s (clear again): %v", c.name, err)
+			}
+			AssertWriteReturnedStoredRow(t, c.name+" (clear again)", again, read)
+		})
+	}
 }
