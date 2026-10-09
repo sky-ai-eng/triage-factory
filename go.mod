@@ -1,6 +1,6 @@
 module github.com/sky-ai-eng/triage-factory
 
-go 1.26.6
+go 1.26.9
 
 require github.com/zalando/go-keyring v0.2.8
 
@@ -84,7 +84,7 @@ require (
 	go.starlark.net v0.0.0-20260102030733-3fee463870c9 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/arch v0.23.0 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect
@@ -154,9 +154,9 @@ require (
 	go.opentelemetry.io/otel/metric v1.45.0
 	go.opentelemetry.io/otel/trace v1.45.0
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/crypto v0.56.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.57.0
+	golang.org/x/sync v0.23.0
+	golang.org/x/text v0.42.0 // indirect
 )
 
 require (
@@ -173,7 +173,7 @@ require (
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/maximhq/bifrost/core v1.7.4-0.20260722042948-0f07e6f726be
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
