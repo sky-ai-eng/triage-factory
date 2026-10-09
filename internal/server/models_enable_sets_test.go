@@ -56,20 +56,18 @@ func modelKeyOn(t *testing.T, provider string) string {
 func connectOrgProviders(t *testing.T, s *Server, anthropic, bedrock bool) {
 	t.Helper()
 	ctx := context.Background()
-	set, err := s.allStores.Orgs.GetSettingsSystem(ctx, runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("get org settings: %v", err)
-	}
-	set.AnthropicAPIKeyRef = ""
+	anthropicRef, bedrockRef := "", ""
 	if anthropic {
-		set.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
+		anthropicRef = secretKeyAnthropicAPIKey
 	}
-	set.BedrockCredentialsRef = ""
 	if bedrock {
-		set.BedrockCredentialsRef = "aws_bearer_token_bedrock"
+		bedrockRef = "aws_bearer_token_bedrock"
 	}
-	if _, err := s.allStores.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set); err != nil {
-		t.Fatalf("connect providers: %v", err)
+	if _, err := s.allStores.Orgs.SetAnthropicKeyRef(ctx, runmode.LocalDefaultOrgID, anthropicRef); err != nil {
+		t.Fatalf("connect anthropic: %v", err)
+	}
+	if _, err := s.allStores.Orgs.SetBedrockCredentialsRef(ctx, runmode.LocalDefaultOrgID, bedrockRef); err != nil {
+		t.Fatalf("connect bedrock: %v", err)
 	}
 }
 

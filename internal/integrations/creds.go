@@ -136,7 +136,8 @@ const (
 // BedrockKeys returns every Bedrock-related secret key the connect flow
 // manages: both auth methods' credentials plus the non-secret config
 // riding the same vault. One list so the write path (replace/clear), the
-// uninstall sweep, and the drift tests all agree on the full set.
+// uninstall sweep, and the drift tests all agree on the full set. Writers take
+// the keys in this order, for the reason GitHubKeys gives.
 func BedrockKeys() []string {
 	return []string{
 		KeyAWSAccessKeyID, KeyAWSSecretAccessKey, KeyAWSSessionToken,

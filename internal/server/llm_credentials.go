@@ -65,14 +65,6 @@ func llmCredentialBedrock(method string) string { return "bedrock:" + method }
 // this file's routes.
 var errLLMAuthMethodHasCredentials = errors.New("an organization running on the host's Claude credentials can hold none of its own")
 
-// onOwnCredentials records that the org's Claude credentials are now its own.
-// Every bind stamps it, because holding provider material and running on the
-// host's environment are mutually exclusive and the bind is the act that
-// settles which one this org is doing — there is nothing left to ask an admin
-// to confirm. The refs still say WHICH provider is bound; this says the org is
-// not on the host's.
-func onOwnCredentials(o *domain.OrgSettings) { o.LLMAuthMethod = domain.LLMAuthBYOK }
-
 // boundLLMProviders names the providers an org holds material for, in the words
 // an admin would use to go find them. Empty means the org has bound nothing,
 // which is the only state domain.LLMAuthSystem is true in.
@@ -142,20 +134,27 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// In local mode the key lands in the keychain, outside the transaction, so
+	// a failure later in it puts the prior key back rather than leaving one the
+	// org never committed to.
+	restore, unlock, err := se.guardAnthropicWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "llm-credentials", err)
+		return
+	}
+	defer unlock()
+
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return fmt.Errorf("load org settings: %w", err)
-		}
 		if err := tx.Secrets.Put(r.Context(), orgID, secretKeyAnthropicAPIKey, key, "Org's Anthropic API key"); err != nil {
 			return fmt.Errorf("store Anthropic key: %w", err)
 		}
-		// The org's Bedrock material, if any, is untouched: both providers are
-		// live at once, and each run resolves the one its model is served by.
-		orgSet.AnthropicAPIKeyRef = secretKeyAnthropicAPIKey
-		onOwnCredentials(&orgSet)
-		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
+		// The ref write also moves the org onto its own credentials: holding
+		// provider material and running on the host's are mutually exclusive,
+		// and the bind is what settles which one the org is doing. The org's
+		// Bedrock material, if any, is untouched: both providers are live at
+		// once, and each run resolves the one its model is served by.
+		if _, err := tx.Orgs.SetAnthropicKeyRef(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
+			return fmt.Errorf("set anthropic key ref: %w", err)
 		}
 		return tx.AccessChangeLog.Record(r.Context(), orgID, domain.AccessChange{
 			ActorUserID: userID,
@@ -163,6 +162,9 @@ func (se *settingsHandler) handleAnthropicPut(w http.ResponseWriter, r *http.Req
 			DetailJSON:  accessDetailCredential(domain.CredentialKindAnthropicKey, ""),
 		})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "llm-credentials", fmt.Errorf("persist anthropic credentials: %w", err))
 		return
 	}
@@ -194,6 +196,17 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 	if !ok {
 		return
 	}
+
+	// In local mode the keychain sits outside the transaction, so a failure
+	// after the delete puts the key back: the request reports the disconnect
+	// failed, so the org must still be connected.
+	restore, unlock, err := se.guardAnthropicWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "llm-credentials", err)
+		return
+	}
+	defer unlock()
+
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Settings first: its ref is the record of whether a key was actually
 		// configured, which the idempotent vault delete cannot report.
@@ -205,9 +218,8 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 		if _, err := tx.Secrets.Delete(r.Context(), orgID, secretKeyAnthropicAPIKey); err != nil {
 			return fmt.Errorf("clear Anthropic key: %w", err)
 		}
-		orgSet.AnthropicAPIKeyRef = ""
-		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
+		if _, err := tx.Orgs.SetAnthropicKeyRef(r.Context(), orgID, ""); err != nil {
+			return fmt.Errorf("clear anthropic key ref: %w", err)
 		}
 		if !had {
 			return nil
@@ -215,6 +227,9 @@ func (se *settingsHandler) handleAnthropicDelete(w http.ResponseWriter, r *http.
 		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
 			[]string{domain.CredentialKindAnthropicKey})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "llm-credentials", fmt.Errorf("clear anthropic credentials: %w", err))
 		return
 	}
@@ -303,24 +318,12 @@ func (se *settingsHandler) handleBedrockAccessKeysPut(w http.ResponseWriter, r *
 	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSAccessKeyID,
 		config: req.bedrockConfig,
-		// The session token is part of the replaced set: absent means "no
-		// session token" (long-lived keys), never "keep the old one" — a stale
-		// token would 403 every call.
-		clear: []string{integrations.KeyAWSBearerTokenBedrock, integrations.KeyAWSSessionToken},
-		write: func(tx db.TxStores) error {
-			if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSAccessKeyID, req.AccessKeyID, "Org's AWS access key ID"); err != nil {
-				return fmt.Errorf("store AWS access key ID: %w", err)
-			}
-			if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSSecretAccessKey, req.SecretAccessKey, "Org's AWS secret access key"); err != nil {
-				return fmt.Errorf("store AWS secret access key: %w", err)
-			}
-			if req.SessionToken == "" {
-				return nil
-			}
-			if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSSessionToken, req.SessionToken, "Org's AWS session token"); err != nil {
-				return fmt.Errorf("store AWS session token: %w", err)
-			}
-			return nil
+		secrets: []bedrockSecret{
+			{integrations.KeyAWSAccessKeyID, req.AccessKeyID, "Org's AWS access key ID"},
+			{integrations.KeyAWSSecretAccessKey, req.SecretAccessKey, "Org's AWS secret access key"},
+			// Absent means "no session token" (long-lived keys), never "keep
+			// the old one" — a stale token would 403 every call.
+			{integrations.KeyAWSSessionToken, req.SessionToken, "Org's AWS session token"},
 		},
 	})
 }
@@ -350,14 +353,8 @@ func (se *settingsHandler) handleBedrockBearerPut(w http.ResponseWriter, r *http
 	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSBearerTokenBedrock,
 		config: req.bedrockConfig,
-		clear: []string{
-			integrations.KeyAWSAccessKeyID, integrations.KeyAWSSecretAccessKey, integrations.KeyAWSSessionToken,
-		},
-		write: func(tx db.TxStores) error {
-			if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSBearerTokenBedrock, req.BearerToken, "Org's Bedrock API key"); err != nil {
-				return fmt.Errorf("store Bedrock bearer token: %w", err)
-			}
-			return nil
+		secrets: []bedrockSecret{
+			{integrations.KeyAWSBearerTokenBedrock, req.BearerToken, "Org's Bedrock API key"},
 		},
 	})
 }
@@ -402,7 +399,7 @@ func (se *settingsHandler) handleBedrockRolePut(w http.ResponseWriter, r *http.R
 	// Ensure the External ID exists (generate + persist if the admin skipped the
 	// role-setup fetch) BEFORE the probe — the probe must present the same value
 	// the customer's trust policy references. It is stable thereafter, which is
-	// why the sweep below never clears it.
+	// why the role bind never clears it.
 	externalID, err := se.resolveExternalID(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "llm-credentials", fmt.Errorf("prepare bedrock external id: %w", err))
@@ -415,15 +412,8 @@ func (se *settingsHandler) handleBedrockRolePut(w http.ResponseWriter, r *http.R
 	se.bindBedrock(w, r, orgID, userID, bedrockBinding{
 		ref:    integrations.KeyAWSRoleARN,
 		config: req.bedrockConfig,
-		clear: []string{
-			integrations.KeyAWSBearerTokenBedrock,
-			integrations.KeyAWSAccessKeyID, integrations.KeyAWSSecretAccessKey, integrations.KeyAWSSessionToken,
-		},
-		write: func(tx db.TxStores) error {
-			if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSRoleARN, req.RoleARN, "Org's Bedrock IAM role ARN"); err != nil {
-				return fmt.Errorf("store role ARN: %w", err)
-			}
-			return nil
+		secrets: []bedrockSecret{
+			{integrations.KeyAWSRoleARN, req.RoleARN, "Org's Bedrock IAM role ARN"},
 		},
 	})
 }
@@ -437,6 +427,17 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
+
+	// In local mode the keychain sits outside the transaction, so a failure
+	// after the deletes puts every key back: the request reports the
+	// disconnect failed, so the org must still be connected.
+	restore, unlock, err := se.guardBedrockWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "llm-credentials", err)
+		return
+	}
+	defer unlock()
+
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		// Settings first — its ref tells us whether there was anything to
 		// revoke, which the idempotent vault deletes cannot.
@@ -448,9 +449,8 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 		if err := clearBedrockSecrets(r, tx, orgID); err != nil {
 			return err
 		}
-		orgSet.BedrockCredentialsRef = ""
-		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
+		if _, err := tx.Orgs.SetBedrockCredentialsRef(r.Context(), orgID, ""); err != nil {
+			return fmt.Errorf("clear bedrock credentials ref: %w", err)
 		}
 		if !had {
 			return nil
@@ -458,6 +458,9 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 		return recordCredentialRemovals(r.Context(), tx, orgID, userID,
 			[]string{domain.CredentialKindBedrock})
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "llm-credentials", fmt.Errorf("clear bedrock credentials: %w", err))
 		return
 	}
@@ -465,20 +468,42 @@ func (se *settingsHandler) handleBedrockDelete(w http.ResponseWriter, r *http.Re
 }
 
 // bedrockBinding is what one flavor's PUT contributes to the shared write: the
-// ref marker that records which shape is live, the non-secret config, the keys
-// this flavor's material replaces, and the writes for its own material.
+// ref marker that records which shape is live, the non-secret config, and the
+// flavor's own material.
 type bedrockBinding struct {
-	ref    string
-	config bedrockConfig
-	clear  []string
-	write  func(tx db.TxStores) error
+	ref     string
+	config  bedrockConfig
+	secrets []bedrockSecret
 }
+
+// bedrockSecret is one Bedrock key a bind leaves in the vault. An empty value
+// is an optional key the request left out, which the bind deletes.
+type bedrockSecret struct{ key, value, desc string }
 
 // bindBedrock performs the parts every Bedrock flavor shares: the flavor's own
 // writes, the non-secret config, the sweep of the Bedrock material this bind
 // replaces, the settings ref, and the audit row — all in one transaction, so a
 // half-bound org is not a state that exists.
 func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, orgID, userID string, b bedrockBinding) {
+	set := map[string]bedrockSecret{}
+	for _, sec := range append(b.secrets,
+		bedrockSecret{integrations.KeyAWSRegion, b.config.Region, "Org's Bedrock region"},
+		bedrockSecret{integrations.KeyBedrockModelID, b.config.ModelID, "Org's Bedrock model ID"},
+		bedrockSecret{integrations.KeyBedrockBaseURL, b.config.BaseURL, "Org's Bedrock endpoint override"},
+	) {
+		set[sec.key] = sec
+	}
+
+	// In local mode the keys land in the keychain, outside the transaction, so
+	// a failure later in it puts every prior key back rather than leaving the
+	// org half-bound, or bound to a shape it never committed to.
+	restore, unlock, err := se.guardBedrockWrite(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "llm-credentials", err)
+		return
+	}
+	defer unlock()
+
 	var cleared []string
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
@@ -487,49 +512,31 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		}
 		_, bedrock := storedLLMCredentials(orgSet)
 
-		// Sweep BEFORE writing, not after. A shape's own optional key can be in
-		// its clear set — the access-key pair's session token is, because an
-		// absent token means "long-lived keys", never "keep the old one" — so a
-		// sweep that ran second would delete the token this very request just
-		// stored.
-		//
-		// The other Bedrock shapes' material must not linger either. The
+		// One pass over integrations.BedrockKeys, the order the unbind deletes
+		// them in: each key is written if this bind sets it and deleted
+		// otherwise, so the other Bedrock shapes' material does not linger. The
 		// resolver detects role mode by aws_role_arn presence, so a stale ARN
 		// would make it try to mint instead of using the material stored here,
 		// and stale IAM keys in the vault are wrong regardless of precedence.
-		// The sweep stops at Bedrock: the org's Anthropic key, if any, stays —
-		// it serves that provider's models and this write says nothing about
-		// them.
-		clear := b.clear
-		if b.ref != integrations.KeyAWSRoleARN {
-			// Leaving role mode drops the role ARN and its External ID together;
-			// keeping an orphan ID would name a trust policy nothing presents.
-			clear = append(append([]string{}, clear...), integrations.KeyAWSRoleARN, integrations.KeyAWSExternalID)
-		}
-		for _, k := range clear {
-			if _, err := tx.Secrets.Delete(r.Context(), orgID, k); err != nil {
-				return fmt.Errorf("clear stale %s: %w", k, err)
+		// Leaving role mode drops the role ARN and its External ID together;
+		// keeping an orphan ID would name a trust policy nothing presents. Role
+		// mode itself keeps the ID, which is stable once generated. The sweep
+		// stops at Bedrock: the org's Anthropic key, if any, stays — it serves
+		// that provider's models and this write says nothing about them.
+		for _, k := range integrations.BedrockKeys() {
+			if k == integrations.KeyAWSExternalID && b.ref == integrations.KeyAWSRoleARN {
+				continue
+			}
+			sec := set[k]
+			if err := putOrClearSecret(r, tx, orgID, k, sec.value, sec.desc); err != nil {
+				return err
 			}
 		}
 
-		if err := b.write(tx); err != nil {
-			return err
-		}
-
-		if err := tx.Secrets.Put(r.Context(), orgID, integrations.KeyAWSRegion, b.config.Region, "Org's Bedrock region"); err != nil {
-			return fmt.Errorf("store Bedrock region: %w", err)
-		}
-		if err := putOrClearSecret(r, tx, orgID, integrations.KeyBedrockModelID, b.config.ModelID, "Org's Bedrock model ID"); err != nil {
-			return err
-		}
-		if err := putOrClearSecret(r, tx, orgID, integrations.KeyBedrockBaseURL, b.config.BaseURL, "Org's Bedrock endpoint override"); err != nil {
-			return err
-		}
-
-		orgSet.BedrockCredentialsRef = b.ref
-		onOwnCredentials(&orgSet)
-		if _, err := tx.Orgs.UpdateSettings(r.Context(), orgID, orgSet); err != nil {
-			return err
+		// The ref write also moves the org onto its own credentials, as the
+		// Anthropic bind's does.
+		if _, err := tx.Orgs.SetBedrockCredentialsRef(r.Context(), orgID, b.ref); err != nil {
+			return fmt.Errorf("set bedrock credentials ref: %w", err)
 		}
 		// Audit the bind/rotate in the same tx. The endpoint override is the
 		// closest thing to a host and is recorded when set.
@@ -550,6 +557,9 @@ func (se *settingsHandler) bindBedrock(w http.ResponseWriter, r *http.Request, o
 		}
 		return nil
 	}); err != nil {
+		if restore != nil {
+			restore()
+		}
 		internalError(w, "llm-credentials", fmt.Errorf("persist bedrock credentials: %w", err))
 		return
 	}

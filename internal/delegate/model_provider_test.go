@@ -21,21 +21,15 @@ import (
 func connectProviders(t *testing.T, database *sql.DB, anthropic, bedrock bool) {
 	t.Helper()
 	store := sqlitestore.New(database).Orgs
-	set, err := store.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
-	if err != nil {
-		t.Fatalf("get org settings: %v", err)
-	}
 	if anthropic {
-		set.AnthropicAPIKeyRef = "anthropic_api_key"
+		if _, err := store.SetAnthropicKeyRef(context.Background(), runmode.LocalDefaultOrgID, "anthropic_api_key"); err != nil {
+			t.Fatalf("connect anthropic: %v", err)
+		}
 	}
 	if bedrock {
-		set.BedrockCredentialsRef = "aws_bearer_token_bedrock"
-	}
-	if anthropic || bedrock {
-		set.LLMAuthMethod = domain.LLMAuthBYOK
-	}
-	if _, err := store.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, set); err != nil {
-		t.Fatalf("connect providers: %v", err)
+		if _, err := store.SetBedrockCredentialsRef(context.Background(), runmode.LocalDefaultOrgID, "aws_bearer_token_bedrock"); err != nil {
+			t.Fatalf("connect bedrock: %v", err)
+		}
 	}
 }
 

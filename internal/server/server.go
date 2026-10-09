@@ -156,15 +156,18 @@ type Server struct {
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
 	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
-	// linearCredentialMu and jiraCredentialMu serialize each integration's
-	// local-mode bind and unbind across snapshot, transaction and restore
+	// linearCredentialMu, jiraCredentialMu, anthropicCredentialMu and
+	// bedrockCredentialMu serialize each credential's local-mode bind and
+	// unbind across snapshot, transaction and restore
 	// (guardLocalSecretWrite). The keychain sits outside the SQLite
 	// transaction, so two overlapping writes could otherwise snapshot the same
 	// prior key and the one that fails would restore it over the one that
 	// committed. GitHub needs no mutex of its own: every GitHub credential
 	// transition already holds githubAppRegMu for the org.
-	linearCredentialMu sync.Mutex
-	jiraCredentialMu   sync.Mutex
+	linearCredentialMu    sync.Mutex
+	jiraCredentialMu      sync.Mutex
+	anthropicCredentialMu sync.Mutex
+	bedrockCredentialMu   sync.Mutex
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve
@@ -1156,10 +1159,12 @@ func (s *Server) routes() {
 	s.apiMutating("POST /api/github/repos/refresh", s.handleGitHubReposRefresh)
 	se := &settingsHandler{
 		tx: s.tx, az: s.az,
-		bedrockRole:       func() bedrockRoleResolver { return s.bedrockRole },
-		kickJira:          s.kickJiraChanged,
-		guardJiraWrite:    s.guardLocalJiraWrite,
-		kickMemoryBacklog: func(orgID string) { s.kickMemoryOwed(orgID, "") },
+		bedrockRole:         func() bedrockRoleResolver { return s.bedrockRole },
+		kickJira:            s.kickJiraChanged,
+		guardJiraWrite:      s.guardLocalJiraWrite,
+		guardAnthropicWrite: s.guardLocalAnthropicWrite,
+		guardBedrockWrite:   s.guardLocalBedrockWrite,
+		kickMemoryBacklog:   func(orgID string) { s.kickMemoryOwed(orgID, "") },
 	}
 	s.apiMutating("POST /api/github/preflight-ssh", se.handleGitHubPreflightSSH)
 	// URL-only host reachability (the wizard's URL sub-step) — no auth sent,
