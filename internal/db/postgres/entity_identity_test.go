@@ -106,7 +106,57 @@ func TestEntityIdentity_Postgres(t *testing.T) {
 					t.Fatalf("force external id: %v", err)
 				}
 			},
+			Conversation: func(t *testing.T, suffix string) string {
+				t.Helper()
+				host := seedPgSharedEntity(t, h, orgID, "github", "conversation-host-"+suffix, "pr")
+				return seedPgTeamConversationOnEntity(t, h, orgID, userID, seedPgTaskMemoryPrompt(t, h, orgID, userID), teamID, host, suffix)
+			},
+			Link: func(t *testing.T, from, to string) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(
+					`INSERT INTO entity_links (from_entity_id, to_entity_id, kind, origin, org_id) VALUES ($1, $2, 'relates', 'agent', $3)`,
+					from, to, orgID,
+				); err != nil {
+					t.Fatalf("seed entity link: %v", err)
+				}
+			},
+			Referents: func(t *testing.T, entityID string) dbtest.EntityReferents {
+				t.Helper()
+				return pgEntityReferents(t, h.AdminDB, entityID)
+			},
 		}
 		return stores, orgID, seed
 	})
+}
+
+func pgEntityReferents(t *testing.T, conn *sql.DB, entityID string) dbtest.EntityReferents {
+	t.Helper()
+	out := dbtest.EntityReferents{Rows: map[string]int{}, MemoryRoles: map[string]string{}}
+	for table, query := range map[string]string{
+		"tasks":                        `SELECT COUNT(*) FROM tasks WHERE entity_id = $1`,
+		"events":                       `SELECT COUNT(*) FROM events WHERE entity_id = $1`,
+		"event_queue":                  `SELECT COUNT(*) FROM event_queue WHERE entity_id = $1`,
+		"pending_firings":              `SELECT COUNT(*) FROM pending_firings WHERE entity_id = $1`,
+		"conversation_memory_entities": `SELECT COUNT(*) FROM conversation_memory_entities WHERE entity_id = $1`,
+		"entity_links":                 `SELECT COUNT(*) FROM entity_links WHERE from_entity_id = $1 OR to_entity_id = $1`,
+	} {
+		var n int
+		if err := conn.QueryRow(query, entityID).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		out.Rows[table] = n
+	}
+	rows, err := conn.Query(`SELECT conversation_id::text, role FROM conversation_memory_entities WHERE entity_id = $1`, entityID)
+	if err != nil {
+		t.Fatalf("read memory roles: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var conv, role string
+		if err := rows.Scan(&conv, &role); err != nil {
+			t.Fatalf("scan memory role: %v", err)
+		}
+		out.MemoryRoles[conv] = role
+	}
+	return out
 }

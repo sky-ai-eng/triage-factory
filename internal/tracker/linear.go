@@ -381,7 +381,8 @@ func linearRenamed(scope string, e domain.Entity, snap domain.LinearSnapshot) bo
 // under now, and returns the entity as renamed. ok=false means the rename did
 // not land and the caller writes nothing to the entity this cycle: an active
 // row still holds the identifier (it clears once that row is renamed or
-// retired), or the write failed.
+// retired), or the write failed. The returned entity carries the poll_seq the
+// rename bumped to, so the caller's snapshot CAS lands on its own rename.
 func (t *Tracker) renameLinearEntity(ctx context.Context, scope string, e domain.Entity, identifier, url string) (domain.Entity, bool) {
 	out, err := t.entities.RenameSystem(context.Background(), t.orgID, "linear", scope, e.ExternalID, identifier, url)
 	if errors.Is(err, db.ErrEntityKeyOccupied) {
@@ -396,6 +397,7 @@ func (t *Tracker) renameLinearEntity(ctx context.Context, scope string, e domain
 	if out.Renamed {
 		trackerLog.InfoContext(ctx, "linear issue answers under a new identifier; entity renamed",
 			"from", out.From, "to", out.To, "entity_id", e.ID)
+		e.PollSeq = out.PollSeq
 	}
 	e.SourceID = identifier
 	if url != "" {

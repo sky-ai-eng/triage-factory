@@ -124,7 +124,7 @@ func TestRelayRuntime_RecordReadTouch_RoundTrips(t *testing.T) {
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 	ctx := context.Background()
 
-	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "")
+	rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, "octo/repo#7", "", "")
 
 	ent, err := stores.Entities.GetBySource(ctx, info.OrgID, "github", "https://github.com", "octo/repo#7")
 	if err != nil || ent == nil {

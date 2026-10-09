@@ -57,7 +57,7 @@ func newDeadStatusServer(t *testing.T, deadID string, workflow ...jiraclient.Sta
 				return
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"issues":[{"key":"SKY-1","fields":{
+			_, _ = io.WriteString(w, `{"issues":[{"id":"10001","key":"SKY-1","fields":{
 				"summary":"Salvaged","status":{"id":"10001","name":"To Do"}}}]}`)
 
 		default:

@@ -134,19 +134,36 @@ func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, team
 // the events feeding this path come from TF's own trusted poller. Same
 // deliberate split from the ladder's propagate posture as
 // teamTracksEventRepo — see there for the asymmetry that justifies it.
+//
+// key_changed is the one event about two projects, the one the issue is in
+// now and the one it left (old_project), and it passes for a team that tracks
+// either. A team whose issue moved to a project it does not track keeps its
+// tasks on the entity, and this event is the only thing that tells it the
+// issue left; a handler filtered on old_project could never fire otherwise.
+// Every other Jira event routes on its project alone.
 func (r *Router) teamTracksEventProject(ctx context.Context, evt domain.Event, teamID string) bool {
 	var m struct {
-		Project string `json:"project"`
+		Project    string `json:"project"`
+		OldProject string `json:"old_project"`
 	}
 	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err != nil || m.Project == "" {
 		return true
 	}
-	tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, m.Project)
-	if err != nil {
-		routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", m.Project, "error", err)
-		return true
+	projects := []string{m.Project}
+	if evt.EventType == domain.EventJiraIssueKeyChanged && m.OldProject != "" && m.OldProject != m.Project {
+		projects = append(projects, m.OldProject)
 	}
-	return tracks
+	for _, project := range projects {
+		tracks, err := r.jiraRules.TracksProjectSystem(ctx, teamID, project)
+		if err != nil {
+			routerLog.Warn("team-project gate lookup failed, allowing", "team_id", teamID, "project", project, "error", err)
+			return true
+		}
+		if tracks {
+			return true
+		}
+	}
+	return false
 }
 
 // teamTracksEventLinearTeam reads the Linear team id off an event's metadata

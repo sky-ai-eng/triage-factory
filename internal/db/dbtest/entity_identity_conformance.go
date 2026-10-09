@@ -159,10 +159,34 @@ type EntityIdentitySeeder struct {
 	// forbids exactly the state the ambiguity refusal exists for; the backend
 	// restores the index when the test ends.
 	ForceExternalID func(t *testing.T, entityID, externalID string)
+
+	// Conversation inserts a conversation, on a task and entity of its own,
+	// and returns its id, for memory links to name.
+	Conversation func(t *testing.T, suffix string) string
+
+	// Link inserts an entity_links row from one entity to another.
+	Link func(t *testing.T, fromEntityID, toEntityID string)
+
+	// Referents reads, as stored, every row that names entityID: a count per
+	// referencing table, and its memory links' roles by conversation. Raw SQL
+	// because no store reads several of these tables by entity.
+	Referents func(t *testing.T, entityID string) EntityReferents
+}
+
+// EntityReferents is what EntityIdentitySeeder.Referents reads for one entity.
+type EntityReferents struct {
+	// Rows counts the rows naming the entity in tasks, events, event_queue,
+	// pending_firings, conversation_memory_entities and entity_links (either
+	// end), keyed by table.
+	Rows map[string]int
+	// MemoryRoles is the role of each conversation_memory_entities row on the
+	// entity, keyed by conversation id.
+	MemoryRoles map[string]string
 }
 
 // RunEntityIdentityConformance covers the system-only identity writes:
-// GetByExternalIDSystem, StampExternalIDSystem and RenameSystem.
+// GetByExternalIDSystem, StampExternalIDSystem, RenameSystem and
+// MergeDuplicateEntitiesSystem.
 func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -252,9 +276,9 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		commentArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, "uuid-4", "ENG-4", "c-1")
 		neighbourArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-41", "ENG-41", "")
 		otherArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-4b", "ENG-4", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-4", oldURL+"#comment-c1", "rename-moved")
-		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
-		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-4", otherURL, "rename-other")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-4", oldURL+"#comment-c1", "rename-moved")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-4", otherURL, "rename-other")
 
 		out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-4", "OPS-77", newURL)
 		if err != nil {
@@ -268,8 +292,17 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if moved.SourceID != "OPS-77" || moved.URL != newURL || moved.ExternalID != "uuid-4" {
 			t.Errorf("entity = %+v, want key and url moved, id kept", moved)
 		}
-		if moved.SnapshotJSON != before.SnapshotJSON || moved.PollSeq != before.PollSeq {
-			t.Errorf("rename moved the snapshot or poll_seq: before %+v after %+v", before, moved)
+		if moved.SnapshotJSON != before.SnapshotJSON {
+			t.Errorf("rename moved the snapshot: before %+v after %+v", before, moved)
+		}
+		// A rename is a new version of the row: a cycle that read it before
+		// must miss its snapshot CAS, and the renaming caller CASes on the
+		// version the outcome hands back.
+		if moved.PollSeq != before.PollSeq+1 || out.PollSeq != moved.PollSeq {
+			t.Errorf("poll_seq = %d (outcome %d), want %d: the rename bumps it once and returns it", moved.PollSeq, out.PollSeq, before.PollSeq+1)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-4","stale":true}`, before.PollSeq); err != nil || ok {
+			t.Errorf("a snapshot CAS on the version read before the rename = ok %v err %v, want a miss", ok, err)
 		}
 		if old, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "ENG-4"); old != nil {
 			t.Errorf("the old key still resolves: %+v", old)
@@ -316,7 +349,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-9", "uuid-9", "issue", "Café", oldURL); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		recordIdentityAction(t, s, orgID, seed.TeamID, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-9", "OPS-9", newURL); err != nil || !out.Renamed {
 			t.Fatalf("rename = %+v err=%v", out, err)
 		}
@@ -325,53 +358,238 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		}
 	})
 
-	t.Run("RekeyOrMergeSystem_merges_only_into_an_active_holder", func(t *testing.T) {
+	t.Run("RenameSystem_moves_jira_artifacts_keyed_on_the_site_and_issue_id", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		const site = "https://acme.atlassian.net"
+		const otherSite = "https://other.atlassian.net"
+		row, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", site, "ENG-5", "10005", "issue", "t", site+"/browse/ENG-5")
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		// The same key and id on another site: a different issue.
+		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", otherSite, "ENG-5", "10005", "issue", "t", otherSite+"/browse/ENG-5"); err != nil {
+			t.Fatalf("create the other site's ENG-5: %v", err)
+		}
+		issueArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, site, "10005", "ENG-5", "")
+		commentArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, site, "10005", "ENG-5", "20001")
+		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, otherSite, "10005", "ENG-5", "")
+		// An artifact keyed on the issue key names no site; it is left alone.
+		legacy, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
+			Target: "ENG-5", ExternalID: "ENG-5", State: domain.ArtifactStateIssueUpdated,
+			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, "ENG-5", ""),
+		})
+		if err != nil {
+			t.Fatalf("seed key-shaped artifact: %v", err)
+		}
+
+		out, err := s.Entities.RenameSystem(ctx, orgID, "jira", site, "10005", "OPS-9", site+"/browse/OPS-9")
+		if err != nil || !out.Renamed || out.EntityID != row.ID {
+			t.Fatalf("rename = %+v err=%v", out, err)
+		}
+		for _, c := range []struct{ id, wantTarget string }{
+			{issueArt, "OPS-9"},
+			{commentArt, "OPS-9"},
+			{otherArt, "ENG-5"},
+			{legacy.ID, "ENG-5"},
+		} {
+			got, err := s.Artifacts.Get(ctx, orgID, c.id)
+			if err != nil || got == nil {
+				t.Fatalf("artifact %s: %v", c.id, err)
+			}
+			if got.Target != c.wantTarget {
+				t.Errorf("artifact %s target = %q, want %q", got.DedupKey, got.Target, c.wantTarget)
+			}
+		}
+	})
+
+	t.Run("MergeDuplicateEntitiesSystem_folds_the_newer_row_into_the_older", func(t *testing.T) {
 		s, orgID, seed := mk(t)
 		const jiraScope = "https://jira.example.com"
-		create := func(key, title string) *domain.Entity {
-			t.Helper()
-			e, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, key, "", "issue", title, "")
-			if err != nil {
-				t.Fatalf("create %s: %v", key, err)
+		// The older row: the issue's first entity, closed under the key it
+		// had before an earlier move, with no id learned.
+		older, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "OLD-1", "", "issue", "Old title", jiraScope+"/browse/OLD-1")
+		if err != nil {
+			t.Fatalf("create older: %v", err)
+		}
+		olderTask := seed.Task(t, older.ID, "dup")
+		if _, err := s.Entities.MarkClosed(ctx, orgID, older.ID); err != nil {
+			t.Fatalf("close older: %v", err)
+		}
+		// The newer row: the same issue found again under its current key,
+		// active, carrying the id.
+		newer, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "NEW-1", "10001", "issue", "New title", jiraScope+"/browse/NEW-1")
+		if err != nil {
+			t.Fatalf("create newer: %v", err)
+		}
+		const snap = `{"id":"10001","key":"NEW-1"}`
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, newer.ID, snap, newer.PollSeq); err != nil || !ok {
+			t.Fatalf("seed newer snapshot: ok=%v err=%v", ok, err)
+		}
+		newer, _ = s.Entities.GetSystem(ctx, orgID, newer.ID)
+		dupTask := seed.Task(t, newer.ID, "dup")
+		soloTask := seed.Task(t, newer.ID, "solo")
+		third, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "THIRD-1", "10003", "issue", "Third", "")
+		if err != nil {
+			t.Fatalf("create third: %v", err)
+		}
+		seed.Link(t, newer.ID, third.ID)
+		seed.Link(t, newer.ID, older.ID)
+		shared := seed.Conversation(t, "merge-shared")
+		onlyNewer := seed.Conversation(t, "merge-newer")
+		for _, l := range []struct{ conv, entity, role string }{
+			{shared, older.ID, domain.MemoryRoleTouched},
+			{shared, newer.ID, domain.MemoryRolePrimary},
+			{onlyNewer, newer.ID, domain.MemoryRoleProduced},
+		} {
+			if err := s.TaskMemory.RecordEntityTouchSystem(ctx, orgID, l.conv, l.entity, l.role); err != nil {
+				t.Fatalf("seed memory link: %v", err)
 			}
-			return e
+		}
+		newerRefs := seed.Referents(t, newer.ID)
+		// The survivor stops answering to OLD-1. What targets it on the
+		// issue's id moves onto NEW-1; another issue's artifact under the same
+		// key stays.
+		movedArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10001", "OLD-1", "")
+		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10009", "OLD-1", "")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
+
+		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
+		if err != nil || survivor != older.ID {
+			t.Fatalf("merge = (%s, %v), want the older row %s to survive", survivor, err, older.ID)
+		}
+		if gone, _ := s.Entities.GetSystem(ctx, orgID, newer.ID); gone != nil {
+			t.Fatalf("the newer row still exists: %+v", gone)
 		}
 
-		// A closed row under the new key: the moving entity takes the key in
-		// place, and the closed row keeps its own history.
-		closed := create("OPS-9", "Old OPS-9")
-		if _, err := s.Entities.MarkClosed(ctx, orgID, closed.ID); err != nil {
-			t.Fatalf("close: %v", err)
+		got, _ := s.Entities.GetSystem(ctx, orgID, older.ID)
+		if got.State != "active" || got.ClosedAt != nil || got.SourceID != "NEW-1" || got.URL != jiraScope+"/browse/NEW-1" ||
+			got.ExternalID != "10001" || got.SnapshotJSON == "" || got.Title != "New title" {
+			t.Errorf("survivor = %+v, want the newer row's live state and id on the older row", got)
 		}
-		moving := create("ENG-5", "Moving")
-		taskID := seed.Task(t, moving.ID, "rekey")
-		survivor, merged, err := s.Entities.RekeyOrMergeSystem(ctx, orgID, moving.ID, "OPS-9")
-		if err != nil || merged || survivor != moving.ID {
-			t.Fatalf("rekey beside a closed holder = (%s, merged=%v, %v), want %s rekeyed in place", survivor, merged, err, moving.ID)
+		if got.PollSeq <= newer.PollSeq || got.PollSeq <= older.PollSeq {
+			t.Errorf("survivor poll_seq = %d, want it past both rows' (%d, %d)", got.PollSeq, older.PollSeq, newer.PollSeq)
 		}
-		if got, _ := s.Entities.GetSystem(ctx, orgID, moving.ID); got == nil || got.SourceID != "OPS-9" || got.State != "active" {
-			t.Errorf("moving entity = %+v, want active under OPS-9", got)
+		if byKey, _ := s.Entities.GetBySourceSystem(ctx, orgID, "jira", jiraScope, "NEW-1"); byKey == nil || byKey.ID != older.ID {
+			t.Errorf("NEW-1 resolves to %+v, want the survivor", byKey)
 		}
-		if got, _ := s.Entities.GetSystem(ctx, orgID, closed.ID); got == nil || got.State != "closed" || got.Title != "Old OPS-9" {
-			t.Errorf("closed holder = %+v, want it untouched", got)
+		for _, c := range []struct{ id, wantTarget string }{{movedArt, "NEW-1"}, {otherArt, "OLD-1"}} {
+			if a, err := s.Artifacts.Get(ctx, orgID, c.id); err != nil || a == nil || a.Target != c.wantTarget {
+				t.Errorf("artifact %s = %+v err=%v, want target %q", c.id, a, err, c.wantTarget)
+			}
 		}
-		if task, err := s.Tasks.GetSystem(ctx, orgID, taskID); err != nil || task == nil || task.EntityID != moving.ID {
-			t.Errorf("task = %+v err=%v, want it still on the moving entity", task, err)
-		}
-		if got, _ := s.Entities.GetBySourceSystem(ctx, orgID, "jira", jiraScope, "OPS-9"); got == nil || got.ID != moving.ID {
-			t.Errorf("OPS-9 resolves to %+v, want the active row", got)
+		if _, cur := seed.RawActionURL(t, "merge-moved"); cur != jiraScope+"/browse/NEW-1" {
+			t.Errorf("action current_url = %q, want the survivor's link", cur)
 		}
 
-		// An active row under the new key is the same object found again under
-		// it: the moving entity merges into it.
-		holder := create("OPS-10", "Duplicate")
-		loser := create("ENG-6", "Moving again")
-		survivor, merged, err = s.Entities.RekeyOrMergeSystem(ctx, orgID, loser.ID, "OPS-10")
-		if err != nil || !merged || survivor != holder.ID {
-			t.Fatalf("rekey onto an active holder = (%s, merged=%v, %v), want a merge into %s", survivor, merged, err, holder.ID)
+		for _, c := range []struct {
+			id, wantStatus, wantReason string
+		}{
+			{olderTask, "queued", ""},
+			{dupTask, "dismissed", db.DuplicateEntityMergedCloseReason},
+			{soloTask, "queued", ""},
+		} {
+			task, err := s.Tasks.GetSystem(ctx, orgID, c.id)
+			if err != nil || task == nil {
+				t.Fatalf("task %s: %v", c.id, err)
+			}
+			if task.EntityID != older.ID || task.Status != c.wantStatus || task.CloseReason != c.wantReason {
+				t.Errorf("task %s = entity %s status %q reason %q, want on the survivor, %q, %q",
+					c.id, task.EntityID, task.Status, task.CloseReason, c.wantStatus, c.wantReason)
+			}
 		}
-		if got, _ := s.Entities.GetSystem(ctx, orgID, loser.ID); got != nil {
-			t.Errorf("merged-away entity still exists: %+v", got)
+
+		refs := seed.Referents(t, older.ID)
+		if refs.Rows["tasks"] != 3 || refs.Rows["events"] < newerRefs.Rows["events"]+1 {
+			t.Errorf("survivor referents = %v, want every task and event of both rows", refs.Rows)
+		}
+		if refs.Rows["entity_links"] != 1 {
+			t.Errorf("survivor entity_links = %d, want the link to the third row only (the self-link dropped)", refs.Rows["entity_links"])
+		}
+		if refs.MemoryRoles[shared] != domain.MemoryRolePrimary || refs.MemoryRoles[onlyNewer] != domain.MemoryRoleProduced {
+			t.Errorf("survivor memory roles = %v, want the stronger role of each conversation", refs.MemoryRoles)
+		}
+		for table, n := range seed.Referents(t, newer.ID).Rows {
+			if n != 0 {
+				t.Errorf("%d %s rows still name the merged-away row", n, table)
+			}
+		}
+	})
+
+	t.Run("MergeDuplicateEntitiesSystem_keeps_an_active_survivor_when_the_newer_row_is_closed", func(t *testing.T) {
+		s, orgID, seed := mk(t)
+		const jiraScope = "https://jira.example.com"
+		older, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "OLD-2", "", "issue", "Older", jiraScope+"/browse/OLD-2")
+		if err != nil {
+			t.Fatalf("create older: %v", err)
+		}
+		newer, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "NEW-2", "10002", "issue", "Newer", jiraScope+"/browse/NEW-2")
+		if err != nil {
+			t.Fatalf("create newer: %v", err)
+		}
+		if _, err := s.Entities.MarkClosed(ctx, orgID, newer.ID); err != nil {
+			t.Fatalf("close newer: %v", err)
+		}
+		// The survivor keeps OLD-2, so what targets the closed row's NEW-2
+		// moves onto it.
+		art := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10002", "NEW-2", "")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
+
+		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
+		if err != nil || survivor != older.ID {
+			t.Fatalf("merge = (%s, %v), want %s", survivor, err, older.ID)
+		}
+		got, _ := s.Entities.GetSystem(ctx, orgID, older.ID)
+		if got.State != "active" || got.SourceID != "OLD-2" || got.Title != "Older" || got.ExternalID != "10002" {
+			t.Errorf("survivor = %+v, want its own state and key, with the newer row's id", got)
+		}
+		// The merge is a new version of the row even when the survivor keeps
+		// its own live state.
+		if got.PollSeq != older.PollSeq+1 {
+			t.Errorf("survivor poll_seq = %d, want %d", got.PollSeq, older.PollSeq+1)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, older.ID, `{"key":"OLD-2"}`, older.PollSeq); err != nil || ok {
+			t.Errorf("a snapshot CAS on the version read before the merge = ok %v err %v, want a miss", ok, err)
+		}
+		if a, err := s.Artifacts.Get(ctx, orgID, art); err != nil || a == nil || a.Target != "OLD-2" {
+			t.Errorf("artifact = %+v err=%v, want target OLD-2", a, err)
+		}
+		if _, cur := seed.RawActionURL(t, "merge-closed"); cur != jiraScope+"/browse/OLD-2" {
+			t.Errorf("action current_url = %q, want the survivor's link", cur)
+		}
+	})
+
+	t.Run("MergeDuplicateEntitiesSystem_refuses_rows_that_are_not_one_object", func(t *testing.T) {
+		s, orgID, _ := mk(t)
+		const jiraScope = "https://jira.example.com"
+		a, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "A-1", "20001", "issue", "a", "")
+		if err != nil {
+			t.Fatalf("create a: %v", err)
+		}
+		b, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", jiraScope, "B-1", "20002", "issue", "b", "")
+		if err != nil {
+			t.Fatalf("create b: %v", err)
+		}
+		elsewhere, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "jira", "https://other.example.com", "C-1", "", "issue", "c", "")
+		if err != nil {
+			t.Fatalf("create elsewhere: %v", err)
+		}
+		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, b.ID); !errors.Is(err, db.ErrEntityIdentityAmbiguous) {
+			t.Errorf("merge of two ids: err=%v, want ErrEntityIdentityAmbiguous", err)
+		}
+		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, elsewhere.ID); err == nil {
+			t.Errorf("merge across scopes succeeded")
+		}
+		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, a.ID); err == nil {
+			t.Errorf("merge of a row with itself succeeded")
+		}
+		if _, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, a.ID, "00000000-0000-0000-0000-00000000dead"); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("merge with a missing row: err=%v, want sql.ErrNoRows", err)
+		}
+		for _, e := range []*domain.Entity{a, b, elsewhere} {
+			if got, _ := s.Entities.GetSystem(ctx, orgID, e.ID); got == nil || got.SourceID != e.SourceID || got.ExternalID != e.ExternalID {
+				t.Errorf("a refused merge changed %s: %+v", e.ID, got)
+			}
 		}
 	})
 
@@ -383,8 +601,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-5", "OPS-5", ""); err != nil || !out.Renamed {
 			t.Fatalf("first rename = %+v err=%v", out, err)
 		}
+		renamed, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "OPS-5")
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-5", "OPS-5", ""); err != nil || out.Renamed {
 			t.Errorf("second rename = %+v err=%v, want a no-op", out, err)
+		}
+		if again, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "OPS-5"); again == nil || again.PollSeq != renamed.PollSeq {
+			t.Errorf("a no-op rename moved poll_seq: %+v, want %d", again, renamed.PollSeq)
 		}
 		for _, tc := range []struct{ name, scope, id string }{
 			{"no id", scope, ""},
@@ -462,6 +684,22 @@ func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, issu
 	return a.ID
 }
 
+// upsertJiraIdentityArtifact records a Jira artifact the way
+// domain.ArtifactDedupKey says to key one: on the issue's site and id, with the
+// key as its target.
+func upsertJiraIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, site, issueID, key, anchor string) string {
+	t.Helper()
+	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
+		TeamID: teamID, Provider: domain.ArtifactProviderJira, Kind: kind,
+		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
+		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, kind, domain.JiraIssueResource(site, issueID), anchor),
+	})
+	if err != nil {
+		t.Fatalf("seed jira %s artifact on %s: %v", kind, key, err)
+	}
+	return a.ID
+}
+
 func identityArtifactState(kind string) string {
 	if kind == domain.ArtifactKindComment {
 		return domain.ArtifactStateCommentPosted
@@ -469,10 +707,10 @@ func identityArtifactState(kind string) string {
 	return domain.ArtifactStateIssueUpdated
 }
 
-func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, key, url, dedupKey string) {
+func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, key, url, dedupKey string) {
 	t.Helper()
 	if err := s.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
-		TeamID: teamID, Provider: domain.ArtifactProviderLinear, Action: domain.ActionIssueCommentPosted,
+		TeamID: teamID, Provider: provider, Action: domain.ActionIssueCommentPosted,
 		Target: key, URL: url, Credential: domain.CredentialNone, DedupKey: dedupKey,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)

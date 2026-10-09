@@ -35,15 +35,19 @@ var attachLog = logging.Component("memoryentities")
 // The primary attach is unconditional even though the upsert is not — the join
 // row is what a later memory write on this conversation becomes reachable
 // through, and writing it costs nothing when there is no memory yet. On the
-// produced side, FindOrCreate (not lookup-only) is deliberate: a PR the agent
-// just opened may not have been polled yet, so the attach mints the
+// produced side, resolve-or-create (not lookup-only) is deliberate: a PR the
+// agent just opened may not have been polled yet, so the attach mints the
 // create-minimal stub the poller/enrichment path later fills (the artifact URL
 // links it out). A repo-level artifact target (a branch push, or owner/repo
 // with no '#N') maps to no entity and is skipped.
 //
 // A produced entity is keyed under its source's current scope in the org
 // (entityscope.Of); an artifact whose source has no scope there, because it is
-// not configured, attaches nothing.
+// not configured, attaches nothing. A Jira artifact resolves through the issue
+// id its dedup key records (domain.ArtifactEntityIdentity), and attaches
+// nothing when the key names no id — it was recorded before Jira artifacts were
+// keyed on one — or names another site than the org's current one. Its target
+// can be older than the entity's key, so the entity is never renamed from it.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -72,20 +76,22 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 		return
 	}
 	for _, a := range arts {
-		source, sourceID, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target)
+		keyScope, externalID, _ := domain.ArtifactEntityIdentity(a.Provider, a.DedupKey)
+		ref, kind, ok := domain.EntityRefForExternal(a.Provider, a.Target, externalID)
 		if !ok {
 			continue
 		}
-		scope, err := entityscope.Of(ctx, stores, orgID, source)
+		scope, err := entityscope.Of(ctx, stores, orgID, ref.Source)
 		if err != nil {
 			attachLog.Warn("resolve produced entity scope for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
 			continue
 		}
-		if scope == "" {
+		if scope == "" || (keyScope != "" && keyScope != scope) {
 			continue
 		}
-		ent, _, err := entities.FindOrCreateSystem(ctx, orgID, source, scope, sourceID, "", kind, "", a.URL)
+		ref.Scope = scope
+		ent, err := entityscope.Resolve(ctx, entities, orgID, ref, kind, a.URL, false)
 		if err != nil || ent == nil {
 			attachLog.Warn("resolve produced entity for conversation memory failed",
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)

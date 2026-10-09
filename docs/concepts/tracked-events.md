@@ -8,7 +8,7 @@ The tracker runs on a configurable poll interval (default: 5 minutes). Each cycl
 
 1. **Discover** — search queries find new items to track
 2. **Register** — new items are stored in `tracked_items` with an initial snapshot
-3. **Refresh** — all tracked items are batch-fetched (GitHub via GraphQL `nodes(ids:[...])`, Jira via `key IN (...)` JQL, Linear via GraphQL `issues` filtered by id, 50 at a time)
+3. **Refresh** — all tracked items are batch-fetched (GitHub via GraphQL `nodes(ids:[...])`, Jira via `id IN (...)` JQL — `key IN (...)` for an issue whose id TF has not learned yet — and Linear via GraphQL `issues` filtered by id, 50 at a time)
 4. **Diff** — current snapshot is compared against the previous snapshot
 5. **Emit** — typed events are recorded in the `events` table and published to the event bus
 
@@ -54,8 +54,9 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 |-------|----|---------|
 | **Status Changed** | `jira:issue:status_changed` | The `status` field changes (e.g. To Do → In Progress) |
 | **Issue Completed** | `jira:issue:completed` | The `status` changes to Done, Closed, or Resolved |
-| **Issue Unreachable** | `jira:issue:unreachable` | Jira will no longer resolve a tracked issue's key — see below |
+| **Issue Unreachable** | `jira:issue:unreachable` | TF will no longer follow a tracked issue — see below |
 | **Issue Body Updated** | `jira:issue:body_updated` | The complete issue description changes, including clearing it |
+| **Key Changed** | `jira:issue:key_changed` | The issue answers under a new key: it moved to another project, or its project's key was renamed — see below |
 
 #### Body updates
 
@@ -85,31 +86,113 @@ The preview remains a best-effort display/scoring mirror and can lag the event.
 A consumer needing full, revision-consistent content must obtain that body and
 check its fingerprint rather than treat the preview as a complete document.
 
+#### Identity
+
+An issue's key (`ENG-123`) is a display key: moving the issue to another
+project gives it a new one, and renaming a project's key changes every key in
+the project. Its numeric id never changes. So a Jira entity's `source_id` is
+the key — what everything displays, searches and calls Jira with — and its
+`external_id` is the id, which is what TF matches it on once it is known.
+Entities are keyed within a `scope`, the org's Jira site (its base URL),
+because ids and keys repeat across sites. Every Jira event's metadata carries
+`issue_key`, `issue_id` and `project` — the key's project, which is what the
+router's team gate reads.
+
+When a tracked issue answers under a new key, the entity is renamed in the
+same cycle: its `source_id` and `url`, and the target of every artifact
+recorded against it, move to the new key, and it keeps its tasks,
+conversations and memory. A Jira artifact is keyed on the issue's site and id,
+so its key does not move, and an artifact on another site's issue with the
+same id is a different row that the rename does not touch. An agent's write or
+read naming an old key is answered by Jira under the issue's current key, so
+it records against the issue's existing entity — renaming it, if TF had not
+seen the move yet — and never creates a second one.
+
+The refresh emits `key_changed` first, ahead of anything else it found (a move
+to another project usually changes the issue's status too), in the same commit
+as the new snapshot. Its metadata carries the usual identity fields for the
+issue as it is now (`issue_key`, `issue_id`, `project`, `assignee`,
+`assignee_account_id`, `issue_type`, `summary`) plus `old_issue_key` and
+`old_project`, and predicates can filter it on `project` and `old_project`. It
+is always the difference from the stored snapshot, so an entity with no
+snapshot (one a source pause cleared) is renamed without it, the way it is
+seeded without every other event. It is the one Jira event the team gate
+passes for a team that tracks either the issue's current project or the one
+it left, so a team still hears about an issue that moved to a project it does
+not track. Its tasks stay on the entity after such a move, and every later
+event goes only to the teams tracking the issue's new project.
+
+A move is told from a project key rename by the project's id, which a rename
+keeps: a key rename renames every entity in the project and retires none of
+them, even while the teams' rules still name the old key. If no rule
+configures the project an issue moved to, TF has nothing to follow it with:
+the entity is renamed, `key_changed` is emitted, and it retires as
+`unreachable` with reason `moved`. That event names the project the issue
+left, which is the project whose teams were tracking it.
+
+A closed issue that reopens is matched by its id too, so it reactivates its
+original entity even after a move. The cycle that reactivates it renames it
+and still emits `key_changed`, naming the key it was closed under.
+
+A project deleted and recreated under the same key gives new issues the keys
+of old ones. A new issue is skipped while the entity of the old issue that
+held its key is still active, and gets an entity of its own once that one is
+confirmed gone and retires; it never inherits the old issue's history.
+
+An entity created before TF recorded Jira issue ids (every Jira entity of an
+install upgraded from a version without them) carries no `external_id`, and
+learns it from the first response that names its issue:
+
+- An active entity is refreshed by key once, and takes the id from the answer.
+  One whose issue moved before it learned its id gets no answer by key; it is
+  asked about directly on its first miss, by key, and Jira's answer — under
+  the issue's current key — gives it its id and renames it.
+- A closed entity learns its id when discovery finds its issue under the key
+  it was closed under. A closed entity whose issue moved before it learned its
+  id is not reconnected: the issue's later activity gets an entity of its own,
+  and the closed one keeps the history it already had.
+- An issue left under two entities by a move nothing followed — one under the
+  old key, one created under the new — is merged when the second one learns
+  the id: the older entity survives, takes the newer one's live state, key and
+  tasks, and of two active tasks for the same situation the newer entity's is
+  dismissed.
+
 #### Issue Unreachable
 
 The one Jira event that doesn't come from the snapshot-diff, because there is no
-new snapshot to diff: it reports that its own subject can no longer be read. Like
-the terminal GitHub events it closes the entity and every task on it, so what it
-takes to emit one is deliberately strict.
+new snapshot to diff: it reports that TF will no longer follow its own subject.
+Like the terminal GitHub events it closes the entity and every task on it, so
+what it takes to emit one is deliberately strict. Its `reason` says why:
 
-**It does not mean the issue was definitely deleted.** Jira answers a request for
-an issue you can't see exactly the way it answers one for an issue that doesn't
-exist — a 404, deliberately, so that existence isn't disclosed. Deletion is the
-usual cause, but a permission-scheme change, a project move, or a
-narrowed/rotated credential produce the identical answer, and nothing on our side
-can tell them apart. The event is named for what was observed rather than what
-probably happened. If one shows up for an issue you can still see in the browser,
-check the credential's access before concluding anything was deleted.
+- `not_found`: Jira will not resolve the issue, asked about directly.
+- `moved`: the issue moved to a project no rule configures (see Identity
+  above).
+- `scope_changed`: the org's Jira base URL now names another site — or the
+  same site under another URL. Every active issue from the previous site
+  retires at the start of the next cycle, without Jira being asked: ids and
+  keys repeat across sites, so nothing the new site answered would be about
+  these issues. The rows are not moved or reused — an issue on the new site
+  that happens to share an old key and id is a different issue and gets its
+  own entity — and pointing the org at the old site again finds them by id.
 
-Both causes leave the issue equally untrackable, which is why they share one
-event type instead of splitting on a discriminator nothing can actually read.
+**`not_found` does not mean the issue was definitely deleted.** Jira answers a
+request for an issue you can't see exactly the way it answers one for an issue
+that doesn't exist — a 404, deliberately, so that existence isn't disclosed.
+Deletion is the usual cause, but a permission-scheme change or a
+narrowed/rotated credential produce the identical answer, and nothing on our
+side can tell them apart. A move does not: Jira answers a request for a moved
+issue under its new key, which TF follows. If a `not_found` shows up for an
+issue you can still see in the browser, check the credential's access before
+concluding anything was deleted.
 
 A tracked issue simply missing from a poll's search results is **not** enough to
 emit it. An issue can drop out of a search while still perfectly readable — an
-index that hasn't caught up, an archived issue or project, a key that moved — so
-absence only starts a clock. Once a key has gone unanswered for long enough, the
-poller asks Jira about that one issue directly, and emits this event **only** on
-a 404 from that request.
+index that hasn't caught up, an archived issue or project — so absence only
+starts a clock. Once an issue has gone unanswered for an hour, the poller asks
+Jira about that one issue directly, by id, and emits this event **only** on a
+404 from that request. An entity whose id TF has not learned yet is asked about
+by key on its first miss instead, since that is how it learns the id. At most
+20 issues are asked about per cycle; the rest wait for the next.
 
 The other outcomes deliberately change nothing. An issue that resolves but never
 appears in search results is logged as such and stays tracked — its entity is
@@ -117,9 +200,11 @@ being skipped by something other than unreachability, and closing it would
 destroy live work. A confirmation that fails for any other reason is not evidence
 either way, and is retried on a later cycle.
 
-Metadata is the entity's last-known state (assignee, project, issue type, last
-status, summary), since the source has nothing left to read. There is no
-`dedup_key` — a key can only stop resolving once.
+Metadata is the entity's last-known state (assignee, issue type, last status,
+summary), since the source has nothing left to read, with the issue's current
+key and id. Its `project` is the current key's, except on `moved`, where it is
+the project the issue left. There is no `dedup_key` — an issue stops being
+followed once.
 
 ## Linear Events
 
@@ -329,10 +414,19 @@ The tracker stores these fields for each PR and diffs them between cycles:
 
 ### Jira Issue Snapshot
 
-- `key`, `summary`, `url`
-- `status`, `assignee`, `priority`
+The entity itself carries `source_id` (the key), `external_id` (the issue id,
+which it is matched on once known) and `scope` (the org's Jira site).
+
+- `id` (issue id), `key` (the entity's `source_id`), `project_id`, `summary`, `url`
+- `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
+- `status`, `status_id` — compared by id
+- `assignee` (display name), `assignee_account_id`, `priority`
 - `labels[]`, `issue_type`, `parent_key`
-- `comment_count`
+- `comment_count`, `open_subtask_count` — subtasks not in a configured done status
+- `created_at`, `updated_at`
+
+`id` and `project_id` are empty on a snapshot stored before they were recorded,
+until its next refresh.
 
 ### Linear Issue Snapshot
 

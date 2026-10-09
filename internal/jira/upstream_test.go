@@ -82,7 +82,7 @@ func epicServer(t *testing.T, rejectBody string) (*httptest.Server, *[]string) {
 			return
 		}
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"key":"SKY-2"}`))
+			_, _ = w.Write([]byte(`{"id":"10002","key":"SKY-2"}`))
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -118,12 +118,12 @@ func TestSetParent_EpicFallbackReadsBody(t *testing.T) {
 func TestCreateIssue_EpicFallbackReadsBody(t *testing.T) {
 	srv, payloads := epicServer(t, `{"errorMessages":["gh.epic.error.not.supported"],"errors":{}}`)
 
-	key, err := testClient(srv.URL).CreateIssue(context.Background(), "SKY", "Story", "s", "", "SKY-9", "")
+	created, err := testClient(srv.URL).CreateIssue(context.Background(), "SKY", "Story", "s", "", "SKY-9", "")
 	if err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
-	if key != "SKY-2" || len(*payloads) != 2 {
-		t.Errorf("key = %q after %d writes, want SKY-2 after 2", key, len(*payloads))
+	if created.Key != "SKY-2" || created.ID != "10002" || len(*payloads) != 2 {
+		t.Errorf("created = %+v after %d writes, want SKY-2 (10002) after 2", created, len(*payloads))
 	}
 }
 

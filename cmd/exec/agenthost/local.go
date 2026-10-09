@@ -893,18 +893,14 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient
 		return nil, err
 	}
 	// The addressed issue is the touched entity — best-effort, relayed on the
-	// sidecar. URL is left empty; the poll cycle owns stub enrichment.
+	// sidecar. URL is left empty; the entity's link is built from its key.
 	//
-	// The key comes off the *response*, not the argument: Jira resolves a key
-	// case-insensitively and follows a moved issue's old key to its new one,
-	// so the response is the only place the issue's current canonical key is
-	// known. Falls back to the argument when the response carried none, which
-	// EntityRefForExternal folds anyway.
-	touched := issue.Key
-	if touched == "" {
-		touched = key
-	}
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, touched, "")
+	// The key and the id come off the *response*, not the argument: Jira
+	// resolves a key case-insensitively and follows a moved issue's old key to
+	// its new one, so the response is the only place the issue's current
+	// canonical key is known, and the id is what its entity is found by. An
+	// entity stored under an older key is renamed onto the one answered here.
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderJira, issue.Key, issue.ID, "")
 	return issue, nil
 }
 
@@ -919,7 +915,7 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	if err := client.TransitionTo(ctx, key, jiraclient.Status{Name: status}); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, jiraDetailsJSON(map[string]any{"status": status}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, jiraDetailsJSON(map[string]any{"status": status}))
 	return nil
 }
 
@@ -940,7 +936,7 @@ func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) erro
 	if err != nil {
 		return err
 	}
-	c.recordJiraComment(ctx, key, commentID, body)
+	c.recordJiraComment(ctx, client, key, commentID, body)
 	return nil
 }
 
@@ -952,7 +948,7 @@ func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
 	if err := client.AssignToSelf(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": "self"}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": "self"}))
 	return nil
 }
 
@@ -964,7 +960,7 @@ func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
 	if err := client.Unassign(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -973,12 +969,12 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	if err != nil {
 		return "", err
 	}
-	key, err := client.CreateIssue(ctx, project, issueType, summary, description, parentKey, priority)
+	created, err := client.CreateIssue(ctx, project, issueType, summary, description, parentKey, priority)
 	if err != nil {
 		return "", err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
-	return key, nil
+	c.recordJiraIssueRef(ctx, created, created.Key, domain.ActionIssueCreated, domain.ArtifactStateIssueCreated, "", "")
+	return created.Key, nil
 }
 
 func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error {
@@ -989,7 +985,7 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	if err := client.UpdateIssue(ctx, key, fields); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
 	return nil
 }
 
@@ -1001,7 +997,7 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	if err := client.SetParent(ctx, key, parentKey); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"parent": parentKey}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"parent": parentKey}))
 	return nil
 }
 
@@ -1037,7 +1033,7 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	if err := client.SetPriority(ctx, key, priority); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"priority": priority}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -1068,66 +1064,131 @@ func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([
 // the full write surface of `exec jira`, so an agent can't mutate an issue
 // without leaving an audit trail.
 
-// recordJiraIssue upserts the single deduped `issue` artifact for KEY. Every
-// issue mutation (create / transition / assign / unassign / update / set-parent
-// / set-priority) collapses onto one row keyed jira:issue:<KEY>; external_id
-// and url are the issue's stable coordinates, populated on every action so a
-// later one can fill a URL an earlier one couldn't compute (the store preserves
-// them on empty either way — see ArtifactStore.Upsert). state + details_json
-// carry the most recent action — by design the row tracks the last action, not
-// the first (domain.Artifact).
+// resolveJiraIssue reads which issue a verb that named key acted on: its id,
+// which is what its artifacts are keyed on and its entity is found by, and the
+// key it has now — Jira follows a moved issue's old key to its new one, so an
+// agent writing to an old key records against the issue's current key and its
+// existing entity. Read after the write, on the same credential, so a failure
+// here is rare and costs only the artifact: the zero ref it then returns makes
+// the caller record the action alone.
+func (c *LocalClient) resolveJiraIssue(ctx context.Context, client *jiraclient.Client, key string) jiraclient.IssueRef {
+	ref, err := client.GetIssueRef(ctx, key)
+	if err != nil || ref.ID == "" || ref.Key == "" {
+		agenthostLog.Warn("could not read back the jira issue a write named; recording the action without an artifact",
+			"conversation", c.info.ConversationID, "issue", key, "error", err)
+		return jiraclient.IssueRef{}
+	}
+	return ref
+}
+
+// jiraIssueResource is the dedup-key resource every artifact on the issue is
+// keyed under: the org's Jira site and the issue's id. "" when the site is
+// unreadable, which leaves the artifact nothing stable to key on.
+func (c *LocalClient) jiraIssueResource(ctx context.Context, issueID string) string {
+	site, _ := domain.JiraHost(c.jiraSiteBase(ctx))
+	return domain.JiraIssueResource(site, issueID)
+}
+
+// recordJiraIssue upserts the single deduped `issue` artifact for the issue
+// key names. Every issue mutation (create / transition / assign / unassign /
+// update / set-parent / set-priority) collapses onto one row keyed on the
+// issue's site and id (domain.JiraIssueResource), never its key: the key
+// changes when the issue moves or its project's key is renamed, and the id
+// repeats across sites. target is the issue's current key and url its link,
+// both of which an entity rename moves; external_id is the issue id. The store
+// preserves target/url on empty either way — see ArtifactStore.Upsert. state +
+// details_json carry the most recent action — by design the row tracks the
+// last action, not the first (domain.Artifact).
 // action is the audit discriminator (issue_created / issue_transitioned /
 // issue_assigned / issue_updated) — finer-grained than the artifact's
 // created/updated state, which can't distinguish a transition from an assign from
 // a field edit. toState carries a transition's target status (the Jira status the
 // agent moved the ticket to), empty otherwise; the agent's exec transition can't
 // cheaply know the prior status, so no from-state is recorded.
-func (c *LocalClient) recordJiraIssue(ctx context.Context, key, action, state, toState, detailsJSON string) {
-	// Folded before it reaches target/external_id/dedup_key: the artifact row
-	// is deduped on the key, so two spellings of one issue would otherwise
-	// upsert into two rows describing the same object — and the produced-entity
-	// attach resolves its entity from this target.
-	key = domain.NormalizeJiraKey(key)
-	if key == "" {
+func (c *LocalClient) recordJiraIssue(ctx context.Context, client *jiraclient.Client, key, action, state, toState, detailsJSON string) {
+	c.recordJiraIssueRef(ctx, c.resolveJiraIssue(ctx, client, key), key, action, state, toState, detailsJSON)
+}
+
+// recordJiraIssueRef is recordJiraIssue for an issue whose id and current key
+// are already known (ref), as a create's response gives them. A zero ref — the
+// read-back failed — records the action alone, against the key the verb named:
+// an artifact keyed on the key could not be found again once the issue moved.
+func (c *LocalClient) recordJiraIssueRef(ctx context.Context, ref jiraclient.IssueRef, named, action, state, toState, detailsJSON string) {
+	resource := ""
+	if ref.ID != "" {
+		resource = c.jiraIssueResource(ctx, ref.ID)
+	}
+	if resource == "" {
+		// Folded before it reaches the audit row's target, like every Jira key
+		// TF stores. See NormalizeJiraKey.
+		named = domain.NormalizeJiraKey(named)
+		if named == "" {
+			return
+		}
+		c.upsertJiraArtifact(ctx, nil, &domain.ExternalAction{
+			Provider: domain.ArtifactProviderJira, Action: action, Target: named,
+			URL: c.jiraBrowseURL(ctx, named), ToState: toState,
+			Credential: domain.CredentialJiraOrg, DetailJSON: detailsJSON,
+		})
 		return
 	}
+	key := domain.NormalizeJiraKey(ref.Key)
 	a := domain.Artifact{
 		Kind:        domain.ArtifactKindIssue,
 		Target:      key,
-		ExternalID:  key,
+		ExternalID:  ref.ID,
 		URL:         c.jiraBrowseURL(ctx, key),
 		State:       state,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, key, ""),
+		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, resource, ""),
 		DetailsJSON: detailsJSON,
 	}
-	c.upsertJiraArtifact(ctx, a, jiraAction(a, action, "", toState))
+	c.upsertJiraArtifact(ctx, &a, jiraAction(a, action, "", toState))
 }
 
-// recordJiraComment upserts a `comment` artifact keyed jira:comment:<id>. A
-// missing comment id (the POST landed but its body didn't parse) means there's
-// no stable key to dedup on, so recording is skipped — the comment still
-// posted; only its audit row is best-effort dropped. The skip is logged at
-// debug so a future Jira response-shape change surfaces as missing rows with a
-// breadcrumb, not silently.
-func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, body string) {
-	// Deduped on the comment id, so the key only rides along as the target —
-	// but that target is what the produced-entity attach resolves against.
-	key = domain.NormalizeJiraKey(key)
+// recordJiraComment upserts a `comment` artifact keyed on the issue's site and
+// id with the comment's id as its anchor (jira:comment:<site/issue id>:<comment
+// id>), so an entity rename moves its target with the issue's other artifacts.
+// A missing comment id (the POST landed but its body didn't parse) means
+// there's no stable key to dedup on, so recording is skipped — the comment
+// still posted; only its audit row is best-effort dropped. The skip is logged
+// at debug so a future Jira response-shape change surfaces as missing rows with
+// a breadcrumb, not silently. An issue whose id cannot be read back records
+// the action alone, as recordJiraIssueRef does.
+func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.Client, key, commentID, body string) {
 	if commentID == "" {
 		agenthostLog.Debug("jira comment recorded without an id; skipping artifact",
 			"conversation", c.info.ConversationID, "issue", key)
 		return
 	}
+	detail := jiraDetailsJSON(map[string]any{"body": jiraBodySnippet(body)})
+	ref := c.resolveJiraIssue(ctx, client, key)
+	resource := ""
+	if ref.ID != "" {
+		resource = c.jiraIssueResource(ctx, ref.ID)
+	}
+	if resource == "" {
+		named := domain.NormalizeJiraKey(key)
+		c.upsertJiraArtifact(ctx, nil, &domain.ExternalAction{
+			Provider: domain.ArtifactProviderJira, Action: domain.ActionIssueCommentPosted, Target: named,
+			ExternalID: commentID, URL: c.jiraCommentURL(ctx, named, commentID),
+			Credential: domain.CredentialJiraOrg, DetailJSON: detail,
+		})
+		return
+	}
+	// Deduped on the issue and the comment id, so the key only rides along as
+	// the target — but that target is what the produced-entity attach and the
+	// touch resolve against.
+	current := domain.NormalizeJiraKey(ref.Key)
 	a := domain.Artifact{
 		Kind:        domain.ArtifactKindComment,
-		Target:      key,
+		Target:      current,
 		ExternalID:  commentID,
-		URL:         c.jiraCommentURL(ctx, key, commentID),
+		URL:         c.jiraCommentURL(ctx, current, commentID),
 		State:       domain.ArtifactStateCommentPosted,
-		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, commentID, ""),
-		DetailsJSON: jiraDetailsJSON(map[string]any{"body": jiraBodySnippet(body)}),
+		DedupKey:    domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment, resource, commentID),
+		DetailsJSON: detail,
 	}
-	c.upsertJiraArtifact(ctx, a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""))
+	c.upsertJiraArtifact(ctx, &a, jiraAction(a, domain.ActionIssueCommentPosted, "", ""))
 }
 
 // upsertJiraArtifact stamps the provider onto a and writes it best-effort via
@@ -1135,10 +1196,12 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, key, commentID, bod
 // failure is logged and swallowed so it never fails the agent's already-
 // applied Jira action. act is the external-action audit row appended in the
 // SAME write as the artifact (TFAC-483), under the org Jira service-account
-// credential. See upsertGithubArtifact.
-func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
-	a.Provider = domain.ArtifactProviderJira
-	c.rt.Record(ctx, &a, act)
+// credential. A nil a records the action alone. See upsertGithubArtifact.
+func (c *LocalClient) upsertJiraArtifact(ctx context.Context, a *domain.Artifact, act *domain.ExternalAction) {
+	if a != nil {
+		a.Provider = domain.ArtifactProviderJira
+	}
+	c.rt.Record(ctx, a, act)
 }
 
 // jiraSiteBase returns the org's configured Jira site URL, trailing slash
@@ -1537,7 +1600,7 @@ func (c *LocalClient) GithubGetReviewDetail(ctx context.Context, owner, repo str
 // actions download-logs) never call this — the rule is addressed → touch,
 // returned-in-a-set → never.
 func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number int) {
-	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "")
+	c.rt.RecordReadTouch(ctx, domain.ArtifactProviderGitHub, domain.PullRequestTarget(owner+"/"+repo, number), "", "")
 }
 
 // RecordReadTouch is the Client-interface escape hatch for an addressed read
@@ -1545,8 +1608,11 @@ func (c *LocalClient) touchPR(ctx context.Context, owner, repo string, number in
 // the PR number is a CLI positional the ghAPI seam doesn't carry). It routes to
 // the same best-effort runtime touch the in-method reads use, so the sidecar
 // relay and the local write behave identically.
+//
+// No provider id crosses this door, so a Jira coordinate through it touches
+// nothing: a Jira read records its own touch from the response it read.
 func (c *LocalClient) RecordReadTouch(ctx context.Context, provider, target, url string) {
-	c.rt.RecordReadTouch(ctx, provider, target, url)
+	c.rt.RecordReadTouch(ctx, provider, target, "", url)
 }
 
 // memoryLoadSources is the set of entity source values `memory load` accepts —
@@ -1565,11 +1631,31 @@ var memoryLoadSources = map[string]bool{
 // where this LocalClient holds no stores). Validation lives here — not just in
 // the CLI — so every caller of the Client seam gets the same guard, and an
 // invalid source fails fast without a relay round-trip.
+//
+// A Jira key the store has no row for may be one the issue left: it moved, or
+// its project's key was renamed. Jira follows an old key to the issue, so the
+// miss is resolved through it, and the entity is looked up by the issue's id.
 func (c *LocalClient) MemoryLoad(ctx context.Context, source, sourceID string, limit int) (*MemoryLoadResult, error) {
 	if !memoryLoadSources[source] {
 		return nil, fmt.Errorf("invalid source %q: expected one of github, jira, slack", source)
 	}
-	return c.rt.MemoryLoad(ctx, source, sourceID, limit)
+	res, err := c.rt.MemoryLoad(ctx, source, sourceID, "", limit)
+	if err != nil || res == nil || res.EntityID != "" || source != domain.ArtifactProviderJira {
+		return res, err
+	}
+	client, err := c.jiraSystemClient(ctx)
+	if err != nil {
+		return res, nil
+	}
+	ref, err := client.GetIssueRef(ctx, sourceID)
+	if err != nil || ref.ID == "" {
+		if err != nil && !jiraclient.IsNotFound(err) {
+			agenthostLog.Warn("memory load: resolving a jira key through jira failed; answering the miss",
+				"conversation", c.info.ConversationID, "issue", sourceID, "error", err)
+		}
+		return res, nil
+	}
+	return c.rt.MemoryLoad(ctx, source, domain.NormalizeJiraKey(ref.Key), ref.ID, limit)
 }
 
 // GithubDismissReview clears a SUBMITTED review's approval or change-request

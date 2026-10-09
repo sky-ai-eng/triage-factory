@@ -21,7 +21,7 @@ import (
 // neighbour in exactly the two dimensions these tests vary.
 func jiraIssuePage(status, updated string) string {
 	return `{"issues":[
-		{"key":"SKY-1","fields":{
+		{"id":"10001","key":"SKY-1","fields":{
 			"summary":"Stale-read subject","status":{"name":"` + status + `"},
 			"assignee":{"displayName":"Alice","accountId":"acc-1"},
 			"created":"2026-06-01T00:00:00.000+0000","updated":"` + updated + `"

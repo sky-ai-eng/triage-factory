@@ -226,13 +226,26 @@ func DedupCheckRunsByName(runs []CheckRun) []CheckRun {
 // per-action events. Keep it small — large bulk text (issue descriptions,
 // PR bodies) lives on entities.description instead so diff reads don't
 // drag it through every refresh cycle.
+//
+// The entity's source_id is the issue key and its external_id is ID, which is
+// what the entity is matched on: a project move or a project key rename
+// changes the key and leaves the id alone, and the entity is renamed to
+// follow it. ID repeats the external id so a stored snapshot is
+// self-describing.
 type JiraSnapshot struct {
 	// BodyHash covers the full description, including ADF links/formatting.
 	// Empty means unknown rather than an explicitly cleared description.
 	BodyHash string `json:"body_hash,omitempty"`
-	Key      string `json:"key"`
-	Summary  string `json:"summary"`
-	Status   string `json:"status"`
+	// ID is Jira's numeric issue id. Empty on snapshots captured before it was
+	// recorded.
+	ID  string `json:"id,omitempty"`
+	Key string `json:"key"`
+	// ProjectID is the id of the project the issue is in. A project key rename
+	// changes the key's prefix and leaves this alone, so it is what tells a
+	// rename from a move. Empty on snapshots captured before it was recorded.
+	ProjectID string `json:"project_id,omitempty"`
+	Summary   string `json:"summary"`
+	Status    string `json:"status"`
 	// StatusID is Jira's identifier for the status Status names. It is the
 	// stable half of the pair: a workflow status can be renamed, and matching
 	// on the id is what keeps rule membership and change detection right when

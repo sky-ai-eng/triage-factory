@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -98,8 +99,8 @@ import (
 // CloseWithSnapshotCASSystem and StampOwningTeamIfUnsetSystem (compare-and-
 // swap guards whose bool already answers whether the write landed),
 // CloseTerminalSystem (a composition across entities and tasks that answers
-// with what it closed), and RekeyOrMergeSystem (a composition across tables
-// that answers with the surviving id). FindOrCreate / FindOrCreateSystem
+// with what it closed), and MergeDuplicateEntitiesSystem (a composition across
+// tables that answers with the surviving id). FindOrCreate / FindOrCreateSystem
 // already return the row, StampExternalIDSystem returns the row it stamped,
 // and RenameSystem is a composition across entities, artifacts and the audit
 // ledger that answers with what it moved.
@@ -113,8 +114,9 @@ var (
 	// the key a create or a rename would give a different object. A provider
 	// cannot serve two live objects under one key, so the holder is an object
 	// TF has not yet seen move or go away — a Linear team key freed and reused
-	// before the old holder's rename was observed, for one. It clears once the
-	// holder is renamed or retired.
+	// before the old holder's rename was observed, or a Jira project deleted
+	// and recreated under its key while the old issues' entities are still
+	// active. It clears once the holder is renamed or retired.
 	ErrEntityKeyOccupied = errors.New("an active entity in this scope already holds the key")
 
 	// ErrEntityIdentityAmbiguous means more than one row carries the provider
@@ -325,18 +327,19 @@ type EntityStore interface {
 	//
 	//   - entities.source_id, and entities.url when newURL is non-empty;
 	//   - the target of the source's artifacts keyed on the entity's id
-	//     (provider = source, dedup resource segment = externalID; see
-	//     domain.ArtifactDedupKey). Their dedup key carries the id, so it
-	//     stays. An artifact keyed on the display key is left alone: the key
-	//     repeats across scopes, and the org-wide dedup key does not say
-	//     which scope's object a row is about.
-	//     TODO(TFAC-1061): Jira artifacts are keyed on the issue key
-	//     (jira:issue:<KEY>), so a Jira rename moves none of them.
+	//     (provider = source, dedup resource segment =
+	//     domain.EntityArtifactResource: the site and issue id for Jira, the
+	//     UUID for Linear; see domain.ArtifactDedupKey). Their dedup key
+	//     carries the id, so it stays. An artifact keyed on a display key — a
+	//     Jira artifact recorded before Jira artifacts were keyed on the issue
+	//     id — is left alone: the key repeats across scopes, and the org-wide
+	//     dedup key does not say which scope's object a row is about.
 	//   - external_actions.current_url, the audit ledger's maintained pointer,
 	//     for actions whose link resolves to the entity's old url. The record
 	//     of the act itself (target, url, detail) is never touched. A url
-	//     names its scope (a Linear url carries the workspace's url key), so
-	//     this match cannot reach another scope's actions.
+	//     names its scope (a Jira url carries the site, a Linear url the
+	//     workspace's url key), so this match cannot reach another scope's
+	//     actions.
 	//
 	// Detection happens here: a candidate that went stale between the
 	// caller's read and this call is a no-op. Every no-op is a nil error with
@@ -346,10 +349,14 @@ type EntityStore interface {
 	// than one row carries the id. Neither writes anything. An empty scope is
 	// ErrEntityScopeRequired.
 	//
-	// The snapshot, poll_seq and last_polled_at are left alone: the caller
-	// commits the fresh snapshot through its own CAS afterwards, on the
-	// poll_seq it read. System (admin-pool) only: the rewrite spans artifacts
-	// of every team in the org.
+	// poll_seq is bumped and returned (EntityRenameOutcome.PollSeq); the
+	// snapshot and last_polled_at are left alone. A rename is a new version of
+	// the row: a poll cycle that read the entity before it — under the old
+	// key, from a search the move had not reached — must not commit that read
+	// over it, and the bump is what makes its snapshot CAS miss. A caller that
+	// renames and then commits a fresh snapshot itself (the trackers) CASes on
+	// the returned value. System (admin-pool) only: the rewrite spans
+	// artifacts of every team in the org.
 	RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error)
 
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
@@ -562,20 +569,48 @@ type EntityStore interface {
 	// nothing else, and no caller looks at the answer.
 	MarkPolledSystem(ctx context.Context, orgID, id string) error
 
-	// RekeyOrMergeSystem follows an external object's changed natural key.
-	// When an ACTIVE row in the entity's own scope holds newSourceID, that row
-	// survives and every entity-id referent is moved to it. Otherwise the
-	// entity is re-keyed in place, beside any closed rows under the key. A
-	// closed holder is never merged into: it may be another object that held
-	// the key before it was freed and reused, and tasks moved onto a closed
-	// row would never close, since its close has already run and a closed row
-	// is not refreshed. The operation is atomic. Returns the surviving entity
-	// id and whether a merge occurred.
+	// MergeDuplicateEntitiesSystem folds two rows that turned out to be one
+	// external object into one. Its one caller is the Jira tracker's learning
+	// path: a row written before Jira issue ids were recorded learns its id and
+	// finds another row already carrying it — one issue left under two rows by
+	// a move nothing followed — which is the identity index refusing the stamp
+	// (ErrEntityIdentityAmbiguous from StampExternalIDSystem).
 	//
-	// Exempt from the returned-row rule: it is a composition, not a single-row
-	// write — the merge arm moves every referent across tables and deletes the
-	// loser, so which row survived is the outcome and that is what it returns.
-	RekeyOrMergeSystem(ctx context.Context, orgID, id, newSourceID string) (survivorID string, merged bool, err error)
+	// The older row survives (earliest created_at, ties broken by id): it is
+	// the one the issue's history accumulated on first. In one transaction:
+	//
+	//   - where both rows hold an active task with the same (event_type,
+	//     dedup_key), the newer row's is dismissed with close_reason
+	//     duplicate_entity_merged, and a blueprint still running under one of
+	//     its unsettled conversations is marked cancel_requested;
+	//   - the newer row's tasks, events, queue rows, pending firings, memory
+	//     links (at the stronger of the two roles) and entity links move onto
+	//     the survivor;
+	//   - the newer row is deleted;
+	//   - the survivor keeps its own external_id, owning team and commissioning
+	//     user, and takes the newer row's where it has none;
+	//   - when the newer row is active, the survivor takes its live state: the
+	//     active state, its key and url, snapshot, title, description and
+	//     last_polled_at, with poll_seq bumped past both rows'. Otherwise the
+	//     newer row's active tasks would land on a closed entity, whose close
+	//     has already run and which is never refreshed, so they would never
+	//     close; and the active row is the one the provider was still
+	//     answering for, under the key it has now;
+	//   - the survivor's poll_seq is bumped either way, so a cycle that read
+	//     either row before the merge misses its CAS;
+	//   - artifacts keyed on the pair's id that target the key the survivor
+	//     no longer answers to, and audit-ledger links under its url, move
+	//     onto the key and url it keeps (DuplicateEntityMergedKeys), as a
+	//     rename moves them.
+	//
+	// Refused, writing nothing: the two ids are the same, either row is
+	// missing (sql.ErrNoRows), the rows differ in source or scope, or both
+	// carry an external id and the two differ (ErrEntityIdentityAmbiguous —
+	// they are two objects). Returns the survivor's id.
+	//
+	// Exempt from the returned-row rule: a composition across tables, whose
+	// answer is which row survived.
+	MergeDuplicateEntitiesSystem(ctx context.Context, orgID, entityID, otherID string) (survivorID string, err error)
 
 	UpdateTitleSystem(ctx context.Context, orgID, id, title string) (domain.Entity, error)
 	UpdateDescriptionSystem(ctx context.Context, orgID, id, description string) (domain.Entity, error)
@@ -657,4 +692,46 @@ type EntityStore interface {
 	// neighbour: the funnel races the poller's mint of the same entity, first
 	// commit wins, and re-delivery of the same PR-open write is a no-op.
 	StampCommissionedByIfUnsetSystem(ctx context.Context, orgID, entityID, userID string) (stamped bool, err error)
+}
+
+// DuplicateEntityMergedCloseReason is the close_reason MergeDuplicateEntitiesSystem
+// stamps on the newer row's tasks it dismisses. It names exactly those tasks,
+// which is what the merge's cancel of their running blueprints selects on.
+const DuplicateEntityMergedCloseReason = "duplicate_entity_merged"
+
+// DuplicateEntityPair decides which of two rows MergeDuplicateEntitiesSystem
+// keeps: the older (earliest created_at, ties broken by id). It refuses a pair
+// that cannot be one object — rows of different sources or scopes, or two rows
+// carrying different external ids (ErrEntityIdentityAmbiguous). Both dialects
+// decide through it, so they cannot disagree about which row survives.
+func DuplicateEntityPair(a, b domain.Entity) (survivor, loser domain.Entity, err error) {
+	if a.Source != b.Source || a.Scope != b.Scope {
+		return domain.Entity{}, domain.Entity{}, fmt.Errorf("merge entities: %s (%s in %q) and %s (%s in %q) are keyed in different namespaces",
+			a.ID, a.Source, a.Scope, b.ID, b.Source, b.Scope)
+	}
+	if a.ExternalID != "" && b.ExternalID != "" && a.ExternalID != b.ExternalID {
+		return domain.Entity{}, domain.Entity{}, fmt.Errorf("%w: %s carries %s and %s carries %s",
+			ErrEntityIdentityAmbiguous, a.ID, a.ExternalID, b.ID, b.ExternalID)
+	}
+	if b.CreatedAt.Before(a.CreatedAt) || (b.CreatedAt.Equal(a.CreatedAt) && b.ID < a.ID) {
+		return b, a, nil
+	}
+	return a, b, nil
+}
+
+// DuplicateEntityMergedKeys names, for a pair DuplicateEntityPair returned,
+// the row whose key and link the merged row keeps and the row whose key and
+// link it stops answering to: the newer row's are kept when it is active (the
+// survivor takes its live state), the survivor's own otherwise. kept carries
+// the pair's external id, whichever row held it. Both dialects move artifact
+// targets and audit-ledger links from dropped onto kept, as a rename does.
+func DuplicateEntityMergedKeys(survivor, loser domain.Entity) (kept, dropped domain.Entity) {
+	kept, dropped = survivor, loser
+	if loser.State == "active" {
+		kept, dropped = loser, survivor
+	}
+	if kept.ExternalID == "" {
+		kept.ExternalID = dropped.ExternalID
+	}
+	return kept, dropped
 }

@@ -152,7 +152,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}
 	// Resolve the touched entity outside the audit write (TFAC-513 §2).
-	touched := recordTouchInfo(ctx, stores, info, act)
+	touched := recordTouchInfo(ctx, stores, info, a, act)
 	// Same placement, same reason: an admin-pool write, so it must run after
 	// withWriteInfo's tx has settled. It takes the touch's resolution because
 	// on the common path the two want the same entity — githubAction copies the
@@ -168,46 +168,68 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 // (provider, target) into an entities row, returning an existing entity or a
 // freshly-minted snapshot-less stub.
 
-// resolveTouchedEntityInfo maps a (provider, target, url) triple to an entities
-// row, returning an existing entity or a freshly-minted snapshot-less stub, and
-// "" for anything the touched-entity rule skips (a repo-level GitHub target with
-// no '#N', an empty key, an unmapped provider). It is the free-function
-// counterpart of the former LocalClient.resolveTouchedEntity; kept here so the
-// write funnel and the read path both reach it without a LocalClient.
+// entityCoordinate is an external object as the exec funnel saw it: the
+// (provider, target) a write or an addressed read named, its link, and — for a
+// provider whose entities are identified by an id a key change does not move —
+// that id, off the response the verb read or the artifact's dedup key.
+type entityCoordinate struct {
+	provider, target, url string
+	externalID            string
+	// scope is the namespace the coordinate was recorded in, when it names
+	// one: a Jira artifact's dedup key carries its site. "" means the org's
+	// current scope.
+	scope string
+}
+
+// resolveTouchedEntityInfo maps a coordinate to an entities row, returning an
+// existing entity or a freshly-minted snapshot-less stub, and "" for anything
+// the touched-entity rule skips (a repo-level GitHub target with no '#N', an
+// empty key, a Jira coordinate with no issue id, a coordinate from another
+// scope than the org's current one, an unmapped provider). It is the
+// free-function counterpart of the former LocalClient.resolveTouchedEntity;
+// kept here so the write funnel and the read path both reach it without a
+// LocalClient.
+//
+// The coordinate's key is what the provider answered with at the time of the
+// write or read, so an entity stored under another key is renamed onto it
+// (entityscope.Resolve with follow): an agent touching a moved Jira issue by
+// its old key resolves the issue's existing entity, never a second one.
 //
 // The Slack case mints a "message" entity keyed on target — expected to already
 // be domain.SlackSourceID(channel, rootTS), the same key the ingest pipeline
 // uses (ee/slack/ingest.go), so a bot-authored write on a thread
 // resolves/creates the identical entity a human mention would.
-func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, provider, target, url string) (string, error) {
+func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) (string, error) {
 	if stores.Entities == nil {
 		return "", nil
 	}
-	source, sourceID, kind, ok := domain.EntityRefForExternal(provider, target)
+	ref, kind, ok := domain.EntityRefForExternal(c.provider, c.target, c.externalID)
 	if !ok {
 		return "", nil
 	}
-	scope, err := entityscope.Of(ctx, stores, info.OrgID, source)
+	scope, err := entityscope.Of(ctx, stores, info.OrgID, ref.Source)
 	if err != nil {
 		return "", err
 	}
-	if scope == "" {
-		// The source has no scope in this org — it is not configured — so
-		// the object has no address an entity could be keyed under.
+	if scope == "" || (c.scope != "" && c.scope != scope) {
+		// The source has no scope in this org — it is not configured — or the
+		// object belongs to a namespace the org has since left, so the object
+		// has no address an entity could be keyed under.
 		return "", nil
 	}
-	// title is left empty — neither an ExternalAction nor an addressed read
-	// carries a human title, and the poll cycle (or, for Slack, the ingest
-	// pipeline) seeds it from context. url rides through when present.
-	entity, _, err := stores.Entities.FindOrCreateSystem(ctx, info.OrgID, source, scope, sourceID, "", kind, "", url)
+	ref.Scope = scope
+	// The poll cycle (or, for Slack, the ingest pipeline) seeds the title from
+	// context; neither an ExternalAction nor an addressed read carries one.
+	// url rides through when present.
+	entity, err := entityscope.Resolve(ctx, stores.Entities, info.OrgID, ref, kind, c.url, true)
 	if err != nil {
 		return "", err
 	}
 	return entity.ID, nil
 }
 
-// recordEntityTouch resolves-or-creates the touched entity for (provider,
-// target, url) and, when it maps to a real entity, persists a durable
+// recordEntityTouch resolves-or-creates the touched entity for a coordinate
+// and, when it maps to a real entity, persists a durable
 // (conversation_id, entity_id, role='touched') row. Shared by the write funnel
 // (recordTouchInfo) and the addressed-read path (Runtime.RecordReadTouch).
 //
@@ -222,11 +244,11 @@ func resolveTouchedEntityInfo(ctx context.Context, stores db.Stores, info Conver
 // It returns the entity it resolved (empty for a skipped or failed resolve) so
 // a later consumer in the same funnel call can reuse it rather than resolving
 // the same key again; callers with no such consumer ignore the result.
-func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationInfo, provider, target, url string) string {
-	id, err := resolveTouchedEntityInfo(ctx, stores, info, provider, target, url)
+func recordEntityTouch(ctx context.Context, stores db.Stores, info ConversationInfo, c entityCoordinate) string {
+	id, err := resolveTouchedEntityInfo(ctx, stores, info, c)
 	if err != nil {
 		agenthostLog.Warn("touched-entity resolve failed (will retry on next poll)",
-			"conversation", info.ConversationID, "target", target, "error", err)
+			"conversation", info.ConversationID, "target", c.target, "error", err)
 		return ""
 	}
 	if id == "" || stores.TaskMemory == nil {
@@ -256,17 +278,27 @@ func (r resolvedEntity) matches(provider, target string) bool {
 }
 
 // recordTouchInfo persists the write funnel's touched entity: it unwraps the
-// external action into its (provider, target, url) and records the conversation→entity
-// touch. A nil action (an audit-only write with no external action) touches
-// nothing. See recordEntityTouch for the best-effort + outside-the-tx contract.
+// external action into its (provider, target, url) and records the
+// conversation→entity touch. The provider id the entity is identified by comes
+// off the artifact's dedup key when the artifact is the same provider's (a
+// Jira artifact's key names its site and issue id; see
+// domain.ArtifactEntityIdentity). A nil action (an audit-only write with no
+// external action) touches nothing. See recordEntityTouch for the best-effort
+// + outside-the-tx contract.
 //
 // Returns what it resolved, for stampPRAttribution to reuse — see the funnel.
-func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) resolvedEntity {
+func recordTouchInfo(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) resolvedEntity {
 	if act == nil {
 		return resolvedEntity{}
 	}
+	c := entityCoordinate{provider: act.Provider, target: act.Target, url: act.URL}
+	if a != nil && a.Provider == act.Provider {
+		if scope, externalID, ok := domain.ArtifactEntityIdentity(a.Provider, a.DedupKey); ok {
+			c.scope, c.externalID = scope, externalID
+		}
+	}
 	return resolvedEntity{
-		entityID: recordEntityTouch(ctx, stores, info, act.Provider, act.Target, act.URL),
+		entityID: recordEntityTouch(ctx, stores, info, c),
 		provider: act.Provider,
 		target:   act.Target,
 	}
@@ -327,7 +359,7 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 	entityID := touched.entityID
 	if !touched.matches(a.Provider, a.Target) {
 		var err error
-		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, a.Provider, a.Target, a.URL)
+		entityID, err = resolveTouchedEntityInfo(ctx, stores, info, entityCoordinate{provider: a.Provider, target: a.Target, url: a.URL})
 		if err != nil {
 			agenthostLog.Warn("PR attribution stamp skipped: entity resolve failed",
 				"conversation", info.ConversationID, "target", a.Target, "error", err)
@@ -363,8 +395,9 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 }
 
 // loadEntityMemory is the host side of `exec memory load`: it looks up the
-// entity for (source, sourceID) by its natural key in the org's current scope
-// for the source — LOOKUP ONLY, never
+// entity for (source, sourceID) in the org's current scope for the source — by
+// externalID, the provider id the entity is identified by, when the caller has
+// one, else by its natural key — LOOKUP ONLY, never
 // FindOrCreate, so a load of something unknown is a miss, not a stub mint — and
 // on a hit returns that entity's prior conversation memory scoped to the conversation's team,
 // plus records a best-effort conversation→entity 'touched' row (loading IS an address).
@@ -382,7 +415,7 @@ func stampPRAttribution(ctx context.Context, stores db.Stores, info Conversation
 // fetched-all-then-sliced) so a hot entity's long history isn't transferred to
 // keep only the tail. The touch is best-effort — a read never fails on its
 // touch.
-func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationInfo, source, sourceID string, limit int) (*MemoryLoadResult, error) {
+func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationInfo, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
 	res := &MemoryLoadResult{Source: source, SourceID: sourceID, Memories: []MemoryLoadEntry{}}
 	if stores.Entities == nil {
 		return res, nil
@@ -391,7 +424,12 @@ func loadEntityMemory(ctx context.Context, stores db.Stores, info ConversationIn
 	if err != nil {
 		return nil, err
 	}
-	entity, err := stores.Entities.GetBySourceSystem(ctx, info.OrgID, source, scope, sourceID)
+	var entity *domain.Entity
+	if externalID != "" {
+		entity, err = stores.Entities.GetByExternalIDSystem(ctx, info.OrgID, source, scope, externalID)
+	} else {
+		entity, err = stores.Entities.GetBySourceSystem(ctx, info.OrgID, source, scope, sourceID)
+	}
 	if err != nil {
 		return nil, err
 	}

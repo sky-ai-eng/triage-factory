@@ -19,7 +19,7 @@ import (
 // arrival through assignee=currentUser() is itself the assignment transition.
 func TestRefreshJira_FirstDiscoveryAssignedToCurrentUserEmitsAssignment(t *testing.T) {
 	const searchResp = `{"issues":[
-		{"key":"SKY-852","fields":{
+		{"id":"10852","key":"SKY-852","fields":{
 			"summary":"Newly assigned issue","status":{"name":"In Progress"},
 			"assignee":{"displayName":"Alice","accountId":"acc-1"},
 			"priority":{"name":"High"},"issuetype":{"name":"Task"},

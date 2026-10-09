@@ -107,6 +107,11 @@ const (
 	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
 	EventJiraIssueUnreachable     = "jira:issue:unreachable"
 	EventJiraIssueBodyUpdated     = "jira:issue:body_updated"
+	// EventJiraIssueKeyChanged is a tracked issue answering under a new key: a
+	// move to another project, or its project's key renamed. The issue's id
+	// did not change, so the entity is renamed and carries on; this event is
+	// the record of that.
+	EventJiraIssueKeyChanged = "jira:issue:key_changed"
 )
 
 // Linear events. The Jira set's shape, plus parent_changed: a Linear issue's
@@ -293,7 +298,8 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssueBodyUpdated, Source: "jira", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
-		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "A tracked issue can no longer be resolved in Jira — deleted, or no longer visible to the configured credential (Jira answers both the same way). Confirmed by asking about the issue directly, not inferred from its absence in a search"},
+		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "Triage Factory no longer follows a tracked issue — Jira will not resolve it (deleted, or no longer visible to the configured credential; Jira answers both the same way), it moved to a project no rule configures, or the org's Jira base URL now names another site. Never inferred from its absence in a search"},
+		{ID: EventJiraIssueKeyChanged, Source: "jira", Category: "issue", Label: "Key Changed", Description: "A tracked issue answers under a new key — moved to another project, or its project's key renamed. The entity follows the issue and keeps its tasks and history"},
 
 		// --- Linear ---
 		{ID: EventLinearIssueAssigned, Source: "linear", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned, or first seen already assigned"},

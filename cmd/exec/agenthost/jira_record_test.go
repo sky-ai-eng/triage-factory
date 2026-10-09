@@ -27,15 +27,33 @@ import (
 // LocalClient is the single seam the multi daemon dispatches through, so
 // proving it here covers both the sandbox and local-mode paths.
 
+// fakeJiraIssueID is the issue id startFakeJira gives the issue under key:
+// "1" and the key's number, zero-padded to four digits (SKY-9 → 10009).
+func fakeJiraIssueID(key string) string {
+	_, n, _ := strings.Cut(key, "-")
+	return "1" + strings.Repeat("0", max(0, 4-len(n))) + n
+}
+
+// fakeJiraIssueDedupKey is the dedup key of the issue artifact for key on the
+// test site.
+func fakeJiraIssueDedupKey(key string) string {
+	return domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue,
+		domain.JiraIssueResource(testScope("jira"), fakeJiraIssueID(key)), "")
+}
+
 // startFakeJira stands a minimal Jira REST backend covering the mutating verbs
 // the recording tests exercise: transition (list + apply), comment (returns an
-// id), assignee (self/unassign), and create (returns a key).
+// id), assignee (self/unassign), create (returns an id and a key), and the
+// read-back of which issue a key names (fakeJiraIssueID).
 func startFakeJira(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		path := r.URL.Path
 		switch {
+		case r.Method == http.MethodGet && strings.Contains(path, "/issue/") && !strings.Contains(path, "/transitions"):
+			key := strings.ToUpper(path[strings.LastIndex(path, "/")+1:])
+			_, _ = io.WriteString(w, `{"id":"`+fakeJiraIssueID(key)+`","key":"`+key+`"}`)
 		case strings.HasSuffix(path, "/myself"):
 			_, _ = io.WriteString(w, `{"name":"bot","accountId":""}`)
 		case strings.Contains(path, "/transitions"):
@@ -49,7 +67,7 @@ func startFakeJira(t *testing.T) *httptest.Server {
 		case strings.HasSuffix(path, "/assignee"):
 			w.WriteHeader(http.StatusNoContent)
 		case strings.HasSuffix(path, "/issue"):
-			_, _ = io.WriteString(w, `{"key":"SKY-1"}`)
+			_, _ = io.WriteString(w, `{"id":"10001","key":"SKY-1"}`)
 		default:
 			_, _ = io.WriteString(w, `{}`)
 		}
@@ -139,8 +157,8 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Provider != domain.ArtifactProviderJira || a.Kind != domain.ArtifactKindIssue ||
-					a.Target != "SKY-1" || a.ExternalID != "SKY-1" || a.State != domain.ArtifactStateIssueCreated ||
-					a.DedupKey != "jira:issue:SKY-1" {
+					a.Target != "SKY-1" || a.ExternalID != "10001" || a.State != domain.ArtifactStateIssueCreated ||
+					a.DedupKey != fakeJiraIssueDedupKey("SKY-1") {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
 				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -162,7 +180,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != "jira:issue:SKY-9" {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
 					t.Errorf("transition artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"status":"Done"`) {
@@ -185,7 +203,8 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindComment || a.Target != "SKY-9" ||
 					a.ExternalID != "10042" || a.State != domain.ArtifactStateCommentPosted ||
-					a.DedupKey != "jira:comment:10042" {
+					a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
+						domain.JiraIssueResource(testScope("jira"), "10009"), "10042") {
 					t.Errorf("comment artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, "looks good to me") {
@@ -207,7 +226,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != "jira:issue:SKY-9" {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
 					t.Errorf("assign artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"assignee":"self"`) {
@@ -233,7 +252,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != "jira:issue:SKY-9" {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
 					t.Errorf("update artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"summary"`) || !strings.Contains(a.DetailsJSON, `"priority"`) {
@@ -251,7 +270,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
-					arts[0].DedupKey != "jira:issue:SKY-9" || arts[0].State != domain.ArtifactStateIssueUpdated {
+					arts[0].DedupKey != fakeJiraIssueDedupKey("SKY-9") || arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-parent artifact mismatch: %+v", arts)
 				}
 				if !strings.Contains(arts[0].DetailsJSON, `"parent":"SKY-1"`) {
@@ -268,7 +287,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					t.Fatalf("JiraSetPriority: %v", err)
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
-				if len(arts) != 1 || arts[0].DedupKey != "jira:issue:SKY-9" ||
+				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey("SKY-9") ||
 					arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-priority artifact mismatch: %+v", arts)
 				}
@@ -337,7 +356,8 @@ func TestLocalClient_JiraComment_NoID_SkipsArtifact(t *testing.T) {
 
 // TestLocalClient_JiraTransitionThenComment_DedupsIssue pins the upsert
 // invariant: a transition and a comment on the same issue leave exactly one
-// `issue` artifact (deduped on jira:issue:<KEY>) plus one `comment` artifact.
+// `issue` artifact (deduped on the issue's site and id) plus one `comment`
+// artifact.
 func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
@@ -360,12 +380,13 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 		switch a.Kind {
 		case domain.ArtifactKindIssue:
 			issues++
-			if a.DedupKey != "jira:issue:SKY-5" {
+			if a.DedupKey != fakeJiraIssueDedupKey("SKY-5") {
 				t.Errorf("issue dedup_key = %q", a.DedupKey)
 			}
 		case domain.ArtifactKindComment:
 			comments++
-			if a.DedupKey != "jira:comment:10042" {
+			if a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
+				domain.JiraIssueResource(testScope("jira"), "10005"), "10042") {
 				t.Errorf("comment dedup_key = %q", a.DedupKey)
 			}
 		default:

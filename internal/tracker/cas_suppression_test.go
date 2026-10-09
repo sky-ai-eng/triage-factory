@@ -251,7 +251,7 @@ func TestRefreshJira_FailedCommitSuppressesTransitions(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if strings.HasSuffix(r.URL.Path, "/search") {
 			_, _ = w.Write([]byte(`{"issues":[
-				{"key":"SKY-1","fields":{
+				{"id":"10001","key":"SKY-1","fields":{
 					"summary":"Touched issue","status":{"name":"` + status.Load().(string) + `"},
 					"assignee":{"displayName":"Alice","accountId":"acc-1"},
 					"created":"2026-06-01T00:00:00.000+0000","updated":"2026-06-10T00:00:00.000+0000"

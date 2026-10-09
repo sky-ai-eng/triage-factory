@@ -206,6 +206,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 			stockLog.Warn("skipping entity, invalid snapshot", "entity", e.ID, "source_id", e.SourceID, "error", err)
 			continue
 		}
+		snap = currentJiraIdentity(e, snap)
 		// Subtask gate applies to both buckets — a parent ticket
 		// with open subtasks is a container, not a work unit. Its subtasks
 		// (if assigned or available) surface on their own; if the
@@ -682,6 +683,22 @@ func (s *Server) applyStockItem(r *http.Request, b *stockBatch, issueKey string)
 	return result
 }
 
+// currentJiraIdentity overlays a ticket's stored snapshot with its entity's
+// identity: the key, link and issue id. An entity is renamed the moment TF
+// learns its issue moved — by an agent's read, say — while the snapshot keeps
+// the old key until the next poll refresh, so the deck lists, and an action
+// looks a ticket up and calls Jira by, the key the entity answers to now.
+func currentJiraIdentity(e domain.Entity, snap domain.JiraSnapshot) domain.JiraSnapshot {
+	snap.Key = e.SourceID
+	if e.URL != "" {
+		snap.URL = e.URL
+	}
+	if e.ExternalID != "" {
+		snap.ID = e.ExternalID
+	}
+	return snap
+}
+
 // stockBucket is which half of the deck a ticket sits in, as re-derived
 // server-side at action time rather than trusted from the client.
 type stockBucket int
@@ -741,6 +758,7 @@ func (s *Server) resolveStockTicket(r *http.Request, b *stockBatch, issueKey str
 		stockLog.Error("stock: invalid snapshot", "issue", issueKey, "entity", entity.ID, "error", err)
 		return fail(httpx.ReasonInternal, "invalid snapshot")
 	}
+	snap = currentJiraIdentity(*entity, snap)
 
 	// Per-project rule lookup. Tickets whose project_key has no configured
 	// rules fall through every status branch below — there's no terminal
@@ -935,6 +953,7 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 		Assignee:          snap.Assignee,
 		AssigneeAccountID: snap.AssigneeAccountID,
 		IssueKey:          snap.Key,
+		IssueID:           snap.ID,
 		Project:           projectFromKey(snap.Key),
 		IssueType:         snap.IssueType,
 		Priority:          snap.Priority,
@@ -962,6 +981,7 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, orgID, entityID string, snap domain.JiraSnapshot) (string, error) {
 	meta := jiraevents.JiraIssueAvailableMetadata{
 		IssueKey:  snap.Key,
+		IssueID:   snap.ID,
 		Project:   projectFromKey(snap.Key),
 		IssueType: snap.IssueType,
 		Priority:  snap.Priority,

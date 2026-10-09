@@ -167,7 +167,7 @@ func TestRefreshJira_EnrichesSnapshotlessStub(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			searchResp := `{"issues":[
-				{"key":"SKY-1","fields":{
+				{"id":"10001","key":"SKY-1","fields":{
 					"summary":"Touched issue","status":{"name":"` + tc.status + `"},
 					"assignee":{"displayName":"Alice","accountId":"acc-1"},
 					"created":"2026-06-01T00:00:00.000+0000","updated":"2026-06-10T00:00:00.000+0000"
