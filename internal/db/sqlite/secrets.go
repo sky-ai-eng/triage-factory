@@ -67,11 +67,58 @@ func (*secretStore) GetSystem(_ context.Context, orgID, key string) (string, err
 	return auth.GetSecret(key)
 }
 
+// PutSystem == Put in local mode, for the reason GetSystem == Get. It takes
+// orgSecretsMu so DeleteSystemIfValue's read and delete stay one step against
+// it.
+func (*secretStore) PutSystem(_ context.Context, orgID, key, value, _ string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
+	return auth.PutSecret(key, value)
+}
+
 func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
 	return deleteStoredSecret(key)
+}
+
+// orgSecretsMu makes DeleteSystemIfValue's read and delete one step against
+// PutSystem, the other system writer of a rotating org credential: a rotation
+// landing between them must not be the value deleted. The handlers' Put and
+// Delete serialize on their own per-credential locks
+// (guardLocalSecretWrite), which this does not replace.
+var orgSecretsMu sync.Mutex
+
+func (*secretStore) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
+	return deleteSecretIfValue(key, value)
+}
+
+// deleteSecretIfValue deletes key when it holds value, under whichever lock
+// the caller holds.
+func deleteSecretIfValue(key, value string) (bool, error) {
+	cur, err := auth.GetSecret(key)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" {
+		return false, nil
+	}
+	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
+		return false, nil
+	}
+	if err := auth.DeleteSecret(key); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // deleteStoredSecret deletes key and reports whether an entry was there. The
@@ -165,21 +212,7 @@ func (*secretStore) DeleteUserSystemIfValue(_ context.Context, orgID, userID, ke
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	uk := userKeychainKey(userID, key)
 	userSecretsMu.Lock()
 	defer userSecretsMu.Unlock()
-	cur, err := auth.GetSecret(uk)
-	if err != nil {
-		return false, err
-	}
-	if cur == "" {
-		return false, nil
-	}
-	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
-		return false, nil
-	}
-	if err := auth.DeleteSecret(uk); err != nil {
-		return false, err
-	}
-	return true, nil
+	return deleteSecretIfValue(userKeychainKey(userID, key), value)
 }

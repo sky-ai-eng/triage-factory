@@ -954,3 +954,49 @@ func TestSecretStore_Postgres_DeleteUserSystemIfValue(t *testing.T) {
 		t.Fatalf("another key after the delete = (%q, %v), want it untouched", got, err)
 	}
 }
+
+// TestSecretStore_Postgres_PutSystemDeleteSystemIfValue pins the org-scope
+// system doors: PutSystem writes with no claims where the claims-checked Get
+// reads, and the compare-and-delete removes the org row only while it holds the
+// value the caller read, leaving a per-user row under the same key alone.
+func TestSecretStore_Postgres_PutSystemDeleteSystemIfValue(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	const key = "linear_app_install"
+	if err := stores.Secrets.PutSystem(ctx, orgID, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("PutSystem: %v", err)
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, key, "user_value", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Get(ctx, orgID, key)
+		if err != nil {
+			return err
+		}
+		if got != "envelope_v1" {
+			t.Errorf("claims-checked Get after PutSystem = %q, want envelope_v1", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, orgID, key, "envelope_v0"); err != nil || deleted {
+		t.Fatalf("delete naming a value the row no longer holds = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, orgID, key, "envelope_v1"); err != nil || !deleted {
+		t.Fatalf("delete naming the held value = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetSystem(ctx, orgID, key); err != nil || got != "" {
+		t.Fatalf("org value after the delete = (%q, %v), want none", got, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "user_value" {
+		t.Fatalf("per-user row under the same key = (%q, %v), want it untouched", got, err)
+	}
+}

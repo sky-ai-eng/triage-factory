@@ -267,6 +267,12 @@ func (s *secretStore) GetSystem(ctx context.Context, orgID, key string) (string,
 	return s.getOrg(ctx, s.admin, false, "secrets.GetSystem", orgID, key)
 }
 
+// PutSystem writes an org-scoped secret on the supabase_admin pool — RLS
+// bypassed, the passed orgID trusted. The write-side mirror of GetSystem.
+func (s *secretStore) PutSystem(ctx context.Context, orgID, key, value, description string) error {
+	return s.upsert(ctx, s.admin, orgID, "", key, value, description)
+}
+
 func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, error) {
 	return s.del(ctx,
 		`DELETE FROM public.org_secrets
@@ -316,6 +322,17 @@ func (s *secretStore) DeleteUser(ctx context.Context, orgID, userID, key string)
 // an upsert from another pod waits for this transaction, and either finds the
 // row gone and inserts its value, or is the value this read sees.
 func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
+	return s.deleteIfValue(ctx, orgID, userID, key, value)
+}
+
+// DeleteSystemIfValue is DeleteUserSystemIfValue for an org-scoped secret.
+func (s *secretStore) DeleteSystemIfValue(ctx context.Context, orgID, key, value string) (bool, error) {
+	return s.deleteIfValue(ctx, orgID, "", key, value)
+}
+
+// deleteIfValue is the compare-and-delete both doors share; userID is "" for
+// org scope.
+func (s *secretStore) deleteIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
 	aad, err := secretAAD(orgID, userID, key)
 	if err != nil {
 		return false, err
@@ -325,9 +342,9 @@ func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID
 		var ct, nonce []byte
 		err := q.QueryRowContext(ctx, `
 			SELECT ciphertext, nonce FROM public.org_secrets
-			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
+			WHERE org_id = $1::uuid AND user_id IS NOT DISTINCT FROM $2::uuid AND key = $3::text
 			FOR UPDATE
-		`, orgID, userID, key).Scan(&ct, &nonce)
+		`, orgID, nullableUUID(userID), key).Scan(&ct, &nonce)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -343,8 +360,8 @@ func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID
 		}
 		if _, err := q.ExecContext(ctx, `
 			DELETE FROM public.org_secrets
-			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
-		`, orgID, userID, key); err != nil {
+			WHERE org_id = $1::uuid AND user_id IS NOT DISTINCT FROM $2::uuid AND key = $3::text
+		`, orgID, nullableUUID(userID), key); err != nil {
 			return err
 		}
 		deleted = true

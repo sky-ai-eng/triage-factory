@@ -4208,6 +4208,108 @@ GRANT ALL ON TABLE public.org_jira_apps TO authenticated;
 GRANT ALL ON TABLE public.org_jira_apps TO service_role;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_jira_apps TO tf_app;
 
+-- The org's own Linear OAuth app, the sibling of org_jira_apps: the install
+-- ceremony and the per-user Connect run against it, and an org with no row
+-- falls back to the deployment app. client_secret_ref names the org secret
+-- that holds the client secret.
+
+CREATE TABLE public.org_linear_apps (
+    org_id uuid NOT NULL,
+    client_id text NOT NULL,
+    client_secret_ref text NOT NULL,
+    registered_at timestamp with time zone DEFAULT now() NOT NULL,
+    registered_by_user_id uuid
+);
+
+ALTER TABLE ONLY public.org_linear_apps
+    ADD CONSTRAINT org_linear_apps_pkey PRIMARY KEY (org_id);
+
+ALTER TABLE ONLY public.org_linear_apps
+    ADD CONSTRAINT org_linear_apps_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.org_linear_apps
+    ADD CONSTRAINT org_linear_apps_registered_by_user_id_fkey FOREIGN KEY (registered_by_user_id) REFERENCES public.users(id) ON DELETE SET NULL;
+
+ALTER TABLE public.org_linear_apps ENABLE ROW LEVEL SECURITY;
+
+-- The org_jira_apps posture: any org member reads, org admins write.
+CREATE POLICY org_linear_apps_select ON public.org_linear_apps FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY org_linear_apps_insert ON public.org_linear_apps FOR INSERT TO tf_app
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+CREATE POLICY org_linear_apps_update ON public.org_linear_apps FOR UPDATE TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)))
+    WITH CHECK (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+CREATE POLICY org_linear_apps_delete ON public.org_linear_apps FOR DELETE TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
+
+GRANT ALL ON TABLE public.org_linear_apps TO postgres;
+GRANT ALL ON TABLE public.org_linear_apps TO anon;
+GRANT ALL ON TABLE public.org_linear_apps TO authenticated;
+GRANT ALL ON TABLE public.org_linear_apps TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_linear_apps TO tf_app;
+
+-- The Linear workspace that installed the org's resolved OAuth app as an app
+-- user (actor=app), whichever app that was. One row per org; the refresh token
+-- lives in the org secret linear_app_install. app_user_id is the app user TF
+-- acts as, app_client_id the app whose secret refreshes it,
+-- installed_by_user_id a soft reference that outlives the admin.
+
+CREATE TABLE public.org_linear_installs (
+    org_id uuid NOT NULL,
+    workspace_id text NOT NULL,
+    workspace_url_key text NOT NULL,
+    app_user_id text NOT NULL,
+    app_client_id text NOT NULL,
+    installed_by_user_id uuid,
+    installed_at timestamp with time zone NOT NULL,
+    removed_at timestamp with time zone,
+    removed_reason text,
+    CONSTRAINT org_linear_installs_removed_reason_check
+        CHECK ((removed_reason = ANY (ARRAY['disconnected'::text, 'install_revoked'::text, 'install_failed'::text]))),
+    CONSTRAINT org_linear_installs_removed_pair_check
+        CHECK (((removed_at IS NULL) = (removed_reason IS NULL)))
+);
+
+ALTER TABLE ONLY public.org_linear_installs
+    ADD CONSTRAINT org_linear_installs_pkey PRIMARY KEY (org_id);
+
+ALTER TABLE ONLY public.org_linear_installs
+    ADD CONSTRAINT org_linear_installs_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
+
+-- One Linear workspace installs into at most one TF org. The credential is a
+-- per-workspace token, so there is no cross-tenant listing to scope and
+-- nothing else can enforce it. A removed install holds nothing.
+CREATE UNIQUE INDEX org_linear_installs_workspace_live
+    ON public.org_linear_installs (workspace_id)
+    WHERE (removed_at IS NULL);
+
+ALTER TABLE public.org_linear_installs ENABLE ROW LEVEL SECURITY;
+
+-- Members read. Every write goes through the admin pool, from the install
+-- callback and the disconnect: the callback's uniqueness check has to see
+-- every org's rows, which no claims transaction can.
+CREATE POLICY org_linear_installs_select ON public.org_linear_installs FOR SELECT TO tf_app
+    USING (((org_id = tf.current_org_id()) AND tf.user_has_org_access(org_id)));
+
+CREATE POLICY org_linear_installs_insert ON public.org_linear_installs FOR INSERT TO tf_app
+    WITH CHECK (false);
+
+CREATE POLICY org_linear_installs_update ON public.org_linear_installs FOR UPDATE TO tf_app
+    USING (false);
+
+CREATE POLICY org_linear_installs_delete ON public.org_linear_installs FOR DELETE TO tf_app
+    USING (false);
+
+GRANT ALL ON TABLE public.org_linear_installs TO postgres;
+GRANT ALL ON TABLE public.org_linear_installs TO anon;
+GRANT ALL ON TABLE public.org_linear_installs TO authenticated;
+GRANT ALL ON TABLE public.org_linear_installs TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_linear_installs TO tf_app;
+
 
 --
 -- Secrets are encrypted app-side (AES-256-GCM) with TF_SECRET_ENCRYPTION_KEY

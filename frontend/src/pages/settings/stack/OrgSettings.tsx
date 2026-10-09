@@ -59,6 +59,7 @@ import LinearAccessGroup from '../LinearAccessGroup'
 import EventSourcesGroup from '../EventSourcesGroup'
 import ApiTokenPolicyGroup from '../ApiTokenPolicyGroup'
 import AtlassianOAuthAppCard from '../AtlassianOAuthAppCard'
+import LinearOAuthAppCard from '../LinearOAuthAppCard'
 import SlackWorkspacesCard from '../SlackWorkspacesCard'
 import TeamManagementSection from '../../../components/TeamManagementSection'
 import {
@@ -646,26 +647,47 @@ export default function OrgSettings({
         </SettingsSection>
       )}
 
+      {/* ── Linear OAuth app ── The app the Linear install runs against: the
+          org's own, created in Linear from a pre-filled link. An action
+          section — the card commits its own store/remove inline — that tells
+          the connection section below whether Install is available. */}
+      {orgId && (
+        <SettingsSection title="Linear OAuth app" summary="Install Triage Factory as a Linear app">
+          <LinearOAuthAppCard
+            orgId={orgId}
+            onStatus={(st) => {
+              const available = { linearInstallAvailable: st.install_available }
+              setDraft((d) => ({ ...d, ...available }))
+              setBaseline((b) => ({ ...b, ...available }))
+            }}
+          />
+        </SettingsSection>
+      )}
+
       {/* ── Linear connection ── The Jira section's shape: unconnected (or
-          rebinding), a form whose Save performs the bind; connected, a status
-          line carrying the inline Disconnect and "Replace key", which re-opens
-          the form against the still-connected org so a rotation never starts
-          with a disconnect. */}
+          rebinding), a form whose Save performs the bind, with Install offered
+          first when an app resolves; connected, a status line carrying the
+          inline Disconnect and, for a key, "Replace key", which re-opens the
+          form against the still-connected org so a rotation never starts with
+          a disconnect. */}
       {draft.linearConnected && !linearRebinding ? (
         <SettingsSection
           title="Linear connection"
           summary={
-            baseline.linearWorkspaceUrlKey
-              ? `Connected · linear.app/${baseline.linearWorkspaceUrlKey}`
-              : 'Connected'
+            (baseline.linearAuthMethod === 'app_install' ? 'Installed' : 'Connected') +
+            (baseline.linearWorkspaceUrlKey
+              ? ` · linear.app/${baseline.linearWorkspaceUrlKey}`
+              : '')
           }
         >
           <LinearAccessGroup
             value={{ linear_api_key: draft.org.linear_api_key }}
             onChange={(p) => patch({ org: { ...draft.org, ...p } })}
             connected
+            authMethod={draft.linearAuthMethod}
             boundAs={draft.linearBoundAs}
             workspaceUrlKey={draft.linearWorkspaceUrlKey}
+            installAvailable={draft.linearInstallAvailable}
             orgId={orgId}
             onReplace={() => setLinearRebinding(true)}
             onDisconnected={() => {
@@ -673,6 +695,8 @@ export default function OrgSettings({
                 linearConnected: false,
                 linearWorkspaceUrlKey: '',
                 linearBoundAs: '',
+                linearAuthMethod: '' as const,
+                linearLastError: '',
               }
               // As with Jira, an unsaved cadence edit hides with the polling
               // section, so it is dropped here.
@@ -721,6 +745,8 @@ export default function OrgSettings({
                 linearConnected: true,
                 linearWorkspaceUrlKey: result.access.workspace_url_key,
                 linearBoundAs: boundAsName(result.access),
+                linearAuthMethod: result.access.auth_method,
+                linearLastError: '',
               }
               setDraft((d) => ({ ...d, ...connected, org: { ...d.org, linear_api_key: '' } }))
               setBaseline((b) => ({ ...b, ...connected }))
@@ -740,6 +766,8 @@ export default function OrgSettings({
             value={{ linear_api_key: draft.org.linear_api_key }}
             onChange={(p) => patch({ org: { ...draft.org, ...p } })}
             connected={false}
+            installAvailable={!linearRebinding && draft.linearInstallAvailable}
+            lastError={draft.linearLastError}
             orgId={orgId}
             bare
           />

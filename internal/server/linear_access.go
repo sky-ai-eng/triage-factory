@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
@@ -29,7 +30,8 @@ import (
 // body carries no URL and no deployment discriminator, and the workspace is
 // learned from the key rather than typed: the bind writes
 // org_settings.linear_workspace_id / linear_workspace_url_key from the key's
-// organization, and the unbind clears them.
+// organization, and the unbind clears them. The other shape, an installed app,
+// is bound by the install ceremony (linear_install.go) and unbound here.
 
 // linearCredentialRequest is the PUT body: the key, and nothing else.
 type linearCredentialRequest struct {
@@ -54,9 +56,11 @@ type linearBoundAsJSON struct {
 
 // linearAccessStatus is the GET body, and what a successful bind answers with.
 //
-// connect_available and using_deployment_default describe the app-install
-// shape, which this build cannot bind; they are false here and present so the
-// client contract does not change when it can.
+// connect_available is whether a Linear OAuth app resolves for the org, so the
+// install ceremony can run; using_deployment_default is whether that app is
+// the deployment's rather than the org's own. last_error explains a
+// disconnection the org did not ask for: "install_revoked" when the app was
+// removed from the workspace in Linear and its refresh token refused.
 type linearAccessStatus struct {
 	Connected              bool               `json:"connected"`
 	AuthMethod             string             `json:"auth_method"`
@@ -65,12 +69,14 @@ type linearAccessStatus struct {
 	BoundAs                *linearBoundAsJSON `json:"bound_as"`
 	ConnectAvailable       bool               `json:"connect_available"`
 	UsingDeploymentDefault bool               `json:"using_deployment_default"`
+	LastError              string             `json:"last_error,omitempty"`
 }
 
-// errLinearAppInstalled is the bind finding the org's Linear credential is an
-// installed app. Binding a key over it would leave the install's tokens live
-// in Linear with nothing in TF left to revoke them, so the bind refuses and
-// the admin disconnects first.
+// errLinearAppInstalled is the bind finding the org's Linear credential is a
+// live installed app. Binding a key over it would leave the install's tokens
+// live in Linear with nothing in TF left to revoke them, so the bind refuses
+// and the admin disconnects first. An install Linear already revoked has no
+// tokens left, and a key may replace it.
 var errLinearAppInstalled = errors.New("linear: org credential is an installed app")
 
 // handleLinearCredentialPut binds (or rotates) the org's Linear API key. It
@@ -138,7 +144,13 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 			return fmt.Errorf("read linear auth method: %w", err)
 		}
 		if linear.AuthMethod(method) == linear.AuthMethodAppInstall {
-			return errLinearAppInstalled
+			envelope, err := tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAppInstall)
+			if err != nil {
+				return fmt.Errorf("read linear install credential: %w", err)
+			}
+			if envelope != "" {
+				return errLinearAppInstalled
+			}
 		}
 		// The keys are written in the order ClearLinear deletes them, the
 		// unbind's order. Postgres holds each row's lock until commit, so two
@@ -200,6 +212,13 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 // and no audit row, because a removal that removed nothing is not an access
 // change.
 //
+// It is an installed app's disconnect too. The install's row is marked
+// removed, which releases its workspace, and once the clear has committed its
+// refresh token is revoked in Linear. The revoke is best-effort: TF has
+// already forgotten the token, so a failure only logs. The app user stays in
+// the workspace's member list until a workspace admin removes the app in
+// Linear.
+//
 // Per-user Linear credentials are left intact: each is custodied under its
 // owner's own secret scope and cleared only by its own surface.
 //
@@ -220,7 +239,10 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 	}
 	defer unlock()
 
-	var had bool
+	var (
+		had      bool
+		envelope string
+	)
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		method, err := tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAuthMethod)
 		if err != nil {
@@ -231,9 +253,17 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 			return fmt.Errorf("read linear api key: %w", err)
 		}
 		had = method != "" || key != ""
-		// TODO(TFAC-1022): when method is app_install, revoke the install's
-		// refresh token in Linear and mark its org_linear_installs row removed
-		// before the clear below — this route is that app's disconnect too.
+		if linear.AuthMethod(method) == linear.AuthMethodAppInstall {
+			if envelope, err = tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAppInstall); err != nil {
+				return fmt.Errorf("read linear install credential: %w", err)
+			}
+			// On Postgres this commits on the admin pool ahead of the
+			// transaction; a clear that then fails leaves the row removed
+			// and the credential restored, and the retry converges.
+			if _, err := tx.LinearInstalls.MarkRemovedSystem(ctx, orgID, domain.LinearInstallRemovedDisconnected); err != nil {
+				return fmt.Errorf("mark linear install removed: %w", err)
+			}
+		}
 		if err := integrations.ClearLinear(ctx, tx.Secrets, orgID); err != nil {
 			return fmt.Errorf("clear credential: %w", err)
 		}
@@ -263,11 +293,38 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	if envelope != "" {
+		s.revokeLinearInstall(ctx, orgID, envelope)
+	}
 	// Nothing was polling under a credential that was not there.
 	if had {
 		s.kickLinearChanged(r, orgID)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+}
+
+// revokeLinearInstall revokes a disconnected install's refresh token in
+// Linear, with the app that minted it. Best-effort: the credential is already
+// gone from TF, so a failure leaves only a grant nothing uses, which a
+// workspace admin ends by removing the app in Linear.
+func (s *Server) revokeLinearInstall(ctx context.Context, orgID, envelope string) {
+	ctx = context.WithoutCancel(ctx)
+	cred, err := linear.ParseInstallCredential(envelope)
+	if err != nil {
+		linearInstallLog.Warn("disconnected install credential unreadable; nothing to revoke", "org", orgID, "error", err)
+		return
+	}
+	app, _, err := s.linearOAuthApps.Resolve(ctx, orgID)
+	if err != nil || app.ClientID != cred.ClientID {
+		linearInstallLog.Warn("the app that minted the disconnected install no longer resolves; its grant stays until the app is removed in Linear",
+			"org", orgID, "client_id", cred.ClientID, "error", err)
+		return
+	}
+	if err := s.linearOAuthMinter.Revoke(ctx, app, cred.RefreshToken, linearoauth.HintRefreshToken); err != nil {
+		linearInstallLog.Warn("revoke disconnected install failed; its grant stays until the app is removed in Linear", "org", orgID, "error", err)
+		return
+	}
+	linearInstallLog.Info("revoked disconnected install", "org", orgID, "workspace", cred.WorkspaceID)
 }
 
 // handleLinearAccessGet reports the org's Linear connection. Any org member
@@ -297,6 +354,7 @@ func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (li
 		creds   auth.Credentials
 		orgSet  domain.OrgSettings
 		binding string
+		install *domain.OrgLinearInstall
 	)
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var err error
@@ -309,13 +367,27 @@ func (s *Server) readLinearAccess(ctx context.Context, orgID, userID string) (li
 		if binding, err = tx.Secrets.Get(ctx, orgID, integrations.KeyLinearBoundAs); err != nil {
 			return fmt.Errorf("read linear binding: %w", err)
 		}
+		if install, err = tx.LinearInstalls.GetForOrgSystem(ctx, orgID); err != nil {
+			return fmt.Errorf("read linear install: %w", err)
+		}
 		return nil
 	}); err != nil {
 		return linearAccessStatus{}, err
 	}
 
-	status := linearAccessStatus{Connected: integrations.LinearSystemConfigured(creds)}
+	source := s.resolveLinearAppSource(ctx, orgID)
+	status := linearAccessStatus{
+		Connected:              integrations.LinearSystemConfigured(creds),
+		ConnectAvailable:       source != linear.SourceNone,
+		UsingDeploymentDefault: source == linear.SourceDeployment,
+	}
 	if !status.Connected {
+		// An app_install marker left behind with no envelope is an install
+		// whose refresh Linear refused; the row says why.
+		if linear.AuthMethod(creds.LinearAuthMethod) == linear.AuthMethodAppInstall &&
+			install != nil && install.RemovedReason == domain.LinearInstallRemovedRevoked {
+			status.LastError = domain.LinearInstallRemovedRevoked
+		}
 		return status, nil
 	}
 	status.AuthMethod = creds.LinearAuthMethod

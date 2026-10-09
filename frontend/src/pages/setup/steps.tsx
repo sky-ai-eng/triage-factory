@@ -133,6 +133,9 @@ export const initialWizardState = (): WizardState => ({
   linearConnected: false,
   linearWorkspaceUrlKey: '',
   linearBoundAs: '',
+  linearAuthMethod: '',
+  linearInstallAvailable: false,
+  linearLastError: '',
   anthropicKeySource: null,
   anthropicConnected: false,
   claudeProvider: 'anthropic',
@@ -270,6 +273,9 @@ export async function loadOrg(ctx: LoadContext): Promise<Partial<WizardState>> {
     linearConnected: linear.connected,
     linearWorkspaceUrlKey: linear.workspace_url_key,
     linearBoundAs: boundAsName(linear),
+    linearAuthMethod: linear.auth_method,
+    linearInstallAvailable: linear.connect_available,
+    linearLastError: linear.last_error ?? '',
     // Claude credentials: the source resumes from the org's STORED selection,
     // not from whether a credential happens to be bound — an org that chose to
     // bring its own key and has not bound one yet is a different state from one
@@ -1115,10 +1121,13 @@ export const linearActive = (s: WizardState) => s.tracker === 'linear' && s.line
 
 // Step · Linear access (visible only when Linear is the chosen tracker). The
 // whole of Linear's org connection in one step: no URL to probe (Linear has
-// one host) and no deployment to pick (one key shape). Continue performs the
-// bind via connectLinear, which validates the key against Linear before it
-// stores anything; the disconnect stays inside LinearAccessGroup. Mandatory
-// while Linear is selected, invisible (and so non-blocking) otherwise.
+// one host). Two ways to complete it. When a Linear OAuth app resolves, the
+// group offers Install first — a navigation through Linear's consent page that
+// returns here with the org connected, which completes the step on reload. A
+// personal API key is the alternative: Continue binds it via connectLinear,
+// which validates the key against Linear before it stores anything. The
+// disconnect stays inside LinearAccessGroup. Mandatory while Linear is
+// selected, invisible (and so non-blocking) otherwise.
 const linearAccessStep: WizardStep = {
   id: 'org-linear-access',
   section: 'org',
@@ -1129,7 +1138,9 @@ const linearAccessStep: WizardStep = {
   validate: (s) =>
     s.linearConnected || s.org.linear_api_key.trim() !== ''
       ? null
-      : 'Paste a Linear API key to connect.',
+      : s.linearInstallAvailable
+        ? 'Install Triage Factory in Linear, or paste a Linear API key to connect.'
+        : 'Paste a Linear API key to connect.',
   persist: async ({ state, orgId, patch }) => {
     if (state.linearConnected) return
     if (!orgId) throw new Error('No organization context.')
@@ -1139,6 +1150,8 @@ const linearAccessStep: WizardStep = {
       linearConnected: true,
       linearWorkspaceUrlKey: result.access.workspace_url_key,
       linearBoundAs: boundAsName(result.access),
+      linearAuthMethod: result.access.auth_method,
+      linearLastError: '',
       org: { ...state.org, linear_api_key: '' },
     })
   },
@@ -1146,8 +1159,10 @@ const linearAccessStep: WizardStep = {
     !s.linearConnected
       ? 'Not connected'
       : s.linearWorkspaceUrlKey
-        ? `Connected · linear.app/${s.linearWorkspaceUrlKey}`
-        : 'Connected',
+        ? `${s.linearAuthMethod === 'app_install' ? 'Installed' : 'Connected'} · linear.app/${s.linearWorkspaceUrlKey}`
+        : s.linearAuthMethod === 'app_install'
+          ? 'Installed'
+          : 'Connected',
   render: (ctx) => <LinearAccessStep {...ctx} />,
 }
 

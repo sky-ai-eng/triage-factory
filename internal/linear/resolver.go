@@ -71,6 +71,54 @@ func ParseUserCredential(raw string) (UserCredential, error) {
 	return c, nil
 }
 
+// InstallCredential is the envelope an app install stores under the org secret
+// linear_app_install: the refresh token and what identifies the install it
+// belongs to. ClientID is the app that minted it, whose secret every refresh
+// needs. InstalledAt is the install's org_linear_installs.installed_at: a
+// rotation keeps it and a new install changes it, which is how a cached access
+// token learns the install it was minted for has been replaced.
+type InstallCredential struct {
+	WorkspaceID  string    `json:"workspace_id"`
+	AppUserID    string    `json:"app_user_id"`
+	RefreshToken string    `json:"refresh_token"`
+	ClientID     string    `json:"client_id"`
+	InstalledAt  time.Time `json:"installed_at"`
+}
+
+// MarshalInstallCredential renders an InstallCredential for storage.
+func MarshalInstallCredential(c InstallCredential) (string, error) {
+	b, err := json.Marshal(c)
+	if err != nil {
+		return "", fmt.Errorf("linear: marshal install credential: %w", err)
+	}
+	return string(b), nil
+}
+
+// ParseInstallCredential reads a stored InstallCredential. An empty or
+// malformed value, or one with no refresh token or client id, is an error:
+// the key exists, so this is corruption, not absence.
+func ParseInstallCredential(raw string) (InstallCredential, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return InstallCredential{}, errors.New("linear: empty install credential")
+	}
+	var c InstallCredential
+	if err := json.Unmarshal([]byte(raw), &c); err != nil {
+		return InstallCredential{}, fmt.Errorf("linear: parse install credential: %w", err)
+	}
+	if c.RefreshToken == "" || c.ClientID == "" {
+		return InstallCredential{}, errors.New("linear: install credential has no refresh token or client id")
+	}
+	return c, nil
+}
+
+// InstallTokenSource mints the app user's access token from an org's install
+// envelope. internal/linearoauth's TokenCache implements it. An org with no
+// usable install is ErrNoLinearSystemCredential.
+type InstallTokenSource interface {
+	AccessTokenForOrg(ctx context.Context, orgID string) (accessToken string, expiresAt time.Time, err error)
+}
+
 // SystemCredential is the org's service credential as raw fields rather than
 // a live client, for sealing into a run's credential bundle. Method decides
 // which field is set: APIKey for AuthMethodAPIKey, AccessToken and ExpiresAt
@@ -109,11 +157,20 @@ type Resolver interface {
 type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
+	install InstallTokenSource // nil when the app-install shape isn't wired
 }
 
-// NewResolver builds a Resolver over the secret and org-settings stores.
+// NewResolver builds a Resolver over the secret and org-settings stores. It
+// resolves the api_key shape only; an installed org is an error. Callers that
+// serve installed orgs use NewResolverWithInstall.
 func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 	return &resolver{secrets: secrets, orgs: orgs}
+}
+
+// NewResolverWithInstall builds a Resolver that also resolves the app_install
+// shape, minting the app user's access token through install.
+func NewResolverWithInstall(secrets db.SecretStore, orgs db.OrgsStore, install InstallTokenSource) Resolver {
+	return &resolver{secrets: secrets, orgs: orgs, install: install}
 }
 
 // ForSystem builds a client from the org's service credential, counted under
@@ -151,10 +208,14 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 		}
 		return SystemCredential{Method: AuthMethodAPIKey, APIKey: key}, nil
 	case AuthMethodAppInstall:
-		// TODO(TFAC-1022): mint the app user's access token from the install
-		// envelope stored under linear_app_install. Until then an installed org
-		// resolves as unconfigured.
-		return SystemCredential{}, fmt.Errorf("%w: org=%s (app_install not supported yet)", ErrNoLinearSystemCredential, orgID)
+		if r.install == nil {
+			return SystemCredential{}, fmt.Errorf("resolve linear credential for org %s: app_install with no install token source wired", orgID)
+		}
+		token, expiresAt, err := r.install.AccessTokenForOrg(ctx, orgID)
+		if err != nil {
+			return SystemCredential{}, err
+		}
+		return SystemCredential{Method: AuthMethodAppInstall, AccessToken: token, ExpiresAt: expiresAt}, nil
 	default:
 		return SystemCredential{}, fmt.Errorf("resolve linear credential for org %s: unknown auth method %q", orgID, method)
 	}

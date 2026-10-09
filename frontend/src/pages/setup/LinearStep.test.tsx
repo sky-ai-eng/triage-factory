@@ -50,6 +50,8 @@ describe('LinearAccessStep — disconnecting', () => {
         linearConnected: false,
         linearWorkspaceUrlKey: '',
         linearBoundAs: '',
+        linearAuthMethod: '',
+        linearLastError: '',
         org: expect.objectContaining({ version: 7, linear_api_key: '' }),
       }),
     )

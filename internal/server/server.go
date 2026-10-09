@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/knowledgeevent"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/poller"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/reconcile"
@@ -152,6 +153,18 @@ type Server struct {
 	// Linear picker reads and the team-rules write gate. Built in New, never
 	// nil; tests swap it to point the client at a fake GraphQL endpoint.
 	linearResolver linear.Resolver
+	// linearOAuthApps resolves the Linear OAuth app an org's install ceremony
+	// and its refreshes run against (the org's own row → the deployment app).
+	// Built in New, never nil.
+	linearOAuthApps linear.OAuthAppResolver
+	// linearOAuthMinter performs Linear's OAuth exchanges for the install
+	// ceremony and the disconnect's revoke. Built in New, never nil; tests
+	// point it at a fake token endpoint.
+	linearOAuthMinter *linearoauth.Minter
+	// linearInstalls is org_linear_installs on the admin pool, for the reads
+	// and writes the install ceremony, the disconnect and the app card make
+	// outside a transaction.
+	linearInstalls db.LinearInstallsStore
 	// validateLinear checks a Linear credential live and reports who it acts
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
@@ -574,8 +587,14 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.jiraResolver = jira.NewResolverWithOAuth(stores.Secrets, stores.Orgs, s.jiraTokenCache)
 	// Linear credential resolver. The picker and the team-rules write gate
 	// read the org's catalog through ForSystem, whichever shape the org's
-	// service credential takes.
-	s.linearResolver = linear.NewResolver(stores.Secrets, stores.Orgs)
+	// service credential takes; an installed org's access token comes from the
+	// token cache, which refreshes it off the install's rotating refresh
+	// token.
+	s.linearOAuthApps = linear.NewOAuthAppResolver(stores.LinearApps, stores.Secrets, linear.DeploymentOAuthAppFromEnv())
+	s.linearOAuthMinter = linearoauth.NewMinter()
+	s.linearInstalls = stores.LinearInstalls
+	s.linearResolver = linear.NewResolverWithInstall(stores.Secrets, stores.Orgs,
+		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls))
 	s.validateLinear = auth.ValidateLinear
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
@@ -1570,6 +1589,20 @@ func (s *Server) routes() {
 	s.api("GET /api/orgs/{org_id}/linear/access", s.handleLinearAccessGet)
 	s.apiMutating("PUT /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialPut)
 	s.apiMutating("DELETE /api/orgs/{org_id}/linear/access/credential", s.handleLinearCredentialDelete)
+	// The org's own Linear OAuth app (linear_app_handlers.go): the status read
+	// the app card renders, and the admin's store and delete.
+	s.api("GET /api/orgs/{org_id}/linear/app", s.handleLinearAppStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/linear/app", s.handleLinearAppImport)
+	s.apiMutating("DELETE /api/orgs/{org_id}/linear/app", s.handleLinearAppDelete)
+	// The workspace install ceremony (linear_install.go). Both legs are
+	// top-level navigations — the start from the card, the callback from
+	// Linear's redirect — so they ride s.api (session, no CSRF wrap) and carry
+	// their own state-cookie CSRF defense. The callback is static because
+	// Linear matches redirect URIs exactly and one app serves every org; its
+	// org comes from the signed cookie. Both paths are registered on app
+	// owners' Linear apps, so a rename breaks every existing app.
+	s.api("GET /api/orgs/{org_id}/linear/install/start", s.handleLinearInstallStart)
+	s.api("GET /api/linear/install/callback", s.handleLinearInstallCallback)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential

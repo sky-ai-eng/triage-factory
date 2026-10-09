@@ -34,6 +34,12 @@ func TestDisabledSecretStore_EveryMethodReturnsTheSentinel(t *testing.T) {
 	if _, err := s.GetSystem(ctx, "org", "key"); !errors.Is(err, db.ErrSecretStoreUnavailable) {
 		t.Errorf("GetSystem error = %v, want ErrSecretStoreUnavailable", err)
 	}
+	if err := s.PutSystem(ctx, "org", "key", "value", ""); !errors.Is(err, db.ErrSecretStoreUnavailable) {
+		t.Errorf("PutSystem error = %v, want ErrSecretStoreUnavailable", err)
+	}
+	if _, err := s.DeleteSystemIfValue(ctx, "org", "key", "value"); !errors.Is(err, db.ErrSecretStoreUnavailable) {
+		t.Errorf("DeleteSystemIfValue error = %v, want ErrSecretStoreUnavailable", err)
+	}
 	if _, err := s.Delete(ctx, "org", "key"); !errors.Is(err, db.ErrSecretStoreUnavailable) {
 		t.Errorf("Delete error = %v, want ErrSecretStoreUnavailable", err)
 	}

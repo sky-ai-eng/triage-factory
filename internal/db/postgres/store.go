@@ -330,6 +330,11 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// JiraApps: app pool for request-handler reads/writes (RLS-gated);
 		// admin pool for the no-claims read the OAuth-app resolver needs.
 		JiraApps: newJiraAppsStore(app, admin),
+		// LinearApps: the JiraApps split. LinearInstalls: admin pool only —
+		// tf_app is refused every write, and the upsert's uniqueness spans
+		// orgs.
+		LinearApps:     newLinearAppsStore(app, admin),
+		LinearInstalls: newLinearInstallsStore(admin),
 		// ShippedDefaults is admin-pool only (claims-less bootstrap work).
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.
@@ -529,6 +534,8 @@ func NewForTx(tx *sql.Tx, secretKey aead.Key) db.TxStores {
 		// it use New(admin, app, key) directly, same as the SecretStore tests.
 		GitHubApps:               newGitHubAppsStore(tx, tx, newSecretStore(tx, tx, secretKey)),
 		JiraApps:                 newJiraAppsStore(tx, tx),
+		LinearApps:               newLinearAppsStore(tx, tx),
+		LinearInstalls:           newLinearInstallsStore(tx),
 		ShippedDefaults:          newTxShippedDefaultsStore(tx, newTxEventHandlerStore(tx)),
 		Invites:                  newInvitesStore(tx, tx),
 		SystemLLMRuns:            newSystemLLMRunStore(tx),

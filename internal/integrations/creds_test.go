@@ -385,7 +385,7 @@ func TestAllKeys_IncludesLegacyKeychainKeys(t *testing.T) {
 // there would dangle the ref. They belong only in AllLocalSweepKeys (the full
 // uninstall wipe, where the DB is gone too).
 func TestStaticOrgSecretsExcludedFromAllKeys(t *testing.T) {
-	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret} {
+	for _, k := range []string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret, integrations.KeyLinearOAuthClientSecret} {
 		if slices.Contains(integrations.AllKeys(), k) {
 			t.Errorf("%q must NOT be in AllKeys: nothing on that path reconciles its companion DB ref", k)
 		}
@@ -404,7 +404,7 @@ func TestAllLocalSweepKeys_IsAllKeysPlusStaticOrgSecrets(t *testing.T) {
 			t.Errorf("AllLocalSweepKeys missing AllKeys entry %q (must be a superset)", k)
 		}
 	}
-	orgSecrets := append([]string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret},
+	orgSecrets := append([]string{integrations.KeyAnthropicAPIKey, integrations.KeyJiraOAuthClientSecret, integrations.KeyLinearOAuthClientSecret},
 		integrations.BedrockKeys()...)
 	for _, k := range orgSecrets {
 		if !slices.Contains(sweep, k) {
@@ -463,29 +463,32 @@ func TestSlackWorkspaceKeysFor_Format(t *testing.T) {
 	}
 }
 
-// TestLinearSystemConfig pins the marker × key-presence matrix of the two
-// Linear helpers: a client config exists only for a key under an api_key
+// TestLinearSystemConfig pins the marker × credential-presence matrix of the
+// two Linear helpers: a client config exists only for a key under an api_key
 // marker or no marker, while an app_install marker counts as configured
-// whatever the bundle holds, because its credential is an envelope the
-// resolver reads.
+// exactly when its install envelope is stored, because that envelope is what
+// the resolver mints from.
 func TestLinearSystemConfig(t *testing.T) {
 	cases := []struct {
 		name           string
 		marker, key    string
+		installed      bool
 		wantConfig     bool
 		wantConfigured bool
 	}{
-		{"api_key with key", "api_key", "lin_api_org", true, true},
-		{"api_key without key", "api_key", "", false, false},
-		{"app_install without key", "app_install", "", false, true},
-		{"app_install with a stale key", "app_install", "lin_api_org", false, true},
-		{"no marker with key", "", "lin_api_org", true, true},
-		{"no marker, no key", "", "", false, false},
-		{"unknown marker", "saml_v9", "lin_api_org", false, false},
+		{"api_key with key", "api_key", "lin_api_org", false, true, true},
+		{"api_key without key", "api_key", "", false, false, false},
+		{"api_key with a stale envelope", "api_key", "", true, false, false},
+		{"app_install with its envelope", "app_install", "", true, false, true},
+		{"app_install without its envelope", "app_install", "", false, false, false},
+		{"app_install with a stale key", "app_install", "lin_api_org", false, false, false},
+		{"no marker with key", "", "lin_api_org", false, true, true},
+		{"no marker, no key", "", "", false, false, false},
+		{"unknown marker", "saml_v9", "lin_api_org", true, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			creds := auth.Credentials{LinearAuthMethod: tc.marker, LinearAPIKey: tc.key}
+			creds := auth.Credentials{LinearAuthMethod: tc.marker, LinearAPIKey: tc.key, LinearAppInstalled: tc.installed}
 			cfg, ok := integrations.LinearSystemConfig(creds)
 			if ok != tc.wantConfig {
 				t.Errorf("LinearSystemConfig ok = %v, want %v", ok, tc.wantConfig)
@@ -530,8 +533,9 @@ func TestLoad_ReadsLinear(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		if got.LinearAuthMethod != "api_key" || got.LinearAPIKey != "lin_api_org" {
-			t.Errorf("%s Linear half = (%q, %q), want (api_key, lin_api_org)", name, got.LinearAuthMethod, got.LinearAPIKey)
+		if got.LinearAuthMethod != "api_key" || got.LinearAPIKey != "lin_api_org" || !got.LinearAppInstalled {
+			t.Errorf("%s Linear half = (%q, %q, installed=%v), want (api_key, lin_api_org, installed=true)",
+				name, got.LinearAuthMethod, got.LinearAPIKey, got.LinearAppInstalled)
 		}
 	}
 }
