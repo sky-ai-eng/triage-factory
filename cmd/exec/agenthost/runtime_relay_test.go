@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -32,14 +33,15 @@ func (c directDispatchConn) call(ctx context.Context, namespace, op string, args
 
 func TestRelayRuntime_InsertConversationWorktreeBindsConversationIdentity(t *testing.T) {
 	conn, stores, info := newCaptureStoresConn(t, true)
-	if _, err := conn.Exec(`INSERT INTO repositories (id, source, owner, repo) VALUES (?, 'github', 'octocat', 'relay')`, uuid.New().String()); err != nil {
+	repositoryID := uuid.New().String()
+	if _, err := conn.Exec(`INSERT INTO repositories (id, source, host, owner, repo) VALUES (?, 'github', ?, 'octocat', 'relay')`, repositoryID, dbtest.TestGitHubHost); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	srv := NewRelayServer(stores, info, nil)
 	rt := newRelayRuntime(directDispatchConn{srv: srv}, info, nil)
 
 	inserted, _, err := rt.InsertConversationWorktree(context.Background(), domain.ConversationWorktree{
-		ConversationID: "conversation-from-wire", RepoID: "octocat/relay",
+		ConversationID: "conversation-from-wire", RepositoryID: repositoryID,
 		Path: "/tmp/relay", Ref: "default",
 	})
 	if err != nil || !inserted {

@@ -57,6 +57,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Seed a repo into orgA only.
 	if _, err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
+		Host:  dbtest.TestGitHubHost,
 		Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
@@ -102,7 +103,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
+	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
 		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
 	}
 	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); got.CloneStatus == "failed" {
@@ -131,6 +132,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if _, err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
+		Host:  dbtest.TestGitHubHost,
 		Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
@@ -177,6 +179,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
+				Host:  dbtest.TestGitHubHost,
 				Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
@@ -292,6 +295,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	write("Upsert (insert arm)", func(tx db.TxStores) error {
 		var e error
 		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Host:  dbtest.TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main", ExternalID: "1296269",
 			ProfiledAt: &profiled,
@@ -303,6 +307,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	write("Upsert (update arm)", func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Host:  dbtest.TestGitHubHost,
 			Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main",
 			ProfiledAt: &profiled,
@@ -324,13 +329,35 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	var stamped *domain.Repository
 	write("UpdateCloneStatusByRef", func(tx db.TxStores) error {
 		var e error
-		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
 		return e
 	})
 	if stamped == nil {
 		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
 	}
 	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
+}
+
+// TestRepositoryStore_Postgres_UpsertReturnedRowConformance runs the
+// host-carrying upsert's returned-row suite inside a claims-carrying
+// transaction on the app pool, so every arm's RETURNING — and the id-rule
+// subquery it evaluates — answers under the repositories RLS policy rather
+// than on a BYPASSRLS connection.
+func TestRepositoryStore_Postgres_UpsertReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgRepoOrg(t, h)
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).Repos
+		dbtest.RunRepositoryUpsertReturnedRowConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
+			t.Helper()
+			return store, orgID
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
 }
 
 func repoIDs(profiles []domain.Repository) []string {

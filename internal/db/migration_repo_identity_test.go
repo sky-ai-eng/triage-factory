@@ -172,14 +172,16 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 
 	// The identity index is live: a second row for the same repository is
 	// refused, in the same casing and in another. Without this the assertions
-	// above would also pass on a migration that dropped the key entirely.
+	// above would also pass on a migration that dropped the key entirely. The
+	// key includes the GitHub host, and the migrated rows are on the default
+	// one, so the duplicates name it.
 	if _, err := database.Exec(
-		`INSERT INTO repositories (id, owner, repo) VALUES ('octo/widget-2', 'octo', 'widget')`,
+		`INSERT INTO repositories (id, host, owner, repo) VALUES ('octo/widget-2', 'https://github.com', 'octo', 'widget')`,
 	); err == nil {
 		t.Error("a duplicate repository was accepted; want the identity index to refuse it")
 	}
 	if _, err := database.Exec(
-		`INSERT INTO repositories (id, owner, repo) VALUES ('OCTO/WIDGET', 'OCTO', 'WIDGET')`,
+		`INSERT INTO repositories (id, host, owner, repo) VALUES ('OCTO/WIDGET', 'https://github.com', 'OCTO', 'WIDGET')`,
 	); err == nil {
 		t.Error("a case-variant duplicate was accepted; want the folded key to refuse it — " +
 			"that is the row pair the old case-sensitive unique let through")
@@ -189,7 +191,7 @@ func TestMigrate_RepoIdentityRebuildPreservesRows(t *testing.T) {
 	// would have refused. (The slug PK still forces a distinct id here — see
 	// the migration's note on why that stays local mode's business.)
 	if _, err := database.Exec(
-		`INSERT INTO repositories (id, owner, repo, source) VALUES ('gitlab:octo/widget', 'octo', 'widget', 'gitlab')`,
+		`INSERT INTO repositories (id, host, owner, repo, source) VALUES ('gitlab:octo/widget', 'https://github.com', 'octo', 'widget', 'gitlab')`,
 	); err != nil {
 		t.Errorf("same slug under a different source was refused: %v", err)
 	}

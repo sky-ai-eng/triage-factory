@@ -368,12 +368,14 @@ type recordingRepositoryStore struct {
 	db.RepositoryStore
 	mu      sync.Mutex
 	visited []string
+	hosts   []string
 }
 
 func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
+	r.hosts = append(r.hosts, host)
 	return nil, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
@@ -16,7 +17,12 @@ import (
 // GitHub API call, so this test exercises the iteration without
 // needing a real github client.
 func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
-	orgs := &fakeOrgsStore{ids: []string{"org-a", "org-b", "org-c"}}
+	// org-b is on another GitHub host; its base URL carries a trailing slash
+	// the host does not.
+	orgs := &fakeOrgsStore{
+		ids:   []string{"org-a", "org-b", "org-c"},
+		bases: map[string]string{"org-b": "https://ghe.example.com/"},
+	}
 	repos := &recordingRepositoryStore{}
 
 	p := NewProfiler(nil, nil, nil, repos, orgs, nil, nil, nil)
@@ -35,6 +41,13 @@ func TestProfiler_Run_IteratesActiveOrgs(t *testing.T) {
 	for i, got := range repos.visited {
 		if got != orgs.ids[i] {
 			t.Errorf("visit[%d] = %s; want %s (per-org iteration must preserve ListActiveSystem order)", i, got, orgs.ids[i])
+		}
+	}
+	// Each org's tracked set is read on that org's own current host.
+	wantHosts := []string{dbtest.TestGitHubHost, "https://ghe.example.com", dbtest.TestGitHubHost}
+	for i, got := range repos.hosts {
+		if got != wantHosts[i] {
+			t.Errorf("tracked set %d read on host %q; want %q", i, got, wantHosts[i])
 		}
 	}
 }
@@ -67,6 +80,7 @@ type fakeOrgsStore struct {
 	ids          []string
 	err          error
 	calls        int
+	bases        map[string]string // org id → github_base_url
 }
 
 func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) {
@@ -77,6 +91,12 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 	return append([]string(nil), f.ids...), nil
 }
 
+// GetSettingsSystem answers each org's GitHub base URL from bases, and the
+// default (no base URL, so the default host) for an org it does not name.
+func (f *fakeOrgsStore) GetSettingsSystem(_ context.Context, orgID string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{GitHubBaseURL: f.bases[orgID]}, nil
+}
+
 // recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only
 // ListTrackedNamesSystem. Returning empty short-circuits Run
 // before any GitHub API call, so the test isolates the per-org loop
@@ -85,12 +105,14 @@ type recordingRepositoryStore struct {
 	db.RepositoryStore
 	mu      sync.Mutex
 	visited []string
+	hosts   []string
 }
 
-func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (r *recordingRepositoryStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.visited = append(r.visited, orgID)
+	r.hosts = append(r.hosts, host)
 	return nil, nil
 }
 

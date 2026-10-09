@@ -82,11 +82,11 @@ func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _ string, c
 	return nil
 }
 
-func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ReachableRepository, int, error) {
+func (f *fakeMirror) ListReachWithoutPurposeSystem(context.Context, string, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	return nil, 0, nil
 }
 
-func (f *fakeMirror) ListScopeDriftSystem(context.Context, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
+func (f *fakeMirror) ListScopeDriftSystem(context.Context, string, string, domain.GitHubCredentialClass, db.ListOpts) ([]domain.ScopeDriftRepository, int, error) {
 	return nil, 0, nil
 }
 
@@ -98,15 +98,15 @@ func (f *fakeMirror) ReplaceForPATSystem(context.Context, string, string, []doma
 	panic("grantmirror must not write pat-tier entries")
 }
 
-func (f *fakeMirror) ListReachableSystem(context.Context, string, domain.GitHubCredentialClass, string, db.ListOpts) ([]domain.ReachableRepository, int, error) {
+func (f *fakeMirror) ListReachableSystem(context.Context, string, string, domain.GitHubCredentialClass, string, db.ListOpts) ([]domain.ReachableRepository, int, error) {
 	panic("grantmirror must not read the picker list")
 }
 
-func (f *fakeMirror) ReachableStateSystem(context.Context, string, domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
+func (f *fakeMirror) ReachableStateSystem(context.Context, string, string, domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
 	panic("grantmirror must not read cache state")
 }
 
-func (f *fakeMirror) ReachableSlugsSystem(context.Context, string, domain.GitHubCredentialClass, []string) (map[string]struct{}, error) {
+func (f *fakeMirror) ReachableSlugsSystem(context.Context, string, string, domain.GitHubCredentialClass, []string) (map[string]struct{}, error) {
 	panic("grantmirror must not read the write gate's slug set")
 }
 

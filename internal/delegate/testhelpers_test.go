@@ -240,10 +240,34 @@ func hasActiveClaim(t *testing.T, database *sql.DB, convID string) bool {
 
 // createPRCheckoutForTest builds a PR checkout the way setupGitHub does: the
 // task's run root, and the checkout beneath it namespaced by the conversation.
+// The bare is testRepo(owner, repo)'s.
 func createPRCheckoutForTest(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey string, opts ...worktree.CloneOption) (string, error) {
 	root, err := worktree.MakeRunRoot(rootKey)
 	if err != nil {
 		return "", err
 	}
-	return worktree.CreateForPRInRoot(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, rootKey, root, opts...)
+	return worktree.CreateForPRInRoot(ctx, testRepo(owner, repo), upstreamCloneURL, headCloneURL, headBranch, prNumber, rootKey, root, opts...)
+}
+
+// testRepo is the worktree handle for a repository a test names by its slug
+// and holds no row for: a stand-in row id built from the slug, so two
+// repositories never share a bare and repeated calls reach the same one.
+func testRepo(owner, repo string) worktree.Repo {
+	return worktree.Repo{ID: testRepositoryID(owner, repo), Owner: owner, Name: repo}
+}
+
+// testRepositoryID is testRepo's stand-in row id.
+func testRepositoryID(owner, repo string) string {
+	return "repo-" + owner + "-" + repo
+}
+
+// repositoryIDFor is the id of the repository row for owner/repo on the
+// default GitHub host, which a test seeded (tracking a repo mints its row).
+func repositoryIDFor(t *testing.T, stores db.Stores, owner, repo string) string {
+	t.Helper()
+	row, err := stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: owner, Repo: repo})
+	if err != nil || row == nil {
+		t.Fatalf("load repository %s/%s: row=%v err=%v", owner, repo, row, err)
+	}
+	return row.ID
 }

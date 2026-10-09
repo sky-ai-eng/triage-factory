@@ -216,20 +216,24 @@ func doJSON(t *testing.T, s *Server, method, path string, body any) *httptest.Re
 // team_github_repos insert is accumulative so multiple seed calls don't
 // clobber each other the way ReplaceForTeam would.
 //
-// The registry row comes first: tracking references it by id.
+// The registry row comes first: tracking references it by id. It is on the
+// org's current GitHub host, read when the seed runs, so a test that changes
+// the host and wants the row on the new one seeds after the change.
 // Returns the registry row id, which is how every repo route and every
 // repo-identifying payload field addresses it.
 func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	ctx := context.Background()
+	host := seedRepoHost(t, s)
 	if _, err := sqlitestore.New(s.db).Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+		Host:          host,
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
 	}); err != nil {
 		t.Fatalf("seed configured repo %s/%s: %v", owner, repo, err)
 	}
-	// Scoped the same way the store's own resolver is, on all four columns of
+	// Scoped the same way the store's own resolver is, on all five columns of
 	// the folded identity index. The fixture is single-org today, so org_id and
 	// source cannot yet select the wrong row — which is the reason to bind them
 	// now, while "there is only one" is an accident of the fixture rather than
@@ -237,9 +241,9 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 	var repositoryID string
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT id FROM repositories
-		 WHERE org_id = ? AND source = ?
+		 WHERE org_id = ? AND source = ? AND host = ?
 		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&repositoryID); err != nil {
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, host, owner, repo).Scan(&repositoryID); err != nil {
 		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
 	}
 	if _, err := s.db.ExecContext(ctx, `
@@ -254,10 +258,12 @@ func seedConfiguredRepo(t *testing.T, s *Server, owner, repo string) string {
 
 // seedUntrackedRepo mints a registry row no team tracks — the registry is a
 // superset of the tracked set, so this is a real state, and it is the one that
-// separates "no such repository" from "not yours to pin".
+// separates "no such repository" from "not yours to pin". Like
+// seedConfiguredRepo, the row is on the org's current GitHub host.
 func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	if _, err := sqlitestore.New(s.db).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+		Host:          seedRepoHost(t, s),
 		Owner:         owner,
 		Repo:          repo,
 		DefaultBranch: "main",
@@ -267,20 +273,32 @@ func seedUntrackedRepo(t *testing.T, s *Server, owner, repo string) string {
 	return repoIDFor(t, s, owner, repo)
 }
 
-// repoIDFor resolves an already-seeded repository's registry id. Same folded
-// lookup seedConfiguredRepo does, for the tests that seed through another
-// path (or that need the id again after a rename moved the name).
+// repoIDFor resolves an already-seeded repository's registry id on the org's
+// current GitHub host. Same folded lookup seedConfiguredRepo does, for the
+// tests that seed through another path (or that need the id again after a
+// rename moved the name).
 func repoIDFor(t *testing.T, s *Server, owner, repo string) string {
 	t.Helper()
 	var id string
 	if err := s.db.QueryRowContext(context.Background(), `
 		SELECT id FROM repositories
-		 WHERE org_id = ? AND source = ?
+		 WHERE org_id = ? AND source = ? AND host = ?
 		   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, owner, repo).Scan(&id); err != nil {
+	`, runmode.LocalDefaultOrgID, domain.RepoSourceGitHub, seedRepoHost(t, s), owner, repo).Scan(&id); err != nil {
 		t.Fatalf("resolve repository id for %s/%s: %v", owner, repo, err)
 	}
 	return id
+}
+
+// seedRepoHost is the local org's current GitHub host, the host the repository
+// fixtures seed and resolve on.
+func seedRepoHost(t *testing.T, s *Server) string {
+	t.Helper()
+	host, err := s.orgGitHubHost(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read the org's github host: %v", err)
+	}
+	return host
 }
 
 // blueprintRunSeq makes the blueprint / blueprint_run IDs minted by

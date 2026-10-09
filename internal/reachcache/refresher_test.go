@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,27 +31,47 @@ type fakeReachMirror struct {
 	db.ReachableReposStore
 	state    domain.ReachableCacheState
 	replaced int32
+
+	// stateHosts and replacedHosts record the host each state read and each
+	// PAT replace was scoped to, and replacedRows the rows of the latest
+	// replace. Guarded by mu: the runner tests drive RunOrg from goroutines.
+	mu            sync.Mutex
+	stateHosts    []string
+	replacedHosts []string
+	replacedRows  []domain.ReachableRepository
 }
 
-func (m *fakeReachMirror) ReachableStateSystem(context.Context, string, domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
+func (m *fakeReachMirror) ReachableStateSystem(_ context.Context, _ string, host string, _ domain.GitHubCredentialClass) (domain.ReachableCacheState, error) {
+	m.mu.Lock()
+	m.stateHosts = append(m.stateHosts, host)
+	m.mu.Unlock()
 	return m.state, nil
 }
 
-func (m *fakeReachMirror) ReplaceForPATSystem(context.Context, string, string, []domain.ReachableRepository) error {
+func (m *fakeReachMirror) ReplaceForPATSystem(_ context.Context, _ string, host string, rows []domain.ReachableRepository) error {
 	atomic.AddInt32(&m.replaced, 1)
+	m.mu.Lock()
+	m.replacedHosts = append(m.replacedHosts, host)
+	m.replacedRows = rows
+	m.mu.Unlock()
 	return nil
 }
 
 // fakeResolver hands back a real *github.Client pointed at the test server, so
-// the walk under test is the production one.
+// the walk under test is the production one. A non-nil err is what ClientFor
+// answers instead.
 type fakeResolver struct {
 	github.Resolver
 	base string
+	err  error
 }
 
 func (f fakeResolver) BaseURLFor(context.Context, string) (string, error) { return f.base, nil }
 
 func (f fakeResolver) ClientFor(context.Context, string, string) (*github.Client, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return github.NewClient(f.base, "test-token"), nil
 }
 
@@ -217,10 +238,10 @@ func TestRunOrgAppClassesRefreshThroughTheGrantReconcile(t *testing.T) {
 					fakeApps{app: &domain.OrgGitHubApp{Active: true}},
 				),
 				&fakeReachMirror{},
-				// A resolver with no host, so the PAT arm — if it were taken — would
-				// decline rather than write, and the write assertion below would
-				// catch the misrouting.
-				fakeResolver{},
+				// A resolver with no credential, so the PAT arm — if it were taken —
+				// would decline rather than write, and the write assertion below
+				// would catch the misrouting.
+				fakeResolver{err: github.ErrNoGitHubCredentials},
 				func(context.Context, string) error { grants++; return nil },
 				nil,
 			)
@@ -236,5 +257,100 @@ func TestRunOrgAppClassesRefreshThroughTheGrantReconcile(t *testing.T) {
 				t.Errorf("grant reconcile ran %d times; want 1", grants)
 			}
 		})
+	}
+}
+
+// A PAT refresh is scoped to the org's current GitHub host: the state read
+// that gates it and the rows it writes are both under the host org_settings
+// resolves to — not the resolver's base, which can fall back to the URL stored
+// beside the PAT — so every read of the mirror, which asks about the current
+// host, sees what the refresh wrote.
+func TestRunOrgPATRefreshWritesUnderTheSettingsHost(t *testing.T) {
+	ctx := context.Background()
+	var truncate, pages int32
+	srv := userReposServer(t, &truncate, &pages)
+	mirror := &fakeReachMirror{}
+	r := NewRefresher(
+		NewClassResolver(fakeOrgs{settings: domain.OrgSettings{
+			GitHubCredentialClass: domain.GitHubCredentialClassPAT,
+			GitHubBaseURL:         "https://ghe.example.com/",
+		}}, nil),
+		mirror,
+		fakeResolver{base: srv.URL},
+		nil,
+		nil,
+	)
+
+	wrote, err := r.RunOrg(ctx, "org-1", true)
+	if err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if !wrote {
+		t.Fatal("a completable PAT enumeration did not write")
+	}
+	const want = "https://ghe.example.com"
+	if len(mirror.stateHosts) != 1 || mirror.stateHosts[0] != want {
+		t.Errorf("state read on hosts %q; want exactly [%q]", mirror.stateHosts, want)
+	}
+	if len(mirror.replacedHosts) != 1 || mirror.replacedHosts[0] != want {
+		t.Errorf("PAT rows replaced on hosts %q; want exactly [%q]", mirror.replacedHosts, want)
+	}
+	if len(mirror.replacedRows) == 0 {
+		t.Error("the replace carried no rows")
+	}
+}
+
+// An org with no github_base_url is on the deployment's default host, and its
+// PAT rows land there rather than under an empty host no read matches.
+func TestRunOrgPATRefreshDefaultsToTheDeploymentHost(t *testing.T) {
+	ctx := context.Background()
+	var truncate, pages int32
+	srv := userReposServer(t, &truncate, &pages)
+	mirror := &fakeReachMirror{}
+	r := patRefresher(mirror, srv.URL)
+
+	if _, err := r.RunOrg(ctx, "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	want := db.EffectiveGitHubHost("")
+	if len(mirror.replacedHosts) != 1 || mirror.replacedHosts[0] != want {
+		t.Errorf("PAT rows replaced on hosts %q; want exactly [%q]", mirror.replacedHosts, want)
+	}
+}
+
+// A PAT validated on another host is refused by the resolver before any
+// request is made. The refresh reads that as a decline — nothing on the
+// current host is known until the PAT is rebound there — so it writes no rows,
+// returns no error, and arms the backoff so the picker's polling does not
+// re-run it on every read.
+func TestRunOrgPATHostMismatchIsADecline(t *testing.T) {
+	ctx := context.Background()
+	mirror := &fakeReachMirror{}
+	mismatch := &github.PATHostMismatchError{OrgID: "org-1", BoundHost: "https://ghe.old.example.com", CurrentHost: "https://github.com"}
+	r := NewRefresher(
+		NewClassResolver(fakeOrgs{settings: domain.OrgSettings{GitHubCredentialClass: domain.GitHubCredentialClassPAT}}, nil),
+		mirror,
+		fakeResolver{err: mismatch},
+		nil,
+		nil,
+	)
+
+	wrote, err := r.RunOrg(ctx, "org-1", true)
+	if err != nil {
+		t.Fatalf("RunOrg: %v; a PAT bound on another host is a decline, not an error", err)
+	}
+	if wrote {
+		t.Error("RunOrg reported a write for a PAT it could not use")
+	}
+	if got := atomic.LoadInt32(&mirror.replaced); got != 0 {
+		t.Errorf("mirror replaced %d times; want 0", got)
+	}
+	if !r.recentlyDeclined("org-1") {
+		t.Error("the decline did not arm the backoff; every picker poll would re-run the refresh")
+	}
+
+	wrote, err = r.RunOrg(ctx, "org-1", false)
+	if err != nil || wrote {
+		t.Errorf("a non-forced kick inside the window = (%v, %v); want (false, nil)", wrote, err)
 	}
 }

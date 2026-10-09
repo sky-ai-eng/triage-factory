@@ -95,9 +95,13 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 		// Give the repository about to be untracked the durable reference a
 		// real one accumulates: a worktree a run checked out.
+		dropped, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(untrackedSlug))
+		if err != nil || dropped == nil {
+			t.Fatalf("resolve %s: got=%v err=%v", untrackedSlug, dropped, err)
+		}
 		convID := conversation(t, "untrack")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: convID, RepoID: untrackedSlug, Ref: "pr-7",
+			ConversationID: convID, RepositoryID: dropped.ID, Ref: "pr-7",
 			Path: "/tmp/wt/" + convID + "/octo/dropped/pr-7",
 		}); err != nil {
 			t.Fatalf("reserve worktree: %v", err)
@@ -138,17 +142,17 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 	})
 
 	t.Run("A_worktree_cannot_be_reserved_for_a_repository_with_no_row", func(t *testing.T) {
-		// The reference is checked rather than assumed. Before the conversion
-		// this wrote a row naming a repository nothing knew about, and the
-		// ledger rotted quietly; now it fails at the point the caller is
-		// wrong. The store resolves rather than creates on purpose — the
-		// executor's role holds no INSERT on repositories.
+		// The reference is checked rather than assumed: a reservation naming a
+		// repository id no row answers to fails at the point the caller is
+		// wrong instead of recording a reference to nothing. The store checks
+		// rather than creates on purpose — the executor's role holds no INSERT
+		// on repositories.
 		s, orgID, _, conversation := mk(t)
 		convID := conversation(t, "unknown")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: convID, RepoID: "ghost/repo", Ref: "default", Path: "/tmp/wt/ghost",
-		}); err == nil {
-			t.Error("reserving a worktree for a repository with no registry row succeeded; want an error")
+			ConversationID: convID, RepositoryID: unknownRepoID, RepoID: "ghost/repo", Ref: "default", Path: "/tmp/wt/ghost",
+		}); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("reserving a worktree for a repository with no registry row = %v; want db.ErrNoSuchRepository", err)
 		}
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("ghost/repo")); got != nil {
 			t.Errorf("the refused reservation minted a repository row: %+v", got)

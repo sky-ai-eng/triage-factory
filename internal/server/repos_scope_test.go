@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -77,7 +78,7 @@ func newRepoScopeRig(t *testing.T) *repoScopeRig {
 func (r *repoScopeRig) replaceTeamRepos(t *testing.T, actingUser, teamID string, repos ...domain.TeamGitHubRepo) {
 	t.Helper()
 	if err := r.s.tx.WithTx(t.Context(), r.orgID, actingUser, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(t.Context(), r.orgID, teamID, repos)
+		return tx.TeamGitHubRepos.ReplaceForTeam(t.Context(), r.orgID, teamID, dbtest.TestGitHubHost, repos)
 	}); err != nil {
 		t.Fatalf("ReplaceForTeam(%s): %v", teamID, err)
 	}
@@ -334,6 +335,87 @@ func TestHandleRepoBranches_TeamScoped(t *testing.T) {
 	// NOT_CONFIGURED, distinctly from the gate's 404.
 	if rec := branches(rig.memberB, "acme", "web"); rec.Code != http.StatusConflict {
 		t.Fatalf("memberB branches list for acme/web: status = %d, want 409 (gate passed, no GitHub creds); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// setGitHubHost points the org at base through the settings writer, as the org
+// owner — the one door that owns the column.
+func (r *repoScopeRig) setGitHubHost(t *testing.T, base string) {
+	t.Helper()
+	if err := r.s.tx.WithTx(t.Context(), r.orgID, r.orgOwner, func(tx db.TxStores) error {
+		cur, err := tx.Orgs.GetSettings(t.Context(), r.orgID)
+		if err != nil {
+			return err
+		}
+		cur.GitHubBaseURL = base
+		_, err = tx.Orgs.UpdateSettingsVersioned(t.Context(), r.orgID, cur, cur.Version)
+		return err
+	}); err != nil {
+		t.Fatalf("set github host %q: %v", base, err)
+	}
+}
+
+// TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres pins the host gate under
+// RLS and real roles. Once the org points at another GitHub host, its rows on
+// the host it left are 404 to every caller — the org owner included, who sees
+// every row on the current host — on the id read, the by-name read, the PATCH
+// (no write, and a 404 rather than the 403 a tracking team's non-admin gets on
+// the current host), and the branch list. Pointing the org back restores them.
+func TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres(t *testing.T) {
+	rig := newRepoScopeRig(t)
+	apiID := rig.repoID(t, "acme", "api")
+	if rec := rig.patchBaseBranch(t, rig.orgOwner, "acme", "api", "release"); rec.Code != http.StatusOK {
+		t.Fatalf("seed base_branch: status = %d; body=%s", rec.Code, rec.Body.String())
+	}
+
+	rig.setGitHubHost(t, "https://ghe.example.com")
+
+	call := func(handler http.HandlerFunc, method, path, callerID string, body any, values map[string]string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		req := rig.req(method, path, callerID, body)
+		for k, v := range values {
+			req.SetPathValue(k, v)
+		}
+		handler(rec, req)
+		return rec
+	}
+	for _, caller := range []struct{ name, id string }{
+		{"org owner", rig.orgOwner},
+		{"tracking team admin", rig.memberB},
+		{"tracking team member", rig.plainB},
+	} {
+		t.Run(caller.name, func(t *testing.T) {
+			if rec := call(rig.s.handleRepoGet, http.MethodGet, "/api/repos/"+apiID, caller.id, nil,
+				map[string]string{"id": apiID}); rec.Code != http.StatusNotFound {
+				t.Errorf("GET by id = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			if rec := call(rig.s.handleRepoGetByName, http.MethodGet, "/api/repos/by-name/acme/web", caller.id, nil,
+				map[string]string{"owner": "acme", "repo": "web"}); rec.Code != http.StatusNotFound {
+				t.Errorf("GET by name = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			if rec := rig.patchBaseBranch(t, caller.id, "acme", "web", "hijacked"); rec.Code != http.StatusNotFound {
+				t.Errorf("PATCH = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			webID := rig.repoID(t, "acme", "web")
+			if rec := call(rig.s.handleRepoBranches, http.MethodPost, "/api/repos/"+webID+"/branches/list", caller.id, map[string]any{},
+				map[string]string{"id": webID}); rec.Code != http.StatusNotFound {
+				t.Errorf("branches = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+			if page := rig.listRepos(t, caller.id); len(page.Items) != 0 {
+				t.Errorf("list = %v, want no rows from the host the org left", listedRepoSlugs(page))
+			}
+		})
+	}
+	if got := rig.baseBranch(t, "acme", "web"); got != "" {
+		t.Errorf("acme/web base_branch = %q after refused PATCHes, want unset", got)
+	}
+
+	rig.setGitHubHost(t, "")
+	if got := listedRepoSlugs(rig.listRepos(t, rig.orgOwner)); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
+		t.Errorf("org owner list back on the original host = %v, want both rows again", got)
+	}
+	if got := rig.baseBranch(t, "acme", "api"); got != "release" {
+		t.Errorf("acme/api base_branch = %q, want the row kept unchanged at release", got)
 	}
 }
 

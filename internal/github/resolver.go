@@ -619,36 +619,45 @@ func (r *resolver) orgContextFor(ctx context.Context, orgID string) (orgGitHubCo
 	return orgGitHubContext{base: base, class: set.GitHubCredentialClass}, nil
 }
 
-// credentialClassFor reads the credential class alone, for the two entry points
-// that resolve no host (HasAnyCredential, OrgIdentityFor). Resolving a base they
-// would discard can cost an extra secret read, so they don't go through
-// orgContextFor.
-func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
+// credentialClassFor reads the credential class, for the two entry points that
+// need the host on some arms only (HasAnyCredential, OrgIdentityFor). Resolving
+// a base an arm would discard can cost an extra secret read, so they don't go
+// through orgContextFor. The hostResolver it returns derives the host from the
+// same settings row on first call and remembers it, so an arm that does need
+// the host pays at most baseFrom's secret read and never a second settings
+// read.
+func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, hostResolver, error) {
 	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		return "", fmt.Errorf("resolve github credential class for org %s: %w", orgID, err)
+		return "", nil, fmt.Errorf("resolve github credential class for org %s: %w", orgID, err)
 	}
-	return set.GitHubCredentialClass, nil
+	var (
+		resolved bool
+		base     string
+		baseErr  error
+	)
+	host := func() (string, error) {
+		if !resolved {
+			base, baseErr = r.baseFrom(ctx, orgID, set, nil)
+			resolved = true
+		}
+		return base, baseErr
+	}
+	return set.GitHubCredentialClass, host, nil
 }
 
 // hostResolver defers resolving the org's GitHub host to the arm that needs
-// one, which is only ever the managed arm: establishing the deployment App's
-// identity is a call to a particular GitHub, and the two entry points that read
-// the class alone (HasAnyCredential, OrgIdentityFor) deliberately resolve no
-// host — for every other class they would pay a settings read, and possibly a
-// secret read, for a value they discard.
+// one: the managed arm, since establishing the deployment App's identity is a
+// call to a particular GitHub, and the PAT arm, since a PAT is used only on the
+// host it was bound on. The two entry points that read the class first
+// (HasAnyCredential, OrgIdentityFor) resolve no host on any other arm, which
+// would cost a possible secret read for a value they discard.
 type hostResolver func() (string, error)
 
 // fixedHost is the resolver for the entry points that already resolved the
 // org's host alongside its class, off the one settings row orgContextFor read.
 func fixedHost(base string) hostResolver {
 	return func() (string, error) { return base, nil }
-}
-
-// lazyHost resolves the org's host on demand, for the entry points that read
-// the class alone and would otherwise never need one.
-func (r *resolver) lazyHost(ctx context.Context, orgID string) hostResolver {
-	return func() (string, error) { return r.githubBaseFor(ctx, orgID) }
 }
 
 // resolvedApp is the App a resolution mints from, in whichever of the two
@@ -1032,13 +1041,13 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // PAT-tier read error propagates so a transient secret-store outage isn't
 // misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	// Class alone: this probe resolves no host, so it skips orgContextFor and
-	// the base resolution (and possible secret read) it would discard.
-	class, err := r.credentialClassFor(ctx, orgID)
+	// Class first: only the managed and PAT arms need the host, so it is
+	// resolved on demand from the same settings row.
+	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil {
 		return false, err
 	}
-	app, err := r.activeApp(ctx, orgID, class, r.lazyHost(ctx, orgID))
+	app, err := r.activeApp(ctx, orgID, class, host)
 	if err != nil {
 		return false, err
 	}
@@ -1049,9 +1058,9 @@ func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, er
 		}
 		return len(insts) > 0, nil
 	}
-	// The PAT tier needs the host after all: a PAT bound on another host is
-	// not usable here, and says so rather than reading as "no credential".
-	base, err := r.githubBaseFor(ctx, orgID)
+	// The PAT tier needs the host: a PAT bound on another host is not usable
+	// here, and says so rather than reading as "no credential".
+	base, err := host()
 	if err != nil {
 		return false, err
 	}
@@ -1123,7 +1132,7 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // the whole posture of this function is to refuse a fabricated identity, and
 // under an unrecognised class the PAT login would be exactly that.
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
-	class, err := r.credentialClassFor(ctx, orgID)
+	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil || !class.Known() {
 		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
 			"org", orgID, "class", class, "error", err)
@@ -1136,7 +1145,7 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// installations the App has). A staged/inactive App or a read error skips to
 	// PAT rather than claiming an identity the org isn't acting as — during a
 	// PAT→App switch the org is in the App system but still committing as its PAT.
-	if app, err := r.appForIdentity(ctx, orgID, class, r.lazyHost(ctx, orgID)); err == nil && app.commitIdentityReady() {
+	if app, err := r.appForIdentity(ctx, orgID, class, host); err == nil && app.commitIdentityReady() {
 		name = app.slug() + "[bot]"
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
@@ -1175,7 +1184,7 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	//
 	// The same rule as every PAT read: a PAT bound on a host other than the
 	// org's current one authenticates as nobody here, so it lends no identity.
-	base, err := r.githubBaseFor(ctx, orgID)
+	base, err := host()
 	if err != nil {
 		return "", "", false
 	}

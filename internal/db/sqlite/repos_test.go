@@ -19,6 +19,7 @@ import (
 func anyRepository() domain.Repository {
 	id := uuid.New().String()
 	return domain.Repository{
+		Host:  dbtest.TestGitHubHost,
 		Owner: id, Repo: id,
 	}
 }
@@ -46,6 +47,16 @@ func TestRepositoryStore_SQLite(t *testing.T) {
 
 // TestRepositoryStore_SQLite_RejectsNonLocalOrg pins the assertLocalOrg
 // guard — every method must refuse a non-local orgID.
+// TestRepositoryStore_SQLite_UpsertReturnedRowConformance runs the
+// host-carrying upsert's returned-row suite against the SQLite impl, the same
+// cases Postgres runs under RLS.
+func TestRepositoryStore_SQLite_UpsertReturnedRowConformance(t *testing.T) {
+	dbtest.RunRepositoryUpsertReturnedRowConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
+		t.Helper()
+		return sqlitestore.New(openSQLiteForTest(t)).Repos, runmode.LocalDefaultOrgID
+	})
+}
+
 func TestRepositoryStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	conn := newSQLiteForRepoTest(t)
 	stores := sqlitestore.New(conn)

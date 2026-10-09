@@ -1287,22 +1287,26 @@ func TestConversationStore_Postgres_PRCoherenceTargets(t *testing.T) {
 					t.Fatalf("seed pending review: %v", err)
 				}
 			},
-			Worktree: func(t *testing.T, conversationID, slug, ref string) {
+			Worktree: func(t *testing.T, conversationID, host, slug, ref string) {
 				t.Helper()
 				// Tracking is the one door into the registry, and the worktree
 				// references the row it mints. Appended rather than replaced so
 				// every staged repository stays tracked.
-				tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, dbtest.TestGitHubHost)
+				tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, host)
 				if err != nil {
 					t.Fatalf("list tracked repos: %v", err)
 				}
-				r := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
+				r := domain.RepoRefFromSlug(host, slug)
 				tracked = append(tracked, domain.TeamGitHubRepo{Owner: r.Owner, Repo: r.Repo})
-				if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, dbtest.TestGitHubHost, tracked); err != nil {
-					t.Fatalf("track repository %s: %v", slug, err)
+				if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, host, tracked); err != nil {
+					t.Fatalf("track repository %s on %s: %v", slug, host, err)
+				}
+				repo, err := stores.Repos.GetByRefSystem(ctx, orgID, r)
+				if err != nil || repo == nil {
+					t.Fatalf("resolve tracked repository %s on %s: got=%v err=%v", slug, host, repo, err)
 				}
 				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-					ConversationID: conversationID, RepoID: slug, Ref: ref,
+					ConversationID: conversationID, RepositoryID: repo.ID, Ref: ref,
 					Path: "/tmp/coherence/" + conversationID + "/" + ref,
 				}); err != nil {
 					t.Fatalf("seed worktree: %v", err)

@@ -344,19 +344,20 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		// The registry row is seeded on the admin pool, not minted by the
 		// store: the executor's role holds SELECT and UPDATE on repositories
-		// and deliberately no INSERT, so a worktree reservation resolves the
-		// slug and never creates one. That IS part of this conformance —
-		// InsertSystem below has to reach the row through a SELECT alone.
-		SeedRepository(t, h, orgID, "octo", "repo")
+		// and deliberately no INSERT, so a worktree reservation checks the
+		// repository id and never creates a row. That IS part of this
+		// conformance — InsertSystem below has to reach the row through a
+		// SELECT alone.
+		repositoryID := SeedRepository(t, h, orgID, "octo", "repo")
 		if inserted, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: conversationID, RepoID: "octo/repo", Path: "/tmp/conformance-wt", Ref: "main",
+			ConversationID: conversationID, RepositoryID: repositoryID, Path: "/tmp/conformance-wt", Ref: "main",
 		}); err != nil || !inserted {
 			t.Errorf("ConversationWorktrees.InsertSystem: inserted=%v err=%v", inserted, err)
 		}
 		if _, err := stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID); err != nil {
 			t.Errorf("ConversationWorktrees.ListSystem: %v", err)
 		}
-		if err := stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, orgID, conversationID, "octo/repo", "main"); err != nil {
+		if err := stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, orgID, conversationID, repositoryID, "main"); err != nil {
 			t.Errorf("ConversationWorktrees.DeleteByRepoRefSystem: %v", err)
 		}
 	})
@@ -587,7 +588,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 
 	t.Run("repositories", func(t *testing.T) {
 		seedRepository(t, h, orgID)
-		ref := domain.RepoRef{Owner: "octo", Repo: "conformance-repo"}
+		ref := domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "conformance-repo"}
 		if got, err := stores.Repos.GetByRefSystem(ctx, orgID, ref); err != nil || got == nil {
 			t.Errorf("Repos.GetByRefSystem: got=%v err=%v", got, err)
 		}
@@ -743,9 +744,9 @@ func seedTrigger(t *testing.T, h *Harness, orgID, creatorID, teamID, blueprintID
 func seedRepository(t *testing.T, h *Harness, orgID string) {
 	t.Helper()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO repositories (org_id, owner, repo)
-		VALUES ($1, 'octo', 'conformance-repo')
-	`, orgID)
+		INSERT INTO repositories (org_id, host, owner, repo)
+		VALUES ($1, $2, 'octo', 'conformance-repo')
+	`, orgID, dbtest.TestGitHubHost)
 }
 
 // assertPgCode is defined in baseline_test.go (same package); referenced

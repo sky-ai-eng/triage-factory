@@ -117,16 +117,16 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
-	// The worktree store resolves the slug to a registry row and never creates
-	// one (the executor holds no INSERT on repositories), so the fixture brings
-	// each repository into existence the way tracking would.
-	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
-	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "third-repo")
+	// The worktree store references a registry row and never creates one (the
+	// executor holds no INSERT on repositories), so the fixture brings each
+	// repository into existence the way tracking would.
+	otherRepoID := pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
+	thirdRepoID := pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "third-repo")
 
 	msgs, ready := credDoorbells(t, h)
 	ready()
 
-	row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/default", Ref: "default"}
+	row := domain.ConversationWorktree{ConversationID: conversationID, RepositoryID: otherRepoID, Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/default", Ref: "default"}
 	inserted, _, err := stores.ConversationWorktrees.InsertSystem(ctx, orgID, row)
 	if err != nil || !inserted {
 		t.Fatalf("InsertSystem: inserted=%v err=%v", inserted, err)
@@ -147,7 +147,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	// row, but credentials are minted per repo — the authorized set is
 	// unchanged, so re-sealing would spend GitHub App mint quota on a
 	// byte-identical grant.
-	secondRef := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/pr-42", Ref: "pr-42"}
+	secondRef := domain.ConversationWorktree{ConversationID: conversationID, RepositoryID: otherRepoID, Path: "/runs/" + conversationID + "/sky-ai-eng/other-repo/pr-42", Ref: "pr-42"}
 	inserted, _, err = stores.ConversationWorktrees.InsertSystem(ctx, orgID, secondRef)
 	if err != nil || !inserted {
 		t.Fatalf("InsertSystem (second ref): inserted=%v err=%v, want inserted=true", inserted, err)
@@ -155,7 +155,7 @@ func TestConversationWorktreeStore_Postgres_InsertRingsCredDoorbell(t *testing.T
 	expectNoCredRequest(t, msgs)
 
 	// A different repo does widen the set.
-	otherRepo := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/third-repo", Path: "/runs/" + conversationID + "/sky-ai-eng/third-repo/default", Ref: "default"}
+	otherRepo := domain.ConversationWorktree{ConversationID: conversationID, RepositoryID: thirdRepoID, Path: "/runs/" + conversationID + "/sky-ai-eng/third-repo/default", Ref: "default"}
 	inserted, _, err = stores.ConversationWorktrees.InsertSystem(ctx, orgID, otherRepo)
 	if err != nil || !inserted {
 		t.Fatalf("InsertSystem (new repo): inserted=%v err=%v, want inserted=true", inserted, err)
@@ -179,7 +179,7 @@ func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *t
 	orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "alice")
 	conversationID := seedPgArtifactConversation(t, h, orgID, teamID, userID)
 
-	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
+	otherRepoID := pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
 
 	msgs, ready := credDoorbells(t, h)
 	ready()
@@ -190,7 +190,7 @@ func TestConversationWorktreeStore_Postgres_RolledBackInsertRingsNoDoorbell(t *t
 	}
 	txStores := pgstore.NewForTx(tx, pgtest.SecretKey)
 	inserted, _, err := txStores.ConversationWorktrees.Insert(ctx, orgID, domain.ConversationWorktree{
-		ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/x", Ref: "default",
+		ConversationID: conversationID, RepositoryID: otherRepoID, Path: "/runs/x", Ref: "default",
 	})
 	if err != nil || !inserted {
 		t.Fatalf("Insert in tx: inserted=%v err=%v", inserted, err)
@@ -235,17 +235,10 @@ func TestConversationWorktreeStore_Postgres_Conformance(t *testing.T) {
 				t.Helper()
 				pgtest.MustExec(t, h.AdminDB, `DELETE FROM conversations WHERE id = $1`, conversationID)
 			},
-			Repo: func(t *testing.T, slug string) {
+			Repo: func(t *testing.T, host, slug string) string {
 				t.Helper()
-				ref := domain.RepoRefFromSlug(dbtest.TestGitHubHost, slug)
-				var exists bool
-				if err := h.AdminDB.QueryRow(`SELECT EXISTS (SELECT 1 FROM repositories WHERE org_id = $1 AND owner = $2 AND repo = $3)`,
-					orgID, ref.Owner, ref.Repo).Scan(&exists); err != nil {
-					t.Fatalf("look up repository: %v", err)
-				}
-				if !exists {
-					pgtest.SeedRepository(t, h, orgID, ref.Owner, ref.Repo)
-				}
+				ref := domain.RepoRefFromSlug(host, slug)
+				return pgtest.SeedRepositoryOnHost(t, h, orgID, host, ref.Owner, ref.Repo)
 			},
 			SiblingConversation: func(t *testing.T, conversationID string) string {
 				t.Helper()
@@ -288,13 +281,13 @@ func TestConversationWorktreeStore_Postgres_RecordRingsCredDoorbell(t *testing.T
 		INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
 		VALUES ($1, $2, $3, 'exec-test', 1, now() + interval '1 hour')
 	`, claimID, orgID, conversationID)
-	pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
+	otherRepoID := pgtest.SeedRepository(t, h, orgID, "sky-ai-eng", "other-repo")
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 
 	msgs, ready := credDoorbells(t, h)
 	ready()
 
-	row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "sky-ai-eng/other-repo", Path: "/runs/a/sky-ai-eng/other-repo/default", Ref: "default"}
+	row := domain.ConversationWorktree{ConversationID: conversationID, RepositoryID: otherRepoID, Path: "/runs/a/sky-ai-eng/other-repo/default", Ref: "default"}
 	if _, err := stores.ConversationWorktrees.RecordForClaimSystem(ctx, orgID, claimID, row); err != nil {
 		t.Fatalf("RecordForClaimSystem: %v", err)
 	}

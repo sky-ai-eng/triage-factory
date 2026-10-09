@@ -367,6 +367,44 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 	}
 }
 
+// A memoized coverage answer is about one host's repository: when the org's
+// host changes, the same slug on the new host is probed there rather than
+// inherited from the old host's positive.
+func TestResolver_ClientForRepo_CoverageIsPerHost(t *testing.T) {
+	ghA := newGHTestServer(t)
+	ghA.installRepos = []string{"acme/widget"}
+	ghB := newGHTestServer(t)
+	ghB.installRepos = []string{"acme/widget"}
+	orgs := &fakeOrgs{base: ghA.srv.URL}
+	r := newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		orgs,
+		&fakeAgents{},
+		nil,
+	)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+			t.Fatalf("ClientForRepo on host A #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&ghA.repoProbes); got != 1 {
+		t.Fatalf("host A coverage probes = %d, want 1 (memoized after the first)", got)
+	}
+
+	orgs.base = ghB.srv.URL
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo on host B: %v", err)
+	}
+	if got := atomic.LoadInt32(&ghB.repoProbes); got != 1 {
+		t.Errorf("host B coverage probes = %d, want 1 (host A's positive must not vouch for host B's repository)", got)
+	}
+	if got := atomic.LoadInt32(&ghB.mintCalls); got != 1 {
+		t.Errorf("host B mints = %d, want 1 (host A's cached installation token must not be sent to host B)", got)
+	}
+}
+
 // ClientForRepo must NOT cache a non-coverage answer: a repo newly added to a
 // selective grant has to be picked up on the next call, not pinned to
 // ErrNoGitHubCredentials for a whole TTL. So each not-covered resolution

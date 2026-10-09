@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -1434,5 +1435,88 @@ func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	}
 	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
 		t.Errorf("a rejected policy must not be stored: got %q", got)
+	}
+}
+
+// changeKicks records the GitHub and Jira change hooks a write fires. The hooks
+// are set directly rather than through SetOnGitHubChanged, which would also
+// start a reachable-repo refresh this test is not about.
+type changeKicks struct{ github, jira chan string }
+
+func recordChangeKicks(s *Server) changeKicks {
+	k := changeKicks{github: make(chan string, 8), jira: make(chan string, 8)}
+	s.onGitHubChanged = func(orgID string) { k.github <- orgID }
+	s.onJiraChanged = func(orgID string) { k.jira <- orgID }
+	return k
+}
+
+// fired reports whether ch received a kick within a short window.
+func fired(ch chan string) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(300 * time.Millisecond):
+		return false
+	}
+}
+
+// markPollsComplete records a completed poll for every source in sources, so a
+// later write's restart mark is observable as readiness going false.
+func markPollsComplete(t *testing.T, s *Server, sources ...string) {
+	t.Helper()
+	for _, src := range sources {
+		if err := s.allStores.PollReadiness.MarkPollComplete(t.Context(), runmode.LocalDefaultOrgID, src, time.Time{}); err != nil {
+			t.Fatalf("MarkPollComplete(%s): %v", src, err)
+		}
+	}
+}
+
+// pollReady reads source's poll readiness for the local org.
+func pollReady(t *testing.T, s *Server, source string) bool {
+	t.Helper()
+	ok, err := s.allStores.PollReadiness.Ready(t.Context(), runmode.LocalDefaultOrgID, source)
+	if err != nil {
+		t.Fatalf("Ready(%s): %v", source, err)
+	}
+	return ok
+}
+
+// TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly pins which
+// poll readiness a settings save clears. A GitHub change (here the host) kicks
+// the GitHub poller and marks GitHub restarted, so the last-poll time waits for
+// a poll of the new configuration; Jira's poller is not kicked and its
+// readiness stands. A save that changes GitHub and Jira together kicks and
+// marks both.
+func TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	kicks := recordChangeKicks(s)
+
+	markPollsComplete(t, s, "github", "jira")
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://ghe.example.com"})
+	if !fired(kicks.github) {
+		t.Error("a GitHub host change did not kick the GitHub poller")
+	}
+	if fired(kicks.jira) {
+		t.Error("a GitHub-only change kicked the Jira poller")
+	}
+	if pollReady(t, s, "github") {
+		t.Error("GitHub readiness survived a GitHub host change")
+	}
+	if !pollReady(t, s, "jira") {
+		t.Error("a GitHub-only change cleared Jira readiness")
+	}
+
+	markPollsComplete(t, s, "github", "jira")
+	patchOrgSettingsOK(t, s, map[string]any{
+		"github_base_url": "https://ghe2.example.com",
+		"jira_base_url":   "https://jira.example.com",
+	})
+	if !fired(kicks.github) || !fired(kicks.jira) {
+		t.Error("a combined GitHub and Jira change must kick both pollers")
+	}
+	if pollReady(t, s, "github") || pollReady(t, s, "jira") {
+		t.Error("a combined GitHub and Jira change must clear both readiness rows")
 	}
 }

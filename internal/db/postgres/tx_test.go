@@ -68,9 +68,9 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Seed a repo in orgB through the admin pool so the row exists
 	// regardless of claims.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repositories (org_id, owner, repo, profiled_at)
-		VALUES ($1, 'orgb-owner', 'orgb-repo', now())
-	`, orgB); err != nil {
+		INSERT INTO repositories (org_id, host, owner, repo, profiled_at)
+		VALUES ($1, $2, 'orgb-owner', 'orgb-repo', now())
+	`, orgB, dbtest.TestGitHubHost); err != nil {
 		t.Fatalf("seed orgB repo: %v", err)
 	}
 

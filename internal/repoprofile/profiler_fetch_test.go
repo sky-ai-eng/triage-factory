@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -97,7 +98,93 @@ func TestProfiler_FetchErrorLeavesRowUntouched(t *testing.T) {
 	}
 }
 
+// TestRunOrg_ProfilesOnlyTheCurrentHostsRepositories: an org that moved to
+// another GitHub host still has repositories tracked on the old one, and the
+// same names can belong to other repositories on the new one. A profiling pass
+// reads the tracked set of the org's current host only, so every fetch goes to
+// that host for one of its own repositories, and every row it reads and writes
+// is on that host.
+func TestRunOrg_ProfilesOnlyTheCurrentHostsRepositories(t *testing.T) {
+	const newHost = "https://ghe.example.com"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/")
+		if !strings.HasPrefix(path, "acme/new") {
+			t.Errorf("fetched %s; only the current host's acme/new is profiled", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if strings.Contains(path, "/contents/") {
+			w.WriteHeader(http.StatusNotFound) // docs-less: straight to the upsert
+			return
+		}
+		_, _ = w.Write([]byte(`{"default_branch":"main","clone_url":"https://x/acme/new.git"}`))
+	}))
+	defer srv.Close()
+
+	repos := &hostRepositoryStore{tracked: map[string][]string{
+		dbtest.TestGitHubHost: {"octo/old"},
+		newHost:               {"acme/new"},
+	}}
+	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, hostOrgStore{base: newHost + "/"}, nil, nil, nil)
+	if _, err := p.RunOrg(context.Background(), "org-1", true); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+
+	if len(repos.listedHosts) != 1 || repos.listedHosts[0] != newHost {
+		t.Errorf("tracked set read for hosts %v; want [%s]", repos.listedHosts, newHost)
+	}
+	for _, ref := range repos.reads {
+		if ref.Host != newHost || ref.Slug() != "acme/new" {
+			t.Errorf("read row %s on %q; want only acme/new on %s", ref.Slug(), ref.Host, newHost)
+		}
+	}
+	got := repos.upsertedByID()
+	if _, ok := got["octo/old"]; ok {
+		t.Error("the old host's repository was profiled")
+	}
+	written, ok := got["acme/new"]
+	if !ok {
+		t.Fatalf("acme/new was not profiled; got %v", keysOf(got))
+	}
+	if written.Host != newHost {
+		t.Errorf("profile row written on host %q; want %s", written.Host, newHost)
+	}
+}
+
 // --- test doubles (distinct from profiler_perorg_test.go's fakes) ---
+
+// hostOrgStore is oneOrgStore with a GitHub base URL.
+type hostOrgStore struct {
+	oneOrgStore
+	base string
+}
+
+func (s hostOrgStore) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
+	set, err := s.oneOrgStore.GetSettingsSystem(ctx, orgID)
+	set.GitHubBaseURL = s.base
+	return set, err
+}
+
+// hostRepositoryStore is fetchRepositoryStore with a tracked set per host, the
+// way the real store answers, recording the host each read asked about.
+type hostRepositoryStore struct {
+	fetchRepositoryStore
+	tracked     map[string][]string
+	listedHosts []string
+	reads       []domain.RepoRef
+}
+
+func (s *hostRepositoryStore) ListTrackedNamesSystem(_ context.Context, _, host string) ([]string, error) {
+	s.listedHosts = append(s.listedHosts, host)
+	return s.tracked[host], nil
+}
+
+func (s *hostRepositoryStore) GetByRefSystem(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
+	s.mu.Lock()
+	s.reads = append(s.reads, ref)
+	s.mu.Unlock()
+	return s.fetchRepositoryStore.GetByRefSystem(ctx, orgID, ref)
+}
 
 // oneOrgStore drives the per-org outer loop with a single active org and stub
 // settings — enough to reach runOrg's per-repo body without a real DB.
@@ -126,7 +213,7 @@ type fetchRepositoryStore struct {
 	upserts []domain.Repository
 }
 
-func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string, string) ([]string, error) {
 	return s.names, nil
 }
 
@@ -136,7 +223,7 @@ func (s *fetchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 // before any fetch, and every test built on this double would assert against
 // an empty run. ProfiledAt stays unset, so the TTL gate never skips.
 func (s *fetchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
-	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *fetchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
@@ -169,6 +256,8 @@ func (f fixedResolver) ClientFor(context.Context, string, string) (*github.Clien
 
 var (
 	_ db.OrgsStore       = oneOrgStore{}
+	_ db.OrgsStore       = hostOrgStore{}
 	_ db.RepositoryStore = (*fetchRepositoryStore)(nil)
+	_ db.RepositoryStore = (*hostRepositoryStore)(nil)
 	_ github.Resolver    = fixedResolver{}
 )

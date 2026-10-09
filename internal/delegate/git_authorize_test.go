@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -52,14 +53,14 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	// durable-registry state a repository lands in once its last team
 	// untracks it. The worktree ledger references the registry row, so the
 	// row has to exist; the point of the case is that tracking does not.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "tracked-only"},
 		{Owner: "acme", Repo: "materialized-only"},
 	}); err != nil {
 		t.Fatalf("track repos: %v", err)
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 		{Owner: "acme", Repo: "tracked-only"},
 	}); err != nil {
@@ -68,18 +69,18 @@ func TestGitAuthorizeDecision(t *testing.T) {
 	// A profile for acme/api so the protected-branch filter has a default to
 	// compare against (it must not reject the agent's own feature branch).
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	// Ref on the rows is informational only — the gate reads the live branch,
 	// stubbed below by worktree path.
 	for _, w := range []domain.ConversationWorktree{
-		{ConversationID: "run-1", RepoID: "acme/api", Path: "/tmp/a", Ref: "default"},
-		{ConversationID: "run-1", RepoID: "acme/materialized-only", Path: "/tmp/m", Ref: "default"},
+		{ConversationID: "run-1", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: "/tmp/a", Ref: "default"},
+		{ConversationID: "run-1", RepositoryID: repositoryIDFor(t, stores, "acme", "materialized-only"), Path: "/tmp/m", Ref: "default"},
 	} {
 		if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, w); err != nil {
-			t.Fatalf("materialize %s: %v", w.RepoID, err)
+			t.Fatalf("materialize %s: %v", w.Path, err)
 		}
 	}
 	stubLiveBranch(t, map[string]string{
@@ -147,14 +148,14 @@ func TestGitAuthorizeDecision_TaskOwnRepoReadableBeforeLedger(t *testing.T) {
 	// Track the run's own task repo AND an unrelated repo. The exception only
 	// fires for a TRACKED repo (the tracks gate runs first), so both are tracked;
 	// what distinguishes them is whether they are the run's task repo.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "owner", Repo: "repo"},
 		{Owner: "acme", Repo: "other"},
 	}); err != nil {
 		t.Fatalf("track repos: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
@@ -188,20 +189,20 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 	seedConversation(t, database, "run-2", "sess", "/tmp/wt")
 	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-2"}
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	// base_branch is user-configured (Upsert preserves it), so set it
 	// explicitly — resolve the name to a row and write by its id, the way the
 	// settings handler does.
-	row, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
+	row, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
 	if err != nil || row == nil {
 		t.Fatalf("GetByRef: got=%v err=%v", row, err)
 	}
@@ -209,7 +210,7 @@ func TestGitAuthorizeDecision_ProtectedAndDetached(t *testing.T) {
 		t.Fatalf("set base branch: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-2", RepoID: "acme/api", Path: "/tmp/api", Ref: "default",
+		ConversationID: "run-2", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: "/tmp/api", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -255,13 +256,13 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 	seedConversation(t, database, "run-pr", "sess", "/tmp/wt")
 	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-pr"}
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
@@ -284,7 +285,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 	gitAt("config", "branch.triagefactory/run-pr/pr-58.pushRemote", "tfpush-run-pr-58")
 
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-pr", RepoID: "acme/api", Path: wt, Ref: "pr-58",
+		ConversationID: "run-pr", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: wt, Ref: "pr-58",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -329,13 +330,13 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	seedConversation(t, database, "run-pr-own", "sess", "/tmp/wt")
 	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-pr-own"}
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
@@ -358,7 +359,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	gitAt("config", "branch.triagefactory/run-pr-own/pr-58.pushRemote", "tfpush-run-pr-own-58")
 
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-pr-own", RepoID: "acme/api", Path: wt, Ref: "pr-58",
+		ConversationID: "run-pr-own", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: wt, Ref: "pr-58",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -381,6 +382,73 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 	}
 }
 
+// TestGitAuthorizeDecision_GatesOnTheOrgsCurrentHost: the proxy forwards a
+// push to the org's current GitHub host, so the repository it authorizes is
+// the one on that host. Tracking is read there, and a ledger row earns push
+// authority only when it names that host's repository row: a checkout of the
+// same owner/repo materialized from the host the org left is a different
+// repository, and its branch must not become a pushable ref on the new one.
+func TestGitAuthorizeDecision_GatesOnTheOrgsCurrentHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	database := newDelegateTestDB(t)
+	stores := sqlitestore.New(database)
+	ctx := context.Background()
+	seedConversation(t, database, "run-host", "sess", "/tmp/wt")
+	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-host"}
+
+	// acme/api is tracked on the default host, where the run materialized it,
+	// and the org then moves to GHE.
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track acme/api on %s: %v", dbtest.TestGitHubHost, err)
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "run-host", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: "/tmp/old-host", Ref: "default",
+	}); err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ghe})
+	stubLiveBranch(t, map[string]string{"/tmp/old-host": "agent/old", "/tmp/new-host": "agent/new"})
+
+	// Tracked only on the host the org left: not tracked here.
+	if d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api"); err != nil || d.Allowed || d.DenyReason != "repo-not-tracked" {
+		t.Errorf("tracked only on %s: decision=%+v err=%v; want deny repo-not-tracked", dbtest.TestGitHubHost, d, err)
+	}
+
+	// Tracked on GHE too, but the only checkout is the other host's repository.
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, ghe, []domain.TeamGitHubRepo{
+		{Owner: "acme", Repo: "api"},
+	}); err != nil {
+		t.Fatalf("track acme/api on %s: %v", ghe, err)
+	}
+	d, err := gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision: %v", err)
+	}
+	if d.Allowed || d.DenyReason != "repo-not-materialized" {
+		t.Errorf("only an old-host checkout: decision=%+v; want deny repo-not-materialized (its branch is not a ref on %s)", d, ghe)
+	}
+
+	// A checkout of the GHE repository earns its own branch, and only that.
+	gheRow, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, domain.RepoRef{Host: ghe, Owner: "acme", Repo: "api"})
+	if err != nil || gheRow == nil {
+		t.Fatalf("load acme/api on %s: row=%v err=%v", ghe, gheRow, err)
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: "run-host", RepositoryID: gheRow.ID, Path: "/tmp/new-host", Ref: "default",
+	}); err != nil {
+		t.Fatalf("materialize on %s: %v", ghe, err)
+	}
+	d, err = gitAuthorizeDecision(ctx, stores, info, "acme", "api")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision: %v", err)
+	}
+	if !d.Allowed || !equalRefs(d.AllowedRefs, []string{"refs/heads/agent/new"}) {
+		t.Errorf("with a %s checkout: decision=%+v; want Allowed with refs/heads/agent/new alone", ghe, d)
+	}
+}
+
 // TestGitAuthorizeDecision_UniversalProtectionWithoutProfile pins that main and
 // master are refused even when the repo has no repository row to name them (the
 // universal protected set), so an unprofiled repo can't be pushed to on its
@@ -394,13 +462,13 @@ func TestGitAuthorizeDecision_UniversalProtectionWithoutProfile(t *testing.T) {
 	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-3"}
 
 	// Track + materialize a repo with NO repositories row.
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "noprofile"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-3", RepoID: "acme/noprofile", Path: "/tmp/np", Ref: "default",
+		ConversationID: "run-3", RepositoryID: repositoryIDFor(t, stores, "acme", "noprofile"), Path: "/tmp/np", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -429,13 +497,13 @@ func TestGitAuthorizeDecision_FailsClosedWithoutReposStore(t *testing.T) {
 	seedConversation(t, database, "run-4", "sess", "/tmp/wt")
 	info := agenthost.ConversationInfo{OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID, ConversationID: "run-4"}
 
-	if err := full.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := full.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, _, err := full.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-4", RepoID: "acme/api", Path: "/tmp/api4", Ref: "default",
+		ConversationID: "run-4", RepositoryID: repositoryIDFor(t, full, "acme", "api"), Path: "/tmp/api4", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}
@@ -473,18 +541,18 @@ func TestGitAuthorizeDecision_BaseBranchPushPolicy(t *testing.T) {
 	ctx := context.Background()
 	seedConversation(t, database, "run-bb", "sess", "/tmp/wt")
 
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "acme", Repo: "api"},
 	}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "run-bb", RepoID: "acme/api", Path: "/tmp/bb", Ref: "default",
+		ConversationID: "run-bb", RepositoryID: repositoryIDFor(t, stores, "acme", "api"), Path: "/tmp/bb", Ref: "default",
 	}); err != nil {
 		t.Fatalf("materialize: %v", err)
 	}

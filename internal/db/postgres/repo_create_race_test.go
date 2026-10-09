@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
@@ -41,7 +42,7 @@ func TestInsertRepositoryRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T) 
 	}
 	defer func() { _ = tx1.Rollback() }()
 
-	if err := insertRepositoryRow(ctx, tx1, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}); err != nil {
+	if err := insertRepositoryRow(ctx, tx1, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "Acme", Repo: "Api"}); err != nil {
 		t.Fatalf("tx1 create: %v", err)
 	}
 
@@ -55,7 +56,7 @@ func TestInsertRepositoryRow_CaseDifferingCreatorsResolveToOneRow(t *testing.T) 
 			done <- result{err}
 			return
 		}
-		if err := insertRepositoryRow(ctx, tx2, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}); err != nil {
+		if err := insertRepositoryRow(ctx, tx2, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api"}); err != nil {
 			_ = tx2.Rollback()
 			done <- result{err}
 			return

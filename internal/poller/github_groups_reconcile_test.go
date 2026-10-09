@@ -46,6 +46,14 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed mappings: %v", err)
 	}
+	// The same org login on another host is another organization: the teams
+	// listed on this host say nothing about its teams, so its mapping survives.
+	const otherHost = "https://ghe.example.com"
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, otherHost, []domain.TeamGitHubGroup{
+		{OrgLogin: "octo", TeamSlug: "legacy"},
+	}); err != nil {
+		t.Fatalf("seed other host's mapping: %v", err)
+	}
 
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
@@ -65,6 +73,13 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].TeamSlug != "backend" {
 		t.Errorf("after reconcile, mappings = %+v; want only octo/backend (legacy pruned)", got)
+	}
+	other, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, otherHost)
+	if err != nil {
+		t.Fatalf("ListForTeam on the other host: %v", err)
+	}
+	if len(other) != 1 || other[0].TeamSlug != "legacy" {
+		t.Errorf("after reconcile, the other host's mappings = %+v; want octo/legacy untouched", other)
 	}
 }
 

@@ -16,14 +16,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// seedRepositoryStore embeds db.RepositoryStore as nil and answers only
-// GetByRefSystem — the one read the rehydrate's seed resolution makes. profile
-// nil models a repo with no row; err models a store failure.
+// seedRepositoryStore embeds db.RepositoryStore as nil and answers only the
+// point reads a rehydrate makes: GetSystem, the seed's read of a checkout's
+// repository by row id, and GetByRefSystem, an older manifest's resolution of
+// a name. profile nil models a repository with no row; err models a store
+// failure.
 type seedRepositoryStore struct {
 	db.RepositoryStore
 	profile  *domain.Repository
 	err      error
+	gotIDs   []string
 	gotNames []string
+}
+
+func (s *seedRepositoryStore) GetSystem(_ context.Context, _ string, id string) (*domain.Repository, error) {
+	s.gotIDs = append(s.gotIDs, id)
+	return s.profile, s.err
 }
 
 func (s *seedRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
@@ -72,7 +80,7 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 	repos := &seedRepositoryStore{profile: &domain.Repository{Owner: "acme", Repo: "widgets", CloneURL: cloneURL}}
 	s := NewSpawner(nil, db.Stores{Repos: repos}, nil, nil, "")
 
-	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "per-run-placeholder"))
+	seed := s.gitSeedFor(context.Background(), "org-1", "repo-widgets", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "per-run-placeholder"))
 
 	if seed.owner != "acme" || seed.repo != "widgets" {
 		t.Errorf("seed repo = %s/%s, want acme/widgets", seed.owner, seed.repo)
@@ -80,8 +88,8 @@ func TestGitSeedFor_MultiRoutesRebuildThroughRunGitProxy(t *testing.T) {
 	if seed.cloneURL != cloneURL {
 		t.Errorf("seed clone URL = %q, want the repository row's %q — a missing bare cannot be seeded without it", seed.cloneURL, cloneURL)
 	}
-	if len(repos.gotNames) != 1 || repos.gotNames[0] != "acme/widgets" {
-		t.Errorf("repository lookups = %v, want one for %q", repos.gotNames, "acme/widgets")
+	if len(repos.gotIDs) != 1 || repos.gotIDs[0] != "repo-widgets" || len(repos.gotNames) != 0 {
+		t.Errorf("repository lookups = ids %v, names %v; want one by id %q and none by name", repos.gotIDs, repos.gotNames, "repo-widgets")
 	}
 	assertEntries(t, seed.auth.GitConfigEntries(),
 		wantProxyEntries("http://10.42.0.1:4100", "https://github.com", "per-run-placeholder"))
@@ -102,7 +110,7 @@ func TestGitSeedFor_NoProfileURLStillAuthenticatesViaOrgGitHost(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{profile: nil}}, nil, nil, "")
 	s.SetRunCredentialResolvers(&fakeResolver{baseURL: "https://ghe.acme.dev"}, nil, nil)
 
-	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
+	seed := s.gitSeedFor(context.Background(), "org-1", "repo-widgets", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
 		t.Errorf("seed clone URL = %q, want empty (no repository row to read one from)", seed.cloneURL)
@@ -118,7 +126,7 @@ func TestGitSeedFor_ProfileReadFailureDoesNotStrandTheRebuild(t *testing.T) {
 	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{err: errors.New("boom")}}, nil, nil, "")
 	s.SetRunCredentialResolvers(&fakeResolver{}, nil, nil)
 
-	seed := s.gitSeedFor(context.Background(), "org-1", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
+	seed := s.gitSeedFor(context.Background(), "org-1", "repo-widgets", "acme", "widgets", proxySandbox("http://10.42.0.1:4100", "ph"))
 
 	if seed.cloneURL != "" {
 		t.Errorf("seed clone URL = %q, want empty after a failed repository read", seed.cloneURL)
@@ -135,7 +143,7 @@ func TestGitSeedFor_UnwiredLocalCarriesCloneURLAndNoCredential(t *testing.T) {
 	const cloneURL = "https://github.com/acme/widgets.git"
 	s := NewSpawner(nil, db.Stores{Repos: &seedRepositoryStore{profile: &domain.Repository{CloneURL: cloneURL}}}, nil, nil, "")
 
-	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "acme", "widgets", nil)
+	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "repo-widgets", "acme", "widgets", nil)
 
 	if seed.cloneURL != cloneURL {
 		t.Errorf("seed clone URL = %q, want %q", seed.cloneURL, cloneURL)
@@ -169,7 +177,7 @@ func TestEnsureWorkspace_ColdRehydrate_HandsGitTheProxyCredential(t *testing.T) 
 	t.Cleanup(func() { restoreCheckout = restore })
 
 	sandbox := proxySandbox("http://10.42.0.3:4100", "run-placeholder")
-	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, sandbox, nil)
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, "entity-unread", sandbox, nil)
 	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
 		t.Fatalf("ensureWorkspace (cold): %v", err)
 	}
@@ -194,7 +202,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 
 	// Fresh executor: no run root, and no bare either.
 	f.loseRoot(t)
-	bareDir, err := worktree.RepoDir("acme", "widgets")
+	bareDir, err := worktree.RepoDir(testRepositoryID("acme", "widgets"))
 	if err != nil {
 		t.Fatalf("RepoDir: %v", err)
 	}
@@ -204,7 +212,7 @@ func TestEnsureWorkspace_ColdRehydrate_SeedsAMissingBare(t *testing.T) {
 	}
 	f.s.repos = &seedRepositoryStore{profile: &domain.Repository{CloneURL: upstream}}
 
-	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, nil, nil)
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, "entity-unread", nil, nil)
 	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, nil); err != nil {
 		t.Fatalf("ensureWorkspace with no bare on this host: %v", err)
 	}

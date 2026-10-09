@@ -13,13 +13,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
+	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -138,9 +142,11 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 			for _, w := range f.ledger.recordedRows() {
 				recorded[w.Path] = w
 			}
-			for _, co := range []string{pr, lib, docs} {
+			for co, repo := range map[string]string{pr: "app", lib: "lib", docs: "docs"} {
 				if w, ok := recorded[co]; !ok || w.ConversationID != conv.ID {
 					t.Errorf("no row recorded for %s as %s's (recorded: %v)", co, conv.ID, f.ledger.recordedRows())
+				} else if want := testRepositoryID("acme", repo); w.RepositoryID != want {
+					t.Errorf("row recorded for %s names repository %q, want %q", co, w.RepositoryID, want)
 				}
 			}
 
@@ -229,7 +235,7 @@ func TestEnsureWorkspace_FailureAfterCheckoutsTakesThemBack(t *testing.T) {
 	sessPath := writeSession(t, f.root, sessionID, `{"type":"summary"}`)
 	f.snapshot(t, sessionID, domain.ConversationRuntimeSDK)
 	f.loseRoot(t)
-	bare, err := worktree.RepoDir("acme", "app")
+	bare, err := worktree.RepoDir(testRepositoryID("acme", "app"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,24 +348,13 @@ func TestSnapshotWorkspace_RowFromAnotherRootStillCarriesTheCheckout(t *testing.
 // no tree to take for a warm one and runs the setup again.
 func TestSetupGitHub_FailsWithoutItsCheckoutRow(t *testing.T) {
 	f := newSnapshotFixture(t, "task-setup-row")
-	origin := f.upstream(t, "acme/app")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/repos/acme/app/pulls/7" {
-			http.NotFound(w, r)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"number": 7,
-			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": origin}},
-			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": origin}},
-		})
-	}))
-	t.Cleanup(srv.Close)
+	srv := f.prServer(t, nil)
+	entityID, _ := f.taskRegistry(t, dbtest.TestGitHubHost, dbtest.TestGitHubHost)
 	conversations := &setupConversations{}
 	f.s.conversations = conversations
 	f.s.conversationWorktrees = refusingLedger{}
 
-	task := domain.Task{ID: f.key, EntitySource: "github", EntitySourceID: "acme/app#7"}
+	task := domain.Task{ID: f.key, EntityID: entityID, EntitySource: "github", EntitySourceID: "acme/app#7"}
 	_, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "conversation_worktrees") {
 		t.Fatalf("setupGitHub = %v, want the failed row write", err)
@@ -393,6 +388,82 @@ type refusingLedger struct{ db.ConversationWorktreeStore }
 
 func (refusingLedger) RecordForClaimSystem(context.Context, string, string, domain.ConversationWorktree) (domain.ConversationWorktree, error) {
 	return domain.ConversationWorktree{}, errors.New("database is locked")
+}
+
+// TestSetupGitHub_ResolvesTheTaskRepositoryOnTheEntitysHost: the repository a
+// PR task's setup clones and records is the row for its owner/repo on the
+// GitHub host its pull request was polled from — the entity's scope — not on
+// the host the org names now. Both hosts hold an acme/app row here, and the
+// org's current host is always the other one, so a setup that read the org's
+// host would key the ledger row and the bare by the wrong repository.
+func TestSetupGitHub_ResolvesTheTaskRepositoryOnTheEntitysHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	for _, tc := range []struct{ entityHost, orgHost string }{
+		{entityHost: dbtest.TestGitHubHost, orgHost: ghe},
+		{entityHost: ghe, orgHost: dbtest.TestGitHubHost},
+	} {
+		t.Run("entity on "+tc.entityHost, func(t *testing.T) {
+			f := newSnapshotFixture(t, "task-setup-host")
+			srv := f.prServer(t, nil)
+			entityID, rows := f.taskRegistry(t, tc.entityHost, dbtest.TestGitHubHost, ghe)
+			dbtest.SeedOrgSettings(t, f.s.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: tc.orgHost})
+			f.s.conversations = &setupConversations{}
+
+			task := domain.Task{ID: f.key, EntityID: entityID, EntitySource: "github", EntitySourceID: "acme/app#7"}
+			cfg, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
+			if err != nil {
+				t.Fatalf("setupGitHub: %v", err)
+			}
+
+			want, other := rows[tc.entityHost], rows[tc.orgHost]
+			recorded := f.ledger.recordedRows()
+			if len(recorded) != 1 {
+				t.Fatalf("setup recorded %d ledger rows, want 1: %+v", len(recorded), recorded)
+			}
+			if got := recorded[0]; got.RepositoryID != want.ID || got.Path != cfg.prCheckout || got.Ref != worktree.PRRefSlug(7) {
+				t.Errorf("ledger row = {repository:%q path:%q ref:%q}, want {repository:%q (acme/app on %s) path:%q ref:%q}",
+					got.RepositoryID, got.Path, got.Ref, want.ID, tc.entityHost, cfg.prCheckout, worktree.PRRefSlug(7))
+			}
+			bare, err := worktree.RepoDir(want.ID)
+			if err != nil {
+				t.Fatalf("RepoDir: %v", err)
+			}
+			if _, err := os.Stat(bare); err != nil {
+				t.Errorf("no bare under the entity host's repository %s: %v", want.ID, err)
+			}
+			if otherBare, err := worktree.RepoDir(other.ID); err == nil {
+				if _, err := os.Stat(otherBare); !os.IsNotExist(err) {
+					t.Errorf("setup built a bare under the org host's repository %s (stat err %v)", other.ID, err)
+				}
+			}
+		})
+	}
+}
+
+// TestSetupGitHub_NoRepositoryOnTheEntitysHostFailsBeforeTheFetch: a PR task
+// whose owner/repo has no row on its entity's host has no repository to key a
+// ledger row or a bare by. A same-named row on the org's current host is a
+// different repository and is not borrowed; the setup fails before it reads
+// the pull request or records anything.
+func TestSetupGitHub_NoRepositoryOnTheEntitysHostFailsBeforeTheFetch(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	f := newSnapshotFixture(t, "task-setup-norow")
+	var fetches atomic.Int32
+	srv := f.prServer(t, &fetches)
+	entityID, _ := f.taskRegistry(t, ghe, dbtest.TestGitHubHost)
+	f.s.conversations = &setupConversations{}
+
+	task := domain.Task{ID: f.key, EntityID: entityID, EntitySource: "github", EntitySourceID: "acme/app#7"}
+	_, err := f.s.setupGitHub(context.Background(), runmode.LocalDefaultOrgID, fixtureConversation, "claim-1", f.key, "user-1", task, ghclient.NewProxyClient(srv.URL, "placeholder"), nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "acme/app") || !strings.Contains(err.Error(), ghe) {
+		t.Fatalf("setupGitHub = %v, want an error naming acme/app on %s", err, ghe)
+	}
+	if n := fetches.Load(); n != 0 {
+		t.Errorf("setup made %d GitHub requests before failing; it resolves the repository first", n)
+	}
+	if rows := f.ledger.recordedRows(); len(rows) != 0 {
+		t.Errorf("setup recorded %v without a repository", rows)
+	}
 }
 
 // TestSnapshotWorkspace_UnstattableCheckoutFailsThePersist: a checkout the
@@ -527,8 +598,9 @@ func TestSnapshotWorkspace_BlobFormat(t *testing.T) {
 	if err := json.NewDecoder(tr).Decode(&man); err != nil {
 		t.Fatal(err)
 	}
-	want := manifestCheckout{RepoID: "acme/app", Slug: "default", Path: "acme/app/default"}
+	want := manifestCheckout{RepositoryID: testRepositoryID("acme", "app"), RepoID: "acme/app", Slug: "default", Path: "acme/app/default"}
 	if man.LayoutVersion != snapshotLayoutVersion || len(man.Checkouts) != 1 ||
+		man.Checkouts[0].RepositoryID != want.RepositoryID ||
 		man.Checkouts[0].RepoID != want.RepoID || man.Checkouts[0].Slug != want.Slug || man.Checkouts[0].Path != want.Path || man.Checkouts[0].Head == "" {
 		t.Errorf("manifest = %+v, want layout %d carrying %+v", man, snapshotLayoutVersion, want)
 	}
@@ -790,6 +862,139 @@ func TestSnapshotWorkspace_PhaseSpans_NoCheckoutsNoSession(t *testing.T) {
 	}
 }
 
+// TestEnsureWorkspace_ColdRehydrate_RebuildsAgainstTheRecordedRepository: a
+// snapshot records each checkout's repository row id beside its owner/repo,
+// and a restore rebuilds against that id — the seed is resolved for it, the
+// rebuild git is handed carries it (it keys the bare), and the row recorded
+// for the restoring conversation names it — without resolving any name.
+func TestEnsureWorkspace_ColdRehydrate_RebuildsAgainstTheRecordedRepository(t *testing.T) {
+	f := newSnapshotFixture(t, "task-restore-id")
+	app := f.addCheckoutOf(t, worktree.Repo{ID: "row-app", Owner: "acme", Name: "app"}, "default")
+	lib := f.addCheckoutOf(t, worktree.Repo{ID: "row-lib", Owner: "acme", Name: "lib"}, "ref-main")
+	dirtyCheckout(t, app)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restorer := f.restorer()
+	var seeded []string
+	seed := restorer.seed
+	restorer.seed = func(ctx context.Context, repositoryID, owner, repo string) gitSeed {
+		seeded = append(seeded, repositoryID+" "+owner+"/"+repo)
+		return seed(ctx, repositoryID, owner, repo)
+	}
+	restorer.repository = func(_ context.Context, owner, repo string) (string, error) {
+		t.Errorf("resolved %s/%s by name; the manifest records its repository", owner, repo)
+		return "", errors.New("no name resolution in this test")
+	}
+	var restored []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		restored = append(restored, r)
+		return restore(ctx, r)
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	assertFileContains(t, filepath.Join(app, "committed.txt"), "unpushed commit")
+
+	wantByPath := map[string]string{app: "row-app", lib: "row-lib"}
+	if len(restored) != 2 {
+		t.Fatalf("restore rebuilt %d checkouts, want 2", len(restored))
+	}
+	for _, r := range restored {
+		path := filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)
+		if want := wantByPath[path]; r.RepositoryID != want {
+			t.Errorf("rebuild of %s carries repository %q, want %q", path, r.RepositoryID, want)
+		}
+	}
+	slices.Sort(seeded)
+	if want := []string{"row-app acme/app", "row-lib acme/lib"}; !slices.Equal(seeded, want) {
+		t.Errorf("seeds resolved for %v, want %v", seeded, want)
+	}
+	recorded := f.ledger.recordedRows()
+	if len(recorded) != 2 {
+		t.Fatalf("restore recorded %d rows, want 2: %+v", len(recorded), recorded)
+	}
+	for _, w := range recorded {
+		if want := wantByPath[w.Path]; w.RepositoryID != want || w.ConversationID != fixtureConversation {
+			t.Errorf("recorded row %+v, want repository %q for %s", w, want, fixtureConversation)
+		}
+	}
+}
+
+// TestEnsureWorkspace_ColdRehydrate_LegacyManifestResolvesOnTheEntitysHost: a
+// manifest written before checkouts recorded their repository row names each
+// by owner/repo alone. Its restore resolves that name on the GitHub host of
+// the task's own entity, through the restorer a claim builds, so with acme/app
+// rows on two hosts the one on the entity's scope is rebuilt and recorded —
+// whatever host the org names now.
+func TestEnsureWorkspace_ColdRehydrate_LegacyManifestResolvesOnTheEntitysHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	f := newSnapshotFixture(t, "task-restore-legacy")
+	co := f.addCheckout(t, "acme/app", "default")
+	dirtyCheckout(t, co)
+	f.writeLegacySnapshot(t)
+	f.loseRoot(t)
+
+	entityID, rows := f.taskRegistry(t, ghe, dbtest.TestGitHubHost, ghe)
+	want := rows[ghe]
+
+	var restored []worktree.CheckoutRestore
+	restore := restoreCheckout
+	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		restored = append(restored, r)
+		return restore(ctx, r)
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, entityID, nil, nil)
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	if len(restored) != 1 {
+		t.Fatalf("restore rebuilt %d checkouts, want 1", len(restored))
+	}
+	if r := restored[0]; r.RepositoryID != want.ID || r.CloneURL != want.CloneURL {
+		t.Errorf("rebuild = {repository:%q clone:%q}, want acme/app on %s {repository:%q clone:%q}", r.RepositoryID, r.CloneURL, ghe, want.ID, want.CloneURL)
+	}
+	assertFileContains(t, filepath.Join(co, "committed.txt"), "unpushed commit")
+	recorded := f.ledger.recordedRows()
+	if len(recorded) != 1 || recorded[0].RepositoryID != want.ID || recorded[0].Path != co {
+		t.Errorf("recorded rows = %+v, want one for %s naming repository %s", recorded, co, want.ID)
+	}
+}
+
+// TestEnsureWorkspace_ColdRehydrate_LegacyManifestWithNoRowOnTheEntitysHost: a
+// legacy manifest whose owner/repo has no row on the entity's host has nothing
+// to rebuild against. A row of that name on another host is another
+// repository, so the restore fails, naming the checkout, and leaves nothing
+// behind.
+func TestEnsureWorkspace_ColdRehydrate_LegacyManifestWithNoRowOnTheEntitysHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	f := newSnapshotFixture(t, "task-restore-legacy-norow")
+	f.addCheckout(t, "acme/app", "default")
+	f.writeLegacySnapshot(t)
+	f.loseRoot(t)
+
+	entityID, _ := f.taskRegistry(t, ghe, dbtest.TestGitHubHost)
+	restorer := f.s.checkoutRestorerFor(runmode.LocalDefaultOrgID, entityID, nil, nil)
+	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
+	if err == nil {
+		t.Fatal("ensureWorkspace restored a checkout whose repository has no row on the entity's host")
+	}
+	if !strings.Contains(err.Error(), "acme/app/default") {
+		t.Errorf("error = %v, want it to name the checkout acme/app/default", err)
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root survived a failed restore (stat err %v)", err)
+	}
+	if rows := f.ledger.recordedRows(); len(rows) != 0 {
+		t.Errorf("a failed restore recorded %v", rows)
+	}
+}
+
 // --- fixture ---------------------------------------------------------------
 
 // snapshotFixture is a task's run root with real checkouts beneath it, on a
@@ -822,27 +1027,36 @@ func newSnapshotFixture(t *testing.T, key string) *snapshotFixture {
 
 // addCheckout builds a checkout of repoID under the root the way the run
 // would: slug pr-7 as setup builds a PR run's checkout, any other slug as
-// `workspace add` does. It records the checkout's row and returns its path.
+// `workspace add` does. The repository is testRepo's for the slug. It records
+// the checkout's row as the store reads one back, carrying both the row id and
+// the slug, and returns its path.
 func (f *snapshotFixture) addCheckout(t *testing.T, repoID, slug string) string {
 	t.Helper()
 	owner, repo := parseOwnerRepo(repoID)
-	origin := f.upstream(t, repoID)
+	return f.addCheckoutOf(t, testRepo(owner, repo), slug)
+}
+
+// addCheckoutOf is addCheckout for a named repository: r.ID keys its bare and
+// its ledger row.
+func (f *snapshotFixture) addCheckoutOf(t *testing.T, r worktree.Repo, slug string) string {
+	t.Helper()
+	origin := f.upstream(t, r.Slug())
 	var (
 		path string
 		err  error
 	)
 	switch slug {
 	case "pr-7":
-		path, err = worktree.CreateForPRInRoot(context.Background(), owner, repo, origin, origin, "feature", 7, fixtureConversation, f.root)
+		path, err = worktree.CreateForPRInRoot(context.Background(), r, origin, origin, "feature", 7, fixtureConversation, f.root)
 	case "default":
-		path, err = worktree.CreateForCheckoutInRoot(context.Background(), owner, repo, origin, "", f.key, f.root)
+		path, err = worktree.CreateForCheckoutInRoot(context.Background(), r, origin, "", f.key, f.root)
 	default:
-		path, err = worktree.CreateForCheckoutInRoot(context.Background(), owner, repo, origin, strings.TrimPrefix(slug, "ref-"), f.key, f.root)
+		path, err = worktree.CreateForCheckoutInRoot(context.Background(), r, origin, strings.TrimPrefix(slug, "ref-"), f.key, f.root)
 	}
 	if err != nil {
-		t.Fatalf("build %s %s: %v", repoID, slug, err)
+		t.Fatalf("build %s %s: %v", r.Slug(), slug, err)
 	}
-	f.ledger.add(domain.ConversationWorktree{ConversationID: fixtureConversation, RepoID: repoID, Path: path, Ref: slug})
+	f.ledger.add(domain.ConversationWorktree{ConversationID: fixtureConversation, RepositoryID: r.ID, RepoID: r.Slug(), Path: path, Ref: slug})
 	return path
 }
 
@@ -870,16 +1084,111 @@ func (f *snapshotFixture) upstream(t *testing.T, repoID string) string {
 }
 
 // restorer rebuilds the fixture's checkouts from their local origins, reading
-// pull request #7 as one whose head is feature on the same origin.
+// pull request #7 as one whose head is feature on the same origin. It resolves
+// no name to a repository: every checkout the fixture writes records its row id.
 func (f *snapshotFixture) restorer() checkoutRestorer {
 	return checkoutRestorer{
-		seed: func(_ context.Context, owner, repo string) gitSeed {
+		seed: func(_ context.Context, _, owner, repo string) gitSeed {
 			return gitSeed{owner: owner, repo: repo, cloneURL: f.upstreams[owner+"/"+repo]}
 		},
 		pr: func(_ context.Context, owner, repo string, number int) (*ghclient.PRView, error) {
 			origin := f.upstreams[owner+"/"+repo]
 			return &ghclient.PRView{Number: number, HeadRef: "feature", BaseRef: "main", CloneURL: origin, SSHURL: origin}, nil
 		},
+	}
+}
+
+// prServer is a GitHub REST stand-in that answers pull request acme/app#7 with
+// the fixture's acme/app origin as both base and head, counting the requests
+// it serves when fetches is non-nil.
+func (f *snapshotFixture) prServer(t *testing.T, fetches *atomic.Int32) *httptest.Server {
+	t.Helper()
+	origin := f.upstream(t, "acme/app")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if fetches != nil {
+			fetches.Add(1)
+		}
+		if r.URL.Path != "/repos/acme/app/pulls/7" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"number": 7,
+			"head":   map[string]any{"ref": "feature", "repo": map[string]any{"clone_url": origin}},
+			"base":   map[string]any{"ref": "main", "repo": map[string]any{"clone_url": origin}},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// taskRegistry backs the fixture's spawner with a database holding the task's
+// entity — pull request acme/app#7, polled from entityHost — and an acme/app
+// repository row on each of hosts, returning the entity's id and the rows by
+// host. The row on entityHost clones from the fixture's acme/app origin; any
+// other row's clone URL leads nowhere, so a rebuild seeded from it fails.
+func (f *snapshotFixture) taskRegistry(t *testing.T, entityHost string, hosts ...string) (string, map[string]domain.Repository) {
+	t.Helper()
+	ctx := context.Background()
+	stores := sqlitestore.New(newDelegateTestDB(t))
+	entity, _, err := stores.Entities.FindOrCreate(ctx, runmode.LocalDefaultOrgID, "github", entityHost, "acme/app#7", "", "pr", "T", entityHost+"/acme/app/pull/7")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	rows := map[string]domain.Repository{}
+	for _, host := range hosts {
+		cloneURL := "file://" + filepath.Join(t.TempDir(), "elsewhere.git")
+		if host == entityHost {
+			cloneURL = f.upstream(t, "acme/app")
+		}
+		row, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{Host: host, Owner: "acme", Repo: "app", CloneURL: cloneURL})
+		if err != nil {
+			t.Fatalf("seed acme/app on %s: %v", host, err)
+		}
+		rows[host] = row
+	}
+	f.s.repos = stores.Repos
+	f.s.entities = stores.Entities
+	f.s.orgs = stores.Orgs
+	return entity.ID, rows
+}
+
+// writeLegacySnapshot writes the fixture tree's snapshot the way a binary that
+// did not record repository row ids wrote it: each manifest checkout names its
+// repository by owner/repo alone. It asserts the manifest has that shape.
+func (f *snapshotFixture) writeLegacySnapshot(t *testing.T) {
+	t.Helper()
+	f.ledger.mu.Lock()
+	for i := range f.ledger.rows {
+		f.ledger.rows[i].RepositoryID = ""
+	}
+	f.ledger.mu.Unlock()
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+
+	rc, err := f.s.Storage().Get(context.Background(), snapshotKey(runmode.LocalDefaultOrgID, f.key))
+	if err != nil {
+		t.Fatalf("get blob: %v", err)
+	}
+	defer rc.Close()
+	zr, err := zstd.NewReader(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	tr := tar.NewReader(zr)
+	if hdr, err := tr.Next(); err != nil || hdr.Name != snapManifest {
+		t.Fatalf("first member = %v (err %v), want the manifest", hdr, err)
+	}
+	var man struct {
+		Checkouts []map[string]any `json:"checkouts"`
+	}
+	if err := json.NewDecoder(tr).Decode(&man); err != nil {
+		t.Fatal(err)
+	}
+	for _, co := range man.Checkouts {
+		if _, ok := co["repository_id"]; ok || co["repo_id"] == "" {
+			t.Fatalf("legacy manifest checkout = %v, want repo_id and no repository_id", co)
+		}
 	}
 }
 

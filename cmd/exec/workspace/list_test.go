@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -57,7 +58,7 @@ func TestListWorkspaces_AvailableFiltersOutMaterialized(t *testing.T) {
 
 	// Materialize one of the three.
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "r1", RepoID: "owner/beta",
+		ConversationID: "r1", RepositoryID: repoRowID(t, database, "owner", "beta"),
 		Path: "/tmp/wt/beta", Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed materialized: %v", err)
@@ -115,7 +116,7 @@ func TestListWorkspaces_ScopedToRun(t *testing.T) {
 	seedRepository(t, database, "owner", "shared", "https://x", "main")
 
 	if _, _, err := sqlitestore.New(database.Conn).ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "r2", RepoID: "owner/shared",
+		ConversationID: "r2", RepositoryID: repoRowID(t, database, "owner", "shared"),
 		Path: "/tmp/wt/r2/owner/shared", Ref: "default",
 	}); err != nil {
 		t.Fatalf("seed r2 materialized: %v", err)
@@ -145,7 +146,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	seedJiraConversation(t, database, "r1", "SKY-1")
 
 	if _, err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "owner", Repo: "alpha",
+		Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "alpha",
 		Description:   "Core API service",
 		ProfileText:   "Long LLM-generated profile text that should NOT appear in workspace list output...",
 		CloneURL:      "https://x",
@@ -158,7 +159,7 @@ func TestListWorkspaces_AvailableSurfacesDescription(t *testing.T) {
 	// no-clone-url profiles, so surfacing them here would lead the
 	// agent to options that fail at materialize time.
 	if _, err := sqlitestore.New(database.Conn).Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "owner", Repo: "skeleton",
+		Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "skeleton",
 		// CloneURL deliberately empty
 		DefaultBranch: "main",
 	}); err != nil {

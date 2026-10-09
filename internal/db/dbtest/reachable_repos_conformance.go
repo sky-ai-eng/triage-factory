@@ -787,13 +787,16 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// read answers for the host the org names now: an installation on
 		// another host, or PAT rows written under one, are another deployment's
 		// reach and never merge into this one's.
+		//
+		// The ghe installation is on a differently named account: an org holds
+		// one active installation per account login, whatever its host.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID:      "2",
 			OrgID:               b.OrgID,
 			AccountType:         "Organization",
-			AccountLogin:        "acme",
+			AccountLogin:        "acme-ghe",
 			GitHubHost:          "https://ghe.internal",
 			RepositorySelection: domain.RepositorySelectionSelected,
 		}); err != nil {
@@ -805,7 +808,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("ReplaceForInstallationSystem(github.com): %v", err)
 		}
 		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
-			entry(b, "2", "acme", "enterprise", "10"),
+			entry(b, "2", "acme-ghe", "enterprise", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(ghe): %v", err)
 		}
@@ -819,13 +822,13 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			return slugs(t, rows)
 		}
 		equal(t, "github.com reach", read(TestGitHubHost), []string{"acme/dotcom"})
-		equal(t, "ghe reach", read("https://ghe.internal"), []string{"acme/enterprise"})
+		equal(t, "ghe reach", read("https://ghe.internal"), []string{"acme-ghe/enterprise"})
 
-		set, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, byoApp, []string{"acme/dotcom", "acme/enterprise"})
+		set, err := b.Mirror.ReachableSlugsSystem(ctx, b.OrgID, TestGitHubHost, byoApp, []string{"acme/dotcom", "acme-ghe/enterprise"})
 		if err != nil {
 			t.Fatalf("ReachableSlugsSystem: %v", err)
 		}
-		if _, ok := set["acme/enterprise"]; ok || len(set) != 1 {
+		if _, ok := set["acme-ghe/enterprise"]; ok || len(set) != 1 {
 			t.Errorf("ReachableSlugsSystem(github.com) = %v; want only acme/dotcom", set)
 		}
 

@@ -3,6 +3,7 @@ package tracker
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -21,7 +22,9 @@ import (
 // these pull requests. Asking would also hand the new host the old one's node
 // ids, and its stub lookups the old one's owner/repo#N. The rows are not moved:
 // they stay where they are, closed with their history, and the old host's
-// discovery finds them again by key if the org moves back.
+// discovery finds them again by key if the org moves back. For that discovery
+// to see them, the conditional-request cursor of each retired pull request's
+// repository on the old host is dropped here (forgetPullsCursor).
 //
 // The entity is closed by the router, which this event terminates it through;
 // an entity whose close has not landed by the next cycle is emitted for again,
@@ -36,14 +39,50 @@ func (t *Tracker) RetireGitHubOutOfScope(ctx context.Context, scope string) int 
 		return 0
 	}
 	retired := 0
+	forgotten := map[domain.RepoRef]bool{}
 	for _, e := range entities {
 		if e.Scope == scope {
 			continue
 		}
+		t.forgetPullsCursor(ctx, e, forgotten)
 		t.emitGitHubUnreachable(ctx, e, events.GitHubUnreachableScopeChanged)
 		retired++
 	}
 	return retired
+}
+
+// forgetPullsCursor clears the stored ETag of the open-PR listing of e's
+// repository on e's host, keeping its poll time, so the next listing there is
+// unconditional. Without it, an org that returns to the host would replay the
+// ETag stored before it left; a listing nothing changed in since answers 304,
+// discovery sees none of its pull requests, and the ones retired in the
+// meantime stay closed until something in the repository changes. done holds
+// the repositories already handled this pass. Best-effort: a cursor left in
+// place costs that delay, never a wrong event.
+func (t *Tracker) forgetPullsCursor(ctx context.Context, e domain.Entity, done map[domain.RepoRef]bool) {
+	if t.repos == nil || e.Scope == "" {
+		return
+	}
+	owner, repo, _ := domain.SplitGitHubEntitySourceID(e.SourceID)
+	if owner == "" || repo == "" {
+		return
+	}
+	ref := domain.RepoRef{Host: e.Scope, Owner: strings.ToLower(owner), Repo: strings.ToLower(repo)}
+	if done[ref] {
+		return
+	}
+	done[ref] = true
+	etag, polledAt, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, ref)
+	if err != nil {
+		trackerLog.WarnContext(ctx, "read pulls poll state of a retired pull request's repository failed", "host", e.Scope, "repo", owner+"/"+repo, "error", err)
+		return
+	}
+	if etag == "" || polledAt == nil {
+		return
+	}
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, ref, "", *polledAt); err != nil {
+		trackerLog.WarnContext(ctx, "clear pulls poll state of a retired pull request's repository failed", "host", e.Scope, "repo", owner+"/"+repo, "error", err)
+	}
 }
 
 // emitGitHubUnreachable publishes github:pr:unreachable for e, from its stored

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -141,7 +142,7 @@ func TestReadRepo_AnnotationIsOptional(t *testing.T) {
 	}
 	orgID, userID := runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID
 
-	row, canEdit, err := s.readRepo(t.Context(), orgID, userID, withCanEdit, lookup)
+	row, canEdit, err := s.readRepo(t.Context(), orgID, userID, dbtest.TestGitHubHost, withCanEdit, lookup)
 	if err != nil || row == nil {
 		t.Fatalf("withCanEdit: row = %v, err = %v", row, err)
 	}
@@ -149,7 +150,7 @@ func TestReadRepo_AnnotationIsOptional(t *testing.T) {
 		t.Fatal("withCanEdit: can_edit = false; local mode's single user may edit")
 	}
 
-	row, canEdit, err = s.readRepo(t.Context(), orgID, userID, noCanEdit, lookup)
+	row, canEdit, err = s.readRepo(t.Context(), orgID, userID, dbtest.TestGitHubHost, noCanEdit, lookup)
 	if err != nil || row == nil {
 		t.Fatalf("noCanEdit: row = %v, err = %v", row, err)
 	}
@@ -197,5 +198,54 @@ func TestRepoAddressing_SurvivesRename(t *testing.T) {
 	// The old name is gone, and by-name says so rather than resolving it.
 	if stale := doJSON(t, s, http.MethodGet, "/api/repos/by-name/acme/api", nil); stale.Code != http.StatusNotFound {
 		t.Errorf("by-name on the pre-rename name = %d, want 404", stale.Code)
+	}
+}
+
+// TestRepoRoutes_RowOnAnotherHostIsInvisible pins that a repository row on a
+// GitHub host other than the org's current one is in nobody's view — local
+// mode's single user is an org admin, so this is the admin case. Every route
+// that resolves a repository answers 404 for it: the id read, the by-name read
+// (which resolves the name on the current host), the PATCH (which writes
+// nothing), and the branch list (which asks GitHub nothing). The row itself is
+// kept, so pointing the org back at its host shows it again unchanged.
+func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	repoID := seedConfiguredRepo(t, s, "acme", "api")
+	if rec := doJSON(t, s, http.MethodGet, "/api/repos/"+repoID, nil); rec.Code != http.StatusOK {
+		t.Fatalf("GET on its own host = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	setOrgGitHubBase(t, s, "https://ghe.example.com")
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               any
+	}{
+		{"GET by id", http.MethodGet, "/api/repos/" + repoID, nil},
+		{"GET by name", http.MethodGet, "/api/repos/by-name/acme/api", nil},
+		{"PATCH", http.MethodPatch, "/api/repos/" + repoID, map[string]string{"base_branch": "develop"}},
+		{"branches", http.MethodPost, "/api/repos/" + repoID + "/branches/list", map[string]any{}},
+	} {
+		if rec := doJSON(t, s, tc.method, tc.path, tc.body); rec.Code != http.StatusNotFound {
+			t.Errorf("%s for a row on another host = %d, want 404; body=%s", tc.name, rec.Code, rec.Body.String())
+		}
+	}
+	page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{}))
+	if len(page.Items) != 0 {
+		t.Errorf("list on the new host = %v, want no rows from the host the org left", listedRepoSlugs(page))
+	}
+
+	setOrgGitHubBase(t, s, "")
+	rec := doJSON(t, s, http.MethodGet, "/api/repos/"+repoID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET back on its own host = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got repoJSON
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.BaseBranch != "" {
+		t.Errorf("base_branch = %q, want unset: the PATCH refused on the other host must not have written", got.BaseBranch)
 	}
 }

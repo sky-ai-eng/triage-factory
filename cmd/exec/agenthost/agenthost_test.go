@@ -430,7 +430,8 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T) {
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-server", "", "event")
-	if _, err := conn.Exec(`INSERT INTO repositories (id, source, owner, repo) VALUES (?, 'github', 'octocat', 'hello')`, uuid.New().String()); err != nil {
+	repositoryID := uuid.New().String()
+	if _, err := conn.Exec(`INSERT INTO repositories (id, source, host, owner, repo) VALUES (?, 'github', ?, 'octocat', 'hello')`, repositoryID, dbtest.TestGitHubHost); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 
@@ -453,7 +454,7 @@ func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T
 	client := Dial(sockPath)
 	t.Cleanup(func() { _ = client.Close() })
 	row := domain.ConversationWorktree{
-		ConversationID: "conv-attacker", RepoID: "octocat/hello",
+		ConversationID: "conv-attacker", RepositoryID: repositoryID,
 		Path: "/tmp/conv-server/hello", Ref: "default",
 	}
 	inserted, _, err := client.InsertConversationWorktree(context.Background(), row)

@@ -62,6 +62,10 @@ type RepositorySeeder struct {
 //     row already holds (profile, base branch, clone state, poll cursor).
 //   - Every single-row write returns the row it persisted, and that row is
 //     the one a point read finds.
+//   - The GitHub host is part of a repository's identity: the same slug on
+//     two hosts is two rows, every ref-keyed and listing method answers only
+//     for the host it is given and refuses an empty one with
+//     db.ErrRepoHostRequired, and a provider id is unique per host.
 func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -84,6 +88,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// assertion below.
 		profiled := time.Now().UTC().Truncate(time.Second)
 		created, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			Description: "v1", ProfileText: "v1",
 			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
@@ -113,6 +118,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// right about all four.
 		reprofiled := profiled.Add(time.Hour)
 		updated, err := s.UpsertSystem(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "acme", Repo: "api",
 			Description: "v2", ProfileText: "v2", DefaultBranch: "main",
 			ProfiledAt: &reprofiled,
@@ -129,13 +135,13 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 				updated.ExternalID, updated.BaseBranch)
 		}
 
-		stamped, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		stamped, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
 		if err != nil || stamped == nil {
 			t.Fatalf("UpdateCloneStatusByRef: got=%v err=%v", stamped, err)
 		}
 		AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef", *stamped, read(created.ID))
 
-		stampedSys, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "ok", "", "")
+		stampedSys, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "ok", "", "")
 		if err != nil || stampedSys == nil {
 			t.Fatalf("UpdateCloneStatusByRefSystem: got=%v err=%v", stampedSys, err)
 		}
@@ -146,6 +152,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID, _ := mk(t)
 		now := time.Now().UTC().Truncate(time.Second)
 		p := domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "widget",
 			Description:   "Widget service",
 			HasReadme:     true,
@@ -255,6 +262,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// setting. Same goes for clone-status fields.
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "o", Repo: "r",
 			Description: "v1", ProfileText: "v1",
 			DefaultBranch: "main",
@@ -264,12 +272,13 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "o/r", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 
 		// Re-profile: same id, refreshed description + profile text.
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "o", Repo: "r",
 			Description: "v2", ProfileText: "v2",
 			DefaultBranch: "main",
@@ -297,7 +306,8 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		for _, id := range []string{"z/last", "a/first", "m/middle"} {
 			owner, repo := id[:1], id[2:]
 			if _, err := s.Upsert(ctx, orgID, domain.Repository{
-				ID: id, Owner: owner, Repo: repo,
+				Host: TestGitHubHost,
+				ID:   id, Owner: owner, Repo: repo,
 				DefaultBranch: "main",
 			}); err != nil {
 				t.Fatalf("Upsert %s: %v", id, err)
@@ -369,6 +379,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID, seed := mk(t)
 		profiled := time.Now().UTC().Truncate(time.Second)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			Description: "Api service", ProfileText: "accumulated profile",
 			CloneURL: "git@github.com:Acme/Api.git", DefaultBranch: "main",
@@ -380,7 +391,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		if err := setBaseBranch(ctx, s, orgID, "Acme/Api", "develop"); err != nil {
 			t.Fatalf("UpdateBaseBranch: %v", err)
 		}
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "Acme", Repo: "Api"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "Acme", Repo: "Api"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		etagAt := profiled.Add(time.Hour)
@@ -460,6 +471,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// store does the same via NULLIF / nullIfEmpty.
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -490,6 +502,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// still find the row.
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			DefaultBranch: "main",
 		}); err != nil {
@@ -510,13 +523,14 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	t.Run("UpdateCloneStatus_records_outcome", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "o", Repo: "r",
 			DefaultBranch: "main",
 		}); err != nil {
 			t.Fatalf("Upsert: %v", err)
 		}
 		// ok path: empty err fields collapse to NULL → empty string on read.
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "ok", "", ""); err != nil {
 			t.Fatalf("UpdateCloneStatus ok: %v", err)
 		}
 		got, _ := s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -524,7 +538,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("ok status mismatch: %+v", got)
 		}
 		// failed path: ssh-kind capture for SSH preflight confirms.
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "o", Repo: "r"}, "failed", "permission denied", "ssh"); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "o", Repo: "r"}, "failed", "permission denied", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus failed: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("o/r"))
@@ -540,7 +554,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// raw SQL UPDATE silently affects 0 rows — store contract
 		// mirrors that, no error.
 		s, orgID, _ := mk(t)
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "ghost", Repo: "repo"}, "ok", "", ""); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "ghost", Repo: "repo"}, "ok", "", ""); err != nil {
 			t.Errorf("UpdateCloneStatus on absent repo should be a no-op, got %v", err)
 		}
 	})
@@ -570,7 +584,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 			t.Errorf("GetSystem with different casing: got=%v err=%v", sys, err)
 		}
 
-		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh"); err != nil {
+		if _, err := s.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh"); err != nil {
 			t.Fatalf("UpdateCloneStatus: %v", err)
 		}
 		got, _ = s.GetByRef(ctx, orgID, repoRef("Acme/Api"))
@@ -606,7 +620,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// cannot drift apart the way they already did once.
 		s, orgID, seed := mk(t)
 		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
-		bogus := domain.RepoRef{Source: "gitlob", Owner: "octo", Repo: "widget"}
+		bogus := domain.RepoRef{Source: "gitlob", Host: TestGitHubHost, Owner: "octo", Repo: "widget"}
 
 		if got, err := s.GetByRef(ctx, orgID, bogus); err == nil {
 			t.Errorf("GetByRef accepted an unknown source and returned %+v; want an error", got)
@@ -724,6 +738,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		s, orgID, seed := mk(t)
 		trackRepos(t, seed, orgID, seed.TeamID, "Acme/Api", "octo/known", "octo/bare")
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "known",
 			ExternalID: "111", DefaultBranch: "main",
 		}); err != nil {
@@ -733,13 +748,13 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
 			// Different casing than stored — the grant's spelling is GitHub's,
 			// not necessarily the one tracked.
-			{Owner: "acme", Repo: "api", ExternalID: "1296269"},
+			{Host: TestGitHubHost, Owner: "acme", Repo: "api", ExternalID: "1296269"},
 			// Already has one; a fill must never move it.
-			{Owner: "octo", Repo: "known", ExternalID: "999"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "known", ExternalID: "999"},
 			// No id to record; not a write.
-			{Owner: "octo", Repo: "bare"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "bare"},
 			// Not a configured repo; nothing to fill, and nothing created.
-			{Owner: "ghost", Repo: "repo", ExternalID: "42"},
+			{Host: TestGitHubHost, Owner: "ghost", Repo: "repo", ExternalID: "42"},
 		})
 		if err != nil {
 			t.Fatalf("FillMissingExternalIDsSystem: %v", err)
@@ -772,7 +787,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// Steady state: running it again fills nothing.
 		filled, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
-			{Owner: "Acme", Repo: "Api", ExternalID: "1296269"},
+			{Host: TestGitHubHost, Owner: "Acme", Repo: "Api", ExternalID: "1296269"},
 		})
 		if err != nil {
 			t.Fatalf("re-run: %v", err)
@@ -793,6 +808,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// leaves the stored id alone.
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "widget",
 			Source: domain.RepoSourceGitHub, ExternalID: "1296269",
 			ProfileText: "v1", DefaultBranch: "main",
@@ -806,6 +822,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 
 		// A re-profile that carries no id keeps the one on the row.
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "widget",
 			ProfileText: "v2", DefaultBranch: "main",
 		}); err != nil {
@@ -822,6 +839,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// One that carries a different id takes it: GitHub is authoritative
 		// for what the slug resolves to now.
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "widget",
 			ExternalID: "77", ProfileText: "v3", DefaultBranch: "main",
 		}); err != nil {
@@ -840,6 +858,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		// casing wins, matching what the tracked-set reconcile does.
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main",
 		}); err != nil {
@@ -850,6 +869,7 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 		}
 
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main", ExternalID: "1296269",
 		}); err != nil {
@@ -877,12 +897,262 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 	t.Run("Upsert_refuses_an_unknown_source", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		if _, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "widget", Source: "gitlob",
 		}); err == nil {
 			t.Error("Upsert accepted an unknown source; want an error")
 		}
 		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 0 {
 			t.Errorf("rows = %d, want 0 — a refused source must not write", n)
+		}
+	})
+
+	t.Run("The_same_slug_on_two_hosts_is_two_repositories", func(t *testing.T) {
+		// A repository's identity is (org, source, host, owner/repo): GitHub
+		// names repeat across deployments, so the same owner/repo on two hosts
+		// is two rows, and every ref-keyed and listing read answers only for
+		// the host it is asked about.
+		s, orgID, seed := mk(t)
+		trackReposOnHost(t, seed, orgID, seed.TeamID, TestGitHubHost, "octo/widget", "octo/only-dotcom")
+		trackReposOnHost(t, seed, orgID, seed.TeamID, TestOtherGitHubHost, "octo/widget", "octo/only-ghe")
+
+		dotcom, err := s.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestGitHubHost, "octo/widget"))
+		if err != nil || dotcom == nil {
+			t.Fatalf("GetByRefSystem(github.com) = %v, %v", dotcom, err)
+		}
+		ghe, err := s.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, "OCTO/Widget"))
+		if err != nil || ghe == nil {
+			t.Fatalf("GetByRefSystem(ghe) = %v, %v", ghe, err)
+		}
+		if dotcom.ID == ghe.ID {
+			t.Fatalf("both hosts resolved to row %s; want two rows", dotcom.ID)
+		}
+		if dotcom.Host != TestGitHubHost || ghe.Host != TestOtherGitHubHost {
+			t.Errorf("hosts = (%q, %q), want (%q, %q)", dotcom.Host, ghe.Host, TestGitHubHost, TestOtherGitHubHost)
+		}
+		if miss, err := s.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, "octo/only-dotcom")); err != nil || miss != nil {
+			t.Errorf("GetByRefSystem(ghe, octo/only-dotcom) = %+v, %v; want nil — it is tracked on github.com only", miss, err)
+		}
+
+		// A write through one host's ref lands on that host's row alone.
+		if _, err := s.UpdateCloneStatusByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, "octo/widget"), "failed", "boom", "ssh"); err != nil {
+			t.Fatalf("UpdateCloneStatusByRefSystem(ghe): %v", err)
+		}
+		if got, _ := s.Get(ctx, orgID, dotcom.ID); got == nil || got.CloneStatus == "failed" {
+			t.Errorf("github.com row after a ghe clone-status write = %+v; want it untouched", got)
+		}
+
+		listed := func(rows []domain.Repository, host string) []string {
+			t.Helper()
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				if r.Host != host {
+					t.Errorf("row %s on %q listed for %q", r.Slug(), r.Host, host)
+				}
+				out = append(out, r.Slug())
+			}
+			return out
+		}
+		for _, c := range []struct {
+			host string
+			want []string
+		}{
+			{TestGitHubHost, []string{"octo/only-dotcom", "octo/widget"}},
+			{TestOtherGitHubHost, []string{"octo/only-ghe", "octo/widget"}},
+		} {
+			rows, total, err := s.List(ctx, orgID, c.host, db.Unwindowed)
+			if err != nil {
+				t.Fatalf("List(%s): %v", c.host, err)
+			}
+			if got := listed(rows, c.host); !equalStringSlice(got, c.want) || total != len(c.want) {
+				t.Errorf("List(%s) = %v (total %d), want %v", c.host, got, total, c.want)
+			}
+			sys, err := s.ListSystem(ctx, orgID, c.host)
+			if err != nil {
+				t.Fatalf("ListSystem(%s): %v", c.host, err)
+			}
+			if got := listed(sys, c.host); !equalStringSlice(got, c.want) {
+				t.Errorf("ListSystem(%s) = %v, want %v", c.host, got, c.want)
+			}
+			names, err := s.ListTrackedNamesSystem(ctx, orgID, c.host)
+			if err != nil {
+				t.Fatalf("ListTrackedNamesSystem(%s): %v", c.host, err)
+			}
+			if !equalStringSlice(names, c.want) {
+				t.Errorf("ListTrackedNamesSystem(%s) = %v, want %v", c.host, names, c.want)
+			}
+			if n, err := s.CountConfigured(ctx, orgID, c.host); err != nil || n != len(c.want) {
+				t.Errorf("CountConfigured(%s) = %d, %v; want %d", c.host, n, err, len(c.want))
+			}
+		}
+
+		// Untracking everything on one host leaves the other host's tracked
+		// set exactly as it stands.
+		trackReposOnHost(t, seed, orgID, seed.TeamID, TestOtherGitHubHost)
+		if names, err := s.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost); err != nil || !equalStringSlice(names, []string{"octo/only-dotcom", "octo/widget"}) {
+			t.Errorf("github.com tracked names after clearing ghe = %v, %v; want both kept", names, err)
+		}
+		if names, err := s.ListTrackedNamesSystem(ctx, orgID, TestOtherGitHubHost); err != nil || len(names) != 0 {
+			t.Errorf("ghe tracked names after clearing = %v, %v; want none", names, err)
+		}
+
+		// Each host's provider ids are its own: the identities a rename
+		// detector reads for one host carry that host and none of the other's.
+		if filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "100"},
+			{Host: TestOtherGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "200"},
+		}); err != nil || filled != 2 {
+			t.Fatalf("FillMissingExternalIDsSystem = %d, %v; want 2 — one row per host", filled, err)
+		}
+		for _, c := range []struct{ host, id string }{{TestGitHubHost, "100"}, {TestOtherGitHubHost, "200"}} {
+			ids, err := s.ListIdentitiesSystem(ctx, orgID, c.host)
+			if err != nil {
+				t.Fatalf("ListIdentitiesSystem(%s): %v", c.host, err)
+			}
+			if len(ids) != 1 || ids[0].Host != c.host || ids[0].Slug() != "octo/widget" || ids[0].ExternalID != c.id {
+				t.Errorf("ListIdentitiesSystem(%s) = %+v, want only octo/widget id %s on that host", c.host, ids, c.id)
+			}
+		}
+	})
+
+	t.Run("Every_host_scoped_method_refuses_an_empty_host", func(t *testing.T) {
+		// A name and a provider id are each unique only within one host, so
+		// a call without one names no repository. It is refused rather than
+		// answered as a miss, which would read as "not configured".
+		s, orgID, seed := mk(t)
+		trackRepos(t, seed, orgID, seed.TeamID, "octo/widget")
+		noHost := domain.RepoRef{Owner: "octo", Repo: "widget", ExternalID: "1"}
+
+		check := func(name string, err error) {
+			t.Helper()
+			if !errors.Is(err, db.ErrRepoHostRequired) {
+				t.Errorf("%s with no host = %v, want db.ErrRepoHostRequired", name, err)
+			}
+		}
+		_, err := s.GetByRef(ctx, orgID, noHost)
+		check("GetByRef", err)
+		_, err = s.GetByRefSystem(ctx, orgID, noHost)
+		check("GetByRefSystem", err)
+		_, err = s.Upsert(ctx, orgID, domain.Repository{Owner: "octo", Repo: "widget", ProfileText: "v2"})
+		check("Upsert", err)
+		_, err = s.UpsertSystem(ctx, orgID, domain.Repository{Owner: "octo", Repo: "widget", ProfileText: "v2"})
+		check("UpsertSystem", err)
+		_, err = s.UpdateCloneStatusByRef(ctx, orgID, noHost, "failed", "boom", "ssh")
+		check("UpdateCloneStatusByRef", err)
+		_, err = s.UpdateCloneStatusByRefSystem(ctx, orgID, noHost, "failed", "boom", "ssh")
+		check("UpdateCloneStatusByRefSystem", err)
+		check("SetPullsPollStateByRefSystem", s.SetPullsPollStateByRefSystem(ctx, orgID, noHost, `"etag"`, time.Now()))
+		_, _, err = s.GetPullsPollStateByRefSystem(ctx, orgID, noHost)
+		check("GetPullsPollStateByRefSystem", err)
+		_, err = s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{noHost})
+		check("FillMissingExternalIDsSystem", err)
+		_, err = s.RenameSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "renamed", ExternalID: "1"})
+		check("RenameSystem", err)
+		_, _, err = s.List(ctx, orgID, "", db.Unwindowed)
+		check("List", err)
+		_, err = s.ListSystem(ctx, orgID, "")
+		check("ListSystem", err)
+		_, err = s.CountConfigured(ctx, orgID, "")
+		check("CountConfigured", err)
+		_, err = s.ListTrackedNamesSystem(ctx, orgID, "")
+		check("ListTrackedNamesSystem", err)
+		_, err = s.ListIdentitiesSystem(ctx, orgID, "")
+		check("ListIdentitiesSystem", err)
+		check("ReplaceForTeam", seed.Tracking.ReplaceForTeam(ctx, orgID, seed.TeamID, "", []domain.TeamGitHubRepo{{Owner: "octo", Repo: "other"}}))
+
+		// None of the refusals wrote anything.
+		got, err := s.GetByRef(ctx, orgID, repoRef("octo/widget"))
+		if err != nil || got == nil {
+			t.Fatalf("GetByRef after the refusals = %v, %v", got, err)
+		}
+		if got.CloneStatus == "failed" || got.ExternalID != "" || got.ProfileText != "" {
+			t.Errorf("row after the refusals = %+v; a refused call must not write", got)
+		}
+		if n, _ := s.CountConfigured(ctx, orgID, TestGitHubHost); n != 1 {
+			t.Errorf("rows = %d, want 1 — a refused tracking save must not mint", n)
+		}
+	})
+
+	t.Run("A_provider_id_is_unique_per_host", func(t *testing.T) {
+		// Repository ids are per-deployment sequences, so the same number on
+		// two hosts names two repositories and both rows keep it. Within one
+		// host the id names one repository: an upsert carrying an id another
+		// row on the host already holds does not write it — that is a rename
+		// the poller has not applied — and the returned row says so.
+		s, orgID, _ := mk(t)
+		read := func(id string) func() (*domain.Repository, error) {
+			return func() (*domain.Repository, error) { return s.Get(ctx, orgID, id) }
+		}
+
+		dotcom, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host: TestGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "4242", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("Upsert(github.com): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert(github.com)", dotcom, read(dotcom.ID))
+		ghe, err := s.UpsertSystem(ctx, orgID, domain.Repository{
+			Host: TestOtherGitHubHost, Owner: "octo", Repo: "widget", ExternalID: "4242", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("UpsertSystem(ghe): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertSystem(ghe)", ghe, read(ghe.ID))
+		if ghe.ID == dotcom.ID || ghe.Host != TestOtherGitHubHost || ghe.ExternalID != "4242" {
+			t.Errorf("ghe row = %+v; want its own row on %s carrying 4242", ghe, TestOtherGitHubHost)
+		}
+		if dotcom.Host != TestGitHubHost || dotcom.ExternalID != "4242" {
+			t.Errorf("github.com row = %+v; want it on %s carrying 4242", dotcom, TestGitHubHost)
+		}
+
+		// A new name on github.com claiming the id octo/widget holds there:
+		// the row is created, without the id.
+		claimant, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host: TestGitHubHost, Owner: "octo", Repo: "widget-renamed", ExternalID: "4242", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("Upsert(claimant): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert(claimant)", claimant, read(claimant.ID))
+		if claimant.ExternalID != "" {
+			t.Errorf("claimant external id = %q, want empty — octo/widget already holds 4242 on this host", claimant.ExternalID)
+		}
+
+		// The update arm follows the same rule: a row with its own id keeps it
+		// when an upsert carries one another row on the host holds.
+		other, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host: TestGitHubHost, Owner: "octo", Repo: "other", ExternalID: "5150", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("Upsert(other): %v", err)
+		}
+		reprofiled, err := s.Upsert(ctx, orgID, domain.Repository{
+			Host: TestGitHubHost, Owner: "Octo", Repo: "Other", ExternalID: "4242", ProfileText: "v2", DefaultBranch: "main",
+		})
+		if err != nil {
+			t.Fatalf("Upsert(other, colliding id): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "Upsert(other, colliding id)", reprofiled, read(other.ID))
+		if reprofiled.ID != other.ID || reprofiled.ExternalID != "5150" || reprofiled.ProfileText != "v2" {
+			t.Errorf("update arm returned %+v; want row %s keeping 5150 with the profile refreshed", reprofiled, other.ID)
+		}
+
+		// The holders are unmoved, and the fill obeys the same rule.
+		for _, c := range []struct {
+			host, slug, id string
+		}{
+			{TestGitHubHost, "octo/widget", "4242"},
+			{TestOtherGitHubHost, "octo/widget", "4242"},
+		} {
+			got, err := s.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(c.host, c.slug))
+			if err != nil || got == nil || got.ExternalID != c.id {
+				t.Errorf("%s on %s = %+v, %v; want external id %s", c.slug, c.host, got, err, c.id)
+			}
+		}
+		if filled, err := s.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: TestGitHubHost, Owner: "octo", Repo: "widget-renamed", ExternalID: "4242"},
+		}); err != nil || filled != 0 {
+			t.Errorf("fill of an id another row on the host holds = %d, %v; want 0", filled, err)
 		}
 	})
 
@@ -949,13 +1219,20 @@ func RunRepositoryStoreConformance(t *testing.T, mk RepositoryStoreFactory) {
 // form the cases are about.
 func trackRepos(t *testing.T, seed RepositorySeeder, orgID, teamID string, slugs ...string) {
 	t.Helper()
+	trackReposOnHost(t, seed, orgID, teamID, TestGitHubHost, slugs...)
+}
+
+// trackReposOnHost is trackRepos on a named GitHub host. It replaces the
+// team's tracked set on that host only.
+func trackReposOnHost(t *testing.T, seed RepositorySeeder, orgID, teamID, host string, slugs ...string) {
+	t.Helper()
 	repos := make([]domain.TeamGitHubRepo, 0, len(slugs))
 	for _, slug := range slugs {
-		ref := repoRef(slug)
+		ref := domain.RepoRefFromSlug(host, slug)
 		repos = append(repos, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
 	}
-	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, TestGitHubHost, repos); err != nil {
-		t.Fatalf("track %v for team %s: %v", slugs, teamID, err)
+	if err := seed.Tracking.ReplaceForTeam(context.Background(), orgID, teamID, host, repos); err != nil {
+		t.Fatalf("track %v on %s for team %s: %v", slugs, host, teamID, err)
 	}
 }
 

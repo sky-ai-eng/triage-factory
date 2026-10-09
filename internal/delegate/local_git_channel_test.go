@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/gitssh"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -86,7 +87,7 @@ func TestStartLocalGitChannel_RoutesHTTPSAndSSHForms(t *testing.T) {
 		}
 	}
 
-	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "acme", "widgets", nil, channel)
+	seed := s.gitSeedFor(context.Background(), runmode.LocalDefaultOrgID, "repo-widgets", "acme", "widgets", nil, channel)
 	if seed.cloneURL != "https://github.com/acme/widgets.git" {
 		t.Errorf("local rehydrate clone URL = %q, want managed HTTPS form", seed.cloneURL)
 	}
@@ -242,12 +243,12 @@ func TestLocalGitChannel_AnUnresolvableCredentialIsARefusalNotAnOutage(t *testin
 			stores := sqlitestore.New(database)
 			ctx := context.Background()
 			seedConversation(t, database, "run-cred", "sess", "")
-			if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID,
+			if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 				[]domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 				t.Fatalf("track repo: %v", err)
 			}
 			if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-				Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://github.com/owner/repo.git", ProfileText: "t",
+				Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://github.com/owner/repo.git", ProfileText: "t",
 			}); err != nil {
 				t.Fatalf("seed repository: %v", err)
 			}

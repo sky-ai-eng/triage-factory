@@ -204,22 +204,7 @@ func trackPgTeamRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, ownerRepo s
 	if !ok {
 		t.Fatalf("fixture repo %q is not owner/repo", ownerRepo)
 	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
-		ON CONFLICT DO NOTHING
-	`, orgID, owner, repo); err != nil {
-		t.Fatalf("seed repository %s: %v", ownerRepo, err)
-	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_github_repos (team_id, repository_id, org_id)
-		VALUES ($1,
-		        (SELECT id FROM repositories
-		          WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)),
-		        $2)
-		ON CONFLICT (team_id, repository_id) DO NOTHING
-	`, teamID, orgID, owner, repo); err != nil {
-		t.Fatalf("track repo %s for team %s: %v", ownerRepo, teamID, err)
-	}
+	pgtest.SeedTrackedRepo(t, h, orgID, teamID, owner, repo)
 }
 
 func repoOf(snap domain.PRSnapshot) string {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -50,9 +51,15 @@ func newLaunchFixtureWithWorktree(t *testing.T, suffix, wt string) *launchFixtur
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
 
-	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", "https://github.com", "owner/repo#"+suffix, "", "pr", "T", "https://x/"+suffix)
+	entity, _, err := stores.Entities.FindOrCreate(ctx, org, "github", dbtest.TestGitHubHost, "owner/repo#"+suffix, "", "pr", "T", "https://x/"+suffix)
 	if err != nil {
 		t.Fatalf("entity: %v", err)
+	}
+	// The pull request's repository has a row on the entity's host, as every
+	// polled pull request's does: the setup resolves the task's repository to
+	// it before it fetches anything.
+	if _, err := stores.Repos.Upsert(ctx, org, domain.Repository{Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "repo"}); err != nil {
+		t.Fatalf("repository: %v", err)
 	}
 	eventID, err := stores.Events.Record(ctx, org, domain.Event{
 		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entity.ID, MetadataJSON: `{}`,

@@ -70,7 +70,9 @@ const (
 // hold: the multi-table rewrite lands everywhere or nowhere, a second run is a
 // no-op rather than an error, and the two states that look like a rename but
 // are not — a deleted repository whose name a new one claimed, and a
-// repository TF has no provider id for — never move a row.
+// repository TF has no provider id for — never move a row. A rename stays on
+// its GitHub host: a same-named repository, entity or linked record on another
+// host is never touched.
 func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -80,6 +82,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRenameFixture(t, s, orgID, seed, "rewrite")
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		})
 		if err != nil {
@@ -185,6 +188,119 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 	})
 
+	t.Run("Rename_acts_only_within_the_host", func(t *testing.T) {
+		// The same owner/repo on another GitHub host is another repository,
+		// even when it carries the same provider id — ids are per-deployment
+		// sequences. A rename on one host rewrites nothing of the other's:
+		// not its registry row, not its entity (a different scope), not an
+		// artifact or ledger row whose link is on that host.
+		s, orgID, seed := mk(t)
+		fx := seedRenameFixture(t, s, orgID, seed, "host")
+		const gheURL = TestOtherGitHubHost + "/" + renameOldSlug + "/pull/18"
+
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, TestOtherGitHubHost, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "api"},
+		}); err != nil {
+			t.Fatalf("track %s on %s: %v", renameOldSlug, TestOtherGitHubHost, err)
+		}
+		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: TestOtherGitHubHost, Owner: "octo", Repo: "api", ExternalID: fx.externalID},
+		}); err != nil || filled != 1 {
+			t.Fatalf("seed ghe identity: filled=%d err=%v — the same id on another host is not a collision", filled, err)
+		}
+		gheRepo, err := s.Repos.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, renameOldSlug))
+		if err != nil || gheRepo == nil {
+			t.Fatalf("resolve ghe repository: %v, %v", gheRepo, err)
+		}
+		gheEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", TestOtherGitHubHost, renameOldSlug+"#18", "", "pr", "The ghe PR", gheURL)
+		if err != nil {
+			t.Fatalf("seed ghe entity: %v", err)
+		}
+		gheArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Target: domain.PullRequestTarget(renameOldSlug, 19), ExternalID: "19",
+			URL:   TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
+			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, 19),
+		})
+		if err != nil {
+			t.Fatalf("seed ghe artifact: %v", err)
+		}
+		gheActionKey := "rename-ghe-" + fx.movedActionKey
+		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+			TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+			Target: renameOldSlug + "#19", ExternalID: "19",
+			URL:        TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
+			Credential: domain.CredentialGitHubApp, DedupKey: gheActionKey,
+		}); err != nil {
+			t.Fatalf("seed ghe action: %v", err)
+		}
+
+		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
+			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
+		})
+		if err != nil {
+			t.Fatalf("RenameSystem(github.com): %v", err)
+		}
+		if !out.Renamed {
+			t.Fatalf("outcome = %+v, want the github.com rename to go through", out)
+		}
+
+		// github.com moved.
+		if moved, _ := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug)); moved == nil {
+			t.Errorf("github.com repository did not move to %s", renameNewSlug)
+		}
+		// ghe did not.
+		got, err := s.Repos.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, renameOldSlug))
+		if err != nil || got == nil || got.ID != gheRepo.ID || got.ExternalID != fx.externalID {
+			t.Errorf("ghe repository after a github.com rename = %+v, %v; want %s still at %s", got, err, gheRepo.ID, renameOldSlug)
+		}
+		if moved, _ := s.Repos.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, renameNewSlug)); moved != nil {
+			t.Errorf("a ghe row answers to %s after a github.com rename: %+v", renameNewSlug, moved)
+		}
+		ent, err := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestOtherGitHubHost, renameOldSlug+"#18")
+		if err != nil || ent == nil || ent.ID != gheEntity.ID || ent.URL != gheURL {
+			t.Errorf("ghe entity = %+v, %v; want it untouched under %s#18", ent, err, renameOldSlug)
+		}
+		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestOtherGitHubHost, renameNewSlug+"#18"); ent != nil {
+			t.Errorf("a ghe entity answers to %s#18: %+v", renameNewSlug, ent)
+		}
+		art, err := s.Artifacts.Get(ctx, orgID, gheArtifact.ID)
+		if err != nil || art == nil {
+			t.Fatalf("Artifacts.Get(ghe): %v, %v", art, err)
+		}
+		if art.Target != renameOldSlug+"#19" || art.DedupKey != domain.PullRequestDedupKey(renameOldSlug, 19) {
+			t.Errorf("ghe artifact = (target %q, key %q); want it untouched — its link is on another host", art.Target, art.DedupKey)
+		}
+		if a := findActionByKey(t, s, orgID, gheActionKey); a.URL != TestOtherGitHubHost+"/"+renameOldSlug+"/pull/19" {
+			t.Errorf("ghe action url = %q, want it untouched", a.URL)
+		}
+		if _, rawCurrent := seed.RawActionURL(t, gheActionKey); rawCurrent != "" {
+			t.Errorf("ghe action current_url = %q, want NULL — its object never moved", rawCurrent)
+		}
+
+		// And the other way round: renaming the ghe repository moves only it.
+		out, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestOtherGitHubHost,
+			Owner: "octo", Repo: "api-ghe", ExternalID: fx.externalID,
+		})
+		if err != nil || !out.Renamed {
+			t.Fatalf("RenameSystem(ghe) = %+v, %v; want a rename", out, err)
+		}
+		if got, _ := s.Repos.GetByRefSystem(ctx, orgID, domain.RepoRefFromSlug(TestOtherGitHubHost, "octo/api-ghe")); got == nil || got.ID != gheRepo.ID {
+			t.Errorf("ghe repository after its own rename = %+v; want row %s at octo/api-ghe", got, gheRepo.ID)
+		}
+		if got, _ := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameNewSlug)); got == nil || got.ExternalID != fx.externalID {
+			t.Errorf("github.com repository after a ghe rename = %+v; want it still at %s", got, renameNewSlug)
+		}
+		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestOtherGitHubHost, "octo/api-ghe#18"); ent == nil || ent.ID != gheEntity.ID {
+			t.Errorf("ghe entity after its own rename = %+v; want row %s under octo/api-ghe#18", ent, gheEntity.ID)
+		}
+		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestGitHubHost, renameNewSlug+"#18"); ent == nil || ent.ID != fx.entityID {
+			t.Errorf("github.com entity after a ghe rename = %+v; want row %s under %s#18", ent, fx.entityID, renameNewSlug)
+		}
+	})
+
 	t.Run("Rename_moves_the_stored_links_and_freezes_the_record", func(t *testing.T) {
 		// The stored-link half of the rewrite. An entity's URL and the audit
 		// ledger's rendered link must resolve under the new slug — the GitHub
@@ -199,6 +315,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		capturedURL := "https://github.com/" + renameOldSlug + "/pull/18"
 
 		if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		}); err != nil {
 			t.Fatalf("RenameSystem: %v", err)
@@ -254,6 +371,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// served URL follows the object again while the history column still
 		// holds the original capture.
 		if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api-v2", ExternalID: fx.externalID,
 		}); err != nil {
 			t.Fatalf("second RenameSystem: %v", err)
@@ -272,7 +390,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// a nil error, not a failure: losing is terminal and needs no retry.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "idempotent")
-		observed := domain.RepoRef{Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID}
+		observed := domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID}
 
 		if _, err := s.Repos.RenameSystem(ctx, orgID, observed); err != nil {
 			t.Fatalf("first RenameSystem: %v", err)
@@ -302,6 +420,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRenameFixture(t, s, orgID, seed, "casing")
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "Octo", Repo: "API", ExternalID: fx.externalID,
 		})
 		if err != nil {
@@ -324,6 +443,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRenameFixture(t, s, orgID, seed, "recreate")
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "api", ExternalID: "999000111",
 		})
 		if err != nil {
@@ -341,8 +461,8 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 		// The same conclusion from the detection half, which is what the
 		// pollers actually run before they ever call the store.
-		stored := []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: fx.externalID}}
-		observed := []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "999000111"}}
+		stored := []domain.RepoRef{{Host: TestGitHubHost, Source: "github", Owner: "octo", Repo: "api", ExternalID: fx.externalID}}
+		observed := []domain.RepoRef{{Host: TestGitHubHost, Source: "github", Owner: "octo", Repo: "api", ExternalID: "999000111"}}
 		if got := domain.DetectRepoRenames(stored, observed); len(got) != 0 {
 			t.Errorf("DetectRepoRenames = %+v, want none", got)
 		}
@@ -359,7 +479,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// No id on the observation: nothing to key on, so nothing happens.
-		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{Owner: "octo", Repo: "renamed"})
+		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{Host: TestGitHubHost, Owner: "octo", Repo: "renamed"})
 		if err != nil {
 			t.Fatalf("RenameSystem with no observed id: %v", err)
 		}
@@ -370,6 +490,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// An id on the observation, none on the row: the row is not reachable
 		// by identity, so it is not renamable in this direction either.
 		out, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "renamed", ExternalID: "1296269",
 		})
 		if err != nil {
@@ -397,6 +518,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		tasksBefore := seed.CountTasks(t)
 
 		if _, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		}); err != nil {
 			t.Fatalf("RenameSystem: %v", err)
@@ -427,12 +549,14 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// The occupant is a registry row nothing tracks any more, carrying
 		// the identity the profiler recorded for it while it was live.
 		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: "555000555",
 		}); err != nil {
 			t.Fatalf("seed occupant: %v", err)
 		}
 
 		_, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		})
 		if !errors.Is(err, db.ErrRepoSlugOccupied) {
@@ -476,6 +600,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// A live repository with a PR of the same number, which GitHub now
 		// renames onto the freed name.
 		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "legacy", ExternalID: "2",
 		}); err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
@@ -485,6 +610,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		_, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "api", ExternalID: "2",
 		})
 		if !errors.Is(err, db.ErrRepoSlugOccupied) {
@@ -526,6 +652,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 
 		// The live repository whose PR of the same number would collide.
 		if _, err := s.Repos.UpsertSystem(ctx, orgID, domain.Repository{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "legacy", ExternalID: "2",
 		}); err != nil {
 			t.Fatalf("seed the renaming repository: %v", err)
@@ -540,6 +667,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		_, err = s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "api", ExternalID: "2",
 		})
 		if !errors.Is(err, db.ErrRepoSlugOccupied) {
@@ -583,6 +711,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		})
 		if err != nil {
@@ -617,6 +746,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "octo", Repo: "platform-api", ExternalID: fx.externalID,
 		})
 		if err != nil {
@@ -645,6 +775,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 	t.Run("Rename_of_a_repository_with_no_row_is_a_no_op", func(t *testing.T) {
 		s, orgID, _ := mk(t)
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host:  TestGitHubHost,
 			Owner: "ghost", Repo: "repo", ExternalID: "42",
 		})
 		if err != nil {
@@ -669,7 +800,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed tracked set: %v", err)
 		}
 		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
-			{Owner: "octo", Repo: "identified", ExternalID: "1296269"},
+			{Host: TestGitHubHost, Owner: "octo", Repo: "identified", ExternalID: "1296269"},
 		}); err != nil || filled != 1 {
 			t.Fatalf("seed identified: filled=%d err=%v", filled, err)
 		}
@@ -720,7 +851,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	// The identity arrives the way it does in production: tracking mints a
 	// bare row, and the poller's grant enumeration fills the id in.
 	if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
-		{Owner: "octo", Repo: "api", ExternalID: externalID},
+		{Host: TestGitHubHost, Owner: "octo", Repo: "api", ExternalID: externalID},
 	}); err != nil || filled != 1 {
 		t.Fatalf("seed repository identity: filled=%d err=%v", filled, err)
 	}
@@ -728,9 +859,13 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed base branch: %v", err)
 	}
 
+	repo, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(renameOldSlug))
+	if err != nil || repo == nil {
+		t.Fatalf("resolve %s: got=%v err=%v", renameOldSlug, repo, err)
+	}
 	conversationID := seed.Conversation(t, suffix)
 	if _, _, err := s.ConversationWorktrees.Insert(ctx, orgID, domain.ConversationWorktree{
-		ConversationID: conversationID, RepoID: renameOldSlug, Ref: "pr-18",
+		ConversationID: conversationID, RepositoryID: repo.ID, Ref: "pr-18",
 		Path: "/tmp/wt/" + conversationID + "/octo/api/pr-18",
 	}); err != nil {
 		t.Fatalf("seed worktree: %v", err)

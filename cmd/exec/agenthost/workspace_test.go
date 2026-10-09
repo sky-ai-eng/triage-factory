@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -29,25 +30,35 @@ func (r tokenResolver) TokenFor(_ context.Context, _, _ string) (githubapp.Token
 	return githubapp.Token{Value: r.cloneToken}, nil
 }
 
-// seedWorkspaceRepo seeds an org-configured, team-tracked repository row — the
-// state CreateWorkspaceCheckout's gates require.
-func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL string) {
+// seedWorkspaceRepo seeds an org-configured, team-tracked repository row on the
+// default GitHub host — the state CreateWorkspaceCheckout's gates require — and
+// returns the stored row.
+func seedWorkspaceRepo(t *testing.T, stores db.Stores, owner, repo, cloneURL string) domain.Repository {
+	t.Helper()
+	return seedWorkspaceRepoOnHost(t, stores, dbtest.TestGitHubHost, owner, repo, cloneURL)
+}
+
+// seedWorkspaceRepoOnHost is seedWorkspaceRepo on a named GitHub host: the row
+// and the team's tracking of it both live on host.
+func seedWorkspaceRepoOnHost(t *testing.T, stores db.Stores, host, owner, repo, cloneURL string) domain.Repository {
 	t.Helper()
 	ctx := context.Background()
-	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: owner, Repo: repo,
+	row, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+		Host: host, Owner: owner, Repo: repo,
 		CloneURL: cloneURL, DefaultBranch: "main", ProfileText: "test profile",
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("upsert repository: %v", err)
 	}
-	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID, host)
 	if err != nil {
 		t.Fatalf("list team repos: %v", err)
 	}
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, tracked); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
 		t.Fatalf("track team repo: %v", err)
 	}
+	return row
 }
 
 func workspaceInfo(conversationID string) ConversationInfo {
@@ -66,14 +77,14 @@ type createRecorder struct {
 	prCalls       int
 
 	// checkout args
-	coOwner, coRepo, coCloneURL, coRef, coConversationID, coRunRoot string
-	coAuth                                                          worktree.CloneAuth
+	coRepositoryID, coOwner, coRepo, coCloneURL, coRef, coConversationID, coRunRoot string
+	coAuth                                                                          worktree.CloneAuth
 
 	// PR args
-	prOwner, prRepo, prUpstream, prHead, prHeadBranch, prConversationID, prRunRoot string
-	prNumber                                                                       int
-	prBase                                                                         string
-	prAuth                                                                         worktree.CloneAuth
+	prRepositoryID, prOwner, prRepo, prUpstream, prHead, prHeadBranch, prConversationID, prRunRoot string
+	prNumber                                                                                       int
+	prBase                                                                                         string
+	prAuth                                                                                         worktree.CloneAuth
 
 	path string
 	err  error
@@ -82,15 +93,17 @@ type createRecorder struct {
 func stubWorkspaceCreates(t *testing.T, rec *createRecorder) {
 	t.Helper()
 	origCheckout, origPR := workspaceCreateCheckout, workspaceCreatePR
-	workspaceCreateCheckout = func(_ context.Context, owner, repo, cloneURL, ref, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
+	workspaceCreateCheckout = func(_ context.Context, r worktree.Repo, cloneURL, ref, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
 		rec.checkoutCalls++
-		rec.coOwner, rec.coRepo, rec.coCloneURL, rec.coRef, rec.coConversationID, rec.coRunRoot = owner, repo, cloneURL, ref, conversationID, runRoot
+		rec.coRepositoryID, rec.coOwner, rec.coRepo = r.ID, r.Owner, r.Name
+		rec.coCloneURL, rec.coRef, rec.coConversationID, rec.coRunRoot = cloneURL, ref, conversationID, runRoot
 		rec.coAuth = worktree.CloneAuthFromOptions(opts...)
 		return rec.path, rec.err
 	}
-	workspaceCreatePR = func(_ context.Context, owner, repo, upstream, head, headBranch string, prNumber int, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
+	workspaceCreatePR = func(_ context.Context, r worktree.Repo, upstream, head, headBranch string, prNumber int, conversationID, runRoot string, opts ...worktree.CloneOption) (string, error) {
 		rec.prCalls++
-		rec.prOwner, rec.prRepo, rec.prUpstream, rec.prHead, rec.prHeadBranch = owner, repo, upstream, head, headBranch
+		rec.prRepositoryID, rec.prOwner, rec.prRepo = r.ID, r.Owner, r.Name
+		rec.prUpstream, rec.prHead, rec.prHeadBranch = upstream, head, headBranch
 		rec.prNumber, rec.prConversationID, rec.prRunRoot = prNumber, conversationID, runRoot
 		rec.prBase = worktree.BaseBranchFromOptions(opts...)
 		rec.prAuth = worktree.CloneAuthFromOptions(opts...)
@@ -228,7 +241,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 
 	// Org-configured but team-untracked: profile only, no team row.
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "sky", Repo: "untracked",
+		Host: dbtest.TestGitHubHost, Owner: "sky", Repo: "untracked",
 		CloneURL: "https://x", DefaultBranch: "main", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("upsert repository: %v", err)
@@ -262,7 +275,7 @@ func TestLocalClient_CreateWorkspaceCheckout_Gates(t *testing.T) {
 func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-co", runmode.LocalDefaultUserID, "manual")
-	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
+	repoRow := seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	rec := &createRecorder{path: "/wt/path"}
 	stubWorkspaceCreates(t, rec)
 	client := NewLocal(stores, workspaceInfo("conv-co"))
@@ -279,6 +292,9 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	}
 	if rec.coOwner != "sky" || rec.coRepo != "core" {
 		t.Errorf("owner/repo = %s/%s, want sky/core (canonical, from the repository row)", rec.coOwner, rec.coRepo)
+	}
+	if rec.coRepositoryID != repoRow.ID {
+		t.Errorf("repository id = %q, want the repository row's %q (it keys the bare clone)", rec.coRepositoryID, repoRow.ID)
 	}
 	if rec.coCloneURL != "https://github.com/sky/core.git" {
 		t.Errorf("cloneURL = %q, want the stored repository row's — never the wire's", rec.coCloneURL)
@@ -298,6 +314,61 @@ func TestLocalClient_CreateWorkspaceCheckout_DefaultPath(t *testing.T) {
 	}
 	if rec.coAuth != (worktree.CloneAuth{}) {
 		t.Errorf("local mode threaded a clone credential %+v; want none (operator's own git path)", rec.coAuth)
+	}
+}
+
+// TestLocalClient_CreateWorkspaceCheckout_ResolvesOnTheOrgsHost pins the verb
+// boundary's host scoping: the agent's owner/repo resolves to the repository
+// row on the org's current GitHub host, and the team-tracking gate reads that
+// host too. The same owner/repo on the host the org left is another repository:
+// its row is never the one checked out, a name only it has is not configured,
+// and tracking held only there does not admit the current host's row.
+func TestLocalClient_CreateWorkspaceCheckout_ResolvesOnTheOrgsHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	stores, conn := newTestDB(t)
+	seedConversation(t, stores, conn, "conv-host", runmode.LocalDefaultUserID, "manual")
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ghe})
+	seedWorkspaceRepoOnHost(t, stores, dbtest.TestGitHubHost, "sky", "core", "https://github.com/sky/core.git")
+	gheRow := seedWorkspaceRepoOnHost(t, stores, ghe, "sky", "core", ghe+"/sky/core.git")
+	seedWorkspaceRepoOnHost(t, stores, dbtest.TestGitHubHost, "sky", "left-behind", "https://github.com/sky/left-behind.git")
+	ctx := context.Background()
+	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+		Host: ghe, Owner: "sky", Repo: "tracked-elsewhere",
+		CloneURL: ghe + "/sky/tracked-elsewhere.git", DefaultBranch: "main", ProfileText: "t",
+	}); err != nil {
+		t.Fatalf("upsert repository: %v", err)
+	}
+	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost)
+	if err != nil {
+		t.Fatalf("list team repos: %v", err)
+	}
+	tracked = append(tracked, domain.TeamGitHubRepo{Owner: "sky", Repo: "tracked-elsewhere"})
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, tracked); err != nil {
+		t.Fatalf("track team repo: %v", err)
+	}
+
+	rec := &createRecorder{path: "/wt/host"}
+	stubWorkspaceCreates(t, rec)
+	client := NewLocal(stores, workspaceInfo("conv-host"))
+
+	if _, err := client.CreateWorkspaceCheckout(ctx, "sky", "core", "feature-x", 0); err != nil {
+		t.Fatalf("CreateWorkspaceCheckout: %v", err)
+	}
+	if rec.coRepositoryID != gheRow.ID {
+		t.Errorf("repository id = %q, want the %s row %q", rec.coRepositoryID, ghe, gheRow.ID)
+	}
+	if rec.coCloneURL != ghe+"/sky/core.git" {
+		t.Errorf("cloneURL = %q, want the %s row's", rec.coCloneURL, ghe)
+	}
+
+	if _, err := client.CreateWorkspaceCheckout(ctx, "sky", "left-behind", "", 0); err == nil || !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("repo with a row only on the host the org left: err = %v, want 'not configured'", err)
+	}
+	if _, err := client.CreateWorkspaceCheckout(ctx, "sky", "tracked-elsewhere", "", 0); err == nil || !strings.Contains(err.Error(), "not tracked") {
+		t.Errorf("repo tracked only on the host the org left: err = %v, want 'not tracked'", err)
+	}
+	if rec.checkoutCalls != 1 {
+		t.Errorf("checkout create ran %d times, want 1 (only the current host's sky/core)", rec.checkoutCalls)
 	}
 }
 
@@ -323,7 +394,7 @@ func TestLocalClient_CreateWorkspaceCheckout_ResolvesBareAdd(t *testing.T) {
 	}
 
 	// The configured base branch, when set, wins over the profiled default.
-	row, err := stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{Owner: "sky", Repo: "core"})
+	row, err := stores.Repos.GetByRefSystem(context.Background(), runmode.LocalDefaultOrgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "sky", Repo: "core"})
 	if err != nil || row == nil {
 		t.Fatalf("load repository: row=%v err=%v", row, err)
 	}
@@ -358,12 +429,12 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-pr", runmode.LocalDefaultUserID, "manual")
-	seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
+	repoRow := seedWorkspaceRepo(t, stores, "sky", "core", "https://github.com/sky/core.git")
 	// The workspace CLI reserves the conversation_worktrees row BEFORE the create — and
 	// the host-side PR fetch rides the exec-gh channel, whose least-privilege
 	// gate requires that row. Mirror the production ordering.
 	if _, _, err := stores.ConversationWorktrees.Insert(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "conv-pr", RepoID: "sky/core", Path: "/wt/pr-path", Ref: "pr-42",
+		ConversationID: "conv-pr", RepositoryID: repoRow.ID, Path: "/wt/pr-path", Ref: "pr-42",
 	}); err != nil {
 		t.Fatalf("reserve conversation_worktrees row: %v", err)
 	}
@@ -384,6 +455,9 @@ func TestLocalClient_CreateWorkspaceCheckout_PRPath(t *testing.T) {
 	}
 	if rec.prCalls != 1 || rec.checkoutCalls != 0 {
 		t.Fatalf("calls = %d/%d, want 0 checkout / 1 pr", rec.checkoutCalls, rec.prCalls)
+	}
+	if rec.prRepositoryID != repoRow.ID || rec.prOwner != "sky" || rec.prRepo != "core" {
+		t.Errorf("repo = %s (%s/%s), want the repository row %s (sky/core)", rec.prRepositoryID, rec.prOwner, rec.prRepo, repoRow.ID)
 	}
 	if rec.prNumber != 42 || rec.prHeadBranch != "contrib-branch" {
 		t.Errorf("pr/head = %d/%q, want 42/contrib-branch", rec.prNumber, rec.prHeadBranch)

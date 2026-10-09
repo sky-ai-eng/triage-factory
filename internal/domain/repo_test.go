@@ -83,14 +83,48 @@ func TestRepositorySlugRendersFromTheNameColumns(t *testing.T) {
 func TestRepositoryRefCarriesProviderIdentity(t *testing.T) {
 	r := Repository{
 		ID: "6f1d5f1e-0b3a-4a1e-9f3c-2b7a5d4c8e90", Owner: "octo", Repo: "widget",
-		Source: RepoSourceGitHub, ExternalID: "1296269",
+		Source: RepoSourceGitHub, Host: "https://ghe.example.com", ExternalID: "1296269",
 	}
-	want := RepoRef{Source: RepoSourceGitHub, Owner: "octo", Repo: "widget", ExternalID: "1296269"}
+	want := RepoRef{Source: RepoSourceGitHub, Host: "https://ghe.example.com", Owner: "octo", Repo: "widget", ExternalID: "1296269"}
 	if got := r.Ref(); got != want {
 		t.Errorf("Ref() = %+v, want %+v", got, want)
 	}
 	if got := r.Ref().Slug(); got != r.Slug() {
 		t.Errorf("Ref().Slug() = %q, want it to agree with Repository.Slug() %q", got, r.Slug())
+	}
+}
+
+// RepoRefFromSlug places the slug on the host it is given: a slug names a
+// repository only together with its host.
+func TestRepoRefFromSlug(t *testing.T) {
+	want := RepoRef{Host: "https://ghe.example.com", Owner: "octo", Repo: "widget"}
+	if got := RepoRefFromSlug("https://ghe.example.com", "octo/widget"); got != want {
+		t.Errorf("RepoRefFromSlug = %+v, want %+v", got, want)
+	}
+	if got := RepoRefFromSlug("https://ghe.example.com", "no-slash"); got.Repo != "" {
+		t.Errorf("RepoRefFromSlug of a string with no slash = %+v, want an empty Repo", got)
+	}
+}
+
+func TestGitHubURLOnHost(t *testing.T) {
+	for _, tc := range []struct {
+		url, host string
+		want      bool
+	}{
+		{"https://github.com/octo/widget/pull/1", "https://github.com", true},
+		{"https://GitHub.com/octo/widget/pull/1", "https://github.com", true},
+		{"https://ghe.example.com/octo/widget/pull/1", "https://github.com", false},
+		// A host that is a prefix of another is not that host.
+		{"https://github.company.com/octo/widget", "https://github.com", false},
+		// A context path is part of the host.
+		{"https://example.com/github/octo/widget", "https://example.com/github", true},
+		{"https://example.com/gitlab/octo/widget", "https://example.com/github", false},
+		{"", "https://github.com", false},
+		{"https://github.com/octo/widget", "", false},
+	} {
+		if got := GitHubURLOnHost(tc.url, tc.host); got != tc.want {
+			t.Errorf("GitHubURLOnHost(%q, %q) = %v, want %v", tc.url, tc.host, got, tc.want)
+		}
 	}
 }
 

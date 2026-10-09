@@ -638,11 +638,11 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 					t.Fatalf("seed pending review: %v", err)
 				}
 			},
-			Worktree: func(t *testing.T, conversationID, slug, ref string) {
+			Worktree: func(t *testing.T, conversationID, host, slug, ref string) {
 				t.Helper()
-				trackRepoForTest(t, stores, slug)
+				repositoryID := trackRepoOnHostForTest(t, stores, host, slug)
 				if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-					ConversationID: conversationID, RepoID: slug, Ref: ref,
+					ConversationID: conversationID, RepositoryID: repositoryID, Ref: ref,
 					Path: "/tmp/coherence/" + conversationID + "/" + ref,
 				}); err != nil {
 					t.Fatalf("seed worktree: %v", err)

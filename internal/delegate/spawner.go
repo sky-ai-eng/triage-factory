@@ -1041,6 +1041,14 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("worktree ledger read: %w", err)
 	}
+	// A ledger row names its repository by registry id, and the repository a
+	// push here reaches is the row for owner/repo on host. A checkout of the
+	// same owner/repo on another host is another repository, so it earns
+	// nothing on this one. No row on host means no ledger row can name it.
+	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	if err != nil {
+		return gitproxy.Decision{}, fmt.Errorf("repository read: %w", err)
+	}
 
 	// Base / protected refs are not pushable regardless of what the worktree is
 	// checked out on, unless the team's base-branch push policy says otherwise
@@ -1057,15 +1065,15 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	var allowedRefs []string
 	found := false
 	for _, w := range rows {
-		if !strings.EqualFold(w.RepoID, repoID) {
+		if repoRow == nil || w.RepositoryID != repoRow.ID {
 			continue
 		}
 		found = true
 		// A HEAD file read plus a few `git config --file` subprocesses per
 		// matching row (the current branch comes from a plain .git/HEAD read,
-		// no subprocess). conversation_worktrees is keyed (conversation_id, repo_id, ref), so
-		// several rows can match; git ops per run are few enough that per-row
-		// spawning stays fine.
+		// no subprocess). conversation_worktrees is keyed (conversation_id,
+		// repository_id, ref), so several rows can match; git ops per run are
+		// few enough that per-row spawning stays fine.
 		branch := worktreePushTargetBranch(w.Path)
 		if branch == "" || protected[branch] {
 			continue

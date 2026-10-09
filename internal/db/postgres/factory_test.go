@@ -120,19 +120,19 @@ func newPgFactorySeeder(conn *sql.DB, orgID, userID, promptID string) dbtest.Fac
 				t.Fatalf("seed entity %s: %v", suffix, err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+				INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
 				ON CONFLICT DO NOTHING
-			`, orgID, owner, repo); err != nil {
+			`, orgID, dbtest.TestGitHubHost, owner, repo); err != nil {
 				t.Fatalf("seed entity repository %s/%s: %v", owner, repo, err)
 			}
 			if _, err := conn.Exec(`
 				INSERT INTO team_github_repos (team_id, repository_id, org_id)
 				VALUES ((SELECT id FROM teams WHERE org_id = $1 ORDER BY created_at ASC LIMIT 1),
 				        (SELECT id FROM repositories
-				          WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)),
+				          WHERE org_id = $1 AND host = $4 AND lower(owner) = lower($2) AND lower(repo) = lower($3)),
 				        $1)
 				ON CONFLICT (team_id, repository_id) DO NOTHING
-			`, orgID, owner, repo); err != nil {
+			`, orgID, owner, repo, dbtest.TestGitHubHost); err != nil {
 				t.Fatalf("track entity repo %s/%s: %v", owner, repo, err)
 			}
 			return id
@@ -282,13 +282,20 @@ func trackPgRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, owner, repo str
 // exclude boundary. (newPgFactorySeeder.Entity auto-tracks; these don't.)
 func seedPgGitHubEntityRaw(t *testing.T, h *pgtest.Harness, orgID, owner, repo string, number int) string {
 	t.Helper()
+	return seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestGitHubHost, owner, repo, number)
+}
+
+// seedPgGitHubEntityOnHost is seedPgGitHubEntityRaw with the entity's scope —
+// the GitHub host it was polled from — named.
+func seedPgGitHubEntityOnHost(t *testing.T, h *pgtest.Harness, orgID, host, owner, repo string, number int) string {
+	t.Helper()
 	id := uuid.New().String()
 	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if _, err := h.AdminDB.Exec(`
 		INSERT INTO entities (id, org_id, source, source_id, kind, title, url, snapshot_json, created_at, scope)
-		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5, 'https://github.com')
-	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC()); err != nil {
-		t.Fatalf("seed github entity %s: %v", sourceID, err)
+		VALUES ($1, $2, 'github', $3, 'pr', $4, '', '{}'::jsonb, $5, $6)
+	`, id, orgID, sourceID, "PR "+sourceID, time.Now().UTC(), host); err != nil {
+		t.Fatalf("seed github entity %s on %s: %v", sourceID, host, err)
 	}
 	return id
 }
@@ -367,6 +374,49 @@ func TestFactoryReadStore_Postgres_ExcludesUntrackedEntity(t *testing.T) {
 	}
 	if got[onUntracked] {
 		t.Errorf("entity on untracked repo %s leaked through — tracked-set semi-join not applied", onUntracked)
+	}
+}
+
+// TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost pins the
+// host half of the tracked-set semi-join: a pull request entity's scope is the
+// GitHub host it was polled from, and it rides the belt only when a team tracks
+// its owner/repo on that host. The same owner/repo tracked on another host is
+// a different repository and admits nothing.
+func TestFactoryReadStore_Postgres_GitHubMatchesTrackingOnItsOwnHost(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, _ := seedPgFactoryOrg(t, h)
+	teamID := firstTeamForOrg(t, h, orgID)
+
+	pgtest.SeedTrackedRepoOnHost(t, h, orgID, teamID, dbtest.TestGitHubHost, "acme", "api")
+	pgtest.SeedTrackedRepoOnHost(t, h, orgID, teamID, dbtest.TestOtherGitHubHost, "acme", "ghe-only")
+
+	dotcomTracked := seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestGitHubHost, "acme", "api", 1)
+	gheSameSlug := seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestOtherGitHubHost, "acme", "api", 2)
+	gheTracked := seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestOtherGitHubHost, "ACME", "Ghe-Only", 3)
+	dotcomSameSlug := seedPgGitHubEntityOnHost(t, h, orgID, dbtest.TestGitHubHost, "acme", "ghe-only", 4)
+
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	rows, err := stores.Factory.Entities(context.Background(), orgID, 100, nil)
+	if err != nil {
+		t.Fatalf("Entities: %v", err)
+	}
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Entity.ID] = true
+	}
+	for _, c := range []struct {
+		name, id string
+		want     bool
+	}{
+		{"acme/api#1 on github.com, tracked there", dotcomTracked, true},
+		{"acme/api#2 on ghe, tracked only on github.com", gheSameSlug, false},
+		{"acme/ghe-only#3 on ghe, tracked there", gheTracked, true},
+		{"acme/ghe-only#4 on github.com, tracked only on ghe", dotcomSameSlug, false},
+	} {
+		if got[c.id] != c.want {
+			t.Errorf("%s: on belt = %v, want %v", c.name, got[c.id], c.want)
+		}
 	}
 }
 
