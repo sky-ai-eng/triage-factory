@@ -544,6 +544,10 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 	if err != nil {
 		return 0, err
 	}
+	metadataJSON, err := events.Current(ctx, orgID, eventType, primaryEvent.MetadataJSON)
+	if err != nil {
+		return 0, err
+	}
 	for _, h := range handlers {
 		if h.Kind != domain.EventHandlerKindRule || h.DefaultPriority == nil {
 			// Trigger rows have no DefaultPriority; skip.
@@ -565,7 +569,7 @@ func teamDefaultPriority(ctx context.Context, tx db.TxStores, orgID, teamID, eve
 		if h.ScopePredicateJSON != nil {
 			predJSON = *h.ScopePredicateJSON
 		}
-		matched, merr := schema.Match(predJSON, primaryEvent.MetadataJSON)
+		matched, merr := schema.Match(predJSON, metadataJSON)
 		if merr != nil {
 			tasksLog.Warn("event_handler predicate error, skipping", "event_handler", h.ID, "error", merr)
 			continue

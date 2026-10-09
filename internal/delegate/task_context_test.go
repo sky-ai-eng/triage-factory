@@ -616,3 +616,46 @@ func TestTaskArtifacts_ReadFailurePassesNone(t *testing.T) {
 		t.Errorf("a taskless run must pass none, got %+v", got)
 	}
 }
+
+// metadataEvents stubs the one EventStore read taskEventMetadata makes.
+type metadataEvents struct {
+	db.EventStore
+	meta string
+	err  error
+}
+
+func (m metadataEvents) GetMetadataSystem(context.Context, string, string) (string, error) {
+	return m.meta, m.err
+}
+
+// TestTaskEventMetadata_ReadsThroughTheCurrentView: the task context carries
+// the primary event's metadata as its event type's current view reads it, the
+// metadata as recorded when the view fails, and no event fields when the read
+// itself fails.
+func TestTaskEventMetadata_ReadsThroughTheCurrentView(t *testing.T) {
+	const eventType = "test:task_context_view"
+	var viewErr error
+	events.RegisterCurrentView(eventType, func(_ context.Context, _, meta string) (string, error) {
+		if viewErr != nil {
+			return "", viewErr
+		}
+		return strings.ReplaceAll(meta, "G1", "C1"), nil
+	})
+	t.Cleanup(func() { events.ResetCurrentView(eventType) })
+
+	task := domain.Task{ID: "task-1", EventType: eventType, PrimaryEventID: "event-1"}
+	ctx := context.Background()
+	s := &Spawner{events: metadataEvents{meta: `{"channel":"G1"}`}}
+
+	if got := s.taskEventMetadata(ctx, "org-1", task); got != `{"channel":"C1"}` {
+		t.Errorf("taskEventMetadata = %q, want the current view", got)
+	}
+	viewErr = errors.New("db down")
+	if got := s.taskEventMetadata(ctx, "org-1", task); got != `{"channel":"G1"}` {
+		t.Errorf("taskEventMetadata with a failed view = %q, want the metadata as recorded", got)
+	}
+	s.events = metadataEvents{err: errors.New("db down")}
+	if got := s.taskEventMetadata(ctx, "org-1", task); got != "" {
+		t.Errorf("taskEventMetadata with a failed read = %q, want no metadata", got)
+	}
+}

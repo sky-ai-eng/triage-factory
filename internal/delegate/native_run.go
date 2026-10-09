@@ -376,12 +376,7 @@ type nativeLaunchText struct {
 // Nothing in it fails: the one read it makes degrades to a task context with no
 // event fields rather than refusing the launch.
 func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, mission string, cfg runConfig, knowledge, replayed string) nativeLaunchText {
-	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), cfg.orgID, task.PrimaryEventID)
-	if err != nil {
-		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
-			"task", task.ID, "event", task.PrimaryEventID, "error", err)
-		metadataJSON = ""
-	}
+	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), cfg.orgID, task)
 	artifacts := s.taskArtifacts(context.WithoutCancel(ctx), cfg.orgID, task.ID)
 
 	systemBlock := replayed

@@ -1,7 +1,9 @@
 package slack
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -122,5 +124,56 @@ func TestSlackMessageSource_GatedOnFeatureSlack(t *testing.T) {
 	}
 	if f != entitlements.FeatureSlack {
 		t.Errorf("gating feature = %q; want %q", f, entitlements.FeatureSlack)
+	}
+}
+
+// TestSlackMessageCurrentView: the view hands back metadata naming a channel
+// that never moved byte for byte, rewrites only the channel of one that did,
+// and surfaces a failed read. Registered, it is what lets a handler filter
+// that followed the move still match a message recorded before it.
+func TestSlackMessageCurrentView(t *testing.T) {
+	channels := newFakeChannelRegistry()
+	channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
+	view := slackMessageCurrentView(channels)
+	ctx := context.Background()
+
+	unmoved := `{"workspace_id":"T1","channel":"C9","ts":"1.0","mentioned":true}`
+	if got, err := view(ctx, "org-1", unmoved); err != nil || got != unmoved {
+		t.Errorf("view(unmoved) = %q, %v; want the metadata as recorded", got, err)
+	}
+
+	recorded := `{"workspace_id":"T1","api_app_id":"A1","channel":"G1","ts":"2.0","thread_ts":"1.0","sender_id":"U1","text":"hi","event_id":"Ev1","mentioned":true}`
+	got, err := view(ctx, "org-1", recorded)
+	if err != nil {
+		t.Fatalf("view(moved): %v", err)
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte(got), &meta); err != nil {
+		t.Fatalf("decode view output: %v", err)
+	}
+	want := SlackMessageMetadata{WorkspaceID: "T1", APIAppID: "A1", Channel: "C1", TS: "2.0", ThreadTS: "1.0", SenderID: "U1", Text: "hi", EventID: "Ev1", Mentioned: true}
+	if meta != want {
+		t.Errorf("view(moved) = %+v, want %+v", meta, want)
+	}
+
+	if got, err := view(ctx, "org-2", recorded); err != nil || got != recorded {
+		t.Errorf("view in another org = %q, %v; want the metadata as recorded", got, err)
+	}
+
+	channels.currentErr = errors.New("db down")
+	if _, err := view(ctx, "org-1", recorded); err == nil {
+		t.Error("view with a failed read = nil error; want the read's error")
+	}
+	channels.currentErr = nil
+
+	events.RegisterCurrentView(domain.EventSlackMessage, view)
+	t.Cleanup(func() { events.ResetCurrentView(domain.EventSlackMessage) })
+	schema, _ := events.Get(domain.EventSlackMessage)
+	current, err := events.Current(ctx, "org-1", domain.EventSlackMessage, recorded)
+	if err != nil {
+		t.Fatalf("events.Current: %v", err)
+	}
+	if matched, err := schema.Match(`{"channel_in":["C1"]}`, current); err != nil || !matched {
+		t.Errorf("filter on the new id against the recorded message = %v, %v; want a match", matched, err)
 	}
 }

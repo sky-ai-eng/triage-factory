@@ -26,6 +26,8 @@ import (
 	"net/http"
 
 	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/routing"
 	"github.com/sky-ai-eng/triage-factory/internal/server"
 	"go.opentelemetry.io/otel"
@@ -69,6 +71,7 @@ func install(api server.ExtensionAPI) {
 		ResolveOwner: slackChannelOwner(bundle),
 		TracksScope:  slackTeamTracksChannel(bundle),
 	})
+	events.RegisterCurrentView(domain.EventSlackMessage, slackMessageCurrentView(bundle.Channels))
 
 	// One stats instance spans the pipeline and both transports: outcome
 	// counts land in the shared pipeline; retry / rate-limit signals are

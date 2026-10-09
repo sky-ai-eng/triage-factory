@@ -41,13 +41,6 @@ install — and subscribes the bot to these events:
   Slack Connect. TF moves everything it holds about the channel to the new ID
   (see [concepts/tracked-events.md](../concepts/tracked-events.md#channel-id-changes)).
 
-An app created from an earlier manifest doesn't subscribe to
-`channel_id_changed`. Add it under **Event Subscriptions → Subscribe to bot
-events** in the app's settings, or paste the current manifest over the app's,
-and reinstall if Slack asks. Until then, when a private channel the bot is in
-is shared through Slack Connect, follow-ups in its existing threads stop being
-heard, and a new mention in one of them starts a separate thread entity.
-
 
 ## Auditing workspace connects
 

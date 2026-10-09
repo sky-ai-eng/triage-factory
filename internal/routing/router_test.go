@@ -1,11 +1,15 @@
 package routing
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // --- matchPredicate unit tests ----------------------------------------------
@@ -258,5 +262,44 @@ func TestEntityTerminatingEvents(t *testing.T) {
 		if EntityTerminatingEvents[et] {
 			t.Errorf("expected %q to NOT be entity-terminating", et)
 		}
+	}
+}
+
+// TestMatchHandlers_MatchesThroughTheCurrentView is the event-time twin: an
+// event recorded under a replaced id matches a filter naming its replacement,
+// and a view that cannot answer is a failed match, never "nothing matched".
+func TestMatchHandlers_MatchesThroughTheCurrentView(t *testing.T) {
+	var viewErr error
+	events.RegisterCurrentView(domain.EventGitHubPRCICheckFailed, func(_ context.Context, _, meta string) (string, error) {
+		if viewErr != nil {
+			return "", viewErr
+		}
+		return strings.ReplaceAll(meta, `"author":"old-login"`, `"author":"aidan"`), nil
+	})
+	t.Cleanup(func() { events.ResetCurrentView(domain.EventGitHubPRCICheckFailed) })
+
+	database := newTestDB(t)
+	createTestPrompt(t, database, domain.Prompt{ID: "p5", Name: "Test5", Body: "Do", Source: "user"})
+	pred := `{"author_in":["aidan"]}`
+	createTriggerForTestRouting(t, database, domain.EventHandler{
+		ID: "t-view-event", Kind: domain.EventHandlerKindTrigger,
+		BlueprintID: "p5", TriggerType: domain.TriggerTypeEvent,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		MinAutonomySuitability: floatPtr(0), Enabled: true,
+		ScopePredicateJSON: &pred,
+	})
+	r := reDeriveRouter(t, database, nil)
+
+	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", CheckName: "build", Repo: "owner/repo"})
+	evt := domain.Event{OrgID: runmode.LocalDefaultOrgID, EventType: domain.EventGitHubPRCICheckFailed, MetadataJSON: string(metaJSON)}
+
+	_, triggers, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, map[string]bool{})
+	if err != nil || len(triggers) != 1 || triggers[0].ID != "t-view-event" {
+		t.Errorf("matchHandlers = %+v, %v; want t-view-event matched through the view", triggers, err)
+	}
+
+	viewErr = errors.New("db down")
+	if _, _, err := r.matchHandlers(context.Background(), runmode.LocalDefaultOrgID, evt, map[string]bool{}); err == nil {
+		t.Error("matchHandlers with a failing view = nil error; want the view's error")
 	}
 }

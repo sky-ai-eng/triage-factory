@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
 )
 
@@ -102,10 +103,14 @@ func (r *Router) evaluateReDerive(ctx context.Context, orgID, taskID string) (re
 		return reDerivePlan{}, fmt.Errorf("query event_handlers for %s: %w", task.EventType, err)
 	}
 
-	// Fetch the primary event's metadata for predicate matching.
+	// Fetch the primary event's metadata for predicate matching, through its
+	// current view, as the event-time path matches it.
 	metadata, err := r.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
 	if err != nil {
 		return reDerivePlan{}, fmt.Errorf("fetch metadata of event %s: %w", task.PrimaryEventID, err)
+	}
+	if metadata, err = events.Current(ctx, orgID, task.EventType, metadata); err != nil {
+		return reDerivePlan{}, fmt.Errorf("resolve metadata of event %s: %w", task.PrimaryEventID, err)
 	}
 
 	// The task's recorded visibility set — the teams whose handlers matched
