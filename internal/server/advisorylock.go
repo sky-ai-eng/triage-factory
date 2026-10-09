@@ -93,6 +93,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	8 — this file                                 (org id, session)
 //	9 — this file                                 (github host + installation
 //	    id, session; githubInstallationBindLockSalt)
+//	10 — this file                                (org id, session;
+//	    linearCredentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
 //	    exclusive to move, shared to settle; channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
@@ -117,4 +119,21 @@ const (
 	// the org lock, and nothing waits on an org lock while holding this one, so
 	// no cycle can form.
 	githubInstallationBindLockSalt int64 = 9
+
+	// linearCredentialLockSalt namespaces the per-org Linear credential lock
+	// (lockLinearCredential). Every writer of an org's Linear credential, its
+	// install row, or its OAuth app holds it, so a check one of them makes —
+	// is an install live, which app minted it, what did the row say before
+	// this ceremony replaced it — still holds when its write lands, on every
+	// pod. It is its own keyspace because the GitHub org lock's critical
+	// sections are GitHub's, and sharing one would serialize two
+	// integrations for no reason.
+	linearCredentialLockSalt int64 = 10
 )
+
+// lockLinearCredential takes orgID's Linear credential lock. Callers hold it
+// across the reads their write depends on and the write itself, and take it
+// before guardLocalLinearWrite, which relies on it.
+func (s *Server) lockLinearCredential(ctx context.Context, orgID string) (release func(), err error) {
+	return s.acquireKeyedLock(ctx, &s.linearCredentialLock, linearCredentialLockSalt, orgID)
+}

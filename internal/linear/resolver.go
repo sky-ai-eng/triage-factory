@@ -74,15 +74,16 @@ func ParseUserCredential(raw string) (UserCredential, error) {
 // InstallCredential is the envelope an app install stores under the org secret
 // linear_app_install: the refresh token and what identifies the install it
 // belongs to. ClientID is the app that minted it, whose secret every refresh
-// needs. InstalledAt is the install's org_linear_installs.installed_at: a
-// rotation keeps it and a new install changes it, which is how a cached access
-// token learns the install it was minted for has been replaced.
+// needs. InstallID is the install's org_linear_installs.install_id: a rotation
+// keeps it and a new install changes it, so a cached access token learns the
+// install it was minted for has been replaced, and a removal names the one
+// install it read.
 type InstallCredential struct {
-	WorkspaceID  string    `json:"workspace_id"`
-	AppUserID    string    `json:"app_user_id"`
-	RefreshToken string    `json:"refresh_token"`
-	ClientID     string    `json:"client_id"`
-	InstalledAt  time.Time `json:"installed_at"`
+	InstallID    string `json:"install_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	AppUserID    string `json:"app_user_id"`
+	RefreshToken string `json:"refresh_token"`
+	ClientID     string `json:"client_id"`
 }
 
 // MarshalInstallCredential renders an InstallCredential for storage.
@@ -95,8 +96,8 @@ func MarshalInstallCredential(c InstallCredential) (string, error) {
 }
 
 // ParseInstallCredential reads a stored InstallCredential. An empty or
-// malformed value, or one with no refresh token or client id, is an error:
-// the key exists, so this is corruption, not absence.
+// malformed value, or one missing its install id, refresh token or client id,
+// is an error: the key exists, so this is corruption, not absence.
 func ParseInstallCredential(raw string) (InstallCredential, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -106,8 +107,8 @@ func ParseInstallCredential(raw string) (InstallCredential, error) {
 	if err := json.Unmarshal([]byte(raw), &c); err != nil {
 		return InstallCredential{}, fmt.Errorf("linear: parse install credential: %w", err)
 	}
-	if c.RefreshToken == "" || c.ClientID == "" {
-		return InstallCredential{}, errors.New("linear: install credential has no refresh token or client id")
+	if c.InstallID == "" || c.RefreshToken == "" || c.ClientID == "" {
+		return InstallCredential{}, errors.New("linear: install credential is missing its install id, refresh token or client id")
 	}
 	return c, nil
 }

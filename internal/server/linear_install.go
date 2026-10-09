@@ -246,6 +246,12 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 		redirectLinearInstallError(w, r, orgID, returnTo, "workspace_taken")
 		return
 	}
+	if errors.Is(err, errLinearAppChanged) {
+		linearInstallLog.Warn("the org's linear app changed during the install; refusing", "org", orgID, "client_id", app.ClientID)
+		s.revokeLinearTokens(ctx, orgID, app, tok)
+		redirectLinearInstallError(w, r, orgID, returnTo, "install_failed")
+		return
+	}
 	if err != nil {
 		s.revokeLinearTokens(ctx, orgID, app, tok)
 		internalError(w, "linear-install", err)
@@ -265,11 +271,33 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, linearInstallReturn(orgID, returnTo, "linear", "installed"), http.StatusFound)
 }
 
+// errLinearAppChanged is an install whose OAuth app was replaced or removed
+// between the code exchange and the store. Its refresh token needs the secret
+// of the app that minted it, which is no longer the org's, so it is refused
+// rather than stored unable to refresh.
+var errLinearAppChanged = errors.New("linear: the oauth app changed during the install")
+
+// newLinearInstallID mints an install's id: random, so two installs of one
+// org can never share one.
+func newLinearInstallID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // storeLinearInstall writes a completed install: the org_linear_installs row,
 // and in one transaction the envelope, the app_install marker, the dropped
 // API key, the bound-as record, the workspace columns and the change log. It
 // returns the refresh token of an install this one replaced, for the caller
 // to revoke, when the same app minted it.
+//
+// It holds the org's Linear credential lock throughout, so what it reads
+// first — the app the code was exchanged against, and the install row it is
+// about to replace — is still true when it writes, on every pod: an app
+// change since the exchange is errLinearAppChanged, and a failed store puts
+// back the row it read.
 //
 // The installs row is written on the admin pool in Postgres, so it commits
 // ahead of the transaction rather than with it; a transaction that then fails
@@ -281,6 +309,26 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 	binding, err := json.Marshal(linearBinding{Name: viewer.Name, DisplayName: viewer.DisplayName, WorkspaceName: org.Name})
 	if err != nil {
 		return "", fmt.Errorf("marshal linear binding: %w", err)
+	}
+	installID, err := newLinearInstallID()
+	if err != nil {
+		return "", fmt.Errorf("mint linear install id: %w", err)
+	}
+
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
+
+	current, _, err := s.linearOAuthApps.Resolve(ctx, orgID)
+	switch {
+	case errors.Is(err, linear.ErrNoLinearOAuthApp):
+		return "", errLinearAppChanged
+	case err != nil:
+		return "", err
+	case current.ClientID != app.ClientID:
+		return "", errLinearAppChanged
 	}
 	prior, err := s.linearInstalls.GetForOrgSystem(ctx, orgID)
 	if err != nil {
@@ -298,25 +346,25 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 		priorEnv   string
 	)
 	err = s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		stored, err := tx.LinearInstalls.UpsertSystem(ctx, domain.OrgLinearInstall{
+		if _, err := tx.LinearInstalls.UpsertSystem(ctx, domain.OrgLinearInstall{
 			OrgID:             orgID,
+			InstallID:         installID,
 			WorkspaceID:       org.ID,
 			WorkspaceURLKey:   org.URLKey,
 			AppUserID:         viewer.ID,
 			AppClientID:       app.ClientID,
 			InstalledByUserID: userID,
 			InstalledAt:       timeNow().UTC(),
-		})
-		if err != nil {
+		}); err != nil {
 			return err
 		}
 		rowWritten = true
 		envelope, err := linear.MarshalInstallCredential(linear.InstallCredential{
+			InstallID:    installID,
 			WorkspaceID:  org.ID,
 			AppUserID:    viewer.ID,
 			RefreshToken: tok.RefreshToken,
 			ClientID:     app.ClientID,
-			InstalledAt:  stored.InstalledAt,
 		})
 		if err != nil {
 			return err
@@ -353,7 +401,7 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 			restore()
 		}
 		if rowWritten {
-			s.restoreLinearInstall(ctx, orgID, prior)
+			s.restoreLinearInstall(ctx, orgID, prior, installID)
 		}
 		return "", err
 	}
@@ -367,16 +415,17 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 }
 
 // restoreLinearInstall puts back the install row a failed store replaced:
-// the prior live row, or, when there was none, the new row marked failed so it
-// holds no workspace. Best-effort: it runs after a failure already being
-// reported, so its own failure only logs.
-func (s *Server) restoreLinearInstall(ctx context.Context, orgID string, prior *domain.OrgLinearInstall) {
+// the prior live row, or, when there was none, the new install (installID)
+// marked failed so it holds no workspace. The caller still holds the org's
+// Linear credential lock, so prior is still what was there. Best-effort: it
+// runs after a failure already being reported, so its own failure only logs.
+func (s *Server) restoreLinearInstall(ctx context.Context, orgID string, prior *domain.OrgLinearInstall, installID string) {
 	ctx = context.WithoutCancel(ctx)
 	var err error
 	if prior != nil && prior.Live() {
 		_, err = s.linearInstalls.UpsertSystem(ctx, *prior)
 	} else {
-		_, err = s.linearInstalls.MarkRemovedSystem(ctx, orgID, domain.LinearInstallRemovedFailed)
+		_, err = s.linearInstalls.MarkRemovedSystem(ctx, orgID, installID, domain.LinearInstallRemovedFailed)
 	}
 	if err != nil {
 		linearInstallLog.Error("restore linear install row after a failed install failed", "org", orgID, "error", err)

@@ -169,18 +169,21 @@ type Server struct {
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
 	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
-	// linearCredentialMu, jiraCredentialMu, anthropicCredentialMu and
-	// bedrockCredentialMu serialize each credential's local-mode bind and
-	// unbind across snapshot, transaction and restore
-	// (guardLocalSecretWrite). The keychain sits outside the SQLite
-	// transaction, so two overlapping writes could otherwise snapshot the same
-	// prior key and the one that fails would restore it over the one that
-	// committed. GitHub needs no mutex of its own: every GitHub credential
-	// transition already holds githubAppRegMu for the org.
-	linearCredentialMu    sync.Mutex
+	// jiraCredentialMu, anthropicCredentialMu and bedrockCredentialMu
+	// serialize each credential's local-mode bind and unbind across snapshot,
+	// transaction and restore (guardLocalSecretWrite). The keychain sits
+	// outside the SQLite transaction, so two overlapping writes could
+	// otherwise snapshot the same prior key and the one that fails would
+	// restore it over the one that committed. GitHub and Linear need no mutex
+	// of their own: every GitHub credential transition holds githubAppRegMu
+	// for the org, and every Linear one holds linearCredentialLock.
 	jiraCredentialMu      sync.Mutex
 	anthropicCredentialMu sync.Mutex
 	bedrockCredentialMu   sync.Mutex
+	// linearCredentialLock is lockLinearCredential's local-mode keyspace,
+	// map[orgID]*sync.Mutex. In multi mode the lock is a Postgres advisory
+	// lock instead, so it holds across pods.
+	linearCredentialLock sync.Map
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve

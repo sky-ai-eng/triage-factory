@@ -111,8 +111,8 @@ func (f *fakeSecretStore) Get(context.Context, string, string) (string, error)  
 func (f *fakeSecretStore) GetSystem(_ context.Context, orgID, key string) (string, error) {
 	return f.values[orgID+"/"+key], nil
 }
-func (f *fakeSecretStore) PutSystem(context.Context, string, string, string, string) error {
-	return nil
+func (f *fakeSecretStore) PutSystemIfValue(context.Context, string, string, string, string, string) (bool, error) {
+	return false, nil
 }
 func (f *fakeSecretStore) DeleteSystemIfValue(context.Context, string, string, string) (bool, error) {
 	return false, nil

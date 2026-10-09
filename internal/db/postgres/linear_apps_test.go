@@ -57,8 +57,8 @@ func TestLinearInstallsStore_Postgres_AppPoolCannotWrite(t *testing.T) {
 	orgID, userID := seedPgOrgAndUserForGitHubApps(t, h)
 
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO org_linear_installs (org_id, workspace_id, workspace_url_key, app_user_id, app_client_id, installed_at)
-		VALUES ($1, 'ws-rls', 'rls', 'app-user', 'client', now())
+		INSERT INTO org_linear_installs (org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id, installed_at)
+		VALUES ($1, 'inst-rls', 'ws-rls', 'rls', 'app-user', 'client', now())
 	`, orgID); err != nil {
 		t.Fatalf("seed install: %v", err)
 	}
@@ -91,8 +91,8 @@ func TestLinearInstallsStore_Postgres_AppPoolCannotWrite(t *testing.T) {
 
 	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
 		_, err := tx.Exec(`
-			INSERT INTO org_linear_installs (org_id, workspace_id, workspace_url_key, app_user_id, app_client_id, installed_at)
-			VALUES ($1, 'ws-other', 'other', 'app-user', 'client', now())
+			INSERT INTO org_linear_installs (org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id, installed_at)
+			VALUES ($1, 'inst-other', 'ws-other', 'other', 'app-user', 'client', now())
 			ON CONFLICT (org_id) DO NOTHING
 		`, orgID)
 		return err

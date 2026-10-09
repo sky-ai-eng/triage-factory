@@ -31,8 +31,8 @@ func (disabledSecretStore) GetSystem(context.Context, string, string) (string, e
 	return "", db.ErrSecretStoreUnavailable
 }
 
-func (disabledSecretStore) PutSystem(context.Context, string, string, string, string) error {
-	return db.ErrSecretStoreUnavailable
+func (disabledSecretStore) PutSystemIfValue(context.Context, string, string, string, string, string) (bool, error) {
+	return false, db.ErrSecretStoreUnavailable
 }
 
 func (disabledSecretStore) DeleteSystemIfValue(context.Context, string, string, string) (bool, error) {

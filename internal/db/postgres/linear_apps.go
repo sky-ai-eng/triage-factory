@@ -108,7 +108,7 @@ var _ db.LinearInstallsStore = (*linearInstallsStore)(nil)
 
 // pgLinearInstallColumns is the projection of an org_linear_installs row, in
 // the order scanLinearInstall reads it.
-const pgLinearInstallColumns = `org_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
+const pgLinearInstallColumns = `org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 	installed_by_user_id, installed_at, removed_at, removed_reason`
 
 // linearInstallsWorkspaceLiveIndex is the partial unique index holding a live
@@ -122,7 +122,7 @@ func scanLinearInstall(row interface{ Scan(...any) error }) (*domain.OrgLinearIn
 		removedAt sql.NullTime
 		reason    sql.NullString
 	)
-	err := row.Scan(&inst.OrgID, &inst.WorkspaceID, &inst.WorkspaceURLKey, &inst.AppUserID, &inst.AppClientID,
+	err := row.Scan(&inst.OrgID, &inst.InstallID, &inst.WorkspaceID, &inst.WorkspaceURLKey, &inst.AppUserID, &inst.AppClientID,
 		&installBy, &inst.InstalledAt, &removedAt, &reason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -154,10 +154,11 @@ func (s *linearInstallsStore) GetForOrgSystem(ctx context.Context, orgID string)
 func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgLinearInstall) (domain.OrgLinearInstall, error) {
 	stored, err := scanLinearInstall(s.admin.QueryRowContext(ctx, `
 		INSERT INTO org_linear_installs
-			(org_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
+			(org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 			 installed_by_user_id, installed_at, removed_at, removed_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), NULL, NULL)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), NULL, NULL)
 		ON CONFLICT (org_id) DO UPDATE SET
+			install_id           = EXCLUDED.install_id,
 			workspace_id         = EXCLUDED.workspace_id,
 			workspace_url_key    = EXCLUDED.workspace_url_key,
 			app_user_id          = EXCLUDED.app_user_id,
@@ -167,7 +168,7 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 			removed_at           = NULL,
 			removed_reason       = NULL
 		RETURNING `+pgLinearInstallColumns,
-		inst.OrgID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
+		inst.OrgID, inst.InstallID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
 		nullString(inst.InstalledByUserID), nullTime(inst.InstalledAt)))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == linearInstallsWorkspaceLiveIndex {
@@ -182,16 +183,16 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 	return *stored, nil
 }
 
-func (s *linearInstallsStore) MarkRemovedSystem(ctx context.Context, orgID, reason string) (*domain.OrgLinearInstall, error) {
+func (s *linearInstallsStore) MarkRemovedSystem(ctx context.Context, orgID, installID, reason string) (*domain.OrgLinearInstall, error) {
 	if !isValidUUID(orgID) {
 		return nil, nil
 	}
 	inst, err := scanLinearInstall(s.admin.QueryRowContext(ctx, `
 		UPDATE org_linear_installs
-		   SET removed_at = now(), removed_reason = $2
-		 WHERE org_id = $1 AND removed_at IS NULL
+		   SET removed_at = now(), removed_reason = $3
+		 WHERE org_id = $1 AND install_id = $2 AND removed_at IS NULL
 		RETURNING `+pgLinearInstallColumns,
-		orgID, reason))
+		orgID, installID, reason))
 	if err != nil {
 		return nil, fmt.Errorf("mark org_linear_installs removed: %w", err)
 	}

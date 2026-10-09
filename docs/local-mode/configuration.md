@@ -36,8 +36,9 @@ types every workflow state, so watching a team maps it for you.
      polls and acts in Linear as its own app user. The app user holds no
      person's API key and does not take a seat. It needs a Linear OAuth app,
      which you create once:
-     1. Under Workspace settings → **Linear OAuth app**, click **Create the app
-        in Linear**. Linear's new-application page opens with the name, the
+     1. Under Workspace settings → **Linear OAuth app** (in the setup wizard,
+        **Install Triage Factory as an app instead of using a personal key** on
+        the Linear access step), click **Create the app in Linear**. Linear's new-application page opens with the name, the
         URL and both redirect URIs filled in
         (`http://localhost:<port>/api/linear/install/callback` and
         `…/api/linear/connect/callback`; Linear accepts `http` for

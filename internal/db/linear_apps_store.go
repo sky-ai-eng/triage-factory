@@ -63,13 +63,15 @@ type LinearInstallsStore interface {
 	GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgLinearInstall, error)
 
 	// UpsertSystem writes inst as the org's live install, replacing any row the
-	// org has, live or removed, and returns the row it persisted. InstalledAt
-	// is stored as given. A workspace another org holds live is
+	// org has, live or removed, and returns the row it persisted. InstallID and
+	// InstalledAt are stored as given. A workspace another org holds live is
 	// ErrWorkspaceInstalledElsewhere, and nothing is written.
 	UpsertSystem(ctx context.Context, inst domain.OrgLinearInstall) (domain.OrgLinearInstall, error)
 
-	// MarkRemovedSystem stamps the org's live install removed for reason (a
-	// domain.LinearInstallRemoved* value) and returns the removed row; nil
-	// when the org has no live install.
-	MarkRemovedSystem(ctx context.Context, orgID, reason string) (*domain.OrgLinearInstall, error)
+	// MarkRemovedSystem stamps the org's install removed for reason (a
+	// domain.LinearInstallRemoved* value), but only while it is live and is
+	// the install named by installID, and returns the removed row. nil when
+	// there is no such live install: already removed, or replaced by a newer
+	// one, which this never touches.
+	MarkRemovedSystem(ctx context.Context, orgID, installID, reason string) (*domain.OrgLinearInstall, error)
 }

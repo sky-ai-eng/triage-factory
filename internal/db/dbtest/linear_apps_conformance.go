@@ -78,6 +78,7 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 	install := func(orgID, workspace, userID string) domain.OrgLinearInstall {
 		return domain.OrgLinearInstall{
 			OrgID:             orgID,
+			InstallID:         "inst-" + orgID + "-" + workspace,
 			WorkspaceID:       workspace,
 			WorkspaceURLKey:   workspace + "-key",
 			AppUserID:         "app-user-" + workspace,
@@ -147,10 +148,11 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 		store, orgA, orgB, userID := mk(t)
 		ctx := context.Background()
 
-		if _, err := store.UpsertSystem(ctx, install(orgA, "ws-free", userID)); err != nil {
+		live, err := store.UpsertSystem(ctx, install(orgA, "ws-free", userID))
+		if err != nil {
 			t.Fatalf("UpsertSystem org A: %v", err)
 		}
-		removed, err := store.MarkRemovedSystem(ctx, orgA, domain.LinearInstallRemovedDisconnected)
+		removed, err := store.MarkRemovedSystem(ctx, orgA, live.InstallID, domain.LinearInstallRemovedDisconnected)
 		if err != nil {
 			t.Fatalf("MarkRemovedSystem: %v", err)
 		}
@@ -163,7 +165,7 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 		if removed.Live() || removed.RemovedReason != domain.LinearInstallRemovedDisconnected {
 			t.Errorf("removed row = %+v, want removed with reason %q", removed, domain.LinearInstallRemovedDisconnected)
 		}
-		if again, err := store.MarkRemovedSystem(ctx, orgA, domain.LinearInstallRemovedRevoked); err != nil || again != nil {
+		if again, err := store.MarkRemovedSystem(ctx, orgA, live.InstallID, domain.LinearInstallRemovedRevoked); err != nil || again != nil {
 			t.Fatalf("MarkRemovedSystem on a removed install = (%+v, %v), want (nil, nil)", again, err)
 		}
 		if got, err := store.GetForOrgSystem(ctx, orgA); err != nil || got == nil || got.RemovedReason != domain.LinearInstallRemovedDisconnected {
@@ -188,10 +190,11 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 		store, orgA, _, userID := mk(t)
 		ctx := context.Background()
 
-		if _, err := store.UpsertSystem(ctx, install(orgA, "ws-back", userID)); err != nil {
+		first, err := store.UpsertSystem(ctx, install(orgA, "ws-back", userID))
+		if err != nil {
 			t.Fatalf("UpsertSystem: %v", err)
 		}
-		if _, err := store.MarkRemovedSystem(ctx, orgA, domain.LinearInstallRemovedRevoked); err != nil {
+		if _, err := store.MarkRemovedSystem(ctx, orgA, first.InstallID, domain.LinearInstallRemovedRevoked); err != nil {
 			t.Fatalf("MarkRemovedSystem: %v", err)
 		}
 		back, err := store.UpsertSystem(ctx, install(orgA, "ws-back", userID))
@@ -200,6 +203,28 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 		}
 		if !back.Live() || back.RemovedReason != "" {
 			t.Errorf("re-install = %+v, want live with the removal cleared", back)
+		}
+	})
+
+	t.Run("a_removal_never_lands_on_a_newer_install", func(t *testing.T) {
+		store, orgA, _, userID := mk(t)
+		ctx := context.Background()
+
+		old, err := store.UpsertSystem(ctx, install(orgA, "ws-old", userID))
+		if err != nil {
+			t.Fatalf("UpsertSystem (old): %v", err)
+		}
+		newer := install(orgA, "ws-new", userID)
+		if _, err := store.UpsertSystem(ctx, newer); err != nil {
+			t.Fatalf("UpsertSystem (newer): %v", err)
+		}
+		// A writer still holding the old install's id — a refresh that read
+		// it before the re-install — removes nothing.
+		if got, err := store.MarkRemovedSystem(ctx, orgA, old.InstallID, domain.LinearInstallRemovedRevoked); err != nil || got != nil {
+			t.Fatalf("MarkRemovedSystem naming a replaced install = (%+v, %v), want (nil, nil)", got, err)
+		}
+		if got, err := store.GetForOrgSystem(ctx, orgA); err != nil || got == nil || !got.Live() || got.InstallID != newer.InstallID {
+			t.Fatalf("org A after the stale removal = (%+v, %v), want the newer install live", got, err)
 		}
 	})
 }

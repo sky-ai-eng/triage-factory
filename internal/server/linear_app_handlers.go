@@ -251,6 +251,16 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Held across the install check and the write: an install completing on
+	// another pod lands either before the check, which then sees it, or after
+	// the write, and the ceremony refuses an app that changed under it.
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-app", err)
+		return
+	}
+	defer release()
+
 	inst, err := s.liveLinearInstall(ctx, orgID)
 	if err != nil {
 		internalError(w, "linear-app", err)
@@ -264,7 +274,7 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	// In local mode the secret lands in the keychain outside the transaction,
 	// so a failed import puts back the secret that was there before rather
 	// than leaving the new one beside the old row.
-	restore, unlock, err := s.guardLocalSecretWrite(ctx, &s.linearCredentialMu, orgID, linearOAuthClientSecretKey)
+	restore, unlock, err := s.guardLocalLinearAppWrite(ctx, orgID)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return
@@ -324,7 +334,16 @@ func (s *Server) handleLinearAppDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 
-	restore, unlock, err := s.guardLocalSecretWrite(ctx, &s.linearCredentialMu, orgID, linearOAuthClientSecretKey)
+	// Held across the install check and the delete, for the reason the import
+	// gives.
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-app", err)
+		return
+	}
+	defer release()
+
+	restore, unlock, err := s.guardLocalLinearAppWrite(ctx, orgID)
 	if err != nil {
 		internalError(w, "linear-app", err)
 		return

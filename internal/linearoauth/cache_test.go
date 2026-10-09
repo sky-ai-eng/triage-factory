@@ -26,9 +26,8 @@ const cOrg = "org-1"
 // reached.
 type fakeSecrets struct {
 	db.SecretStore
-	mu   sync.Mutex
-	bag  map[string]string
-	puts int
+	mu  sync.Mutex
+	bag map[string]string
 }
 
 func newFakeSecrets() *fakeSecrets { return &fakeSecrets{bag: map[string]string{}} }
@@ -39,12 +38,22 @@ func (f *fakeSecrets) GetSystem(_ context.Context, orgID, key string) (string, e
 	return f.bag[orgID+"|"+key], nil
 }
 
-func (f *fakeSecrets) PutSystem(_ context.Context, orgID, key, value, _ string) error {
+// set writes a value directly, the way a handler or another process would.
+func (f *fakeSecrets) set(orgID, key, value string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.bag[orgID+"|"+key] = value
-	f.puts++
-	return nil
+}
+
+func (f *fakeSecrets) PutSystemIfValue(_ context.Context, orgID, key, old, value, _ string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := orgID + "|" + key
+	if cur, ok := f.bag[k]; !ok || cur != old {
+		return false, nil
+	}
+	f.bag[k] = value
+	return true, nil
 }
 
 func (f *fakeSecrets) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
@@ -58,18 +67,28 @@ func (f *fakeSecrets) DeleteSystemIfValue(_ context.Context, orgID, key, value s
 	return true, nil
 }
 
-// fakeInstalls records MarkRemovedSystem calls.
+// fakeInstalls records MarkRemovedSystem calls, failing them while err is set.
 type fakeInstalls struct {
 	db.LinearInstallsStore
 	mu      sync.Mutex
 	removed []string
+	err     error
 }
 
-func (f *fakeInstalls) MarkRemovedSystem(_ context.Context, orgID, reason string) (*domain.OrgLinearInstall, error) {
+func (f *fakeInstalls) MarkRemovedSystem(_ context.Context, orgID, installID, reason string) (*domain.OrgLinearInstall, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.removed = append(f.removed, orgID+":"+reason)
-	return &domain.OrgLinearInstall{OrgID: orgID, RemovedReason: reason}, nil
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.removed = append(f.removed, orgID+":"+installID+":"+reason)
+	return &domain.OrgLinearInstall{OrgID: orgID, InstallID: installID, RemovedReason: reason}, nil
+}
+
+func (f *fakeInstalls) Removed() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.removed...)
 }
 
 type fakeAppResolver struct{ clientID string }
@@ -121,17 +140,17 @@ func (g *graceRefresher) Refresh(_ context.Context, _ linear.OAuthApp, refreshTo
 
 var installedAt = time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
 
-func seedInstall(t *testing.T, secrets *fakeSecrets, refreshToken string, at time.Time) {
+const firstInstall = "inst-1"
+
+func seedInstall(t *testing.T, secrets *fakeSecrets, refreshToken, installID string) {
 	t.Helper()
 	env, err := linear.MarshalInstallCredential(linear.InstallCredential{
-		WorkspaceID: "ws-1", AppUserID: "app-user-1", RefreshToken: refreshToken, ClientID: "client-1", InstalledAt: at,
+		InstallID: installID, WorkspaceID: "ws-1", AppUserID: "app-user-1", RefreshToken: refreshToken, ClientID: "client-1",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	if err := secrets.PutSystem(context.Background(), cOrg, integrations.KeyLinearAppInstall, env, ""); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	secrets.set(cOrg, integrations.KeyLinearAppInstall, env)
 }
 
 func storedInstall(t *testing.T, secrets *fakeSecrets) (linear.InstallCredential, bool) {
@@ -158,8 +177,7 @@ func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{secrets: newFakeSecrets(), installs: &fakeInstalls{}, clock: installedAt}
 	r.ref = &graceRefresher{expires: 24 * time.Hour, now: r.now}
-	seedInstall(t, r.secrets, "ref-0", installedAt)
-	r.secrets.puts = 0
+	seedInstall(t, r.secrets, "ref-0", firstInstall)
 	return r
 }
 
@@ -186,7 +204,7 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	if stored.RefreshToken != "ref-1" {
 		t.Fatalf("stored refresh token = %q, want the rotated ref-1", stored.RefreshToken)
 	}
-	if stored.WorkspaceID != "ws-1" || stored.AppUserID != "app-user-1" || stored.ClientID != "client-1" || !stored.InstalledAt.Equal(installedAt) {
+	if stored.WorkspaceID != "ws-1" || stored.AppUserID != "app-user-1" || stored.ClientID != "client-1" || stored.InstallID != firstInstall {
 		t.Errorf("rotation rewrote the install's identity: %+v", stored)
 	}
 
@@ -304,7 +322,7 @@ func TestTokenCache_ConcurrentCachesConverge(t *testing.T) {
 
 // TestTokenCache_NewInstallReplacesTheCachedToken pins that a cached token is
 // served only for the install it was minted for: an envelope with a different
-// installed_at, written by an install in another process, is refreshed on the
+// install_id, written by an install in another process, is refreshed on the
 // next read.
 func TestTokenCache_NewInstallReplacesTheCachedToken(t *testing.T) {
 	r := newRig(t)
@@ -313,7 +331,7 @@ func TestTokenCache_NewInstallReplacesTheCachedToken(t *testing.T) {
 		t.Fatalf("first: %v", err)
 	}
 
-	seedInstall(t, r.secrets, "ref-100", installedAt.Add(time.Hour))
+	seedInstall(t, r.secrets, "ref-100", "inst-2")
 	access, _, err := cache.AccessTokenForOrg(context.Background(), cOrg)
 	if err != nil {
 		t.Fatalf("after re-install: %v", err)
@@ -325,7 +343,9 @@ func TestTokenCache_NewInstallReplacesTheCachedToken(t *testing.T) {
 
 func TestTokenCache_NoEnvelopeIsUnconfigured(t *testing.T) {
 	r := newRig(t)
+	r.secrets.mu.Lock()
 	r.secrets.bag = map[string]string{}
+	r.secrets.mu.Unlock()
 	_, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
 	if !errors.Is(err, linear.ErrNoLinearSystemCredential) {
 		t.Errorf("err = %v, want ErrNoLinearSystemCredential", err)
@@ -349,8 +369,8 @@ func TestTokenCache_InvalidGrantRemovesTheInstall(t *testing.T) {
 	if _, ok := storedInstall(t, r.secrets); ok {
 		t.Error("the refused envelope is still stored")
 	}
-	if got := r.installs.removed; len(got) != 1 || got[0] != cOrg+":"+domain.LinearInstallRemovedRevoked {
-		t.Errorf("installs removed = %v, want [%s:%s]", got, cOrg, domain.LinearInstallRemovedRevoked)
+	if got, want := r.installs.Removed(), cOrg+":"+firstInstall+":"+domain.LinearInstallRemovedRevoked; len(got) != 1 || got[0] != want {
+		t.Errorf("installs removed = %v, want [%s]", got, want)
 	}
 }
 
@@ -362,7 +382,7 @@ func TestTokenCache_RefusalAfterARotationRetries(t *testing.T) {
 	r.ref.onRefresh = func(tok string) {
 		if tok == "ref-0" {
 			// Another process rotated the token while this one was refused.
-			seedInstall(t, r.secrets, "ref-7", installedAt)
+			seedInstall(t, r.secrets, "ref-7", firstInstall)
 		}
 	}
 
@@ -373,8 +393,8 @@ func TestTokenCache_RefusalAfterARotationRetries(t *testing.T) {
 	if access != "acc-8" {
 		t.Errorf("access = %q, want acc-8 from the token stored meanwhile", access)
 	}
-	if len(r.installs.removed) != 0 {
-		t.Errorf("install marked removed over a token that was not the stored one: %v", r.installs.removed)
+	if got := r.installs.Removed(); len(got) != 0 {
+		t.Errorf("install marked removed over a token that was not the stored one: %v", got)
 	}
 }
 
@@ -385,7 +405,11 @@ func TestTokenCache_RefusalAfterARotationRetries(t *testing.T) {
 func TestTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 	t.Run("disconnect", func(t *testing.T) {
 		r := newRig(t)
-		r.ref.onRefresh = func(string) { r.secrets.bag = map[string]string{} }
+		r.ref.onRefresh = func(string) {
+			r.secrets.mu.Lock()
+			r.secrets.bag = map[string]string{}
+			r.secrets.mu.Unlock()
+		}
 
 		_, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
 		if !errors.Is(err, linear.ErrNoLinearSystemCredential) {
@@ -397,10 +421,9 @@ func TestTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 	})
 	t.Run("new install", func(t *testing.T) {
 		r := newRig(t)
-		newInstall := installedAt.Add(time.Hour)
 		r.ref.onRefresh = func(tok string) {
 			if tok == "ref-0" {
-				seedInstall(t, r.secrets, "ref-50", newInstall)
+				seedInstall(t, r.secrets, "ref-50", "inst-2")
 			}
 		}
 
@@ -412,7 +435,7 @@ func TestTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 			t.Errorf("access = %q, want acc-51 from the new install", access)
 		}
 		stored, _ := storedInstall(t, r.secrets)
-		if stored.RefreshToken != "ref-51" || !stored.InstalledAt.Equal(newInstall) {
+		if stored.RefreshToken != "ref-51" || stored.InstallID != "inst-2" {
 			t.Errorf("stored = %+v, want the new install rotated to ref-51", stored)
 		}
 	})
@@ -429,5 +452,60 @@ func TestTokenCache_AppMismatchDoesNotRefresh(t *testing.T) {
 	}
 	if r.ref.calls.Load() != 0 {
 		t.Error("refreshed a token minted by another app with this app's secret")
+	}
+}
+
+// TestTokenCache_FailedRemovalKeepsTheEnvelope pins the order of the revoked
+// path: the row is marked removed before the envelope goes, so a failed mark
+// leaves the envelope for the next read to refuse and remove again, rather
+// than a live row holding the workspace with nothing left to retry it.
+func TestTokenCache_FailedRemovalKeepsTheEnvelope(t *testing.T) {
+	r := newRig(t)
+	r.ref.refuse = map[string]bool{"ref-0": true}
+	r.installs.err = errors.New("db down")
+
+	_, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
+	if err == nil || errors.Is(err, linear.ErrNoLinearSystemCredential) {
+		t.Fatalf("err = %v, want the failed removal, not unconfigured", err)
+	}
+	if _, ok := storedInstall(t, r.secrets); !ok {
+		t.Fatal("the envelope was deleted although the install row is still live")
+	}
+
+	r.installs.mu.Lock()
+	r.installs.err = nil
+	r.installs.mu.Unlock()
+	if _, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg); !errors.Is(err, linear.ErrNoLinearSystemCredential) {
+		t.Fatalf("retry err = %v, want the install removed", err)
+	}
+	if got := r.installs.Removed(); len(got) != 1 {
+		t.Errorf("installs removed = %v, want the one install", got)
+	}
+	if _, ok := storedInstall(t, r.secrets); ok {
+		t.Error("the envelope survived the retried removal")
+	}
+}
+
+// TestTokenCache_WriteBackNeverOverwritesANewerRotation pins the
+// compare-and-swap: when another process stores a newer rotation of the same
+// install while this refresh is in flight, the newer token stays, and this
+// refresh's access token is still served.
+func TestTokenCache_WriteBackNeverOverwritesANewerRotation(t *testing.T) {
+	r := newRig(t)
+	r.ref.onRefresh = func(tok string) {
+		if tok == "ref-0" {
+			seedInstall(t, r.secrets, "ref-9", firstInstall)
+		}
+	}
+
+	access, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
+	if err != nil {
+		t.Fatalf("AccessTokenForOrg: %v", err)
+	}
+	if access != "acc-1" {
+		t.Errorf("access = %q, want this refresh's acc-1", access)
+	}
+	if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken != "ref-9" {
+		t.Errorf("stored refresh token = %q, want the newer ref-9 kept", stored.RefreshToken)
 	}
 }

@@ -31,20 +31,27 @@ type refresher interface {
 // cached.
 var errInstallReplaced = errors.New("linearoauth: install replaced during refresh")
 
+// errEnvelopeMoved is a refresh token Linear refused that is no longer the one
+// stored: another process rotated or replaced it meanwhile, so the refusal
+// says nothing about the install as it stands now.
+var errEnvelopeMoved = errors.New("linearoauth: refused refresh token is no longer the stored one")
+
 // TokenCache mints and caches the access token of an org's app install, and
 // writes each rotated refresh token back to the install's envelope. It
 // implements linear.InstallTokenSource.
 //
 // Every read starts from the stored envelope, so a cached token is served only
 // while the envelope still names the install it was minted for (its
-// installed_at). A new install or a disconnect anywhere in the deployment is
+// install_id). A new install or a disconnect anywhere in the deployment is
 // therefore seen on the next read, with no invalidation message to deliver.
 //
 // A singleflight keyed by org coalesces one process's concurrent refreshes.
-// Across processes none is needed: Linear answers a refresh token replayed
-// within its grace window with the identical new pair, so two processes
-// refreshing at once converge, and whichever writes back last writes the same
-// token.
+// Across processes, every write is a compare-and-swap against the envelope
+// the refresh read: a rotation lands only over the token it rotated, so it
+// can neither resurrect a disconnected install nor overwrite a newer one.
+// Linear answers a refresh token replayed within its grace window with the
+// identical new pair, so two processes refreshing the same token at once
+// converge on one pair whichever of them stores it.
 type TokenCache struct {
 	minter   refresher
 	apps     linear.OAuthAppResolver
@@ -61,7 +68,7 @@ type TokenCache struct {
 }
 
 type cachedToken struct {
-	installedAt time.Time
+	installID   string
 	accessToken string
 	expiresAt   time.Time
 }
@@ -100,7 +107,7 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	if ct, ok := c.fresh(orgID, cred.InstalledAt); ok {
+	if ct, ok := c.fresh(orgID, cred.InstallID); ok {
 		return ct.accessToken, ct.expiresAt, nil
 	}
 
@@ -118,12 +125,12 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 }
 
 // fresh is the cached token for orgID when it was minted for the install
-// installedAt names and has headroom left.
-func (c *TokenCache) fresh(orgID string, installedAt time.Time) (cachedToken, bool) {
+// installID names and has headroom left.
+func (c *TokenCache) fresh(orgID, installID string) (cachedToken, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ct, ok := c.cache[orgID]
-	if !ok || !ct.installedAt.Equal(installedAt) || !c.timeNow().Add(refreshSkew).Before(ct.expiresAt) {
+	if !ok || ct.installID != installID || !c.timeNow().Add(refreshSkew).Before(ct.expiresAt) {
 		return cachedToken{}, false
 	}
 	return ct, true
@@ -146,117 +153,130 @@ func (c *TokenCache) readEnvelope(ctx context.Context, orgID string) (linear.Ins
 	return cred, raw, nil
 }
 
-// refresh mints a fresh access token (refreshOnce) and answers the two ways a
+// refresh mints a fresh access token (refreshOnce) and answers the ways a
 // refresh can lose its footing.
-//
-// A refresh token Linear refuses with invalid_grant means the app was removed
-// from the workspace: the install is marked removed, its envelope deleted, and
-// the org reads as having no Linear credential until an admin installs again.
-// The envelope goes only while it still holds the refused token. If another
-// process stored a different one meanwhile, that one is tried once instead.
 //
 // A refresh that outlives its install (a disconnect, or a new install,
 // landing while the request was in flight) is retried once against whatever
 // is stored now.
+//
+// A refresh token Linear refuses with invalid_grant means the app was removed
+// from the workspace (revokeInstall), unless it is no longer the stored one:
+// a process that held an old token past Linear's grace window is refused
+// while the install is fine, so the stored token is tried once instead.
 func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, error) {
 	// Re-checked under the flight: a sibling caller may have just refreshed.
 	if cred, _, err := c.readEnvelope(ctx, orgID); err == nil {
-		if ct, ok := c.fresh(orgID, cred.InstalledAt); ok {
+		if ct, ok := c.fresh(orgID, cred.InstallID); ok {
 			return ct, nil
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		ct, raw, err := c.refreshOnce(ctx, orgID)
+		ct, cred, raw, err := c.refreshOnce(ctx, orgID)
+		if RefusedGrant(err) {
+			err = c.revokeInstall(ctx, orgID, cred, raw, err)
+		}
 		switch {
 		case err == nil:
 			return ct, nil
-		case errors.Is(err, errInstallReplaced):
-			if attempt > 0 {
-				return cachedToken{}, err
-			}
+		case (errors.Is(err, errInstallReplaced) || errors.Is(err, errEnvelopeMoved)) && attempt == 0:
 			continue
-		case !RefusedGrant(err):
+		default:
 			return cachedToken{}, err
 		}
-
-		deleted, derr := c.secrets.DeleteSystemIfValue(ctx, orgID, integrations.KeyLinearAppInstall, raw)
-		switch {
-		case derr != nil:
-			// The token is still dead and installing again replaces it, so
-			// the org gets the same answer; only the settings card is behind.
-			cacheLog.Warn("linear refused an install's refresh token and removing it failed",
-				"org", orgID, "error", derr)
-		case deleted:
-			c.forget(orgID)
-			if _, merr := c.installs.MarkRemovedSystem(ctx, orgID, domain.LinearInstallRemovedRevoked); merr != nil {
-				cacheLog.Warn("mark revoked linear install removed failed", "org", orgID, "error", merr)
-			}
-			cacheLog.Warn("linear refused the install's refresh token: the app was removed from the workspace; removed the install, so an admin has to install again",
-				"org", orgID)
-		case attempt == 0:
-			continue
-		}
-		return cachedToken{}, fmt.Errorf("%w: org=%s (install revoked in linear): %w", linear.ErrNoLinearSystemCredential, orgID, err)
 	}
 }
 
+// revokeInstall answers Linear refusing the install's refresh token, refused.
+// The install is marked removed first and the envelope deleted after, so a
+// failure between them leaves a removed row and a dead envelope, which the
+// next read refuses and removes again; the other order could leave the
+// envelope gone and the row live, holding the workspace with nothing left to
+// retry. Both writes name what this refresh read, the install by its id and
+// the envelope by its value, so neither can land on a newer install.
+func (c *TokenCache) revokeInstall(ctx context.Context, orgID string, cred linear.InstallCredential, raw string, refused error) error {
+	_, current, err := c.readEnvelope(ctx, orgID)
+	switch {
+	case errors.Is(err, linear.ErrNoLinearSystemCredential):
+		return fmt.Errorf("%w: %w", errInstallReplaced, refused)
+	case err != nil:
+		return err
+	case current != raw:
+		return fmt.Errorf("%w: %w", errEnvelopeMoved, refused)
+	}
+	if _, err := c.installs.MarkRemovedSystem(ctx, orgID, cred.InstallID, domain.LinearInstallRemovedRevoked); err != nil {
+		return fmt.Errorf("linearoauth: mark org %s's revoked install removed: %w", orgID, err)
+	}
+	c.forget(orgID)
+	if _, err := c.secrets.DeleteSystemIfValue(ctx, orgID, integrations.KeyLinearAppInstall, raw); err != nil {
+		// The row is removed, so the workspace is free; the envelope is
+		// refused again and removed on the next read.
+		cacheLog.Warn("removing a revoked install's credential failed", "org", orgID, "error", err)
+	}
+	cacheLog.Warn("linear refused the install's refresh token: the app was removed from the workspace; removed the install, so an admin has to install again",
+		"org", orgID)
+	return fmt.Errorf("%w: org=%s (install revoked in linear): %w", linear.ErrNoLinearSystemCredential, orgID, refused)
+}
+
 // refreshOnce reads the envelope, refreshes off its refresh token, writes the
-// rotated token back, and caches the access token. raw is the envelope read,
-// for refresh to remove when its token was refused.
-func (c *TokenCache) refreshOnce(ctx context.Context, orgID string) (_ cachedToken, raw string, _ error) {
+// rotated token back, and caches the access token. It returns the envelope it
+// read, parsed and raw, for refresh to act on a refusal.
+func (c *TokenCache) refreshOnce(ctx context.Context, orgID string) (_ cachedToken, _ linear.InstallCredential, raw string, _ error) {
 	cred, raw, err := c.readEnvelope(ctx, orgID)
 	if err != nil {
-		return cachedToken{}, raw, err
+		return cachedToken{}, cred, raw, err
 	}
 	app, _, err := c.apps.Resolve(ctx, orgID)
 	if err != nil {
-		return cachedToken{}, raw, fmt.Errorf("linearoauth: resolve oauth app for org %s: %w", orgID, err)
+		return cachedToken{}, cred, raw, fmt.Errorf("linearoauth: resolve oauth app for org %s: %w", orgID, err)
 	}
 	if app.ClientID != cred.ClientID {
 		// The app that minted the install is no longer the one that resolves;
 		// its secret is the only one Linear accepts for this refresh token.
-		return cachedToken{}, raw, fmt.Errorf("linearoauth: org %s's install was minted by OAuth app %s, but app %s resolves now; install again under the current app",
+		return cachedToken{}, cred, raw, fmt.Errorf("linearoauth: org %s's install was minted by OAuth app %s, but app %s resolves now; install again under the current app",
 			orgID, cred.ClientID, app.ClientID)
 	}
 
 	tok, err := c.minter.Refresh(ctx, app, cred.RefreshToken)
 	if err != nil {
-		return cachedToken{}, raw, err
+		return cachedToken{}, cred, raw, err
 	}
 
-	// A disconnect or a new install may have landed while the request was in
-	// flight. Writing this install's rotation back over it would resurrect a
-	// disconnected credential or overwrite a newer one, so the envelope is read
-	// again and the write made only while it still names this install. The
-	// window left is the read and the write, not the round trip.
-	current, _, err := c.readEnvelope(ctx, orgID)
-	if errors.Is(err, linear.ErrNoLinearSystemCredential) {
-		return cachedToken{}, raw, fmt.Errorf("%w: org=%s (install removed)", errInstallReplaced, orgID)
-	}
-	if err != nil {
-		return cachedToken{}, raw, err
-	}
-	if !current.InstalledAt.Equal(cred.InstalledAt) || current.ClientID != cred.ClientID {
-		return cachedToken{}, raw, fmt.Errorf("%w: org=%s", errInstallReplaced, orgID)
-	}
-
-	// The write-back comes before the cache: a crash after it still leaves a
-	// live refresh token for the next refresh.
+	// The write-back lands only over the envelope this refresh read, and
+	// before the cache, so a crash after it still leaves a live refresh token
+	// for the next refresh.
 	rotated := cred
 	rotated.RefreshToken = tok.RefreshToken
 	env, err := linear.MarshalInstallCredential(rotated)
 	if err != nil {
-		return cachedToken{}, raw, err
+		return cachedToken{}, cred, raw, err
 	}
-	if err := c.secrets.PutSystem(ctx, orgID, integrations.KeyLinearAppInstall, env, "Linear app install"); err != nil {
-		return cachedToken{}, raw, fmt.Errorf("linearoauth: persist rotated refresh token for org %s: %w", orgID, err)
+	swapped, err := c.secrets.PutSystemIfValue(ctx, orgID, integrations.KeyLinearAppInstall, raw, env, "Linear app install")
+	if err != nil {
+		return cachedToken{}, cred, raw, fmt.Errorf("linearoauth: persist rotated refresh token for org %s: %w", orgID, err)
+	}
+	if !swapped {
+		// Something wrote the envelope while this refresh was in flight. A
+		// disconnect or a new install means this pair belongs to an install
+		// the org no longer has. Another process's rotation of the same
+		// install is the newer token and stays; this pair's access token is
+		// still good until it expires.
+		current, _, err := c.readEnvelope(ctx, orgID)
+		switch {
+		case errors.Is(err, linear.ErrNoLinearSystemCredential):
+			return cachedToken{}, cred, raw, fmt.Errorf("%w: org=%s (install removed)", errInstallReplaced, orgID)
+		case err != nil:
+			return cachedToken{}, cred, raw, err
+		case current.InstallID != cred.InstallID:
+			return cachedToken{}, cred, raw, fmt.Errorf("%w: org=%s", errInstallReplaced, orgID)
+		}
 	}
 
-	ct := cachedToken{installedAt: cred.InstalledAt, accessToken: tok.AccessToken, expiresAt: tok.ExpiresAt}
+	ct := cachedToken{installID: cred.InstallID, accessToken: tok.AccessToken, expiresAt: tok.ExpiresAt}
 	c.mu.Lock()
 	c.cache[orgID] = ct
 	c.mu.Unlock()
-	return ct, raw, nil
+	return ct, cred, raw, nil
 }
 
 func (c *TokenCache) forget(orgID string) {

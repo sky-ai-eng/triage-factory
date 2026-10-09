@@ -128,6 +128,15 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Held across the install check and the write, so an install completing
+	// on another pod cannot land between them.
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-access", err)
+		return
+	}
+	defer release()
+
 	// A failure later in the transaction puts the prior keys back rather than
 	// leaving the new key half-bound — or, on a rotation, deleting the key
 	// that was working.
@@ -212,12 +221,15 @@ func (s *Server) handleLinearCredentialPut(w http.ResponseWriter, r *http.Reques
 // and no audit row, because a removal that removed nothing is not an access
 // change.
 //
-// It is an installed app's disconnect too. The install's row is marked
-// removed, which releases its workspace, and once the clear has committed its
-// refresh token is revoked in Linear. The revoke is best-effort: TF has
-// already forgotten the token, so a failure only logs. The app user stays in
-// the workspace's member list until a workspace admin removes the app in
-// Linear.
+// It is an installed app's disconnect too. Once the clear has committed, the
+// org's live install row is marked removed, which releases its workspace, and
+// the install's refresh token is revoked in Linear. The row is released only
+// after the commit, so a clear that fails never frees a workspace the org is
+// still polling; a release that fails answers 500, and the retry releases it,
+// since a live row with no credential behind it is released whatever the
+// credential was. The revoke is best-effort: TF has already forgotten the
+// token, so a failure only logs. The app user stays in the workspace's member
+// list until a workspace admin removes the app in Linear.
 //
 // Per-user Linear credentials are left intact: each is custodied under its
 // owner's own secret scope and cleared only by its own surface.
@@ -229,6 +241,13 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 	ctx := r.Context()
+
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		internalError(w, "linear-access", err)
+		return
+	}
+	defer release()
 
 	// A failure after the clear puts the credential back: the request reports
 	// the disconnect failed, so the org must still be connected.
@@ -256,12 +275,6 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		if linear.AuthMethod(method) == linear.AuthMethodAppInstall {
 			if envelope, err = tx.Secrets.Get(ctx, orgID, integrations.KeyLinearAppInstall); err != nil {
 				return fmt.Errorf("read linear install credential: %w", err)
-			}
-			// On Postgres this commits on the admin pool ahead of the
-			// transaction; a clear that then fails leaves the row removed
-			// and the credential restored, and the retry converges.
-			if _, err := tx.LinearInstalls.MarkRemovedSystem(ctx, orgID, domain.LinearInstallRemovedDisconnected); err != nil {
-				return fmt.Errorf("mark linear install removed: %w", err)
 			}
 		}
 		if err := integrations.ClearLinear(ctx, tx.Secrets, orgID); err != nil {
@@ -293,14 +306,43 @@ func (s *Server) handleLinearCredentialDelete(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if envelope != "" {
-		s.revokeLinearInstall(ctx, orgID, envelope)
-	}
 	// Nothing was polling under a credential that was not there.
 	if had {
 		s.kickLinearChanged(r, orgID)
 	}
+	// The release reads the live row and marks it by its install id, so it
+	// runs under the lock, where no install can replace that row between the
+	// two. The revoke is network I/O and runs after it, whether or not the
+	// release succeeded: the credential is already gone, and a retry would
+	// find no token left to revoke.
+	releaseErr := s.releaseLinearInstall(ctx, orgID)
+	release()
+	if envelope != "" {
+		s.revokeLinearInstall(ctx, orgID, envelope)
+	}
+	if releaseErr != nil {
+		internalError(w, "linear-access", releaseErr)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
+}
+
+// releaseLinearInstall marks the org's live install row removed as
+// disconnected, freeing its workspace. The caller has just cleared the org's
+// credential under the Linear credential lock, so no live row can have a
+// credential behind it.
+func (s *Server) releaseLinearInstall(ctx context.Context, orgID string) error {
+	inst, err := s.liveLinearInstall(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("read linear install: %w", err)
+	}
+	if inst == nil {
+		return nil
+	}
+	if _, err := s.linearInstalls.MarkRemovedSystem(ctx, orgID, inst.InstallID, domain.LinearInstallRemovedDisconnected); err != nil {
+		return fmt.Errorf("release linear install: %w", err)
+	}
+	return nil
 }
 
 // revokeLinearInstall revokes a disconnected install's refresh token in

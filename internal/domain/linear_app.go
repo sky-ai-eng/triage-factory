@@ -39,7 +39,11 @@ const (
 // One row per org. A live row (RemovedAt zero) holds its workspace against
 // every other org: one Linear workspace installs into at most one TF org.
 type OrgLinearInstall struct {
-	OrgID           string
+	OrgID string
+	// InstallID is minted per install and stored in the install's secret too,
+	// so a writer acting on what it read names exactly that install: a
+	// removal can never land on a newer install of the same org.
+	InstallID       string
 	WorkspaceID     string
 	WorkspaceURLKey string
 	// AppUserID is viewer.id under the install's token: the app user TF acts

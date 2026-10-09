@@ -4254,12 +4254,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.org_linear_apps TO tf_app;
 
 -- The Linear workspace that installed the org's resolved OAuth app as an app
 -- user (actor=app), whichever app that was. One row per org; the refresh token
--- lives in the org secret linear_app_install. app_user_id is the app user TF
--- acts as, app_client_id the app whose secret refreshes it,
--- installed_by_user_id a soft reference that outlives the admin.
+-- lives in the org secret linear_app_install. install_id is minted per install
+-- and stored in that secret too, so a writer names exactly the install it read.
+-- app_user_id is the app user TF acts as, app_client_id the app whose secret
+-- refreshes it, installed_by_user_id a soft reference that outlives the admin.
 
 CREATE TABLE public.org_linear_installs (
     org_id uuid NOT NULL,
+    install_id text NOT NULL,
     workspace_id text NOT NULL,
     workspace_url_key text NOT NULL,
     app_user_id text NOT NULL,
@@ -4268,6 +4270,8 @@ CREATE TABLE public.org_linear_installs (
     installed_at timestamp with time zone NOT NULL,
     removed_at timestamp with time zone,
     removed_reason text,
+    CONSTRAINT org_linear_installs_install_id_check
+        CHECK ((install_id <> ''::text)),
     CONSTRAINT org_linear_installs_removed_reason_check
         CHECK ((removed_reason = ANY (ARRAY['disconnected'::text, 'install_revoked'::text, 'install_failed'::text]))),
     CONSTRAINT org_linear_installs_removed_pair_check

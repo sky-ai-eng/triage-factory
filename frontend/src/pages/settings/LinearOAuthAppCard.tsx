@@ -99,6 +99,16 @@ export default function LinearOAuthAppCard({
   const secretTrim = clientSecret.trim()
   const canSubmit = idTrim !== '' && secretTrim !== '' && !busy
 
+  // Enter in either field saves the app. It stops there: the setup wizard
+  // listens for Enter to Continue, which would otherwise fire from these
+  // fields too.
+  const onFieldKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
+    e.preventDefault()
+    e.stopPropagation()
+    void submit()
+  }
+
   const submit = async () => {
     if (!canSubmit) return
     setBusy(true)
@@ -203,6 +213,7 @@ export default function LinearOAuthAppCard({
               autoComplete="off"
               placeholder="Your Linear OAuth app's client ID"
               onChange={(e) => setClientId(e.target.value)}
+              onKeyDown={onFieldKeyDown}
               className={glassInputClass}
             />
           </label>
@@ -217,6 +228,7 @@ export default function LinearOAuthAppCard({
               autoComplete="off"
               placeholder="Your Linear OAuth app's client secret"
               onChange={(e) => setClientSecret(e.target.value)}
+              onKeyDown={onFieldKeyDown}
               className={glassInputClass}
             />
           </label>

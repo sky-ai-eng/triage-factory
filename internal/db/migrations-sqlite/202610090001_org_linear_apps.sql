@@ -17,6 +17,8 @@ CREATE TABLE org_linear_apps (
 -- token lives in the org secret "linear_app_install"; this row is the
 -- queryable half.
 --
+-- install_id is minted per install and stored in the secret too, so a writer
+-- holding one names exactly the install it read and cannot remove a newer one.
 -- app_user_id is viewer.id under the app token, the identity TF acts as in the
 -- workspace. app_client_id is the app that minted the install: a refresh
 -- needs that app's secret. installed_by_user_id is a soft reference, so the
@@ -24,6 +26,7 @@ CREATE TABLE org_linear_apps (
 -- removed_at is.
 CREATE TABLE org_linear_installs (
     org_id               TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    install_id           TEXT NOT NULL CHECK (install_id <> ''),
     workspace_id         TEXT NOT NULL,
     workspace_url_key    TEXT NOT NULL,
     app_user_id          TEXT NOT NULL,

@@ -97,7 +97,7 @@ var _ db.LinearInstallsStore = (*linearInstallsStore)(nil)
 
 // sqliteLinearInstallColumns is the projection of an org_linear_installs row,
 // in the order scanSQLiteLinearInstall reads it.
-const sqliteLinearInstallColumns = `org_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
+const sqliteLinearInstallColumns = `org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 	installed_by_user_id, installed_at, removed_at, removed_reason`
 
 func scanSQLiteLinearInstall(scan func(...any) error) (domain.OrgLinearInstall, error) {
@@ -107,7 +107,7 @@ func scanSQLiteLinearInstall(scan func(...any) error) (domain.OrgLinearInstall, 
 		removedAt sql.NullTime
 		reason    sql.NullString
 	)
-	if err := scan(&inst.OrgID, &inst.WorkspaceID, &inst.WorkspaceURLKey, &inst.AppUserID, &inst.AppClientID,
+	if err := scan(&inst.OrgID, &inst.InstallID, &inst.WorkspaceID, &inst.WorkspaceURLKey, &inst.AppUserID, &inst.AppClientID,
 		&installBy, &inst.InstalledAt, &removedAt, &reason); err != nil {
 		return domain.OrgLinearInstall{}, err
 	}
@@ -135,10 +135,11 @@ func (s *linearInstallsStore) GetForOrgSystem(ctx context.Context, orgID string)
 func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgLinearInstall) (domain.OrgLinearInstall, error) {
 	stored, err := scanSQLiteLinearInstall(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_linear_installs
-			(org_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
+			(org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 			 installed_by_user_id, installed_at, removed_at, removed_reason)
-		VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL, NULL)
+		VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL, NULL)
 		ON CONFLICT(org_id) DO UPDATE SET
+			install_id           = excluded.install_id,
 			workspace_id         = excluded.workspace_id,
 			workspace_url_key    = excluded.workspace_url_key,
 			app_user_id          = excluded.app_user_id,
@@ -148,7 +149,7 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 			removed_at           = NULL,
 			removed_reason       = NULL
 		RETURNING `+sqliteLinearInstallColumns,
-		inst.OrgID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
+		inst.OrgID, inst.InstallID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
 		nullStringValue(inst.InstalledByUserID), nullTimeValue(inst.InstalledAt)).Scan)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: org_linear_installs.workspace_id") {
@@ -159,13 +160,13 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 	return stored, nil
 }
 
-func (s *linearInstallsStore) MarkRemovedSystem(ctx context.Context, orgID, reason string) (*domain.OrgLinearInstall, error) {
+func (s *linearInstallsStore) MarkRemovedSystem(ctx context.Context, orgID, installID, reason string) (*domain.OrgLinearInstall, error) {
 	inst, err := scanSQLiteLinearInstall(s.q.QueryRowContext(ctx, `
 		UPDATE org_linear_installs
 		   SET removed_at = CURRENT_TIMESTAMP, removed_reason = ?
-		 WHERE org_id = ? AND removed_at IS NULL
+		 WHERE org_id = ? AND install_id = ? AND removed_at IS NULL
 		RETURNING `+sqliteLinearInstallColumns,
-		reason, orgID).Scan)
+		reason, orgID, installID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

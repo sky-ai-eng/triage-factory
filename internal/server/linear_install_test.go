@@ -33,6 +33,9 @@ type linearOAuthFake struct {
 	revoked []string
 	refuse  map[string]bool
 	grants  []string
+	// onExchange runs before a code exchange is answered, outside the fake's
+	// lock: a test's way to change something while a ceremony is mid-flight.
+	onExchange func()
 }
 
 func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
@@ -40,6 +43,12 @@ func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
 	f := &linearOAuthFake{refuse: map[string]bool{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
+		f.mu.Lock()
+		hook := f.onExchange
+		f.mu.Unlock()
+		if hook != nil && r.URL.Path == "/token" && r.PostForm.Get("grant_type") == "authorization_code" {
+			hook()
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
@@ -249,8 +258,8 @@ func TestLinearInstall_HappyPath(t *testing.T) {
 		inst.AppUserID != "lu-ada" || inst.AppClientID != "lin-client-1" || inst.InstalledByUserID != runmode.LocalDefaultUserID {
 		t.Errorf("install row = %+v", inst)
 	}
-	if !env.InstalledAt.Equal(inst.InstalledAt) {
-		t.Errorf("envelope installed_at %v, want the row's %v", env.InstalledAt, inst.InstalledAt)
+	if env.InstallID == "" || env.InstallID != inst.InstallID {
+		t.Errorf("envelope install_id %q, want the row's %q", env.InstallID, inst.InstallID)
 	}
 
 	rows := r.credentialRows(t)
@@ -415,7 +424,7 @@ func TestLinearInstall_WorkspaceTaken(t *testing.T) {
 		t.Fatalf("seed org: %v", err)
 	}
 	if _, err := r.stores.LinearInstalls.UpsertSystem(t.Context(), domain.OrgLinearInstall{
-		OrgID: otherOrg, WorkspaceID: "org-acme", WorkspaceURLKey: "acme", AppUserID: "lu-other",
+		OrgID: otherOrg, InstallID: "inst-other", WorkspaceID: "org-acme", WorkspaceURLKey: "acme", AppUserID: "lu-other",
 		AppClientID: "other-client", InstalledAt: time.Now(),
 	}); err != nil {
 		t.Fatalf("seed other org's install: %v", err)
@@ -465,6 +474,60 @@ func TestLinearInstall_Disconnect(t *testing.T) {
 	if st := readOrgSources(t, r.s)[eventsource.KindLinear]; st != string(eventsource.StateUnconfigured) {
 		t.Errorf("linear source = %q after the disconnect, want unconfigured", st)
 	}
+}
+
+// TestLinearInstall_AppChangedMidCeremonyIsRefused: the code is exchanged
+// against the app that resolved when the callback started. An app replaced or
+// removed before the install is stored would leave it unable to refresh, so
+// the store refuses, revokes the pair, and writes nothing.
+func TestLinearInstall_AppChangedMidCeremonyIsRefused(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, r *linearInstallRig){
+		"replaced": func(t *testing.T, r *linearInstallRig) { r.registerApp(t, "lin-client-2") },
+		"removed": func(t *testing.T, r *linearInstallRig) {
+			if rec := doJSON(t, r.s, http.MethodDelete, linearAppPath(), nil); rec.Code != http.StatusOK {
+				t.Errorf("DELETE app mid-ceremony: %d: %s", rec.Code, rec.Body.String())
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newLinearInstallRig(t)
+			cookie, state := r.start(t)
+			r.oauth.mu.Lock()
+			r.oauth.onExchange = func() { change(t, r) }
+			r.oauth.mu.Unlock()
+
+			rec := r.get(t, callbackPath(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
+			expectRedirect(t, rec, "linear_error", "install_failed")
+			r.assertNothingWritten(t)
+			if inst := r.installRow(t); inst != nil {
+				t.Errorf("install row = %+v, want none", inst)
+			}
+			if got := r.oauth.Revoked(); len(got) != 2 {
+				t.Errorf("revoked %v, want the minted pair", got)
+			}
+		})
+	}
+}
+
+// TestLinearInstall_DisconnectReleasesALeftoverRow: a live install row with no
+// credential behind it — a release that failed after its disconnect committed
+// — is released by the next disconnect, so the retry frees the workspace.
+func TestLinearInstall_DisconnectReleasesALeftoverRow(t *testing.T) {
+	r := newLinearInstallRig(t)
+	if _, err := r.stores.LinearInstalls.UpsertSystem(t.Context(), domain.OrgLinearInstall{
+		OrgID: runmode.LocalDefaultOrgID, InstallID: "inst-left", WorkspaceID: "org-acme", WorkspaceURLKey: "acme",
+		AppUserID: "lu-ada", AppClientID: "lin-client-1", InstalledAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("seed leftover install: %v", err)
+	}
+
+	if rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
+	}
+	if inst := r.installRow(t); inst == nil || inst.Live() || inst.RemovedReason != domain.LinearInstallRemovedDisconnected {
+		t.Errorf("leftover install = %+v, want released as disconnected", inst)
+	}
+	r.expectNoKick(t)
 }
 
 // TestLinearInstall_RefreshRefusedMarksRemoved: Linear refusing the install's
@@ -727,8 +790,34 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 	if rec := rig.tokensJSON(http.MethodDelete, "/api/orgs/"+orgA.String()+"/linear/access/credential", nil, sidA, ""); rec.Code != http.StatusOK {
 		t.Fatalf("disconnect: %d: %s", rec.Code, rec.Body.String())
 	}
+
+	// The store waits on org B's Linear credential lock however it is held:
+	// here by another session, the way another pod would hold it.
+	other, err := rig.h.AdminDB.Conn(t.Context())
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer other.Close()
+	if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_lock(hashtextextended($1, $2))`, orgB.String(), linearCredentialLockSalt); err != nil {
+		t.Fatalf("take the lock: %v", err)
+	}
 	cookie, state = start(orgB, sidB)
-	expectRedirect(t, get(callback(state), sidB, "", cookie), "linear", "installed")
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- get(callback(state), sidB, "", cookie) }()
+	select {
+	case rec := <-done:
+		t.Fatalf("the callback completed (%d) while another session held the org's lock", rec.Code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, orgB.String(), linearCredentialLockSalt); err != nil {
+		t.Fatalf("release the lock: %v", err)
+	}
+	select {
+	case rec := <-done:
+		expectRedirect(t, rec, "linear", "installed")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the callback did not complete after the lock was released")
+	}
 }
 
 func TestLinearInstallReturn(t *testing.T) {

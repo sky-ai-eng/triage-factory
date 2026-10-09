@@ -214,10 +214,7 @@ func TestForSystem_AppInstallWithoutSourceIsAnError(t *testing.T) {
 }
 
 func TestInstallCredential_RoundTrip(t *testing.T) {
-	in := InstallCredential{
-		WorkspaceID: "ws-1", AppUserID: "app-1", RefreshToken: "r1", ClientID: "c1",
-		InstalledAt: time.Date(2026, 10, 9, 12, 0, 0, 123, time.UTC),
-	}
+	in := InstallCredential{InstallID: "inst-1", WorkspaceID: "ws-1", AppUserID: "app-1", RefreshToken: "r1", ClientID: "c1"}
 	raw, err := MarshalInstallCredential(in)
 	if err != nil {
 		t.Fatalf("MarshalInstallCredential: %v", err)
@@ -226,15 +223,15 @@ func TestInstallCredential_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseInstallCredential: %v", err)
 	}
-	if out.WorkspaceID != in.WorkspaceID || out.AppUserID != in.AppUserID || out.RefreshToken != in.RefreshToken ||
-		out.ClientID != in.ClientID || !out.InstalledAt.Equal(in.InstalledAt) {
+	if out != in {
 		t.Errorf("round trip = %+v, want %+v", out, in)
 	}
 	for name, bad := range map[string]string{
 		"empty":            "",
 		"not json":         "nope",
-		"no refresh token": `{"client_id":"c1"}`,
-		"no client id":     `{"refresh_token":"r1"}`,
+		"no install id":    `{"refresh_token":"r1","client_id":"c1"}`,
+		"no refresh token": `{"install_id":"i1","client_id":"c1"}`,
+		"no client id":     `{"install_id":"i1","refresh_token":"r1"}`,
 	} {
 		if _, err := ParseInstallCredential(bad); err == nil {
 			t.Errorf("ParseInstallCredential(%s) = nil error, want one", name)

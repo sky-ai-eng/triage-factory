@@ -45,6 +45,8 @@ func (*secretStore) Put(_ context.Context, orgID, key, value, _ string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
 	return auth.PutSecret(key, value)
 }
 
@@ -67,31 +69,42 @@ func (*secretStore) GetSystem(_ context.Context, orgID, key string) (string, err
 	return auth.GetSecret(key)
 }
 
-// PutSystem == Put in local mode, for the reason GetSystem == Get. It takes
-// orgSecretsMu so DeleteSystemIfValue's read and delete stay one step against
-// it.
-func (*secretStore) PutSystem(_ context.Context, orgID, key, value, _ string) error {
-	if err := assertLocalOrg(orgID); err != nil {
-		return err
-	}
-	orgSecretsMu.Lock()
-	defer orgSecretsMu.Unlock()
-	return auth.PutSecret(key, value)
-}
-
 func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
 	return deleteStoredSecret(key)
 }
 
-// orgSecretsMu makes DeleteSystemIfValue's read and delete one step against
-// PutSystem, the other system writer of a rotating org credential: a rotation
-// landing between them must not be the value deleted. The handlers' Put and
-// Delete serialize on their own per-credential locks
-// (guardLocalSecretWrite), which this does not replace.
+// orgSecretsMu makes each org-scope write one step against every other, so
+// the compare-and-swap doors (PutSystemIfValue, DeleteSystemIfValue) compare
+// and write with nothing landing between. The keychain has no compare-and-set
+// of its own, and local mode is one process per state root, so a lock every
+// org-scope writer in it takes is enough.
 var orgSecretsMu sync.Mutex
+
+// PutSystemIfValue is the system door's compare-and-swap; GetSystem == Get in
+// local mode, and so do the writes.
+func (*secretStore) PutSystemIfValue(_ context.Context, orgID, key, old, value, _ string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
+	cur, err := auth.GetSecret(key)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" || subtle.ConstantTimeCompare([]byte(cur), []byte(old)) != 1 {
+		return false, nil
+	}
+	if err := auth.PutSecret(key, value); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 
 func (*secretStore) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
