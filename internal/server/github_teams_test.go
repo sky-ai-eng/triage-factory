@@ -11,6 +11,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -53,9 +54,7 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
@@ -140,9 +139,7 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	}))
 	t.Cleanup(ts.Close)
 
-	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
@@ -228,9 +225,7 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 
 	// Org base URL + PAT both point at the stub so ghResolver.ClientFor
 	// resolves a tier-3 PAT-borrow client aimed at our GraphQL endpoint.
-	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
@@ -274,9 +269,7 @@ func TestUserTeamsMulti_NoLoginIsEmpty(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	ctx := context.Background()
-	if _, err := srv.orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: "https://github.example.com"})
 	seedConfiguredRepo(t, srv, "acme", "api")
 
 	teams, err := srv.userTeamsMulti(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)

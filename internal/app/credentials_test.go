@@ -45,7 +45,7 @@ func enableSetStores(t *testing.T, orgSet, teamSet []string, teamDefault string)
 		t.Fatalf("read org settings: %v", err)
 	}
 	org.EnabledModels = orgSet
-	if _, err := stores.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, org); err != nil {
+	if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, runmode.LocalDefaultOrgID, org, org.Version); err != nil {
 		t.Fatalf("write org settings: %v", err)
 	}
 

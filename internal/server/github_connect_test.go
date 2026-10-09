@@ -734,7 +734,7 @@ func seedLocalOrgGitHubHost(t *testing.T, s *Server, host string) {
 			return err
 		}
 		set.GitHubBaseURL = host
-		_, err = tx.Orgs.UpdateSettings(ctx, runmode.LocalDefaultOrgID, set)
+		_, err = tx.Orgs.UpdateSettingsVersioned(ctx, runmode.LocalDefaultOrgID, set, set.Version)
 		return err
 	}); err != nil {
 		t.Fatalf("seed org github host: %v", err)

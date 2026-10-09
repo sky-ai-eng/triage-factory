@@ -48,7 +48,7 @@ func setDailyCostCap(t *testing.T, database *sql.DB, cap float64) {
 		t.Fatalf("get settings: %v", err)
 	}
 	set.MaxDailyCostUSD = cap
-	if _, err := store.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := store.UpdateSettingsVersioned(context.Background(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("set daily cost cap: %v", err)
 	}
 }

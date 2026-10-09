@@ -27,7 +27,7 @@ var ErrOrgSettingsVersion = errors.New("org settings version conflict")
 //     callers are background goroutines launched at boot — they have
 //     no JWT-claims context, and the work is by definition a cross-org
 //     system-service read.
-//   - GetSettings and UpdateSettings run on the app pool. The
+//   - GetSettings and UpdateSettingsVersioned run on the app pool. The
 //     org_settings_select / org_settings_update RLS policies gate
 //     reads by org membership and writes by org admin; the request-
 //     handler caller has set the JWT claims via the TxRunner.
@@ -97,12 +97,22 @@ type OrgsStore interface {
 	// same impl. Same defaults-on-ErrNoRows contract.
 	GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error)
 
-	// UpdateSettings upserts the org's settings row. An empty
-	// GitHubBaseURL / JiraBaseURL, and a nil EnabledModels, write NULL into
-	// the column. An empty GitHubCloneProtocol substitutes "https" — the
+	// UpdateSettingsVersioned writes the org's whole settings row, guarded by
+	// the row's optimistic-concurrency token: the write lands only if the
+	// stored version still equals expected, and otherwise fails with
+	// ErrOrgSettingsVersion — nothing is written. It is the only whole-row
+	// writer. A caller passes the version it read, in the same transaction, so
+	// a settings write that committed in between fails this one instead of
+	// being overwritten by it. A write that owns one value does not come
+	// through here; it uses a targeted method that touches nothing else
+	// (SetSourceBaseURL, SetGitHubCredentialClass, SetLinearWorkspace,
+	// SetAnthropicKeyRef, SetBedrockCredentialsRef).
+	//
+	// An empty GitHubBaseURL / JiraBaseURL, and a nil EnabledModels, write NULL
+	// into the column. An empty GitHubCloneProtocol substitutes "https" — the
 	// column CHECK rejects empty strings, and this matches both the column
-	// DEFAULT and DefaultOrgSettings, so no door onto it disagrees. Postgres routes through
-	// the app pool (org_settings_update RLS gates by org admin).
+	// DEFAULT and DefaultOrgSettings, so no door onto it disagrees. Postgres
+	// routes through the app pool (org_settings_update RLS gates by org admin).
 	//
 	// It does NOT write github_credential_class, linear_workspace_id,
 	// linear_workspace_url_key, anthropic_api_key_ref or
@@ -112,32 +122,13 @@ type OrgsStore interface {
 	// See SetGitHubCredentialClass, SetLinearWorkspace, SetAnthropicKeyRef and
 	// SetBedrockCredentialsRef.
 	//
-	// It is unguarded: it writes every column it owns, whatever the caller
-	// read, so a caller that loads the row, edits one field and writes the
-	// struct back puts back every other field as it was when it loaded —
-	// undoing any settings save that committed in between. A write that owns
-	// one value never goes through here; it uses a targeted method that touches
-	// nothing else (SetSourceBaseURL, SetGitHubCredentialClass,
-	// SetLinearWorkspace, SetAnthropicKeyRef, SetBedrockCredentialsRef). It
-	// bumps the row's version, so a guarded save loaded before it conflicts
-	// rather than landing on top of it. The settings API uses
-	// UpdateSettingsVersioned.
-	//
-	// Returns the persisted settings, read off RETURNING on the write
-	// statement itself rather than from a follow-up SELECT, and projecting
-	// GetSettings' column list and scanner.
-	UpdateSettings(ctx context.Context, orgID string, updates domain.OrgSettings) (domain.OrgSettings, error)
-
-	// UpdateSettingsVersioned is UpdateSettings guarded by the row's
-	// optimistic-concurrency token: the write lands only if the stored version
-	// still equals expected, and otherwise fails with ErrOrgSettingsVersion —
-	// nothing is written.
-	//
 	// expected 0 asserts "no row yet" and is the ONLY value that may create
 	// one, so two callers racing to materialize a settings row resolve to
 	// exactly one winner. Any other expected asserts a stored version and never
 	// creates: if the row is absent, that is the same conflict a moved version
 	// gets, because either way the caller's read no longer describes the world.
+	// A read of a missing row reports version 0 (domain.DefaultOrgSettings), so
+	// passing the version GetSettings returned covers both cases.
 	//
 	// The guard is in the statement, not in a preceding read: READ COMMITTED
 	// means a re-read inside the caller's own transaction cannot see a
@@ -158,10 +149,10 @@ type OrgsStore interface {
 	// discard), so the class and the credential change it describes commit
 	// together and no crash can land between them.
 	//
-	// It is deliberately NOT reachable through UpdateSettings. Folding the
-	// column into that upsert's column lists — which reads as tidiness — would
-	// reset the class to the struct's zero value on every bulk settings save,
-	// quietly converting a BYO-App org to PAT.
+	// It is deliberately NOT reachable through UpdateSettingsVersioned.
+	// Folding the column into that writer's column lists — which reads as
+	// tidiness — would reset the class to the struct's zero value on every
+	// bulk settings save, quietly converting a BYO-App org to PAT.
 	//
 	// The partial INSERT relies on the schema DEFAULT clauses for every other
 	// column when no row exists yet, and ON CONFLICT touches only the class, so

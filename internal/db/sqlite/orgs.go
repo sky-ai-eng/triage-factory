@@ -188,12 +188,13 @@ func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind string, ov
 	return err
 }
 
-// UpdateSettings upserts every org_settings column this writer owns.
+// UpdateSettingsVersioned writes every org_settings column this writer owns,
+// under the row's concurrency token.
 //
 // github_credential_class is deliberately absent from BOTH the INSERT column
-// list and the ON CONFLICT SET list, and must stay that way. Absent from both,
-// the column takes its DEFAULT on insert and is left untouched on update —
-// exactly the behaviour required, because the class is owned by the credential
+// list and the UPDATE SET list, and must stay that way. Absent from both, the
+// column takes its DEFAULT on insert and is left untouched on update — exactly
+// the behaviour required, because the class is owned by the credential
 // transitions (SetGitHubCredentialClass), not by the settings writer. Adding it
 // here would look like tidiness and would instead reset the class to the
 // struct's zero value on every bulk settings save, silently converting a
@@ -203,19 +204,6 @@ func upsertSourceOverride(ctx context.Context, q queryer, orgID, kind string, ov
 // for the same reason: the LLM credential routes own them (SetAnthropicKeyRef,
 // SetBedrockCredentialsRef). A bulk save that wrote them would put back a ref
 // that a bind or unbind committed after the save's caller read the row.
-func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.OrgSettings) (domain.OrgSettings, error) {
-	// No version guard: see the interface doc for why a write that owns one
-	// value must not come through here. It still bumps the token, so an
-	// admin's in-flight settings edit conflicts rather than landing on top of
-	// a write it never saw.
-	stored, err := s.upsertSettings(ctx, orgID, u, orgSettingsConflictUpdate)
-	if err != nil {
-		return domain.OrgSettings{}, fmt.Errorf("upsert org_settings: %w", err)
-	}
-	return stored, nil
-}
-
-// UpdateSettingsVersioned is UpdateSettings under the row's concurrency token.
 //
 // The two assertions it can be handed are two different statements, because
 // they are two different questions:
@@ -229,11 +217,11 @@ func (s *orgsStore) UpdateSettings(ctx context.Context, orgID string, u domain.O
 //     version give the same answer — nothing matched — which is exactly right:
 //     both mean the caller's read no longer describes the world.
 //
-// Folding the two into one guarded upsert is the shape this started as, and it
-// is wrong in a way that is easy to miss: the guard can only ride the conflict
-// arm, so a caller asserting a stale non-zero version against a row that had
-// since been deleted would fall through to the INSERT arm and silently CREATE
-// the row at version 1 — a create reported as a successful update.
+// Folding the two into one guarded upsert is wrong in a way that is easy to
+// miss: the guard can only ride the conflict arm, so a caller asserting a
+// stale non-zero version against a row that had since been deleted would fall
+// through to the INSERT arm and silently CREATE the row at version 1 — a
+// create reported as a successful update.
 //
 // Local mode is N=1, so the conflict practically never fires here — this exists
 // so the two dialects answer the settings API identically rather than having
@@ -244,7 +232,17 @@ func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u
 		err    error
 	)
 	if expected == 0 {
-		stored, err = s.upsertSettings(ctx, orgID, u, `ON CONFLICT(org_id) DO NOTHING`)
+		args := append([]any{orgID}, orgSettingsValues(u)...)
+		stored, err = db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
+			INSERT INTO org_settings (
+				org_id, github_clone_protocol, enabled_models,
+				background_jobs_model, llm_auth_method,
+				max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
+				api_token_max_age_days, version, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+			ON CONFLICT(org_id) DO NOTHING
+			RETURNING `+orgSettingsColumns, args...).Scan)
+		stored, err = s.finishSettingsWrite(ctx, orgID, u, stored, err)
 	} else {
 		stored, err = s.updateSettingsAtVersion(ctx, orgID, u, expected)
 	}
@@ -259,27 +257,10 @@ func (s *orgsStore) UpdateSettingsVersioned(ctx context.Context, orgID string, u
 	return stored, nil
 }
 
-// orgSettingsConflictUpdate is the unguarded writer's conflict action: replace
-// every column this writer owns and bump the token. It is a constant rather
-// than inline so the INSERT half of the statement has exactly one spelling —
-// see upsertSettings.
-const orgSettingsConflictUpdate = `
-		ON CONFLICT(org_id) DO UPDATE SET
-			github_clone_protocol = excluded.github_clone_protocol,
-			enabled_models = excluded.enabled_models,
-			background_jobs_model = excluded.background_jobs_model,
-			llm_auth_method = excluded.llm_auth_method,
-			max_daily_cost_usd = excluded.max_daily_cost_usd,
-			max_concurrent_runs = excluded.max_concurrent_runs,
-			marketplace_enabled = excluded.marketplace_enabled,
-			api_token_max_age_days = excluded.api_token_max_age_days,
-			version = org_settings.version + 1,
-			updated_at = CURRENT_TIMESTAMP`
-
 // orgSettingsValues is the ordered column values this writer owns, without the
-// org id — SQLite placeholders are positional, so the INSERT (org first) and
-// the UPDATE (org in the WHERE, so last) need the same values in different
-// places, and this is the one list both build from. GitHubBaseURL /
+// org id — SQLite placeholders are positional, so the create arm's INSERT (org
+// first) and the UPDATE (org in the WHERE, so last) need the same values in
+// different places, and this is the one list both build from. GitHubBaseURL /
 // GitHubPollInterval / JiraBaseURL / JiraPollInterval are NOT here — they are
 // org_event_sources columns now; finishSettingsWrite below writes them
 // separately, in the same transaction.
@@ -312,7 +293,7 @@ func orgSettingsValues(u domain.OrgSettings) []any {
 }
 
 // authMethodOrDefault substitutes the column's DEFAULT for an unset field, the
-// way orgSettingsValues substitutes "ssh" for an unset clone protocol.
+// way orgSettingsValues substitutes "https" for an unset clone protocol.
 func authMethodOrDefault(method string) string {
 	if method == "" {
 		return domain.LLMAuthSystem
@@ -320,36 +301,18 @@ func authMethodOrDefault(method string) string {
 	return method
 }
 
-// upsertSettings writes every org_settings column this writer owns and
-// returns the row RETURNING produced, with the caller's conflict action
-// deciding what an existing row means: replace it (the unguarded save, which
-// always returns a row) or leave it alone (the create assertion's ON
-// CONFLICT DO NOTHING, which yields sql.ErrNoRows on conflict — the "nothing
-// written" case UpdateSettingsVersioned's create arm relies on).
-func (s *orgsStore) upsertSettings(ctx context.Context, orgID string, u domain.OrgSettings, conflict string) (domain.OrgSettings, error) {
-	args := append([]any{orgID}, orgSettingsValues(u)...)
-	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
-		INSERT INTO org_settings (
-			org_id, github_clone_protocol, enabled_models,
-			background_jobs_model, llm_auth_method,
-			max_daily_cost_usd, max_concurrent_runs, marketplace_enabled,
-			api_token_max_age_days, version, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)`+conflict+`
-		RETURNING `+orgSettingsColumns, args...).Scan)
-	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
-}
-
-// updateSettingsAtVersion writes the same columns as an ordinary UPDATE under
-// the row's concurrency token and returns the row RETURNING produced. It
-// never creates a row: a caller that asserted a version read one, and if that
-// row is gone the honest answer is the same sql.ErrNoRows a moved version
-// gets — WHERE matches nothing, so RETURNING produces nothing.
+// updateSettingsAtVersion is UpdateSettingsVersioned's update arm: the
+// create arm's columns, written as an ordinary UPDATE under the row's
+// concurrency token, returning the row RETURNING produced. It never creates a
+// row: a caller that asserted a version read one, and if that row is gone the
+// honest answer is the same sql.ErrNoRows a moved version gets — WHERE matches
+// nothing, so RETURNING produces nothing.
 //
-// Its SET list must stay in step with orgSettingsConflictUpdate above — same
-// columns, in the same order (the placeholders are positional), same
+// Its SET list must stay in step with the create arm's INSERT column list —
+// same columns, in the same order (the placeholders are positional), same
 // exclusions. github_credential_class, the Linear workspace columns and the
-// LLM credential refs are absent from both for the reasons UpdateSettings' doc
-// gives.
+// LLM credential refs are absent from both for the reasons
+// UpdateSettingsVersioned's doc gives.
 func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u domain.OrgSettings, expected int) (domain.OrgSettings, error) {
 	args := append(orgSettingsValues(u), orgID, expected)
 	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
@@ -369,18 +332,17 @@ func (s *orgsStore) updateSettingsAtVersion(ctx context.Context, orgID string, u
 	return s.finishSettingsWrite(ctx, orgID, u, stored, err)
 }
 
-// finishSettingsWrite is the shared tail of upsertSettings and
-// updateSettingsAtVersion: given the org_settings statement's own result, it
-// either propagates a failed/no-match write untouched (a version conflict or
-// a losing create must write NOTHING, org_event_sources included, so this
-// returns before touching it) or, on success, upserts the github, jira and
-// linear org_event_sources rows from u (db.SourceOverridesOf) and resolves
-// them into the row it hands back exactly as a read would. Both writes land in the same transaction as the
-// org_settings statement (the shared s.q), so a rollback after this point
+// finishSettingsWrite is the shared tail of UpdateSettingsVersioned's two
+// arms: given the org_settings statement's own result, it either propagates a
+// failed/no-match write untouched (a version conflict or a losing create must
+// write NOTHING, org_event_sources included, so this returns before touching
+// it) or, on success, upserts the github, jira and linear org_event_sources
+// rows from u (db.SourceOverridesOf) and resolves them into the row it hands
+// back exactly as a read would. Both writes land in the same transaction as
+// the org_settings statement (the shared s.q), so a rollback after this point
 // undoes both halves together — ordinary transaction atomicity is what gives
-// the guarded caller its "nothing written on conflict" contract; there is no
-// second version token to invent (see the org_settings.version schema
-// comment).
+// the writer its "nothing written on conflict" contract; there is no second
+// version token to invent (see the org_settings.version schema comment).
 func (s *orgsStore) finishSettingsWrite(ctx context.Context, orgID string, u domain.OrgSettings, stored domain.OrgSettings, err error) (domain.OrgSettings, error) {
 	if err != nil {
 		return domain.OrgSettings{}, err
@@ -403,8 +365,8 @@ func (s *orgsStore) finishSettingsWrite(ctx context.Context, orgID string, u dom
 // SetGitHubCredentialClass upserts ONLY org_settings.github_credential_class —
 // which credential system the org's GitHub access belongs to. See the
 // OrgsStore interface doc for why this is a separate writer from
-// UpdateSettings. SQLite is N=1 / no RLS so it's a plain write; the Postgres
-// twin runs on the app pool under the caller's claims.
+// UpdateSettingsVersioned. SQLite is N=1 / no RLS so it's a plain write; the
+// Postgres twin runs on the app pool under the caller's claims.
 //
 // The partial INSERT relies on the schema DEFAULT clauses for every other
 // org_settings column when no row exists yet, and ON CONFLICT touches only the

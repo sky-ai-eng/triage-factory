@@ -17,6 +17,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -144,9 +145,7 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	t.Helper()
 	ctx := context.Background()
 	org := runmode.LocalDefaultOrgID
-	if _, err := s.orgs.UpdateSettings(ctx, org, domain.OrgSettings{GitHubBaseURL: stub.URL}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, s.orgs, org, domain.OrgSettings{GitHubBaseURL: stub.URL})
 	if err := s.secrets.Put(ctx, org, "pem", testRSAPEM(t), ""); err != nil {
 		t.Fatalf("store pem: %v", err)
 	}

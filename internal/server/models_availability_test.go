@@ -706,7 +706,7 @@ func TestModelTest_LocalMode_NothingBoundRefusesWithoutNamingAProvider(t *testin
 		t.Fatalf("read org settings: %v", err)
 	}
 	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("select byok: %v", err)
 	}
 
@@ -994,7 +994,7 @@ func TestModelsList_LocalMode_OwnCredentialsWithNoneBoundIsUnconfigured(t *testi
 		t.Fatalf("read org settings: %v", err)
 	}
 	set.LLMAuthMethod = domain.LLMAuthBYOK
-	if _, err := s.allStores.Orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+	if _, err := s.allStores.Orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 		t.Fatalf("select byok: %v", err)
 	}
 

@@ -215,10 +215,9 @@ const (
 // per-source settings consolidated off the org_settings singleton, keyed by
 // kind ("github" / "jira" / "linear") instead of by a column-name prefix.
 // GetSettings composes them into this struct so every existing reader keeps
-// working unchanged, and
-// UpdateSettings / UpdateSettingsVersioned keep accepting and writing them —
-// they are ordinary read-write fields on this struct, exactly as before;
-// only their storage moved. NULL on org_event_sources means "no override
+// working unchanged, and UpdateSettingsVersioned keeps accepting and writing
+// them — they are ordinary read-write fields on this struct, exactly as
+// before; only their storage moved. NULL on org_event_sources means "no override
 // recorded", and GetSettings resolves that to "" for a base URL (not
 // configured yet) or DefaultOrgSettings()'s 5-minute cadence for a poll
 // interval — the same fallback org_settings' NOT NULL DEFAULT columns gave
@@ -245,7 +244,7 @@ const (
 //
 // GitHubCloneProtocol is "ssh" or "https" only — enforced by a CHECK
 // on both backends. An empty string from a caller is treated as
-// "leave the default in place" by UpdateSettings (substitutes "https"),
+// "leave the default in place" by UpdateSettingsVersioned (substitutes "https"),
 // never written to the column.
 type OrgSettings struct {
 	GitHubBaseURL       string
@@ -264,8 +263,8 @@ type OrgSettings struct {
 	// Owned by the credential bind (PUT /api/orgs/{org_id}/linear/access/
 	// credential), which sets both from the key's organization, and the unbind,
 	// which clears them — not by the settings PATCH, which has no field for
-	// either. UpdateSettings writes them as part of the whole row, so a
-	// read-modify-write carries them through unchanged.
+	// either. UpdateSettingsVersioned does not write them, so a settings save
+	// leaves them as the credential routes set them.
 	LinearWorkspaceID     string
 	LinearWorkspaceURLKey string
 	// LinearPollInterval is the Linear poll cadence. Stored on
@@ -376,12 +375,12 @@ type OrgSettings struct {
 	// access belongs to. See the GitHubCredentialClass type doc for the values
 	// and the invariant.
 	//
-	// READ-ONLY THROUGH THIS STRUCT. UpdateSettings does NOT own the column and
-	// deliberately omits it from its upsert's column lists, so a bulk settings
-	// save leaves whatever the credential transitions wrote. Setting this field
-	// and calling UpdateSettings silently does nothing; the only writer is
-	// OrgsStore.SetGitHubCredentialClass, called from the credential
-	// transitions inside their own transaction.
+	// READ-ONLY THROUGH THIS STRUCT. UpdateSettingsVersioned does NOT own the
+	// column and deliberately omits it from its column lists, so a bulk
+	// settings save leaves whatever the credential transitions wrote. Setting
+	// this field and calling UpdateSettingsVersioned silently does nothing; the
+	// only writer is OrgsStore.SetGitHubCredentialClass, called from the
+	// credential transitions inside their own transaction.
 	GitHubCredentialClass GitHubCredentialClass
 
 	// Version is the row's optimistic-concurrency token. The settings save is a
@@ -392,8 +391,8 @@ type OrgSettings struct {
 	//
 	// READ-ONLY THROUGH THIS STRUCT, like GitHubCredentialClass above but for a
 	// different reason: the counter belongs to the store, not the caller.
-	// UpdateSettings ignores the field and bumps the stored value; the only way
-	// to assert a version is UpdateSettingsVersioned's explicit argument, which
+	// UpdateSettingsVersioned ignores the field and bumps the stored value; the
+	// only way to assert a version is its explicit expected argument, which
 	// is what makes the assertion visible at the call site rather than smuggled
 	// in a struct field a caller could forget to carry.
 	//

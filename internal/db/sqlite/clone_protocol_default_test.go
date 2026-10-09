@@ -70,7 +70,7 @@ func TestOrgSettings_CloneProtocolDefault_SQLite(t *testing.T) {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
 		set.GitHubCloneProtocol = "ssh"
-		if _, err := orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, set); err != nil {
+		if _, err := orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, set, set.Version); err != nil {
 			t.Fatalf("store the operator's choice: %v", err)
 		}
 
@@ -83,7 +83,7 @@ func TestOrgSettings_CloneProtocolDefault_SQLite(t *testing.T) {
 			t.Fatalf("GetSettingsSystem: %v", err)
 		}
 		saved.JiraPollInterval = 7 * time.Minute
-		if _, err := orgs.UpdateSettings(t.Context(), runmode.LocalDefaultOrgID, saved); err != nil {
+		if _, err := orgs.UpdateSettingsVersioned(t.Context(), runmode.LocalDefaultOrgID, saved, saved.Version); err != nil {
 			t.Fatalf("unrelated save: %v", err)
 		}
 		if got := storedProtocol(t, conn); got != "ssh" {

@@ -15,6 +15,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -181,9 +182,7 @@ func seedInstallation(t *testing.T, s *Server, id int64, login string) {
 
 func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 	t.Helper()
-	if _, err := s.orgs.UpdateSettings(context.Background(), runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: base}); err != nil {
-		t.Fatalf("set org github base: %v", err)
-	}
+	dbtest.SeedOrgSettings(t, s.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: base})
 }
 
 // ghAppsRaceHook wraps the App store and fires a one-shot hook right after one

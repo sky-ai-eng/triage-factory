@@ -694,8 +694,8 @@ CREATE TABLE public.org_settings (
     github_clone_protocol text DEFAULT 'https'::text NOT NULL,
     -- org_secrets key refs, not raw secrets. NULL = the deployment default or
     -- not configured yet (self-host); rotation never touches this row.
-    -- UpdateSettings omits both; SetAnthropicKeyRef / SetBedrockCredentialsRef
-    -- write them, from the LLM credential routes.
+    -- UpdateSettingsVersioned omits both; SetAnthropicKeyRef /
+    -- SetBedrockCredentialsRef write them, from the LLM credential routes.
     anthropic_api_key_ref text,
     bedrock_credentials_ref text,
     -- 'system' (host credentials, resolved by the SDK from the environment) or
@@ -723,8 +723,8 @@ CREATE TABLE public.org_settings (
     marketplace_enabled boolean DEFAULT false NOT NULL,
     -- 'pat', 'byo_app', or 'managed_app' (the deployment's shared App, which no
     -- path writes yet); app-validated, no CHECK. Stated, not inferred: a missing
-    -- org_github_apps row also describes an org on a shared App. UpdateSettings
-    -- omits it; SetGitHubCredentialClass writes it.
+    -- org_github_apps row also describes an org on a shared App.
+    -- UpdateSettingsVersioned omits it; SetGitHubCredentialClass writes it.
     github_credential_class text DEFAULT 'pat'::text NOT NULL,
     -- Ceiling on how long any of the org's API tokens may live, in days. NULL
     -- (the default, and the SQLite twin's too) = uncapped. It is applied at USE
@@ -737,11 +737,12 @@ CREATE TABLE public.org_settings (
     api_token_max_age_days integer CHECK (api_token_max_age_days IS NULL OR api_token_max_age_days BETWEEN 1 AND 365),
     -- The Linear workspace the org's Linear credential belongs to, learned from
     -- the credential's own organization { id urlKey }, never typed. Written by
-    -- the credential bind / install, cleared by the unbind; UpdateSettings
-    -- carries them through a read-modify-write and the settings PATCH has no
-    -- field for either. NULL = no Linear credential bound. A user's own Linear
-    -- credential is keyed under linear_workspace_id. The Linear poll cadence is
-    -- org_event_sources.poll_interval under kind 'linear', not a column here.
+    -- the credential bind / install, cleared by the unbind; SetLinearWorkspace
+    -- writes them, UpdateSettingsVersioned omits them, and the settings PATCH
+    -- has no field for either. NULL = no Linear credential bound. A user's own
+    -- Linear credential is keyed under linear_workspace_id. The Linear poll
+    -- cadence is org_event_sources.poll_interval under kind 'linear', not a
+    -- column here.
     linear_workspace_id text,
     linear_workspace_url_key text,
     -- Optimistic-concurrency token for the settings save: the read hands it to
@@ -749,15 +750,15 @@ CREATE TABLE public.org_settings (
     -- merge. It guards everything that save writes: this row, and base_url /
     -- poll_interval on the org's org_event_sources rows, written in the same
     -- transaction. Every change to one of those values bumps it —
-    -- OrgsStore.UpdateSettings, UpdateSettingsVersioned, and SetSourceBaseURL,
-    -- the credential routes' write of a source's host, which bumps it only
-    -- when the host differs from the stored one. SetAnthropicKeyRef and
-    -- SetBedrockCredentialsRef bump it too, when they change a ref or
-    -- llm_auth_method: the save cannot write the refs, but it validates
-    -- llm_auth_method against them. Writes to values the save never touches
-    -- or checks leave it alone: SetGitHubCredentialClass, SetLinearWorkspace,
-    -- and the per-source off switch (OrgEventSourceStore.SetDisabled), which
-    -- is last-writer-wins.
+    -- OrgsStore.UpdateSettingsVersioned, the only whole-row writer, and
+    -- SetSourceBaseURL, the credential routes' write of a source's host, which
+    -- bumps it only when the host differs from the stored one.
+    -- SetAnthropicKeyRef and SetBedrockCredentialsRef bump it too, when they
+    -- change a ref or llm_auth_method: the save cannot write the refs, but it
+    -- validates llm_auth_method against them. Writes to values the save never
+    -- touches or checks leave it alone: SetGitHubCredentialClass,
+    -- SetLinearWorkspace, and the per-source off switch
+    -- (OrgEventSourceStore.SetDisabled), which is last-writer-wins.
     version integer DEFAULT 1 NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT org_settings_github_clone_protocol_check CHECK ((github_clone_protocol = ANY (ARRAY['https'::text, 'ssh'::text])))

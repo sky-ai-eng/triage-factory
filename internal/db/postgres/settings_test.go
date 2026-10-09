@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
@@ -62,14 +63,12 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 	// Seed a real settings row on orgB so the negative read has
 	// something to (fail to) return.
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	if _, err := stores.Orgs.UpdateSettings(context.Background(), orgB, domain.OrgSettings{
+	dbtest.SeedOrgSettings(t, stores.Orgs, orgB, domain.OrgSettings{
 		GitHubBaseURL:       "https://b.example.com",
 		GitHubPollInterval:  5 * time.Minute,
 		GitHubCloneProtocol: "ssh",
 		JiraPollInterval:    5 * time.Minute,
-	}); err != nil {
-		t.Fatalf("seed orgB settings: %v", err)
-	}
+	})
 
 	// userA, scoped to orgA, must not see orgB's row. The store
 	// returns domain.DefaultOrgSettings() on the underlying
@@ -97,89 +96,77 @@ func TestOrgsStore_Postgres_GetSettings_IsolatesPerOrg(t *testing.T) {
 	}
 }
 
-// TestOrgsStore_Postgres_UpdateSettings_AdminGated pins the
-// admin-vs-member write contract: org_settings_update RLS gates writes
-// on tf.user_is_org_admin(). A non-admin member's UPDATE filters every
-// row out (RowsAffected=0), and the org_settings_insert WITH CHECK on
-// the upsert's INSERT side fails outright with SQLSTATE 42501.
-func TestOrgsStore_Postgres_UpdateSettings_AdminGated(t *testing.T) {
+// TestOrgsStore_Postgres_UpdateSettingsVersioned_AdminGated pins the
+// admin-vs-member write contract on both arms of the settings writer. A
+// non-admin's create is an INSERT, which the org_settings_insert WITH CHECK
+// (tf.user_is_org_admin()) fails outright with SQLSTATE 42501. A non-admin's
+// update is an UPDATE whose rows org_settings_update's USING clause filters
+// out, so it matches nothing and reports the ErrOrgSettingsVersion a moved
+// version would. Neither writes anything.
+func TestOrgsStore_Postgres_UpdateSettingsVersioned_AdminGated(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
+	ctx := context.Background()
 
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, h, "admin-gate")
 	member := pgtest.SeedUser(t, h, "plain-member")
 	pgtest.AddOrgMember(t, h, member, orgID, teamID, "member", "member")
 
-	// Seed a row as owner so the non-admin update path takes the
-	// UPDATE branch (where RLS filters out the row) rather than the
-	// INSERT branch (which 42501-errors).
+	// save is the settings handler's shape: read the row and write it back at
+	// the version read, in one claims-bound transaction. The error is returned
+	// rather than swallowed — a 42501 aborts the tx, and h.WithUser rolls back
+	// and surfaces it.
+	save := func(userID, baseURL string) error {
+		return h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+			stores := pgstore.NewForTx(tx, pgtest.SecretKey)
+			cur, err := stores.Orgs.GetSettings(ctx, orgID)
+			if err != nil {
+				return err
+			}
+			cur.GitHubBaseURL = baseURL
+			_, err = stores.Orgs.UpdateSettingsVersioned(ctx, orgID, cur, cur.Version)
+			return err
+		})
+	}
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
-	if _, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
-		GitHubBaseURL:       "https://owner-set.example.com",
-		GitHubPollInterval:  5 * time.Minute,
-		GitHubCloneProtocol: "ssh",
-		JiraPollInterval:    5 * time.Minute,
-	}); err != nil {
-		t.Fatalf("owner seed UpdateSettings: %v", err)
+	stored := func() domain.OrgSettings {
+		t.Helper()
+		got, err := stores.Orgs.GetSettingsSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		return got
 	}
 
-	// Member attempt: INSERT ... ON CONFLICT DO UPDATE always runs the
-	// INSERT-side WITH CHECK first, and org_settings_insert gates on
-	// tf.user_is_org_admin(). A non-admin trips the gate with a
-	// SQLSTATE 42501 RLS violation. The error aborts the tx, so we
-	// have to return it (not swallow it) — h.WithUser then rolls back
-	// cleanly and surfaces the error to the test for assertion.
-	wantPoll := 5 * time.Minute
-	memberErr := h.WithUser(t, member, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		_, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
-			GitHubBaseURL:       "https://member-overwrite.example.com",
-			GitHubPollInterval:  9 * time.Minute,
-			GitHubCloneProtocol: "ssh",
-			JiraPollInterval:    9 * time.Minute,
-		})
-		return err
-	})
-	if memberErr == nil {
-		t.Fatal("member UpdateSettings succeeded; admin gate broken")
-	}
+	// No row yet: the member reads version 0, so its write is the create arm.
+	err := save(member, "https://member-create.example.com")
 	var pgErr *pgconn.PgError
-	if !errors.As(memberErr, &pgErr) || pgErr.Code != "42501" {
-		t.Fatalf("expected 42501 RLS error, got %v", memberErr)
+	if !errors.As(err, &pgErr) || pgErr.Code != "42501" {
+		t.Fatalf("member create: expected 42501 RLS error, got %v", err)
+	}
+	if got := stored(); got.Version != 0 {
+		t.Fatalf("member create materialized a row: %+v", got)
 	}
 
-	// Owner's row must still be intact.
-	got, err := stores.Orgs.GetSettingsSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("GetSettingsSystem: %v", err)
-	}
-	if got.GitHubBaseURL != "https://owner-set.example.com" {
-		t.Errorf("non-admin overwrote org_settings: GitHubBaseURL=%q", got.GitHubBaseURL)
-	}
-	if got.GitHubPollInterval != wantPoll {
-		t.Errorf("non-admin overwrote org_settings: GitHubPollInterval=%v want %v", got.GitHubPollInterval, wantPoll)
+	if err := save(owner, "https://owner-set.example.com"); err != nil {
+		t.Fatalf("owner create: %v", err)
 	}
 
-	// Owner can update freely — pins the positive side of the gate.
-	err = h.WithUser(t, owner, orgID, func(tx *sql.Tx) error {
-		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
-		_, err := stores.Orgs.UpdateSettings(context.Background(), orgID, domain.OrgSettings{
-			GitHubBaseURL:       "https://owner-update.example.com",
-			GitHubPollInterval:  7 * time.Minute,
-			GitHubCloneProtocol: "ssh",
-			JiraPollInterval:    7 * time.Minute,
-		})
-		return err
-	})
-	if err != nil {
-		t.Fatalf("owner UpdateSettings: %v", err)
+	// The member reads the owner's row at version 1, and its UPDATE at that
+	// version matches nothing.
+	if err := save(member, "https://member-overwrite.example.com"); !errors.Is(err, db.ErrOrgSettingsVersion) {
+		t.Fatalf("member update: err = %v, want ErrOrgSettingsVersion", err)
 	}
-	got, err = stores.Orgs.GetSettingsSystem(context.Background(), orgID)
-	if err != nil {
-		t.Fatalf("GetSettingsSystem post-owner-update: %v", err)
+	if got := stored(); got.GitHubBaseURL != "https://owner-set.example.com" || got.Version != 1 {
+		t.Errorf("non-admin overwrote org_settings: GitHubBaseURL=%q version=%d", got.GitHubBaseURL, got.Version)
 	}
-	if got.GitHubBaseURL != "https://owner-update.example.com" {
-		t.Errorf("owner update did not land: GitHubBaseURL=%q", got.GitHubBaseURL)
+
+	// The owner's update lands — the positive side of the gate.
+	if err := save(owner, "https://owner-update.example.com"); err != nil {
+		t.Fatalf("owner update: %v", err)
+	}
+	if got := stored(); got.GitHubBaseURL != "https://owner-update.example.com" || got.Version != 2 {
+		t.Errorf("owner update did not land: GitHubBaseURL=%q version=%d", got.GitHubBaseURL, got.Version)
 	}
 }
 
