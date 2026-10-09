@@ -40,3 +40,15 @@ func (s *channelRegistryStore) GetSystem(context.Context, string, string) (*slac
 func (s *channelRegistryStore) ListForOrg(context.Context, string) ([]slackstore.Channel, error) {
 	return nil, db.ErrNotApplicableInLocal
 }
+
+func (s *channelRegistryStore) MoveSystem(context.Context, string, string, string) (slackstore.ChannelMove, error) {
+	return slackstore.ChannelMove{}, db.ErrNotApplicableInLocal
+}
+
+func (s *channelRegistryStore) CurrentIDSystem(context.Context, string, string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
+}
+
+func (s *channelRegistryStore) SettleSystem(context.Context, string, string) (string, error) {
+	return "", db.ErrNotApplicableInLocal
+}

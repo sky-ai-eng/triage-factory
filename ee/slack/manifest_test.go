@@ -64,13 +64,14 @@ func TestBuildSlackManifest_EventsAPI(t *testing.T) {
 	}
 }
 
-// assertBotEvents pins the exact bot_events set: the explicit @-mention plus
-// the two engaged-thread message subscriptions (public + private channels).
-// message.im / message.mpim are deliberately absent — DM support is a separate
+// assertBotEvents pins the exact bot_events set: the explicit @-mention, the
+// two engaged-thread message subscriptions (public + private channels), and
+// channel_id_changed, which moves a channel's rows when Slack gives it a new
+// id. message.im / message.mpim are deliberately absent — DM support is a separate
 // future ticket, and un-subscribed message types must never reach the binary.
 func assertBotEvents(t *testing.T, got []string) {
 	t.Helper()
-	want := []string{"app_mention", "message.channels", "message.groups"}
+	want := []string{"app_mention", "message.channels", "message.groups", "channel_id_changed"}
 	if len(got) != len(want) {
 		t.Fatalf("bot_events = %v (%d); want %v", got, len(got), want)
 	}

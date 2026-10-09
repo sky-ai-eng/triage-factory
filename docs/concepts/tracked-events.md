@@ -379,6 +379,14 @@ Follow-up ingestion (the un-mentioned `message.channels` / `message.groups` deli
 - it doesn't explicitly @-mention the bot — that copy is owned by the twin `app_mention` delivery, so dropping it here avoids a double publish;
 - the thread's entity already exists, is `kind="thread"`, and is still active.
 
+### Channel ID changes
+
+A thread's entity is keyed by its channel's ID and its root message's timestamp. Slack gives a private channel a new ID when it's shared with another organization through Slack Connect (`G…` becomes `C…`), announces it with `channel_id_changed`, and uses the new ID for everything after. TF follows the change in one transaction: the channel's registry row, each team's tracking of it, the thread entities and their permalinks, the Slack artifacts and audit-log links that name it, and the `channel_in` filter of every `slack:message` handler. It emits no event.
+
+TF also records the change, because event metadata is immutable: a message recorded before the share names the old ID for good. Everything that acts on a recorded message reads its channel as the current ID — handler filters, the team gate and owner resolution, a run's task context and injected follow-ups, the exec verbs, and the bot's own reactions, replies and working indicator — and so does ingest, for a message Slack generated before the change but delivered after it.
+
+Slack doesn't order the change against other deliveries. A message made under the new ID that arrives before the change has no thread to land in yet: an un-mentioned follow-up is dropped, and a mention starts a new thread entity. When the change arrives, the thread's original entity takes the key, and the one the mention started is closed beside it, keeping its own task and conversation. A change Slack delivers again, or delivers after a later change to the same channel, leaves the channel on its latest ID.
+
 ## System Events
 
 These are internal signals, not shown in the triage UI.

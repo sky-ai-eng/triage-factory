@@ -1,6 +1,11 @@
 package slack
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+
+	slackstore "github.com/sky-ai-eng/triage-factory/ee/slack/store"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
@@ -73,6 +78,36 @@ func (p SlackMessagePredicate) Matches(m SlackMessageMetadata) bool {
 		return false
 	}
 	return true
+}
+
+// slackMessageCurrentView is slack:message's events.CurrentView: the
+// recorded channel id resolved to the id the channel has now, so a handler
+// filter, a task context or an injected follow-up recorded before Slack moved
+// the channel names the channel as it is. Metadata naming a channel that never
+// moved is returned as recorded, byte for byte.
+func slackMessageCurrentView(channels slackstore.ChannelRegistryStore) events.CurrentView {
+	return func(ctx context.Context, orgID, metadataJSON string) (string, error) {
+		var meta SlackMessageMetadata
+		if err := json.Unmarshal([]byte(metadataJSON), &meta); err != nil {
+			return "", fmt.Errorf("decode slack message metadata: %w", err)
+		}
+		if meta.Channel == "" {
+			return metadataJSON, nil
+		}
+		current, err := channels.CurrentIDSystem(ctx, orgID, meta.Channel)
+		if err != nil {
+			return "", err
+		}
+		if current == meta.Channel {
+			return metadataJSON, nil
+		}
+		meta.Channel = current
+		out, err := json.Marshal(meta)
+		if err != nil {
+			return "", fmt.Errorf("encode slack message metadata: %w", err)
+		}
+		return string(out), nil
+	}
 }
 
 // init registers slack:message's schema and dormancy gate — the "inert

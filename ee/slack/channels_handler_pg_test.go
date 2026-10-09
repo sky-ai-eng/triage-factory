@@ -318,6 +318,47 @@ func TestChannelsHandler_TeamAdminPUT_OK(t *testing.T) {
 	}
 }
 
+// TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne: a save
+// naming a channel by the id Slack moved it away from (a settings page left
+// open across the share) tracks the channel's current id and keeps the moved
+// row, and a primary reassignment addressed by the old id lands on it too.
+func TestChannelsHandler_PUTAndPrimary_RetiredIDActOnTheCurrentOne(t *testing.T) {
+	r := newSlackChannelsRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-retired-put")
+
+	first := httptest.NewRecorder()
+	r.hdl.handlePut(first, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"G0PUT0001"}}))
+	if first.Code != http.StatusOK {
+		t.Fatalf("setup PUT status = %d (body=%s)", first.Code, first.Body.String())
+	}
+	if _, err := slackstore.FromStores(r.stor).Channels.MoveSystem(t.Context(), orgID, "G0PUT0001", "C0PUT0001"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	r.hdl.handlePut(rec, r.req(http.MethodPut, "/api/slack/teams/"+teamID+"/channels", owner, orgID, teamID,
+		map[string]any{"channel_ids": []string{"G0PUT0001", "C0PUT0001"}}))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%s)", rec.Code, rec.Body.String())
+	}
+	var tracked []string
+	for _, c := range decodeChannels(t, rec).Channels {
+		if c.Tracked {
+			tracked = append(tracked, c.ChannelID)
+		}
+	}
+	if len(tracked) != 1 || tracked[0] != "C0PUT0001" {
+		t.Errorf("tracked channels = %v; want only the current id C0PUT0001", tracked)
+	}
+
+	primary := httptest.NewRecorder()
+	r.hdl.handlePrimary(primary, r.reqPrimary(owner, orgID, "G0PUT0001", map[string]string{"team_id": teamID}))
+	if primary.Code != http.StatusOK {
+		t.Fatalf("primary by the old id: status = %d, want 200 (body=%s)", primary.Code, primary.Body.String())
+	}
+}
+
 func TestChannelsHandler_ArchivedTeamPUT_Refused(t *testing.T) {
 	r := newSlackChannelsRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "chan-archived")

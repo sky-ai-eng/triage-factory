@@ -8,6 +8,7 @@ import (
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
@@ -365,10 +366,14 @@ func (r *Router) enqueueBusyFiring(ctx context.Context, orgID, entityID string, 
 func (r *Router) tryAdditiveInjection(ctx context.Context, orgID, entityID, conversationID string, task *domain.Task, trigger domain.EventHandler, triggeringEventID string, claim dbpkg.AgentClaimStamp) bool {
 	// Best-effort: an empty metadataJSON still renders a body naming the
 	// event type alone, so a lookup failure degrades rather than drops the
-	// injection.
+	// injection, and a failed current view hands the agent the metadata as
+	// recorded.
 	metadataJSON, err := r.events.GetMetadataSystem(ctx, orgID, triggeringEventID)
 	if err != nil {
 		metadataJSON = ""
+	}
+	if current, err := events.Current(ctx, orgID, trigger.EventType, metadataJSON); err == nil {
+		metadataJSON = current
 	}
 	body := domain.AdditiveEventInjection(trigger.EventType, metadataJSON)
 

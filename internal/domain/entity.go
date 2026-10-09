@@ -26,7 +26,9 @@ import (
 // package — it sits beside the other entity-key builders the rest of the app
 // already shares. channel+ts names one thread across all of Slack: a shared
 // channel keeps its id in every workspace it is in, so the entity's scope is
-// SlackScope, never a workspace.
+// SlackScope, never a workspace. The id itself can change (Slack gives a
+// private channel a new one when it is shared through Slack Connect), and
+// ee/slack follows that by rekeying the channel's threads.
 func SlackSourceID(channel, threadTS string) string {
 	return channel + "/" + threadTS
 }

@@ -37,6 +37,9 @@ install — and subscribes the bot to these events:
 - `message.channels` / `message.groups` — messages in public / private channels,
   which back **engaged-thread follow-ups**: replies in a thread the bot already
   owns, with no re-@-mention required.
+- `channel_id_changed` — a private channel's new ID once it's shared through
+  Slack Connect. TF moves everything it holds about the channel to the new ID
+  (see [concepts/tracked-events.md](../concepts/tracked-events.md#channel-id-changes)).
 
 
 ## Auditing workspace connects

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -544,5 +545,43 @@ func TestReDeriveWorker_PredicateMismatch_AdmitsNothing(t *testing.T) {
 	got, _ := testTaskStore(database).Get(t.Context(), runmode.LocalDefaultOrgID, task.ID)
 	if got.Status != "queued" {
 		t.Errorf("expected queued (predicate mismatch), got %s", got.Status)
+	}
+}
+
+// TestReDeriveWorker_MatchesThroughTheCurrentView: the re-derive matches a
+// deferred trigger's filter against the task's event through its event type's
+// current view, so a filter naming the id the source uses now still matches
+// an event recorded under the id it replaced.
+func TestReDeriveWorker_MatchesThroughTheCurrentView(t *testing.T) {
+	events.RegisterCurrentView(domain.EventGitHubPRCICheckFailed, func(_ context.Context, _, meta string) (string, error) {
+		return strings.ReplaceAll(meta, `"author":"old-login"`, `"author":"aidan"`), nil
+	})
+	t.Cleanup(func() { events.ResetCurrentView(domain.EventGitHubPRCICheckFailed) })
+
+	database := newTestDB(t)
+	entity, _, _ := sqlitestore.New(database).Entities.FindOrCreate(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com", "owner/repo#4", "", "pr", "Test PR 4", "https://github.com/owner/repo/pull/4")
+	entityID := entity.ID
+	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{Author: "old-login", CheckName: "build", Repo: "owner/repo"})
+	eventID, _ := sqlitestore.New(database).Events.Record(context.Background(), runmode.LocalDefaultOrgID, domain.Event{
+		EventType: domain.EventGitHubPRCICheckFailed, EntityID: &entityID,
+		DedupKey: "build", MetadataJSON: string(metaJSON),
+	})
+	task, _, _ := testTaskStore(database).FindOrCreate(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, entityID, domain.EventGitHubPRCICheckFailed, "build", eventID, 0.5)
+
+	createTestPrompt(t, database, domain.Prompt{ID: "p4", Name: "Test4", Body: "Do", Source: "user"})
+	pred := `{"author_in":["aidan"]}`
+	createTriggerForTestRouting(t, database, domain.EventHandler{
+		ID: "t-view", Kind: domain.EventHandlerKindTrigger,
+		BlueprintID: "p4", TriggerType: domain.TriggerTypeEvent,
+		EventType: domain.EventGitHubPRCICheckFailed, BreakerThreshold: intPtr(4),
+		MinAutonomySuitability: floatPtr(0.5), Enabled: true,
+		ScopePredicateJSON: &pred,
+	})
+
+	scoreTask(t, database, task.ID, 0.9)
+	drainReDeriveOnce(t, reDeriveRouter(t, database, nil))
+
+	if firings := firingsForTask(t, database, task.ID); len(firings) != 1 || firings[0].TriggerID != "t-view" {
+		t.Errorf("firings = %+v, want one for t-view", firings)
 	}
 }

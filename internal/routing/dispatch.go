@@ -397,10 +397,14 @@ func (r *Router) routableEntity(ctx context.Context, orgID string, evt domain.Ev
 // kind-discriminated locally — preserves the rules-before-triggers order via
 // the store's kind-ASC ORDER BY.
 //
-// err is non-nil ONLY when the event_handlers query itself failed — the
-// caller must not read that as "queried fine, zero handlers matched" (which
-// would misreport an internal error as a legitimate "nothing configured"
-// outcome).
+// Predicates are matched against the event's current view (events.Current):
+// a handler filter names the ids the source uses now, and an event recorded
+// before the source replaced one still names the old.
+//
+// err is non-nil ONLY when a read failed — the event_handlers query or the
+// current view — and the caller must not read that as "queried fine, zero
+// handlers matched" (which would misreport an internal error as a legitimate
+// "nothing configured" outcome).
 func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Event, scopeCache map[string]bool) (matchedRules, matchedTriggers []domain.EventHandler, err error) {
 	ctx, span := tracer.Start(ctx, "route.match")
 	defer span.End()
@@ -409,6 +413,12 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 	if err != nil {
 		span.SetStatus(codes.Error, "query event_handlers")
 		routerLog.ErrorContext(ctx, "failed to query event_handlers", "event_type", evt.EventType, "error", err)
+		return nil, nil, err
+	}
+	metadataJSON, err := events.Current(ctx, orgID, evt.EventType, evt.MetadataJSON)
+	if err != nil {
+		span.SetStatus(codes.Error, "resolve event metadata")
+		routerLog.ErrorContext(ctx, "failed to resolve event metadata", "event_type", evt.EventType, "error", err)
 		return nil, nil, err
 	}
 
@@ -422,7 +432,7 @@ func (r *Router) matchHandlers(ctx context.Context, orgID string, evt domain.Eve
 		if h.ScopePredicateJSON != nil {
 			predJSON = *h.ScopePredicateJSON
 		}
-		matched, err := matchPredicate(evt.EventType, predJSON, evt.MetadataJSON)
+		matched, err := matchPredicate(evt.EventType, predJSON, metadataJSON)
 		if err != nil {
 			routerLog.Error("event_handler predicate error", "handler_id", h.ID, "kind", h.Kind, "error", err)
 			continue

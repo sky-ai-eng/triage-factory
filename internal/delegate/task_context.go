@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 )
 
 // baseFraming is the framing sentence for a run with no external context to
@@ -123,6 +124,28 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string, artifacts
 
 	body := framing + "\n\n" + begin + "\n" + region + "\n" + end
 	return "<task_context>\n" + body + "\n</task_context>"
+}
+
+// taskEventMetadata reads the task's primary event metadata for the task
+// context, through the event type's current view: the run acts on the ids the
+// metadata names, and the source may have replaced one since the event was
+// recorded (a Slack channel moved to a new id). Best-effort like the rest of
+// the block: a failed read renders no event fields, and a failed view renders
+// the metadata as recorded.
+func (s *Spawner) taskEventMetadata(ctx context.Context, orgID string, task domain.Task) string {
+	metadataJSON, err := s.events.GetMetadataSystem(ctx, orgID, task.PrimaryEventID)
+	if err != nil {
+		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields",
+			"task", task.ID, "event", task.PrimaryEventID, "error", err)
+		return ""
+	}
+	current, err := events.Current(ctx, orgID, task.EventType, metadataJSON)
+	if err != nil {
+		delegateLog.Warn("resolve event metadata for task failed; the task context will carry it as recorded",
+			"task", task.ID, "event", task.PrimaryEventID, "error", err)
+		return metadataJSON
+	}
+	return current
 }
 
 // taskArtifacts collects every artifact the task's conversations have produced,

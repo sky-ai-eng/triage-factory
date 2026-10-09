@@ -17,6 +17,9 @@ const (
 	// outcomeAccepted is the single success path: the delivery published a
 	// slack:message event.
 	outcomeAccepted = "accepted"
+	// outcomeChannelMoved is a channel_id_changed delivery that moved the
+	// channel's rows to its new id, or found them already moved.
+	outcomeChannelMoved = "channel_moved"
 	// outcomeError is any genuine pipeline failure (store error, marshal
 	// failure) — the transport 5xxes / withholds its ack so Slack redelivers,
 	// meaning the same event may be counted again under its retry.
@@ -25,7 +28,7 @@ const (
 	dropUnsupportedType    = "unsupported_type"    // inner event type this pipeline doesn't ingest
 	dropUnsupportedSubtype = "unsupported_subtype" // message edit/delete/system/bot subtype variants
 	dropNotThreadReply     = "not_thread_reply"    // root-channel chatter; the bot listens only to threads it owns
-	dropMalformed          = "malformed"           // missing event_id/channel/ts
+	dropMalformed          = "malformed"           // missing event_id/channel/ts, or a channel_id_changed missing either id
 	dropSelfOrBot          = "self_or_bot"         // authored by TF's own bot or another bot
 	dropMentionDedup       = "mention_dedup"       // threaded @-mention owned by its app_mention twin delivery
 	dropNotEngaged         = "not_engaged"         // no active bot-owned thread entity for this reply

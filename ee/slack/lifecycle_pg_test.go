@@ -489,6 +489,36 @@ func TestLifecycleAdapter_Disposition_TasklessNoHandlerOrOwner_PostsNotConfigure
 	}
 }
 
+// TestLifecycleAdapter_Disposition_ChannelMovedSinceTheMention: a mention
+// recorded under a channel id Slack has since replaced is acknowledged, and
+// answered when nothing handles it, in the channel's new id.
+func TestLifecycleAdapter_Disposition_ChannelMovedSinceTheMention(t *testing.T) {
+	for _, disp := range []string{events.DispositionTaskCreated, events.DispositionTasklessNoHandler} {
+		t.Run(disp, func(t *testing.T) {
+			h, stores, fake, orgID, owner, _ := newLifecycleTestRig(t)
+			seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+			eventID, _ := seedSlackMessageEvent(t, h, orgID, "T1", "A1", "G0LIFE002", "1700000000.000200", "1700000000.000100", true)
+			if _, err := slackstore.FromStores(stores).Channels.MoveSystem(t.Context(), orgID, "G0LIFE002", "C0LIFE002"); err != nil {
+				t.Fatalf("MoveSystem: %v", err)
+			}
+
+			adapter := newTestLifecycleAdapter(stores, staticURL(""))
+			adapter.dispatch(context.Background(), dispositionEvent(orgID, eventID, domain.EventSlackMessage, disp), map[string]*conversationEntry{})
+
+			var channels []string
+			for _, c := range fake.reactionCalls() {
+				channels = append(channels, c.Channel)
+			}
+			for _, p := range fake.postCalls() {
+				channels = append(channels, p.Channel)
+			}
+			if len(channels) != 1 || channels[0] != "C0LIFE002" {
+				t.Errorf("Slack calls went to %v, want one call to the new id C0LIFE002", channels)
+			}
+		})
+	}
+}
+
 // TestLifecycleAdapter_Disposition_UnmentionedFollowUp_NoNotConfiguredReply
 // pins that an un-mentioned follow-up (Mentioned=false) landing on a
 // taskless_no_handler/taskless_no_owner disposition draws no automated
@@ -614,6 +644,30 @@ func TestLifecycleAdapter_ConversationStatus_RunningThenActivity_SetsDescription
 		return last.Status == "is running: Running go test ./..." &&
 			len(last.Loading) == 1 && last.Loading[0] == "Running: Running go test ./..."
 	})
+}
+
+// TestLifecycleAdapter_ConversationStatus_ChannelMovedSinceTheTasksEvent: a
+// conversation on a task whose message was recorded before Slack moved the
+// channel to a new id sets its indicator in the channel's new id, not the
+// one the immutable event metadata names.
+func TestLifecycleAdapter_ConversationStatus_ChannelMovedSinceTheTasksEvent(t *testing.T) {
+	withFastLifecycleTimings(t)
+	h, stores, fake, orgID, owner, teamID := newLifecycleTestRig(t)
+	seedLifecycleWorkspace(t, stores, orgID, owner, "T1", "A1", "xoxb-test")
+	fx := seedSlackMessageConversation(t, h, orgID, owner, teamID, "T1", "A1", "G0LIFE001", "1700000000.000100", "")
+	if _, err := slackstore.FromStores(stores).Channels.MoveSystem(t.Context(), orgID, "G0LIFE001", "C0LIFE001"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+
+	adapter := newTestLifecycleAdapter(stores, staticURL(""))
+	convs := map[string]*conversationEntry{}
+	t.Cleanup(func() { stopAllLifecycleWorkers(t, convs) })
+
+	adapter.dispatch(context.Background(), conversationStatusEvent(orgID, fx.ConversationID, "running"), convs)
+	waitForCondition(t, 2*time.Second, func() bool { return len(fake.statusCalls()) >= 1 })
+	if got := fake.statusCalls()[0].Channel; got != "C0LIFE001" {
+		t.Errorf("status call channel = %q, want the channel's new id C0LIFE001", got)
+	}
 }
 
 // TestLifecycleAdapter_ConversationStatus_PreRunningPhases_ShowSetupProgress

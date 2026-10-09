@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,6 +21,10 @@ import (
 type fakeEntities struct {
 	byKey map[string]*domain.Entity
 	err   error
+	// afterFindOrCreate, if set, runs after each FindOrCreateSystem — the
+	// point where a channel move can commit between the pipeline's resolve
+	// and its settle.
+	afterFindOrCreate func()
 }
 
 func newFakeEntities() *fakeEntities { return &fakeEntities{byKey: map[string]*domain.Entity{}} }
@@ -31,6 +36,9 @@ func fakeEntityKey(orgID, source, scope, sourceID string) string {
 func (f *fakeEntities) FindOrCreateSystem(_ context.Context, orgID, source, scope, sourceID, externalID, kind, title, url string) (*domain.Entity, bool, error) {
 	if f.err != nil {
 		return nil, false, f.err
+	}
+	if f.afterFindOrCreate != nil {
+		defer f.afterFindOrCreate()
 	}
 	key := fakeEntityKey(orgID, source, scope, sourceID)
 	if e, ok := f.byKey[key]; ok {
@@ -94,6 +102,17 @@ type fakeChannelRegistry struct {
 	upsertErr error
 	sawUpsert []string // channelKey values, one per UpsertSightingSystem call
 
+	// moved maps channelKey(org, old id) to the id MoveSystem moved it to;
+	// sawMoves records each MoveSystem call as "<channelKey>-><new id>".
+	moved      map[string]string
+	sawMoves   []string
+	moveErr    error
+	currentErr error
+	// sawSettles records each SettleSystem call's channelKey; settleErr fails
+	// it.
+	sawSettles []string
+	settleErr  error
+
 	// done, if non-nil, receives whenever SetNameSystem completes — the
 	// same deterministic "the detached resolver goroutine finished" signal
 	// fakeIdentityStore.done provides in identity_test.go.
@@ -151,6 +170,47 @@ func (f *fakeChannelRegistry) GetSystem(_ context.Context, orgID, channelID stri
 
 func (f *fakeChannelRegistry) ListForOrg(context.Context, string) ([]slackstore.Channel, error) {
 	return nil, nil
+}
+
+// MoveSystem records the change so CurrentIDSystem resolves it, and the call
+// itself in sawMoves; moveErr fails it.
+func (f *fakeChannelRegistry) MoveSystem(_ context.Context, orgID, oldID, newID string) (slackstore.ChannelMove, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sawMoves = append(f.sawMoves, channelKey(orgID, oldID)+"->"+newID)
+	if f.moveErr != nil {
+		return slackstore.ChannelMove{}, f.moveErr
+	}
+	if f.moved == nil {
+		f.moved = map[string]string{}
+	}
+	f.moved[channelKey(orgID, oldID)] = newID
+	return slackstore.ChannelMove{}, nil
+}
+
+func (f *fakeChannelRegistry) CurrentIDSystem(_ context.Context, orgID, channelID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.currentErr != nil {
+		return "", f.currentErr
+	}
+	if moved, ok := f.moved[channelKey(orgID, channelID)]; ok {
+		return moved, nil
+	}
+	return channelID, nil
+}
+
+// SettleSystem resolves like CurrentIDSystem; the real store's sweep of rows
+// left under a retired id has no fake rows to act on.
+func (f *fakeChannelRegistry) SettleSystem(ctx context.Context, orgID, channelID string) (string, error) {
+	f.mu.Lock()
+	f.sawSettles = append(f.sawSettles, channelKey(orgID, channelID))
+	err := f.settleErr
+	f.mu.Unlock()
+	if err != nil {
+		return "", err
+	}
+	return f.CurrentIDSystem(ctx, orgID, channelID)
 }
 
 var _ slackstore.ChannelRegistryStore = (*fakeChannelRegistry)(nil)
@@ -281,6 +341,203 @@ func TestHandleEventCallback_UnsupportedTypeDropped(t *testing.T) {
 	}
 	if len(*published) != 0 {
 		t.Errorf("published %d events; want 0 (unsupported type dropped)", len(*published))
+	}
+}
+
+// TestHandleChannelIDChanged_MovesTheChannel: the change moves the channel for
+// the delivering workspace's org, publishes nothing, and records no delivery
+// row — the move is idempotent, so a redelivery moves (nothing) again rather
+// than being dropped.
+func TestHandleChannelIDChanged_MovesTheChannel(t *testing.T) {
+	p, _, deliveries, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	p.channels = channels
+	ws := testWorkspaceRow("org-1")
+	ev := inboundMention{Type: "channel_id_changed", EventID: "Ev1", OldChannelID: "G1", NewChannelID: "C1"}
+
+	for i := 0; i < 2; i++ {
+		if err := p.handleEventCallback(context.Background(), ws, ev); err != nil {
+			t.Fatalf("delivery %d: %v", i, err)
+		}
+	}
+	if want := []string{"org-1/G1->C1", "org-1/G1->C1"}; !reflect.DeepEqual(channels.sawMoves, want) {
+		t.Errorf("moves = %v; want %v (each delivery moves)", channels.sawMoves, want)
+	}
+	if len(*published) != 0 {
+		t.Errorf("published %d events; want 0", len(*published))
+	}
+	if len(deliveries.seen) != 0 {
+		t.Errorf("recorded %d deliveries; want 0", len(deliveries.seen))
+	}
+}
+
+// TestHandleChannelIDChanged_MalformedDropped: a change missing either id, or
+// naming the same id twice, moves nothing.
+func TestHandleChannelIDChanged_MalformedDropped(t *testing.T) {
+	for _, ev := range []inboundMention{
+		{Type: "channel_id_changed", EventID: "Ev1", NewChannelID: "C1"},
+		{Type: "channel_id_changed", EventID: "Ev2", OldChannelID: "G1"},
+		{Type: "channel_id_changed", EventID: "Ev3", OldChannelID: "C1", NewChannelID: "C1"},
+	} {
+		p, _, _, _ := newTestPipeline()
+		channels := newFakeChannelRegistry()
+		p.channels = channels
+		if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+			t.Fatalf("%s: %v", ev.EventID, err)
+		}
+		if len(channels.sawMoves) != 0 {
+			t.Errorf("%s: moves = %v; want none", ev.EventID, channels.sawMoves)
+		}
+	}
+}
+
+// TestHandleChannelIDChanged_MoveErrorReturned: a failed move is an error, so
+// the transport withholds its ack and Slack redelivers the change.
+func TestHandleChannelIDChanged_MoveErrorReturned(t *testing.T) {
+	p, _, _, _ := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.moveErr = errors.New("db down")
+	p.channels = channels
+	ev := inboundMention{Type: "channel_id_changed", EventID: "Ev1", OldChannelID: "G1", NewChannelID: "C1"}
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err == nil {
+		t.Fatal("handleEventCallback = nil; want the move's error")
+	}
+}
+
+// TestHandleEventCallback_MentionUnderARetiredChannelID: a mention Slack
+// generated before the channel's id changed and delivered after the move
+// lands under the new id — the sighting, the thread key and the published
+// metadata alike — instead of reviving the old one.
+func TestHandleEventCallback_MentionUnderARetiredChannelID(t *testing.T) {
+	p, entities, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
+	p.channels = channels
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100", ThreadTS: "1599999999.000001"}
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if _, ok := entities.byKey[fakeEntityKey("org-1", "slack", domain.SlackScope, "C1/1599999999.000001")]; !ok {
+		t.Errorf("no entity under the new id; entities = %v", entities.byKey)
+	}
+	if want := []string{channelKey("org-1", "C1")}; !reflect.DeepEqual(channels.sawUpsert, want) {
+		t.Errorf("sightings = %v; want %v", channels.sawUpsert, want)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+}
+
+// TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve: a move that
+// commits after the mention resolved its channel is settled once the entity
+// is written, and the event publishes under the new id, on the entity that
+// holds the thread's key there.
+func TestHandleEventCallback_MentionSettlesAMoveAfterItsResolve(t *testing.T) {
+	p, entities, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	p.channels = channels
+	entities.afterFindOrCreate = func() {
+		channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
+	}
+	const thread = "C1/1599999999.000001"
+	entities.seedThread("org-1", thread, "thread", "active")
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "G1", User: "U1", Text: "hi", TS: "1600000000.000100", ThreadTS: "1599999999.000001"}
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if want := []string{channelKey("org-1", "G1")}; !reflect.DeepEqual(channels.sawSettles, want) {
+		t.Errorf("settles = %v; want %v", channels.sawSettles, want)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte((*published)[0].MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+	if got, want := (*published)[0].EntityID, entities.byKey[fakeEntityKey("org-1", "slack", domain.SlackScope, thread)].ID; got == nil || *got != want {
+		t.Errorf("EntityID = %v; want the thread's entity %s", got, want)
+	}
+}
+
+// TestHandleEventCallback_MentionSettleErrorStillPublishes: the delivery is
+// already recorded when the settle runs, so a failed settle publishes under
+// the id the mention resolved rather than failing into a dropped redelivery.
+func TestHandleEventCallback_MentionSettleErrorStillPublishes(t *testing.T) {
+	p, _, _, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.settleErr = errors.New("db down")
+	p.channels = channels
+	ev := inboundMention{Type: "app_mention", EventID: "Ev1", Channel: "C1", User: "U1", Text: "hi", TS: "1600000000.000100"}
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+}
+
+// TestHandleThreadMessage_FollowUpUnderARetiredChannelID: a follow-up
+// delivered under the old id after the move reaches the thread, now keyed
+// under the new id, and publishes under it.
+func TestHandleThreadMessage_FollowUpUnderARetiredChannelID(t *testing.T) {
+	p, entities, deliveries, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.moved = map[string]string{channelKey("org-1", "G1"): "C1"}
+	p.channels = channels
+	entities.seedThread("org-1", engagedSourceID, "thread", "active")
+
+	ev := engagedFollowUp()
+	ev.Channel = "G1"
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), ev); err != nil {
+		t.Fatalf("handleEventCallback: %v", err)
+	}
+	if len(*published) != 1 {
+		t.Fatalf("published %d events; want 1", len(*published))
+	}
+	got := (*published)[0]
+	if got.EntityID == nil || *got.EntityID != engagedEntityID {
+		t.Errorf("EntityID = %v; want %s", got.EntityID, engagedEntityID)
+	}
+	var meta SlackMessageMetadata
+	if err := json.Unmarshal([]byte(got.MetadataJSON), &meta); err != nil {
+		t.Fatalf("metadata: %v", err)
+	}
+	if meta.Channel != "C1" {
+		t.Errorf("metadata channel = %q; want C1", meta.Channel)
+	}
+	if len(deliveries.seen) != 1 {
+		t.Errorf("recorded %d deliveries; want 1", len(deliveries.seen))
+	}
+}
+
+// TestHandleThreadMessage_ChannelResolveErrorBeforeDelivery: when the miss's
+// channel id read fails, the reply is an error and no delivery row is
+// recorded, so Slack's redelivery can still land it.
+func TestHandleThreadMessage_ChannelResolveErrorBeforeDelivery(t *testing.T) {
+	p, _, deliveries, published := newTestPipeline()
+	channels := newFakeChannelRegistry()
+	channels.currentErr = errors.New("db down")
+	p.channels = channels
+
+	if err := p.handleEventCallback(context.Background(), testWorkspaceRow("org-1"), engagedFollowUp()); err == nil {
+		t.Fatal("handleEventCallback = nil; want the read's error")
+	}
+	if len(*published) != 0 || len(deliveries.seen) != 0 {
+		t.Errorf("published %d, recorded %d deliveries; want neither", len(*published), len(deliveries.seen))
 	}
 }
 

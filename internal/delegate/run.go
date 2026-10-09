@@ -341,11 +341,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// failure here is non-fatal: the block just renders without them. FKs
 	// guarantee the event exists, so a real miss would be a DB-level problem we
 	// want to log and continue through rather than aborting the run.
-	metadataJSON, err := s.events.GetMetadataSystem(context.WithoutCancel(ctx), orgID, task.PrimaryEventID)
-	if err != nil {
-		delegateLog.Warn("load event metadata for task failed; the task context will carry no event fields", "task", task.ID, "event", task.PrimaryEventID, "error", err)
-		metadataJSON = ""
-	}
+	metadataJSON := s.taskEventMetadata(context.WithoutCancel(ctx), orgID, task)
 
 	// Resolve the paths the agent will actually observe, which differ from the
 	// host paths under the sandbox: the run-root is bind-mounted at "/work" and

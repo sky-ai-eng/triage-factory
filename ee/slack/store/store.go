@@ -300,6 +300,62 @@ type ChannelRegistryStore interface {
 	// ListForOrg is the app-pool, member-RLS-gated read — the discovery/
 	// claim UX's "channels we know of" list.
 	ListForOrg(ctx context.Context, orgID string) ([]Channel, error)
+
+	// MoveSystem follows Slack's change of a channel's id (the
+	// channel_id_changed event: a private channel shared through Slack
+	// Connect gets a new one). One transaction, serialized per org, moves
+	// every row of orgID that names oldID onto newID:
+	//
+	//   - the registry row, merged into a row newID already has (a message
+	//     delivered under the new id before the change was) — earliest
+	//     first_seen_at, latest last_mention_at, the newID row's name and
+	//     workspace when it has them;
+	//   - the team tracking rows. A team tracking both ids keeps one row, with
+	//     the older created_at. The old id's primary team stays primary, and a
+	//     primary the new id gained in the meantime is demoted;
+	//   - every Slack thread entity keyed "<oldID>/…", with its permalink. Two
+	//     active entities for one thread — one the new id minted for a mention
+	//     delivered before the change arrived, or one a writer the move
+	//     overtook left under oldID (SettleSystem) — resolve to the older,
+	//     the thread's original, which carries its tasks, conversations,
+	//     memory and kind and keeps the key. The newer is closed
+	//     (ChannelMove.Superseded) and keeps what it collected;
+	//   - the Slack artifacts naming the channel: target, dedup key and
+	//     permalink. A key the new id already has is left as it is;
+	//   - external_actions.current_url, the audit ledger's pointer, for
+	//     actions whose link points into the channel. The record of the act
+	//     is not touched;
+	//   - the channel_in filter of every slack:message handler naming oldID.
+	//     One whose filter cannot be decoded is left as stored and reported
+	//     (ChannelMove.SkippedHandlers) rather than failing the move.
+	//
+	// It also records the change, so CurrentIDSystem resolves oldID — and any
+	// id that earlier moved to oldID — to newID from then on. Slack changes a
+	// channel's id only from the one it has now, so an oldID already recorded
+	// as changed is a redelivery, or a change a later one has overtaken: it
+	// records nothing, and anything left under oldID moves to the id the
+	// record names. A newID recorded as changed was overtaken the same way,
+	// and the rows move past it — unless it changed to oldID, which puts the
+	// channel back on newID. ChannelMove.To is the id the rows moved to.
+	// That last case cannot tell a real move back from a late redelivery of
+	// the change it reverses (A→B, B→A, then A→B again): both are applied,
+	// and the redelivery moves the channel back to newID.
+	// oldID == newID is a no-op.
+	MoveSystem(ctx context.Context, orgID, oldID, newID string) (ChannelMove, error)
+
+	// CurrentIDSystem returns the id channelID goes by now: the id a recorded
+	// change moved it to, else channelID itself. For an id TF holds from
+	// before a change — event metadata is immutable, and Slack may redeliver
+	// an event generated before the change after it — and is about to act on.
+	CurrentIDSystem(ctx context.Context, orgID, channelID string) (string, error)
+
+	// SettleSystem returns the id channelID goes by now, after moving onto it
+	// anything still under channelID once Slack has retired it. A caller that
+	// resolved an id (CurrentIDSystem) and then wrote rows naming it calls
+	// this when the writes are done: a move committing between the resolve
+	// and the writes leaves them under the retired id. It waits for a move in
+	// progress, so either it sees the change or the move saw the rows.
+	SettleSystem(ctx context.Context, orgID, channelID string) (string, error)
 }
 
 // TeamChannel is one row of team_slack_channels — a team's tracking claim on
@@ -343,13 +399,17 @@ type TeamChannelStore interface {
 	ReplaceForTeam(ctx context.Context, orgID, teamID string, channelIDs []string) error
 
 	// TracksChannelSystem is the router's stage-1 scope gate: does teamID
-	// track channelID. Admin pool — the router has no request claims.
+	// track channelID. Admin pool — the router has no request claims. An id
+	// the channel had before a change (ChannelRegistryStore.MoveSystem) is
+	// read as the id it has now: the router judges events whose metadata was
+	// recorded before the change.
 	TracksChannelSystem(ctx context.Context, orgID, teamID, channelID string) (bool, error)
 
 	// PrimaryTeamForChannelSystem returns the team_id currently holding
 	// is_primary for channelID, or "" if the channel has no primary yet (no
 	// tracker at all, or ReconcilePrimariesSystem hasn't run since the last
-	// primary was removed).
+	// primary was removed). Resolves an earlier id the way
+	// TracksChannelSystem does.
 	PrimaryTeamForChannelSystem(ctx context.Context, orgID, channelID string) (string, error)
 
 	// ListTrackersForOrgSystem returns every tracking row for the org,

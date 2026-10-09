@@ -174,7 +174,15 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSONStrict(w, r, &req) {
 		return
 	}
-	desired := normalizeChannelIDs(req.ChannelIDs)
+	admin := slackstore.FromStores(h.stores)
+	// A client holding a channel's id from before Slack moved it (a settings
+	// page left open across the share) would otherwise track an id no message
+	// will ever carry again, and prune the moved row.
+	desired, err := currentChannelIDs(r.Context(), admin.Channels, orgID, normalizeChannelIDs(req.ChannelIDs))
+	if err != nil {
+		httpx.InternalError(w, "slack/channels", err)
+		return
+	}
 
 	var prior []slackstore.TeamChannel
 	if err := h.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -208,7 +216,6 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	added, removed := diffChannelIDs(prior, desired)
 
-	admin := slackstore.FromStores(h.stores)
 	touched := append(append([]string{}, added...), removed...)
 	if len(touched) > 0 {
 		if err := admin.TeamChannels.ReconcilePrimariesSystem(r.Context(), orgID, touched); err != nil {
@@ -220,6 +227,15 @@ func (h *channelsHandler) handlePut(w http.ResponseWriter, r *http.Request) {
 	var joinWarnings []channelsWarning
 	if len(added) > 0 {
 		joinWarnings = h.ensureAndAutoJoin(r.Context(), orgID, userID, added)
+	}
+	// A change committing after currentChannelIDs resolved the set leaves
+	// this save's rows under the retired id; settling moves them on before
+	// the response reads them back.
+	for _, channelID := range desired {
+		if _, err := admin.Channels.SettleSystem(r.Context(), orgID, channelID); err != nil {
+			httpx.InternalError(w, "slack/channels", err)
+			return
+		}
 	}
 
 	resp, err := h.buildChannelsResponse(r.Context(), orgID, userID, teamID, "admin")
@@ -280,6 +296,10 @@ func (h *channelsHandler) handlePrimary(w http.ResponseWriter, r *http.Request) 
 	}
 
 	admin := slackstore.FromStores(h.stores)
+	if channelID, err = admin.Channels.CurrentIDSystem(r.Context(), orgID, channelID); err != nil {
+		httpx.InternalError(w, "slack/channels", err)
+		return
+	}
 	if err := admin.TeamChannels.SetPrimarySystem(r.Context(), orgID, channelID, teamID); err != nil {
 		if errors.Is(err, slackstore.ErrTeamNotTrackingChannel) {
 			httpx.BadRequest(w, "team does not track this channel")
@@ -599,6 +619,20 @@ func normalizeChannelIDs(ids []string) []string {
 		out = append(out, id)
 	}
 	return out
+}
+
+// currentChannelIDs maps each id to the id its channel has now, dropping the
+// duplicate a list naming a channel by both its ids would otherwise carry.
+func currentChannelIDs(ctx context.Context, channels slackstore.ChannelRegistryStore, orgID string, ids []string) ([]string, error) {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		current, err := channels.CurrentIDSystem(ctx, orgID, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, current)
+	}
+	return normalizeChannelIDs(out), nil
 }
 
 // diffChannelIDs computes added/removed against the prior tracked set —

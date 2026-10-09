@@ -119,11 +119,21 @@ func normalizeChannelIDs(channelIDs []string) []string {
 	return out
 }
 
+// currentChannelIDSQL resolves the channel id bound at the given placeholder
+// to the id the channel has now (ChannelRegistryStore.CurrentIDSystem's
+// read), inline, so a gate judging an earlier id costs no extra round trip.
+// The org is always $1.
+func currentChannelIDSQL(placeholder string) string {
+	return `COALESCE((SELECT c.new_channel_id FROM slack_channel_id_changes c
+		WHERE c.org_id = $1 AND c.old_channel_id = ` + placeholder + `), ` + placeholder + `)`
+}
+
 func (s *teamChannelStore) TracksChannelSystem(ctx context.Context, orgID, teamID, channelID string) (bool, error) {
 	var ok bool
 	if err := s.admin.QueryRowContext(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM team_slack_channels WHERE org_id = $1 AND team_id = $2 AND channel_id = $3
+			SELECT 1 FROM team_slack_channels
+			WHERE org_id = $1 AND team_id = $2 AND channel_id = `+currentChannelIDSQL("$3")+`
 		)
 	`, orgID, teamID, channelID).Scan(&ok); err != nil {
 		return false, fmt.Errorf("tracks channel team_slack_channels: %w", err)
@@ -135,7 +145,7 @@ func (s *teamChannelStore) PrimaryTeamForChannelSystem(ctx context.Context, orgI
 	var teamID string
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT team_id::text FROM team_slack_channels
-		WHERE org_id = $1 AND channel_id = $2 AND is_primary
+		WHERE org_id = $1 AND channel_id = `+currentChannelIDSQL("$2")+` AND is_primary
 	`, orgID, channelID).Scan(&teamID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil

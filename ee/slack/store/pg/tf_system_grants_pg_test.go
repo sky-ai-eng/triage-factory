@@ -54,6 +54,12 @@ func TestTfSystem_SlackProviderReads(t *testing.T) {
 	if _, err := sys.Channels.GetSystem(ctx, orgID, channelID); err != nil {
 		t.Errorf("Channels.GetSystem (slack_channels grant): %v", err)
 	}
+	if _, err := sys.Channels.CurrentIDSystem(ctx, orgID, channelID); err != nil {
+		t.Errorf("Channels.CurrentIDSystem (slack_channel_id_changes grant): %v", err)
+	}
+	if _, err := sys.TeamChannels.PrimaryTeamForChannelSystem(ctx, orgID, channelID); err != nil {
+		t.Errorf("TeamChannels.PrimaryTeamForChannelSystem (team_slack_channels + slack_channel_id_changes grants): %v", err)
+	}
 	if _, err := sys.Workspaces.GetByWorkspaceAppSystem(ctx, workspaceID, apiAppID); err != nil {
 		t.Errorf("Workspaces.GetByWorkspaceAppSystem (org_slack_workspaces grant): %v", err)
 	}

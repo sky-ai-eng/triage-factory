@@ -66,6 +66,7 @@ func TestIngestStats_OneOutcomePerDelivery(t *testing.T) {
 	stats, reader := newTestStats()
 	p, _, _, _ := newTestPipeline()
 	p.stats = stats
+	p.channels = newFakeChannelRegistry()
 	ws := testWorkspaceRow("org-1")
 	ctx := context.Background()
 
@@ -92,6 +93,8 @@ func TestIngestStats_OneOutcomePerDelivery(t *testing.T) {
 		{Type: "message", EventID: "Ev7", Channel: "C1", User: "U2", Text: "x", TS: "1600000007.000100"},
 		// mention_dedup: threaded @-mention owned by its app_mention twin.
 		{Type: "message", EventID: "Ev8", Channel: "C1", User: "U2", Text: "<@U0BOT> hey", TS: "1600000008.000100", ThreadTS: rootTS},
+		// channel_moved: another channel's id changed.
+		{Type: "channel_id_changed", EventID: "Ev9", OldChannelID: "G2", NewChannelID: "C2"},
 	}
 	for i, ev := range deliveries {
 		if err := p.handleEventCallback(ctx, ws, ev); err != nil {
@@ -109,6 +112,7 @@ func TestIngestStats_OneOutcomePerDelivery(t *testing.T) {
 		dropUnsupportedSubtype: 1,
 		dropNotThreadReply:     1,
 		dropMentionDedup:       1,
+		outcomeChannelMoved:    1,
 	}
 	got := sumByAttr(t, reader, "slack.ingest.events", "outcome")
 	var total int64

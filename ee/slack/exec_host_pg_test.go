@@ -992,6 +992,35 @@ func TestSlackExecHandler_Send_AuthzRefusal_TeamDoesNotTrackChannel(t *testing.T
 	}
 }
 
+// TestSlackExecHandler_Send_ChannelMovedToANewID: an agent replying with the
+// channel id its task's event metadata names, after Slack moved that channel
+// to a new id, is authorized through the moved tracking row and posts — and
+// records — under the new id.
+func TestSlackExecHandler_Send_ChannelMovedToANewID(t *testing.T) {
+	r := newSlackExecRig(t)
+	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-moved-chan")
+	r.seedWorkspace(orgID, owner, "T1", "A1", "xoxb-test")
+	r.seedChannel(orgID, "T1", "G0EXEC001")
+	r.trackChannel(orgID, owner, teamID, "G0EXEC001")
+	if _, err := slackstore.FromStores(r.stor).Channels.MoveSystem(r.t.Context(), orgID, "G0EXEC001", "C0EXEC001"); err != nil {
+		t.Fatalf("MoveSystem: %v", err)
+	}
+	conversationID := r.seedConversation(orgID, teamID, owner, true)
+	info := agenthost.ConversationInfo{OrgID: orgID, UserID: owner, ConversationID: conversationID, TeamID: teamID, IsEventTriggered: true}
+
+	out, err := r.hdl.send(context.Background(), r.rt(info), slackSendArgs{Channel: "G0EXEC001", ThreadTS: "1700000000.000100", Body: "hi"})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if out.Channel != "C0EXEC001" || r.fake.lastPostChannel != "C0EXEC001" {
+		t.Errorf("send result channel = %q, posted to %q; want both C0EXEC001", out.Channel, r.fake.lastPostChannel)
+	}
+	arts := r.artifactsForConversation(orgID, conversationID)
+	if len(arts) != 1 || arts[0].Target != domain.SlackSourceID("C0EXEC001", "1700000000.000100") {
+		t.Errorf("artifacts = %+v, want one targeting the thread under C0EXEC001", arts)
+	}
+}
+
 func TestSlackExecHandler_Send_UnknownChannel(t *testing.T) {
 	r := newSlackExecRig(t)
 	orgID, owner, teamID := pgtest.SeedOrgWithUser(t, r.h, "slack-unknown-chan")

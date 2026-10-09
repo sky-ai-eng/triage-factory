@@ -249,7 +249,11 @@ func (a *lifecycleAdapter) acknowledgeMention(ctx context.Context, orgID, eventI
 	if !ok {
 		return
 	}
-	if err := slackReactionsAdd(ctx, a.client, orgID, token, meta.Channel, meta.TS, slackLifecycleAckReaction); err != nil {
+	channel, ok := a.currentChannel(ctx, orgID, meta.Channel)
+	if !ok {
+		return
+	}
+	if err := slackReactionsAdd(ctx, a.client, orgID, token, channel, meta.TS, slackLifecycleAckReaction); err != nil {
 		slackLog.Warn("slack lifecycle: reactions.add failed", "error", err)
 	}
 }
@@ -270,12 +274,16 @@ func (a *lifecycleAdapter) replyNotConfigured(ctx context.Context, orgID, eventI
 	if !ok {
 		return
 	}
+	channel, ok := a.currentChannel(ctx, orgID, meta.Channel)
+	if !ok {
+		return
+	}
 	threadTS := meta.ThreadTS
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
 	if _, err := slackChatPostMessage(ctx, a.client, orgID, token, slackMessageParams{
-		Channel: meta.Channel, ThreadTS: threadTS, Text: slackLifecycleNoMatchCopy,
+		Channel: channel, ThreadTS: threadTS, Text: slackLifecycleNoMatchCopy,
 	}); err != nil {
 		slackLog.Warn("slack lifecycle: not-configured reply failed", "error", err)
 	}
@@ -303,6 +311,20 @@ func (a *lifecycleAdapter) messageMetadata(ctx context.Context, orgID, eventID s
 		return SlackMessageMetadata{}, false
 	}
 	return meta, true
+}
+
+// currentChannel resolves a channel id read from event metadata to the id
+// the channel has now: the event may have been recorded before Slack moved
+// the channel to a new one. ok=false on a failed read, logged: every caller is
+// best-effort and skips its Slack call rather than send it to an id that may
+// be retired.
+func (a *lifecycleAdapter) currentChannel(ctx context.Context, orgID, channelID string) (string, bool) {
+	channel, err := slackstore.FromStores(a.stores).Channels.CurrentIDSystem(ctx, orgID, channelID)
+	if err != nil {
+		slackLog.Warn("slack lifecycle: resolve channel id failed", "channel", channelID, "error", err)
+		return "", false
+	}
+	return channel, true
 }
 
 // resolveBotToken resolves the (workspace, api_app_id) pair to its bot
@@ -542,13 +564,21 @@ func (a *lifecycleAdapter) resolveConversationEntry(ctx context.Context, orgID, 
 	if !ok {
 		return entry
 	}
+	// The task's primary event is immutable and outlives a change of its
+	// channel's id, and every later conversation on the task resolves through
+	// it, so the indicator and the failure note go to the id the channel has
+	// now.
+	channel, ok := a.currentChannel(ctx, orgID, meta.Channel)
+	if !ok {
+		return entry
+	}
 
 	threadTS := meta.ThreadTS
 	if threadTS == "" {
 		threadTS = meta.TS
 	}
 	entry.isSlack = true
-	entry.channel = meta.Channel
+	entry.channel = channel
 	entry.threadTS = threadTS
 	entry.botToken = token
 	return entry

@@ -106,9 +106,19 @@ type slackReactResult struct{}
 // SELECTED locally from the claim's sealed bundle — so no secret crosses back.
 
 // authorizeChannel is the stage-1 gate: the conversation's team must track channelID.
-// The op errors when it doesn't, so a nil return means authorized.
-func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) error {
-	return rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, nil)
+// The op errors when it doesn't, so a nil error means authorized. It answers
+// with the id the channel has now, which the verb acts on from then on: an
+// agent passes the channel its task's event metadata names, and that is still
+// the old id for a channel Slack has since moved to a new one.
+func (h *slackExecHandler) authorizeChannel(ctx context.Context, rt agenthost.ExtensionRuntime, channelID string) (string, error) {
+	var res slackAuthorizedResult
+	if err := rt.Relay(ctx, "slack", opAuthorizeChannel, slackChannelArg{Channel: channelID}, &res); err != nil {
+		return "", err
+	}
+	if res.Channel == "" {
+		return channelID, nil
+	}
+	return res.Channel, nil
 }
 
 // resolveWorkspaceIdentity relays the workspace-identity decision for
@@ -179,9 +189,11 @@ func (h *slackExecHandler) send(ctx context.Context, rt agenthost.ExtensionRunti
 	if a.Body == "" && a.AttachBase64 == "" {
 		return slackSendResult{}, fmt.Errorf("slack: send needs --body/--body-file or --attach-file")
 	}
-	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
+	channel, err := h.authorizeChannel(ctx, rt, a.Channel)
+	if err != nil {
 		return slackSendResult{}, err
 	}
+	a.Channel = channel
 	ws, err := h.resolveWorkspaceIdentity(ctx, rt, a.Channel)
 	if err != nil {
 		return slackSendResult{}, err
@@ -292,9 +304,11 @@ func (h *slackExecHandler) edit(ctx context.Context, rt agenthost.ExtensionRunti
 	if a.Body == "" {
 		return slackEditResult{}, fmt.Errorf("slack: --body/--body-file is required")
 	}
-	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
+	channel, err := h.authorizeChannel(ctx, rt, a.Channel)
+	if err != nil {
 		return slackEditResult{}, err
 	}
+	a.Channel = channel
 	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackEditResult{}, err
@@ -315,9 +329,11 @@ func (h *slackExecHandler) react(ctx context.Context, rt agenthost.ExtensionRunt
 	if a.Channel == "" || a.TS == "" || a.Emoji == "" {
 		return slackReactResult{}, fmt.Errorf("slack: --channel, --ts, and --emoji are required")
 	}
-	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
+	channel, err := h.authorizeChannel(ctx, rt, a.Channel)
+	if err != nil {
 		return slackReactResult{}, err
 	}
+	a.Channel = channel
 	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return slackReactResult{}, err
@@ -517,9 +533,11 @@ func (h *slackExecHandler) readThread(ctx context.Context, rt agenthost.Extensio
 	if a.Channel == "" || a.TS == "" {
 		return nil, fmt.Errorf("slack: --channel and --ts are required")
 	}
-	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
+	channel, err := h.authorizeChannel(ctx, rt, a.Channel)
+	if err != nil {
 		return nil, err
 	}
+	a.Channel = channel
 	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err
@@ -547,9 +565,11 @@ func (h *slackExecHandler) readChannel(ctx context.Context, rt agenthost.Extensi
 	if a.Channel == "" {
 		return nil, fmt.Errorf("slack: --channel is required")
 	}
-	if err := h.authorizeChannel(ctx, rt, a.Channel); err != nil {
+	channel, err := h.authorizeChannel(ctx, rt, a.Channel)
+	if err != nil {
 		return nil, err
 	}
+	a.Channel = channel
 	token, err := h.resolveToken(ctx, rt, a.Channel)
 	if err != nil {
 		return nil, err

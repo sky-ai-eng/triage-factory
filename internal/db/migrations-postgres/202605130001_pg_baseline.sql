@@ -4812,12 +4812,15 @@ REVOKE ALL ON public.slack_event_deliveries FROM anon, authenticated, service_ro
 -- slack_channels: the org-wide registry of channels TF knows of (what exists;
 -- team_slack_channels below is who cares). Powers the discovery/claim UX and
 -- caches display names, since Slack event payloads carry only the channel ID.
--- org_id is part of the PK because channel IDs are globally unique and stable
--- across Enterprise Grid / Slack Connect: two orgs each running their own app in
--- a shared channel each get their own registry row. workspace_id is the
--- workspace the channel was last seen through — context for which bot token
--- resolves its name, not a foreign key. name = '' means unresolved; render the
--- raw channel_id. Postgres-only; the SQLite store returns ErrNotApplicableInLocal.
+-- org_id is part of the PK because a channel ID is globally unique and the same
+-- in every workspace across Enterprise Grid / Slack Connect: two orgs each
+-- running their own app in a shared channel each get their own registry row.
+-- An ID can still change (slack_channel_id_changes below), and following the
+-- change rewrites this row with every other row naming the channel.
+-- workspace_id is the workspace the channel was last seen through — context
+-- for which bot token resolves its name, not a foreign key. name = '' means
+-- unresolved; render the raw channel_id. Postgres-only; the SQLite store
+-- returns ErrNotApplicableInLocal.
 CREATE TABLE public.slack_channels (
     org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
     channel_id text NOT NULL,
@@ -4892,6 +4895,39 @@ CREATE POLICY team_slack_channels_delete ON public.team_slack_channels FOR DELET
 REVOKE ALL ON public.team_slack_channels FROM PUBLIC;
 REVOKE ALL ON public.team_slack_channels FROM anon, authenticated, service_role;
 GRANT SELECT, INSERT, DELETE ON public.team_slack_channels TO tf_app;
+
+
+-- slack_channel_id_changes: the channel IDs Slack replaced (the channel_id_changed
+-- event — a private channel shared through Slack Connect moves from its G… ID to
+-- a C… one). Following the change (the Slack store's MoveSystem) rewrites every
+-- row naming the old ID in one transaction and records the change here, because
+-- some copies of the old ID cannot be rewritten: event metadata is immutable,
+-- so a run on a task recorded before the change is told the old ID, and Slack
+-- may redeliver an event generated before the change after it. Readers that act
+-- on a channel resolve an ID through this table. One hop: when an ID moves
+-- again, every row pointing at it is pointed at its new ID. Per org, like
+-- slack_channels: each org's app receives its own delivery and moves its own
+-- rows. Admin-pool-only system table (RLS enabled, no policy): ingest writes it
+-- with no request claims, and tf_system reads it for the Slack provider policy
+-- ops.
+CREATE TABLE public.slack_channel_id_changes (
+    org_id uuid NOT NULL REFERENCES public.orgs(id) ON DELETE CASCADE,
+    old_channel_id text NOT NULL,
+    new_channel_id text NOT NULL,
+    changed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (org_id, old_channel_id),
+    CONSTRAINT scic_channels_populated CHECK (old_channel_id <> '' AND new_channel_id <> ''),
+    CONSTRAINT scic_channel_changed CHECK (old_channel_id <> new_channel_id)
+);
+
+-- Serves the move's re-pointing of earlier changes onto the newest ID.
+CREATE INDEX slack_channel_id_changes_new_idx
+    ON public.slack_channel_id_changes (org_id, new_channel_id);
+
+ALTER TABLE public.slack_channel_id_changes ENABLE ROW LEVEL SECURITY;
+
+REVOKE ALL ON public.slack_channel_id_changes FROM PUBLIC;
+REVOKE ALL ON public.slack_channel_id_changes FROM anon, authenticated, service_role;
 
 
 -- === Marketplace V1 ======================================================
@@ -6032,6 +6068,7 @@ GRANT SELECT ON TABLE public.system_llm_runs TO tf_system;
 -- identity, never a bot token (that rides the sealed bundle). Read-only.
 GRANT SELECT ON TABLE public.team_slack_channels TO tf_system;
 GRANT SELECT ON TABLE public.slack_channels TO tf_system;
+GRANT SELECT ON TABLE public.slack_channel_id_changes TO tf_system;
 GRANT SELECT ON TABLE public.org_slack_workspaces TO tf_system;
 -- The executor's schema-compatibility assert reads this; no DDL, ever.
 GRANT SELECT ON TABLE public.goose_db_version TO tf_system;

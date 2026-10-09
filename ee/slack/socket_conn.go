@@ -443,6 +443,9 @@ func (c *appConnection) processEventsAPIEnvelope(ctx context.Context, stores db.
 		Text:     inner.Text,
 		TS:       inner.TS,
 		ThreadTS: inner.ThreadTS,
+
+		OldChannelID: inner.OldChannelID,
+		NewChannelID: inner.NewChannelID,
 	}
 	if err := pipeline.handleEventCallback(ctx, *ws, ev); err != nil {
 		slackLog.Error("slack socket mode: pipeline error", "app", c.appID, "error", err)

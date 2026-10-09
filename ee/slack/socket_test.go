@@ -195,6 +195,7 @@ type socketTestRig struct {
 	secrets       *fakeSecretStore
 	configChanged chan struct{}
 	published     *[]domain.Event
+	channels      *fakeChannelRegistry
 }
 
 // newSocketTestRig builds a manager over rows, licensed for FeatureSlack and
@@ -229,15 +230,17 @@ func newSocketTestRig(t *testing.T, rows ...*slackstore.Workspace) *socketTestRi
 	}
 
 	published := &[]domain.Event{}
+	channels := newFakeChannelRegistry()
 	pipeline := &ingestPipeline{
 		entities:   newFakeEntities(),
 		deliveries: newFakeDeliveries(),
+		channels:   channels,
 		publish:    func(_ context.Context, evt domain.Event) { *published = append(*published, evt) },
 	}
 
 	configChanged := make(chan struct{}, 1)
 	mgr := newSocketManager(stores, pipeline, http.DefaultClient, configChanged)
-	return &socketTestRig{mgr: mgr, wsStore: wsStore, secrets: secrets, configChanged: configChanged, published: published}
+	return &socketTestRig{mgr: mgr, wsStore: wsStore, secrets: secrets, configChanged: configChanged, published: published, channels: channels}
 }
 
 func socketTestRow(orgID string) *slackstore.Workspace {
@@ -479,6 +482,40 @@ func TestSocketManager_EngagedThreadFollowUp_PublishesUnmentioned(t *testing.T) 
 	}
 	if meta.ThreadTS != "1600000000.000100" {
 		t.Errorf("follow-up ThreadTS = %q; want the root ts", meta.ThreadTS)
+	}
+}
+
+// TestSocketManager_ChannelIDChanged_MovesTheChannel is the socket twin of
+// the webhook test: the envelope's inner event carries both ids through to
+// the move, and is acked.
+func TestSocketManager_ChannelIDChanged_MovesTheChannel(t *testing.T) {
+	withFastSocketTimings(t)
+	fake := newFakeSlackSocket(t)
+	rig := newSocketTestRig(t, socketTestRow(socketTestOrgID))
+	runManager(t, rig.mgr)
+
+	conn := fake.nextConn(t)
+	payload := eventCallbackPayload(socketTestWorkspace, socketTestAppID, "Ev-moved", map[string]any{
+		"type": "channel_id_changed", "old_channel_id": "G0SHARED1", "new_channel_id": "C0SHARED1", "event_ts": "1612206778.000000",
+	})
+	sendEventsAPI(t, conn, "Env-moved", payload)
+	expectAck(t, conn, "Env-moved")
+
+	want := socketTestOrgID + "/G0SHARED1->C0SHARED1"
+	moves := func() []string {
+		rig.channels.mu.Lock()
+		defer rig.channels.mu.Unlock()
+		return append([]string(nil), rig.channels.sawMoves...)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(moves()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := moves(); len(got) != 1 || got[0] != want {
+		t.Errorf("moves = %v; want [%s]", got, want)
+	}
+	if len(*rig.published) != 0 {
+		t.Errorf("published %d events; want 0", len(*rig.published))
 	}
 }
 
