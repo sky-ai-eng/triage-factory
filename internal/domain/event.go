@@ -94,6 +94,14 @@ const (
 	EventGitHubPRConflicts      = "github:pr:conflicts"
 	EventGitHubPRMentioned      = "github:pr:mentioned"
 	EventGitHubPRBodyUpdated    = "github:pr:body_updated"
+
+	// "Triage Factory no longer follows a tracked PR." Terminating, like
+	// merged/closed. Emitted without asking GitHub, for a PR polled from a host
+	// the org's GitHub base URL no longer names (reason scope_changed): the new
+	// host cannot vouch for the old one's objects, and nothing else would ever
+	// close them, since GitHub has no event for a PR that stopped being
+	// reachable.
+	EventGitHubPRUnreachable = "github:pr:unreachable"
 )
 
 // Jira events
@@ -206,14 +214,15 @@ const (
 )
 
 // EntityTerminatingEventTypes is the set of source transitions that
-// terminate an entity: a merged or closed pull request, a completed or
-// unreachable Jira or Linear issue. The routing package derives the same set from its
+// terminate an entity: a merged, closed or unreachable pull request, a
+// completed or unreachable Jira or Linear issue. The routing package derives the same set from its
 // close relations; a routing test asserts the two agree, so the store layer
 // can read it without importing the router.
 func EntityTerminatingEventTypes() []string {
 	return []string{
 		EventGitHubPRMerged,
 		EventGitHubPRClosed,
+		EventGitHubPRUnreachable,
 		EventJiraIssueCompleted,
 		EventJiraIssueUnreachable,
 		EventLinearIssueCompleted,
@@ -288,6 +297,7 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPROpened, Source: "github", Category: "pr", Label: "PR Opened", Description: "A pull request was opened"},
 		{ID: EventGitHubPRMerged, Source: "github", Category: "pr", Label: "PR Merged", Description: "A pull request was merged"},
 		{ID: EventGitHubPRClosed, Source: "github", Category: "pr", Label: "PR Closed", Description: "A pull request was closed without merging"},
+		{ID: EventGitHubPRUnreachable, Source: "github", Category: "pr", Label: "PR Unreachable", Description: "Triage Factory no longer follows a tracked pull request — the org's GitHub base URL now names another host, which cannot vouch for the old host's objects. Never asked of GitHub"},
 
 		// --- Jira ---
 		{ID: EventJiraIssueAssigned, Source: "jira", Category: "issue", Label: "Issue Assigned", Description: "Issue was assigned to you"},

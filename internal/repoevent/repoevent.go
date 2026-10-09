@@ -46,9 +46,14 @@ const EventType = "repository_updated"
 // silently stranding the card. Slug is display — the toast that names the
 // repository a clone failed for has no row to join against — and is never
 // keyed on. Both are always set; neither is a diffed field.
+//
+// Host is the GitHub host the repository lives on, which the audience is
+// resolved on (tracking is per host). It is never on the wire: the client
+// merges by id, and the host is not one of the fields the emitter wrote.
 type Update struct {
 	ID             string  `json:"id"`
 	Slug           string  `json:"slug"`
+	Host           string  `json:"-"`
 	HasReadme      *bool   `json:"has_readme,omitempty"`
 	HasClaudeMd    *bool   `json:"has_claude_md,omitempty"`
 	HasAgentsMd    *bool   `json:"has_agents_md,omitempty"`
@@ -62,10 +67,11 @@ type Update struct {
 func Ptr[T any](v T) *T { return &v }
 
 // RecipientsFunc resolves the user ids that may receive an Update for
-// (owner, repo) in orgID — the WS mirror of the REST read's visibility.
+// (owner, repo) on host in orgID — the WS mirror of the REST read's
+// visibility.
 // db.TeamGitHubReposStore.RepoUpdateRecipientsSystem is the production
 // implementation.
-type RecipientsFunc func(ctx context.Context, orgID, owner, repo string) ([]string, error)
+type RecipientsFunc func(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
 
 // Broadcaster is the minimal hub surface Publish needs; *websocket.Hub
 // satisfies it (and is nil-receiver-safe, so a typed-nil hub no-ops).
@@ -112,7 +118,7 @@ func (n *Notifier) Publish(ctx context.Context, orgID string, upd Update) {
 		repoeventLog.Error("dropping event with malformed repo slug", "id", upd.ID, "slug", upd.Slug)
 		return
 	}
-	userIDs, err := n.recipients(ctx, orgID, owner, repo)
+	userIDs, err := n.recipients(ctx, orgID, upd.Host, owner, repo)
 	if err != nil {
 		repoeventLog.Error("resolve recipients failed; dropping event", "repo", upd.Slug, "error", err)
 		return

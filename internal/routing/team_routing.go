@@ -91,9 +91,12 @@ func (r *Router) teamTracksEventScope(ctx context.Context, evt domain.Event, tea
 }
 
 // teamTracksEventRepo extracts the repo from a GitHub event's metadata
-// and asks the store whether teamID tracks it. Every GitHub PR metadata
-// struct carries a top-level "repo" ("owner/name"), so a minimal
-// unmarshal is enough — no per-type decoding. Fail-open on a missing /
+// and asks the store whether teamID tracks it on the event's GitHub host
+// (githubEventHost). Every GitHub PR metadata struct carries a top-level
+// "repo" ("owner/name"), so a minimal unmarshal is enough — no per-type
+// decoding. The host is part of the match because a slug names a different
+// repository on another host: a team tracking acme/api on one host is not
+// tracking the acme/api of another. Fail-open on a missing /
 // malformed repo or a store error: dropping a legitimate task on a
 // transient DB blip or an unexpected metadata shape is worse than the
 // pre-ticket behavior, and the events feeding this path come from TF's
@@ -116,12 +119,41 @@ func (r *Router) teamTracksEventRepo(ctx context.Context, evt domain.Event, team
 	if !ok || owner == "" || name == "" {
 		return true
 	}
-	tracks, err := r.teamRepos.TracksRepoSystem(ctx, teamID, owner, name)
+	host, err := r.githubEventHost(ctx, evt)
+	if err != nil {
+		routerLog.Warn("team-repo gate host lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
+		return true
+	}
+	tracks, err := r.teamRepos.TracksRepoSystem(ctx, teamID, host, owner, name)
 	if err != nil {
 		routerLog.Warn("team-repo gate lookup failed, allowing", "team_id", teamID, "repo", m.Repo, "error", err)
 		return true
 	}
 	return tracks
+}
+
+// githubEventHost is the GitHub host a GitHub event is about: the "host" its
+// metadata names when it carries one (github:pr:unreachable does, because it is
+// emitted for a pull request on a host the org has left), else the scope of the
+// entity it is about — the host the pull request was polled from — else the
+// org's current host, for an event with neither.
+func (r *Router) githubEventHost(ctx context.Context, evt domain.Event) (string, error) {
+	var m struct {
+		Host string `json:"host"`
+	}
+	if err := json.Unmarshal([]byte(evt.MetadataJSON), &m); err == nil && m.Host != "" {
+		return m.Host, nil
+	}
+	if evt.EntityID != nil && r.entities != nil {
+		e, err := r.entities.GetSystem(ctx, evt.OrgID, *evt.EntityID)
+		if err != nil {
+			return "", fmt.Errorf("read entity for github host: %w", err)
+		}
+		if e != nil && e.Source == "github" && e.Scope != "" {
+			return e.Scope, nil
+		}
+	}
+	return dbpkg.OrgGitHubHostSystem(ctx, r.orgs, evt.OrgID)
 }
 
 // teamTracksEventProject extracts the Jira project key from an event's
@@ -331,7 +363,14 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 		if !ok || orgLogin == "" || slug == "" {
 			return nil, true, nil // malformed handle → no team
 		}
-		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, orgLogin, slug)
+		// The GitHub team lives on the pull request's host; a mapping saved
+		// for the same org login on another host names another organization.
+		host, err := r.githubEventHost(ctx, evt)
+		if err != nil {
+			routerLog.Error("review_requested: resolve github host failed", "requested_team", meta.RequestedTeam, "error", err)
+			return nil, false, fmt.Errorf("github host for %s: %w", meta.RequestedTeam, err)
+		}
+		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, host, orgLogin, slug)
 		if err != nil {
 			routerLog.Error("review_requested: github-team mapping lookup failed", "requested_team", meta.RequestedTeam, "error", err)
 			return nil, false, fmt.Errorf("github-team mapping for %s: %w", meta.RequestedTeam, err)

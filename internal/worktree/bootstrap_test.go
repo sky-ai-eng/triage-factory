@@ -59,12 +59,12 @@ func TestEnsureBareClone_Idempotent(t *testing.T) {
 	upstream := makeTestUpstream(t)
 
 	for i := 0; i < 3; i++ {
-		if _, err := EnsureBareClone(context.Background(), "owner2", "repo2", upstream); err != nil {
+		if _, err := EnsureBareClone(context.Background(), testRepo("owner2", "repo2"), upstream); err != nil {
 			t.Fatalf("EnsureBareClone iteration %d: %v", i, err)
 		}
 	}
 
-	bareDir, _ := repoDir("owner2", "repo2")
+	bareDir, _ := repoDir(testRepo("owner2", "repo2").ID)
 	if _, err := os.Stat(bareDir); err != nil {
 		t.Fatalf("bare dir missing after repeated EnsureBareClone: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestEnsureBareClone_RepairsOriginURL(t *testing.T) {
 	upstream1 := makeTestUpstream(t)
 	upstream2 := makeTestUpstream(t)
 
-	bareDir, err := EnsureBareClone(context.Background(), "owner3", "repo3", upstream1)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner3", "repo3"), upstream1)
 	if err != nil {
 		t.Fatalf("first EnsureBareClone: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestEnsureBareClone_RepairsOriginURL(t *testing.T) {
 		t.Fatalf("setup: expected origin %q, got %q", upstream1, got)
 	}
 
-	if _, err := EnsureBareClone(context.Background(), "owner3", "repo3", upstream2); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("owner3", "repo3"), upstream2); err != nil {
 		t.Fatalf("second EnsureBareClone: %v", err)
 	}
 	out, err = exec.Command("git", "-C", bareDir, "config", "--get", "remote.origin.url").Output()
@@ -104,15 +104,15 @@ func TestBootstrapBareClones_SkipsEmptyCloneURL(t *testing.T) {
 	upstream := makeTestUpstream(t)
 
 	BootstrapBareClones(context.Background(), []BootstrapTarget{
-		{Owner: "with", Repo: "url", CloneURL: upstream},
-		{Owner: "without", Repo: "url", CloneURL: ""},
+		{Repo: testRepo("with", "url"), CloneURL: upstream},
+		{Repo: testRepo("without", "url"), CloneURL: ""},
 	})
 
-	withDir, _ := repoDir("with", "url")
+	withDir, _ := repoDir(testRepo("with", "url").ID)
 	if _, err := os.Stat(withDir); err != nil {
 		t.Errorf("expected bare for non-empty URL: %v", err)
 	}
-	withoutDir, _ := repoDir("without", "url")
+	withoutDir, _ := repoDir(testRepo("without", "url").ID)
 	if _, err := os.Stat(withoutDir); !os.IsNotExist(err) {
 		t.Errorf("expected no bare for empty URL, got err=%v", err)
 	}
@@ -285,7 +285,7 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
-	bareDir, _ := repoDir("owner-cleanup-test", "repo-cleanup-test")
+	bareDir, _ := repoDir(testRepo("owner-cleanup-test", "repo-cleanup-test").ID)
 	const branch = "triagefactory/cleanup-test-run/pr-99"
 	const remote = "tfpush-cleanup-test-run-99"
 
@@ -305,7 +305,7 @@ func TestCleanupPRConfig_RemovesForkPRArtifacts(t *testing.T) {
 	if err := RemoveAt(wtPath, "cleanup-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig("owner-cleanup-test", "repo-cleanup-test", 99, "cleanup-test-run")
+	CleanupPRConfig(testRepo("owner-cleanup-test", "repo-cleanup-test").ID, 99, "cleanup-test-run")
 
 	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), remote) {
 		t.Errorf("%s remote still present after cleanup: %s", remote, out)
@@ -332,15 +332,15 @@ func TestCleanupPRConfig_NeverSetUpIsNoOp(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
 
-	if _, err := EnsureBareClone(context.Background(), "owner-noop-test", "repo-noop-test", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("owner-noop-test", "repo-noop-test"), upstream); err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
 
 	// Cleanup for a PR that was never set up. Should not panic, fail,
 	// or affect the bare.
-	CleanupPRConfig("owner-noop-test", "repo-noop-test", 12345, "noop-run")
+	CleanupPRConfig(testRepo("owner-noop-test", "repo-noop-test").ID, 12345, "noop-run")
 
-	bareDir, _ := repoDir("owner-noop-test", "repo-noop-test")
+	bareDir, _ := repoDir(testRepo("owner-noop-test", "repo-noop-test").ID)
 	if out, err := exec.Command("git", "-C", bareDir, "config", "--get", "remote.origin.url").Output(); err != nil || strings.TrimSpace(string(out)) != upstream {
 		t.Errorf("origin URL damaged by no-op cleanup: %v / %s", err, out)
 	}
@@ -527,7 +527,7 @@ func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 		t.Fatalf("RemoveAt: %v", err)
 	}
 
-	bareDir, _ := repoDir("owner-takeover-test", "repo-takeover-test")
+	bareDir, _ := repoDir(testRepo("owner-takeover-test", "repo-takeover-test").ID)
 	const branch = "triagefactory/takeover-test-run/pr-300"
 	const remote = "tfpush-takeover-test-run-300"
 	// Sanity: per-run tracking + ref + remote are still in the bare pre-sweep.
@@ -538,7 +538,7 @@ func TestSweepStaleForkPRConfig_ReclaimsOwnRepoPR(t *testing.T) {
 		t.Fatalf("setup: %s branch missing pre-sweep: %v / %s", branch, err, out)
 	}
 
-	SweepStaleForkPRConfig("owner-takeover-test", "repo-takeover-test")
+	SweepStaleForkPRConfig(testRepo("owner-takeover-test", "repo-takeover-test").ID)
 
 	if _, err := exec.Command("git", "-C", bareDir, "config", "--get", "branch."+branch+".remote").Output(); err == nil {
 		t.Errorf("per-run branch tracking survived sweep")
@@ -584,7 +584,7 @@ func TestCreateForPR_DeletedFork_PerRunBranchCleanedUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateForPR: %v", err)
 	}
-	bareDir, _ := repoDir("owner-stale-test", "repo-stale-test")
+	bareDir, _ := repoDir(testRepo("owner-stale-test", "repo-stale-test").ID)
 	const branch = "triagefactory/stale-test-run/pr-400"
 	// The PR head lands on the run-namespaced branch...
 	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err != nil {
@@ -599,7 +599,7 @@ func TestCreateForPR_DeletedFork_PerRunBranchCleanedUp(t *testing.T) {
 	if err := RemoveAt(wtPath, "stale-test-run"); err != nil {
 		t.Fatalf("RemoveAt: %v", err)
 	}
-	CleanupPRConfig("owner-stale-test", "repo-stale-test", 400, "stale-test-run")
+	CleanupPRConfig(testRepo("owner-stale-test", "repo-stale-test").ID, 400, "stale-test-run")
 
 	if out, err := exec.Command("git", "-C", bareDir, "show-ref", "--verify", "refs/heads/"+branch).CombinedOutput(); err == nil {
 		t.Errorf("refs/heads/%s survived cleanup: %s", branch, out)
@@ -614,10 +614,10 @@ func TestCreateForPR_DeletedFork_PerRunBranchCleanedUp(t *testing.T) {
 func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	if _, err := EnsureBareClone(context.Background(), "owner-strict-test", "repo-strict-test", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("owner-strict-test", "repo-strict-test"), upstream); err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
-	bareDir, _ := repoDir("owner-strict-test", "repo-strict-test")
+	bareDir, _ := repoDir(testRepo("owner-strict-test", "repo-strict-test").ID)
 
 	// Two user-added remotes that prefix-match but aren't ours.
 	for _, name := range []string{"head-42-mine", "head-100x"} {
@@ -626,7 +626,7 @@ func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 		}
 	}
 
-	SweepStaleForkPRConfig("owner-strict-test", "repo-strict-test")
+	SweepStaleForkPRConfig(testRepo("owner-strict-test", "repo-strict-test").ID)
 
 	out, err := exec.Command("git", "-C", bareDir, "remote").Output()
 	if err != nil {
@@ -654,10 +654,10 @@ func TestSweepStaleForkPRConfig_PreservesUserAddedRemotes(t *testing.T) {
 func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	if _, err := EnsureBareClone(context.Background(), "owner-sweep-test", "repo-sweep-test", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("owner-sweep-test", "repo-sweep-test"), upstream); err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
-	bareDir, _ := repoDir("owner-sweep-test", "repo-sweep-test")
+	bareDir, _ := repoDir(testRepo("owner-sweep-test", "repo-sweep-test").ID)
 
 	// Stand up the per-run PR config that PR setup would have produced for two
 	// PRs that are now orphaned (no worktree). The trackedBranchMarkerKey on the
@@ -688,7 +688,7 @@ func TestSweepStaleForkPRConfig_RemovesOrphanedRemotes(t *testing.T) {
 		t.Fatalf("add extra remote: %v: %s", err, out)
 	}
 
-	SweepStaleForkPRConfig("owner-sweep-test", "repo-sweep-test")
+	SweepStaleForkPRConfig(testRepo("owner-sweep-test", "repo-sweep-test").ID)
 
 	remotesOut, err := exec.Command("git", "-C", bareDir, "remote").Output()
 	if err != nil {
@@ -761,9 +761,9 @@ func TestSweepStaleForkPRConfig_PreservesLiveWorktree(t *testing.T) {
 
 	// Sweep with the worktree still present. The per-run branch is in use, so
 	// the sweep must skip it (and its remote).
-	SweepStaleForkPRConfig("owner-live-test", "repo-live-test")
+	SweepStaleForkPRConfig(testRepo("owner-live-test", "repo-live-test").ID)
 
-	bareDir, _ := repoDir("owner-live-test", "repo-live-test")
+	bareDir, _ := repoDir(testRepo("owner-live-test", "repo-live-test").ID)
 	out, err := exec.Command("git", "-C", bareDir, "remote").Output()
 	if err != nil {
 		t.Fatalf("list remotes: %v", err)
@@ -820,9 +820,9 @@ func TestCleanupPRConfig_RunsAfterContextCancellation(t *testing.T) {
 	// CleanupPRConfig takes no ctx — it constructs its own internal
 	// background ctx. Even if the caller's ctx is fully cancelled,
 	// cleanup must still run.
-	CleanupPRConfig("owner-cancel-test", "repo-cancel-test", 123, "cancel-test-run")
+	CleanupPRConfig(testRepo("owner-cancel-test", "repo-cancel-test").ID, 123, "cancel-test-run")
 
-	bareDir, _ := repoDir("owner-cancel-test", "repo-cancel-test")
+	bareDir, _ := repoDir(testRepo("owner-cancel-test", "repo-cancel-test").ID)
 	if out, err := exec.Command("git", "-C", bareDir, "remote").Output(); err != nil || strings.Contains(string(out), "tfpush-cancel-test-run-123") {
 		t.Errorf("per-run remote not cleaned up despite detached context: %v / %s", err, out)
 	}
@@ -955,7 +955,7 @@ func TestCreateForPR_TrackingRefMaterialized(t *testing.T) {
 	localBranch := "triagefactory/tracking-test-run/pr-9"
 	remote := prPushRemoteName("tracking-test-run", 9)
 
-	bareDir, err := repoDir("owner-tracking-test", "repo-tracking-test")
+	bareDir, err := repoDir(testRepo("owner-tracking-test", "repo-tracking-test").ID)
 	if err != nil {
 		t.Fatalf("repoDir: %v", err)
 	}
@@ -1062,7 +1062,7 @@ func TestCreateForPR_ConcurrentSamePR_OwnRepo(t *testing.T) {
 	// real concurrent push to it races at the remote — an orthogonal, expected
 	// non-fast-forward — so assert the DESTINATION refspec, which is what proves
 	// run B also lands on the PR head, not a stray branch).
-	bareDir, _ := repoDir("owner-conc-own", "repo-conc-own")
+	bareDir, _ := repoDir(testRepo("owner-conc-own", "repo-conc-own").ID)
 	if got, want := coOut(t, bareDir, "config", "--get", "remote.tfpush-run-B-8.push"),
 		"refs/heads/triagefactory/run-B/pr-8:refs/heads/shared-feature"; got != want {
 		t.Errorf("run B push refspec = %q, want %q (must target the PR head)", got, want)
@@ -1207,7 +1207,7 @@ func assertReAddSucceeds(t *testing.T, bareDir, branch string) {
 func TestRemoveWorktreeRegFor_UnwedgesAndIsolated(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1240,7 +1240,7 @@ func TestRemoveWorktreeRegFor_UnwedgesAndIsolated(t *testing.T) {
 func TestRemoveWorktreeRegFor_FindsAnUnrecordedEntryBehindATakenName(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1285,7 +1285,7 @@ func TestRemoveWorktreeRegFor_FindsAnUnrecordedEntryBehindATakenName(t *testing.
 func TestClearStaleLockedWorktrees_ReclaimsLocalizedGhost(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1306,7 +1306,7 @@ func TestClearStaleLockedWorktrees_ReclaimsLocalizedGhost(t *testing.T) {
 func TestClearStaleLockedWorktrees_PreservesLiveLockedWorktree(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1329,7 +1329,7 @@ func TestClearStaleLockedWorktrees_PreservesLiveLockedWorktree(t *testing.T) {
 func TestClearStaleLockedWorktrees_PreservesUnmountedUserWorktree(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1354,7 +1354,7 @@ func TestClearStaleLockedWorktrees_PreservesUnmountedUserWorktree(t *testing.T) 
 func TestCleanup_SweepsBareGhostWithoutRunsDir(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "owner", "repo", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("owner", "repo"), upstream)
 	if err != nil {
 		t.Fatalf("EnsureBareClone: %v", err)
 	}
@@ -1425,7 +1425,7 @@ func TestCreateForPR_SnapshotBundleIsBounded(t *testing.T) {
 
 	// The mirror ref records GitHub's known tip in the namespace the
 	// snapshot's bundle excludes — under the per-run local branch path.
-	bareDir, _ := repoDir("owner-bundle-test", "repo-bundle-test")
+	bareDir, _ := repoDir(testRepo("owner-bundle-test", "repo-bundle-test").ID)
 	mirrorRef := "refs/remotes/origin/triagefactory/bundle-test-run/pr-9"
 	out, err = exec.Command("git", "-C", bareDir, "rev-parse", mirrorRef).Output()
 	if err != nil {
@@ -1497,7 +1497,7 @@ func TestCreateForPR_RefreshesBaseBranchRef(t *testing.T) {
 	git("-C", work, "push", "-q", "up", "HEAD:refs/pull/21/head")
 
 	// Seed the bare while main is still at A → its base ref is clone-time A.
-	if _, err := EnsureBareClone(context.Background(), "owner-base", "repo-base", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("owner-base", "repo-base"), upstream); err != nil {
 		t.Fatalf("seed bare: %v", err)
 	}
 
@@ -1517,7 +1517,7 @@ func TestCreateForPR_RefreshesBaseBranchRef(t *testing.T) {
 	// origin/main is created ONLY by the base fetch (a --bare clone populates
 	// refs/heads/*, and the PR head mirror targets refs/remotes/origin/<localBranch>),
 	// so its presence at B proves the refresh ran against the current base.
-	bareDir, err := repoDir("owner-base", "repo-base")
+	bareDir, err := repoDir(testRepo("owner-base", "repo-base").ID)
 	if err != nil {
 		t.Fatalf("repoDir: %v", err)
 	}

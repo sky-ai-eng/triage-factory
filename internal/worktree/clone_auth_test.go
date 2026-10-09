@@ -175,7 +175,7 @@ func TestCloneAuth_InjectsHeaderOnClone(t *testing.T) {
 	base, authHeader := startRefsCaptureServer(t)
 	cloneURL := base + "/acme/repo.git"
 
-	_, _ = EnsureBareClone(context.Background(), "acme", "repo-auth-inject", cloneURL,
+	_, _ = EnsureBareClone(context.Background(), testRepo("acme", "repo-auth-inject"), cloneURL,
 		WithCloneAuth(CloneAuthFor(cloneURL, "ghs_clone_token")))
 
 	want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:ghs_clone_token"))
@@ -194,7 +194,7 @@ func TestCloneAuth_NoHeaderWithoutAuth(t *testing.T) {
 	base, authHeader := startRefsCaptureServer(t)
 	cloneURL := base + "/acme/repo.git"
 
-	_, _ = EnsureBareClone(context.Background(), "acme", "repo-noauth", cloneURL)
+	_, _ = EnsureBareClone(context.Background(), testRepo("acme", "repo-noauth"), cloneURL)
 
 	if got := authHeader(); got != "" {
 		t.Errorf("info/refs Authorization = %q, want empty (no auth injected)", got)

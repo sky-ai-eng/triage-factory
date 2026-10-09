@@ -103,7 +103,7 @@ func TestCheckoutBuilders_WriteNothingOfTFs(t *testing.T) {
 			root := mustRunRoot(t, "isolation-run")
 			t.Cleanup(func() { RemoveRunRoot("isolation-run") })
 
-			pr, err := CreateForPRInRoot(context.Background(), "acme", "repo", upstream, upstream, "feature", 7, "conv-a", root)
+			pr, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForPRInRoot: %v", err)
 			}
@@ -112,7 +112,7 @@ func TestCheckoutBuilders_WriteNothingOfTFs(t *testing.T) {
 			}
 			assertCheckoutUntouched(t, pr)
 
-			co, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", upstream, "main", "conv-a", root)
+			co, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), upstream, "main", "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForCheckoutInRoot: %v", err)
 			}
@@ -133,7 +133,7 @@ func TestRestoreCheckout_TrackedSkillsRoundTrip(t *testing.T) {
 	t.Setenv("TF_STATE_ROOT", t.TempDir())
 	upstream := makeSkillsTrackingUpstream(t)
 
-	wtDir, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", upstream, "main", "conv-a", root)
+	wtDir, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), upstream, "main", "conv-a", root)
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot: %v", err)
 	}

@@ -22,7 +22,23 @@ import (
 // claudeProjectsDir and claudeHome live in claude_session.go alongside the
 // rest of the Claude Code session/project-dir handling.
 
+// Repo names the repository a bare clone is of. ID is its registry row id,
+// which keys the bare clone cache and the lock that serializes it: a slug names
+// a repository only on one GitHub host, and a rename moves it, while the row id
+// is neither, so two hosts' same-named repositories and two orgs' never share a
+// directory, and a renamed repository keeps its own. Owner and Name are what
+// git, the logs and the run tree (<root>/<owner>/<repo>/<slug>) know it by.
+type Repo struct {
+	ID    string
+	Owner string
+	Name  string
+}
+
+// Slug renders the repository's "owner/repo".
+func (r Repo) Slug() string { return r.Owner + "/" + r.Name }
+
 // Per-repo mutexes prevent concurrent fetches from racing on the same bare repo.
+// Keyed by the repository's row id, like the bare itself.
 var (
 	repoMu    sync.Mutex
 	repoLocks = map[string]*sync.Mutex{}
@@ -41,12 +57,12 @@ var (
 // nil-guard early-return.
 var (
 	onCloneResultMu sync.RWMutex
-	onCloneResult   func(owner, repo string, err error)
+	onCloneResult   func(r Repo, err error)
 )
 
 // SetOnCloneResult installs the post-clone callback. Safe to call
 // multiple times (last writer wins). Pass nil to detach (used by tests).
-func SetOnCloneResult(cb func(owner, repo string, err error)) {
+func SetOnCloneResult(cb func(r Repo, err error)) {
 	onCloneResultMu.Lock()
 	defer onCloneResultMu.Unlock()
 	onCloneResult = cb
@@ -55,7 +71,7 @@ func SetOnCloneResult(cb func(owner, repo string, err error)) {
 // fireCloneResult invokes the registered callback if any. Recovers from
 // panics in the callback so a misbehaving consumer can't bring down a
 // poller goroutine — the callback's job is purely observational.
-func fireCloneResult(owner, repo string, err error) {
+func fireCloneResult(r Repo, err error) {
 	onCloneResultMu.RLock()
 	cb := onCloneResult
 	onCloneResultMu.RUnlock()
@@ -63,15 +79,17 @@ func fireCloneResult(owner, repo string, err error) {
 		return
 	}
 	defer func() {
-		if r := recover(); r != nil {
-			worktreeLog.Error("onCloneResult callback panicked", "owner", owner, "repo", repo, "panic", r)
+		if p := recover(); p != nil {
+			worktreeLog.Error("onCloneResult callback panicked", "repository_id", r.ID, "repo", r.Slug(), "panic", p)
 		}
 	}()
-	cb(owner, repo, err)
+	cb(r, err)
 }
 
-func lockRepo(owner, repo string) *sync.Mutex {
-	key := owner + "/" + repo
+// lockRepo returns the mutex serializing every git operation on the bare clone
+// of the repository with registry id repositoryID.
+func lockRepo(repositoryID string) *sync.Mutex {
+	key := repositoryID
 	repoMu.Lock()
 	defer repoMu.Unlock()
 	mu, ok := repoLocks[key]
@@ -92,14 +110,6 @@ func lockRepo(owner, repo string) *sync.Mutex {
 // '<bare>/refs/remotes/origin/<branch>.lock'" or otherwise corrupt
 // the ref, hence the lock.
 //
-// Callback returns drive the caller's error path; the lock is
-// always released on return.
-func WithRepoLock(owner, repo string, fn func() error) error {
-	mu := lockRepo(owner, repo)
-	mu.Lock()
-	defer mu.Unlock()
-	return fn()
-}
 
 // runsDir is the basename for ephemeral run worktrees under
 // os.TempDir() (/tmp/triagefactory-runs/{rootKey}). Ephemeral and
@@ -356,23 +366,34 @@ func CloneAuthFromOptions(opts ...CloneOption) CloneAuth {
 	return resolveCloneOptions(opts).auth
 }
 
-func repoDir(owner, repo string) (string, error) {
-	// orgID is the local-default sentinel for now; threading the
-	// real orgID through here would make this bare cache bounded + evictable.
+// repoDir is the bare clone of the repository with registry id repositoryID:
+// <StateRoot>/repos/<repositoryID>.git. The row id is globally unique, so the
+// cache needs no org or host segment to keep two orgs' or two hosts' same-named
+// repositories apart. An id that is not one path segment is refused rather than
+// resolved somewhere else.
+func repoDir(repositoryID string) (string, error) {
 	// StateRootErr surfaces a missing $HOME the way the pre-paths
 	// os.UserHomeDir call did, rather than letting BareCacheDir panic.
 	if _, err := paths.StateRootErr(); err != nil {
 		return "", err
 	}
-	return paths.BareCacheDir(runmode.LocalDefaultOrgID, owner, repo), nil
+	if !validRepositoryID(repositoryID) {
+		return "", fmt.Errorf("repository id %q is not a bare clone key", repositoryID)
+	}
+	return paths.BareCacheDir(runmode.LocalDefaultOrgID, repositoryID), nil
+}
+
+// validRepositoryID reports whether id can name a bare clone directory: one
+// non-empty path segment that is not "." or "..".
+func validRepositoryID(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\`)
 }
 
 // RepoDir is the exported variant of repoDir for callers outside the worktree
 // package that need the bare clone's path to run git against it directly (e.g.
-// the workspace-snapshot tests). Wrapper rather than renaming repoDir to keep
-// the existing internal call sites untouched.
-func RepoDir(owner, repo string) (string, error) {
-	return repoDir(owner, repo)
+// the workspace-snapshot tests).
+func RepoDir(repositoryID string) (string, error) {
+	return repoDir(repositoryID)
 }
 
 // rootKey names the id a run root is keyed by — see RunRoot for which id that
@@ -446,11 +467,11 @@ func RemoveRunRoot(rootKey string) {
 // in repositories.clone_url, populated during repo profiling). Passing
 // a fork's URL would clobber the bare's origin and is the historical
 // bug this function exists to prevent — see repairOriginURL.
-func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string, opts ...CloneOption) (string, error) {
-	mu := lockRepo(owner, repo)
+func EnsureBareClone(ctx context.Context, r Repo, cloneURL string, opts ...CloneOption) (string, error) {
+	mu := lockRepo(r.ID)
 	mu.Lock()
 	defer mu.Unlock()
-	return ensureBareCloneLocked(ctx, owner, repo, cloneURL, resolveCloneOptions(opts).auth)
+	return ensureBareCloneLocked(ctx, r, cloneURL, resolveCloneOptions(opts).auth)
 }
 
 // ensureBareCloneLocked clones the bare if missing and repairs a
@@ -470,7 +491,7 @@ func EnsureBareClone(ctx context.Context, owner, repo, cloneURL string, opts ...
 // `git fetch` / `git pull`, where it would mirror every PR's head
 // on every refresh — thousands of extra refs on busy repos for no
 // internal benefit.
-func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, auth CloneAuth) (bareDir string, err error) {
+func ensureBareCloneLocked(ctx context.Context, r Repo, cloneURL string, auth CloneAuth) (bareDir string, err error) {
 	// Fire the post-clone callback exactly once per call so consumers
 	// (main.go's hook → repositories + websocket) see one event per
 	// attempt regardless of whether we hit the fresh-clone branch or
@@ -492,12 +513,12 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, au
 	// so detaching it is safe.
 	defer func() {
 		if err != nil {
-			worktreeLog.Error("ensureBareClone failed", "owner", owner, "repo", repo, "error", err)
+			worktreeLog.Error("ensureBareClone failed", "repository_id", r.ID, "repo", r.Slug(), "error", err)
 		}
-		go fireCloneResult(owner, repo, err)
+		go fireCloneResult(r, err)
 	}()
 
-	bareDir, err = cloneBareIfMissing(ctx, owner, repo, cloneURL, auth)
+	bareDir, err = cloneBareIfMissing(ctx, r, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -520,17 +541,17 @@ func ensureBareCloneLocked(ctx context.Context, owner, repo, cloneURL string, au
 // the bare directory doesn't yet exist. Caller must hold the per-repo
 // lock. Does NOT configure origin URL or refspecs — see
 // ensureBareCloneLocked for the full lifecycle.
-func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth CloneAuth) (string, error) {
-	bareDir, err := repoDir(owner, repo)
+func cloneBareIfMissing(ctx context.Context, r Repo, cloneURL string, auth CloneAuth) (string, error) {
+	bareDir, err := repoDir(r.ID)
 	if err != nil {
 		return "", fmt.Errorf("resolve repo dir: %w", err)
 	}
 
 	if _, err := os.Stat(bareDir); os.IsNotExist(err) {
 		if cloneURL == "" {
-			return "", fmt.Errorf("bare clone for %s/%s missing and no cloneURL provided", owner, repo)
+			return "", fmt.Errorf("bare clone for %s missing and no cloneURL provided", r.Slug())
 		}
-		worktreeLog.Info("cloning (first time)", "owner", owner, "repo", repo)
+		worktreeLog.Info("cloning (first time)", "repository_id", r.ID, "repo", r.Slug())
 		if err := os.MkdirAll(filepath.Dir(bareDir), 0755); err != nil {
 			return "", fmt.Errorf("mkdir: %w", err)
 		}
@@ -538,7 +559,7 @@ func cloneBareIfMissing(ctx context.Context, owner, repo, cloneURL string, auth 
 		if err := gitRunCtxAuth(ctx, "", auth, "clone", "--bare", "--filter=blob:none", cloneURL, bareDir); err != nil {
 			return "", fmt.Errorf("bare clone: %w", err)
 		}
-		worktreeLog.Debug("clone completed", "owner", owner, "repo", repo, "duration", time.Since(start).Round(time.Millisecond))
+		worktreeLog.Debug("clone completed", "repository_id", r.ID, "repo", r.Slug(), "duration", time.Since(start).Round(time.Millisecond))
 	}
 
 	return bareDir, nil

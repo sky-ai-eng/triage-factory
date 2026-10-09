@@ -58,7 +58,7 @@ func TestCreateForCheckoutInRoot_DefaultBranchDetached(t *testing.T) {
 	upstream := makeTestUpstream(t) // default branch "main", one commit
 	runRoot := t.TempDir()
 
-	wt, err := CreateForCheckoutInRoot(context.Background(), "owner", "repo", upstream, "", "run-1", runRoot)
+	wt, err := CreateForCheckoutInRoot(context.Background(), testRepo("owner", "repo"), upstream, "", "run-1", runRoot)
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestCreateForCheckoutInRoot_Ref(t *testing.T) {
 	featureTip := coPushBranch(t, upstream, "feature-x")
 	runRoot := t.TempDir()
 
-	wt, err := CreateForCheckoutInRoot(context.Background(), "owner", "repo", upstream, "feature-x", "run-2", runRoot)
+	wt, err := CreateForCheckoutInRoot(context.Background(), testRepo("owner", "repo"), upstream, "feature-x", "run-2", runRoot)
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot(--ref): %v", err)
 	}
@@ -106,7 +106,7 @@ func TestCreateForCheckoutInRoot_Ref(t *testing.T) {
 
 // TestCreateForCheckoutInRoot_RequiresRunRoot pins the in-root contract guard.
 func TestCreateForCheckoutInRoot_RequiresRunRoot(t *testing.T) {
-	if _, err := CreateForCheckoutInRoot(context.Background(), "o", "r", "url", "", "run", ""); err == nil {
+	if _, err := CreateForCheckoutInRoot(context.Background(), testRepo("o", "r"), "url", "", "run", ""); err == nil {
 		t.Fatal("expected error when runRoot is empty")
 	}
 }

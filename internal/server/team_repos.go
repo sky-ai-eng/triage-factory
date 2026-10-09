@@ -444,7 +444,8 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		orgSet, e = tx.Orgs.GetSettings(ctx, orgID)
 		return e
 	})
-	if creds.GitHubPAT != "" {
+	// A PAT bound on another host is never sent to this one.
+	if integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
 		baseURL := orgSet.GitHubBaseURL
 		if baseURL == "" {
 			baseURL = creds.GitHubURL

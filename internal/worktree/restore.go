@@ -15,7 +15,10 @@ import (
 // CheckoutRestore is one checkout a cold restore rebuilds under a run root:
 // where it goes, what it tracks upstream, and the delta captured from it.
 type CheckoutRestore struct {
-	Owner, Repo string
+	// RepositoryID is the registry row of the repository checked out, which
+	// keys the shared bare; Owner and Repo place the checkout in the run tree.
+	RepositoryID string
+	Owner, Repo  string
 	// CloneURL is the upstream the shared bare's origin points at. It seeds a
 	// bare this host lacks and becomes a self-contained clone's origin. Empty
 	// falls back to the origin a surviving bare already has.
@@ -57,8 +60,9 @@ type PRCheckout struct {
 // RestoredCheckout is a checkout RestoreCheckout rebuilt, carrying what
 // Discard needs to take it back out.
 type RestoredCheckout struct {
-	Owner, Repo string
-	Path        string
+	RepositoryID string
+	Owner, Repo  string
+	Path         string
 	// PRNumber and PRKey name the push config a linked PR checkout wrote into
 	// the shared bare; zero and "" when it wrote none there.
 	PRNumber int
@@ -124,8 +128,8 @@ func RestoreCheckout(ctx context.Context, r CheckoutRestore) (RestoredCheckout, 
 	switch {
 	case !ok:
 		return RestoredCheckout{}, fmt.Errorf("restore checkout: unrecognized slug %q", r.Slug)
-	case r.Owner == "" || r.Repo == "" || r.Root == "" || r.RootKey == "":
-		return RestoredCheckout{}, fmt.Errorf("restore checkout %s: owner, repo, root and root key are required", r.Slug)
+	case r.RepositoryID == "" || r.Owner == "" || r.Repo == "" || r.Root == "" || r.RootKey == "":
+		return RestoredCheckout{}, fmt.Errorf("restore checkout %s: repository id, owner, repo, root and root key are required", r.Slug)
 	case prNumber > 0 && r.PR == nil:
 		return RestoredCheckout{}, fmt.Errorf("restore checkout %s/%s %s: pull request details required", r.Owner, r.Repo, r.Slug)
 	case !commitSHAPattern.MatchString(r.Head):
@@ -146,7 +150,7 @@ func RestoreCheckout(ctx context.Context, r CheckoutRestore) (RestoredCheckout, 
 	if err := sandbox.MkdirRunTreeScaffold(r.Root, filepath.Join(r.Owner, r.Repo)); err != nil {
 		return RestoredCheckout{}, fmt.Errorf("restore checkout: mkdir repo subdir: %w", err)
 	}
-	res := RestoredCheckout{Owner: r.Owner, Repo: r.Repo, Path: wtDir}
+	res := RestoredCheckout{RepositoryID: r.RepositoryID, Owner: r.Owner, Repo: r.Repo, Path: wtDir}
 
 	if err := restoreCheckoutLocked(ctx, r, ref, prNumber, wtDir, &res); err != nil {
 		res.Discard()
@@ -173,10 +177,10 @@ func (c RestoredCheckout) Discard() {
 	if err := sandbox.RemoveRunTree(context.Background(), c.Path); err != nil {
 		worktreeLog.Warn("discard restored checkout: remove dir failed", "dir", c.Path, "error", err)
 	}
-	mu := lockRepo(c.Owner, c.Repo)
+	mu := lockRepo(c.RepositoryID)
 	mu.Lock()
 	defer mu.Unlock()
-	bareDir, err := repoDir(c.Owner, c.Repo)
+	bareDir, err := repoDir(c.RepositoryID)
 	if err != nil {
 		return
 	}
@@ -196,11 +200,11 @@ func (c RestoredCheckout) Discard() {
 // It fills res as it writes into the bare, so a failure part-way leaves res
 // naming exactly what Discard has to take back out.
 func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, prNumber int, wtDir string, res *RestoredCheckout) (err error) {
-	mu := lockRepo(r.Owner, r.Repo)
+	mu := lockRepo(r.RepositoryID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, r.Owner, r.Repo, r.CloneURL, r.Auth)
+	bareDir, err := ensureBareCloneLocked(ctx, Repo{ID: r.RepositoryID, Owner: r.Owner, Name: r.Repo}, r.CloneURL, r.Auth)
 	if err != nil {
 		return fmt.Errorf("ensure bare: %w", err)
 	}

@@ -769,9 +769,15 @@ type orgSettingsResponse struct {
 	// you can see which account you're about to swap out. Empty (omitted) when
 	// no PAT is bound, or when the bind predates the login being recorded (it
 	// self-heals on the next bind).
-	GitHubPATLogin   string `json:"github_pat_login,omitempty"`
-	JiraBaseURL      string `json:"jira_base_url"`
-	JiraPollInterval string `json:"jira_poll_interval"`
+	GitHubPATLogin string `json:"github_pat_login,omitempty"`
+	// GitHubPATHost is the GitHub host the stored PAT was validated on, and
+	// GitHubPATNeedsRebind reports that it is not the org's current host: the
+	// PAT is still stored, and TF sends it nowhere until it is rebound on the
+	// current host. Omitted / false when no PAT is bound.
+	GitHubPATHost        string `json:"github_pat_host,omitempty"`
+	GitHubPATNeedsRebind bool   `json:"github_pat_needs_rebind"`
+	JiraBaseURL          string `json:"jira_base_url"`
+	JiraPollInterval     string `json:"jira_poll_interval"`
 	// LinearPollInterval is the Linear poll cadence. Linear is SaaS-only, so
 	// unlike its siblings it has no base URL beside it.
 	LinearPollInterval string `json:"linear_poll_interval"`
@@ -890,6 +896,15 @@ func (s *Server) handleOrgSettingsGet(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// ghPATHost is the GitHub host the org's stored PAT was validated on, or ""
+// when no PAT, or no host beside it, is stored.
+func ghPATHost(creds auth.Credentials) string {
+	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+		return ""
+	}
+	return db.EffectiveGitHubHost(creds.GitHubURL)
+}
+
 // readOrgSettings assembles the org-settings resource. Shared by the GET and by
 // the PATCH's read-back, so a write answers with exactly what a follow-up read
 // would return — including the version the next PATCH has to carry.
@@ -973,31 +988,33 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 	_, hasJiraCred := integrations.JiraSystemConfig(creds)
 
 	return orgSettingsResponse{
-		GitHubBaseURL:       ghBaseURL,
-		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
-		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
-		HasGitHubPAT:        creds.GitHubPAT != "",
-		GitHubPATLogin:      ghPATLogin,
-		JiraBaseURL:         jiraBaseURL,
-		JiraPollInterval:    orgSet.JiraPollInterval.String(),
-		LinearPollInterval:  orgSet.LinearPollInterval.String(),
-		HasJiraCredential:   hasJiraCred,
-		EnabledModels:       orgSet.EnabledModels,
-		BackgroundJobsModel: orgSet.BackgroundJobsModel,
-		MaxDailyCostUSD:     orgSet.MaxDailyCostUSD,
-		MaxConcurrentRuns:   orgSet.MaxConcurrentRuns,
-		APITokenMaxAgeDays:  orgSet.APITokenMaxAgeDays,
-		LLMAuthMethod:       domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, runmode.Current() == runmode.ModeMulti),
-		HasAnthropicAPIKey:  orgSet.AnthropicAPIKeyRef != "",
-		HasBedrockCreds:     orgSet.BedrockCredentialsRef != "",
-		BedrockAuthMethod:   bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
-		BedrockRegion:       bedrockRegion,
-		BedrockModelID:      bedrockModelID,
-		BedrockBaseURL:      bedrockBaseURL,
-		BedrockRoleARN:      bedrockRoleARN,
-		BedrockExternalID:   bedrockExternalID,
-		MemberCount:         memberCount,
-		Version:             orgSet.Version,
+		GitHubBaseURL:        ghBaseURL,
+		GitHubPollInterval:   orgSet.GitHubPollInterval.String(),
+		GitHubCloneProtocol:  defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
+		HasGitHubPAT:         creds.GitHubPAT != "",
+		GitHubPATLogin:       ghPATLogin,
+		GitHubPATHost:        ghPATHost(creds),
+		GitHubPATNeedsRebind: creds.GitHubPAT != "" && !integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL),
+		JiraBaseURL:          jiraBaseURL,
+		JiraPollInterval:     orgSet.JiraPollInterval.String(),
+		LinearPollInterval:   orgSet.LinearPollInterval.String(),
+		HasJiraCredential:    hasJiraCred,
+		EnabledModels:        orgSet.EnabledModels,
+		BackgroundJobsModel:  orgSet.BackgroundJobsModel,
+		MaxDailyCostUSD:      orgSet.MaxDailyCostUSD,
+		MaxConcurrentRuns:    orgSet.MaxConcurrentRuns,
+		APITokenMaxAgeDays:   orgSet.APITokenMaxAgeDays,
+		LLMAuthMethod:        domain.EffectiveLLMAuthMethod(orgSet.LLMAuthMethod, runmode.Current() == runmode.ModeMulti),
+		HasAnthropicAPIKey:   orgSet.AnthropicAPIKeyRef != "",
+		HasBedrockCreds:      orgSet.BedrockCredentialsRef != "",
+		BedrockAuthMethod:    bedrockAuthMethodFromRef(orgSet.BedrockCredentialsRef),
+		BedrockRegion:        bedrockRegion,
+		BedrockModelID:       bedrockModelID,
+		BedrockBaseURL:       bedrockBaseURL,
+		BedrockRoleARN:       bedrockRoleARN,
+		BedrockExternalID:    bedrockExternalID,
+		MemberCount:          memberCount,
+		Version:              orgSet.Version,
 	}, true
 }
 

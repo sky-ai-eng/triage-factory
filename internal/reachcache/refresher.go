@@ -147,8 +147,15 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 	if err != nil {
 		return false, err
 	}
+	// The org's current GitHub host: the state read, and the PAT rows a refresh
+	// writes, are both confined to it, so a host repoint reads as a mirror
+	// never refreshed and the force it arrives with refills it.
+	host, err := db.OrgGitHubHostSystem(ctx, r.classes.orgs, orgID)
+	if err != nil {
+		return false, err
+	}
 
-	state, err := r.mirror.ReachableStateSystem(ctx, orgID, class)
+	state, err := r.mirror.ReachableStateSystem(ctx, orgID, host, class)
 	if err != nil {
 		return false, fmt.Errorf("read reachable cache state: %w", err)
 	}
@@ -177,7 +184,7 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 			return false, fmt.Errorf("refresh app grant: %w", err)
 		}
 	case domain.GitHubCredentialClassPAT:
-		refreshed, err := r.refreshPAT(ctx, orgID)
+		refreshed, err := r.refreshPAT(ctx, orgID, host)
 		if err != nil {
 			return false, err
 		}
@@ -244,20 +251,10 @@ func (r *Refresher) clearDeclined(orgID string) {
 }
 
 // refreshPAT re-enumerates GET /user/repos and replaces the org's pat-class
-// entries. It reports false without an error for every outcome that must leave
-// the previous answer standing.
-func (r *Refresher) refreshPAT(ctx context.Context, orgID string) (bool, error) {
-	host, err := r.resolver.BaseURLFor(ctx, orgID)
-	if err != nil {
-		return false, fmt.Errorf("resolve github host: %w", err)
-	}
-	if host == "" {
-		// No host means nothing has been configured for this org yet. Not an
-		// error: the picker answers "not configured" long before it gets here,
-		// and a credential-change force on an org that just cleared its GitHub
-		// settings lands exactly here.
-		return false, nil
-	}
+// entries on host — the org's current GitHub host, which is the scope every
+// read of the mirror asks about. It reports false without an error for every
+// outcome that must leave the previous answer standing.
+func (r *Refresher) refreshPAT(ctx context.Context, orgID, host string) (bool, error) {
 	// Target is empty on purpose: this arm only runs for a PAT-class org, which
 	// by construction has no active App, so the resolver's App branch cannot be
 	// reached and there is no installation for a target to select.
@@ -265,6 +262,12 @@ func (r *Refresher) refreshPAT(ctx context.Context, orgID string) (bool, error) 
 	if err != nil {
 		if errors.Is(err, github.ErrNoGitHubCredentials) {
 			reachLog.InfoContext(ctx, "no github credentials; leaving the reachable mirror as it is", "org", orgID)
+			return false, nil
+		}
+		if errors.Is(err, github.ErrPATHostMismatch) {
+			// The PAT was bound on another host; nothing this org can reach on
+			// its current one is known until it is rebound there.
+			reachLog.InfoContext(ctx, "github pat bound on another host; leaving the reachable mirror as it is", "org", orgID, "error", err)
 			return false, nil
 		}
 		return false, fmt.Errorf("resolve github client: %w", err)

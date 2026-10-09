@@ -61,10 +61,9 @@ func (r *localReviewerResolver) KnownTeam(orgLogin, slug string) bool {
 
 // storeReviewerResolver is the multi-mode path: TF-known is decided against
 // the claims-free store lookups (the reverse login→user_ids lookup for users,
-// the github-team→TF-team mapping for teams). host is the org's normalized
-// GitHub base URL (the same value the identity-capture writers stored); the
-// store normalizes again internally so passing the raw org_settings value is
-// fine.
+// the github-team→TF-team mapping for teams). host is the org's effective
+// GitHub host (db.EffectiveGitHubHost — the value the identity-capture writers
+// stored and the team mappings are keyed under).
 type storeReviewerResolver struct {
 	// ctx is the poll cycle's context, stored deliberately: the resolver is a
 	// short-lived per-cycle object whose KnownUser/KnownTeam calls happen
@@ -100,7 +99,7 @@ func (r *storeReviewerResolver) KnownTeam(orgLogin, slug string) bool {
 	if r.groups == nil {
 		return false
 	}
-	teams, err := r.groups.TeamsForGroupSystem(r.ctx, r.orgID, orgLogin, slug)
+	teams, err := r.groups.TeamsForGroupSystem(r.ctx, r.orgID, r.host, orgLogin, slug)
 	if err != nil {
 		trackerLog.Warn("reviewer resolve: team lookup failed", "org_login", orgLogin, "slug", slug, "org", r.orgID, "error", err)
 		return false

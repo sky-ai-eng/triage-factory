@@ -14,7 +14,7 @@ func createPRCheckout(ctx context.Context, owner, repo, upstreamCloneURL, headCl
 	if err != nil {
 		return "", err
 	}
-	return CreateForPRInRoot(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, prNumber, rootKey, root, opts...)
+	return CreateForPRInRoot(ctx, testRepo(owner, repo), upstreamCloneURL, headCloneURL, headBranch, prNumber, rootKey, root, opts...)
 }
 
 // createBranchCheckout builds a prescribed-branch checkout beneath a run root
@@ -27,7 +27,7 @@ func createBranchCheckout(ctx context.Context, owner, repo, cloneURL, baseBranch
 	if err := os.MkdirAll(filepath.Join(root, owner), 0o755); err != nil {
 		return "", err
 	}
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, filepath.Join(root, owner, repo), resolveCloneOptions(opts).auth)
+	return createBranchWorktreeAt(ctx, testRepo(owner, repo), cloneURL, baseBranch, featureBranch, filepath.Join(root, owner, repo), resolveCloneOptions(opts).auth)
 }
 
 // mustRunRoot makes rootKey's run root or fails the test.
@@ -56,7 +56,7 @@ func restoreDeltaErr(t *testing.T, root, rootKey, owner, repo, slug, cloneURL st
 	t.Helper()
 	staging := t.TempDir()
 	r := CheckoutRestore{
-		Owner: owner, Repo: repo, CloneURL: cloneURL, Auth: auth,
+		RepositoryID: testRepo(owner, repo).ID, Owner: owner, Repo: repo, CloneURL: cloneURL, Auth: auth,
 		Root: root, Slug: slug, RootKey: rootKey, PR: pr,
 		Head: delta.Head, Branch: delta.Branch,
 	}

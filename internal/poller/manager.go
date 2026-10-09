@@ -666,6 +666,26 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}()
 
+	// The org's GitHub host is the scope every pull request this cycle finds
+	// is keyed under, and the host every repository it reads is on. Read once,
+	// first, and a failure skips the cycle: keying under a guessed host would
+	// mint a second entity beside every one already tracked.
+	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		span.SetStatus(codes.Error, "read org settings")
+		githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", err)
+		return
+	}
+	scope := domain.EntityScope("github", orgSet)
+
+	// Pull requests polled from another host retire before anything else,
+	// with no request: the current host cannot vouch for them, and nothing
+	// else would ever close them. Ahead of every gate below, because an org
+	// that has just moved tracks nothing on its new host yet, and a credential
+	// that does not work on the new host is no reason to keep the old host's
+	// pull requests open.
+	m.trackerForOrg(orgID).RetireGitHubOutOfScope(ctx, scope)
+
 	// Refresh what the App can reach before reading any of it, and BEFORE the
 	// tracked-set gate below: an org that tracks nothing is precisely the org
 	// where "the App can reach repositories nobody asked for" is largest, so
@@ -702,7 +722,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		}
 	}
 
-	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID, scope)
 	if err != nil {
 		span.SetStatus(codes.Error, "load configured repos")
 		githubLog.ErrorContext(ctx, "load configured repos failed", "org", orgID, "error", err)
@@ -717,18 +737,6 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		return
 	}
 
-	// The org's GitHub host is the scope every pull request this cycle finds
-	// is keyed under. Read once, before either credential path, and a failure
-	// skips the cycle: keying under a guessed host would mint a second entity
-	// beside every one already tracked.
-	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		span.SetStatus(codes.Error, "read org settings")
-		githubLog.ErrorContext(ctx, "read org settings failed", "org", orgID, "error", err)
-		return
-	}
-	scope := domain.EntityScope("github", orgSet)
-
 	// TFAC-571: rotate the repo list to start at this org's round-robin
 	// cursor (the resume point saved by a prior cycle that got cut short by
 	// ErrRateLimited), so a large tracked set doesn't starve the repos at
@@ -741,7 +749,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// deletion floor's "periodic refresh" trigger, independent of the
 	// poll-dispatch path below so it runs whether the org polls via App
 	// or PAT.
-	m.reconcileGitHubGroups(ctx, orgID, repos)
+	m.reconcileGitHubGroups(ctx, orgID, scope, repos)
 
 	isLocal := runmode.Current() == runmode.ModeLocal
 
@@ -840,8 +848,8 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// alongside its current name, so the condition — same id, different
 		// name — is readable here with no request of its own, and over the
 		// WHOLE grant rather than the tracked subset.
-		if renamed := m.applyRepoRenames(ctx, orgID, grant); renamed > 0 {
-			repos = m.reloadConfiguredRepos(ctx, orgID, repos)
+		if renamed := m.applyRepoRenames(ctx, orgID, scope, grant); renamed > 0 {
+			repos = m.reloadConfiguredRepos(ctx, orgID, scope, repos)
 		}
 		scoped := intersectConfigured(repos, grant, covered)
 		if len(scoped) == 0 {
@@ -854,7 +862,7 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 		// so it is a no-op on every cycle after the first. Best-effort — an
 		// id TF fails to record is one it records next cycle, and never a
 		// reason to skip the poll the caller actually came for.
-		m.recordRepoIDs(ctx, orgID, scoped, grant)
+		m.recordRepoIDs(ctx, orgID, scope, scoped, grant)
 		// App tokens have no "me" — drop the username axis for discovery
 		// (Sharp edge 2). Predicates still match per-PR fields downstream.
 		_, resumeFrom, rerr := m.trackerForOrg(orgID).RefreshGitHub(ctx, scope, client, "", scoped, resolver)
@@ -947,7 +955,12 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 // result is ambiguous — a user account or zero visibility — where "delete
 // everything for this org" would be wrong). A non-empty list is the org
 // credential's authoritative view, so a missing slug is a real deletion.
-func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos []string) {
+//
+// host is the org's current GitHub host, which repos are on and which the
+// credential lists teams of; only the mappings saved for it are pruned against
+// that list, so another host's mappings are never compared with this one's
+// teams.
+func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID, host string, repos []string) {
 	if m.githubGroups == nil {
 		return
 	}
@@ -981,7 +994,7 @@ func (m *Manager) reconcileGitHubGroups(ctx context.Context, orgID string, repos
 		if len(slugs) == 0 {
 			continue
 		}
-		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, owner, slugs); err != nil {
+		if n, err := m.githubGroups.PruneMissingSystem(ctx, orgID, host, owner, slugs); err != nil {
 			githubGroupsLog.Warn("reconcile prune failed", "org", orgID, "owner", owner, "error", err)
 		} else if n > 0 {
 			githubGroupsLog.Info("pruned stale mappings for deleted github teams", "org", orgID, "owner", owner, "pruned", n)
@@ -1149,8 +1162,9 @@ func (m *Manager) orgHasRegisteredApp(ctx context.Context, orgID string) bool {
 //
 // Scoped to the intersection rather than the whole grant on purpose: a repo
 // nobody tracks has no row, so writing it would either no-op or (worse) invite
-// a create path in the poller.
-func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []string, grant []ghclient.UserRepo) {
+// a create path in the poller. host is the org's current GitHub host, which the
+// grant was read from: ids are stamped only on its rows.
+func (m *Manager) recordRepoIDs(ctx context.Context, orgID, host string, scoped []string, grant []ghclient.UserRepo) {
 	if m.repos == nil {
 		return
 	}
@@ -1171,7 +1185,7 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []stri
 			continue
 		}
 		refs = append(refs, domain.RepoRef{
-			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
+			Source: domain.RepoSourceGitHub, Host: host, Owner: owner, Repo: repo, ExternalID: id,
 		})
 	}
 	if len(refs) == 0 {
@@ -1194,8 +1208,9 @@ func (m *Manager) recordRepoIDs(ctx context.Context, orgID string, scoped []stri
 // row to fill and so follows the tracked intersection, but detecting a rename
 // needs the observation the intersection has already dropped. A grant entry
 // for a repository TF does not track matches no stored identity and costs one
-// map lookup.
-func (m *Manager) applyRepoRenames(ctx context.Context, orgID string, grant []ghclient.UserRepo) int {
+// map lookup. host is the org's current GitHub host, which the grant was
+// read from.
+func (m *Manager) applyRepoRenames(ctx context.Context, orgID, host string, grant []ghclient.UserRepo) int {
 	if m.repos == nil {
 		return 0
 	}
@@ -1213,15 +1228,15 @@ func (m *Manager) applyRepoRenames(ctx context.Context, orgID string, grant []gh
 			Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
 		})
 	}
-	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, observed)
+	return reporename.Apply(ctx, m.repos, m.resolver, githubLog, orgID, host, observed)
 }
 
 // reloadConfiguredRepos re-reads the tracked set after a rename moved a slug
 // inside it, so this cycle's intersection matches the repository under its new
 // name instead of skipping it until the next one. Re-rotated to the same
 // cursor the first read was, so the round-robin position survives.
-func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID string, current []string) []string {
-	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
+func (m *Manager) reloadConfiguredRepos(ctx context.Context, orgID, host string, current []string) []string {
+	refreshed, err := m.repos.ListTrackedNamesSystem(ctx, orgID, host)
 	if err != nil {
 		githubLog.WarnContext(ctx, "re-read configured repos after a rename failed", "org", orgID, "error", err)
 		return current

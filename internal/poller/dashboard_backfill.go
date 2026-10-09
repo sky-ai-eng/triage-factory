@@ -61,7 +61,21 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 		return nil
 	}
 
-	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID)
+	// The seeded pull requests are keyed under the org's GitHub host, the
+	// scope the poll cycle keys them under, so the cycle finds what this
+	// seeds instead of minting a second row beside it. A login bound on any
+	// other host is not a login the org's credential can search for: nothing
+	// to seed, and no marker, so a bind on the current host still backfills.
+	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return err
+	}
+	scope := domain.EntityScope("github", orgSet)
+	if scope != host {
+		return nil
+	}
+
+	repos, err := m.repos.ListTrackedNamesSystem(ctx, orgID, scope)
 	if err != nil {
 		return err
 	}
@@ -77,7 +91,7 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 		return m.users.MarkDashboardBackfilledSystem(ctx, userID, host, login)
 	}
 
-	if err := m.runDashboardBackfill(ctx, orgID, login, repos); err != nil {
+	if err := m.runDashboardBackfill(ctx, orgID, scope, login, repos); err != nil {
 		return err // leave the marker unset → next dashboard load retries
 	}
 	// Don't stamp a cancelled/timed-out backfill: runDashboardBackfill can return
@@ -97,16 +111,11 @@ func (m *Manager) BackfillUserDashboard(ctx context.Context, orgID, userID, logi
 // when no usable credential resolved (or every search failed against the
 // installations that did) so the caller can retry; per-installation failures
 // and not-configured orgs are tolerated.
-func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, login string, repos []string) error {
+//
+// scope is the org's GitHub host, which repos are on and the seeded pull
+// requests are keyed under.
+func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, scope, login string, repos []string) error {
 	tr := m.trackerForOrg(orgID)
-	// The seeded pull requests are keyed under the org's GitHub host, the
-	// scope the poll cycle keys them under, so the cycle finds what this
-	// seeds instead of minting a second row beside it.
-	orgSet, err := m.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		return err
-	}
-	scope := domain.EntityScope("github", orgSet)
 
 	// PAT path (org PAT in multi mode, or any non-App org): one client over the
 	// full configured set. orgHasRegisteredApp mirrors runGitHubCycleForOrg's

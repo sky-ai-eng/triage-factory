@@ -69,7 +69,8 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 	}); err != nil {
 		return nil, err
 	}
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+	// A PAT bound on another host is never sent to this one.
+	if creds.GitHubURL == "" || !integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
 		return nil, errNoGitHub
 	}
 	baseURL := orgSet.GitHubBaseURL

@@ -104,7 +104,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// ETag persisted for conditional re-poll next cycle.
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("octo/repo"))
+	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", "octo/repo"))
 	if err != nil {
 		t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
 	}
@@ -148,7 +148,7 @@ func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
 		}
 		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, repos); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, db.EffectiveGitHubHost(""), repos); err != nil {
 		t.Fatalf("track repos %v: %v", names, err)
 	}
 }

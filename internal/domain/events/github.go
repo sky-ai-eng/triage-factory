@@ -565,6 +565,48 @@ func (p GitHubPRClosedPredicate) Matches(m GitHubPRClosedMetadata) bool {
 }
 
 // -----------------------------------------------------------------------------
+// unreachable — Triage Factory no longer follows a tracked PR. Terminating:
+// it closes the entity and its tasks like merged/closed.
+// -----------------------------------------------------------------------------
+
+// GitHub unreachable reasons.
+const (
+	// GitHubUnreachableScopeChanged: the org's GitHub base URL now names
+	// another host. The PR was polled from Host, which the new host cannot
+	// answer for, so it is retired without a request.
+	GitHubUnreachableScopeChanged = "scope_changed"
+)
+
+// GitHubPRUnreachableMetadata carries the PR's last known fields, from the
+// stored snapshot, plus the host it was polled from and why it is no longer
+// followed.
+type GitHubPRUnreachableMetadata struct {
+	Author   string   `json:"author"`
+	Repo     string   `json:"repo"`
+	PRNumber int      `json:"pr_number"`
+	IsDraft  bool     `json:"is_draft"`
+	HeadSHA  string   `json:"head_sha"`
+	Labels   []string `json:"labels"`
+	Title    string   `json:"title"`
+	Host     string   `json:"host"`
+	Reason   string   `json:"reason"` // one of the GitHubUnreachable* values
+}
+
+type GitHubPRUnreachablePredicate struct {
+	AuthorIn []string `json:"author_in,omitempty"`
+	Author   *string  `json:"author,omitempty"`
+	Repo     *string  `json:"repo,omitempty"`
+	HasLabel *string  `json:"has_label,omitempty"`
+}
+
+func (p GitHubPRUnreachablePredicate) Matches(m GitHubPRUnreachableMetadata) bool {
+	return stringInSliceFold(p.AuthorIn, m.Author) &&
+		strEq(p.Author, m.Author) &&
+		strEq(p.Repo, m.Repo) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
 // mentioned — you were @mentioned in a PR comment.
 // -----------------------------------------------------------------------------
 
@@ -631,5 +673,6 @@ func init() {
 	Register(NewSchema[GitHubPROpenedMetadata, GitHubPROpenedPredicate](domain.EventGitHubPROpened, OwnershipOwned))
 	Register(NewSchema[GitHubPRMergedMetadata, GitHubPRMergedPredicate](domain.EventGitHubPRMerged, OwnershipOwned))
 	Register(NewSchema[GitHubPRClosedMetadata, GitHubPRClosedPredicate](domain.EventGitHubPRClosed, OwnershipOwned))
+	Register(NewSchema[GitHubPRUnreachableMetadata, GitHubPRUnreachablePredicate](domain.EventGitHubPRUnreachable, OwnershipOwned))
 	Register(NewSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipOwned))
 }

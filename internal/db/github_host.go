@@ -1,6 +1,9 @@
 package db
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -36,4 +39,20 @@ func NormalizeGitHubHost(host string) string { return strings.TrimRight(host, "/
 // entities are keyed under; this name is the identity stores' spelling of it.
 func EffectiveGitHubHost(orgBase string) string {
 	return domain.GitHubHost(orgBase)
+}
+
+// OrgGitHubHostSystem reads orgID's settings and returns its current GitHub
+// host (EffectiveGitHubHost of github_base_url) — the host every GitHub-shaped
+// row the org reads, polls or writes now is scoped to: repositories, tracking,
+// team mappings, entities, the reachable-repo cache. Claims-free, for the
+// background and system callers that hold an org id and no settings row.
+func OrgGitHubHostSystem(ctx context.Context, orgs OrgsStore, orgID string) (string, error) {
+	if orgs == nil {
+		return "", errors.New("read github host: no org store")
+	}
+	set, err := orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github host: %w", err)
+	}
+	return EffectiveGitHubHost(set.GitHubBaseURL), nil
 }

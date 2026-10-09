@@ -78,7 +78,7 @@ func TestRestoreCheckout_PRRoundTrip(t *testing.T) {
 				root := mustRunRoot(t, key)
 				t.Cleanup(func() { RemoveRunRoot(key) })
 
-				wtDir, err := CreateForPRInRoot(context.Background(), "acme", "repo", upstream, upstream, "feature", 7, "conv-a", root)
+				wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root)
 				if err != nil {
 					t.Fatalf("CreateForPRInRoot: %v", err)
 				}
@@ -93,7 +93,7 @@ func TestRestoreCheckout_PRRoundTrip(t *testing.T) {
 
 				RemoveRunRoot(key)
 				if freshBare {
-					bare, _ := repoDir("acme", "repo")
+					bare, _ := repoDir(testRepo("acme", "repo").ID)
 					if err := os.RemoveAll(bare); err != nil {
 						t.Fatalf("remove bare: %v", err)
 					}
@@ -141,7 +141,7 @@ func TestRestoreCheckout_BranchOffDetachedCheckout(t *testing.T) {
 			root := mustRunRoot(t, key)
 			t.Cleanup(func() { RemoveRunRoot(key) })
 
-			wtDir, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", upstream, "main", "conv-a", root)
+			wtDir, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), upstream, "main", "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForCheckoutInRoot: %v", err)
 			}
@@ -182,7 +182,7 @@ func TestRestoreCheckout_DetachedRoundTrip(t *testing.T) {
 			root := mustRunRoot(t, key)
 			t.Cleanup(func() { RemoveRunRoot(key) })
 
-			wtDir, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", upstream, "", "conv-a", root)
+			wtDir, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), upstream, "", "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForCheckoutInRoot: %v", err)
 			}
@@ -215,7 +215,7 @@ func TestRestoreCheckout_DeletedForkIsReadOnly(t *testing.T) {
 	root := mustRunRoot(t, key)
 	t.Cleanup(func() { RemoveRunRoot(key) })
 
-	wtDir, err := CreateForPRInRoot(context.Background(), "acme", "repo", upstream, "", "feature", 7, "conv-a", root)
+	wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, "", "feature", 7, "conv-a", root)
 	if err != nil {
 		t.Fatalf("CreateForPRInRoot: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRestoreCheckout_FailureLeavesNothing(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(root, "acme", "repo", "ref-main")); !os.IsNotExist(err) {
 				t.Errorf("failed restore left its checkout behind (err=%v)", err)
 			}
-			bare, _ := repoDir("acme", "repo")
+			bare, _ := repoDir(testRepo("acme", "repo").ID)
 			if out := gitAt(t, bare, "for-each-ref", "refs/heads/triagefactory/"); strings.TrimSpace(out) != "" {
 				t.Errorf("failed restore left run-scoped refs in the bare:\n%s", out)
 			}
@@ -284,7 +284,7 @@ func TestRestoreCheckout_UpstreamFetch(t *testing.T) {
 			root := mustRunRoot(t, key)
 			t.Cleanup(func() { RemoveRunRoot(key) })
 
-			wtDir, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", upstream, "feature", "conv-a", root)
+			wtDir, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), upstream, "feature", "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForCheckoutInRoot: %v", err)
 			}
@@ -295,7 +295,7 @@ func TestRestoreCheckout_UpstreamFetch(t *testing.T) {
 				t.Fatalf("CaptureWorkspaceGit: %v", err)
 			}
 			RemoveRunRoot(key)
-			bare, _ := repoDir("acme", "repo")
+			bare, _ := repoDir(testRepo("acme", "repo").ID)
 			tc.break_(t, upstream, bare)
 
 			// No clone URL: the restore uses the origin the surviving bare has.
@@ -326,7 +326,7 @@ func TestRestoreCheckout_FailedPRFetchKeepsTheRunsBranch(t *testing.T) {
 	root := mustRunRoot(t, key)
 	t.Cleanup(func() { RemoveRunRoot(key) })
 
-	wtDir, err := CreateForPRInRoot(context.Background(), "acme", "repo", upstream, upstream, "feature", 7, "conv-a", root)
+	wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root)
 	if err != nil {
 		t.Fatalf("CreateForPRInRoot: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestRestoreCheckout_FailedPRFetchKeepsTheRunsBranch(t *testing.T) {
 		t.Fatalf("CaptureWorkspaceGit: %v", err)
 	}
 	RemoveRunRoot(key)
-	bare, _ := repoDir("acme", "repo")
+	bare, _ := repoDir(testRepo("acme", "repo").ID)
 	gitAt(t, bare, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
 
 	root = mustRunRoot(t, key)
@@ -373,7 +373,7 @@ func TestRestoreCheckout_FailureDropsBareRunRefs(t *testing.T) {
 			root := mustRunRoot(t, key)
 			t.Cleanup(func() { RemoveRunRoot(key) })
 
-			wtDir, err := CreateForPRInRoot(context.Background(), "acme", "repo", upstream, upstream, "feature", 7, "conv-a", root)
+			wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root)
 			if err != nil {
 				t.Fatalf("CreateForPRInRoot: %v", err)
 			}
@@ -411,7 +411,7 @@ func TestRestoreCheckout_FailureDropsBareRunRefs(t *testing.T) {
 			if _, err := RestoreCheckout(ctx, r); err == nil {
 				t.Fatal("restore succeeded")
 			}
-			bare, _ := repoDir("acme", "repo")
+			bare, _ := repoDir(testRepo("acme", "repo").ID)
 			if out := gitAt(t, bare, "for-each-ref", "refs/heads/triagefactory/", "refs/remotes/origin/triagefactory/"); strings.TrimSpace(out) != "" {
 				t.Errorf("failed restore left per-run refs in the bare:\n%s", out)
 			}

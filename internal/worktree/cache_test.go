@@ -26,10 +26,10 @@ func setBareLastUsed(dir string, t time.Time) {
 func seedBare(t *testing.T, owner, repo string) string {
 	t.Helper()
 	upstream := makeTestUpstream(t)
-	if _, err := EnsureBareClone(context.Background(), owner, repo, upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo(owner, repo), upstream); err != nil {
 		t.Fatalf("seed bare %s/%s: %v", owner, repo, err)
 	}
-	dir, err := repoDir(owner, repo)
+	dir, err := repoDir(testRepo(owner, repo).ID)
 	if err != nil {
 		t.Fatalf("repoDir: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestEnforceBudget_EvictsColdestOverBudget(t *testing.T) {
 
 	// Re-seed is transparent: EnsureBareClone rebuilds the evicted bare.
 	upstream := makeTestUpstream(t)
-	if _, err := EnsureBareClone(context.Background(), "o", "cold", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("o", "cold"), upstream); err != nil {
 		t.Errorf("re-seed after eviction: %v", err)
 	}
 	if _, err := os.Stat(cold); err != nil {
@@ -158,10 +158,10 @@ func TestEnforceBudget_TTLEviction(t *testing.T) {
 func TestEnforceBudget_SkipsInUseBare(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	if _, err := EnsureBareClone(context.Background(), "o", "live", upstream); err != nil {
+	if _, err := EnsureBareClone(context.Background(), testRepo("o", "live"), upstream); err != nil {
 		t.Fatalf("seed bare: %v", err)
 	}
-	bareDir, _ := repoDir("o", "live")
+	bareDir, _ := repoDir(testRepo("o", "live").ID)
 
 	wt := t.TempDir()
 	registerWorktree(t, bareDir, "live-run", wt)
@@ -264,7 +264,7 @@ func TestScanBares_MissingRootSilentStillFindsExisting(t *testing.T) {
 
 	// A real org-tier bare. The sentinel root (<StateRoot>/repos) is
 	// deliberately never created — that absent tier is what logged noise.
-	orgBare := filepath.Join(stateRoot, "orgs", "org-1", "repos", "o", "repo.git")
+	orgBare := filepath.Join(stateRoot, "orgs", "org-1", "repos", "repo-1.git")
 	if err := os.MkdirAll(orgBare, 0o755); err != nil {
 		t.Fatalf("mkdir org bare: %v", err)
 	}
@@ -304,14 +304,14 @@ func TestScanBares_MissingRootSilentStillFindsExisting(t *testing.T) {
 	}
 }
 
-// TestOwnerRepoFromBareDir pins the path → (owner, repo) recovery the
+// TestRepositoryIDFromBareDir pins the path → repository id recovery the
 // reaper uses to take the per-repo lock before evicting.
-func TestOwnerRepoFromBareDir(t *testing.T) {
-	owner, repo, ok := ownerRepoFromBareDir("/data/repos/sky-ai-eng/triage-factory.git")
-	if !ok || owner != "sky-ai-eng" || repo != "triage-factory" {
-		t.Errorf("got (%q, %q, %v), want (sky-ai-eng, triage-factory, true)", owner, repo, ok)
+func TestRepositoryIDFromBareDir(t *testing.T) {
+	id, ok := repositoryIDFromBareDir("/data/repos/0b9c2c1e-7d1a-4c2e-9f3a-1b2c3d4e5f60.git")
+	if !ok || id != "0b9c2c1e-7d1a-4c2e-9f3a-1b2c3d4e5f60" {
+		t.Errorf("got (%q, %v), want the row id", id, ok)
 	}
-	if _, _, ok := ownerRepoFromBareDir("/data/repos/not-a-bare"); ok {
+	if _, ok := repositoryIDFromBareDir("/data/repos/not-a-bare"); ok {
 		t.Error("non-.git dir parsed as a bare")
 	}
 }

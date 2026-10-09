@@ -680,7 +680,7 @@ func realPath(p string) (string, error) {
 //     (the tree doesn't outlive the task), so hasScope is false and no OTHER
 //     mount may claim an org scope either — there is nothing for it to be
 //     consistent with.
-//   - The org-scoped state-root tree: paths.BareCacheDir(orgID, owner, repo),
+//   - The org-scoped state-root tree: paths.BareCacheDir(orgID, repositoryID),
 //     i.e. <StateRoot>/orgs/<orgID>/… in multi mode. orgPrefix is
 //     <StateRoot>/orgs/<orgID>; every other mount under this run must live
 //     under this same prefix.

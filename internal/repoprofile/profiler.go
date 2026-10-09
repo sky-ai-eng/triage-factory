@@ -141,7 +141,14 @@ func (p *Profiler) Run(ctx context.Context, force bool) error {
 // this cycle (see runOrg) — the Runner uses it to skip the bare-clone
 // bootstrap on a no-op TTL-skip cycle.
 func (p *Profiler) RunOrg(ctx context.Context, orgID string, force bool) (bool, error) {
-	repos, err := p.repos.ListTrackedNamesSystem(ctx, orgID)
+	// Only the repositories tracked on the org's current GitHub host: the
+	// fetches below go to that host, where another host's names may belong
+	// to other repositories.
+	host, err := db.OrgGitHubHostSystem(ctx, p.orgs, orgID)
+	if err != nil {
+		return false, fmt.Errorf("load configured repos: %w", err)
+	}
+	repos, err := p.repos.ListTrackedNamesSystem(ctx, orgID, host)
 	if err != nil {
 		return false, fmt.Errorf("load configured repos: %w", err)
 	}
@@ -190,6 +197,8 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 	// picks is what a host-side clone runs against, and an App installation
 	// token is an HTTPS bearer credential no SSH remote can carry.
 	preferSSH := domain.EffectiveCloneProtocol(orgSet.GitHubCloneProtocol, runmode.Current() == runmode.ModeMulti) == "ssh"
+	// The GitHub host every repository this cycle reads and writes is on.
+	host := domain.GitHubHost(orgSet.GitHubBaseURL)
 
 	// A cycle with no usable background-jobs model has no profile it can write,
 	// so it skips before spending a single GitHub call on doc fetches — and
@@ -225,7 +234,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// GitHub fetches are built from; the rename applied further down
 		// moves owner/repo and leaves the id alone, so an id read here stays
 		// the right one either way.
-		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+		existing, existingErr := p.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
 		switch {
 		case existingErr != nil:
 			// Forced passes skip too: without the row there is no id to key
@@ -291,7 +300,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 		// listing sees the same fact within a cycle, but only for App orgs;
 		// here it costs one field on a response already in hand, bounded by
 		// the profile TTL.
-		if moved, ok := p.applyRenameFromMeta(ctx, orgID, name, meta); ok {
+		if moved, ok := p.applyRenameFromMeta(ctx, orgID, host, name, meta); ok {
 			name = moved
 			owner, repo, _ = strings.Cut(name, "/")
 		}
@@ -314,6 +323,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 			Owner:  owner,
 			Repo:   repo,
 			Source: domain.RepoSourceGitHub,
+			Host:   host,
 			// The repository id GitHub just sent on the same response the
 			// clone URL and default branch came from. This is the only place
 			// TF learns it — it is not worth a request of its own, and a row
@@ -475,7 +485,7 @@ func (p *Profiler) runOrg(ctx context.Context, orgID string, repos []string, for
 // the names agree, GitHub sent no id or name to compare, or the rename could
 // not be applied — and the caller then profiles under the name it already had,
 // which still resolves through GitHub's redirect.
-func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, tracked string, meta *github.RepoMeta) (string, bool) {
+func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, host, tracked string, meta *github.RepoMeta) (string, bool) {
 	id := meta.ExternalID()
 	if meta.FullName == "" || id == "" || domain.SameRepoSlug(meta.FullName, tracked) {
 		return "", false
@@ -484,7 +494,7 @@ func (p *Profiler) applyRenameFromMeta(ctx context.Context, orgID, tracked strin
 	if !ok || owner == "" || repo == "" {
 		return "", false
 	}
-	applied := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, []domain.RepoRef{{
+	applied := reporename.Apply(ctx, p.repos, p.resolver, repoprofileLog, orgID, host, []domain.RepoRef{{
 		Source: domain.RepoSourceGitHub, Owner: owner, Repo: repo, ExternalID: id,
 	}})
 	if applied == 0 {

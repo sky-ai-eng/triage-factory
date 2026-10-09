@@ -156,6 +156,16 @@ var closeRelations = []closeRelation{
 		terminatesEntity: true,
 		closeReason:      "entity_closed",
 	},
+	// TF stopped following a tracked PR (its host is no longer the org's) →
+	// the same entity-wide close + terminate. Like Jira's unreachable it spares
+	// only its own type: a merged or closed task on a PR TF can no longer
+	// observe has nothing left to act on.
+	{
+		onEvents:         []string{domain.EventGitHubPRUnreachable},
+		closes:           githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable),
+		terminatesEntity: true,
+		closeReason:      "entity_closed",
+	},
 	// A Jira issue completed → same entity-wide close + terminate.
 	{
 		onEvents:         []string{domain.EventJiraIssueCompleted},
@@ -239,9 +249,16 @@ var EntityTerminatingEvents = func() map[string]bool {
 // in-flight type is covered for free; TestTerminalCloseSet_CoversTaskTypes
 // asserts coverage so drift fails loudly instead of leaking tasks on merge.
 func githubPRTerminalCloseTypes() []string {
+	return githubPRCloseTypesExcept(domain.EventGitHubPRMerged, domain.EventGitHubPRClosed)
+}
+
+// githubPRCloseTypesExcept builds an entity-wide GitHub close set: every
+// author-centric type plus the requested-reviewer task, minus the terminating
+// events' own types — the jiraCloseTypesExcept shape for pull requests.
+func githubPRCloseTypesExcept(terminators ...string) []string {
 	out := make([]string, 0, len(authorCentricGitHubEventTypes)+1)
 	for _, et := range authorCentricGitHubEventTypes {
-		if et == domain.EventGitHubPRMerged || et == domain.EventGitHubPRClosed {
+		if slices.Contains(terminators, et) {
 			continue
 		}
 		out = append(out, et)
@@ -264,8 +281,8 @@ func jiraIssueUnreachableCloseTypes() []string {
 }
 
 // closeOwedCloseTypes is what the poll's close obligation cleans up: the
-// union of the GitHub terminal set and the Jira and Linear completed and
-// unreachable sets, deduplicated, minus every terminating event's own type.
+// union of the GitHub terminal and unreachable sets and the Jira and Linear
+// completed and unreachable sets, deduplicated, minus every terminating event's own type.
 // An entity has one source, so the types of the other sources are no-ops.
 // The subtraction is explicit rather than inherited, because each issue
 // source's two sets spare only their own terminator: the obligation does not
@@ -279,7 +296,7 @@ func closeOwedCloseTypes() []string {
 	seen := map[string]bool{}
 	var out []string
 	sets := [][]string{
-		githubPRTerminalCloseTypes(),
+		githubPRTerminalCloseTypes(), githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable),
 		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
 		linearCloseTypesExcept(domain.EventLinearIssueCompleted), linearCloseTypesExcept(domain.EventLinearIssueUnreachable),
 	}

@@ -53,3 +53,24 @@ func assertFileContent(t *testing.T, path, want string) {
 		t.Errorf("%s = %q, want %q", path, got, want)
 	}
 }
+
+// testRepo is the Repo a test names by its slug: a stand-in row id built from
+// the slug, so two tests' repositories never share a bare and one test's
+// repeated calls always reach the same one.
+func testRepo(owner, repo string) Repo {
+	return Repo{ID: "repo-" + owner + "-" + repo, Owner: owner, Name: repo}
+}
+
+// registerWorktree records a linked worktree named name against bare, its
+// gitdir pointing into checkout — the admin entry `git worktree add` writes,
+// without the git.
+func registerWorktree(t *testing.T, bare, name, checkout string) {
+	t.Helper()
+	adminDir := filepath.Join(bare, "worktrees", name)
+	if err := os.MkdirAll(adminDir, 0o755); err != nil {
+		t.Fatalf("register worktree: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "gitdir"), []byte(filepath.Join(checkout, ".git")+"\n"), 0o644); err != nil {
+		t.Fatalf("write gitdir: %v", err)
+	}
+}
