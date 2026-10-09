@@ -1688,6 +1688,12 @@ func jiraMoved(prev, curr domain.JiraSnapshot) bool {
 // ok=false means the rename did not land and the caller writes nothing to the
 // entity this cycle: an active row still holds the key (it clears once that
 // row is renamed or retired), or the write failed.
+//
+// The returned entity carries the poll_seq the rename bumped to, so the
+// caller's snapshot CAS lands on its own rename. When the row already had the
+// key, someone else renamed it after this cycle read it — an agent's read of
+// the issue, say — and the entity keeps the poll_seq this cycle read, so its
+// CAS misses and the next cycle diffs from what is stored.
 func (t *Tracker) renameJiraEntity(ctx context.Context, c *jiraCycle, e domain.Entity, key string) (domain.Entity, bool) {
 	url := domain.JiraIssueURL(c.baseURL, key)
 	out, err := t.entities.RenameSystem(context.Background(), t.orgID, "jira", c.scope, e.ExternalID, key, url)
@@ -1703,6 +1709,7 @@ func (t *Tracker) renameJiraEntity(ctx context.Context, c *jiraCycle, e domain.E
 	if out.Renamed {
 		trackerLog.InfoContext(ctx, "jira issue answers under a new key; entity renamed",
 			"from", out.From, "to", out.To, "entity_id", e.ID)
+		e.PollSeq = out.PollSeq
 	}
 	e.SourceID, e.URL = key, url
 	return e, true
@@ -1872,8 +1879,11 @@ func (t *Tracker) applyJiraIssue(ctx context.Context, c *jiraCycle, e domain.Ent
 		}
 		if err != nil {
 			trackerLog.Error("seed jira stub snapshot failed", "source_id", e.SourceID, "error", err)
-		} else if !ok {
+			return 0, false
+		}
+		if !ok {
 			trackerLog.Warn("seed jira stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
+			return 0, false
 		}
 		t.mirrorJiraText(orgID, e, state)
 		return 0, false
@@ -1922,21 +1932,18 @@ func (t *Tracker) applyJiraIssue(ctx context.Context, c *jiraCycle, e domain.Ent
 	return enqueued, false
 }
 
-// mirrorJiraText brings the entity's title, description and link up to the
-// issue's. Best effort, outside the snapshot transaction: the event's body
-// hash is the revision authority, and these capped strings can lag a
-// committed event. The link follows a key change through the rename; it is
-// mirrored here too so an entity whose link went stale without one is
-// repaired by its next refresh.
+// mirrorJiraText brings the entity's title and description up to the issue's.
+// Best effort, outside the snapshot transaction: the event's body hash is the
+// revision authority, and these capped strings can lag a committed event. The
+// link is not mirrored: it is derived from the key, and only RenameSystem
+// writes it, under the row lock and together with the key, so a read that
+// predates a rename cannot put the old key's link back.
 func (t *Tracker) mirrorJiraText(orgID string, e domain.Entity, state jiraIssueState) {
 	if e.Title != state.Snap.Summary {
 		_, _ = t.entities.UpdateTitleSystem(context.Background(), orgID, e.ID, state.Snap.Summary)
 	}
 	if state.Snap.BodyHash != "" && e.Description != state.Description {
 		_, _ = t.entities.UpdateDescriptionSystem(context.Background(), orgID, e.ID, state.Description)
-	}
-	if state.Snap.URL != "" && e.SourceID == state.Snap.Key && e.URL != state.Snap.URL {
-		_, _ = t.entities.UpdateURLSystem(context.Background(), orgID, e.ID, state.Snap.URL)
 	}
 }
 

@@ -292,8 +292,17 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if moved.SourceID != "OPS-77" || moved.URL != newURL || moved.ExternalID != "uuid-4" {
 			t.Errorf("entity = %+v, want key and url moved, id kept", moved)
 		}
-		if moved.SnapshotJSON != before.SnapshotJSON || moved.PollSeq != before.PollSeq {
-			t.Errorf("rename moved the snapshot or poll_seq: before %+v after %+v", before, moved)
+		if moved.SnapshotJSON != before.SnapshotJSON {
+			t.Errorf("rename moved the snapshot: before %+v after %+v", before, moved)
+		}
+		// A rename is a new version of the row: a cycle that read it before
+		// must miss its snapshot CAS, and the renaming caller CASes on the
+		// version the outcome hands back.
+		if moved.PollSeq != before.PollSeq+1 || out.PollSeq != moved.PollSeq {
+			t.Errorf("poll_seq = %d (outcome %d), want %d: the rename bumps it once and returns it", moved.PollSeq, out.PollSeq, before.PollSeq+1)
+		}
+		if ok, err := s.Entities.UpdateSnapshotCASSystem(ctx, orgID, row.ID, `{"id":"uuid-4","stale":true}`, before.PollSeq); err != nil || ok {
+			t.Errorf("a snapshot CAS on the version read before the rename = ok %v err %v, want a miss", ok, err)
 		}
 		if old, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "ENG-4"); old != nil {
 			t.Errorf("the old key still resolves: %+v", old)
@@ -559,8 +568,12 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-5", "OPS-5", ""); err != nil || !out.Renamed {
 			t.Fatalf("first rename = %+v err=%v", out, err)
 		}
+		renamed, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "OPS-5")
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-5", "OPS-5", ""); err != nil || out.Renamed {
 			t.Errorf("second rename = %+v err=%v, want a no-op", out, err)
+		}
+		if again, _ := s.Entities.GetBySourceSystem(ctx, orgID, "linear", scope, "OPS-5"); again == nil || again.PollSeq != renamed.PollSeq {
+			t.Errorf("a no-op rename moved poll_seq: %+v, want %d", again, renamed.PollSeq)
 		}
 		for _, tc := range []struct{ name, scope, id string }{
 			{"no id", scope, ""},

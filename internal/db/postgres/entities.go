@@ -569,9 +569,10 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 		if newURL != "" {
 			url = newURL
 		}
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE entities SET source_id = $1, url = $2 WHERE org_id = $3 AND id = $4`,
-			newKey, url, orgID, row.id); err != nil {
+		var pollSeq int64
+		if err := tx.QueryRowContext(ctx,
+			`UPDATE entities SET source_id = $1, url = $2, poll_seq = poll_seq + 1 WHERE org_id = $3 AND id = $4 RETURNING poll_seq`,
+			newKey, url, orgID, row.id).Scan(&pollSeq); err != nil {
 			if isUniqueViolation(err) {
 				return fmt.Errorf("%w: %s %s in %s: %v", db.ErrEntityKeyOccupied, source, newKey, scope, err)
 			}
@@ -583,7 +584,7 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 		if err := rewriteEntityActionURLs(ctx, tx, orgID, source, row.url, url); err != nil {
 			return err
 		}
-		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey}
+		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey, PollSeq: pollSeq}
 		return nil
 	})
 	if err != nil {

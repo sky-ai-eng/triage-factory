@@ -17,13 +17,17 @@ type EntityRef struct {
 // observed, or the caller had no id to key on — and those are outcomes rather
 // than errors, as on RepoRenameOutcome.
 //
-// EntityID, From and To are set only when Renamed is true. From is the key as
-// it was stored, so a log line or an event can name what moved.
+// EntityID, From, To and PollSeq are set only when Renamed is true. From is
+// the key as it was stored, so a log line or an event can name what moved.
+// PollSeq is the entity's poll_seq after the rename, which bumped it: the
+// renaming caller CASes its snapshot on it, and any other writer still
+// holding the version from before the rename misses.
 type EntityRenameOutcome struct {
 	Renamed  bool
 	EntityID string
 	From     string
 	To       string
+	PollSeq  int64
 }
 
 // DetectEntityRenames returns the observed refs whose entity TF stores under a

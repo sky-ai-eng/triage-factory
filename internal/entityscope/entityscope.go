@@ -36,7 +36,9 @@ func Of(ctx context.Context, stores db.Stores, orgID, source string) (string, er
 //   - with ref.ExternalID, the row carrying it in the scope, whatever key it is
 //     stored under. When follow is true, ref.SourceID is the key the provider
 //     answers with now — it came off a response — and a row stored under
-//     another key is renamed onto it (RenameSystem); when the rename is refused
+//     another key is renamed onto it (RenameSystem, whose poll_seq bump makes
+//     a poll cycle that read the row under its old key drop that read rather
+//     than commit it over the rename); when the rename is refused
 //     because an active row still holds the key, the row is returned under its
 //     stored key, which a later read renames. When follow is false the key may
 //     be older than the row's (an artifact's target), and the row is returned
@@ -71,7 +73,7 @@ func Resolve(ctx context.Context, entities db.EntityStore, orgID string, ref dom
 				return nil, err
 			}
 			if out.Renamed {
-				e.SourceID = ref.SourceID
+				e.SourceID, e.PollSeq = ref.SourceID, out.PollSeq
 				if url != "" {
 					e.URL = url
 				}

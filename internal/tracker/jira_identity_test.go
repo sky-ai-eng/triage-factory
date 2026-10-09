@@ -65,6 +65,9 @@ type fakeJira struct {
 	searches []string
 	gets     []string
 	srv      *httptest.Server
+	// onSearch, when set, runs as a search arrives and before it is answered:
+	// something happening on TF's side while a cycle waits on Jira.
+	onSearch func(jql string)
 }
 
 var (
@@ -91,6 +94,9 @@ func (f *fakeJira) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		f.searches = append(f.searches, req.JQL)
+		if f.onSearch != nil {
+			f.onSearch(req.JQL)
+		}
 		var out []map[string]any
 		for _, is := range f.issues {
 			if !is.Gone && f.matches(req.JQL, is) {
@@ -307,6 +313,55 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 
 	if evts := fx.cycle(t, jiraSite, engAndOps()); len(evts) != 0 {
 		t.Fatalf("next cycle emitted %v, want the move not re-emitted", eventTypes(evts))
+	}
+}
+
+// TestRefreshJira_ARenameMidCycleDropsTheCyclesRead: an agent's read of a
+// moved issue renames its entity while a poll cycle is waiting on a refresh
+// that still answers under the old key. The cycle must not commit that read
+// over the rename — the snapshot CAS misses on the version the rename bumped,
+// and nothing it diffed is emitted — and the next cycle, reading the issue
+// under its new key, diffs the move and everything else from the stored
+// snapshot, with the link the rename wrote left in place.
+func TestRefreshJira_ARenameMidCycleDropsTheCyclesRead(t *testing.T) {
+	is := &fakeJiraIssue{ID: "10071", Keys: []string{"ENG-71"}, ProjectID: "100", Status: "In Progress", Assignee: "Alice", Summary: "Racing", Updated: "2026-10-01T10:00:00.000+0000"}
+	fx := newJiraIdentityFixture(t, is)
+	fx.cycle(t, jiraSite, engAndOps())
+	ent := fx.entity(t, jiraSite, "ENG-71")
+
+	fx.jira.update(func() {
+		is.Status, is.Updated = "Review", "2026-10-01T11:00:00.000+0000"
+		fx.jira.onSearch = func(jql string) {
+			if !strings.HasPrefix(jql, "id IN") {
+				return
+			}
+			fx.jira.onSearch = nil
+			if _, err := fx.stores.Entities.RenameSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", jiraSite, "10071", "OPS-7", jiraSite+"/browse/OPS-7"); err != nil {
+				t.Errorf("rename mid-cycle: %v", err)
+			}
+		}
+	})
+	if evts := fx.cycle(t, jiraSite, engAndOps()); len(evts) != 0 {
+		t.Fatalf("events = %v: the cycle committed a read taken under the key the entity had already left", eventTypes(evts))
+	}
+	got := fx.entity(t, jiraSite, "OPS-7")
+	if got == nil || got.ID != ent.ID || got.URL != jiraSite+"/browse/OPS-7" {
+		t.Fatalf("OPS-7 = %+v, want the renamed entity with its new link", got)
+	}
+	if snap, _ := storedJiraSnapshot(*got); snap.Key != "ENG-71" || snap.Status != "In Progress" {
+		t.Errorf("stored snapshot = %+v, want the one from before the rename", snap)
+	}
+
+	fx.jira.update(func() {
+		is.Keys, is.ProjectID, is.Updated = append(is.Keys, "OPS-7"), "200", "2026-10-01T12:00:00.000+0000"
+	})
+	evts := fx.cycle(t, jiraSite, engAndOps())
+	got2 := eventTypes(evts)
+	if len(got2) == 0 || got2[0] != domain.EventJiraIssueKeyChanged || !slices.Contains(got2, domain.EventJiraIssueStatusChanged) {
+		t.Fatalf("next cycle = %v, want key_changed first, then the status change", got2)
+	}
+	if e := fx.entity(t, jiraSite, "OPS-7"); e == nil || e.URL != jiraSite+"/browse/OPS-7" {
+		t.Errorf("OPS-7 = %+v, want its link kept", e)
 	}
 }
 

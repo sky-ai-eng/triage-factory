@@ -349,10 +349,14 @@ type EntityStore interface {
 	// than one row carries the id. Neither writes anything. An empty scope is
 	// ErrEntityScopeRequired.
 	//
-	// The snapshot, poll_seq and last_polled_at are left alone: the caller
-	// commits the fresh snapshot through its own CAS afterwards, on the
-	// poll_seq it read. System (admin-pool) only: the rewrite spans artifacts
-	// of every team in the org.
+	// poll_seq is bumped and returned (EntityRenameOutcome.PollSeq); the
+	// snapshot and last_polled_at are left alone. A rename is a new version of
+	// the row: a poll cycle that read the entity before it — under the old
+	// key, from a search the move had not reached — must not commit that read
+	// over it, and the bump is what makes its snapshot CAS miss. A caller that
+	// renames and then commits a fresh snapshot itself (the trackers) CASes on
+	// the returned value. System (admin-pool) only: the rewrite spans
+	// artifacts of every team in the org.
 	RenameSystem(ctx context.Context, orgID, source, scope, externalID, newKey, newURL string) (domain.EntityRenameOutcome, error)
 
 	ListActiveSystem(ctx context.Context, orgID, source string) ([]domain.Entity, error)
