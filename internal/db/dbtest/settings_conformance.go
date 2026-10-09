@@ -400,6 +400,161 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 	// unwind each other, and each must leave the other's columns alone —
 	// that's the whole point of the split. This test plays out both
 	// directions of that on one shared row.
+	// anthropic_api_key_ref / bedrock_credentials_ref name the LLM material
+	// the org has bound. Like the Linear workspace they belong to the
+	// credential routes, so no bulk save, guarded or not, moves them. Unlike
+	// it, their writers move the version: the settings save validates
+	// llm_auth_method against them, and a bind writes llm_auth_method too.
+	t.Run("OrgSettings_LLMCredentialRefs_OwnedByCredentialRoutes", func(t *testing.T) {
+		type refWriter struct {
+			name  string
+			write func(db.OrgsStore, context.Context, string, string) (domain.OrgSettings, error)
+			ref   func(domain.OrgSettings) string
+		}
+		anthropic := refWriter{"anthropic", db.OrgsStore.SetAnthropicKeyRef,
+			func(o domain.OrgSettings) string { return o.AnthropicAPIKeyRef }}
+		bedrock := refWriter{"bedrock", db.OrgsStore.SetBedrockCredentialsRef,
+			func(o domain.OrgSettings) string { return o.BedrockCredentialsRef }}
+
+		for _, c := range []struct{ this, other refWriter }{{anthropic, bedrock}, {bedrock, anthropic}} {
+			t.Run(c.this.name, func(t *testing.T) {
+				stores, ids := factory(t)
+				write := func(ref string) domain.OrgSettings {
+					t.Helper()
+					got, err := c.this.write(stores.Orgs, ctx, ids.OrgID, ref)
+					if err != nil {
+						t.Fatalf("set %s ref %q: %v", c.this.name, ref, err)
+					}
+					return got
+				}
+
+				// No settings row yet: a bind materializes one from schema
+				// defaults and lands on it, so a save that asserted "no row"
+				// (version 0) conflicts.
+				bound := write("ref-1")
+				if c.this.ref(bound) != "ref-1" || bound.LLMAuthMethod != domain.LLMAuthBYOK || bound.Version != 1 {
+					t.Errorf("bind on a missing row returned ref %q, method %q, version %d; want ref-1, %q, 1",
+						c.this.ref(bound), bound.LLMAuthMethod, bound.Version, domain.LLMAuthBYOK)
+				}
+				if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0); !errors.Is(err, db.ErrOrgSettingsVersion) {
+					t.Errorf("create-asserting save after the bind materialized the row: err = %v, want ErrOrgSettingsVersion", err)
+				}
+
+				// The other provider's ref is its own writer's alone.
+				if _, err := c.other.write(stores.Orgs, ctx, ids.OrgID, "other-ref"); err != nil {
+					t.Fatalf("set %s ref: %v", c.other.name, err)
+				}
+				loaded, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+				if err != nil {
+					t.Fatalf("GetSettingsSystem: %v", err)
+				}
+
+				// A different ref moves the version, so a save loaded before it
+				// conflicts and writes nothing.
+				rebound := write("ref-2")
+				if c.this.ref(rebound) != "ref-2" || rebound.Version != loaded.Version+1 {
+					t.Errorf("rebind returned ref %q version %d, want ref-2 and %d", c.this.ref(rebound), rebound.Version, loaded.Version+1)
+				}
+				if c.other.ref(rebound) != "other-ref" {
+					t.Errorf("%s bind moved the %s ref to %q", c.this.name, c.other.name, c.other.ref(rebound))
+				}
+				stale := loaded
+				stale.MaxConcurrentRuns = 9
+				if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, stale, loaded.Version); !errors.Is(err, db.ErrOrgSettingsVersion) {
+					t.Fatalf("save loaded before the bind: err = %v, want ErrOrgSettingsVersion", err)
+				}
+
+				// The same ref, with the org already on its own credentials,
+				// changes nothing and moves nothing.
+				same := write("ref-2")
+				if same.Version != rebound.Version {
+					t.Errorf("an unchanged bind moved the version %d -> %d", rebound.Version, same.Version)
+				}
+
+				// Neither bulk writer moves either ref, whatever its struct
+				// carries; each still applies its own fields.
+				save := same
+				save.AnthropicAPIKeyRef, save.BedrockCredentialsRef = "", ""
+				save.MaxConcurrentRuns = 4
+				if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, save, same.Version); err != nil {
+					t.Fatalf("UpdateSettingsVersioned (refs blank in struct): %v", err)
+				}
+				save.AnthropicAPIKeyRef, save.BedrockCredentialsRef = "someone-elses", "someone-elses"
+				// The bulk save can still put the org on the host's credentials;
+				// refusing that beside a bound ref is the settings route's rule.
+				save.LLMAuthMethod = domain.LLMAuthSystem
+				saved, err := stores.Orgs.UpdateSettings(ctx, ids.OrgID, save)
+				if err != nil {
+					t.Fatalf("UpdateSettings (refs in struct): %v", err)
+				}
+				if c.this.ref(saved) != "ref-2" || c.other.ref(saved) != "other-ref" {
+					t.Errorf("a settings save moved the refs to (%s %q, %s %q); want them kept",
+						c.this.name, c.this.ref(saved), c.other.name, c.other.ref(saved))
+				}
+				if saved.MaxConcurrentRuns != 4 || saved.LLMAuthMethod != domain.LLMAuthSystem {
+					t.Errorf("the settings saves didn't apply their own fields: concurrent=%d method=%q", saved.MaxConcurrentRuns, saved.LLMAuthMethod)
+				}
+
+				// "" clears the ref, moves the version, and leaves the auth
+				// method as it was.
+				cleared := write("")
+				if c.this.ref(cleared) != "" || cleared.LLMAuthMethod != domain.LLMAuthSystem || cleared.Version != saved.Version+1 {
+					t.Errorf("clear returned ref %q, method %q, version %d; want \"\", %q, %d",
+						c.this.ref(cleared), cleared.LLMAuthMethod, cleared.Version, domain.LLMAuthSystem, saved.Version+1)
+				}
+				if c.other.ref(cleared) != "other-ref" {
+					t.Errorf("%s clear moved the %s ref to %q", c.this.name, c.other.name, c.other.ref(cleared))
+				}
+
+				// Clearing a ref that is already clear changes nothing.
+				again := write("")
+				if again.Version != cleared.Version {
+					t.Errorf("clearing an absent ref moved the version %d -> %d", cleared.Version, again.Version)
+				}
+
+				// The org is on the host's credentials and still holds the other
+				// provider's ref. Binding that same ref changes only the auth
+				// method, which still moves the org onto its own credentials and
+				// moves the version.
+				own, err := c.other.write(stores.Orgs, ctx, ids.OrgID, "other-ref")
+				if err != nil {
+					t.Fatalf("set %s ref: %v", c.other.name, err)
+				}
+				if own.LLMAuthMethod != domain.LLMAuthBYOK || own.Version != again.Version+1 {
+					t.Errorf("bind under an unchanged ref returned method %q version %d, want %q and %d",
+						own.LLMAuthMethod, own.Version, domain.LLMAuthBYOK, again.Version+1)
+				}
+			})
+		}
+
+		// A clear on an org with no settings row has nothing to clear, so it
+		// creates no row: the read still reports the missing-row defaults
+		// rather than the column defaults a created row would take, and a save
+		// asserting "no row" still lands.
+		t.Run("clear on a missing row", func(t *testing.T) {
+			stores, ids := factory(t)
+			for _, w := range []refWriter{anthropic, bedrock} {
+				got, err := w.write(stores.Orgs, ctx, ids.OrgID, "")
+				if err != nil {
+					t.Fatalf("clear %s on a missing row: %v", w.name, err)
+				}
+				if !reflect.DeepEqual(got, domain.DefaultOrgSettings()) {
+					t.Errorf("clear %s on a missing row returned %+v, want the defaults a read finds", w.name, got)
+				}
+				read, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+				if err != nil {
+					t.Fatalf("GetSettingsSystem: %v", err)
+				}
+				if !reflect.DeepEqual(read, domain.DefaultOrgSettings()) {
+					t.Errorf("read after clear %s on a missing row = %+v, want the missing-row defaults", w.name, read)
+				}
+			}
+			if _, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{GitHubCloneProtocol: "https"}, 0); err != nil {
+				t.Errorf("create-asserting save after clears on a missing row: %v", err)
+			}
+		})
+	})
+
 	t.Run("OrgSettings_PerSourceWriteDoesNotShareTheVersionToken", func(t *testing.T) {
 		stores, ids := factory(t)
 		if stores.OrgEventSources == nil {
@@ -474,19 +629,19 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 			GitHubCloneProtocol: "https",
 			JiraBaseURL:         "https://acme.atlassian.net",
 			JiraPollInterval:    3 * time.Minute,
-			// LinearWorkspaceID / LinearWorkspaceURLKey are left empty: like
-			// the class below, UpdateSettings doesn't own them (see
-			// OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave).
-			LinearPollInterval:    11 * time.Minute,
-			AnthropicAPIKeyRef:    "vault://orgs/A/anthropic",
-			BedrockCredentialsRef: "vault://orgs/A/bedrock",
-			EnabledModels:         []string{domain.ModelSonnet, domain.ModelHaiku},
-			BackgroundJobsModel:   domain.ModelSonnet,
-			LLMAuthMethod:         domain.LLMAuthBYOK,
-			MaxDailyCostUSD:       12.50,
-			MaxConcurrentRuns:     8,
-			MarketplaceEnabled:    true,
-			APITokenMaxAgeDays:    30,
+			// LinearWorkspaceID / LinearWorkspaceURLKey, AnthropicAPIKeyRef and
+			// BedrockCredentialsRef are left empty: like the class below,
+			// UpdateSettings doesn't own them (see
+			// OrgSettings_LinearWorkspace_OwnedByCredentialNotSettingsSave and
+			// OrgSettings_LLMCredentialRefs_OwnedByCredentialRoutes).
+			LinearPollInterval:  11 * time.Minute,
+			EnabledModels:       []string{domain.ModelSonnet, domain.ModelHaiku},
+			BackgroundJobsModel: domain.ModelSonnet,
+			LLMAuthMethod:       domain.LLMAuthBYOK,
+			MaxDailyCostUSD:     12.50,
+			MaxConcurrentRuns:   8,
+			MarketplaceEnabled:  true,
+			APITokenMaxAgeDays:  30,
 			// Read-only through this struct: UpdateSettings doesn't own
 			// github_credential_class, so the row keeps its schema default and
 			// the read hands it back. Stated as the expected value rather than

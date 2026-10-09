@@ -98,18 +98,19 @@ type OrgsStore interface {
 	GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error)
 
 	// UpdateSettings upserts the org's settings row. An empty
-	// GitHubBaseURL / JiraBaseURL / AnthropicAPIKeyRef /
-	// BedrockCredentialsRef, and a nil EnabledModels, write NULL into
+	// GitHubBaseURL / JiraBaseURL, and a nil EnabledModels, write NULL into
 	// the column. An empty GitHubCloneProtocol substitutes "https" — the
 	// column CHECK rejects empty strings, and this matches both the column
 	// DEFAULT and DefaultOrgSettings, so no door onto it disagrees. Postgres routes through
 	// the app pool (org_settings_update RLS gates by org admin).
 	//
-	// It does NOT write github_credential_class, linear_workspace_id or
-	// linear_workspace_url_key: those columns are owned by the credential
+	// It does NOT write github_credential_class, linear_workspace_id,
+	// linear_workspace_url_key, anthropic_api_key_ref or
+	// bedrock_credentials_ref: those columns are owned by the credential
 	// transitions, not by the settings writer, so the matching fields of
 	// updates are ignored and an existing value survives every settings save.
-	// See SetGitHubCredentialClass and SetLinearWorkspace.
+	// See SetGitHubCredentialClass, SetLinearWorkspace, SetAnthropicKeyRef and
+	// SetBedrockCredentialsRef.
 	//
 	// It is unguarded: it writes every column it owns, whatever the caller
 	// read, so a caller that loads the row, edits one field and writes the
@@ -117,12 +118,10 @@ type OrgsStore interface {
 	// undoing any settings save that committed in between. A write that owns
 	// one value never goes through here; it uses a targeted method that touches
 	// nothing else (SetSourceBaseURL, SetGitHubCredentialClass,
-	// SetLinearWorkspace). It bumps the row's version, so a guarded save
-	// loaded before it conflicts rather than landing on top of it. The
-	// settings API uses UpdateSettingsVersioned.
-	//
-	// TODO(TFAC-1059): the Anthropic and Bedrock credential routes still
-	// read-modify-write the row through here to change their key refs.
+	// SetLinearWorkspace, SetAnthropicKeyRef, SetBedrockCredentialsRef). It
+	// bumps the row's version, so a guarded save loaded before it conflicts
+	// rather than landing on top of it. The settings API uses
+	// UpdateSettingsVersioned.
 	//
 	// Returns the persisted settings, read off RETURNING on the write
 	// statement itself rather than from a follow-up SELECT, and projecting
@@ -218,4 +217,41 @@ type OrgsStore interface {
 	// queue rather than deadlock. Pool and return contract as
 	// SetGitHubCredentialClass.
 	SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, error)
+
+	// SetAnthropicKeyRef writes ONLY org_settings.anthropic_api_key_ref — the
+	// secret key the org's Anthropic API key is stored under — from inside the
+	// Anthropic credential bind and unbind. A non-empty ref also sets
+	// llm_auth_method to domain.LLMAuthBYOK in the same statement: holding
+	// provider material and running on the host's credentials are mutually
+	// exclusive, and the bind is what settles which one the org is doing. ""
+	// clears the ref (NULL) and leaves llm_auth_method alone, because removing
+	// one provider's key says nothing about where the next run's credential
+	// comes from.
+	//
+	// It bumps org_settings.version. The settings save cannot write the ref,
+	// but it validates against it — it refuses llm_auth_method "system" while
+	// either ref is set — and it writes llm_auth_method, so a save that ran
+	// that check before the bind landed must conflict rather than store
+	// "system" beside a credential.
+	//
+	// A call that would change neither column writes nothing and moves
+	// nothing, so it never fails an open settings edit: rotating a key under
+	// the same ref, clearing a ref that is already clear, and clearing on an
+	// org with no settings row. A bind onto an org with no settings row
+	// creates the row from schema defaults, as SetGitHubCredentialClass does.
+	// A clear never creates one. A missing row already reads as having no ref,
+	// and creating it would move the version and replace what GetSettings
+	// reports for a missing row (domain.DefaultOrgSettings) with the column
+	// defaults, which differ from it in both dialects.
+	//
+	// Pool as SetGitHubCredentialClass. A call that writes returns the stored
+	// row from RETURNING, projecting GetSettings' column list and scanner; a
+	// call that writes nothing returns what GetSettings returns.
+	SetAnthropicKeyRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error)
+
+	// SetBedrockCredentialsRef is SetAnthropicKeyRef for
+	// org_settings.bedrock_credentials_ref — the key of the Bedrock shape the
+	// org has bound, which also names that shape. Same llm_auth_method rule,
+	// version rule, missing-row rule and return contract.
+	SetBedrockCredentialsRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error)
 }
