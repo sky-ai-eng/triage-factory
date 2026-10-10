@@ -362,10 +362,10 @@ type RepositoryStore interface {
 	//
 	// Everything it rewrites belongs to that host: the repository row is
 	// matched on (source, host, external_id), entities only within the host's
-	// entity scope, and artifacts and audit-ledger links only where their link
-	// is on the host (an artifact with no link carries nothing naming a host
-	// and is matched by its key alone). A repository on another host with the
-	// same name or id is never touched.
+	// entity scope, artifacts and audit-ledger rows only where their scope is
+	// the host (with a link or without one), placement pins only on the host,
+	// and a stored link only when it is on the host (domain.RewriteRepoURL).
+	// A repository on another host with the same name or id is never touched.
 	//
 	// Detection happens here, not in the caller: the method re-reads the
 	// repository row under a lock (SELECT … FOR UPDATE in Postgres; SQLite's

@@ -16,16 +16,16 @@ import (
 //	renameRepositoryRow    — the repository's own row. The rename itself.
 //	rewriteSlugDerivedKeys — text keys with a slug embedded in them.
 //
-// The tracked set, the worktree ledger and a project's pinned repos reference
-// the repository by the registry row's id, so a rename moves the slug on one
+// The tracked set and the worktree ledger reference the repository by the
+// registry row's id, so a rename moves the slug on one
 // row and every one of them still resolves without being touched.
 //
 // What is left cannot become a foreign key. A pull request is identified by its
 // repository AND its number, so entities.source_id stays the composite string
 // "owner/repo#18"; an artifact's dedup_key is a contract between two writers
 // that would re-mint every artifact if its shape moved; placement_overrides'
-// key_value is polymorphic (a slug under one key_kind, a project id under
-// another) and could only carry an FK by splitting the table.
+// key_value is a slug that names a repository with or without a registry row,
+// so no FK can hold it.
 //
 // Stored links move with the keys. entities.url is rewritten alongside
 // source_id — a redirect stops the moment the freed name is re-claimed,
@@ -51,7 +51,7 @@ import (
 // touched.
 //
 // Everything here runs on the ADMIN pool. The rewrite spans tables owned by
-// every team in the org — tracked sets, projects, entities, artifacts — and no
+// every team in the org — tracked sets, entities, artifacts — and no
 // request-scoped identity can see all of them, so RLS cannot express the
 // operation; org_id is bound by argument in every statement instead, and
 // team_github_repos (which has no org_id of its own) is bound through teams.
@@ -254,9 +254,8 @@ func rewriteSlugDerivedKeys(ctx context.Context, q queryer, orgID, source, host,
 		return fmt.Errorf("rewrite entity source ids %s -> %s: %w", from, to, err)
 	}
 
-	// placement_overrides — a repo key's value is the bare slug, in a column
-	// that also holds project ids under a different key_kind. A pin names a
-	// repository on one host, so only this host's pins move.
+	// placement_overrides — a repo key's value is the bare slug. A pin names
+	// a repository on one host, so only this host's pins move.
 	if _, err := q.ExecContext(ctx, `
 		DELETE FROM placement_overrides p
 		 WHERE p.org_id = $1 AND p.key_kind = 'repo' AND p.host = $4 AND lower(p.key_value) = lower($2)

@@ -193,8 +193,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// The same owner/repo on another GitHub host is another repository,
 		// even when it carries the same provider id — ids are per-deployment
 		// sequences. A rename on one host rewrites nothing of the other's:
-		// not its registry row, not its entity (a different scope), not an
-		// artifact or ledger row whose link is on that host.
+		// not its registry row, not its entity, not an artifact or ledger row
+		// recorded in its scope (with a link or without one), not its
+		// placement pin.
 		s, orgID, seed := mk(t)
 		fx := seedRenameFixture(t, s, orgID, seed, "host")
 		const gheURL = TestOtherGitHubHost + "/" + renameOldSlug + "/pull/18"
@@ -219,6 +220,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		gheArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Scope:  TestOtherGitHubHost,
 			Target: domain.PullRequestTarget(renameOldSlug, 19), ExternalID: "19",
 			URL:   TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, 19),
@@ -226,14 +228,34 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if err != nil {
 			t.Fatalf("seed ghe artifact: %v", err)
 		}
+		// The same pull request number as the github.com fixture's, with no
+		// link: only its scope says which host it is on, and it is the same
+		// dedup key in another scope, so a second row.
+		gheLinkless, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Scope:  TestOtherGitHubHost,
+			Target: domain.PullRequestTarget(renameOldSlug, 18), ExternalID: "18",
+			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, 18),
+		})
+		if err != nil {
+			t.Fatalf("seed linkless ghe artifact: %v", err)
+		}
+		if gheLinkless.ID == fx.prArtifactID {
+			t.Fatalf("the ghe artifact landed on the github.com row %s: the same dedup key in two scopes is two rows", fx.prArtifactID)
+		}
 		gheActionKey := "rename-ghe-" + fx.movedActionKey
 		if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-			TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+			TeamID: seed.TeamID, Provider: "github", Scope: TestOtherGitHubHost, Action: domain.ActionPRCreated,
 			Target: renameOldSlug + "#19", ExternalID: "19",
 			URL:        TestOtherGitHubHost + "/" + renameOldSlug + "/pull/19",
 			Credential: domain.CredentialGitHubApp, DedupKey: gheActionKey,
 		}); err != nil {
 			t.Fatalf("seed ghe action: %v", err)
+		}
+		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestOtherGitHubHost, KeyValue: renameOldSlug, Replicas: 7,
+		}); err != nil {
+			t.Fatalf("seed ghe placement pin: %v", err)
 		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
@@ -271,13 +293,29 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("Artifacts.Get(ghe): %v, %v", art, err)
 		}
 		if art.Target != renameOldSlug+"#19" || art.DedupKey != domain.PullRequestDedupKey(renameOldSlug, 19) {
-			t.Errorf("ghe artifact = (target %q, key %q); want it untouched — its link is on another host", art.Target, art.DedupKey)
+			t.Errorf("ghe artifact = (target %q, key %q); want it untouched — it is recorded on another host", art.Target, art.DedupKey)
+		}
+		linkless, err := s.Artifacts.Get(ctx, orgID, gheLinkless.ID)
+		if err != nil || linkless == nil {
+			t.Fatalf("Artifacts.Get(linkless ghe): %v, %v", linkless, err)
+		}
+		if linkless.Target != renameOldSlug+"#18" || linkless.DedupKey != domain.PullRequestDedupKey(renameOldSlug, 18) || linkless.Scope != TestOtherGitHubHost {
+			t.Errorf("linkless ghe artifact = %+v; want it untouched — its scope is another host", linkless)
 		}
 		if a := findActionByKey(t, s, orgID, gheActionKey); a.URL != TestOtherGitHubHost+"/"+renameOldSlug+"/pull/19" {
 			t.Errorf("ghe action url = %q, want it untouched", a.URL)
 		}
 		if _, rawCurrent := seed.RawActionURL(t, gheActionKey); rawCurrent != "" {
 			t.Errorf("ghe action current_url = %q, want NULL — its object never moved", rawCurrent)
+		}
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameOldSlug); pin == nil || pin.Replicas != 7 {
+			t.Errorf("ghe pin on %s after a github.com rename = %+v; want it still there", renameOldSlug, pin)
+		}
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameNewSlug); pin != nil {
+			t.Errorf("a ghe pin answers to %s after a github.com rename: %+v", renameNewSlug, pin)
+		}
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug); pin == nil || pin.Replicas != 3 {
+			t.Errorf("github.com pin after its own rename = %+v; want it moved to %s", pin, renameNewSlug)
 		}
 
 		// And the other way round: renaming the ghe repository moves only it.
@@ -300,14 +338,31 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestGitHubHost, renameNewSlug+"#18"); ent == nil || ent.ID != fx.entityID {
 			t.Errorf("github.com entity after a ghe rename = %+v; want row %s under %s#18", ent, fx.entityID, renameNewSlug)
 		}
+		if got, _ := s.Artifacts.Get(ctx, orgID, gheLinkless.ID); got == nil || got.Target != "octo/api-ghe#18" || got.DedupKey != domain.PullRequestDedupKey("octo/api-ghe", 18) {
+			t.Errorf("linkless ghe artifact after its own rename = %+v; want it moved to octo/api-ghe#18 by its scope", got)
+		}
+		if got, _ := s.Artifacts.Get(ctx, orgID, fx.prArtifactID); got == nil || got.Target != renameNewSlug+"#18" {
+			t.Errorf("github.com artifact after a ghe rename = %+v; want it still at %s#18", got, renameNewSlug)
+		}
+		if a := findActionByKey(t, s, orgID, gheActionKey); a.URL != TestOtherGitHubHost+"/octo/api-ghe/pull/19" {
+			t.Errorf("ghe action url after its own rename = %q, want it moved to octo/api-ghe", a.URL)
+		}
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, "octo/api-ghe"); pin == nil || pin.Replicas != 7 {
+			t.Errorf("ghe pin after its own rename = %+v; want it moved to octo/api-ghe", pin)
+		}
+		if pin, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug); pin == nil || pin.Replicas != 3 {
+			t.Errorf("github.com pin after a ghe rename = %+v; want it still at %s", pin, renameNewSlug)
+		}
 	})
 
 	t.Run("Rename_matches_a_context_path_exactly", func(t *testing.T) {
 		// Two deployments served from one authority under context paths that
 		// differ only in case are two hosts: the host is kept as configured, and
 		// a case-sensitive server serves each under its own spelling. A rename
-		// on one rewrites the artifacts linked under its own path and leaves the
-		// other's, which carry the same owner/repo.
+		// on one rewrites the artifacts recorded on it and leaves the other's,
+		// which carry the same owner/repo. Its links are rewritten too: the
+		// slug is read right after the context path, not at the head of the
+		// link's path.
 		s, orgID, seed := mk(t)
 		const (
 			upper = "https://example.com/GitHub"
@@ -327,6 +382,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Helper()
 			a, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+				Scope:  host,
 				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number),
 				URL:   fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
 				State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, number),
@@ -338,6 +394,26 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		other := artifactOn(lower, 21)
 		own := artifactOn(upper, 22)
+		actionOn := func(host string, number int) string {
+			t.Helper()
+			key := fmt.Sprintf("ctx-path-%d", number)
+			if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
+				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Scope: host, Action: domain.ActionPRCreated,
+				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number),
+				URL:        fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
+				Credential: domain.CredentialGitHubApp, DedupKey: key,
+			}); err != nil {
+				t.Fatalf("seed action on %s: %v", host, err)
+			}
+			return key
+		}
+		otherAction := actionOn(lower, 21)
+		ownAction := actionOn(upper, 22)
+		ownEntity, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "github", upper, renameOldSlug+"#22", "", "pr", "A PR under a context path",
+			upper+"/"+renameOldSlug+"/pull/22")
+		if err != nil {
+			t.Fatalf("seed entity on %s: %v", upper, err)
+		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host: upper, Owner: "octo", Repo: "platform-api", ExternalID: "ctx-path-1",
@@ -359,6 +435,20 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if got.Target != domain.PullRequestTarget(renameNewSlug, 22) || got.DedupKey != domain.PullRequestDedupKey(renameNewSlug, 22) {
 			t.Errorf("artifact linked under %s = (target %q, key %q); want it moved to %s", upper, got.Target, got.DedupKey, renameNewSlug)
+		}
+
+		if a := findActionByKey(t, s, orgID, ownAction); a.URL != upper+"/"+renameNewSlug+"/pull/22" {
+			t.Errorf("action url under %s = %q, want %s/%s/pull/22", upper, a.URL, upper, renameNewSlug)
+		}
+		if a := findActionByKey(t, s, orgID, otherAction); a.URL != lower+"/"+renameOldSlug+"/pull/21" {
+			t.Errorf("action url under %s = %q, want it untouched", lower, a.URL)
+		}
+		ent, err := s.Entities.GetSystem(ctx, orgID, ownEntity.ID)
+		if err != nil || ent == nil {
+			t.Fatalf("Entities.GetSystem(%s): %v, %v", ownEntity.ID, ent, err)
+		}
+		if ent.SourceID != renameNewSlug+"#22" || ent.URL != upper+"/"+renameNewSlug+"/pull/22" {
+			t.Errorf("entity under %s = (source id %q, url %q); want both moved to %s", upper, ent.SourceID, ent.URL, renameNewSlug)
 		}
 	})
 
@@ -770,6 +860,13 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}); err != nil {
 			t.Fatalf("seed target placement override: %v", err)
 		}
+		// Another host's pin on the target slug is no collision: it names a
+		// different repository, and the move neither absorbs nor joins it.
+		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestOtherGitHubHost, KeyValue: renameNewSlug, Replicas: 5,
+		}); err != nil {
+			t.Fatalf("seed other-host placement override: %v", err)
+		}
 
 		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
 			Host:  TestGitHubHost,
@@ -788,6 +885,9 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if ov.Replicas != 3 {
 			t.Errorf("placement replicas = %d, want 3 — the LIVE repository's pin wins, not the orphan's", ov.Replicas)
+		}
+		if other, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, renameNewSlug); other == nil || other.Replicas != 5 {
+			t.Errorf("the other host's pin on %s = %+v; want it untouched", renameNewSlug, other)
 		}
 	})
 

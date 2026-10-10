@@ -404,7 +404,7 @@ func ExternalActionTypes() []string {
 // "branch:<conversationID>:<ref>:<sha>". The git pre-push hook and the git-proxy
 // receive-pack backstop both observe the SAME push (same conversation, ref, sha), so they
 // produce an identical key and the twin collapses under ON CONFLICT(org_id,
-// dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
+// scope, dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
 // ref, or new commits) carries a different sha and is recorded as its own row.
 // This is one of the two actions with a deterministic natural key (the other is
 // EgressDenialDedupKey); every other action leaves DedupKey empty (the store
@@ -419,10 +419,10 @@ func BranchPushDedupKey(conversationID, ref, sha string) string {
 // blocked host in a tight loop, and hundreds of identical rows would bury the
 // signal rather than sharpen it — the thing worth recording is that THIS
 // conversation was refused THIS destination, so the repeats collapse under
-// ON CONFLICT(org_id, dedup_key) DO NOTHING.
+// ON CONFLICT(org_id, scope, dedup_key) DO NOTHING.
 //
-// The conversation id is load-bearing, not decoration: the unique index spans
-// (org_id, dedup_key), so a key built from the host alone would let one
+// The conversation id is load-bearing, not decoration: every denial shares one
+// scope (NetworkScope), so a key built from the host alone would let one
 // conversation's probe silently swallow every later conversation's probe of the
 // same host — org-wide, for the lifetime of the table.
 func EgressDenialDedupKey(conversationID, target string) string {

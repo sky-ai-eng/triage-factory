@@ -365,7 +365,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("artifacts", func(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		art, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			ConversationID: conversationID, TeamID: teamID, Provider: "github", Kind: "pull_request",
+			ConversationID: conversationID, TeamID: teamID, Provider: "github", Scope: "https://github.com", Kind: "pull_request",
 			Target: "octo/repo#1", State: "open", DedupKey: "conformance-" + conversationID,
 		})
 		if err != nil {
@@ -396,7 +396,7 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 	t.Run("external_actions", func(t *testing.T) {
 		conversationID := seedStepConversation(t, h, ctx, orgID, taskID, promptID, blueprintRunID, userID)
 		if err := stores.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-			TeamID: teamID, Provider: "jira", Action: "status_transition", Target: "SKY-1",
+			TeamID: teamID, Provider: "jira", Scope: "https://acme.atlassian.net", Action: "status_transition", Target: "SKY-1",
 			ConversationID: conversationID, Credential: "org", ToState: "In Progress",
 		}); err != nil {
 			t.Errorf("ExternalActions.RecordSystem: %v", err)

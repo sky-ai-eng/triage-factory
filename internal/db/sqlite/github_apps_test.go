@@ -369,10 +369,10 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 		t.Fatalf("seed pem secret: %v", err)
 	}
 
-	// Pre-seed a stale active installation (33) that the mock GitHub no
-	// longer reports — the reconcile must soft-remove it.
+	// Pre-seed a stale active installation (33) on the listed host that the
+	// mock GitHub no longer reports — the reconcile must soft-remove it.
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
-		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed",
+		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed", GitHubHost: srv.URL,
 	}); err != nil {
 		t.Fatalf("seed stale installation: %v", err)
 	}

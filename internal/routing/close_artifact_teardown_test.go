@@ -60,7 +60,7 @@ func seedUnresolvedArtifacts(t *testing.T, database *sql.DB, conversationID, rep
 	pr.ConversationID = conversationID
 	pr.OrgID = runmode.LocalDefaultOrgID
 	pr.TeamID = runmode.LocalDefaultTeamID
-	storedPR, err := store.Artifacts.UpsertSystem(t.Context(), runmode.LocalDefaultOrgID, pr)
+	storedPR, err := store.Artifacts.UpsertSystem(t.Context(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, store.Orgs, runmode.LocalDefaultOrgID, pr))
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
@@ -73,7 +73,7 @@ func seedUnresolvedArtifacts(t *testing.T, database *sql.DB, conversationID, rep
 	rd.ReviewBody = "agent draft body"
 	rd.ReviewEvent = "COMMENT"
 	rv.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
-	storedReview, err := store.Artifacts.UpsertSystem(t.Context(), runmode.LocalDefaultOrgID, rv)
+	storedReview, err := store.Artifacts.UpsertSystem(t.Context(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, store.Orgs, runmode.LocalDefaultOrgID, rv))
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}

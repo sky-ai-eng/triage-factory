@@ -27,6 +27,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 		OrgID:          runmode.LocalDefaultOrgID,
 		TeamID:         runmode.LocalDefaultTeamID,
 		Provider:       domain.ArtifactProviderGitHub,
+		Scope:          "https://github.com",
 		Action:         domain.ActionPRMarkedReady,
 		Target:         "octo/repo#123",
 		ExternalID:     "123",
@@ -65,6 +66,7 @@ func TestExternalActionStore_SQLite_RoundTrip(t *testing.T) {
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 		OrgID:      runmode.LocalDefaultOrgID,
 		Provider:   domain.ArtifactProviderJira,
+		Scope:      "https://acme.atlassian.net",
 		Action:     domain.ActionIssueTransitioned,
 		Target:     "SKY-1",
 		Credential: domain.CredentialJiraOrg,
@@ -99,7 +101,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 	twin := func(url string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderGitHub, Action: domain.ActionBranchPushed,
+			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: domain.ActionBranchPushed,
 			Target: "octo/repo", ExternalID: "refs/heads/feat", URL: url, ConversationID: conversationID,
 			ToState: domain.ArtifactStateBranchPushed, Credential: domain.CredentialGitHubApp, DedupKey: key,
 		}
@@ -129,7 +131,7 @@ func TestExternalActionStore_SQLite_BranchTwinDedup(t *testing.T) {
 
 	// A new push (different sha) is its own row.
 	if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
-		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub,
+		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionBranchPushed, Target: "octo/repo", Credential: domain.CredentialGitHubApp,
 		DedupKey: domain.BranchPushDedupKey(conversationID, "refs/heads/feat", "def456"),
 	}); err != nil {
@@ -155,7 +157,7 @@ func TestExternalActionStore_SQLite_EmptyDedupAppendsEveryRow(t *testing.T) {
 	ctx := context.Background()
 
 	repeat := domain.ExternalAction{
-		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub,
+		OrgID: runmode.LocalDefaultOrgID, Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com",
 		Action: domain.ActionPREdited, Target: "octo/repo#1", Credential: domain.CredentialGitHubApp,
 		// DedupKey deliberately empty — the store fills a uuid per insert.
 	}
@@ -212,7 +214,7 @@ func TestExternalActionStore_SQLite_ListFiltersAndPaging(t *testing.T) {
 	for i, s := range seeds {
 		e := domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: s.provider, Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: conversationID,
+			Provider: s.provider, Scope: "https://github.com", Action: s.action, Target: "t", ActorUserID: s.actor, ConversationID: conversationID,
 			Credential: domain.CredentialGitHubApp, DedupKey: "k" + string(rune('a'+i)),
 		}
 		if err := stores.ExternalActions.Record(ctx, runmode.LocalDefaultOrgID, e); err != nil {
@@ -295,7 +297,7 @@ func TestExternalActionStore_SQLite_EgressDenialDedupPerConversation(t *testing.
 	denial := func(conversationID string) domain.ExternalAction {
 		return domain.ExternalAction{
 			OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderNetwork, Action: domain.ActionEgressDenied,
+			Provider: domain.ArtifactProviderNetwork, Scope: domain.NetworkScope, Action: domain.ActionEgressDenied,
 			Target: target, ConversationID: conversationID, Credential: domain.CredentialNone,
 			DedupKey: domain.EgressDenialDedupKey(conversationID, target),
 		}
@@ -347,7 +349,7 @@ func TestExternalActionStore_SQLite_ListByConversation(t *testing.T) {
 		t.Helper()
 		if err := stores.ExternalActions.RecordSystem(ctx, runmode.LocalDefaultOrgID, domain.ExternalAction{
 			ID: id, OrgID: runmode.LocalDefaultOrgID, TeamID: runmode.LocalDefaultTeamID,
-			Provider: domain.ArtifactProviderGitHub, Action: action, Target: "octo/repo",
+			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Action: action, Target: "octo/repo",
 			ConversationID: conversationID, Credential: domain.CredentialGitHubApp,
 		}); err != nil {
 			t.Fatalf("record %s: %v", action, err)

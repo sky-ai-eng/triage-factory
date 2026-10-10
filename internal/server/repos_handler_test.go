@@ -157,6 +157,11 @@ func seedApp(t *testing.T, s *Server, stub *httptest.Server, installs []domain.O
 	seedBYOAppCredentialClass(t, s, org)
 	for _, inst := range installs {
 		inst.OrgID = org
+		// An installation that names no host is on the org's current one, which
+		// is the host every production writer stamps.
+		if inst.GitHubHost == "" {
+			inst.GitHubHost = stub.URL
+		}
 		if _, err := s.githubApps.UpsertInstallation(ctx, inst); err != nil {
 			t.Fatalf("upsert installation %s: %v", inst.AccountLogin, err)
 		}
@@ -293,6 +298,28 @@ func TestHandleGitHubRepos_AppActiveZeroInstallations(t *testing.T) {
 	// case never makes a GitHub call.
 	stub := newAppRepoStub(t, nil)
 	seedApp(t, srv, stub, nil) // active App, zero installations
+
+	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("picker list = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
+	if want := "the GitHub App is not installed on any account"; !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("body=%s, want it to say %q", rec.Body.String(), want)
+	}
+}
+
+// An App installed only on a GitHub the org has moved off is installed on no
+// account here: the resolver mints only from installations on the org's
+// current host, so the picker gives the same install guidance it gives an App
+// installed nowhere, rather than serving a reach nothing can act on.
+func TestHandleGitHubRepos_AppInstalledOnlyOnAnotherHost(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	stub := newAppRepoStub(t, nil)
+	seedApp(t, srv, stub, []domain.OrgGitHubAppInstallation{
+		{InstallationID: "111", AccountType: "Organization", AccountLogin: "acme", GitHubHost: "https://ghe.old.example.com"},
+	})
 
 	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
 	if rec.Code != http.StatusConflict {

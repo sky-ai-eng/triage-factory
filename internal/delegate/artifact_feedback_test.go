@@ -8,6 +8,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -32,7 +33,7 @@ func seedResolvedArtifact(t *testing.T, s *Spawner, conversationID string, a dom
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
 		t.Fatalf("seed artifact %s/%s: %v", a.Kind, a.State, err)
 	}
 }

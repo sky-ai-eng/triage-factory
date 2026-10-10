@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -106,7 +107,7 @@ func pendingApprovalFixture(t *testing.T, database *sql.DB) (taskID, conversatio
 		Comments: []domain.ReviewArtifactComment{{ID: "c_pa", Path: "x.go", Line: &line, Body: "agent comment"}},
 	}
 	reviewArt.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
-	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, reviewArt)
+	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, reviewArt))
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
@@ -198,7 +199,7 @@ func seedCarriedDraftPR(t *testing.T, database *sql.DB, conversationID string) s
 	art.ConversationID = conversationID
 	art.OrgID = runmode.LocalDefaultOrgID
 	art.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, art)
+	stored, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(database).Orgs, runmode.LocalDefaultOrgID, art))
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}

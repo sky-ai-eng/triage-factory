@@ -629,10 +629,10 @@ func TestConversationStore_SQLite_PRCoherenceTargets(t *testing.T) {
 		stores := sqlitestore.New(conn)
 		ctx := context.Background()
 		extra := dbtest.PRCoherenceSeeder{
-			PendingReview: func(t *testing.T, conversationID, repo string, prNumber int) {
+			PendingReview: func(t *testing.T, conversationID, host, repo string, prNumber int) {
 				t.Helper()
 				a := domain.NewReviewArtifact(repo, prNumber, "head-sha", conversationID)
-				a.ConversationID = conversationID
+				a.ConversationID, a.Scope = conversationID, host
 				a.OrgID, a.TeamID = runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 				if _, err := stores.Artifacts.UpsertSystem(ctx, runmode.LocalDefaultOrgID, a); err != nil {
 					t.Fatalf("seed pending review: %v", err)

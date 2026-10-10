@@ -563,6 +563,55 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithApp_409(t *testing.T) {
 	}
 }
 
+// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: a workspace bound to
+// the deployment's App holds the host its installations are on, like a token or
+// a registration does — moving off it is refused while one is bound there. An
+// installation the workspace left on some other GitHub records its own host and
+// is not stranded by the move, so it holds nothing in place.
+func TestOrgSettingsPatch_RetargetGitHubURLWithInstallation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		instHost string
+		wantCode int
+		wantBase string
+	}{
+		{"installed on the current host", "https://old.example.com", http.StatusConflict, "https://old.example.com"},
+		{"installed only on another host", "https://elsewhere.example.com", http.StatusOK, "https://new.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			ctx := t.Context()
+
+			patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
+			if _, err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp); err != nil {
+				t.Fatalf("set credential class: %v", err)
+			}
+			if _, err := s.githubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+				InstallationID: "456", OrgID: runmode.LocalDefaultOrgID, AccountType: "Organization",
+				AccountLogin: "acme", GitHubHost: tc.instHost,
+			}); err != nil {
+				t.Fatalf("seed installation: %v", err)
+			}
+
+			rec := patchOrgSettings(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			var stored string
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
+				runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+				t.Fatalf("read github base_url: %v", err)
+			}
+			if stored != tc.wantBase {
+				t.Errorf("github base_url = %q, want %q", stored, tc.wantBase)
+			}
+		})
+	}
+}
+
 // TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity asserts the
 // access/identity decoupling: clearing the org's GitHub URL is an
 // access change (PAT_1), and it must NOT touch the user's per-user GitHub

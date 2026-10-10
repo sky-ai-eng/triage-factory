@@ -319,6 +319,9 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	seedArt := func(a domain.Artifact) {
 		a.OrgID = runmode.LocalDefaultOrgID
 		a.TeamID = runmode.LocalDefaultTeamID
+		if a.Scope == "" {
+			a.Scope = reconcileTestHost
+		}
 		if _, err := stores.Artifacts.Upsert(ctx, runmode.LocalDefaultOrgID, a); err != nil {
 			t.Fatalf("seed artifact %s: %v", a.DedupKey, err)
 		}
@@ -360,7 +363,7 @@ func TestReconcile_Transitions(t *testing.T) {
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
-	rc := NewReconciler(res, stores.Artifacts, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.Orgs, nil)
 
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
@@ -397,7 +400,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -461,7 +464,7 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	seedArt(draft)
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
 	var (
 		mu       sync.Mutex
 		resolved []string
@@ -500,7 +503,7 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	seedArt(open)
 
 	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
 	hookRan := false
 	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
 
@@ -566,7 +569,7 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
 
 	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
@@ -598,7 +601,7 @@ func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
 	t.Cleanup(func() { reconcileLog = prev })
 
 	stores, _, _ := reconcileTestStores(t)
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.Orgs, nil)
 	r := NewRunner(rc, runmode.LocalDefaultOrgID)
 
 	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
@@ -660,7 +663,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.Orgs, nil)
 
 	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
@@ -683,7 +686,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 // test wants the count via the org-wide path.
 func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID string) ([]domain.Artifact, error) {
 	t.Helper()
-	rc := NewReconciler(res, stores.Artifacts, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.Orgs, nil)
 	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), orgID)
 	if err != nil {
 		return nil, err
@@ -785,7 +788,7 @@ func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 
 	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
 		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
 
 	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
 		t.Fatalf("backstop: %v", err)
@@ -826,7 +829,7 @@ func TestBackstop_Idempotent(t *testing.T) {
 
 	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
 		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, nil)
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
 
 	// A merged PR drops out of the non-terminal set, so run twice to prove the
 	// insert-if-absent write neither duplicates nor resurrects it.
@@ -843,4 +846,105 @@ func TestBackstop_Idempotent(t *testing.T) {
 	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
 		t.Errorf("backstop resurrected the merged PR into the non-terminal set: %+v", got)
 	}
+}
+
+// reconcileTestHost is the GitHub host of the test org — its default, the
+// host the resolver's clients reach — and the scope seeded artifacts take
+// unless a test names another.
+const reconcileTestHost = "https://github.com"
+
+// TestReconcile_SkipsArtifactsOnAnotherHost pins that only artifacts on the
+// org's current GitHub host are reconciled. The resolver's client reaches that
+// host alone, so another host's branch, absent there, would otherwise read as
+// deleted, and another host's pull request would be refreshed from a stranger.
+func TestReconcile_SkipsArtifactsOnAnotherHost(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	ctx := context.Background()
+	const conversationID = "55555555-5555-5555-5555-555555555555"
+	seedConversation("ent-5", conversationID)
+
+	elsewhereBranch, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/elsewhere", "sha", true)
+	elsewhereBranch.ConversationID = conversationID
+	elsewhereBranch.Scope = "https://ghe.example.com"
+	elsewherePR := domain.NewPullRequestArtifact("octo/repo", 21, "PR_21", "x", "main", "https://ghe.example.com/octo/repo/pull/21", "t", "b", false)
+	elsewherePR.ConversationID = conversationID
+	elsewherePR.Scope = "https://ghe.example.com"
+	ownBranch, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/own", "sha", true)
+	ownBranch.ConversationID = conversationID
+	ownBranch.Scope = reconcileTestHost
+	seedArt(elsewhereBranch)
+	seedArt(elsewherePR)
+	seedArt(ownBranch)
+
+	stub := &stubGH{
+		prs: map[string]string{"PR_21": prNodeJSON("PR_21", 21, "MERGED", false, true)},
+		branches: map[string]bool{
+			"octo/repo/elsewhere": false,
+			"octo/repo/own":       false,
+		},
+	}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+
+	assertScopedState(t, stores, elsewhereBranch, domain.ArtifactStateBranchPushed)
+	assertScopedState(t, stores, elsewherePR, domain.ArtifactStatePROpen)
+	assertScopedState(t, stores, ownBranch, domain.ArtifactStateBranchDeleted)
+	if stub.prCalls["PR_21"] {
+		t.Error("a pull request on another host was refreshed through the current host's client")
+	}
+}
+
+// TestBackstop_RecordsOnTheCurrentHostOnly pins the backstop's scope: a PR it
+// records is on the org's current GitHub host, where the client found it, and
+// a branch pushed on another host is never matched against that host's PRs.
+func TestBackstop_RecordsOnTheCurrentHostOnly(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	seedConversation("octo/repo#6", "conv-2")
+
+	own, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
+	own.ConversationID = "conv-1"
+	seedArt(own)
+	elsewhere, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-y", "sha2", true)
+	elsewhere.ConversationID = "conv-2"
+	elsewhere.Scope = "https://ghe.example.com"
+	seedArt(elsewhere)
+
+	prsJSON := `[{"number":5,"node_id":"PR_5","title":"Mine","html_url":"https://github.com/octo/repo/pull/5",` +
+		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}},` +
+		`{"number":6,"node_id":"PR_6","title":"Same branch name, other host","html_url":"https://github.com/octo/repo/pull/6",` +
+		`"state":"open","draft":false,"head":{"ref":"feature-y","sha":"sha2"},"base":{"ref":"main"}}]`
+	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
+	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+
+	got := prArtifactFor(t, stores, "octo/repo", 5)
+	if got == nil || got.Scope != reconcileTestHost || got.ConversationID != "conv-1" {
+		t.Fatalf("recorded PR = %+v, want conv-1's PR on %s", got, reconcileTestHost)
+	}
+	if got := prArtifactFor(t, stores, "octo/repo", 6); got != nil {
+		t.Errorf("a branch pushed on another host was matched to a PR on %s: %+v", reconcileTestHost, got)
+	}
+}
+
+// assertScopedState reads want's row back by its scope and dedup key and
+// requires state.
+func assertScopedState(t *testing.T, stores db.Stores, want domain.Artifact, state string) {
+	t.Helper()
+	arts, _, err := stores.Artifacts.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, db.ArtifactListOpts{})
+	if err != nil {
+		t.Fatalf("ListByOrgSystem: %v", err)
+	}
+	for _, a := range arts {
+		if a.Scope == want.Scope && a.DedupKey == want.DedupKey {
+			if a.State != state {
+				t.Errorf("%s on %s state = %q, want %q", a.DedupKey, a.Scope, a.State, state)
+			}
+			return
+		}
+	}
+	t.Fatalf("no artifact %s on %s", want.DedupKey, want.Scope)
 }

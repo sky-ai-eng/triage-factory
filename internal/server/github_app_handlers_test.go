@@ -318,6 +318,15 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	`, orgA.String()); err != nil {
 		t.Fatalf("seed installation: %v", err)
 	}
+	// The same account on a GitHub the org has moved off. The panel lists what
+	// the App reaches now, so this row is not among the installations shown.
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_github_app_installations
+			(installation_id, org_id, account_type, account_login, github_host)
+		VALUES ('inst-old', $1, 'Organization', 'acme-eng', 'https://ghe.old.example.com')
+	`, orgA.String()); err != nil {
+		t.Fatalf("seed installation on another host: %v", err)
+	}
 
 	get := func(sid, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest("GET", path, nil)
@@ -352,8 +361,8 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 		if !out.App.Active {
 			t.Errorf("active=%v, want true (column default → live App)", out.App.Active)
 		}
-		if len(out.Installations) != 1 || out.Installations[0].AccountLogin != "acme-eng" {
-			t.Errorf("installations=%+v, want one acme-eng row", out.Installations)
+		if len(out.Installations) != 1 || out.Installations[0].AccountLogin != "acme-eng" || out.Installations[0].InstallationID != "inst-1" {
+			t.Errorf("installations=%+v, want the one acme-eng row on the org's host (inst-1)", out.Installations)
 		}
 	})
 

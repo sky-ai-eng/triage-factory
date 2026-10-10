@@ -21,7 +21,7 @@ func seedConversationArtifact(t *testing.T, s *Server, conversationID string, a 
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed artifact: %v", err)
 	}

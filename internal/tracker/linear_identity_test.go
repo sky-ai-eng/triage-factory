@@ -76,7 +76,7 @@ func TestRefreshLinear_MoveBetweenArmedTeams(t *testing.T) {
 	taskID := fx.seedLinearTask(t, before.ID)
 	art, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindIssue,
-		Target: "ENG-4", ExternalID: is.ID, State: domain.ArtifactStateIssueUpdated,
+		Scope: before.Scope, Target: "ENG-4", ExternalID: is.ID, State: domain.ArtifactStateIssueUpdated,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindIssue, is.ID, ""),
 	})
 	if err != nil {

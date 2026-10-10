@@ -1134,7 +1134,7 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// as stored, which is canonical, so re-sending the current value under
 		// another spelling is not a move.
 		if cur.GitHubBaseURL != prevOrgSet.GitHubBaseURL {
-			connected, err := githubCredentialConnected(r.Context(), tx, orgID)
+			connected, err := githubCredentialConnected(r.Context(), tx, orgID, db.EffectiveGitHubHost(prevOrgSet.GitHubBaseURL))
 			if err != nil {
 				return err
 			}

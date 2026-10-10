@@ -50,7 +50,7 @@ func seedReviewArtifactWithConversation(t *testing.T, s *Server, suffix, owner, 
 	d.StagedComments = staged
 	d.Proposed = domain.ReviewArtifactProposed{Body: "## Review\nlgtm", Event: event, Comments: staged}
 	a.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestReviewArtifactApprove_NonPending_409(t *testing.T) {
 	// Flip it to submitted out-of-band.
 	art := getArtifact(t, srv, artID)
 	art.State = domain.ArtifactStateReviewSubmitted
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("flip submitted: %v", err)
 	}
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
@@ -401,7 +401,7 @@ func TestReviewArtifactApprove_NilLineComment_422(t *testing.T) {
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	d.StagedComments[0].Line = nil
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("null line: %v", err)
 	}
 	rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
@@ -508,7 +508,7 @@ func TestReviewArtifactUpdate_NonPending_409(t *testing.T) {
 	// Flip to submitted out-of-band.
 	art := getArtifact(t, srv, artID)
 	art.State = domain.ArtifactStateReviewSubmitted
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("flip submitted: %v", err)
 	}
 	rec := doJSON(t, srv, http.MethodPatch, "/api/artifacts/"+artID+"/review", map[string]any{"body": "edit"})
@@ -648,7 +648,7 @@ func TestReviewArtifactApprove_SharedCommitSHA_PinsToIt(t *testing.T) {
 		{ID: "c2", Path: "a.go", Line: &l2, Body: "second", CommitSHA: "commit_v2"},
 	}
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -683,7 +683,7 @@ func TestReviewArtifactApprove_EmptyReviewRefused(t *testing.T) {
 	d.ReviewBody = ""
 	d.StagedComments = nil
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 

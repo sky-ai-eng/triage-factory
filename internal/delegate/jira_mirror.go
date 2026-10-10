@@ -202,6 +202,21 @@ func (s *Spawner) runJiraMirror(orgID, entityID, issueKey, teamID string, rule d
 		}
 	}
 
+	// The client talks to the org's Jira site now. An issue tracked on
+	// another site is not reachable through it — the same key there is a
+	// different issue — so it is left alone.
+	if scope != "" && s.orgs != nil {
+		set, err := s.orgs.GetSettingsSystem(ctx, orgID)
+		if err != nil {
+			jiraLog.Warn("mirror: read org jira site failed", "org", orgID, "error", err)
+			return
+		}
+		if current := domain.EntityScope("jira", set); current != scope {
+			jiraLog.Info("mirror: issue is on another jira site; skipping", "issue", issueKey, "issue_site", scope, "org_site", current)
+			return
+		}
+	}
+
 	client, err := resolver.ForSystem(ctx, orgID)
 	if err != nil {
 		if shouldLogForSystemErr(err) {

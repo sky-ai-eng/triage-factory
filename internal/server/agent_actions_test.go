@@ -20,7 +20,7 @@ func seedConversationAction(t *testing.T, s *Server, conversationID string, a do
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if err := sqlitestore.New(s.db).ExternalActions.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if err := sqlitestore.New(s.db).ExternalActions.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.ActionInOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a)); err != nil {
 		t.Fatalf("seed action: %v", err)
 	}
 }

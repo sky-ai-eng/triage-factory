@@ -160,8 +160,8 @@ func (r *usageRig) seedArtifacts(t *testing.T) {
 	t.Helper()
 	seed := func(teamID, provider, kind, state, key string) {
 		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO artifacts (org_id, team_id, provider, kind, target, state, dedup_key)
-			VALUES ($1, $2, $3, $4, 'octo/repo', $5, $6)
+			INSERT INTO artifacts (org_id, team_id, provider, scope, kind, target, state, dedup_key)
+			VALUES ($1, $2, $3, 'https://github.com', $4, 'octo/repo', $5, $6)
 		`, r.orgID, teamID, provider, kind, state, key)
 	}
 	seed(r.teamA, "github", "pull_request", "open", "tA-pr")
@@ -337,6 +337,14 @@ func TestUsageArtifactsActivityHandler_Postgres(t *testing.T) {
 // pr_created with no actor + a human-authorized pr_marked_ready by orgAdmin) and
 // one system row on teamB (a Jira transition, no actor). orgAdmin's display name
 // is pinned so the org feed's resolved actor_name is deterministic.
+// scopeForProvider is the namespace a seeded audit row is recorded in.
+func scopeForProvider(provider string) string {
+	if provider == "jira" {
+		return "https://acme.atlassian.net"
+	}
+	return "https://github.com"
+}
+
 func (r *usageRig) seedExternalActions(t *testing.T) {
 	t.Helper()
 	pgtest.MustExec(t, r.h.AdminDB, `UPDATE users SET display_name = 'Org Admin' WHERE id = $1`, r.orgAdmin)
@@ -346,9 +354,9 @@ func (r *usageRig) seedExternalActions(t *testing.T) {
 			actorArg = actor
 		}
 		pgtest.MustExec(t, r.h.AdminDB, `
-			INSERT INTO external_actions (org_id, team_id, provider, action, target, credential, dedup_key, actor_user_id, from_state, to_state)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''))
-		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to)
+			INSERT INTO external_actions (org_id, team_id, provider, scope, action, target, credential, dedup_key, actor_user_id, from_state, to_state)
+			VALUES ($1, $2, $3, $11, $4, $5, $6, $7, $8, NULLIF($9,''), NULLIF($10,''))
+		`, r.orgID, teamID, provider, action, target, cred, key, actorArg, from, to, scopeForProvider(provider))
 	}
 	seed(r.teamA, "github", "pr_created", "octo/repo#1", "github_app", "tA-created", "", "", "draft")
 	seed(r.teamA, "github", "pr_marked_ready", "octo/repo#1", "github_app", "tA-ready", r.orgAdmin, "draft", "open")

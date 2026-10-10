@@ -118,8 +118,8 @@ type Stores struct {
 	// Artifacts owns the artifacts table — the durable,
 	// conversation-attributed, polymorphic record of everything a conversation
 	// produces externally (branch, PR, review, issue, comment). Deduped per
-	// (org_id, dedup_key) so all of TFAC-454's capture writers UPSERT to one
-	// row. App pool in Postgres (team-scoped RLS via team_id, like
+	// (org_id, scope, dedup_key) so all of TFAC-454's capture writers UPSERT to
+	// one row. App pool in Postgres (team-scoped RLS via team_id, like
 	// conversations); consumers are the exec choke point + reconciliation
 	// (writers) and conversation-detail / C2 (readers). See TFAC-455.
 	Artifacts ArtifactStore

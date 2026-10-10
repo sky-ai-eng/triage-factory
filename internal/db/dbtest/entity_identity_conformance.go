@@ -272,13 +272,21 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		taskID := seed.Task(t, row.ID, "rename")
 		before, _ := s.Entities.GetSystem(ctx, orgID, row.ID)
 
-		issueArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-4", "ENG-4", "")
-		commentArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindComment, "uuid-4", "ENG-4", "c-1")
-		neighbourArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-41", "ENG-41", "")
-		otherArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, "uuid-4b", "ENG-4", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-4", oldURL+"#comment-c1", "rename-moved")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-4", otherURL, "rename-other")
+		issueArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, scope, domain.ArtifactKindIssue, "uuid-4", "ENG-4", "")
+		commentArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, scope, domain.ArtifactKindComment, "uuid-4", "ENG-4", "c-1")
+		neighbourArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, scope, domain.ArtifactKindIssue, "uuid-41", "ENG-41", "")
+		otherArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, "ws-b", domain.ArtifactKindIssue, "uuid-4b", "ENG-4", "")
+		// The scope control: the renamed issue's own dedup key, target and link,
+		// recorded in another workspace's scope. Only the scope separates it,
+		// so it is a second row and the rename leaves it alone.
+		foreignArt := upsertIdentityArtifact(t, s, orgID, seed.TeamID, "ws-b", domain.ArtifactKindIssue, "uuid-4", "ENG-4", "")
+		if foreignArt == issueArt {
+			t.Fatalf("the ws-b artifact landed on the ws-a row: the same dedup key in two scopes is two rows")
+		}
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-4", oldURL+"#comment-c1", "rename-moved")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-41", "https://linear.app/acme/issue/ENG-41/neighbour", "rename-neighbour")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", "ENG-4", otherURL, "rename-other")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ws-b", "ENG-4", oldURL+"#comment-c1", "rename-foreign")
 
 		out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-4", "OPS-77", newURL)
 		if err != nil {
@@ -319,6 +327,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 			{commentArt, "OPS-77", "linear:comment:uuid-4:c-1"},
 			{neighbourArt, "ENG-41", "linear:issue:uuid-41"},
 			{otherArt, "ENG-4", "linear:issue:uuid-4b"},
+			{foreignArt, "ENG-4", "linear:issue:uuid-4"},
 		} {
 			got, err := s.Artifacts.Get(ctx, orgID, c.id)
 			if err != nil || got == nil {
@@ -332,7 +341,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if u, cur := seed.RawActionURL(t, "rename-moved"); u != oldURL+"#comment-c1" || cur != newURL+"#comment-c1" {
 			t.Errorf("moved action url=%q current_url=%q, want the record kept and the pointer moved", u, cur)
 		}
-		for _, key := range []string{"rename-neighbour", "rename-other"} {
+		for _, key := range []string{"rename-neighbour", "rename-other", "rename-foreign"} {
 			if _, cur := seed.RawActionURL(t, key); cur != "" {
 				t.Errorf("%s current_url = %q, want untouched", key, cur)
 			}
@@ -349,7 +358,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		if _, _, err := s.Entities.FindOrCreateSystem(ctx, orgID, "linear", scope, "ENG-9", "uuid-9", "issue", "Café", oldURL); err != nil {
 			t.Fatalf("create: %v", err)
 		}
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderLinear, scope, "ENG-9", oldURL+"#comment-c9", "rename-non-ascii")
 		if out, err := s.Entities.RenameSystem(ctx, orgID, "linear", scope, "uuid-9", "OPS-9", newURL); err != nil || !out.Renamed {
 			t.Fatalf("rename = %+v err=%v", out, err)
 		}
@@ -375,7 +384,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, otherSite, "10005", "ENG-5", "")
 		// An artifact keyed on the issue key names no site; it is left alone.
 		legacy, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			TeamID: seed.TeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue, Scope: site,
 			Target: "ENG-5", ExternalID: "ENG-5", State: domain.ArtifactStateIssueUpdated,
 			DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, "ENG-5", ""),
 		})
@@ -452,7 +461,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		// key stays.
 		movedArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10001", "OLD-1", "")
 		otherArt := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10009", "OLD-1", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "OLD-1", jiraScope+"/browse/OLD-1", "merge-moved")
 
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, newer.ID, older.ID)
 		if err != nil || survivor != older.ID {
@@ -533,7 +542,7 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 		// The survivor keeps OLD-2, so what targets the closed row's NEW-2
 		// moves onto it.
 		art := upsertJiraIdentityArtifact(t, s, orgID, seed.TeamID, domain.ArtifactKindIssue, jiraScope, "10002", "NEW-2", "")
-		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
+		recordIdentityAction(t, s, orgID, seed.TeamID, domain.ArtifactProviderJira, jiraScope, "NEW-2", jiraScope+"/browse/NEW-2", "merge-closed")
 
 		survivor, err := s.Entities.MergeDuplicateEntitiesSystem(ctx, orgID, older.ID, newer.ID)
 		if err != nil || survivor != older.ID {
@@ -669,12 +678,13 @@ func RunEntityIdentityConformance(t *testing.T, mk EntityIdentityFactory) {
 	})
 }
 
-// upsertIdentityArtifact records a Linear artifact the way domain.ArtifactDedupKey
-// says to key one: on the issue's UUID, with the identifier as its target.
-func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, issueID, key, anchor string) string {
+// upsertIdentityArtifact records a Linear artifact in workspace scope the way
+// domain.ArtifactDedupKey says to key one: on the issue's UUID, with the
+// identifier as its target.
+func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, scope, kind, issueID, key, anchor string) string {
 	t.Helper()
 	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
-		TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: kind,
+		TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: kind, Scope: scope,
 		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderLinear, kind, issueID, anchor),
 	})
@@ -690,7 +700,7 @@ func upsertIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, issu
 func upsertJiraIdentityArtifact(t *testing.T, s db.Stores, orgID, teamID, kind, site, issueID, key, anchor string) string {
 	t.Helper()
 	a, err := s.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
-		TeamID: teamID, Provider: domain.ArtifactProviderJira, Kind: kind,
+		TeamID: teamID, Provider: domain.ArtifactProviderJira, Kind: kind, Scope: site,
 		Target: key, ExternalID: issueID + anchor, State: identityArtifactState(kind),
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, kind, domain.JiraIssueResource(site, issueID), anchor),
 	})
@@ -707,10 +717,10 @@ func identityArtifactState(kind string) string {
 	return domain.ArtifactStateIssueUpdated
 }
 
-func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, key, url, dedupKey string) {
+func recordIdentityAction(t *testing.T, s db.Stores, orgID, teamID, provider, scope, key, url, dedupKey string) {
 	t.Helper()
 	if err := s.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
-		TeamID: teamID, Provider: provider, Action: domain.ActionIssueCommentPosted,
+		TeamID: teamID, Provider: provider, Scope: scope, Action: domain.ActionIssueCommentPosted,
 		Target: key, URL: url, Credential: domain.CredentialNone, DedupKey: dedupKey,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)

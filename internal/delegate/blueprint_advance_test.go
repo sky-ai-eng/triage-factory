@@ -34,7 +34,7 @@ func seedDraftPRArtifactNumbered(t *testing.T, s *Spawner, conversationID string
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
 }
@@ -271,7 +271,7 @@ func TestCloseTaskIfTerminalAndResolved_ClosesOnceTheLastDraftIsResolved(t *test
 		t.Fatalf("list artifacts: %v (%d)", err, len(arts))
 	}
 	arts[0].State = domain.ArtifactStatePROpen
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, arts[0]); err != nil {
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, arts[0])); err != nil {
 		t.Fatalf("flip artifact: %v", err)
 	}
 	s.CloseTaskIfTerminalAndResolved(context.Background(), runmode.LocalDefaultOrgID, conversationID)

@@ -60,7 +60,7 @@ func seedPendingReview(t *testing.T, s *Spawner, conversationID, repo string, pr
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if _, err := s.artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, s.orgs, runmode.LocalDefaultOrgID, a)); err != nil {
 		t.Fatalf("seed pending review: %v", err)
 	}
 }

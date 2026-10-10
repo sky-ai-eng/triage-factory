@@ -74,7 +74,7 @@ func seedThreadEntity(t *testing.T, stores db.Stores, orgID, sourceID, kind, url
 func seedMessageArtifact(t *testing.T, stores db.Stores, orgID, teamID, channel, rootTS, ts string) string {
 	t.Helper()
 	a, err := stores.Artifacts.UpsertSystem(context.Background(), orgID, domain.Artifact{
-		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Kind: domain.ArtifactKindMessage,
+		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Kind: domain.ArtifactKindMessage,
 		Target: domain.SlackSourceID(channel, rootTS), ExternalID: ts,
 		URL:      moveReplyPermalink(channel, ts, rootTS),
 		State:    domain.ArtifactStateMessagePosted,
@@ -101,7 +101,7 @@ func readArtifact(t *testing.T, h *pgtest.Harness, id string) artifactRow {
 func seedSlackAction(t *testing.T, stores db.Stores, orgID, teamID, target, url, dedupKey string) {
 	t.Helper()
 	if err := stores.ExternalActions.RecordSystem(context.Background(), orgID, domain.ExternalAction{
-		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Action: domain.ActionSlackMessagePosted,
+		TeamID: teamID, Provider: domain.ArtifactProviderSlack, Scope: domain.SlackScope, Action: domain.ActionSlackMessagePosted,
 		Target: target, URL: url, Credential: domain.CredentialSlackBot, DedupKey: dedupKey,
 	}); err != nil {
 		t.Fatalf("seed action %s: %v", dedupKey, err)

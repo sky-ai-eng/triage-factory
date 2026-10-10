@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/zalando/go-keyring"
@@ -194,7 +195,7 @@ func TestArtifactGet_ServesEveryKind(t *testing.T) {
 	branch.ConversationID = conversationID
 	branch.OrgID = runmode.LocalDefaultOrgID
 	branch.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, branch)
+	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, branch))
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)
 	}
@@ -426,7 +427,7 @@ func TestArtifactTeardown_ResolvesAllArtifacts(t *testing.T) {
 	rd.ReviewBody = "body"
 	rd.ReviewEvent = "COMMENT"
 	rv.DetailsJSON = domain.MarshalReviewArtifactDetails(rd)
-	reviewStored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, rv)
+	reviewStored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, rv))
 	if err != nil {
 		t.Fatalf("seed review artifact: %v", err)
 	}
@@ -610,7 +611,7 @@ func TestArtifactDismiss_TaskLessConversationClosesNoTask(t *testing.T) {
 	a.ConversationID = "r_int"
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
@@ -856,7 +857,7 @@ func seedDraftPRArtifactWithConversation(t *testing.T, s *Server, suffix, owner,
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
@@ -902,7 +903,7 @@ func seedClaimedPRApprovalFixture(t *testing.T, s *Server, owner, repo string, n
 	a.ConversationID = "r_ab"
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed draft PR artifact: %v", err)
 	}
@@ -971,7 +972,7 @@ func newRejectStub(t *testing.T, srv *Server, live map[string]any, node string, 
 	t.Cleanup(stub.Close)
 	seedApp(t, srv, stub, acmeInstall())
 	stores := sqlitestore.New(srv.db)
-	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, nil))
+	srv.SetReconciler(reconcile.NewReconciler(srv.ghResolver, stores.Artifacts, stores.Orgs, nil))
 	return rs
 }
 
@@ -986,7 +987,7 @@ func seedBranchArtifact(t *testing.T, s *Server, conversationID, repoPath, ref s
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a)
+	stored, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, a))
 	if err != nil {
 		t.Fatalf("seed branch artifact: %v", err)
 	}
@@ -1260,5 +1261,60 @@ func TestArtifactReject_UnknownHeadBranch409(t *testing.T) {
 	}
 	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRDraft {
 		t.Errorf("artifact state = %q, want draft", got)
+	}
+}
+
+// TestArtifactRoutes_AnArtifactOnAnotherHost: the client these routes resolve
+// talks to the org's GitHub host now, where the same owner/repo#N is a
+// different pull request. An artifact recorded on another host reads back its
+// stored snapshot and refuses every GitHub write with a 409, and GitHub sees
+// no call for it either way.
+func TestArtifactRoutes_AnArtifactOnAnotherHost(t *testing.T) {
+	keyring.MockInit()
+	srv := newTestServer(t)
+	var calls atomic.Int32
+	mux := newAppAPIMux()
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/repos/") || strings.Contains(r.URL.Path, "/graphql") {
+			calls.Add(1)
+		}
+		mux.ServeHTTP(w, r)
+	}))
+	t.Cleanup(stub.Close)
+	seedApp(t, srv, stub, acmeInstall())
+
+	artID, _, _ := seedDraftPRArtifactWithConversation(t, srv, "otherhost", "acme", "api", 42)
+	if _, err := srv.db.Exec(`UPDATE artifacts SET scope = 'https://old.example.com' WHERE id = ?`, artID); err != nil {
+		t.Fatalf("move artifact to another host: %v", err)
+	}
+
+	rec := doJSON(t, srv, http.MethodGet, "/api/artifacts/"+artID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Details struct {
+			Title string `json:"title"`
+		} `json:"details"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Details.Title != "Proposed title" {
+		t.Errorf("title = %q, want the stored snapshot's", got.Details.Title)
+	}
+
+	rec = doJSON(t, srv, http.MethodPost, "/api/artifacts/"+artID+"/approve", nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("approve = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if e := firstError(t, rec); !strings.Contains(e.Message, "https://old.example.com") {
+		t.Errorf("approve message = %q, want it to name the artifact's host", e.Message)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Errorf("GitHub saw %d repository calls for an artifact on another host, want 0", n)
+	}
+	if got := getArtifact(t, srv, artID).State; got != domain.ArtifactStatePRDraft {
+		t.Errorf("artifact state = %q, want draft (unchanged)", got)
 	}
 }

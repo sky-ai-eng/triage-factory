@@ -1044,8 +1044,9 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // usability turns on the PAT. A read error on either tier propagates so a
 // transient store outage isn't misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	// Class first: a staged BYO App needs no host to answer, so it is resolved
-	// on demand from the same settings row.
+	// Class first, the host on demand from the same settings row: every arm
+	// that answers needs it, but a class this build cannot name fails before it
+	// is read.
 	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil {
 		return false, err

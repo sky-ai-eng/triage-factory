@@ -55,12 +55,15 @@ func (s *Server) githubCredentialClass(ctx context.Context, orgID string) (domai
 // belongs to, and it cannot change under one.
 var errGitHubHostHasCredential = errors.New("a GitHub credential only works on the GitHub that issued it — disconnect it before changing the GitHub URL")
 
-// githubCredentialConnected names the GitHub credential org has connected, in
-// the words an admin would use to go find it, or "" when it has none: a token,
-// its own App registration (staged or active), or an installation of an App
-// bound to it. Every read goes through tx, so a caller inside a write sees the
+// githubCredentialConnected names the GitHub credential org has connected on
+// host — its GitHub host before the change being checked — in the words an
+// admin would use to go find it, or "" when it has none: a token, its own App
+// registration (staged or active), or an installation of an App bound to it on
+// that host. An installation on any other host is not held in place: it records
+// its own host, and the org's host moving does not change which GitHub it
+// belongs to. Every read goes through tx, so a caller inside a write sees the
 // rows that write sees and holds no second connection while it does.
-func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID string) (string, error) {
+func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID, host string) (string, error) {
 	creds, err := integrations.Load(ctx, tx.Secrets, orgID)
 	if err != nil {
 		return "", fmt.Errorf("read github token: %w", err)
@@ -75,7 +78,7 @@ func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID string
 	if app != nil {
 		return "this workspace's GitHub App", nil
 	}
-	installs, err := tx.GitHubApps.ListInstallationsForOrg(ctx, orgID)
+	installs, err := tx.GitHubApps.ListInstallationsOnHost(ctx, orgID, host)
 	if err != nil {
 		return "", fmt.Errorf("read github app installations: %w", err)
 	}

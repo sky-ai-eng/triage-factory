@@ -13,12 +13,10 @@ import (
 )
 
 // This file is the shared recording funnel behind every exec choke-point
-// write — gh, jira, and ee-registered extension verbs (e.g. Slack, TFAC-596)
-// alike. It used to live as unexported *LocalClient methods; those methods
-// now delegate here so an ee package (which can't reach LocalClient's
-// internals) gets the identical stamp/write/touch discipline via
-// RecordExternalWrite. Behavior for gh/jira is unchanged — only the call
-// site moved.
+// write — gh, jira, and ee-registered extension verbs (e.g. Slack) alike.
+// LocalClient's recording methods delegate here, and an ee package, which
+// can't reach LocalClient's internals, gets the same stamp/write/touch
+// discipline through RecordExternalWrite.
 
 // withWriteInfo picks the per-run routing strategy off info directly (the
 // free-function counterpart of LocalClient.withWrite, for callers — like an
