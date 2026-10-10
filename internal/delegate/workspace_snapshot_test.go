@@ -876,20 +876,28 @@ func TestEnsureWorkspace_ColdRehydrate_RebuildsAgainstTheRecordedRepository(t *t
 	f.loseRoot(t)
 
 	restorer := f.restorer()
-	var seeded []string
+	// The two checkouts restore concurrently, so both hooks record under mu.
+	var (
+		mu       sync.Mutex
+		seeded   []string
+		restored []worktree.CheckoutRestore
+	)
 	seed := restorer.seed
 	restorer.seed = func(ctx context.Context, repositoryID, owner, repo string) gitSeed {
+		mu.Lock()
 		seeded = append(seeded, repositoryID+" "+owner+"/"+repo)
+		mu.Unlock()
 		return seed(ctx, repositoryID, owner, repo)
 	}
 	restorer.repository = func(_ context.Context, owner, repo string) (string, error) {
 		t.Errorf("resolved %s/%s by name; the manifest records its repository", owner, repo)
 		return "", errors.New("no name resolution in this test")
 	}
-	var restored []worktree.CheckoutRestore
 	restore := restoreCheckout
 	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		mu.Lock()
 		restored = append(restored, r)
+		mu.Unlock()
 		return restore(ctx, r)
 	}
 	t.Cleanup(func() { restoreCheckout = restore })
