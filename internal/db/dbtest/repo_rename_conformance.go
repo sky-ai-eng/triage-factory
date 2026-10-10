@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"testing"
 
@@ -298,6 +299,66 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 		if ent, _ := s.Entities.GetBySourceSystem(ctx, orgID, "github", TestGitHubHost, renameNewSlug+"#18"); ent == nil || ent.ID != fx.entityID {
 			t.Errorf("github.com entity after a ghe rename = %+v; want row %s under %s#18", ent, fx.entityID, renameNewSlug)
+		}
+	})
+
+	t.Run("Rename_matches_a_context_path_exactly", func(t *testing.T) {
+		// Two deployments served from one authority under context paths that
+		// differ only in case are two hosts: the host is kept as configured, and
+		// a case-sensitive server serves each under its own spelling. A rename
+		// on one rewrites the artifacts linked under its own path and leaves the
+		// other's, which carry the same owner/repo.
+		s, orgID, seed := mk(t)
+		const (
+			upper = "https://example.com/GitHub"
+			lower = "https://example.com/github"
+		)
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, seed.TeamID, upper, []domain.TeamGitHubRepo{
+			{Owner: "octo", Repo: "api"},
+		}); err != nil {
+			t.Fatalf("track %s on %s: %v", renameOldSlug, upper, err)
+		}
+		if filled, err := s.Repos.FillMissingExternalIDsSystem(ctx, orgID, []domain.RepoRef{
+			{Host: upper, Owner: "octo", Repo: "api", ExternalID: "ctx-path-1"},
+		}); err != nil || filled != 1 {
+			t.Fatalf("seed identity on %s: filled=%d err=%v", upper, filled, err)
+		}
+		artifactOn := func(host string, number int) domain.Artifact {
+			t.Helper()
+			a, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+				TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+				Target: domain.PullRequestTarget(renameOldSlug, number), ExternalID: fmt.Sprint(number),
+				URL:   fmt.Sprintf("%s/%s/pull/%d", host, renameOldSlug, number),
+				State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, number),
+			})
+			if err != nil {
+				t.Fatalf("seed artifact on %s: %v", host, err)
+			}
+			return a
+		}
+		other := artifactOn(lower, 21)
+		own := artifactOn(upper, 22)
+
+		out, err := s.Repos.RenameSystem(ctx, orgID, domain.RepoRef{
+			Host: upper, Owner: "octo", Repo: "platform-api", ExternalID: "ctx-path-1",
+		})
+		if err != nil || !out.Renamed {
+			t.Fatalf("RenameSystem(%s) = %+v, %v; want a rename", upper, out, err)
+		}
+
+		got, err := s.Artifacts.Get(ctx, orgID, other.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Artifacts.Get(%s): %v, %v", lower, got, err)
+		}
+		if got.Target != domain.PullRequestTarget(renameOldSlug, 21) || got.DedupKey != domain.PullRequestDedupKey(renameOldSlug, 21) {
+			t.Errorf("artifact linked under %s = (target %q, key %q); want it untouched by a rename on %s", lower, got.Target, got.DedupKey, upper)
+		}
+		got, err = s.Artifacts.Get(ctx, orgID, own.ID)
+		if err != nil || got == nil {
+			t.Fatalf("Artifacts.Get(%s): %v, %v", upper, got, err)
+		}
+		if got.Target != domain.PullRequestTarget(renameNewSlug, 22) || got.DedupKey != domain.PullRequestDedupKey(renameNewSlug, 22) {
+			t.Errorf("artifact linked under %s = (target %q, key %q); want it moved to %s", upper, got.Target, got.DedupKey, renameNewSlug)
 		}
 	})
 

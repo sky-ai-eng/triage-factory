@@ -112,15 +112,31 @@ func TestGitHubURLOnHost(t *testing.T) {
 		want      bool
 	}{
 		{"https://github.com/octo/widget/pull/1", "https://github.com", true},
+		// Scheme and authority are case-insensitive, on either side.
 		{"https://GitHub.com/octo/widget/pull/1", "https://github.com", true},
+		{"HTTPS://github.com/octo/widget/pull/1", "https://GITHUB.com", true},
 		{"https://ghe.example.com/octo/widget/pull/1", "https://github.com", false},
 		// A host that is a prefix of another is not that host.
 		{"https://github.company.com/octo/widget", "https://github.com", false},
-		// A context path is part of the host.
+		{"https://github.com:8443/octo/widget", "https://github.com", false},
+		{"http://github.com/octo/widget", "https://github.com", false},
+		// A context path is part of the host, and compares exactly: it is kept
+		// as configured, and a case-sensitive server serves another deployment
+		// under another spelling.
 		{"https://example.com/github/octo/widget", "https://example.com/github", true},
+		{"https://example.com/GitHub/octo/widget", "https://example.com/GitHub", true},
+		{"https://EXAMPLE.com/GitHub/octo/widget", "https://example.com/GitHub", true},
+		{"https://example.com/github/octo/widget", "https://example.com/GitHub", false},
+		{"https://example.com/GitHub/octo/widget", "https://example.com/github", false},
 		{"https://example.com/gitlab/octo/widget", "https://example.com/github", false},
+		{"https://example.com/githubs/octo/widget", "https://example.com/github", false},
+		// A link with nothing past the host is no object on it.
+		{"https://example.com/github", "https://example.com/github", false},
+		{"https://github.com", "https://github.com", false},
 		{"", "https://github.com", false},
 		{"https://github.com/octo/widget", "", false},
+		{"/octo/widget/pull/1", "https://github.com", false},
+		{"https://github.com/octo/widget", "github.com", false},
 	} {
 		if got := GitHubURLOnHost(tc.url, tc.host); got != tc.want {
 			t.Errorf("GitHubURLOnHost(%q, %q) = %v, want %v", tc.url, tc.host, got, tc.want)

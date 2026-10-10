@@ -179,11 +179,22 @@ func RewriteRepoURL(rawURL, oldSlug, newSlug string) (string, bool) {
 // GitHubURLOnHost reports whether rawURL is a link on host, a GitHubHost value
 // (scheme, authority and any context path, with no trailing slash). It is how a
 // record that carries a link but no scope column — an artifact, an audit-ledger
-// entry — is placed on a GitHub deployment. Compared case-insensitively; an
-// empty host or link is on no host.
+// entry — is placed on a GitHub deployment. The scheme and authority compare
+// case-insensitively, as URLs define them. The context path compares exactly:
+// GitHubHost keeps it as configured, a server may treat paths case-sensitively,
+// and every other host comparison is exact. An empty host or link, or one
+// that does not parse as an absolute URL, is on no host.
 func GitHubURLOnHost(rawURL, host string) bool {
 	if rawURL == "" || host == "" {
 		return false
 	}
-	return strings.HasPrefix(strings.ToLower(rawURL), strings.ToLower(host)+"/")
+	h, err := url.Parse(host)
+	if err != nil || h.Scheme == "" || h.Host == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || !strings.EqualFold(u.Scheme, h.Scheme) || !strings.EqualFold(u.Host, h.Host) {
+		return false
+	}
+	return strings.HasPrefix(u.EscapedPath(), strings.TrimRight(h.EscapedPath(), "/")+"/")
 }
