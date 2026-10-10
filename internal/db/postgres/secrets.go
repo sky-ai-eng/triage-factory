@@ -267,6 +267,16 @@ func (s *secretStore) GetSystem(ctx context.Context, orgID, key string) (string,
 	return s.getOrg(ctx, s.admin, false, "secrets.GetSystem", orgID, key)
 }
 
+// PutSystemIfValue replaces an org-scoped secret on the supabase_admin pool —
+// RLS bypassed, the passed orgID trusted — while it still holds old. The
+// compare happens under the row lock DeleteUserSystemIfValue takes, for the
+// reason given there.
+func (s *secretStore) PutSystemIfValue(ctx context.Context, orgID, key, old, value, description string) (bool, error) {
+	return s.applyIfValue(ctx, orgID, "", key, old, func(q queryer) error {
+		return s.upsert(ctx, q, orgID, "", key, value, description)
+	})
+}
+
 func (s *secretStore) Delete(ctx context.Context, orgID, key string) (bool, error) {
 	return s.del(ctx,
 		`DELETE FROM public.org_secrets
@@ -316,18 +326,44 @@ func (s *secretStore) DeleteUser(ctx context.Context, orgID, userID, key string)
 // an upsert from another pod waits for this transaction, and either finds the
 // row gone and inserts its value, or is the value this read sees.
 func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
+	return s.deleteIfValue(ctx, orgID, userID, key, value)
+}
+
+// DeleteSystemIfValue is DeleteUserSystemIfValue for an org-scoped secret.
+func (s *secretStore) DeleteSystemIfValue(ctx context.Context, orgID, key, value string) (bool, error) {
+	return s.deleteIfValue(ctx, orgID, "", key, value)
+}
+
+// deleteIfValue is the compare-and-delete both doors share; userID is "" for
+// org scope.
+func (s *secretStore) deleteIfValue(ctx context.Context, orgID, userID, key, value string) (bool, error) {
+	return s.applyIfValue(ctx, orgID, userID, key, value, func(q queryer) error {
+		_, err := q.ExecContext(ctx, `
+			DELETE FROM public.org_secrets
+			WHERE org_id = $1::uuid AND user_id IS NOT DISTINCT FROM $2::uuid AND key = $3::text
+		`, orgID, nullableUUID(userID), key)
+		return err
+	})
+}
+
+// applyIfValue runs apply in one admin-pool transaction while the row still
+// holds want, reporting whether it ran. The value is only readable decrypted,
+// so the comparison happens in Go with the row locked FOR UPDATE: a writer
+// from another pod waits for this transaction, and either sees what apply did
+// or is the value this read sees. An absent row is never applied to.
+func (s *secretStore) applyIfValue(ctx context.Context, orgID, userID, key, want string, apply func(queryer) error) (bool, error) {
 	aad, err := secretAAD(orgID, userID, key)
 	if err != nil {
 		return false, err
 	}
-	deleted := false
+	applied := false
 	err = inTx(ctx, s.admin, func(q queryer) error {
 		var ct, nonce []byte
 		err := q.QueryRowContext(ctx, `
 			SELECT ciphertext, nonce FROM public.org_secrets
-			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
+			WHERE org_id = $1::uuid AND user_id IS NOT DISTINCT FROM $2::uuid AND key = $3::text
 			FOR UPDATE
-		`, orgID, userID, key).Scan(&ct, &nonce)
+		`, orgID, nullableUUID(userID), key).Scan(&ct, &nonce)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -338,20 +374,17 @@ func (s *secretStore) DeleteUserSystemIfValue(ctx context.Context, orgID, userID
 		if err != nil {
 			return err
 		}
-		if subtle.ConstantTimeCompare(plain, []byte(value)) != 1 {
+		if subtle.ConstantTimeCompare(plain, []byte(want)) != 1 {
 			return nil
 		}
-		if _, err := q.ExecContext(ctx, `
-			DELETE FROM public.org_secrets
-			WHERE org_id = $1::uuid AND user_id = $2::uuid AND key = $3::text
-		`, orgID, userID, key); err != nil {
+		if err := apply(q); err != nil {
 			return err
 		}
-		deleted = true
+		applied = true
 		return nil
 	})
 	if err != nil {
 		return false, err
 	}
-	return deleted, nil
+	return applied, nil
 }

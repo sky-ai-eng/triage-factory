@@ -281,6 +281,11 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		// DeleteForOrg); admin half stays the real admin pool so the resolver's
 		// GetForOrgSystem routes outside the tx.
 		JiraApps: newJiraAppsStore(tx, s.admin),
+		// LinearApps: the JiraApps split. LinearInstalls stays on the real
+		// admin pool, so its writes commit on their own rather than with the
+		// transaction (see db.LinearInstallsStore).
+		LinearApps:     newLinearAppsStore(tx, s.admin),
+		LinearInstalls: newLinearInstallsStore(s.admin),
 		// ShippedDefaults: tx-bound so a misuse from inside WithTx fails
 		// loudly (SeedShippedIntoTeam refuses to run there — admin-pool
 		// bootstrap work). The bootstrap path reaches it through the non-tx

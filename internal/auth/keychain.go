@@ -38,11 +38,13 @@ type Credentials struct {
 
 	// Linear service credential. LinearAuthMethod is the linear.AuthMethod
 	// marker ("api_key" | "app_install"); an empty marker with a key reads as
-	// the api_key shape. LinearAPIKey is the personal key that shape stores. An app install's
-	// credential is an envelope this bundle does not carry: the resolver reads
-	// it.
-	LinearAPIKey     string
-	LinearAuthMethod string
+	// the api_key shape. LinearAPIKey is the personal key that shape stores.
+	// An app install's credential is an envelope holding a refresh token,
+	// which this bundle does not carry: the resolver reads it.
+	// LinearAppInstalled says only whether that envelope is stored.
+	LinearAPIKey       string
+	LinearAuthMethod   string
+	LinearAppInstalled bool
 }
 
 // GetSecret reads a single secret by key, returning "" (not an error) when no

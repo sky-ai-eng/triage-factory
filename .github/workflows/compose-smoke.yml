@@ -20,6 +20,7 @@ on:
       - '.env.example'
       - 'internal/db/migrations-postgres/**'
       - 'scripts/compose-smoke.sh'
+      - 'scripts/ci-images.sh'
       - '.github/workflows/compose-smoke.yml'
       - 'go.mod'
       - 'go.sum'
@@ -28,6 +29,8 @@ on:
 
 permissions:
   contents: read
+  # Pulls the stack's images' copies from GHCR (see mirror-images.yml).
+  packages: read
 
 # A newer commit supersedes an in-flight run on the same ref; the Docker build
 # is expensive, so don't pile them up.
@@ -68,6 +71,15 @@ jobs:
         run: |
           cd frontend && pnpm install --frozen-lockfile && pnpm run build && cd ..
           go build -o triagefactory .
+
+      # The stack's images and the Dockerfile's base images come from their
+      # GHCR copies (mirror-images.yml) rather than Docker Hub; compose and
+      # BuildKit use an image already present instead of pulling it, and an
+      # image with no copy is pulled from Docker Hub as before.
+      - name: Pull the stack's images from the mirror
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/ci-images.sh prefetch compose
 
       - name: Compose smoke test
         run: ./scripts/compose-smoke.sh

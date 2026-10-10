@@ -45,6 +45,8 @@ func (*secretStore) Put(_ context.Context, orgID, key, value, _ string) error {
 	if err := assertLocalOrg(orgID); err != nil {
 		return err
 	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
 	return auth.PutSecret(key, value)
 }
 
@@ -71,7 +73,65 @@ func (*secretStore) Delete(_ context.Context, orgID, key string) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
 	return deleteStoredSecret(key)
+}
+
+// orgSecretsMu makes each org-scope write one step against every other, so
+// the compare-and-swap doors (PutSystemIfValue, DeleteSystemIfValue) compare
+// and write with nothing landing between. The keychain has no compare-and-set
+// of its own, and local mode is one process per state root, so a lock every
+// org-scope writer in it takes is enough.
+var orgSecretsMu sync.Mutex
+
+// PutSystemIfValue is the system door's compare-and-swap; GetSystem == Get in
+// local mode, and so do the writes.
+func (*secretStore) PutSystemIfValue(_ context.Context, orgID, key, old, value, _ string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
+	cur, err := auth.GetSecret(key)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" || subtle.ConstantTimeCompare([]byte(cur), []byte(old)) != 1 {
+		return false, nil
+	}
+	if err := auth.PutSecret(key, value); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (*secretStore) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	orgSecretsMu.Lock()
+	defer orgSecretsMu.Unlock()
+	return deleteSecretIfValue(key, value)
+}
+
+// deleteSecretIfValue deletes key when it holds value, under whichever lock
+// the caller holds.
+func deleteSecretIfValue(key, value string) (bool, error) {
+	cur, err := auth.GetSecret(key)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" {
+		return false, nil
+	}
+	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
+		return false, nil
+	}
+	if err := auth.DeleteSecret(key); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // deleteStoredSecret deletes key and reports whether an entry was there. The
@@ -165,21 +225,7 @@ func (*secretStore) DeleteUserSystemIfValue(_ context.Context, orgID, userID, ke
 	if err := assertLocalOrg(orgID); err != nil {
 		return false, err
 	}
-	uk := userKeychainKey(userID, key)
 	userSecretsMu.Lock()
 	defer userSecretsMu.Unlock()
-	cur, err := auth.GetSecret(uk)
-	if err != nil {
-		return false, err
-	}
-	if cur == "" {
-		return false, nil
-	}
-	if subtle.ConstantTimeCompare([]byte(cur), []byte(value)) != 1 {
-		return false, nil
-	}
-	if err := auth.DeleteSecret(uk); err != nil {
-		return false, err
-	}
-	return true, nil
+	return deleteSecretIfValue(userKeychainKey(userID, key), value)
 }

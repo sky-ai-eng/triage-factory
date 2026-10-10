@@ -954,3 +954,63 @@ func TestSecretStore_Postgres_DeleteUserSystemIfValue(t *testing.T) {
 		t.Fatalf("another key after the delete = (%q, %v), want it untouched", got, err)
 	}
 }
+
+// TestSecretStore_Postgres_OrgCompareAndSwap pins the org-scope system doors:
+// each writes the org row only while it holds the value the caller read, never
+// an absent one, and a per-user row under the same key is left alone. The
+// swapped value reads back through the claims-checked Get.
+func TestSecretStore_Postgres_OrgCompareAndSwap(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	const key = "linear_app_install"
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, orgID, key, "", "envelope_v1", ""); err != nil || swapped {
+		t.Fatalf("swap of an absent row = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, key, "user_value", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, orgID, key, "user_value", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap matched the per-user row = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		return pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Put(ctx, orgID, key, "envelope_v1", "")
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, orgID, key, "envelope_v0", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap naming a value the row no longer holds = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, orgID, key, "envelope_v1", "envelope_v2", ""); err != nil || !swapped {
+		t.Fatalf("swap naming the held value = (%v, %v), want (true, nil)", swapped, err)
+	}
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.Get(ctx, orgID, key)
+		if err != nil {
+			return err
+		}
+		if got != "envelope_v2" {
+			t.Errorf("claims-checked Get after the swap = %q, want envelope_v2", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
+
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, orgID, key, "envelope_v1"); err != nil || deleted {
+		t.Fatalf("delete naming a value the row no longer holds = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, orgID, key, "envelope_v2"); err != nil || !deleted {
+		t.Fatalf("delete naming the held value = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetSystem(ctx, orgID, key); err != nil || got != "" {
+		t.Fatalf("org value after the delete = (%q, %v), want none", got, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "user_value" {
+		t.Fatalf("per-user row under the same key = (%q, %v), want it untouched", got, err)
+	}
+}

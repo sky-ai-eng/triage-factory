@@ -29,15 +29,44 @@ Linear setup also goes connect → watch → map, with one difference: Linear
 types every workflow state, so watching a team maps it for you.
 
 1. Connect Linear under Workspace settings → **Linear connection** (or pick
-   Linear on the setup wizard's Trackers step) by pasting a personal API key.
-   Create one in Linear under Settings → Account → Security & Access, with
-   **Read** and **Write** access. Triage Factory polls and acts in Linear as the
-   person the key belongs to, and the key shares that person's hourly Linear
-   request budget with their other keys. A Linear admin can stop members from
-   creating API keys; if yours has, ask them for one. The key is validated
-   against Linear when you connect and stored in the OS keychain (see
-   [Secret storage](secret-storage.md)). The workspace is read from the key
-   itself; there is nothing else to type.
+   Linear on the setup wizard's Trackers step). There are two ways to connect;
+   the workspace is read from the credential either way, so there is nothing
+   else to type.
+   - **Install Triage Factory as an app** (recommended). Triage Factory then
+     polls and acts in Linear as its own app user. The app user holds no
+     person's API key and does not take a seat. It needs a Linear OAuth app,
+     which you create once:
+     1. Under Workspace settings → **Linear OAuth app** (in the setup wizard,
+        **Install Triage Factory as an app instead of using a personal key** on
+        the Linear access step), click **Create the app in Linear**. Linear's new-application page opens with the name, the
+        URL and both redirect URIs filled in
+        (`http://localhost:<port>/api/linear/install/callback` and
+        `…/api/linear/connect/callback`; Linear accepts `http` for
+        `localhost`). The second is for members connecting their own Linear
+        accounts, which Triage Factory does not offer yet; it is registered now
+        so the app needs no edit later. Create the app.
+     2. Copy the app's client ID and client secret from its page in Linear,
+        paste them into the card, and save. Linear does not hand them back to
+        the creation link, so this step is by hand.
+     3. Under **Linear connection**, click **Install Triage Factory**. You need
+        to be an admin of the Linear workspace to approve the install.
+     Private Linear teams are not visible to the app until you share them with
+     it from the app's page in Linear. A Linear workspace can be installed in
+     only one Triage Factory organization. **Disconnect** revokes the app's
+     access, but the app user stays in the workspace's member list until a
+     Linear admin removes the app in Linear. If someone removes the app in
+     Linear, the connection reads as disconnected with a note saying so;
+     install again to restore it.
+   - **Paste a personal API key.** Create one in Linear under Settings →
+     Account → Security & Access, with **Read** and **Write** access. Triage
+     Factory polls and acts in Linear as the person the key belongs to, and the
+     key shares that person's hourly Linear request budget with their other
+     keys. A Linear admin can stop members from creating API keys; if yours
+     has, ask them for one. The key is validated against Linear when you
+     connect. Installing the app later replaces the key.
+
+   The API key, the install's refresh token and the OAuth app's client secret
+   are stored in the OS keychain (see [Secret storage](secret-storage.md)).
 2. Under the team's **Linear teams** section, the picker lists the Linear teams
    your credential can see, read live from Linear. Private teams are marked.
 3. **Watch** a team in one click. Its workflow states are read straight away
@@ -62,7 +91,8 @@ remove.
 ## Credentials
 
 Credentials Triage Factory stores (the GitHub PAT, the Jira credential, the
-Linear API key, an Anthropic or Bedrock key, GitHub App private keys) are
+Linear API key or app install, an Anthropic or Bedrock key, GitHub App private
+keys, OAuth app client secrets) are
 entered in Settings and kept outside the database — in the OS keychain on
 desktop, or an encrypted file on a host with no keychain. Token fields show
 "leave blank to keep current" when a token is already stored. GitHub, Jira and

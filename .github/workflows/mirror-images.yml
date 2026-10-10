@@ -1,0 +1,65 @@
+name: mirror-images
+
+# Copies the Docker Hub images CI pulls to ghcr.io/sky-ai-eng/mirror, so CI
+# pulls them from GHCR rather than from Docker Hub, whose anonymous pull limit
+# is per IP and shared with whatever else ran on the runner's IP. The test and
+# compose-smoke jobs pull these copies first (scripts/ci-images.sh prefetch)
+# and fall back to Docker Hub for any image with no copy yet.
+#
+# The image list is read from where each image is declared (see
+# scripts/ci-images.sh), so a version bump needs nothing here: the push to
+# main that lands it copies it, and the nightly run re-checks the tags that
+# track releases (node:22-alpine and the like) for upstream changes.
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'internal/db/pgtest/harness.go'
+      - 'internal/storage/object_test.go'
+      - 'docker-compose.yml'
+      - 'docker/Dockerfile'
+      - 'go.mod'
+      - 'scripts/ci-images.sh'
+      - '.github/workflows/mirror-images.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+# Two runs copying the same image at once would race on its tag; queue them.
+concurrency:
+  group: mirror-images
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    # Every CI job runs what it pulls from the mirror, so this workflow writes
+    # it with main's script only. A dispatch can name any branch, which would
+    # run that branch's script with this token; this refuses all but main.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Go reads the Ryuk image from the pinned testcontainers-go module, and
+      # builds crane.
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install crane
+        run: go install github.com/google/go-containerregistry/cmd/crane@v0.22.1
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$GITHUB_TOKEN"
+
+      - name: Copy images
+        run: ./scripts/ci-images.sh sync

@@ -3,7 +3,9 @@ package linear
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -142,17 +144,98 @@ func TestForSystem_KeyWithoutMarkerIsAPIKey(t *testing.T) {
 	}
 }
 
-func TestForSystem_AppInstallMarkerUnsupportedHere(t *testing.T) {
-	sys := map[string]string{
-		keyLinearAuthMethod:  string(AuthMethodAppInstall),
-		"linear_app_install": `{"refresh_token":"r1"}`,
+// fakeInstallTokens answers AccessTokenForOrg with a fixed token or error and
+// records the org it was asked for.
+type fakeInstallTokens struct {
+	token     string
+	expiresAt time.Time
+	err       error
+	gotOrg    string
+}
+
+func (f *fakeInstallTokens) AccessTokenForOrg(_ context.Context, orgID string) (string, time.Time, error) {
+	f.gotOrg = orgID
+	return f.token, f.expiresAt, f.err
+}
+
+func orgAppInstall() map[string]string {
+	return map[string]string{keyLinearAuthMethod: string(AuthMethodAppInstall)}
+}
+
+func TestForSystem_AppInstallBuildsBearerClient(t *testing.T) {
+	exp := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	tokens := &fakeInstallTokens{token: "lin_oauth_app", expiresAt: exp}
+	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, tokens)
+
+	c, err := r.ForSystem(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ForSystem: %v", err)
 	}
-	r := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{})
+	if got := authorizationOf(t, c); got != "Bearer lin_oauth_app" {
+		t.Errorf("Authorization = %q, want the app user's access token as a Bearer", got)
+	}
+	if tokens.gotOrg != testOrgID {
+		t.Errorf("token minted for org %q, want %q", tokens.gotOrg, testOrgID)
+	}
+
+	cred, err := r.ResolveSystemCredential(context.Background(), testOrgID)
+	if err != nil {
+		t.Fatalf("ResolveSystemCredential: %v", err)
+	}
+	if want := (SystemCredential{Method: AuthMethodAppInstall, AccessToken: "lin_oauth_app", ExpiresAt: exp}); cred != want {
+		t.Errorf("credential = %+v, want %+v", cred, want)
+	}
+}
+
+func TestForSystem_AppInstallPassesTheSourceError(t *testing.T) {
+	revoked := fmt.Errorf("%w: org=%s (install revoked in linear)", ErrNoLinearSystemCredential, testOrgID)
+	r := NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, &fakeInstallTokens{err: revoked})
 	if _, err := r.ForSystem(context.Background(), testOrgID); !errors.Is(err, ErrNoLinearSystemCredential) {
-		t.Errorf("ForSystem err = %v, want ErrNoLinearSystemCredential", err)
+		t.Errorf("ForSystem err = %v, want the source's ErrNoLinearSystemCredential", err)
 	}
-	if _, err := r.ResolveSystemCredential(context.Background(), testOrgID); !errors.Is(err, ErrNoLinearSystemCredential) {
-		t.Errorf("ResolveSystemCredential err = %v, want ErrNoLinearSystemCredential", err)
+
+	outage := errors.New("vault down")
+	r = NewResolverWithInstall(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}, &fakeInstallTokens{err: outage})
+	_, err := r.ForSystem(context.Background(), testOrgID)
+	if !errors.Is(err, outage) || errors.Is(err, ErrNoLinearSystemCredential) {
+		t.Errorf("ForSystem err = %v, want the outage itself, not unconfigured", err)
+	}
+}
+
+// TestForSystem_AppInstallWithoutSourceIsAnError pins that a resolver built
+// without the install shape fails loudly on an installed org rather than
+// reporting it unconfigured: that is a wiring fault, and rebinding fixes
+// nothing.
+func TestForSystem_AppInstallWithoutSourceIsAnError(t *testing.T) {
+	_, err := NewResolver(&fakeSecrets{sys: orgAppInstall()}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	if err == nil || errors.Is(err, ErrNoLinearSystemCredential) {
+		t.Errorf("ForSystem err = %v, want a wiring error", err)
+	}
+}
+
+func TestInstallCredential_RoundTrip(t *testing.T) {
+	in := InstallCredential{InstallID: "inst-1", WorkspaceID: "ws-1", AppUserID: "app-1", RefreshToken: "r1", ClientID: "c1"}
+	raw, err := MarshalInstallCredential(in)
+	if err != nil {
+		t.Fatalf("MarshalInstallCredential: %v", err)
+	}
+	out, err := ParseInstallCredential(raw)
+	if err != nil {
+		t.Fatalf("ParseInstallCredential: %v", err)
+	}
+	if out != in {
+		t.Errorf("round trip = %+v, want %+v", out, in)
+	}
+	for name, bad := range map[string]string{
+		"empty":            "",
+		"not json":         "nope",
+		"no install id":    `{"refresh_token":"r1","client_id":"c1"}`,
+		"no refresh token": `{"install_id":"i1","client_id":"c1"}`,
+		"no client id":     `{"install_id":"i1","refresh_token":"r1"}`,
+	} {
+		if _, err := ParseInstallCredential(bad); err == nil {
+			t.Errorf("ParseInstallCredential(%s) = nil error, want one", name)
+		}
 	}
 }
 

@@ -176,6 +176,13 @@ export interface WizardState {
   // the collapsed summary.
   linearWorkspaceUrlKey: string
   linearBoundAs: string
+  // The connected credential's shape (an API key, or an installed app), and
+  // whether an install can run at all — a Linear OAuth app resolves for the
+  // org. linearLastError is the access read's last_error: why an unconnected
+  // org lost its credential.
+  linearAuthMethod: '' | 'api_key' | 'app_install'
+  linearInstallAvailable: boolean
+  linearLastError: string
 
   // ── Org Claude credentials ──
   // How the org's delegated runs (and the scorer) authenticate with Claude —

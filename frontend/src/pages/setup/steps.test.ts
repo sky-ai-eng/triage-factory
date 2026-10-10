@@ -351,6 +351,10 @@ describe('setup — the Linear tracker', () => {
     const typed = { ...state, org: { ...state.org, linear_api_key: 'lin_api_x' } }
     expect(access.validate?.(typed)).toBeNull()
     expect(access.isComplete({ ...state, linearConnected: true })).toBe(true)
+    // With an app to install, the step names both ways in.
+    expect(access.validate?.({ ...state, linearInstallAvailable: true })).toMatch(
+      /Install Triage Factory in Linear, or paste a Linear API key/,
+    )
   })
 
   it('blocks the team step on a half-mapped Linear team only', () => {
@@ -384,6 +388,14 @@ describe('setup — the Linear tracker', () => {
     expect(
       access.collapsedSummary({ ...s, linearConnected: true, linearWorkspaceUrlKey: 'acme' }),
     ).toBe('Connected · linear.app/acme')
+    expect(
+      access.collapsedSummary({
+        ...s,
+        linearConnected: true,
+        linearWorkspaceUrlKey: 'acme',
+        linearAuthMethod: 'app_install',
+      }),
+    ).toBe('Installed · linear.app/acme')
     expect(stepFor('org-trackers').collapsedSummary({ ...s, tracker: 'linear' })).toBe('Linear')
   })
 
@@ -485,6 +497,38 @@ describe('setup — the Linear tracker', () => {
     expect(await loadOrg(ctx)).toMatchObject({ tracker: 'jira', linearConnected: false })
     answer(false, false)
     expect((await loadOrg(ctx)).tracker).toBe('none')
+  })
+
+  it('seeds the install state from the Linear access read', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/linear/access')) {
+          return {
+            ok: true,
+            status: 200,
+            ...jsonBody({
+              connected: false,
+              auth_method: '',
+              workspace_url_key: '',
+              bound_as: null,
+              connect_available: true,
+              using_deployment_default: false,
+              last_error: 'install_revoked',
+            }),
+          }
+        }
+        if (url === '/api/integrations/status') {
+          return { ok: true, status: 200, ...jsonBody({ jira: false }) }
+        }
+        return { ok: true, status: 200, ...jsonBody({ version: 1, github_base_url: '' }) }
+      }),
+    )
+    expect(await loadOrg({ orgId: ORG_ID, teamId: 'default', isLocal: true })).toMatchObject({
+      linearConnected: false,
+      linearInstallAvailable: true,
+      linearLastError: 'install_revoked',
+    })
   })
 
   // An unreadable Linear status is not "not connected": reading it that way

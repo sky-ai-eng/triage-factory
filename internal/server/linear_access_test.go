@@ -35,17 +35,18 @@ type linearWhoamiFake struct {
 	mu        sync.Mutex
 	mode      string // "person" (default), "app", "rejected", "down"
 	workspace linear.Organization
+	viewerID  string
 	calls     int
 }
 
 func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
 	t.Helper()
-	f := &linearWhoamiFake{mode: "person", workspace: linear.Organization{ID: "org-acme", Name: "Acme", URLKey: "acme"}}
+	f := &linearWhoamiFake{mode: "person", workspace: linear.Organization{ID: "org-acme", Name: "Acme", URLKey: "acme"}, viewerID: "lu-ada"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.calls++
-		mode, ws := f.mode, f.workspace
+		mode, ws, viewerID := f.mode, f.workspace, f.viewerID
 		f.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -62,7 +63,7 @@ func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
 			email = "4b1b3139@oauthapp.linear.app"
 		}
 		writeGraphQLData(w, map[string]any{
-			"viewer":       map[string]any{"id": "lu-ada", "name": "ada", "displayName": "Ada", "email": email},
+			"viewer":       map[string]any{"id": viewerID, "name": "ada", "displayName": "Ada", "email": email},
 			"organization": ws,
 		})
 	}))
@@ -81,6 +82,14 @@ func (f *linearWhoamiFake) setWorkspace(ws linear.Organization) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.workspace = ws
+}
+
+// setViewerID changes who the token answers as: an app installed in another
+// workspace is another app user.
+func (f *linearWhoamiFake) setViewerID(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.viewerID = id
 }
 
 func (f *linearWhoamiFake) Calls() int {
