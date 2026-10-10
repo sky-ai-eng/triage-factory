@@ -43,6 +43,12 @@ var issueFlags = map[string]map[string]bool{
 	"search":       {"--team": false, "--state": true, "--assignee": false, "--max": false},
 }
 
+// blankable is the one flag a blank value means something for: edit clears
+// the description with it. Every other flag reads an empty value as the flag
+// being absent, which would widen a search or drop a parent, so the parser
+// refuses one.
+var blankable = map[string]bool{"--description": true}
+
 // ValueFlags is every linear flag, all of which take a value: the input
 // execflags.HasHelpFlag needs to tell `--body "--help"` from a help request.
 // Exported because the exec dispatcher runs the same check one level up, to
@@ -236,21 +242,22 @@ func (a issueArgs) value(flag string) string {
 	return ""
 }
 
-// required is flag's value, exiting when it is absent or empty.
+// required is flag's value, exiting when it is absent. The parser has already
+// refused a blank one.
 func (a issueArgs) required(flag string) string {
-	v := a.value(flag)
-	if strings.TrimSpace(v) == "" {
+	if !a.has(flag) {
 		exitErr(flag + " is required")
 	}
-	return v
+	return a.value(flag)
 }
 
 // parseIssueArgs splits args for action, which takes exactly positionals
 // positional arguments and the flags issueFlags gives it. Every flag takes a
 // value, and the token after a flag is its value whatever it looks like, so a
 // body that starts with "--" is a body. A flag the action does not take, a
-// flag with no value, a non-repeatable flag given twice, and the wrong number
-// of positionals are each an error rather than something to guess past.
+// flag with no value, a blank value for a flag outside blankable, a
+// non-repeatable flag given twice, and the wrong number of positionals are
+// each an error rather than something to guess past.
 func parseIssueArgs(action string, args []string, positionals int) (issueArgs, error) {
 	allowed := issueFlags[action]
 	out := issueArgs{values: map[string][]string{}}
@@ -269,6 +276,9 @@ func parseIssueArgs(action string, args []string, positionals int) (issueArgs, e
 		}
 		if len(out.values[tok]) > 0 && !repeats {
 			return issueArgs{}, fmt.Errorf("%s given more than once", tok)
+		}
+		if strings.TrimSpace(args[i+1]) == "" && !blankable[tok] {
+			return issueArgs{}, fmt.Errorf("%s must not be blank", tok)
 		}
 		out.values[tok] = append(out.values[tok], args[i+1])
 		i++

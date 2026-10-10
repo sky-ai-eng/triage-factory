@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/credprovision"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
@@ -99,10 +100,12 @@ func (a *App) buildRunCredentials() error {
 	// brain refreshes an org's token once for both rather than once each. The
 	// server holds a cache of its own, and the two converge (see
 	// linearoauth.TokenCache); this one writes under the same credential lock
-	// as the server's handlers.
+	// as the server's handlers. The provisioner seals the token it returns
+	// into bundles that are not re-sealed for a while, so it refreshes a token
+	// that would not outlast the next re-seal.
 	linearApps := linear.NewOAuthAppResolver(a.stores.LinearApps, a.stores.Secrets, linear.DeploymentOAuthAppFromEnv())
 	linearTokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), linearApps, a.stores.Secrets, a.stores.LinearInstalls,
-		linearoauth.NewCredentialLock(a.database))
+		linearoauth.NewCredentialLock(a.database), linearoauth.WithHeadroom(credprovision.LinearTokenHeadroom))
 	a.linearResolver = linear.NewResolverWithInstall(a.stores.Secrets, a.stores.Orgs, linearTokens)
 	return nil
 }

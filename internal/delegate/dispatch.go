@@ -1868,10 +1868,11 @@ func (s *Spawner) inheritedWorktreePath(ctx context.Context, orgID, taskID strin
 //
 // Re-running the setup, rather than assembling a checkout here, keeps "fresh"
 // one thing: each shape's construction is specific (a GitHub PR run fetches
-// its pull request and lands on its head ref; a Jira, Linear or Slack run lands
-// a bare run root the agent populates itself), and a second implementation would be a
-// second definition of what a first launch produces. The setups key by
-// task.ID, so the tree lands at the path every conversation on the task shares.
+// its pull request and lands on its head ref; a Jira, Linear or Slack run
+// lands a bare run root the agent populates itself), and a second
+// implementation would be a second definition of what a first launch
+// produces. The setups key by task.ID, so the tree lands at the path every
+// conversation on the task shares.
 //
 // Only the path is taken from the result — the caller has already
 // reconstructed the rest of the step's config from the task.

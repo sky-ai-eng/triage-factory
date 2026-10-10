@@ -133,6 +133,12 @@ func TestParseIssueArgs(t *testing.T) {
 		"missing positional":            {"view", nil, 1, "usage: linear issue view <id>"},
 		"extra positional":              {"view", []string{"ENG-1", "ENG-2"}, 1, "usage: linear issue view <id>"},
 		"positional on search":          {"search", []string{"ENG", "--team", "ENG"}, 0, "usage: linear issue search"},
+		// A blank value would read as the flag being absent: any assignee,
+		// no parent, no title change.
+		"blank assignee":   {"search", []string{"--team", "ENG", "--assignee", ""}, 0, "--assignee must not be blank"},
+		"blank state":      {"search", []string{"--team", "ENG", "--state", " "}, 0, "--state must not be blank"},
+		"blank parent":     {"create", []string{"ENG", "--title", "t", "--parent", ""}, 1, "--parent must not be blank"},
+		"blank edit title": {"edit", []string{"ENG-1", "--title", ""}, 1, "--title must not be blank"},
 	}
 	for name, tc := range refusals {
 		t.Run(name, func(t *testing.T) {

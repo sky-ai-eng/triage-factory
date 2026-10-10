@@ -417,6 +417,7 @@ func TestLinearVerbs_BadCallsFailBeforeCallingLinear(t *testing.T) {
 		"priority 5":       func() error { return lc.LinearSetPriority(ctx, "ENG-7", 5) },
 		"edit priority -1": func() error { m := -1; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Priority: &m}) },
 		"edit nothing":     func() error { return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{}) },
+		"edit blank title": func() error { b := " "; return lc.LinearUpdateIssue(ctx, "ENG-7", LinearIssueEdit{Title: &b}) },
 		"create no title": func() error {
 			_, err := lc.LinearCreateIssue(ctx, LinearCreateIssueRequest{TeamKey: "ENG"})
 			return err

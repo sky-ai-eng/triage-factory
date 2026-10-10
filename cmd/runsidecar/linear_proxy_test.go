@@ -213,9 +213,9 @@ func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
 }
 
 // TestRuntime_LinearAuthHeaderNamesTheMiss pins the sentinel the Linear auth
-// source wraps for each bundle it cannot answer from, and that it answers an
-// expired app token rather than refusing it: Linear's refusal is what the
-// verb reports.
+// source wraps for each bundle it cannot answer from. An expired app token is
+// unresolved, the retry-later answer, rather than forwarded for Linear to
+// refuse as if the install were gone.
 func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 	rt, err := newCredRuntime()
 	if err != nil {
@@ -259,7 +259,7 @@ func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 		AccessToken: "lin_oauth_STALE",
 		ExpiresUnix: time.Now().Add(-time.Hour).Unix(),
 	}})
-	if v, err := rt.linearAuthHeader(ctx); err != nil || v != "Bearer lin_oauth_STALE" {
-		t.Errorf("expired app token = (%q, %v), want it forwarded as a Bearer", v, err)
+	if v, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrLinearCredentialUnresolved) {
+		t.Errorf("expired app token = (%q, %v), want ErrLinearCredentialUnresolved", v, err)
 	}
 }

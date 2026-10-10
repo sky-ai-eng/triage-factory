@@ -723,15 +723,14 @@ func (r *credRuntime) linearAuthHeader(context.Context) (string, error) {
 		if lc.AccessToken == "" {
 			return "", fmt.Errorf("runsidecar: linear api proxy, empty access token: %w", credbundle.ErrNoLinearCredential)
 		}
-		// The token's expiry is not checked here. An expired one is forwarded,
-		// Linear refuses it, and the verb reports linear.ErrUnauthorized.
-		//
-		// TODO(TFAC-1066): nothing re-mints this token ahead of its expiry. The
-		// brain's refresh sweep re-seals the bundle on its own cadence with
-		// whatever access token the shared cache holds, and the cache serves a
-		// token until a minute before it expires, so once per token lifetime
-		// (24h) a run in flight holds an expired token, and its Linear verbs
-		// are refused, until a re-seal after the expiry carries a refreshed one.
+		// The brain seals a token with more life left than the bundle goes
+		// between seals, so one past its expiry here means the brain could
+		// not refresh it: Linear's token endpoint was down. That is the
+		// unresolved answer, which tells the agent to retry, rather than
+		// forwarding a token Linear would refuse as if the install were gone.
+		if lc.ExpiresUnix != 0 && !time.Now().Before(time.Unix(lc.ExpiresUnix, 0)) {
+			return "", fmt.Errorf("runsidecar: linear api proxy, access token expired: %w", credbundle.ErrLinearCredentialUnresolved)
+		}
 		return "Bearer " + lc.AccessToken, nil
 	default:
 		return "", fmt.Errorf("runsidecar: linear api proxy: unknown auth method %q", lc.AuthMethod)

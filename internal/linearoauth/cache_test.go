@@ -120,6 +120,7 @@ type graceRefresher struct {
 	expires   time.Duration
 	now       func() time.Time
 	refuse    map[string]bool
+	down      atomic.Bool
 	onRefresh func(refreshToken string)
 }
 
@@ -135,6 +136,9 @@ func (g *graceRefresher) Refresh(_ context.Context, _ linear.OAuthApp, refreshTo
 	}
 	if refused {
 		return Token{}, &StatusError{Op: opToken, StatusCode: http.StatusBadRequest, Code: "invalid_grant", Class: upstream.Rejected}
+	}
+	if g.down.Load() {
+		return Token{}, &StatusError{Op: opToken, StatusCode: http.StatusServiceUnavailable, Class: upstream.Transient}
 	}
 	n, err := strconv.Atoi(strings.TrimPrefix(refreshToken, "ref-"))
 	if err != nil {
@@ -192,8 +196,8 @@ func newRig(t *testing.T) *rig {
 
 func (r *rig) now() time.Time { return r.clock }
 
-func (r *rig) cache() *TokenCache {
-	c := newTokenCache(r.ref, fakeAppResolver{}, r.secrets, r.installs, NewCredentialLock(nil))
+func (r *rig) cache(opts ...Option) *TokenCache {
+	c := newTokenCache(r.ref, fakeAppResolver{}, r.secrets, r.installs, NewCredentialLock(nil), opts...)
 	c.now = r.now
 	return c
 }
@@ -308,6 +312,86 @@ func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	r.clock = installedAt.Add(24*time.Hour - 30*time.Second)
 	if access, _, _ := cache.AccessTokenForOrg(context.Background(), cOrg); access != "acc-2" {
 		t.Errorf("read inside the refresh skew = %q, want a fresh acc-2", access)
+	}
+}
+
+// TestTokenCache_HeadroomRefreshesEarly pins WithHeadroom: a token with less
+// than the headroom left is refreshed, where the default serves it until a
+// minute before it expires.
+func TestTokenCache_HeadroomRefreshesEarly(t *testing.T) {
+	r := newRig(t)
+	cache := r.cache(WithHeadroom(45 * time.Minute))
+	if _, _, err := cache.AccessTokenForOrg(context.Background(), cOrg); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+
+	r.clock = installedAt.Add(23 * time.Hour)
+	if access, _, _ := cache.AccessTokenForOrg(context.Background(), cOrg); access != "acc-1" {
+		t.Errorf("an hour before expiry = %q, want the cached acc-1", access)
+	}
+	if access, _, _ := r.cache().AccessTokenForOrg(context.Background(), cOrg); access != "acc-1" {
+		t.Errorf("a default cache an hour before expiry = %q, want the stored acc-1", access)
+	}
+
+	r.clock = installedAt.Add(23*time.Hour + 20*time.Minute)
+	access, exp, err := cache.AccessTokenForOrg(context.Background(), cOrg)
+	if err != nil {
+		t.Fatalf("inside the headroom: %v", err)
+	}
+	if access != "acc-2" || !exp.Equal(r.clock.Add(24*time.Hour)) {
+		t.Errorf("inside the headroom = (%q, %v), want a fresh acc-2", access, exp)
+	}
+}
+
+// TestTokenCache_FailedRefreshServesTheHeldToken pins the outage fallback: a
+// refresh the token endpoint fails to answer serves the token the install
+// already has while it has a minute left, and a refresh Linear refuses never
+// does, since the refusal means the install is revoked and its token with it.
+func TestTokenCache_FailedRefreshServesTheHeldToken(t *testing.T) {
+	headroom := WithHeadroom(45 * time.Minute)
+
+	t.Run("endpoint down", func(t *testing.T) {
+		r := newRig(t)
+		warm := r.cache(headroom)
+		if _, _, err := warm.AccessTokenForOrg(context.Background(), cOrg); err != nil {
+			t.Fatalf("first: %v", err)
+		}
+		r.ref.down.Store(true)
+
+		r.clock = installedAt.Add(23*time.Hour + 30*time.Minute)
+		for name, cache := range map[string]*TokenCache{"warm": warm, "cold": r.cache(headroom)} {
+			access, exp, err := cache.AccessTokenForOrg(context.Background(), cOrg)
+			if err != nil || access != "acc-1" || !exp.Equal(installedAt.Add(24*time.Hour)) {
+				t.Errorf("%s, endpoint down = (%q, %v, %v), want the held acc-1", name, access, exp, err)
+			}
+		}
+
+		r.clock = installedAt.Add(24*time.Hour - 30*time.Second)
+		if access, _, err := r.cache(headroom).AccessTokenForOrg(context.Background(), cOrg); err == nil {
+			t.Errorf("endpoint down inside the skew = %q, want the refresh's error", access)
+		}
+	})
+
+	for name, removalFails := range map[string]bool{"revoked": false, "revoked, removal failing": true} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			if _, _, err := r.cache(headroom).AccessTokenForOrg(context.Background(), cOrg); err != nil {
+				t.Fatalf("first: %v", err)
+			}
+			r.ref.mu.Lock()
+			r.ref.refuse = map[string]bool{"ref-1": true}
+			r.ref.mu.Unlock()
+			if removalFails {
+				r.installs.mu.Lock()
+				r.installs.err = errors.New("db down")
+				r.installs.mu.Unlock()
+			}
+
+			r.clock = installedAt.Add(23*time.Hour + 30*time.Minute)
+			if access, _, err := r.cache(headroom).AccessTokenForOrg(context.Background(), cOrg); err == nil || access != "" {
+				t.Errorf("refused = (%q, %v), want an error and no token", access, err)
+			}
+		})
 	}
 }
 

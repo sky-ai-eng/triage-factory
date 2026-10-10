@@ -243,8 +243,8 @@ func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err err
 
 func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (_ *linearclient.Issue, err error) {
 	defer explainLinearError(&err)
-	if strings.TrimSpace(req.Title) == "" {
-		return nil, errors.New("title is required")
+	if err := validateLinearTitle(req.Title); err != nil {
+		return nil, err
 	}
 	if err := validateLinearPriority(req.Priority); err != nil {
 		return nil, err
@@ -288,6 +288,11 @@ func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit 
 	defer explainLinearError(&err)
 	if edit.IsEmpty() {
 		return errors.New("no fields to update")
+	}
+	if edit.Title != nil {
+		if err := validateLinearTitle(*edit.Title); err != nil {
+			return err
+		}
 	}
 	if edit.Priority != nil {
 		if err := validateLinearPriority(*edit.Priority); err != nil {
@@ -578,6 +583,15 @@ func resolveLinearLabels(ctx context.Context, client *linearclient.Client, team 
 		}
 	}
 	return ids, nil
+}
+
+// validateLinearTitle is the title rule create and edit share: an issue
+// always has a title, so neither route takes a blank one.
+func validateLinearTitle(title string) error {
+	if strings.TrimSpace(title) == "" {
+		return errors.New("title must not be blank")
+	}
+	return nil
 }
 
 func validateLinearPriority(p int) error {

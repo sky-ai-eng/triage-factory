@@ -58,6 +58,13 @@ const DefaultRefreshSweepInterval = 5 * time.Minute
 // tokens are hour-lived; this refreshes well within that window.
 const DefaultRefreshAfter = 30 * time.Minute
 
+// LinearTokenHeadroom is the least life a Linear app-install access token has
+// left when it is sealed. A bundle goes at most DefaultRefreshAfter plus one
+// sweep interval between seals (RefreshCadenceForTTL only ever shortens
+// either), and the margin covers the re-seal reaching the sidecar, so a sealed
+// token outlives the bundle that carries it.
+const LinearTokenHeadroom = DefaultRefreshAfter + DefaultRefreshSweepInterval + 10*time.Minute
+
 // jiraSystemResolver is a structural (unexported, anonymous-interface-
 // compatible) view of jira.Resolver's optional ResolveSystemCredential
 // extension — mirrors internal/github's ScopedResolver pattern. Declared
@@ -245,6 +252,11 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	// starting and its in-flight runs' GitHub tokens from being re-minted. The
 	// bundle records the gap instead, so the run's Linear verbs answer that
 	// Linear is unavailable for now, and the next re-seal tries again.
+	//
+	// TODO(TFAC-1066): that next re-seal is the sweep's ordinary one, up to
+	// DefaultRefreshAfter plus a sweep interval away, however soon Linear
+	// recovers; a sealed token that expires during a longer outage waits the
+	// same way.
 	if lc, err := m.resolveLinear(ctx, orgID); err != nil {
 		log.Warn("resolve the org's Linear credential failed; sealing the bundle without it, and the run's Linear verbs will report Linear unavailable until a re-seal resolves it",
 			"org", orgID, "conversation", conversationID, "error", err)
@@ -611,11 +623,11 @@ func (m *Manager) resolveJira(ctx context.Context, orgID string) (*credbundle.Ji
 // the sidecar's Linear proxy injects: nil when the org has no Linear
 // configured (not an error, as with Jira), and an error the caller degrades on
 // for anything else. An app-installed org seals the
-// access token the shared token cache holds, which it refreshes first when
-// the one it has is about to expire, with that token's expiry. The install's
-// refresh token never enters the bundle. The refresh sweep's re-provision
-// reaches here too, so a long run's bundle picks up each token the cache
-// moves on to.
+// access token the shared token cache holds, with that token's expiry; the
+// cache refreshes first when the one it has has less than LinearTokenHeadroom
+// left. The install's refresh token never enters the bundle. The refresh
+// sweep's re-provision reaches here too, so a long run's bundle picks up each
+// token the cache moves on to.
 func (m *Manager) resolveLinear(ctx context.Context, orgID string) (*credbundle.LinearCreds, error) {
 	if m.linearResolver == nil {
 		return nil, nil
