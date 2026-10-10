@@ -101,6 +101,12 @@ func (s *Server) handleLinearInstallStart(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	// The callback refuses API tokens, so a ceremony a token starts could
+	// never finish.
+	if httpx.TokenAuthFrom(r.Context()) != nil {
+		forbidden(w, "installing Linear needs a signed-in session; an API token cannot complete it")
+		return
+	}
 	returnTo := normalizeReturnTo(r.URL.Query().Get("return_to"))
 
 	app, _, err := s.linearOAuthApps.Resolve(r.Context(), orgID)
@@ -291,7 +297,11 @@ func newLinearInstallID() (string, error) {
 // and in one transaction the envelope, the app_install marker, the dropped
 // API key, the bound-as record, the workspace columns and the change log. It
 // returns the refresh token of an install this one replaced, for the caller
-// to revoke, when the same app minted it.
+// to revoke, when the same app minted it for a different app user, meaning a
+// different workspace. A re-install into the same workspace is answered by
+// the same app user, and Linear has not been shown to keep the two grants
+// apart, so revoking the old token could end the install just made; it is
+// left alone, forgotten with its envelope.
 //
 // It holds the org's Linear credential lock throughout, so what it reads
 // first — the app the code was exchanged against, and the install row it is
@@ -302,7 +312,10 @@ func newLinearInstallID() (string, error) {
 // The installs row is written on the admin pool in Postgres, so it commits
 // ahead of the transaction rather than with it; a transaction that then fails
 // puts back the row that was there (see restoreLinearInstall). On SQLite the
-// row is part of the transaction and its rollback already did.
+// row is part of the transaction and its rollback already did. A process
+// that dies between the two on Postgres leaves the new row live beside the
+// old credential, holding its workspace until the org's next install
+// replaces it or a disconnect releases it.
 func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, app linear.OAuthApp, tok linearoauth.Token, viewer *auth.LinearUser, org *auth.LinearOrganization) (superseded string, err error) {
 	// The app user's name under the same bound-as record an API key's person
 	// is stored in, so the access status reads one record for either shape.
@@ -407,22 +420,23 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 	}
 
 	if priorEnv != "" {
-		if old, perr := linear.ParseInstallCredential(priorEnv); perr == nil && old.ClientID == app.ClientID && old.RefreshToken != tok.RefreshToken {
+		if old, perr := linear.ParseInstallCredential(priorEnv); perr == nil && old.ClientID == app.ClientID && old.AppUserID != viewer.ID && old.RefreshToken != tok.RefreshToken {
 			superseded = old.RefreshToken
 		}
 	}
 	return superseded, nil
 }
 
-// restoreLinearInstall puts back the install row a failed store replaced:
-// the prior live row, or, when there was none, the new install (installID)
-// marked failed so it holds no workspace. The caller still holds the org's
-// Linear credential lock, so prior is still what was there. Best-effort: it
-// runs after a failure already being reported, so its own failure only logs.
+// restoreLinearInstall puts back the install row a failed store replaced, as
+// it was: live, or removed with its reason, so a revoked install still reads
+// as revoked. When there was none, the new install (installID) is marked
+// failed so it holds no workspace. The caller still holds the org's Linear
+// credential lock, so prior is still what was there. Best-effort: it runs
+// after a failure already being reported, so its own failure only logs.
 func (s *Server) restoreLinearInstall(ctx context.Context, orgID string, prior *domain.OrgLinearInstall, installID string) {
 	ctx = context.WithoutCancel(ctx)
 	var err error
-	if prior != nil && prior.Live() {
+	if prior != nil {
 		_, err = s.linearInstalls.UpsertSystem(ctx, *prior)
 	} else {
 		_, err = s.linearInstalls.MarkRemovedSystem(ctx, orgID, installID, domain.LinearInstallRemovedFailed)

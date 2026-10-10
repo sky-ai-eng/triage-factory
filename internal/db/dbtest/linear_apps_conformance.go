@@ -197,12 +197,53 @@ func RunLinearInstallsConformance(t *testing.T, mk LinearInstallsStoreFactory) {
 		if _, err := store.MarkRemovedSystem(ctx, orgA, first.InstallID, domain.LinearInstallRemovedRevoked); err != nil {
 			t.Fatalf("MarkRemovedSystem: %v", err)
 		}
-		back, err := store.UpsertSystem(ctx, install(orgA, "ws-back", userID))
+		again := install(orgA, "ws-back", userID)
+		again.InstallID += "-again"
+		back, err := store.UpsertSystem(ctx, again)
 		if err != nil {
 			t.Fatalf("UpsertSystem (re-install): %v", err)
 		}
-		if !back.Live() || back.RemovedReason != "" {
-			t.Errorf("re-install = %+v, want live with the removal cleared", back)
+		if !back.Live() || back.RemovedReason != "" || back.InstallID != again.InstallID {
+			t.Errorf("re-install = %+v, want live as %s with the removal cleared", back, again.InstallID)
+		}
+		// A removal still naming the revoked install leaves the new one live.
+		if got, err := store.MarkRemovedSystem(ctx, orgA, first.InstallID, domain.LinearInstallRemovedRevoked); err != nil || got != nil {
+			t.Errorf("MarkRemovedSystem(old install) = %+v, %v; want nil, nil", got, err)
+		}
+		if row, err := store.GetForOrgSystem(ctx, orgA); err != nil || row == nil || !row.Live() {
+			t.Errorf("after a removal naming the old install, row = %+v, %v; want the re-install live", row, err)
+		}
+	})
+
+	t.Run("upsert_puts_a_removed_row_back_as_removed", func(t *testing.T) {
+		store, orgA, orgB, userID := mk(t)
+		ctx := context.Background()
+
+		first, err := store.UpsertSystem(ctx, install(orgA, "ws-restore", userID))
+		if err != nil {
+			t.Fatalf("UpsertSystem: %v", err)
+		}
+		removed, err := store.MarkRemovedSystem(ctx, orgA, first.InstallID, domain.LinearInstallRemovedRevoked)
+		if err != nil || removed == nil {
+			t.Fatalf("MarkRemovedSystem = %+v, %v", removed, err)
+		}
+		// Another install replaces the row, and the removed one is put back.
+		if _, err := store.UpsertSystem(ctx, install(orgA, "ws-attempt", userID)); err != nil {
+			t.Fatalf("UpsertSystem (attempt): %v", err)
+		}
+		restored, err := store.UpsertSystem(ctx, *removed)
+		if err != nil {
+			t.Fatalf("UpsertSystem (restore): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "UpsertSystem (restore)", restored, func() (*domain.OrgLinearInstall, error) {
+			return store.GetForOrgSystem(ctx, orgA)
+		})
+		if restored.Live() || restored.RemovedReason != domain.LinearInstallRemovedRevoked || restored.InstallID != first.InstallID {
+			t.Errorf("restored = %+v, want %s removed as %s", restored, first.InstallID, domain.LinearInstallRemovedRevoked)
+		}
+		// Put back removed, it holds no workspace.
+		if _, err := store.UpsertSystem(ctx, install(orgB, "ws-restore", userID)); err != nil {
+			t.Errorf("another org installing the restored row's workspace: %v, want it free", err)
 		}
 	})
 

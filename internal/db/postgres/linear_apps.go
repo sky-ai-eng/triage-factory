@@ -45,7 +45,7 @@ func scanLinearApp(row interface{ Scan(...any) error }) (*domain.OrgLinearApp, e
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("get org_linear_apps: %w", err)
+		return nil, err
 	}
 	a.RegisteredByUserID = regBy.String
 	return &a, nil
@@ -56,17 +56,27 @@ func (s *linearAppsStore) GetForOrg(ctx context.Context, orgID string) (*domain.
 		return nil, nil
 	}
 	app, err := scanLinearApp(s.app.QueryRowContext(ctx, selectLinearAppCols, orgID))
-	return app, wrapAppPoolPermErr(err, "linear_apps.GetForOrg")
+	if err != nil {
+		return nil, wrapAppPoolPermErr(fmt.Errorf("get org_linear_apps: %w", err), "linear_apps.GetForOrg")
+	}
+	return app, nil
 }
 
 func (s *linearAppsStore) GetForOrgSystem(ctx context.Context, orgID string) (*domain.OrgLinearApp, error) {
 	if !isValidUUID(orgID) {
 		return nil, nil
 	}
-	return scanLinearApp(s.admin.QueryRowContext(ctx, selectLinearAppCols, orgID))
+	app, err := scanLinearApp(s.admin.QueryRowContext(ctx, selectLinearAppCols, orgID))
+	if err != nil {
+		return nil, fmt.Errorf("get org_linear_apps: %w", err)
+	}
+	return app, nil
 }
 
 func (s *linearAppsStore) UpsertForOrg(ctx context.Context, app domain.OrgLinearApp) (domain.OrgLinearApp, error) {
+	if !isValidUUID(app.OrgID) {
+		return domain.OrgLinearApp{}, fmt.Errorf("upsert org_linear_apps: invalid org id %q", app.OrgID)
+	}
 	stored, err := scanLinearApp(s.app.QueryRowContext(ctx, `
 		INSERT INTO org_linear_apps (org_id, client_id, client_secret_ref, registered_by_user_id)
 		VALUES ($1, $2, $3, $4)
@@ -77,7 +87,7 @@ func (s *linearAppsStore) UpsertForOrg(ctx context.Context, app domain.OrgLinear
 		RETURNING `+pgLinearAppColumns,
 		app.OrgID, app.ClientID, app.ClientSecretRef, nullString(app.RegisteredByUserID)))
 	if err != nil {
-		return domain.OrgLinearApp{}, wrapAppPoolPermErr(err, "linear_apps.UpsertForOrg")
+		return domain.OrgLinearApp{}, wrapAppPoolPermErr(fmt.Errorf("upsert org_linear_apps: %w", err), "linear_apps.UpsertForOrg")
 	}
 	if stored == nil {
 		return domain.OrgLinearApp{}, sql.ErrNoRows
@@ -156,7 +166,7 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 		INSERT INTO org_linear_installs
 			(org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 			 installed_by_user_id, installed_at, removed_at, removed_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), NULL, NULL)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), $9, $10)
 		ON CONFLICT (org_id) DO UPDATE SET
 			install_id           = EXCLUDED.install_id,
 			workspace_id         = EXCLUDED.workspace_id,
@@ -165,11 +175,12 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 			app_client_id        = EXCLUDED.app_client_id,
 			installed_by_user_id = EXCLUDED.installed_by_user_id,
 			installed_at         = EXCLUDED.installed_at,
-			removed_at           = NULL,
-			removed_reason       = NULL
+			removed_at           = EXCLUDED.removed_at,
+			removed_reason       = EXCLUDED.removed_reason
 		RETURNING `+pgLinearInstallColumns,
 		inst.OrgID, inst.InstallID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
-		nullString(inst.InstalledByUserID), nullTime(inst.InstalledAt)))
+		nullString(inst.InstalledByUserID), nullTime(inst.InstalledAt),
+		nullTime(inst.RemovedAt), nullString(inst.RemovedReason)))
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == linearInstallsWorkspaceLiveIndex {
 		return domain.OrgLinearInstall{}, db.ErrWorkspaceInstalledElsewhere

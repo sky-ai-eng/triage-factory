@@ -135,6 +135,31 @@ describe('LinearAccessGroup install path', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('already connected to another')
     expect(window.location.search).toBe('?tab=org')
   })
+
+  it('drops the returned error once the org connects another way', () => {
+    window.history.replaceState(null, '', '/setup?linear_error=denied')
+    const group = (connected: boolean) => (
+      <LinearAccessGroup
+        value={{ linear_api_key: '' }}
+        onChange={() => {}}
+        connected={connected}
+        boundAs={connected ? 'Ada' : undefined}
+        workspaceUrlKey={connected ? 'acme' : undefined}
+        orgId="org-1"
+        bare
+      />
+    )
+    const { rerender } = render(group(false))
+    expect(screen.getByRole('alert')).toHaveTextContent('cancelled in Linear')
+    rerender(group(true))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('keeps the returned error for an org that was already connected', () => {
+    window.history.replaceState(null, '', '/settings?linear_error=workspace_taken')
+    renderGroupWithInstall()
+    expect(screen.getByRole('alert')).toHaveTextContent('already connected to another')
+  })
 })
 
 function renderGroupWithInstall() {

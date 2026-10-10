@@ -19,6 +19,11 @@ import (
 // treats it as stale, so a token never runs out mid-request.
 const refreshSkew = 60 * time.Second
 
+// refreshFlightTimeout bounds one refresh, which no caller's ctx bounds: up
+// to two token requests (each with the minter's own 30s limit), the waits on
+// the org's credential lock, and the writes.
+const refreshFlightTimeout = 2 * time.Minute
+
 // refresher is the slice of *Minter the cache uses, an interface so the
 // rotation write-back is testable without an HTTP endpoint.
 type refresher interface {
@@ -116,17 +121,26 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 		return ct.accessToken, ct.expiresAt, nil
 	}
 
-	// The shared call runs under the first caller's ctx, so a cancellation
-	// there reaches every coalesced waiter. That is the cost of one refresh
-	// per rotation, which the rotating token depends on.
-	res, err, _ := c.group.Do(orgID, func() (any, error) {
-		return c.refresh(ctx, orgID)
+	// The refresh runs detached from every caller's ctx. Linear may have
+	// rotated the token by the time a caller gives up, and a write-back
+	// abandoned there leaves the old token stored; once it falls out of
+	// Linear's grace window, its refusal reads as a revoked install. A caller
+	// that gives up stops waiting, and the refresh carries on for the rest.
+	ch := c.group.DoChan(orgID, func() (any, error) {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshFlightTimeout)
+		defer cancel()
+		return c.refresh(fctx, orgID)
 	})
-	if err != nil {
-		return "", time.Time{}, err
+	select {
+	case <-ctx.Done():
+		return "", time.Time{}, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return "", time.Time{}, res.Err
+		}
+		ct := res.Val.(cachedToken)
+		return ct.accessToken, ct.expiresAt, nil
 	}
-	ct := res.(cachedToken)
-	return ct.accessToken, ct.expiresAt, nil
 }
 
 // fresh is the cached token for orgID when it was minted for the install

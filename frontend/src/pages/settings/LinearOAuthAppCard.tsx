@@ -11,7 +11,7 @@
 // whether an install is now available, so the connection section can offer it
 // without a reload.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, Copy, ExternalLink } from 'lucide-react'
 import { toast } from '../../components/Toast/toastStore'
 import { glassInputClass } from './primitives'
@@ -24,11 +24,14 @@ import {
 
 function CopyField({ label, value }: { label: string; value: string }) {
   const [copied, setCopied] = useState(false)
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value)
       setCopied(true)
-      setTimeout(() => setCopied(false), 1500)
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => setCopied(false), 1500)
     } catch {
       // Clipboard denied — the value is still selectable in the field.
     }
@@ -69,6 +72,7 @@ export default function LinearOAuthAppCard({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [replacing, setReplacing] = useState(false)
+  const [loadFailed, setLoadFailed] = useState(false)
 
   const setStatus = (s: LinearAppStatus) => {
     setStatusState(s)
@@ -84,8 +88,9 @@ export default function LinearOAuthAppCard({
         onStatus?.(s)
       })
       .catch(() => {
-        // A failed read leaves the card in its entry state: saving still
-        // works, only the summary, link and redirect URIs are missing.
+        // Saving still works, but the card cannot tell whether an app is
+        // already saved, so it says so rather than look like there is none.
+        if (!cancelled) setLoadFailed(true)
       })
     return () => {
       cancelled = true
@@ -159,6 +164,13 @@ export default function LinearOAuthAppCard({
         someone&rsquo;s personal API key, and the app user takes no seat. The secret is stored
         encrypted and never leaves your deployment.
       </p>
+
+      {loadFailed && (
+        <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
+          Could not load this workspace&rsquo;s Linear app, so an app may already be saved. Reload
+          to try again.
+        </p>
+      )}
 
       {hasOverride && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
@@ -243,7 +255,9 @@ export default function LinearOAuthAppCard({
               ))}
               <p className="text-reported leading-relaxed text-ink-3">
                 The link above registers both. If you create the app by hand, add each one under its
-                Callback URLs — Linear matches them exactly.
+                Callback URLs — Linear matches them exactly. The second is for members connecting
+                their own Linear accounts, which Triage Factory does not offer yet; registering it
+                now saves editing the app later.
               </p>
             </div>
           )}

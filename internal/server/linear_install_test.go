@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -21,11 +23,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // linearOAuthFake is Linear's token and revoke endpoints. "good-code" exchanges
-// for the install's pair; a refresh token in refuse answers invalid_grant;
-// any other refresh rotates. Every revoke is recorded.
+// for an install's pair, a fresh one each time (ref-install, ref-install-2,
+// ...); a refresh token in refuse answers invalid_grant; any other refresh
+// rotates. Every revoke is recorded.
 type linearOAuthFake struct {
 	URL string
 
@@ -33,6 +37,7 @@ type linearOAuthFake struct {
 	revoked []string
 	refuse  map[string]bool
 	grants  []string
+	codes   int
 	// onExchange runs before a code exchange is answered, outside the fake's
 	// lock: a test's way to change something while a ceremony is mid-flight.
 	onExchange func()
@@ -61,7 +66,12 @@ func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
 			f.grants = append(f.grants, grant)
 			switch {
 			case grant == "authorization_code" && r.PostForm.Get("code") == "good-code":
-				_, _ = w.Write([]byte(`{"access_token":"acc-install","refresh_token":"ref-install","expires_in":86399}`))
+				f.codes++
+				suffix := ""
+				if f.codes > 1 {
+					suffix = fmt.Sprintf("-%d", f.codes)
+				}
+				_, _ = fmt.Fprintf(w, `{"access_token":"acc-install%s","refresh_token":"ref-install%s","expires_in":86399}`, suffix, suffix)
 			case grant == "refresh_token" && !f.refuse[r.PostForm.Get("refresh_token")]:
 				_, _ = w.Write([]byte(`{"access_token":"acc-refreshed","refresh_token":"ref-refreshed","expires_in":86399}`))
 			default:
@@ -625,6 +635,16 @@ func TestLinearApp_ImportValidatesEveryField(t *testing.T) {
 	if len(items) != 2 || items[0].Field != "client_id" || items[1].Field != "client_secret" {
 		t.Errorf("errors = %+v, want both fields named", items)
 	}
+
+	long := strings.Repeat("x", linearAppCredentialMaxLen+1)
+	rec = doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": long, "client_secret": long})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("over-long credentials: status = %d, want 400", rec.Code)
+	}
+	items = decodeErrorItems(t, rec)
+	if len(items) != 2 || items[0].Reason != httpx.ReasonOutOfRange || items[0].Field != "client_id" || items[1].Field != "client_secret" {
+		t.Errorf("over-long credentials: errors = %+v, want both fields named out of range", items)
+	}
 }
 
 // TestLinearApp_ChangesThatStrandTheInstallAreRefused: while an install minted
@@ -740,8 +760,12 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 	}
 
 	// A Bearer token is refused on the static callback, even the starting
-	// admin's own.
+	// admin's own, and so the start leg refuses one too: it could begin a
+	// ceremony nothing could finish.
 	_, bearer := rig.mintToken(alice, orgA, "ci")
+	if rec := get("/api/orgs/"+orgA.String()+"/linear/install/start", "", bearer, nil); rec.Code != http.StatusForbidden {
+		t.Errorf("start over a Bearer token = %d, want 403", rec.Code)
+	}
 	cookie, state := start(orgA, sidA)
 	if rec := get(callback(state), "", bearer, cookie); rec.Code != http.StatusUnauthorized {
 		t.Errorf("callback over a Bearer token = %d, want 401", rec.Code)
@@ -793,12 +817,21 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 
 	// The store waits on org B's Linear credential lock however it is held:
 	// here by another session, the way another pod's handler or token cache
-	// would hold it.
-	releaseOther, err := linearoauth.NewCredentialLock(rig.h.AdminDB).Lock(t.Context(), orgB.String())
+	// would hold it. Taken by hand, because a CredentialLock in this process
+	// would queue the callback on the process's own gate instead.
+	other, err := rig.h.AdminDB.Conn(t.Context())
 	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	defer other.Close()
+	if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_lock(hashtextextended($1, $2))`, orgB.String(), linearoauth.CredentialLockSalt); err != nil {
 		t.Fatalf("take the lock: %v", err)
 	}
-	defer releaseOther()
+	releaseOther := func() {
+		if _, err := other.ExecContext(t.Context(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, orgB.String(), linearoauth.CredentialLockSalt); err != nil {
+			t.Fatalf("release the lock: %v", err)
+		}
+	}
 	cookie, state = start(orgB, sidB)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() { done <- get(callback(state), sidB, "", cookie) }()
@@ -813,6 +846,61 @@ func TestLinearInstall_MultiMode(t *testing.T) {
 		expectRedirect(t, rec, "linear", "installed")
 	case <-time.After(10 * time.Second):
 		t.Fatal("the callback did not complete after the lock was released")
+	}
+
+	// Linear revokes org B's install, the way the token cache records it:
+	// the row removed as revoked, the envelope gone, the marker kept.
+	revoked, err := stores.LinearInstalls.GetForOrgSystem(t.Context(), orgB.String())
+	if err != nil || revoked == nil {
+		t.Fatalf("read org B's install = %+v, %v", revoked, err)
+	}
+	if _, err := stores.LinearInstalls.MarkRemovedSystem(t.Context(), orgB.String(), revoked.InstallID, domain.LinearInstallRemovedRevoked); err != nil {
+		t.Fatalf("mark revoked: %v", err)
+	}
+	env, err := stores.Secrets.GetSystem(t.Context(), orgB.String(), integrations.KeyLinearAppInstall)
+	if err != nil {
+		t.Fatalf("read envelope: %v", err)
+	}
+	if _, err := stores.Secrets.DeleteSystemIfValue(t.Context(), orgB.String(), integrations.KeyLinearAppInstall, env); err != nil {
+		t.Fatalf("delete envelope: %v", err)
+	}
+	lastError := func() string {
+		rec := rig.tokensJSON(http.MethodGet, "/api/orgs/"+orgB.String()+"/linear/access", nil, sidB, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("access read: %d: %s", rec.Code, rec.Body.String())
+		}
+		var access struct {
+			LastError string `json:"last_error"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &access); err != nil {
+			t.Fatalf("decode access: %v", err)
+		}
+		return access.LastError
+	}
+	if got := lastError(); got != "install_revoked" {
+		t.Fatalf("last_error after the revoke = %q, want install_revoked", got)
+	}
+
+	// A reinstall that fails after its row committed on the admin pool puts
+	// the revoked row back as revoked, so the org still reads why it lost
+	// Linear.
+	tx := s.tx
+	s.tx = failingWorkspaceTx{TxRunner: tx}
+	cookie, state = start(orgB, sidB)
+	if rec := get(callback(state), sidB, "", cookie); rec.Code != http.StatusInternalServerError {
+		t.Errorf("reinstall with a failing write = %d, want 500", rec.Code)
+	}
+	s.tx = tx
+	back, err := stores.LinearInstalls.GetForOrgSystem(t.Context(), orgB.String())
+	if err != nil || back == nil {
+		t.Fatalf("read org B's install after the failed reinstall = %+v, %v", back, err)
+	}
+	if back.InstallID != revoked.InstallID || back.RemovedReason != domain.LinearInstallRemovedRevoked {
+		t.Errorf("install after the failed reinstall = %s removed as %q, want %s removed as %q",
+			back.InstallID, back.RemovedReason, revoked.InstallID, domain.LinearInstallRemovedRevoked)
+	}
+	if got := lastError(); got != "install_revoked" {
+		t.Errorf("last_error after the failed reinstall = %q, want install_revoked still", got)
 	}
 }
 
@@ -831,5 +919,27 @@ func TestLinearInstallReturn(t *testing.T) {
 		if got := linearInstallReturn(tc.org, tc.returnTo, "linear_error", "state"); got != tc.want {
 			t.Errorf("linearInstallReturn(%q, %q) = %q, want %q", tc.org, tc.returnTo, got, tc.want)
 		}
+	}
+}
+
+// TestLinearInstall_ReinstallRevokesOnlyAnotherWorkspacesToken pins which
+// replaced install's refresh token the callback revokes. A re-install into
+// the same workspace is answered by the same app user, and Linear has not
+// been shown to keep its grant apart from the new one, so the old token is
+// left alone rather than risk ending the install just made. An install into
+// another workspace is another app user's grant, and is revoked.
+func TestLinearInstall_ReinstallRevokesOnlyAnotherWorkspacesToken(t *testing.T) {
+	r := newLinearInstallRig(t)
+	r.install(t)
+	r.install(t)
+	if slices.Contains(r.oauth.Revoked(), "ref-install") {
+		t.Errorf("revoked = %v after a same-workspace re-install, want the first install's token left alone", r.oauth.Revoked())
+	}
+
+	r.fake.setWorkspace(linear.Organization{ID: "org-beta", Name: "Beta", URLKey: "beta"})
+	r.fake.setViewerID("lu-app-beta")
+	r.install(t)
+	if !slices.Contains(r.oauth.Revoked(), "ref-install-2") {
+		t.Errorf("revoked = %v after an install into another workspace, want the replaced install's ref-install-2", r.oauth.Revoked())
 	}
 }

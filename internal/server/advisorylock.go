@@ -10,8 +10,9 @@ import (
 // acquireKeyedLock serializes a read-merge-write critical section keyed on
 // key (an org id, ...) across the whole deployment, not just this process
 // (TFAC-579): a Postgres advisory lock on s.db in multi mode, so two control
-// pods cannot interleave the same org's read-merge-write, and the key's mutex
-// in mu in local mode. See db.AcquireKeyedLock.
+// pods cannot interleave the same org's read-merge-write, behind the key's
+// in-process gate in mu, which is the whole lock in local mode. See
+// db.AcquireKeyedLock.
 func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64, key string) (release func(), err error) {
 	return db.AcquireKeyedLock(ctx, s.db, mu, salt, key)
 }
@@ -37,7 +38,7 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	9 — this file                                 (github host + installation
 //	    id, session; githubInstallationBindLockSalt)
 //	10 — internal/linearoauth                     (org id, session;
-//	    credentialLockSalt)
+//	    CredentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
 //	    exclusive to move, shared to settle; channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)

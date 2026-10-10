@@ -77,9 +77,17 @@ export default function LinearAccessGroup({
 
   // The install ceremony reports its failure on the URL it returns to. Read it
   // once, then drop it from the URL so a reload does not show it again.
-  const [returnedError] = useState(() =>
+  const [returnedError, setReturnedError] = useState(() =>
     new URLSearchParams(window.location.search).get('linear_error'),
   )
+  // Connecting afterwards answers the error: it was about getting connected,
+  // and now the org is. An org that was already connected when the ceremony
+  // came back (a key it kept) still reads why the install failed.
+  const [wasConnected, setWasConnected] = useState(connected)
+  if (connected !== wasConnected) {
+    setWasConnected(connected)
+    if (connected && returnedError) setReturnedError(null)
+  }
   useEffect(() => {
     if (!returnedError) return
     const url = new URL(window.location.href)

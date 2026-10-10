@@ -42,7 +42,9 @@ types every workflow state, so watching a team maps it for you.
         URL and both redirect URIs filled in
         (`http://localhost:<port>/api/linear/install/callback` and
         `…/api/linear/connect/callback`; Linear accepts `http` for
-        `localhost`). Create the app.
+        `localhost`). The second is for members connecting their own Linear
+        accounts, which Triage Factory does not offer yet; it is registered now
+        so the app needs no edit later. Create the app.
      2. Copy the app's client ID and client secret from its page in Linear,
         paste them into the card, and save. Linear does not hand them back to
         the creation link, so this step is by hand.

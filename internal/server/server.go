@@ -312,7 +312,7 @@ type Server struct {
 	// process can race, but not across control pods in multi mode, where
 	// acquireKeyedLock takes a Postgres session-scoped advisory lock instead.
 	// Reach it only through acquireKeyedLock.
-	githubAppRegMu sync.Map // map[orgID]*sync.Mutex
+	githubAppRegMu sync.Map // map[orgID]chan struct{}, db.AcquireKeyedLock's gates
 
 	// githubInstallationBindMu is the same mechanism over a different keyspace:
 	// one installation on one GitHub host, rather than one workspace. The

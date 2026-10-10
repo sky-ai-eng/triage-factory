@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -137,7 +138,7 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 		INSERT INTO org_linear_installs
 			(org_id, install_id, workspace_id, workspace_url_key, app_user_id, app_client_id,
 			 installed_by_user_id, installed_at, removed_at, removed_reason)
-		VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL, NULL)
+		VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)
 		ON CONFLICT(org_id) DO UPDATE SET
 			install_id           = excluded.install_id,
 			workspace_id         = excluded.workspace_id,
@@ -146,11 +147,12 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 			app_client_id        = excluded.app_client_id,
 			installed_by_user_id = excluded.installed_by_user_id,
 			installed_at         = excluded.installed_at,
-			removed_at           = NULL,
-			removed_reason       = NULL
+			removed_at           = excluded.removed_at,
+			removed_reason       = excluded.removed_reason
 		RETURNING `+sqliteLinearInstallColumns,
 		inst.OrgID, inst.InstallID, inst.WorkspaceID, inst.WorkspaceURLKey, inst.AppUserID, inst.AppClientID,
-		nullStringValue(inst.InstalledByUserID), nullTimeValue(inst.InstalledAt)).Scan)
+		nullStringValue(inst.InstalledByUserID), nullTimeValue(inst.InstalledAt),
+		nullTimeValue(inst.RemovedAt), nullStringValue(inst.RemovedReason)).Scan)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed: org_linear_installs.workspace_id") {
 			return domain.OrgLinearInstall{}, db.ErrWorkspaceInstalledElsewhere
@@ -163,10 +165,12 @@ func (s *linearInstallsStore) UpsertSystem(ctx context.Context, inst domain.OrgL
 func (s *linearInstallsStore) MarkRemovedSystem(ctx context.Context, orgID, installID, reason string) (*domain.OrgLinearInstall, error) {
 	inst, err := scanSQLiteLinearInstall(s.q.QueryRowContext(ctx, `
 		UPDATE org_linear_installs
-		   SET removed_at = CURRENT_TIMESTAMP, removed_reason = ?
+		   SET removed_at = ?, removed_reason = ?
 		 WHERE org_id = ? AND install_id = ? AND removed_at IS NULL
 		RETURNING `+sqliteLinearInstallColumns,
-		reason, orgID, installID).Scan)
+		// Bound rather than CURRENT_TIMESTAMP, whose whole seconds would sort
+		// a removal before an install stamped earlier in the same second.
+		time.Now().UTC(), reason, orgID, installID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

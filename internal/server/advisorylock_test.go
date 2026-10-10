@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -34,10 +35,12 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	s := New(h.AdminDB, stores)
 	ctx := context.Background()
 
-	var mu sync.Map
+	// One map per simulated pod: callers sharing a map queue on its
+	// in-process gate, so only separate maps reach the advisory lock.
+	var podA, podB sync.Map
 	const key = "same-id"
 
-	releaseA, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
+	releaseA, err := s.acquireKeyedLock(ctx, &podA, testLockSalt, key)
 	if err != nil {
 		t.Fatalf("acquire A: %v", err)
 	}
@@ -46,7 +49,7 @@ func TestAcquireKeyedLock_Multi_SerializesSameKey(t *testing.T) {
 	// acquires before A releases, the lock isn't actually serializing.
 	acquiredB := make(chan struct{})
 	go func() {
-		releaseB, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
+		releaseB, err := s.acquireKeyedLock(ctx, &podB, testLockSalt, key)
 		if err != nil {
 			t.Errorf("acquire B: %v", err)
 			return
@@ -179,5 +182,71 @@ func TestAcquireKeyedLock_Local_UsesInProcessMutex(t *testing.T) {
 	wg.Wait()
 	if counter != n {
 		t.Errorf("counter = %d, want %d (concurrent increments weren't serialized)", counter, n)
+	}
+}
+
+// TestAcquireKeyedLock_Multi_WaitersDoNotDrainThePool pins that callers queued
+// on one key hold no pool connection while they wait. The holder needs a
+// second connection for the work the lock guards; were each waiter blocked on
+// pg_advisory_lock over a connection of its own, a queue as long as the pool
+// would leave the holder none, and nothing would move until a ctx expired.
+func TestAcquireKeyedLock_Multi_WaitersDoNotDrainThePool(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	s := New(h.AdminDB, stores)
+	h.AdminDB.SetMaxOpenConns(2)
+	t.Cleanup(func() { h.AdminDB.SetMaxOpenConns(0) })
+	ctx := context.Background()
+
+	var mu sync.Map
+	const key = "queued-id"
+	release, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, key)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	waitCtx, cancelWaiters := context.WithCancel(ctx)
+	var waiters sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		waiters.Add(1)
+		go func() {
+			defer waiters.Done()
+			if r, err := s.acquireKeyedLock(waitCtx, &mu, testLockSalt, key); err == nil {
+				r()
+			}
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	workCtx, cancelWork := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelWork()
+	var one int
+	if err := h.AdminDB.QueryRowContext(workCtx, `SELECT 1`).Scan(&one); err != nil {
+		t.Errorf("the holder could not get a connection while 5 callers waited on its key: %v", err)
+	}
+	cancelWaiters()
+	release()
+	waiters.Wait()
+}
+
+// TestAcquireKeyedLock_Local_WaitHonorsCtx pins that a local-mode waiter gives
+// up when its ctx does, rather than waiting out the holder.
+func TestAcquireKeyedLock_Local_WaitHonorsCtx(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := &Server{}
+	var mu sync.Map
+	release, err := s.acquireKeyedLock(context.Background(), &mu, testLockSalt, "held")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := s.acquireKeyedLock(ctx, &mu, testLockSalt, "held"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want the waiter's deadline", err)
 	}
 }

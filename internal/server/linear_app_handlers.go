@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -36,8 +37,15 @@ const linearOAuthClientSecretKey = "linear_oauth_client_secret"
 // and user a ceremony belongs to travel in its signed state cookie.
 const (
 	linearInstallCallbackPath = "/api/linear/install/callback"
+	// TODO(TFAC-1023): nothing serves this path yet; it is the per-user
+	// Connect callback. It is registered now so an app created today needs
+	// no second redirect URI added by hand once Connect ships.
 	linearConnectCallbackPath = "/api/linear/connect/callback"
 )
+
+// linearAppCredentialMaxLen caps the client ID and the client secret. Linear's
+// are 32 characters; the cap only refuses a value no OAuth app would issue.
+const linearAppCredentialMaxLen = 256
 
 // linearAppCreateURL is Linear's app-creation page, which pre-fills its form
 // from these query parameters. It does not hand the credentials back, so the
@@ -245,6 +253,12 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	}
 	if clientSecret == "" {
 		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client secret is required.", Field: "client_secret"})
+	}
+	if len(clientID) > linearAppCredentialMaxLen {
+		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_id must be at most %d characters", linearAppCredentialMaxLen), Field: "client_id"})
+	}
+	if len(clientSecret) > linearAppCredentialMaxLen {
+		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_secret must be at most %d characters", linearAppCredentialMaxLen), Field: "client_secret"})
 	}
 	if len(faults) > 0 {
 		httpx.WriteErrors(w, http.StatusBadRequest, faults...)

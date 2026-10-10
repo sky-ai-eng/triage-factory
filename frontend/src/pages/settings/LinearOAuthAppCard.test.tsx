@@ -111,4 +111,14 @@ describe('LinearOAuthAppCard', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('disconnect the installed app first'),
     )
   })
+
+  it('says so when the status read fails, rather than look like no app is saved', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: false, status: 500, ...jsonBody({ errors: [] }) }),
+    )
+    render(<LinearOAuthAppCard orgId="org-1" />)
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('an app may already be saved')
+  })
 })

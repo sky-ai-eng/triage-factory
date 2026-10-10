@@ -23,7 +23,7 @@ const cOrg = "org-1"
 
 // fakeSecrets is an in-memory org secret bag over the three system doors the
 // cache uses. Embeds the interface so the rest compile-satisfy and panic if
-// reached.
+// reached. Like a real store, each door fails on a cancelled ctx.
 type fakeSecrets struct {
 	db.SecretStore
 	mu  sync.Mutex
@@ -32,7 +32,10 @@ type fakeSecrets struct {
 
 func newFakeSecrets() *fakeSecrets { return &fakeSecrets{bag: map[string]string{}} }
 
-func (f *fakeSecrets) GetSystem(_ context.Context, orgID, key string) (string, error) {
+func (f *fakeSecrets) GetSystem(ctx context.Context, orgID, key string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.bag[orgID+"|"+key], nil
@@ -45,7 +48,10 @@ func (f *fakeSecrets) set(orgID, key, value string) {
 	f.bag[orgID+"|"+key] = value
 }
 
-func (f *fakeSecrets) PutSystemIfValue(_ context.Context, orgID, key, old, value, _ string) (bool, error) {
+func (f *fakeSecrets) PutSystemIfValue(ctx context.Context, orgID, key, old, value, _ string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := orgID + "|" + key
@@ -56,7 +62,10 @@ func (f *fakeSecrets) PutSystemIfValue(_ context.Context, orgID, key, old, value
 	return true, nil
 }
 
-func (f *fakeSecrets) DeleteSystemIfValue(_ context.Context, orgID, key, value string) (bool, error) {
+func (f *fakeSecrets) DeleteSystemIfValue(ctx context.Context, orgID, key, value string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	k := orgID + "|" + key
@@ -578,4 +587,40 @@ func TestTokenCache_WritesWaitOnTheCredentialLock(t *testing.T) {
 			t.Error("the refused envelope is still stored after the release")
 		}
 	})
+}
+
+// TestTokenCache_CancelledCallerKeepsTheRotation pins that a refresh outlives
+// the caller that started it. Linear has rotated the token by the time the
+// caller gives up; the write-back still lands, so the stored refresh token is
+// the live one rather than one that ages out of Linear's grace window and
+// reads as a revoked install.
+func TestTokenCache_CancelledCallerKeepsTheRotation(t *testing.T) {
+	r := newRig(t)
+	cache := r.cache()
+	ctx, cancel := context.WithCancel(context.Background())
+	r.ref.onRefresh = func(string) { cancel() }
+
+	if _, _, err := cache.AccessTokenForOrg(ctx, cOrg); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the caller's cancellation", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if stored, _ := storedInstall(t, r.secrets); stored.RefreshToken == "ref-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			stored, _ := storedInstall(t, r.secrets)
+			t.Fatalf("stored = %q, want the rotation ref-1 written back after the caller gave up", stored.RefreshToken)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	r.ref.onRefresh = nil
+	access, _, err := cache.AccessTokenForOrg(context.Background(), cOrg)
+	if err != nil {
+		t.Fatalf("next read: %v", err)
+	}
+	if access != "acc-1" || r.ref.calls.Load() != 1 {
+		t.Errorf("next read = %q after %d refreshes, want acc-1 from the cache after 1", access, r.ref.calls.Load())
+	}
 }
