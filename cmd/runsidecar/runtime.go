@@ -726,7 +726,7 @@ func (r *credRuntime) linearAuthHeader(context.Context) (string, error) {
 		// The token's expiry is not checked here. An expired one is forwarded,
 		// Linear refuses it, and the verb reports linear.ErrUnauthorized.
 		//
-		// TODO(TFAC-86): nothing re-mints this token ahead of its expiry. The
+		// TODO(TFAC-1066): nothing re-mints this token ahead of its expiry. The
 		// brain's refresh sweep re-seals the bundle on its own cadence with
 		// whatever access token the shared cache holds, and the cache serves a
 		// token until a minute before it expires, so once per token lifetime

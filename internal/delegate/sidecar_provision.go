@@ -335,7 +335,7 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		// Jira upstream is left empty: the sidecar derives it from the bundle's
 		// Jira URL. Linear has one upstream for every workspace.
 		//
-		// TODO(TFAC-86): both proxies are gated on the trigger source, not on
+		// TODO(TFAC-1066): both proxies are gated on the trigger source, not on
 		// the org's available sources, so a run about another source's entity,
 		// in an org with Jira or Linear configured, is told about those verbs
 		// (its <tools> section is composed from the available sources) but has
