@@ -25,11 +25,6 @@ on:
       - 'go.mod'
       - 'scripts/ci-images.sh'
       - '.github/workflows/mirror-images.yml'
-  # A change to the copying itself runs it before merge.
-  pull_request:
-    paths:
-      - 'scripts/ci-images.sh'
-      - '.github/workflows/mirror-images.yml'
 
 permissions:
   contents: read
@@ -42,8 +37,10 @@ concurrency:
 
 jobs:
   mirror:
-    # A fork's pull request gets a read-only token, which cannot push.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Every CI job runs what it pulls from the mirror, so this workflow writes
+    # it with main's script only. A dispatch can name any branch, which would
+    # run that branch's script with this token; this refuses all but main.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
