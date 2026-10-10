@@ -39,22 +39,7 @@ func TestReachableRepos_Postgres(t *testing.T) {
 			TrackRepo: func(t *testing.T, repoOwner, repo string) {
 				t.Helper()
 				// The registry row first: a tracking row references it.
-				pgtest.MustExec(t, h.AdminDB,
-					`INSERT INTO repositories (org_id, owner, repo) VALUES ($1, $2, $3)
-					 ON CONFLICT DO NOTHING`,
-					orgID, repoOwner, repo)
-				var repositoryID string
-				if err := h.AdminDB.QueryRow(
-					`SELECT id::text FROM repositories
-					  WHERE org_id = $1 AND lower(owner) = lower($2) AND lower(repo) = lower($3)`,
-					orgID, repoOwner, repo,
-				).Scan(&repositoryID); err != nil {
-					t.Fatalf("resolve repository id: %v", err)
-				}
-				pgtest.MustExec(t, h.AdminDB,
-					`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
-					 ON CONFLICT DO NOTHING`,
-					teamID, repositoryID, orgID)
+				pgtest.SeedTrackedRepoOnHost(t, h, orgID, teamID, dbtest.TestGitHubHost, repoOwner, repo)
 			},
 		}
 	})

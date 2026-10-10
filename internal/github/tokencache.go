@@ -19,41 +19,44 @@ const tokenExpiryGuard = 5 * time.Minute
 // must treat a token within tokenExpiryGuard of expiry as a miss so callers
 // never receive one that could 401.
 //
-// Keyed by (orgID, installationID), not installationID alone: installation
-// IDs are unique only per GitHub host, so two tenants on different GHES
-// appliances can collide on the same numeric ID. Scoping by org keeps one
-// tenant from ever being served another's token.
+// Keyed by (orgID, host, installationID), not installationID alone:
+// installation IDs are unique only per GitHub host, so two tenants on different
+// GHES appliances can collide on the same numeric ID, and so can one org's
+// installations on the two hosts it has been pointed at. Scoping by org keeps
+// one tenant from ever being served another's token; scoping by host keeps an
+// org that moved hosts from being served a token another deployment minted.
+// host is the GitHubHost the token was minted against.
 type TokenCache interface {
-	Get(orgID, installationID string) (githubapp.Token, bool)
-	Set(orgID, installationID string, tok githubapp.Token)
+	Get(orgID, host, installationID string) (githubapp.Token, bool)
+	Set(orgID, host, installationID string, tok githubapp.Token)
 
-	// Invalidate drops the entry for (orgID, installationID). Wired to the
-	// installation.deleted and installation.suspend webhooks (via the server's
-	// onInstallationTokensInvalid hook) so an installation whose tokens GitHub
-	// has stopped honouring isn't served from cache until their natural expiry.
-	// The resolver drops a suspended installation's entry on read as well, for
-	// the suspension a reconcile discovered rather than a delivery.
+	// Invalidate drops every entry for (orgID, installationID), on any host.
+	// Wired to the installation.deleted and installation.suspend webhooks (via
+	// the server's onInstallationTokensInvalid hook) so an installation whose
+	// tokens GitHub has stopped honouring isn't served from cache until their
+	// natural expiry. The resolver drops a suspended installation's entry on
+	// read as well, for the suspension a reconcile discovered rather than a
+	// delivery. Dropping a same-numbered installation's entry on another host
+	// costs that one a re-mint, which is the safe direction.
 	Invalidate(orgID, installationID string)
 }
 
-// cacheKey joins org + installation with a NUL so no orgID/installationID
-// pair can alias another by concatenation.
-func cacheKey(orgID, installationID string) string {
-	return orgID + "\x00" + installationID
-}
+// tokenCacheKey is one cached token's coordinates. A struct key, so no
+// org/host/installation triple can alias another by concatenation.
+type tokenCacheKey struct{ orgID, host, installationID string }
 
 // memoryTokenCache is the process-local TokenCache. A single TF process owns
 // one of these; tokens don't need to survive a restart (a fresh process
 // re-mints on first use).
 type memoryTokenCache struct {
 	mu     sync.Mutex
-	tokens map[string]githubapp.Token
+	tokens map[tokenCacheKey]githubapp.Token
 	now    func() time.Time // injectable clock for tests; nil → time.Now
 }
 
 // NewMemoryTokenCache returns an empty in-memory TokenCache.
 func NewMemoryTokenCache() TokenCache {
-	return &memoryTokenCache{tokens: make(map[string]githubapp.Token)}
+	return &memoryTokenCache{tokens: make(map[tokenCacheKey]githubapp.Token)}
 }
 
 func (c *memoryTokenCache) timeNow() time.Time {
@@ -63,8 +66,8 @@ func (c *memoryTokenCache) timeNow() time.Time {
 	return time.Now()
 }
 
-func (c *memoryTokenCache) Get(orgID, installationID string) (githubapp.Token, bool) {
-	key := cacheKey(orgID, installationID)
+func (c *memoryTokenCache) Get(orgID, host, installationID string) (githubapp.Token, bool) {
+	key := tokenCacheKey{orgID, host, installationID}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	tok, ok := c.tokens[key]
@@ -80,14 +83,18 @@ func (c *memoryTokenCache) Get(orgID, installationID string) (githubapp.Token, b
 	return tok, true
 }
 
-func (c *memoryTokenCache) Set(orgID, installationID string, tok githubapp.Token) {
+func (c *memoryTokenCache) Set(orgID, host, installationID string, tok githubapp.Token) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.tokens[cacheKey(orgID, installationID)] = tok
+	c.tokens[tokenCacheKey{orgID, host, installationID}] = tok
 }
 
 func (c *memoryTokenCache) Invalidate(orgID, installationID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.tokens, cacheKey(orgID, installationID))
+	for key := range c.tokens {
+		if key.orgID == orgID && key.installationID == installationID {
+			delete(c.tokens, key)
+		}
+	}
 }

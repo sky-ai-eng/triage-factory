@@ -49,11 +49,26 @@ func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitH
 	return f.app, nil
 }
 
-func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+// ListInstallationsOnHostSystem answers like the store: the live rows on host,
+// and nothing for an empty host. A fixture installation that names no
+// GitHubHost is on the org's current host — the host every production writer
+// stamps — and the resolver asks only about that host, so it answers for any
+// non-empty host asked. One that names a host is on that host alone.
+func (f *fakeApps) ListInstallationsOnHostSystem(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.insts, nil
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 type fakeOrgs struct {
@@ -364,6 +379,44 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&gh.repoProbes); got != 1 {
 		t.Errorf("coverage probes = %d, want 1 (positive decision should be memoized)", got)
+	}
+}
+
+// A memoized coverage answer is about one host's repository: when the org's
+// host changes, the same slug on the new host is probed there rather than
+// inherited from the old host's positive.
+func TestResolver_ClientForRepo_CoverageIsPerHost(t *testing.T) {
+	ghA := newGHTestServer(t)
+	ghA.installRepos = []string{"acme/widget"}
+	ghB := newGHTestServer(t)
+	ghB.installRepos = []string{"acme/widget"}
+	orgs := &fakeOrgs{base: ghA.srv.URL}
+	r := newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		orgs,
+		&fakeAgents{},
+		nil,
+	)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+			t.Fatalf("ClientForRepo on host A #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&ghA.repoProbes); got != 1 {
+		t.Fatalf("host A coverage probes = %d, want 1 (memoized after the first)", got)
+	}
+
+	orgs.base = ghB.srv.URL
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo on host B: %v", err)
+	}
+	if got := atomic.LoadInt32(&ghB.repoProbes); got != 1 {
+		t.Errorf("host B coverage probes = %d, want 1 (host A's positive must not vouch for host B's repository)", got)
+	}
+	if got := atomic.LoadInt32(&ghB.mintCalls); got != 1 {
+		t.Errorf("host B mints = %d, want 1 (host A's cached installation token must not be sent to host B)", got)
 	}
 }
 

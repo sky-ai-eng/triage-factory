@@ -2032,6 +2032,16 @@ func (s *Server) MarkJiraRestarted(ctx context.Context, orgID string) {
 	}
 }
 
+// MarkGitHubRestarted is MarkJiraRestarted for GitHub: it clears orgID's
+// GitHub readiness until the poller's next completion, so the last-poll time
+// the team activity page shows is never one taken on a GitHub host or under a
+// credential the org has since replaced. Best-effort for the same reasons.
+func (s *Server) MarkGitHubRestarted(ctx context.Context, orgID string) {
+	if err := s.allStores.PollReadiness.MarkRestarted(ctx, orgID, "github"); err != nil {
+		serverLog.Warn("mark github poll restarted failed", "org", orgID, "error", err)
+	}
+}
+
 // MarkLinearRestarted is MarkJiraRestarted for Linear: it clears orgID's
 // Linear readiness until the poller's next completion, which is what the
 // team activity page's last-poll time and the "config took effect" toast

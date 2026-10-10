@@ -6,10 +6,11 @@ import (
 )
 
 func TestDetectRepoRenames(t *testing.T) {
+	const gh, ghe = "https://github.com", "https://ghe.example.com"
 	stored := []RepoRef{
-		{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"},
-		{Source: "github", Owner: "octo", Repo: "web", ExternalID: "2"},
-		{Source: "github", Owner: "octo", Repo: "no-id"},
+		{Source: "github", Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"},
+		{Source: "github", Host: gh, Owner: "octo", Repo: "web", ExternalID: "2"},
+		{Source: "github", Host: gh, Owner: "octo", Repo: "no-id"},
 	}
 
 	tests := []struct {
@@ -19,44 +20,56 @@ func TestDetectRepoRenames(t *testing.T) {
 	}{
 		{
 			name:     "same id under a different name is a rename",
-			observed: []RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}},
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "platform-api", ExternalID: "1"}},
 			want:     []string{"octo/platform-api"},
 		},
 		{
 			name: "a transfer to another owner is the same condition",
 			// GitHub keeps the id across a transfer, so the owner half moving
 			// is a rename by exactly the same rule.
-			observed: []RepoRef{{Owner: "acme", Repo: "api", ExternalID: "1"}},
+			observed: []RepoRef{{Host: gh, Owner: "acme", Repo: "api", ExternalID: "1"}},
 			want:     []string{"acme/api"},
 		},
 		{
 			name:     "the same name under a different id is NOT a rename",
-			observed: []RepoRef{{Owner: "octo", Repo: "api", ExternalID: "99"}},
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "api", ExternalID: "99"}},
 			want:     nil,
 		},
 		{
 			name:     "an observation with no id is never a rename",
-			observed: []RepoRef{{Owner: "octo", Repo: "renamed"}},
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "renamed"}},
 			want:     nil,
 		},
 		{
 			name:     "a stored row with no id is never renamed",
-			observed: []RepoRef{{Owner: "octo", Repo: "still-no-id", ExternalID: "3"}},
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "still-no-id", ExternalID: "3"}},
 			want:     nil,
 		},
 		{
 			name:     "casing alone is not a rename",
-			observed: []RepoRef{{Owner: "Octo", Repo: "API", ExternalID: "1"}},
+			observed: []RepoRef{{Host: gh, Owner: "Octo", Repo: "API", ExternalID: "1"}},
 			want:     nil,
 		},
 		{
 			name:     "the steady state reports nothing",
-			observed: []RepoRef{{Owner: "octo", Repo: "api", ExternalID: "1"}, {Owner: "octo", Repo: "web", ExternalID: "2"}},
+			observed: []RepoRef{{Host: gh, Owner: "octo", Repo: "api", ExternalID: "1"}, {Host: gh, Owner: "octo", Repo: "web", ExternalID: "2"}},
+			want:     nil,
+		},
+		{
+			// Repository ids are per-deployment sequences, so another host's
+			// repository carrying the same id is a different repository.
+			name:     "the same id on another host is NOT a rename",
+			observed: []RepoRef{{Host: ghe, Owner: "acme", Repo: "other", ExternalID: "1"}},
+			want:     nil,
+		},
+		{
+			name:     "an observation with no host matches nothing",
+			observed: []RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}},
 			want:     nil,
 		},
 		{
 			name:     "an unknown source contributes nothing rather than erroring",
-			observed: []RepoRef{{Source: "gitlob", Owner: "octo", Repo: "renamed", ExternalID: "1"}},
+			observed: []RepoRef{{Source: "gitlob", Host: gh, Owner: "octo", Repo: "renamed", ExternalID: "1"}},
 			want:     nil,
 		},
 	}

@@ -200,13 +200,13 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 // This wraps s.githubApps, which is NOT the store a handler's own
 // tx.GitHubApps calls run against inside s.tx.WithTx — WithTx builds a fresh
 // TxStores straight off the *sql.Tx, so a hook here only reaches the
-// pre-transaction reads (GetForOrgSystem, ListInstallationsForOrgSystem), never
+// pre-transaction reads (GetForOrgSystem, ListInstallationsOnHostSystem), never
 // a write made through tx. See setActiveReturnsNilTx below for the shape that
 // reaches inside the transaction.
 type ghAppsRaceHook struct {
 	db.GitHubAppsStore
 	afterGet  func() // fires once, after the first GetForOrgSystem
-	afterList func() // fires once, after the first ListInstallationsForOrgSystem
+	afterList func() // fires once, after the first ListInstallationsOnHostSystem
 	getOnce   sync.Once
 	listOnce  sync.Once
 }
@@ -219,8 +219,8 @@ func (g *ghAppsRaceHook) GetForOrgSystem(ctx context.Context, orgID string) (*do
 	return app, err
 }
 
-func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	insts, err := g.GitHubAppsStore.ListInstallationsForOrgSystem(ctx, orgID)
+func (g *ghAppsRaceHook) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	insts, err := g.GitHubAppsStore.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err == nil && g.afterList != nil {
 		g.listOnce.Do(g.afterList)
 	}
@@ -1123,6 +1123,107 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	}
 	if got := orgPATLogin(t, s); got != "" {
 		t.Errorf("github_pat_login = %q after unbind, want empty", got)
+	}
+}
+
+// TestOrgSettingsGet_ReportsPATHostAndRebind pins the two fields the Settings
+// rebind notice reads. github_pat_host is the host the stored PAT was validated
+// on; github_pat_needs_rebind is true exactly while the org's GitHub host is
+// another one, because TF sends the PAT nowhere else. Moving the setting back
+// to the PAT's host, or clearing it (which resolves to the PAT's own URL),
+// makes the PAT usable again without a rebind.
+func TestOrgSettingsGet_ReportsPATHostAndRebind(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+
+	if host, rebind := orgPATHost(t, s); host != "" || rebind {
+		t.Errorf("with nothing bound: github_pat_host = %q, needs_rebind = %v; want empty and false", host, rebind)
+	}
+
+	gh := githubUserStub(t, "acme-bot")
+	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_on_a"); rec.Code != http.StatusOK {
+		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if host, rebind := orgPATHost(t, s); host != gh.URL || rebind {
+		t.Errorf("on the bound host: github_pat_host = %q, needs_rebind = %v; want %q and false", host, rebind, gh.URL)
+	}
+
+	commitGitHubHost(t, s, "https://ghe.example.com")
+	if host, rebind := orgPATHost(t, s); host != gh.URL || !rebind {
+		t.Errorf("after a host move: github_pat_host = %q, needs_rebind = %v; want %q and true", host, rebind, gh.URL)
+	}
+
+	commitGitHubHost(t, s, gh.URL)
+	if host, rebind := orgPATHost(t, s); host != gh.URL || rebind {
+		t.Errorf("back on the bound host: github_pat_host = %q, needs_rebind = %v; want %q and false", host, rebind, gh.URL)
+	}
+
+	if rec := patchOrgSettings(t, s, map[string]any{"github_base_url": nil}); rec.Code != http.StatusOK {
+		t.Fatalf("clear github_base_url = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, rebind := orgPATHost(t, s); rebind {
+		t.Error("with the host setting cleared: needs_rebind = true; an empty setting resolves to the PAT's own host")
+	}
+}
+
+// orgPATHost reads github_pat_host and github_pat_needs_rebind off the org
+// settings GET.
+func orgPATHost(t *testing.T, s *Server) (string, bool) {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodGet, orgSettingsPath(), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET org settings = %d: %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Host   string `json:"github_pat_host"`
+		Rebind *bool  `json:"github_pat_needs_rebind"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode org settings: %v", err)
+	}
+	if out.Rebind == nil {
+		t.Fatalf("github_pat_needs_rebind missing from the settings read: %s", rec.Body.String())
+	}
+	return out.Host, *out.Rebind
+}
+
+// TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly pins kickGitHubChanged:
+// a PAT bind and a PAT unbind each kick the GitHub poller and mark GitHub poll
+// readiness restarted, and leave Jira's poller and readiness alone — a GitHub
+// credential change does not touch the Jira poller.
+func TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	gh := githubUserStub(t, "acme-bot")
+	commitGitHubHost(t, s, gh.URL)
+	kicks := recordChangeKicks(s)
+
+	for _, step := range []struct {
+		name   string
+		method string
+		body   any
+	}{
+		{"bind", http.MethodPut, map[string]any{"pat": "ghp_x"}},
+		{"unbind", http.MethodDelete, nil},
+	} {
+		markPollsComplete(t, s, "github", "jira")
+		if rec := doJSON(t, s, step.method, patRoute(), step.body); rec.Code != http.StatusOK {
+			t.Fatalf("pat %s = %d, body=%s", step.name, rec.Code, rec.Body.String())
+		}
+		if !fired(kicks.github) {
+			t.Errorf("pat %s did not kick the GitHub poller", step.name)
+		}
+		if fired(kicks.jira) {
+			t.Errorf("pat %s kicked the Jira poller", step.name)
+		}
+		if pollReady(t, s, "github") {
+			t.Errorf("GitHub readiness survived a pat %s", step.name)
+		}
+		if !pollReady(t, s, "jira") {
+			t.Errorf("a pat %s cleared Jira readiness", step.name)
+		}
 	}
 }
 

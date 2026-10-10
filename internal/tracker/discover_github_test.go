@@ -104,7 +104,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 	}
 
 	// ETag persisted for conditional re-poll next cycle.
-	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("octo/repo"))
+	etag, polledAt, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", "octo/repo"))
 	if err != nil {
 		t.Fatalf("GetPullsPollStateByRefSystem: %v", err)
 	}
@@ -140,6 +140,13 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 // about tracking rather than a listing of the registry.
 func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
 	t.Helper()
+	trackReposOn(t, stores, orgID, db.EffectiveGitHubHost(""), names)
+}
+
+// trackReposOn is trackRepos on host. Tracking is per host, so each host an
+// org has polled keeps its own tracked set.
+func trackReposOn(t *testing.T, stores db.Stores, orgID, host string, names []string) {
+	t.Helper()
 	repos := make([]domain.TeamGitHubRepo, 0, len(names))
 	for _, name := range names {
 		owner, repo, ok := strings.Cut(name, "/")
@@ -148,7 +155,7 @@ func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
 		}
 		repos = append(repos, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, repos); err != nil {
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, runmode.LocalDefaultTeamID, host, repos); err != nil {
 		t.Fatalf("track repos %v: %v", names, err)
 	}
 }

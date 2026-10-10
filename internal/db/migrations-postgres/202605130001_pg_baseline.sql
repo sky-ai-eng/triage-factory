@@ -433,11 +433,16 @@ CREATE TABLE public.access_change_log (
 -- hook and git-proxy backstop) and carries a deterministic key so the twin collapses
 -- under ON CONFLICT DO NOTHING. current_url is the only column an UPDATE may touch:
 -- where the object lives now (reads serve COALESCE(current_url, url)).
+-- scope is the provider namespace the acted-on object lives in, the value an
+-- entity of that provider is scoped under (domain.ExternalObjectScope): the
+-- GitHub host, the Jira site, the Linear workspace id. target and dedup_key are
+-- only unique inside it.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     team_id uuid,
     provider text NOT NULL,
+    scope text NOT NULL,
     action text NOT NULL,
     target text NOT NULL,
     external_id text,
@@ -645,14 +650,19 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, github_org_login, github_team_slug): a team routing a
--- GitHub team's review requests to itself. Dumb string labels, no membership
+-- One row per (team, host, github_org_login, github_team_slug): a team routing
+-- a GitHub team's review requests to itself. Dumb string labels, no membership
 -- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
+-- login names a different organization on another host, so every read and the
+-- deletion reconcile see only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
+    host text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tgg_host_populated CHECK (host <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -887,15 +897,19 @@ CREATE TABLE public.prompts (
 
 
 -- The registry of the repositories TF works with, and the target every
--- repository reference in this schema points at. (source, external_id) is the
--- half of a repository identity a rename does not move; source is app-validated.
--- Durable: untracking never deletes it, since a worktree or task may name it.
+-- repository reference in this schema points at. (source, host, external_id) is
+-- the half of a repository identity a rename does not move; source is
+-- app-validated. host is the GitHub host (domain.GitHubHost) the repository
+-- lives on: repository ids are per-deployment sequences and names repeat across
+-- deployments, so nothing matches across hosts. Durable: untracking never
+-- deletes it, since a worktree or task may name it.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
     source text DEFAULT 'github'::text NOT NULL,
+    host text NOT NULL,
     external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
@@ -917,8 +931,12 @@ CREATE TABLE public.repositories (
 
 -- One row per external object a conversation produces (branch, PR, review,
 -- issue, comment); provider + kind discriminate, writers UPSERT on
--- (org_id, dedup_key). team_id is denormalized from the conversation so reads
--- scope by team; conversation_id is nullable so the row survives a purge.
+-- (org_id, scope, dedup_key). scope is the provider namespace the object lives
+-- in, the value an entity of that provider is scoped under
+-- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
+-- workspace id; target and dedup_key are only unique inside it. team_id is
+-- denormalized from the conversation so reads scope by team; conversation_id is
+-- nullable so the row survives a purge.
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -926,6 +944,7 @@ CREATE TABLE public.artifacts (
     team_id uuid NOT NULL,
     provider text NOT NULL,
     kind text NOT NULL,
+    scope text NOT NULL,
     target text NOT NULL,
     external_id text,
     url text,
@@ -1527,7 +1546,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -1781,10 +1800,15 @@ CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, ev
 
 
 -- Repository natural key. source distinguishes providers issuing the same
--- owner/repo; lower() folds case, since GitHub identifiers are case-insensitive,
--- so a racing writer conflicts instead of inserting a twin. An expression key
--- must be an index, not a UNIQUE constraint; the store infers it in ON CONFLICT.
-CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
+-- owner/repo and host the deployments of one provider; lower() folds case, since
+-- GitHub identifiers are case-insensitive, so a racing writer conflicts instead
+-- of inserting a twin. An expression key must be an index, not a UNIQUE
+-- constraint; the store infers it in ON CONFLICT.
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, host, lower(owner), lower(repo));
+
+
+-- One row per provider id on a host: what a rename keys on.
+CREATE UNIQUE INDEX repositories_external_identity ON public.repositories USING btree (org_id, source, host, external_id) WHERE (external_id IS NOT NULL);
 
 
 -- Serves the ordered org-wide list the folded key cannot: ORDER BY owner, repo.
@@ -1808,7 +1832,7 @@ CREATE INDEX idx_access_change_log_org_created ON public.access_change_log USING
 -- Append-only dedup: the branch hook+proxy twin shares a deterministic key and
 -- collapses via ON CONFLICT DO NOTHING; any other duplicate is rejected.
 
-CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, dedup_key);
+CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, scope, dedup_key);
 
 
 CREATE INDEX idx_external_actions_org_occurred ON public.external_actions USING btree (org_id, occurred_at DESC);
@@ -1820,7 +1844,7 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
-CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, dedup_key);
+CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, scope, dedup_key);
 
 
 CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id, created_at DESC);
@@ -3678,10 +3702,14 @@ ALTER TABLE ONLY public.org_github_app_installations
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
--- At most one active install per account, without overwriting history: an
--- uninstall stamps removed_at, a reinstall inserts a fresh installation_id.
+-- At most one active install per account on each GitHub deployment, without
+-- overwriting history: an uninstall stamps removed_at, a reinstall inserts a
+-- fresh installation_id. github_host is in the key because a login is unique
+-- only within one deployment: an org that moves to another GitHub keeps the old
+-- host's rows live, and binds the new host's installation for an account of the
+-- same name beside them.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
-    ON public.org_github_app_installations (org_id, account_login)
+    ON public.org_github_app_installations (org_id, github_host, account_login)
     WHERE (removed_at IS NULL);
 
 -- An installation belongs to exactly one workspace per GitHub deployment. The
@@ -3871,7 +3899,8 @@ CREATE TABLE public.reachable_scopes (
         CONSTRAINT reachable_scopes_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
     -- The credential instance one refresh replaces: the installation id for the
-    -- App classes, the host for pat. Opaque text, never joined on.
+    -- App classes, the host for pat. Reads join it to the installation to place
+    -- an App scope on its GitHub host.
     scope text NOT NULL,
     refreshed_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -5492,14 +5521,18 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 -- capacity-weighted rendezvous order for one placement key — a manual pin or a
 -- hot-key replica count, nothing else (drain lives on the instances row).
 -- Checked before the hash and expected to stay nearly empty. key_kind is
--- 'repo', key_value "owner/repo"; org_id is plain text, matching the
--- rendezvous key's own org fold. A pin wins when both intents are set. Neither
--- is FK-validated — a pin to a retired instance self-heals via the claim's
--- aging tier. Admin-pool-only system table, same posture as instances: RLS
--- with NO policy plus REVOKE ALL, org_id bound by argument.
+-- 'repo', key_value "owner/repo", and host the GitHub host (domain.GitHubHost)
+-- that repository lives on: a slug names a repository only within one host,
+-- so a pin is one host's and a rename moves only that host's pins. org_id is
+-- plain text, matching the rendezvous key's own org fold. A pin wins when both
+-- intents are set. Neither is FK-validated — a pin to a retired instance
+-- self-heals via the claim's aging tier. Admin-pool-only system table, same
+-- posture as instances: RLS with NO policy plus REVOKE ALL, org_id bound by
+-- argument.
 CREATE TABLE public.placement_overrides (
     org_id             text NOT NULL,
     key_kind           text NOT NULL,
+    host               text NOT NULL,
     key_value          text NOT NULL,
     pinned_instance_id text,
     replicas           integer NOT NULL DEFAULT 0,
@@ -5507,7 +5540,7 @@ CREATE TABLE public.placement_overrides (
 );
 
 ALTER TABLE ONLY public.placement_overrides
-    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, key_value);
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, host, key_value);
 
 ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 

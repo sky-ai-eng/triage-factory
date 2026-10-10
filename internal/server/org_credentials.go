@@ -188,9 +188,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{
-			GitHubURL: baseURL, GitHubPAT: pat,
-		}); err != nil {
+		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("store credential: %w", err)
 		}
 		// The org credential's OWN login, so the resolver can stamp the org
@@ -408,23 +406,20 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
-// kickGitHubChanged re-dues polling under a changed GitHub credential. Jira is
-// marked restarted alongside it because the GitHub restart path rebuilds both
-// pollers; skipping the mark would let Jira carry over a stale snapshot.
+// kickGitHubChanged re-dues GitHub polling under a changed GitHub credential
+// and clears GitHub's readiness until that poll completes. Jira's poller is
+// not touched by it, so its readiness is left alone.
 func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 	if s.onGitHubChanged == nil {
 		return
 	}
-	s.MarkJiraRestarted(r.Context(), orgID)
+	s.MarkGitHubRestarted(r.Context(), orgID)
 	go s.onGitHubChanged(orgID)
 }
 
-// kickJiraChanged re-dues Jira polling under a changed Jira credential — the
-// Jira half of the pair above, and the half a credential BIND owed and did not
-// pay. The unbind has always kicked; the bind used to get its restart
-// second-hand, from the fused setup route that carried the Jira credential
-// alongside the GitHub one and kicked the GitHub path (which rebuilds both
-// pollers). With that route gone, an org connecting Jira has to kick here or it
+// kickJiraChanged re-dues Jira polling under a changed Jira credential and
+// clears Jira's readiness until that poll completes — the Jira half of the pair
+// above. A bind kicks as well as an unbind: an org connecting Jira otherwise
 // polls nothing until the next scheduled cycle.
 func (s *Server) kickJiraChanged(r *http.Request, orgID string) {
 	if s.onJiraChanged == nil {

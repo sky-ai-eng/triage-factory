@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -61,9 +62,9 @@ func TestGitHubGrantFindings_MultiMode_AdminsSeeTheSameBytes(t *testing.T) {
 	for _, repo := range []string{"api", "legacy"} {
 		var repoID string
 		if err := rig.h.AdminDB.QueryRow(`
-			INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', 'acme', $2)
+			INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, 'acme', $3)
 			RETURNING id::text
-		`, org.String(), repo).Scan(&repoID); err != nil {
+		`, org.String(), dbtest.TestGitHubHost, repo).Scan(&repoID); err != nil {
 			t.Fatalf("seed repository acme/%s: %v", repo, err)
 		}
 		pgtest.MustExec(t, rig.h.AdminDB,

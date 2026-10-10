@@ -56,16 +56,28 @@ type grantLister interface {
 	ListInstallationReposComplete(ctx context.Context) ([]github.UserRepo, bool, error)
 }
 
-// clientSource resolves the per-installation client the grant is read through.
-// It is satisfied by github.Resolver via resolverSource below.
+// clientSource resolves the per-installation client the grant is read through,
+// and the GitHub host that client is minted against. It is satisfied by
+// github.Resolver via resolverSource below.
 type clientSource interface {
 	grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error)
+	// githubHostFor is the GitHub host grantListerFor resolves installations
+	// on — the org's current host — or "" when the org resolves none.
+	githubHostFor(ctx context.Context, orgID string) (string, error)
 }
 
 type resolverSource struct{ resolver github.Resolver }
 
 func (s resolverSource) grantListerFor(ctx context.Context, orgID, accountLogin string) (grantLister, error) {
 	return s.resolver.ClientFor(ctx, orgID, accountLogin)
+}
+
+func (s resolverSource) githubHostFor(ctx context.Context, orgID string) (string, error) {
+	base, err := s.resolver.BaseURLFor(ctx, orgID)
+	if err != nil || base == "" {
+		return "", err
+	}
+	return domain.GitHubHost(base), nil
 }
 
 // classResolver answers which credential class an org's reachable entries are
@@ -257,7 +269,16 @@ func (r *Reconciler) RunOrg(ctx context.Context, orgID string) error {
 		return nil
 	}
 
-	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+	// The installations on the host the resolver mints against, and no others.
+	// grantListerFor resolves a client by account login on that host, so an
+	// installation left on a host the org has moved off would be read through
+	// whichever installation on the current host answers to its login — and its
+	// grant written under the wrong installation id.
+	host, err := r.clients.githubHostFor(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("resolve github host: %w", err)
+	}
+	insts, err := r.apps.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err != nil {
 		return fmt.Errorf("list installations: %w", err)
 	}

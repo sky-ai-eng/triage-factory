@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -31,8 +32,9 @@ type RepoRecipientsSeeder struct {
 	// ('owner' | 'admin' | 'member').
 	OrgMembership func(t *testing.T, userID, orgID, role string)
 
-	// TrackRepo inserts a team_github_repos row for teamID.
-	TrackRepo func(t *testing.T, teamID, owner, repo string)
+	// TrackRepo inserts a team_github_repos row for teamID referencing the
+	// registry row for owner/repo on host, minting that row if absent.
+	TrackRepo func(t *testing.T, teamID, host, owner, repo string)
 
 	// ArchiveTeam soft-deletes teamID (sets teams.deleted_at).
 	ArchiveTeam func(t *testing.T, teamID string)
@@ -47,20 +49,24 @@ type RepoRecipientsFactory func(t *testing.T) (db.TeamGitHubReposStore, RepoReci
 // delivery scope for repository_updated events. It pins the visibility
 // contract the method mirrors from the REST read (handleRepositories):
 // org admins/owners always receive; members receive only through a team
-// that tracks the repo (archived or not — archive hides nothing);
-// nobody else does. Both backends run the identical subtests so SQLite
-// and Postgres pin to one result.
+// that tracks the repo (archived or not — archive hides nothing) on the
+// GitHub host asked about; nobody else does. Both backends run the
+// identical subtests so SQLite and Postgres pin to one result.
 func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 	t.Helper()
 	ctx := context.Background()
 
-	recipients := func(t *testing.T, s db.TeamGitHubReposStore, orgID, owner, repo string) []string {
+	recipientsOn := func(t *testing.T, s db.TeamGitHubReposStore, orgID, host, owner, repo string) []string {
 		t.Helper()
-		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, owner, repo)
+		got, err := s.RepoUpdateRecipientsSystem(ctx, orgID, host, owner, repo)
 		if err != nil {
-			t.Fatalf("RepoUpdateRecipientsSystem(%s, %s/%s): %v", orgID, owner, repo, err)
+			t.Fatalf("RepoUpdateRecipientsSystem(%s, %s, %s/%s): %v", orgID, host, owner, repo, err)
 		}
 		return got
+	}
+	recipients := func(t *testing.T, s db.TeamGitHubReposStore, orgID, owner, repo string) []string {
+		t.Helper()
+		return recipientsOn(t, s, orgID, TestGitHubHost, owner, repo)
 	}
 
 	t.Run("RepoRecipients_TrackingTeamMemberIn_NonTrackingOut", func(t *testing.T) {
@@ -78,7 +84,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		seed.OrgMembership(t, userB, org, "member")
 		seed.TeamMembership(t, userA, teamA)
 		seed.TeamMembership(t, userB, teamB)
-		seed.TrackRepo(t, teamA, "Acme", "api")
+		seed.TrackRepo(t, teamA, TestGitHubHost, "Acme", "api")
 
 		assertSameSet(t, "recipients(tracked repo)", recipients(t, s, org, "Acme", "api"), []string{userA})
 		// Case-insensitive on both fields, matching TracksRepoSystem.
@@ -105,7 +111,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		tracker := seed.User(t)
 		seed.OrgMembership(t, tracker, org, "member")
 		seed.TeamMembership(t, tracker, team)
-		seed.TrackRepo(t, team, "acme", "api")
+		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
 		assertSameSet(t, "recipients(admins+tracker)",
 			recipients(t, s, org, "acme", "api"), []string{founder, admin, tracker})
@@ -118,7 +124,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		team := seed.Team(t, org)
 		seed.OrgMembership(t, founder, org, "admin")
 		seed.TeamMembership(t, founder, team)
-		seed.TrackRepo(t, team, "acme", "api")
+		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
 		got := recipients(t, s, org, "acme", "api")
 		if len(got) != 1 || got[0] != founder {
@@ -143,7 +149,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		member := seed.User(t)
 		seed.OrgMembership(t, member, org, "member")
 		seed.TeamMembership(t, member, team)
-		seed.TrackRepo(t, team, "acme", "api")
+		seed.TrackRepo(t, team, TestGitHubHost, "acme", "api")
 
 		assertSameSet(t, "recipients(live team)", recipients(t, s, org, "acme", "api"), []string{member})
 		seed.ArchiveTeam(t, team)
@@ -161,7 +167,7 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		user1 := seed.User(t)
 		seed.OrgMembership(t, user1, org1, "member")
 		seed.TeamMembership(t, user1, team1)
-		seed.TrackRepo(t, team1, "acme", "api")
+		seed.TrackRepo(t, team1, TestGitHubHost, "acme", "api")
 
 		founder2 := seed.User(t)
 		org2 := seed.Org(t, founder2)
@@ -170,9 +176,36 @@ func RunRepoRecipientsConformance(t *testing.T, mk RepoRecipientsFactory) {
 		user2 := seed.User(t)
 		seed.OrgMembership(t, user2, org2, "member")
 		seed.TeamMembership(t, user2, team2)
-		seed.TrackRepo(t, team2, "acme", "api")
+		seed.TrackRepo(t, team2, TestGitHubHost, "acme", "api")
 
 		assertSameSet(t, "recipients(org1)", recipients(t, s, org1, "acme", "api"), []string{user1})
 		assertSameSet(t, "recipients(org2)", recipients(t, s, org2, "acme", "api"), []string{founder2, user2})
+	})
+	t.Run("RepoRecipients_HostScoped", func(t *testing.T) {
+		// One owner/repo on two GitHub hosts is two repositories. A member
+		// whose team tracks it on one host is not told about the other's
+		// updates; org admins are in on every host, as they are for every
+		// repository.
+		s, seed := mk(t)
+		founder := seed.User(t)
+		org := seed.Org(t, founder)
+		seed.OrgMembership(t, founder, org, "owner")
+		dotcomTeam := seed.Team(t, org)
+		gheTeam := seed.Team(t, org)
+		dotcomUser := seed.User(t)
+		gheUser := seed.User(t)
+		seed.OrgMembership(t, dotcomUser, org, "member")
+		seed.OrgMembership(t, gheUser, org, "member")
+		seed.TeamMembership(t, dotcomUser, dotcomTeam)
+		seed.TeamMembership(t, gheUser, gheTeam)
+		seed.TrackRepo(t, dotcomTeam, TestGitHubHost, "acme", "api")
+		seed.TrackRepo(t, gheTeam, TestOtherGitHubHost, "acme", "api")
+
+		assertSameSet(t, "recipients(github.com)", recipientsOn(t, s, org, TestGitHubHost, "acme", "api"), []string{founder, dotcomUser})
+		assertSameSet(t, "recipients(ghe)", recipientsOn(t, s, org, TestOtherGitHubHost, "Acme", "API"), []string{founder, gheUser})
+
+		if _, err := s.RepoUpdateRecipientsSystem(ctx, org, "", "acme", "api"); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("RepoUpdateRecipientsSystem with no host = %v, want db.ErrRepoHostRequired", err)
+		}
 	})
 }

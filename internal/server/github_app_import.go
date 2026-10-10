@@ -573,7 +573,7 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 	// follow-up read needed, the write already handed it back. No installations
 	// yet (no backfill at import; the install step reconciles), so this carries
 	// an empty list the wizard's install step refreshes.
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	insts, err := s.installationsOnOrgHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return

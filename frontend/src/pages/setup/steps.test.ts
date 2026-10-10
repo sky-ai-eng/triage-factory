@@ -549,3 +549,4 @@ describe('setup — the Linear tracker', () => {
     await expect(loadOrg({ orgId: ORG_ID, teamId: 'default', isLocal: true })).rejects.toThrow()
   })
 })
+

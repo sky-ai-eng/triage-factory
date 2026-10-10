@@ -19,6 +19,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -343,12 +344,17 @@ func TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken(t *testing.T) 
 
 	// Prime the cache the way a resolution would: a token good for another
 	// hour, which is exactly what makes the stale-token window an hour long.
-	s.ghTokenCache.Set(runmode.LocalDefaultOrgID, "4242", githubapp.Token{
-		Value:     "ghs_minted_before_the_suspension",
-		ExpiresAt: time.Now().Add(time.Hour),
-	})
-	if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "4242"); !ok {
-		t.Fatal("primed token not in the cache; the test asserts nothing")
+	// It is primed on two hosts, because the delivery names no host and the
+	// installation's tokens die on whichever one minted them.
+	const otherHost = "https://ghe.example.com"
+	for _, host := range []string{dbtest.TestGitHubHost, otherHost} {
+		s.ghTokenCache.Set(runmode.LocalDefaultOrgID, host, "4242", githubapp.Token{
+			Value:     "ghs_minted_before_the_suspension",
+			ExpiresAt: time.Now().Add(time.Hour),
+		})
+		if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, host, "4242"); !ok {
+			t.Fatal("primed token not in the cache; the test asserts nothing")
+		}
 	}
 
 	body := []byte(`{"action":"suspend","installation":{"id":4242,"account":{"login":"acme","type":"Organization"},` +
@@ -357,16 +363,18 @@ func TestGitHubWebhook_InstallationSuspend_InvalidatesCachedToken(t *testing.T) 
 		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
 	}
 
-	if tok, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "4242"); ok {
-		t.Errorf("cache still serves %q after a suspend; want a miss", tok.Value)
+	for _, host := range []string{dbtest.TestGitHubHost, otherHost} {
+		if tok, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, host, "4242"); ok {
+			t.Errorf("cache still serves %q on %s after a suspend; want a miss", tok.Value, host)
+		}
 	}
 	// Only this installation's token dies with it — another account's
 	// installation under the same App keeps minting.
-	s.ghTokenCache.Set(runmode.LocalDefaultOrgID, "9999", githubapp.Token{Value: "ghs_other", ExpiresAt: time.Now().Add(time.Hour)})
+	s.ghTokenCache.Set(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "9999", githubapp.Token{Value: "ghs_other", ExpiresAt: time.Now().Add(time.Hour)})
 	if rec := postWebhook(s, "installation", sign(body), body); rec.Code != http.StatusNoContent {
 		t.Fatalf("second suspend status = %d, want 204", rec.Code)
 	}
-	if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, "9999"); !ok {
+	if _, ok := s.ghTokenCache.Get(runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "9999"); !ok {
 		t.Error("a suspend dropped another installation's cached token; want it untouched")
 	}
 }

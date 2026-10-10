@@ -24,8 +24,8 @@ import (
 //     claims). ListByOrgSystem reads here, org-wide across teams.
 //
 // org_id stays in every statement as defense in depth. Append-only: both Record
-// paths ON CONFLICT(org_id, dedup_key) DO NOTHING — a duplicate is rejected,
-// never a mutation.
+// paths ON CONFLICT(org_id, scope, dedup_key) DO NOTHING — a duplicate is
+// rejected, never a mutation.
 type externalActionStore struct {
 	q     queryer
 	admin queryer
@@ -44,7 +44,7 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 // object, the captured url otherwise — so every feed's link resolves without
 // any reader knowing the pointer column exists.
 const pgExternalActionColumns = `
-	id::text, org_id::text, COALESCE(team_id::text, ''), provider, action, target,
+	id::text, org_id::text, COALESCE(team_id::text, ''), provider, scope, action, target,
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
@@ -70,20 +70,23 @@ func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e 
 // NULL via NULLIF; the uuid columns cast after the NULLIF so an empty string
 // never reaches ::uuid. ON CONFLICT DO NOTHING keeps it append-only.
 func (s *externalActionStore) record(ctx context.Context, q queryer, orgID string, e domain.ExternalAction) error {
+	if err := db.RequireExternalObjectScope(e.Scope); err != nil {
+		return err
+	}
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
-			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
 			NULLIF($11, '')::uuid, NULLIF($12, '')::uuid, $13,
-			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, '')
+			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16
 		)
-		ON CONFLICT (org_id, dedup_key) DO NOTHING
+		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
-		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON,
+		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON, e.Scope,
 	)
 	return err
 }
@@ -218,7 +221,7 @@ func scanExternalActionRows(rows *sql.Rows) ([]domain.ExternalAction, error) {
 
 func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
-		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Action, &e.Target,
+		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
 	)

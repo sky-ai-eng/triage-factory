@@ -33,7 +33,7 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 
 	const rootKey = "checkout-run-multi"
 	runRoot := t.TempDir()
-	wtPath, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", cloneURL, "", rootKey, runRoot,
+	wtPath, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), cloneURL, "", rootKey, runRoot,
 		WithCloneAuth(CloneAuthFor(cloneURL, token)))
 	if err != nil {
 		t.Fatalf("CreateForCheckoutInRoot (multi mode, self-contained): %v", err)
@@ -90,7 +90,7 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 	if exec.Command("git", "-C", wtPath, "show-ref", "--verify", "--quiet", "refs/heads/"+staging).Run() == nil {
 		t.Errorf("run clone still has staging branch refs/heads/%s", staging)
 	}
-	bareDir, err := repoDir("acme", "repo")
+	bareDir, err := repoDir(testRepo("acme", "repo").ID)
 	if err != nil {
 		t.Fatalf("repoDir: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestCreateForCheckoutInRoot_SelfContainedClone_MultiMode(t *testing.T) {
 // CLI's argv validation.
 func TestCreateForCheckoutInRoot_RejectsInvalidRef(t *testing.T) {
 	withTestHome(t)
-	if _, err := CreateForCheckoutInRoot(context.Background(), "acme", "repo", "https://example.invalid/repo.git", "--upload-pack=evil", "run-x", t.TempDir()); err == nil {
+	if _, err := CreateForCheckoutInRoot(context.Background(), testRepo("acme", "repo"), "https://example.invalid/repo.git", "--upload-pack=evil", "run-x", t.TempDir()); err == nil {
 		t.Fatal("CreateForCheckoutInRoot accepted an injection-shaped ref; want validation error")
 	}
 }

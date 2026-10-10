@@ -752,8 +752,8 @@ func (c *LocalClient) AvailableSources(ctx context.Context) ([]string, error) {
 	return c.rt.AvailableSources(ctx)
 }
 
-func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return c.rt.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
+func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return c.rt.GetConversationWorktreeByRepoRef(ctx, repositoryID, ref)
 }
 
 func (c *LocalClient) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
@@ -764,8 +764,8 @@ func (c *LocalClient) InsertConversationWorktree(ctx context.Context, row domain
 	return c.rt.InsertConversationWorktree(ctx, row)
 }
 
-func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.rt.DeleteConversationWorktree(ctx, repoID, ref)
+func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) error {
+	return c.rt.DeleteConversationWorktree(ctx, repositoryID, ref)
 }
 
 // --- disclosure footer ---
@@ -1506,9 +1506,20 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 	}
-	for _, w := range rows {
-		if strings.EqualFold(w.RepoID, repoID) {
-			return nil
+	// A ledger row names its repository by registry id, and the repository a
+	// verb reaches is the row for owner/repo on the org's current GitHub host.
+	// A checkout of the same owner/repo on another host is another repository
+	// and authorizes nothing here.
+	if len(rows) > 0 {
+		profile, perr := c.rt.GetRepo(ctx, repoID)
+		if perr != nil {
+			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, perr)
+		}
+		for _, w := range rows {
+			if profile != nil && w.RepositoryID == profile.ID {
+				return nil
+			}
 		}
 	}
 	// No ledger row. The run's OWN task repo is authorized anyway, because a

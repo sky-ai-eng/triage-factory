@@ -135,6 +135,19 @@ func (s *Server) invalidateInstallationTokens(orgID string, insts []domain.OrgGi
 	}
 }
 
+// installationsOnOrgHost reads the org's live installations on its current
+// GitHub host — the ones its App mints from now (see
+// GitHubAppsStore.ListInstallationsOnHost). Claims-free: every caller holds an
+// orgID an admin gate already authorized. A teardown that removes every row the
+// org holds, on any host, reads ListInstallationsForOrgSystem instead.
+func (s *Server) installationsOnOrgHost(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	return s.githubApps.ListInstallationsOnHostSystem(ctx, orgID, host)
+}
+
 // appSecretRefs is the App's Vault/keychain secret refs (client_secret, PEM,
 // webhook_secret) carried on the registration row, without the empty ones (a
 // hookless App has no webhook secret).
@@ -206,7 +219,10 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteErrors(w, http.StatusBadGateway, httpx.ErrorItem{Reason: httpx.ReasonUpstreamUnavailable, Message: "failed to sync App installations from GitHub"})
 		return
 	}
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	// Installed on the org's current host, where the App will mint once live:
+	// an installation left on a host the org has moved off reaches nothing
+	// here, and cutting over to it would dark the org just the same.
+	insts, err := s.installationsOnOrgHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -251,7 +267,7 @@ func (s *Server) handleGitHubAppCutover(w http.ResponseWriter, r *http.Request) 
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: msgAppAlreadyLive})
 		return
 	}
-	insts, err = s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	insts, err = s.installationsOnOrgHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -419,7 +435,8 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	}
 
 	// Capture the installations before teardown so their cached tokens can be
-	// invalidated after the commit.
+	// invalidated after the commit — on every host, since DeleteForOrg removes
+	// every row the org holds.
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -429,7 +446,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Save the PAT first: an aborted teardown then leaves the org on a
 		// working PAT with the App intact — recoverable from either side.
-		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubURL: base, GitHubPAT: pat}); err != nil {
+		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("save pat: %w", err)
 		}
 		// The PAT is now the org's GitHub identity (the App is torn down below) —
@@ -552,6 +569,8 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Every host's installations: DeleteForOrg removes them all, and each one's
+	// cached token goes with it below.
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -692,7 +711,8 @@ func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Captured before teardown so their cached tokens can be invalidated after
-	// the commit.
+	// the commit — on every host, since DeleteForOrg removes every row the org
+	// holds.
 	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
@@ -807,7 +827,9 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		githubAppLog.Warn("cutover-preflight: backfill installations failed, using current mirror", "org", orgID, "error", berr)
 	}
 
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	// Only the installations on the org's current host are minted against it
+	// below: an id from another host names a different installation here.
+	insts, err := s.installationsOnOrgHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -835,7 +857,12 @@ func (s *Server) handleGitHubAppCutoverPreflight(w http.ResponseWriter, r *http.
 		}
 	}
 
-	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID)
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-app", err)
+		return
+	}
+	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return
@@ -943,7 +970,12 @@ func (s *Server) handleGitHubAccessPATPreflight(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID)
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, "github-access", err)
+		return
+	}
+	tracked, err := s.allStores.TeamGitHubRepos.ListOrgReposWithTeamsSystem(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-access", err)
 		return

@@ -963,7 +963,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, closed); e != nil {
 			return e
 		}
-		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, repoPath, headRef)
+		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, repoPath, headRef)
 		if e != nil {
 			return e
 		}
@@ -993,13 +993,13 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// (on repoPath) to deleted, returning its web URL for the audit row. A
-// conversation with no such artifact — a push the capture writers missed, or
-// no conversation at all — is not an error: the PR artifact carries the
-// rejection on its own, and the returned URL falls back to the public-host
-// branch link so the audit row still links somewhere.
-func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, repoPath, headRef string) (string, error) {
-	fallbackURL, _ := domain.BranchArtifactWebURL("", repoPath, headRef)
+// (on repoPath, on the GitHub host scope) to deleted, returning its web URL
+// for the audit row. A conversation with no such artifact — a push the
+// capture writers missed, or no conversation at all — is not an error: the PR
+// artifact carries the rejection on its own, and the returned URL falls back
+// to the branch link on scope's host so the audit row still links somewhere.
+func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, error) {
+	fallbackURL, _ := domain.BranchArtifactWebURL(scope, repoPath, headRef)
 	if conversationID == "" {
 		return fallbackURL, nil
 	}
@@ -1009,7 +1009,7 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 	}
 	for i := range arts {
 		a := arts[i]
-		if a.Kind != domain.ArtifactKindBranch || a.Target != repoPath || a.ExternalID != headRef {
+		if a.Kind != domain.ArtifactKindBranch || a.Scope != scope || a.Target != repoPath || a.ExternalID != headRef {
 			continue
 		}
 		if a.State != domain.ArtifactStateBranchDeleted {
@@ -1036,6 +1036,7 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 	return domain.ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       domain.ArtifactProviderGitHub,
+		Scope:          art.Scope,
 		Action:         domain.ActionBranchDeleted,
 		Target:         repoPath,
 		ExternalID:     headRef,

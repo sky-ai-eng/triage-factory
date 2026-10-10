@@ -152,11 +152,13 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
-		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID)
-		if e != nil {
+		if orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID); e != nil {
 			return e
 		}
-		if orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID); e != nil {
+		// Repositories on the org's current GitHub host: one the org tracked on
+		// a host it has left is not a repository it has configured here.
+		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
+		if e != nil {
 			return e
 		}
 		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
@@ -228,8 +230,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		"setup_step":     setupStep,
 	}
 
-	if creds.GitHubURL != "" {
-		result["github_url"] = creds.GitHubURL
+	if orgSet.GitHubBaseURL != "" {
+		result["github_url"] = orgSet.GitHubBaseURL
 	}
 	if creds.JiraURL != "" {
 		result["jira_url"] = creds.JiraURL

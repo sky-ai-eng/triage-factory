@@ -41,11 +41,11 @@ func TestCreateInRoot_MintsScaffoldDirs(t *testing.T) {
 	}{
 		{"checkout", func(runRoot string) (string, error) {
 			return CreateForCheckoutInRoot(context.Background(),
-				"sky-ai-eng", "orrery", upstream, "", "root-key", runRoot)
+				testRepo("sky-ai-eng", "orrery"), upstream, "", "root-key", runRoot)
 		}},
 		{"pr", func(runRoot string) (string, error) {
 			return CreateForPRInRoot(context.Background(),
-				"sky-ai-eng", "orrery", upstream, upstream, "main", 7, "root-key", runRoot)
+				testRepo("sky-ai-eng", "orrery"), upstream, upstream, "main", 7, "root-key", runRoot)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

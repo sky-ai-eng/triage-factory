@@ -227,9 +227,12 @@ type taskOwnRepoResult struct {
 	IsTaskRepo bool `json:"is_task_repo"`
 }
 
+// conversationWorktreeByRepoRefArgs names a ledger row by the registry id of
+// its repository — what `workspace add` resolved the agent's argv to — and its
+// ref.
 type conversationWorktreeByRepoRefArgs struct {
-	RepoID string `json:"repo_id"`
-	Ref    string `json:"ref"`
+	RepositoryID string `json:"repository_id"`
+	Ref          string `json:"ref"`
 }
 
 type conversationWorktreeResult struct {
@@ -250,8 +253,8 @@ type insertConversationWorktreeResult struct {
 }
 
 type deleteConversationWorktreeByRepoRefArgs struct {
-	RepoID string `json:"repo_id"`
-	Ref    string `json:"ref"`
+	RepositoryID string `json:"repository_id"`
+	Ref          string `json:"ref"`
 }
 
 // workspaceRootsResult carries the run root's two path-namespace views. The

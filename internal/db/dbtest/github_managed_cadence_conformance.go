@@ -398,6 +398,61 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
+	t.Run("ARowOnAnotherHostIsNeitherMatchedNorRemoved", func(t *testing.T) {
+		// The per-org suite's case, through the cadence: a workspace on the
+		// deployment's GitHub that also holds a live row on another GitHub,
+		// whose id the listing here reuses for an unrelated installation. The
+		// row on the listed host converges; the other host's row is not
+		// refreshed into the stranger's installation and not removed.
+		store, seed := mk(t)
+		body := managedListing(t,
+			managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"},
+			managedListingItem{ID: 222, AccountID: 2220, AccountLogin: "stranger"},
+		)
+		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
+		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		const other = "https://ghe.other.test"
+		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "222", OrgID: org, AccountLogin: "old-acct", GitHubHost: other})
+
+		if err := store.RefreshAllManagedInstallations(ctx, deployment); err != nil {
+			t.Fatalf("RefreshAllManagedInstallations: %v", err)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("listing walked %d times; want 1", got)
+		}
+		rows := live(t, store, org)
+		if got := rows["111"]; got.AccountLogin != "acme-renamed" {
+			t.Errorf("row 111 AccountLogin = %q; want %q", got.AccountLogin, "acme-renamed")
+		}
+		got, ok := rows["222"]
+		if !ok || got.GitHubHost != other || got.AccountLogin != "old-acct" {
+			t.Errorf("row 222 = %+v (live=%v); want it live on %s as old-acct, untouched", got, ok, other)
+		}
+	})
+
+	t.Run("AWorkspaceThatMovedAfterBindingIsStillReported", func(t *testing.T) {
+		// The realistic shape of a moved workspace: its rows are on the
+		// deployment's GitHub, where the bind wrote them, and its base URL now
+		// names another. Nothing it holds is on its own host, and the mismatch
+		// is still carried — a workspace drifting off the deployment's GitHub
+		// must stay visible whichever host its rows are on.
+		store, seed := mk(t)
+		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"})
+		base, _ := managedFakeGitHub(t, http.StatusOK, &body)
+		const other = "https://ghe.other.test"
+		moved := seed.Org(t, seed.User(t))
+		seed.Class(t, moved, domain.GitHubCredentialClassManagedApp, other)
+		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "111", OrgID: moved, AccountLogin: "acme", GitHubHost: db.EffectiveGitHubHost(base)})
+
+		err := store.RefreshAllManagedInstallations(ctx, deployment)
+		if !errors.Is(err, db.ErrManagedWorkspaceOnOtherGitHub) || !strings.Contains(err.Error(), moved) {
+			t.Fatalf("RefreshAllManagedInstallations err = %v; want ErrManagedWorkspaceOnOtherGitHub naming %s", err, moved)
+		}
+		if got, ok := live(t, store, moved)["111"]; !ok || got.AccountLogin != "acme" {
+			t.Errorf("moved workspace row = %+v (live=%v); want [111 acme] untouched", got, ok)
+		}
+	})
+
 	t.Run("AWorkspaceOnAnotherGitHubIsSkipped", func(t *testing.T) {
 		// The deployment App is on one GitHub, so there is one listing. A
 		// managed workspace whose base URL resolves elsewhere — one that moved

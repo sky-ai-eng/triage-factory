@@ -2,7 +2,6 @@ package domain
 
 import (
 	"net/url"
-	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
@@ -50,24 +49,21 @@ func EntityScope(source string, s OrgSettings) string {
 const SlackScope = "slack.com"
 
 // GitHubHost resolves an org's configured github_base_url to the host GitHub
-// objects and identities are keyed under: trailing slashes trimmed, and an
-// empty setting is the deployment's default GitHub (ghbase.DefaultBaseURL —
-// github.com unless the operator named another). Case is kept: GHES
-// path-based hosts are case-sensitive below the authority.
+// objects and identities are keyed under: the ghbase.CanonicalBaseURL form
+// (scheme and authority lowercased, the path's case kept, trailing slashes
+// trimmed), and an empty setting is the deployment's default GitHub
+// (ghbase.DefaultBaseURL — github.com unless the operator named another).
 func GitHubHost(orgBase string) string {
-	if h := strings.TrimRight(orgBase, "/"); h != "" {
-		return h
-	}
-	return ghbase.DefaultBaseURL()
+	return ghbase.ResolveBaseURL(orgBase)
 }
 
 // JiraHost canonicalizes an org's configured Jira base URL into the site a
-// Jira object or credential is keyed under: surrounding whitespace and
-// trailing slashes trimmed, and the result must be a real http(s) origin.
-// ok=false, with "", for an empty ("Jira not configured") or malformed base
-// URL. A context path is part of the site and is kept.
+// Jira object or credential is keyed under: the ghbase.CanonicalBaseURL form,
+// which must be a real http(s) origin. ok=false, with "", for an empty ("Jira
+// not configured") or malformed base URL. A context path is part of the site
+// and keeps its case.
 func JiraHost(orgBase string) (string, bool) {
-	host := strings.TrimRight(strings.TrimSpace(orgBase), "/")
+	host := ghbase.CanonicalBaseURL(orgBase)
 	if host == "" {
 		return "", false
 	}

@@ -68,9 +68,9 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// Seed a repo in orgB through the admin pool so the row exists
 	// regardless of claims.
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repositories (org_id, owner, repo, profiled_at)
-		VALUES ($1, 'orgb-owner', 'orgb-repo', now())
-	`, orgB); err != nil {
+		INSERT INTO repositories (org_id, host, owner, repo, profiled_at)
+		VALUES ($1, $2, 'orgb-owner', 'orgb-repo', now())
+	`, orgB, dbtest.TestGitHubHost); err != nil {
 		t.Fatalf("seed orgB repo: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// must reject the read because tf.current_org_id() resolves to
 	// orgA and repositories_all gates on (org_id = current_org_id()).
 	if err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgA, userA, func(tx db.TxStores) error {
-		got, _, err := tx.Repos.List(context.Background(), orgB, db.ListOpts{})
+		got, _, err := tx.Repos.List(context.Background(), orgB, dbtest.TestGitHubHost, db.ListOpts{})
 		if err != nil {
 			return fmt.Errorf("orgB List under orgA claims: %w", err)
 		}
@@ -97,7 +97,7 @@ func TestSyntheticClaimsWithTx_Postgres_CrossOrgLeakage(t *testing.T) {
 	// "the seed didn't land" as a false negative on the assertion
 	// above. Uses the `...System` admin variant to exercise
 	// that path end-to-end.
-	got, err := stores.Repos.ListSystem(context.Background(), orgB)
+	got, err := stores.Repos.ListSystem(context.Background(), orgB, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListSystem(orgB): %v", err)
 	}
@@ -168,7 +168,7 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 	sentinel := errors.New("forced rollback")
 
 	err := stores.Tx.SyntheticClaimsWithTx(context.Background(), orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, teamID,
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(context.Background(), orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "rolled", Repo: "back"}}); err != nil {
 			return err
 		}
@@ -193,7 +193,7 @@ func TestSyntheticClaimsWithTx_Postgres_RollsBackOnError(t *testing.T) {
 // row instead.
 func registryNames(t *testing.T, stores db.Stores, orgID string) []string {
 	t.Helper()
-	repos, err := stores.Repos.ListSystem(context.Background(), orgID)
+	repos, err := stores.Repos.ListSystem(context.Background(), orgID, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListSystem: %v", err)
 	}
@@ -241,7 +241,7 @@ func TestWithTx_Postgres_SurvivesCancelledOriginCtx(t *testing.T) {
 	// Inside WithTx, write a row + read it back. Both must succeed
 	// despite the parent ctx being done.
 	if err := stores.Tx.WithTx(cleanupCtx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(cleanupCtx, orgID, teamID,
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(cleanupCtx, orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "survives", Repo: "cancel"}}); err != nil {
 			return fmt.Errorf("ReplaceForTeam under detached ctx: %w", err)
 		}
@@ -274,13 +274,13 @@ func TestWithTx_Postgres_CanceledCtxSurfacesAsCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	err := stores.Tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID,
+		if err := tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "gone", Repo: "client"}}); err != nil {
 			return err
 		}
 		cancel()
 		return dbtest.WaitTxDone(t, func(live context.Context) error {
-			_, _, err := tx.Repos.List(live, orgID, db.ListOpts{})
+			_, _, err := tx.Repos.List(live, orgID, dbtest.TestGitHubHost, db.ListOpts{})
 			return err
 		})
 	})
@@ -350,7 +350,7 @@ func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
 	for name, door := range doors {
 		t.Run(name, func(t *testing.T) {
 			err := door(ctx, orgID, userID, func(tx db.TxStores) error {
-				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID,
+				return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, dbtest.TestGitHubHost,
 					[]domain.TeamGitHubRepo{{Owner: "read", Repo: "door"}})
 			})
 			if err == nil {
@@ -366,7 +366,7 @@ func TestWithReadTx_Postgres_RefusesWriteAndReads(t *testing.T) {
 			}
 
 			if err := door(ctx, orgID, userID, func(tx db.TxStores) error {
-				_, _, err := tx.Repos.List(ctx, orgID, db.ListOpts{})
+				_, _, err := tx.Repos.List(ctx, orgID, dbtest.TestGitHubHost, db.ListOpts{})
 				return err
 			}); err != nil {
 				t.Fatalf("%s refused a read under claims: %v", name, err)

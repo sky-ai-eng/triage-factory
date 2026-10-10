@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -36,21 +37,21 @@ func TestTeamGitHubGroups_SQLite_ManyToOneRouting(t *testing.T) {
 	teamB := "team-b-0000-0000-0000-000000000001"
 	seedExtraTeam(t, conn, teamB, "team-b")
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 		{OrgLogin: "acme", TeamSlug: "frontend"},
 		{OrgLogin: "acme", TeamSlug: "platform"},
 	}); err != nil {
 		t.Fatalf("seed teamA: %v", err)
 	}
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "platform"},
 	}); err != nil {
 		t.Fatalf("seed teamB: %v", err)
 	}
 
 	for _, slug := range []string{"backend", "frontend", "platform"} {
-		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, "acme", slug)
+		teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", slug)
 		if err != nil {
 			t.Fatalf("TeamsForGroupSystem(%s): %v", slug, err)
 		}
@@ -66,7 +67,7 @@ func TestTeamGitHubGroups_SQLite_ManyToOneRouting(t *testing.T) {
 	}
 
 	// platform is shared → resolves to both teams.
-	teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, "acme", "platform")
+	teams, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "platform")
 	if err != nil {
 		t.Fatalf("TeamsForGroupSystem(platform): %v", err)
 	}
@@ -75,7 +76,7 @@ func TestTeamGitHubGroups_SQLite_ManyToOneRouting(t *testing.T) {
 	}
 
 	// A login/slug nobody mapped resolves to nothing.
-	none, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, "acme", "ghost")
+	none, err := stores.TeamGitHubGroups.TeamsForGroupSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", "ghost")
 	if err != nil {
 		t.Fatalf("TeamsForGroupSystem(ghost): %v", err)
 	}
@@ -97,20 +98,20 @@ func TestTeamGitHubGroups_SQLite_PruneDeletionLifecycle(t *testing.T) {
 	teamB := "team-b-0000-0000-0000-000000000002"
 	seedExtraTeam(t, conn, teamB, "team-b")
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "legacy"},
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("seed teamA: %v", err)
 	}
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "legacy"},
 	}); err != nil {
 		t.Fatalf("seed teamB: %v", err)
 	}
 
 	// GitHub now reports only "backend" — "legacy" was deleted.
-	n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, runmode.LocalDefaultOrgID, "acme", []string{"backend"})
+	n, err := stores.TeamGitHubGroups.PruneMissingSystem(ctx, runmode.LocalDefaultOrgID, dbtest.TestGitHubHost, "acme", []string{"backend"})
 	if err != nil {
 		t.Fatalf("PruneMissingSystem: %v", err)
 	}
@@ -118,14 +119,14 @@ func TestTeamGitHubGroups_SQLite_PruneDeletionLifecycle(t *testing.T) {
 		t.Errorf("PruneMissingSystem removed %d rows; want 2 (legacy from both teams)", n)
 	}
 
-	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA)
+	a, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamA, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamA): %v", err)
 	}
 	if len(a) != 1 || a[0].TeamSlug != "backend" {
 		t.Errorf("teamA after prune = %+v; want only backend", a)
 	}
-	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB)
+	b, err := stores.TeamGitHubGroups.ListForTeam(ctx, teamB, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeamSystem(teamB): %v", err)
 	}

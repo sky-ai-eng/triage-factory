@@ -65,7 +65,7 @@ func TestDiscoverGitHub_BoundedConcurrency_MaxInFlight(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	start := time.Now()
-	if _, _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
+	if _, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -126,7 +126,7 @@ func TestDiscoverGitHub_ConcurrencyOne_IsFullySerial(t *testing.T) {
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	if _, _, _, err := tr.discoverGitHub(ctx, client, "", repos); err != nil {
+	if _, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 
@@ -175,7 +175,7 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 	var discovered []ghclient.DiscoveredPR
 	var discoverErr error
 	go func() {
-		discovered, _, _, discoverErr = tr.discoverGitHub(ctx, client, "", repos)
+		discovered, _, _, discoverErr = tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
 		close(done)
 	}()
 
@@ -240,7 +240,7 @@ func TestDiscoverGitHub_DeterministicOrderAcrossConcurrency(t *testing.T) {
 		tr := &Tracker{repos: stores.Repos, orgID: org}
 		client := ghclient.NewClient(srv.URL, "tok")
 
-		discovered, _, _, err := tr.discoverGitHub(ctx, client, "", repos)
+		discovered, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
 		if err != nil {
 			t.Fatalf("discoverGitHub: %v", err)
 		}

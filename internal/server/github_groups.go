@@ -109,10 +109,17 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// The team's mappings on the org's current GitHub host: an org login on a
+	// host the org has left names another organization.
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
 	var groups []domain.TeamGitHubGroup
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
-		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID)
+		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID, host)
 		return e
 	}); err != nil {
 		internalError(w, "teams/github-groups", err)
@@ -170,8 +177,15 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Saved on the org's current GitHub host, which is the host the candidates
+	// were listed from; the team's mappings on any other host are kept.
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "teams/github-groups", err)
+		return
+	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		return tx.TeamGitHubGroups.SetForTeam(r.Context(), teamID, groups)
+		return tx.TeamGitHubGroups.SetForTeam(r.Context(), teamID, host, groups)
 	}); err != nil {
 		internalError(w, "teams/github-groups", err)
 		return
@@ -206,12 +220,19 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 // owner just had nothing to import). Callers surface credsMissing as a
 // reconnect prompt instead of a silent empty list.
 func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string) ([]gitHubGroupCandidateJSON, bool) {
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		githubGroupsLog.Error("read github host failed", "error", err)
+		return nil, false
+	}
 	var repos []domain.Repository
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
 		// Unwindowed: the candidate set is derived from the whole registry,
 		// not browsed, so a page would silently narrow what can be imported.
-		repos, _, e = tx.Repos.List(ctx, orgID, db.Unwindowed)
+		// The registry on the org's current host: its owners are the ones the
+		// credential below lists teams of.
+		repos, _, e = tx.Repos.List(ctx, orgID, host, db.Unwindowed)
 		return e
 	}); err != nil {
 		githubGroupsLog.Error("load configured repos failed", "error", err)

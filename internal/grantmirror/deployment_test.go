@@ -168,7 +168,10 @@ func TestRunDeployment_ALostUnsuspendUnblocksTheGrantPass(t *testing.T) {
 	r := &Reconciler{
 		apps:       stores.GitHubApps,
 		mirror:     mirror,
-		clients:    fakeGrants{byLogin: map[string]grantAnswer{"acme": {repos: []github.UserRepo{repo("acme/api", 1)}, complete: true}}},
+		clients: fakeGrants{
+			byLogin: map[string]grantAnswer{"acme": {repos: []github.UserRepo{repo("acme/api", 1)}, complete: true}},
+			host:    db.EffectiveGitHubHost(gh.srv.URL),
+		},
 		classes:    fakeClasses{class: domain.GitHubCredentialClassManagedApp},
 		deployment: app,
 	}

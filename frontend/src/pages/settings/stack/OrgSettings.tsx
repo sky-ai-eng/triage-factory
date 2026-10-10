@@ -369,6 +369,15 @@ export default function OrgSettings({
     ? bedrockErr !== null
     : claudeWantsByok && !claudeKeyTyped && !baseline.anthropicConnected
 
+  // The server refuses to move the GitHub URL while any GitHub credential is
+  // connected: a token or an App works only on the GitHub that issued it. These
+  // are the same three things it checks.
+  const githubConnected =
+    baseline.hasGitHubPat ||
+    baseline.githubAppRegistered ||
+    baseline.githubAppStaged ||
+    (baseline.githubAppManaged && baseline.githubAppInstallCount > 0)
+
   return (
     <div className="divide-y divide-line-1">
       {/* ── GitHub URL ── */}
@@ -377,6 +386,7 @@ export default function OrgSettings({
         summary={hostOf(baseline.org.github_url || 'github.com')}
         dirty={draft.org.github_url !== baseline.org.github_url}
         saving={isSaving('gh-url')}
+        saveDisabled={githubConnected}
         onSave={async () => {
           // The outer mark covers the reachability-probe window (before
           // commitOrgSlice, which marks/unmarks 'gh-url' itself — a Set makes
@@ -401,7 +411,14 @@ export default function OrgSettings({
           setUrlError(null)
         }}
       >
-        <GitHubUrlStep {...ctx} error={urlError} />
+        {githubConnected ? (
+          <p className="text-body leading-relaxed text-ink-3">
+            To change the GitHub URL, disconnect GitHub below first, then connect again on the new
+            URL. A GitHub token or App only works on the GitHub that issued it.
+          </p>
+        ) : (
+          <GitHubUrlStep {...ctx} error={urlError} />
+        )}
       </SettingsSection>
 
       {/* ── GitHub access (mode header + guided switch / token replacement) ──

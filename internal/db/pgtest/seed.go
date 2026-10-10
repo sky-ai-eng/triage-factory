@@ -2,7 +2,10 @@ package pgtest
 
 import (
 	"database/sql"
+	"errors"
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 )
 
 // Shared seed helpers used by both the pgtest baseline suite and the
@@ -55,8 +58,9 @@ func SeedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 	return id
 }
 
-// SeedRepository mints a registry row for owner/repo in orgID and returns its
-// id — the value every repository reference in the schema stores.
+// SeedRepository mints a registry row for owner/repo in orgID, on the org's
+// current GitHub host (db.EffectiveGitHubHost of its configured base URL), and
+// returns its id — the value every repository reference in the schema stores.
 // team_github_repos and conversation_worktrees both
 // point at it, and none of the stores behind them will create it (the
 // executor's role holds no INSERT on repositories at all), so a fixture that
@@ -65,26 +69,55 @@ func SeedTeam(t *testing.T, h *Harness, orgID, slug string) string {
 // identity key, so repeated calls for one repository return its single row.
 func SeedRepository(t *testing.T, h *Harness, orgID, owner, repo string) string {
 	t.Helper()
+	return SeedRepositoryOnHost(t, h, orgID, OrgGitHubHost(t, h, orgID), owner, repo)
+}
+
+// SeedRepositoryOnHost is SeedRepository on a named GitHub host, for fixtures
+// that stage the same owner/repo on two hosts.
+func SeedRepositoryOnHost(t *testing.T, h *Harness, orgID, host, owner, repo string) string {
+	t.Helper()
 	MustExec(t, h.AdminDB, `
-		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+		INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
 		ON CONFLICT DO NOTHING
-	`, orgID, owner, repo)
+	`, orgID, host, owner, repo)
 	var id string
 	if err := h.AdminDB.QueryRow(`
 		SELECT id::text FROM repositories
-		 WHERE org_id = $1 AND source = 'github'
-		   AND lower(owner) = lower($2) AND lower(repo) = lower($3)
-	`, orgID, owner, repo).Scan(&id); err != nil {
-		t.Fatalf("seed repository %s/%s: %v", owner, repo, err)
+		 WHERE org_id = $1 AND source = 'github' AND host = $2
+		   AND lower(owner) = lower($3) AND lower(repo) = lower($4)
+	`, orgID, host, owner, repo).Scan(&id); err != nil {
+		t.Fatalf("seed repository %s/%s on %s: %v", owner, repo, host, err)
 	}
 	return id
 }
 
+// OrgGitHubHost returns orgID's current GitHub host as the stores resolve it:
+// db.EffectiveGitHubHost of the GitHub base URL stored on org_event_sources,
+// which is the deployment default when the org configured none.
+func OrgGitHubHost(t *testing.T, h *Harness, orgID string) string {
+	t.Helper()
+	var base sql.NullString
+	err := h.AdminDB.QueryRow(`
+		SELECT base_url FROM org_event_sources WHERE org_id = $1 AND kind = 'github'
+	`, orgID).Scan(&base)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("read github base url for org %s: %v", orgID, err)
+	}
+	return db.EffectiveGitHubHost(base.String)
+}
+
 // SeedTrackedRepo records that teamID tracks owner/repo, minting the registry
-// row the tracking row references. Returns the repository id.
+// row the tracking row references on the org's current GitHub host. Returns
+// the repository id.
 func SeedTrackedRepo(t *testing.T, h *Harness, orgID, teamID, owner, repo string) string {
 	t.Helper()
-	repositoryID := SeedRepository(t, h, orgID, owner, repo)
+	return SeedTrackedRepoOnHost(t, h, orgID, teamID, OrgGitHubHost(t, h, orgID), owner, repo)
+}
+
+// SeedTrackedRepoOnHost is SeedTrackedRepo on a named GitHub host.
+func SeedTrackedRepoOnHost(t *testing.T, h *Harness, orgID, teamID, host, owner, repo string) string {
+	t.Helper()
+	repositoryID := SeedRepositoryOnHost(t, h, orgID, host, owner, repo)
 	MustExec(t, h.AdminDB, `
 		INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)
 		ON CONFLICT DO NOTHING

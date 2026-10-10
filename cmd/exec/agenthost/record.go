@@ -2,6 +2,8 @@ package agenthost
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -45,6 +47,33 @@ func stampActionIdentityInfo(act *domain.ExternalAction, info ConversationInfo) 
 	act.ActorUserID = info.UserID // empty for event-triggered → SQL NULL
 }
 
+// stampScopeInfo sets the Scope of a and act (either may be nil) to the
+// org's current scope for each one's provider (domain.ExternalObjectScope).
+// Every exec write goes to the provider the org is configured for now, so that
+// is the namespace the object it wrote lives in. The scope is overwritten, not
+// defaulted, like the run identity stamped beside it: the side that holds the
+// stores decides it, so a relayed row cannot name a namespace the write did
+// not reach.
+func stampScopeInfo(ctx context.Context, stores db.Stores, orgID string, a *domain.Artifact, act *domain.ExternalAction) error {
+	if a == nil && act == nil {
+		return nil
+	}
+	if stores.Orgs == nil {
+		return errors.New("stamp external object scope: no org store to read settings from")
+	}
+	settings, err := stores.Orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("stamp external object scope: load org settings: %w", err)
+	}
+	if a != nil {
+		a.Scope = domain.ExternalObjectScope(a.Provider, settings)
+	}
+	if act != nil {
+		act.Scope = domain.ExternalObjectScope(act.Provider, settings)
+	}
+	return nil
+}
+
 // recordActionSystemInfo appends act on the admin pool (event-triggered
 // runs). A nil act — or a partial test wiring with no ExternalActions store —
 // is a no-op.
@@ -65,7 +94,8 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 }
 
 // RecordExternalWrite is the shared recording funnel behind every exec
-// choke-point write: it stamps the run's identity onto act (if present),
+// choke-point write: it stamps the run's identity and the org's current scope
+// for each provider (stampScopeInfo) onto a and act (if present),
 // upserts a (if non-nil) and appends act (if non-nil) in the SAME write —
 // admin pool for event-triggered runs, a synthetic-claims tx for manual ones
 // — logs (never fails) a write error, and resolves the touched entity
@@ -120,24 +150,27 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 		span.SetAttributes(telemetry.Op(a.Kind))
 	}
 
-	err := withWriteInfo(ctx, stores, info,
-		func() error {
-			if a != nil {
-				if _, e := stores.Artifacts.UpsertSystem(ctx, info.OrgID, *a); e != nil {
-					return e
+	err := stampScopeInfo(ctx, stores, info.OrgID, a, act)
+	if err == nil {
+		err = withWriteInfo(ctx, stores, info,
+			func() error {
+				if a != nil {
+					if _, e := stores.Artifacts.UpsertSystem(ctx, info.OrgID, *a); e != nil {
+						return e
+					}
 				}
-			}
-			return recordActionSystemInfo(ctx, stores, info, act)
-		},
-		func(ts db.TxStores) error {
-			if a != nil {
-				if _, e := ts.Artifacts.Upsert(ctx, info.OrgID, *a); e != nil {
-					return e
+				return recordActionSystemInfo(ctx, stores, info, act)
+			},
+			func(ts db.TxStores) error {
+				if a != nil {
+					if _, e := ts.Artifacts.Upsert(ctx, info.OrgID, *a); e != nil {
+						return e
+					}
 				}
-			}
-			return recordActionTx(ctx, ts, info.OrgID, act)
-		},
-	)
+				return recordActionTx(ctx, ts, info.OrgID, act)
+			},
+		)
+	}
 	if err != nil {
 		target := ""
 		kind := ""

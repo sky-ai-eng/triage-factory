@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -53,8 +54,8 @@ func TestProfiler_AppliesARenameTheMetaResponseRevealed(t *testing.T) {
 	if len(repos.renames) != 1 {
 		t.Fatalf("renames = %+v, want exactly the repository whose name moved", repos.renames)
 	}
-	if got := repos.renames[0]; got.Slug() != "octo/platform-api" || got.ExternalID != "1296269" {
-		t.Errorf("rename = %+v, want octo/platform-api keyed on 1296269", got)
+	if got := repos.renames[0]; got.Slug() != "octo/platform-api" || got.ExternalID != "1296269" || got.Host != dbtest.TestGitHubHost {
+		t.Errorf("rename = %+v, want octo/platform-api keyed on 1296269 on %s", got, dbtest.TestGitHubHost)
 	}
 
 	upserts := repos.upsertedByID()
@@ -134,13 +135,14 @@ type renameProfileStore struct {
 	renames []domain.RepoRef
 }
 
-func (s *renameProfileStore) ListIdentitiesSystem(context.Context, string) ([]domain.RepoRef, error) {
+func (s *renameProfileStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoRef, error) {
 	// The stored identities the observation is compared against: TF tracks
 	// octo/api under id 1296269, which is what makes the meta response's
-	// different name a rename rather than a new repository.
+	// different name a rename rather than a new repository. They are on the
+	// host asked about, as the real store's rows are.
 	return []domain.RepoRef{
-		{Source: domain.RepoSourceGitHub, Owner: "octo", Repo: "api", ExternalID: "1296269"},
-		{Source: domain.RepoSourceGitHub, Owner: "octo", Repo: "web", ExternalID: "555"},
+		{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "api", ExternalID: "1296269"},
+		{Source: domain.RepoSourceGitHub, Host: host, Owner: "octo", Repo: "web", ExternalID: "555"},
 	}, nil
 }
 

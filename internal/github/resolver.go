@@ -83,6 +83,63 @@ func (e *appUnusableError) Is(target error) bool { return target == ErrGitHubApp
 // UpstreamClass implements upstream.Classified.
 func (e *appUnusableError) UpstreamClass() upstream.Class { return upstream.Auth }
 
+// ErrPATHostMismatch reports an org PAT the resolver will not send, because the
+// org's GitHub host is no longer the one the PAT was validated on. A PAT is a
+// credential for one GitHub deployment: sending it to whatever host the
+// setting names now would hand a token for one server to another. The bind
+// records the host beside the PAT (integrations.KeyGitHubURL), and every PAT
+// read checks it against the host the org resolves to now. Rebinding the PAT
+// on the new host clears it.
+//
+// Like ErrGitHubAppUnusable, it deliberately does NOT wrap
+// ErrNoGitHubCredentials: this org did set GitHub up, and the thing to do is
+// rebind the PAT, which only an error that says so leads anyone to.
+var ErrPATHostMismatch = errors.New("github: the org's personal access token was validated on another GitHub host")
+
+// PATHostMismatchError is ErrPATHostMismatch with the two hosts it names. It
+// classes as Auth — a credential that cannot be used here — so a poll cycle
+// records it as the connection's state rather than logging it every pass.
+type PATHostMismatchError struct {
+	OrgID string
+	// BoundHost is the host the PAT was validated on; CurrentHost is the host
+	// the org resolves to now. Both are GitHubHost values.
+	BoundHost   string
+	CurrentHost string
+}
+
+func (e *PATHostMismatchError) Error() string {
+	return fmt.Sprintf("%s: org=%s: the token was validated on %s and the org's GitHub host is now %s; rebind it on %s",
+		ErrPATHostMismatch, e.OrgID, e.BoundHost, e.CurrentHost, e.CurrentHost)
+}
+
+func (e *PATHostMismatchError) Is(target error) bool { return target == ErrPATHostMismatch }
+
+// UpstreamClass implements upstream.Classified.
+func (e *PATHostMismatchError) UpstreamClass() upstream.Class { return upstream.Auth }
+
+// orgPAT returns the org's PAT for use against base, "" when none is bound, or
+// a *PATHostMismatchError when the PAT was validated on a host other than base
+// (integrations.GitHubPATHostMatches). Every PAT read in this file goes through
+// it, so no path can send the token to a host it was not bound on. A
+// secret-store read error propagates rather than reading as "no PAT".
+func (r *resolver) orgPAT(ctx context.Context, orgID, base string) (string, error) {
+	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	if err != nil {
+		return "", fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+	}
+	if pat == "" {
+		return "", nil
+	}
+	bound, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubURL)
+	if err != nil {
+		return "", fmt.Errorf("resolve github pat host for org %s: read %s secret: %w", orgID, integrations.KeyGitHubURL, err)
+	}
+	if !integrations.GitHubPATHostMatches(bound, base) {
+		return "", &PATHostMismatchError{OrgID: orgID, BoundHost: domain.GitHubHost(bound), CurrentHost: domain.GitHubHost(base)}
+	}
+	return pat, nil
+}
+
 // usable refuses an App the reconcile has recorded as unusable. Only the BYO
 // arm can carry the record — the deployment App has no per-org row and is
 // established by its own preflight.
@@ -384,8 +441,8 @@ var (
 
 // RateLimitFor implements RateLimitReader, reading this resolver's
 // process-wide, per-org registry (see newObservedClient).
-func (r *resolver) RateLimitFor(orgID string) (RateLimitState, bool) {
-	return r.rateLimits.get(orgID)
+func (r *resolver) RateLimitFor(orgID, host string) (RateLimitState, bool) {
+	return r.rateLimits.get(orgID, host)
 }
 
 // newObservedClient is the single *Client construction path every
@@ -396,8 +453,9 @@ func (r *resolver) RateLimitFor(orgID string) (RateLimitState, bool) {
 // remembering to wire it.
 func (r *resolver) newObservedClient(orgID, base, token string) *Client {
 	c := NewClient(base, token).WithOrg(orgID)
+	host := domain.GitHubHost(base)
 	c.SetRateLimitObserver(func(s RateLimitState) {
-		r.rateLimits.record(orgID, s)
+		r.rateLimits.record(orgID, host, s)
 	})
 	return c
 }
@@ -561,36 +619,47 @@ func (r *resolver) orgContextFor(ctx context.Context, orgID string) (orgGitHubCo
 	return orgGitHubContext{base: base, class: set.GitHubCredentialClass}, nil
 }
 
-// credentialClassFor reads the credential class alone, for the two entry points
-// that resolve no host (HasAnyCredential, OrgIdentityFor). Resolving a base they
-// would discard can cost an extra secret read, so they don't go through
-// orgContextFor.
-func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, error) {
+// credentialClassFor reads the credential class, for the two entry points that
+// decide on the class before they know whether they need the host
+// (HasAnyCredential, OrgIdentityFor). Resolving a base an arm would discard can
+// cost an extra secret read, so they don't go through orgContextFor. The
+// hostResolver it returns derives the host from the same settings row on first
+// call and remembers it, so an arm that does need the host pays at most
+// baseFrom's secret read and never a second settings read.
+func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, hostResolver, error) {
 	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
-		return "", fmt.Errorf("resolve github credential class for org %s: %w", orgID, err)
+		return "", nil, fmt.Errorf("resolve github credential class for org %s: %w", orgID, err)
 	}
-	return set.GitHubCredentialClass, nil
+	var (
+		resolved bool
+		base     string
+		baseErr  error
+	)
+	host := func() (string, error) {
+		if !resolved {
+			base, baseErr = r.baseFrom(ctx, orgID, set, nil)
+			resolved = true
+		}
+		return base, baseErr
+	}
+	return set.GitHubCredentialClass, host, nil
 }
 
 // hostResolver defers resolving the org's GitHub host to the arm that needs
-// one, which is only ever the managed arm: establishing the deployment App's
-// identity is a call to a particular GitHub, and the two entry points that read
-// the class alone (HasAnyCredential, OrgIdentityFor) deliberately resolve no
-// host — for every other class they would pay a settings read, and possibly a
-// secret read, for a value they discard.
+// one: the managed arm, since establishing the deployment App's identity is a
+// call to a particular GitHub; the PAT arm, since a PAT is used only on the
+// host it was bound on; and HasAnyCredential's App arm, since an installation
+// serves only the host it lives on. OrgIdentityFor's own-App arm resolves none
+// — the bot identity is the App's, not any installation's — and an arm that
+// fails on the class resolves none either; for those a host would cost a
+// possible secret read for a value they discard.
 type hostResolver func() (string, error)
 
 // fixedHost is the resolver for the entry points that already resolved the
 // org's host alongside its class, off the one settings row orgContextFor read.
 func fixedHost(base string) hostResolver {
 	return func() (string, error) { return base, nil }
-}
-
-// lazyHost resolves the org's host on demand, for the entry points that read
-// the class alone and would otherwise never need one.
-func (r *resolver) lazyHost(ctx context.Context, orgID string) hostResolver {
-	return func() (string, error) { return r.githubBaseFor(ctx, orgID) }
 }
 
 // resolvedApp is the App a resolution mints from, in whichever of the two
@@ -741,7 +810,7 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 // TokenCache with ClientFor so the API client and the host-side git clone
 // resolve identically.
 func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(target))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(target))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -772,7 +841,8 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resol
 		return nil, IdentityUnknown, err
 	}
 	client := r.newObservedClient(orgID, base, tok.Value)
-	if r.coverage.covered(orgID, owner, repo) {
+	host := domain.GitHubHost(base)
+	if r.coverage.covered(orgID, host, owner, repo) {
 		return client, IdentityApp, nil // memoized: in the grant
 	}
 	reachable, conclusive := client.CheckRepoAccess(ctx, owner, repo)
@@ -780,7 +850,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resol
 		return client, IdentityApp, nil // indeterminate (5xx) → fail open, don't cache
 	}
 	if reachable {
-		r.coverage.markCovered(orgID, owner, repo)
+		r.coverage.markCovered(orgID, host, owner, repo)
 		return client, IdentityApp, nil
 	}
 	ghResolverLog.Warn("app installed on account but repo not in its grant; no PAT fallback (app-xor-pat)",
@@ -795,7 +865,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resol
 // written there would later be served to an unscoped caller. A scoped mint is
 // ~once per (run, repo); the gitproxy keeps its own per-repo cache.
 func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -834,9 +904,9 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 	// No active App → PAT-borrow, returned as a Token with no mint expiry. A
 	// backend read error propagates rather than being misreported as "not
 	// configured".
-	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	pat, err := r.orgPAT(ctx, orgID, base)
 	if err != nil {
-		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+		return githubapp.Token{}, err
 	}
 	if pat != "" {
 		// patBorrowUser does a DB read purely to label this trace line, so
@@ -871,9 +941,9 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 	if app.present() {
 		return r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 	}
-	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	pat, err := r.orgPAT(ctx, orgID, base)
 	if err != nil {
-		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+		return githubapp.Token{}, err
 	}
 	if pat != "" {
 		return githubapp.Token{Value: pat}, nil
@@ -901,9 +971,9 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 	if app.present() {
 		return r.appReposScopedToken(ctx, orgID, app, owner, repos, base, permissions)
 	}
-	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	pat, err := r.orgPAT(ctx, orgID, base)
 	if err != nil {
-		return githubapp.Token{}, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+		return githubapp.Token{}, err
 	}
 	if pat != "" {
 		return githubapp.Token{Value: pat}, nil
@@ -918,7 +988,7 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 // installation TokenCache (keyed by installation only) so a scoped token is
 // never served to an unscoped caller.
 func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app resolvedApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -968,31 +1038,42 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // HasAnyCredential reports whether the org has any usable GitHub credential
 // without minting a repo-scoped token (see the ScopedResolver interface doc).
 // App XOR PAT (see activeApp): an active App's credential is usable iff it has
-// at least one installation to mint from — a present PAT is NOT a fallback for
-// an active-App org. Only a no-active-App org's usability turns on the PAT. A
-// PAT-tier read error propagates so a transient secret-store outage isn't
-// misreported as "no credential".
+// at least one installation on the org's GitHub host to mint from — a present
+// PAT is NOT a fallback for an active-App org, and an installation left on a
+// host the org has moved off mints nothing here. Only a no-active-App org's
+// usability turns on the PAT. A read error on either tier propagates so a
+// transient store outage isn't misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	// Class alone: this probe resolves no host, so it skips orgContextFor and
-	// the base resolution (and possible secret read) it would discard.
-	class, err := r.credentialClassFor(ctx, orgID)
+	// Class first: a staged BYO App needs no host to answer, so it is resolved
+	// on demand from the same settings row.
+	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil {
 		return false, err
 	}
-	app, err := r.activeApp(ctx, orgID, class, r.lazyHost(ctx, orgID))
+	app, err := r.activeApp(ctx, orgID, class, host)
 	if err != nil {
 		return false, err
 	}
 	if app.present() {
-		insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+		base, err := host()
+		if err != nil {
+			return false, err
+		}
+		insts, err := r.apps.ListInstallationsOnHostSystem(ctx, orgID, installationHost(base))
 		if err != nil {
 			return false, fmt.Errorf("list installations for org %s: %w", orgID, err)
 		}
 		return len(insts) > 0, nil
 	}
-	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	// The PAT tier needs the host: a PAT bound on another host is not usable
+	// here, and says so rather than reading as "no credential".
+	base, err := host()
 	if err != nil {
-		return false, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+		return false, err
+	}
+	pat, err := r.orgPAT(ctx, orgID, base)
+	if err != nil {
+		return false, err
 	}
 	return pat != "", nil
 }
@@ -1058,7 +1139,7 @@ func (r *resolver) BaseURLFor(ctx context.Context, orgID string) (string, error)
 // the whole posture of this function is to refuse a fabricated identity, and
 // under an unrecognised class the PAT login would be exactly that.
 func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, email string, ok bool) {
-	class, err := r.credentialClassFor(ctx, orgID)
+	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil || !class.Known() {
 		ghResolverLog.Warn("resolve credential class failed or unknown; stamping no org identity",
 			"org", orgID, "class", class, "error", err)
@@ -1071,7 +1152,7 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// installations the App has). A staged/inactive App or a read error skips to
 	// PAT rather than claiming an identity the org isn't acting as — during a
 	// PAT→App switch the org is in the App system but still committing as its PAT.
-	if app, err := r.appForIdentity(ctx, orgID, class, r.lazyHost(ctx, orgID)); err == nil && app.commitIdentityReady() {
+	if app, err := r.appForIdentity(ctx, orgID, class, host); err == nil && app.commitIdentityReady() {
 		name = app.slug() + "[bot]"
 		// The numeric-id noreply form links a bot's commits to its account on
 		// github.com (contribution graph + Verified co-author badge); the plain
@@ -1107,7 +1188,14 @@ func (r *resolver) OrgIdentityFor(ctx context.Context, orgID string) (name, emai
 	// left behind after a PAT clear (or a GitHub disconnect) never becomes a
 	// commit identity for an org that no longer has a PAT. A read error is
 	// conservative (treated as no PAT → no identity), never a fabricated one.
-	if pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT); err != nil || pat == "" {
+	//
+	// The same rule as every PAT read: a PAT bound on a host other than the
+	// org's current one authenticates as nobody here, so it lends no identity.
+	base, err := host()
+	if err != nil {
+		return "", "", false
+	}
+	if pat, err := r.orgPAT(ctx, orgID, base); err != nil || pat == "" {
 		return "", "", false
 	}
 	// PAT present: trust the captured pair. A partial identity cannot stamp a
@@ -1163,6 +1251,14 @@ func (a accountRef) String() string {
 // are case-insensitive, so the compare is too), which is the whole of the
 // behaviour for a ref with no id.
 //
+// Only installations on host are candidates — the GitHub the token is minted
+// against (installationHost of the resolution's base). An org that moves to
+// another GitHub keeps the old host's rows live, and neither half of an
+// account ref means anything across deployments: a login on one host may be an
+// unrelated account on another, and account and installation ids are numbered
+// per deployment. A target with no installation on host is ErrNoGitHubCredentials
+// however many the org holds elsewhere, and an empty host selects nothing.
+//
 // An empty ref means "no specific account", which one installation can answer
 // for and several cannot: with exactly one there is nothing to choose between,
 // so it is returned; with more than one the call is ambiguous and the error
@@ -1170,8 +1266,8 @@ func (a accountRef) String() string {
 // name an account rather than a workspace missing a credential. Guessing is not
 // an option on offer — a token minted from the wrong account either 422s at
 // GitHub or, worse, succeeds against somebody else's repositories.
-func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
-	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+func (r *resolver) installationFor(ctx context.Context, orgID, host string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
+	insts, err := r.apps.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err != nil {
 		// A read failure is not a missing credential, and saying so would be
 		// the same misreport the ambiguous case is: it sends a user to
@@ -1187,7 +1283,7 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 			return insts[0], nil
 		}
 		if len(insts) > 1 {
-			return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations to choose from", ErrAmbiguousInstallation, orgID, len(insts))
+			return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations on %s to choose from", ErrAmbiguousInstallation, orgID, len(insts), host)
 		}
 	}
 	if target.ID != "" {
@@ -1210,7 +1306,19 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 			return in, nil
 		}
 	}
-	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s", ErrNoGitHubCredentials, orgID, target)
+	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s on %q", ErrNoGitHubCredentials, orgID, target, host)
+}
+
+// installationHost is the github_host an installation must carry to serve a
+// resolution against base: base's GitHubHost, or "" for an empty base, which
+// no installation carries. baseFrom has already resolved the deployment
+// default by the time a base reaches here, so an empty one is a resolution
+// that found no host, and it selects nothing rather than the default's rows.
+func installationHost(base string) string {
+	if base == "" {
+		return ""
+	}
+	return domain.GitHubHost(base)
 }
 
 // installationToken returns a cached token for the installation or mints a
@@ -1236,7 +1344,7 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app reso
 	}
 	if inst.Suspended() {
 		r.cache.Invalidate(orgID, inst.InstallationID)
-	} else if tok, ok := r.cache.Get(orgID, inst.InstallationID); ok {
+	} else if tok, ok := r.cache.Get(orgID, domain.GitHubHost(base), inst.InstallationID); ok {
 		return tok, nil
 	}
 
@@ -1252,7 +1360,7 @@ func (r *resolver) installationToken(ctx context.Context, orgID string, app reso
 	if err != nil {
 		return githubapp.Token{}, err
 	}
-	r.cache.Set(orgID, inst.InstallationID, tok)
+	r.cache.Set(orgID, domain.GitHubHost(base), inst.InstallationID, tok)
 	return tok, nil
 }
 
@@ -1307,11 +1415,12 @@ func (r *resolver) minterFor(ctx context.Context, orgID string, app resolvedApp,
 // tier3PATClient builds a PAT-backed client, or (nil, nil) when the org has
 // no PAT configured (a genuine "not configured" → caller surfaces
 // ErrNoGitHubCredentials). A secret-store read error is returned as an error
-// so a transient Vault/DB outage isn't misreported as missing config.
+// so a transient Vault/DB outage isn't misreported as missing config, and so is
+// a PAT bound on another host (*PATHostMismatchError).
 func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Client, error) {
-	pat, err := r.secrets.GetSystem(ctx, orgID, integrations.KeyGitHubPAT)
+	pat, err := r.orgPAT(ctx, orgID, base)
 	if err != nil {
-		return nil, fmt.Errorf("resolve github pat for org %s: %w", orgID, err)
+		return nil, err
 	}
 	if pat == "" {
 		return nil, nil

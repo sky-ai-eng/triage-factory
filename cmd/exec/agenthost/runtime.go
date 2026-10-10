@@ -58,7 +58,7 @@ type Runtime interface {
 	// task repo would be exactly such a lie. The answer is asked for only on a
 	// ledger miss, so the authorized path costs nothing.
 	TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error)
-	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
+	GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	OrgJiraBaseURL(ctx context.Context) (string, error)
 
@@ -72,7 +72,7 @@ type Runtime interface {
 
 	// Writes.
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
-	DeleteConversationWorktree(ctx context.Context, repoID, ref string) error
+	DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error
 	UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error)
 	// UpdateReviewDetailsIfPending persists a review draft's mutated
 	// details_json, guarded on the draft still being state=pending. Returns
@@ -378,29 +378,54 @@ func (r *directRuntime) GetTask(ctx context.Context, taskID string) (*domain.Tas
 	return r.stores.Tasks.GetSystem(ctx, r.info.OrgID, taskID)
 }
 
+// githubHost is the org's current GitHub host — the host every repository a
+// run lists, resolves or is gated on lives on. Read per call rather than held:
+// the org can move hosts during a run, and a name the old host answered to may
+// belong to another repository on the new one.
+func (r *directRuntime) githubHost(ctx context.Context) (string, error) {
+	return db.OrgGitHubHostSystem(ctx, r.stores.Orgs, r.info.OrgID)
+}
+
 func (r *directRuntime) ListRepos(ctx context.Context) ([]domain.Repository, error) {
-	return r.stores.Repos.ListSystem(ctx, r.info.OrgID)
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.stores.Repos.ListSystem(ctx, r.info.OrgID, host)
 }
 
 // GetRepo is the verb boundary for `tfac exec workspace add owner/repo`: the
 // agent's argv arrives here as a name and is resolved to a row here, so the id
 // is what everything past this point holds. A name nobody has a row for stays
 // a nil rather than an error — the caller reports it as "repo is not
-// configured in Triage Factory", which is the accurate answer.
+// configured in Triage Factory", which is the accurate answer. The name
+// resolves on the org's current GitHub host only.
 func (r *directRuntime) GetRepo(ctx context.Context, slug string) (*domain.Repository, error) {
-	return r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRefFromSlug(slug))
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return r.stores.Repos.GetByRefSystem(ctx, r.info.OrgID, domain.RepoRefFromSlug(host, slug))
 }
 
 func (r *directRuntime) TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return r.stores.TeamGitHubRepos.TracksRepoSystem(ctx, r.info.TeamID, owner, repo)
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return false, err
+	}
+	return r.stores.TeamGitHubRepos.TracksRepoSystem(ctx, r.info.TeamID, host, owner, repo)
 }
 
 func (r *directRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (bool, error) {
-	return IsTaskOwnRepo(ctx, r.stores, r.info, owner, repo), nil
+	host, err := r.githubHost(ctx)
+	if err != nil {
+		return false, err
+	}
+	return IsTaskOwnRepo(ctx, r.stores, r.info, host, owner, repo), nil
 }
 
-func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return r.stores.ConversationWorktrees.GetByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
+func (r *directRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return r.stores.ConversationWorktrees.GetByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repositoryID, ref)
 }
 
 func (r *directRuntime) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
@@ -485,26 +510,30 @@ func (r *directRuntime) InsertConversationWorktree(ctx context.Context, row doma
 	return inserted, winningPath, err
 }
 
-func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, repoID, ref string) error {
+func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error {
 	return withWriteInfo(ctx, r.stores, r.info,
 		func() error {
-			return r.stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
+			return r.stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, r.info.OrgID, r.info.ConversationID, repositoryID, ref)
 		},
 		func(ts db.TxStores) error {
-			return ts.ConversationWorktrees.DeleteByRepoRef(ctx, r.info.OrgID, r.info.ConversationID, repoID, ref)
+			return ts.ConversationWorktrees.DeleteByRepoRef(ctx, r.info.OrgID, r.info.ConversationID, repositoryID, ref)
 		},
 	)
 }
 
-// UpsertArtifact stamps the run identity onto a and upserts it, composing the
-// branch-push external action into the SAME write (TFAC-483). Event-triggered
-// runs route admin-pool; manual runs wrap in the kicking-off user's synthetic
-// claims. Returns the stored row.
+// UpsertArtifact stamps the run identity and the org's current scope
+// (stampScopeInfo) onto a and upserts it, composing the branch-push external
+// action into the SAME write (TFAC-483). Event-triggered runs route
+// admin-pool; manual runs wrap in the kicking-off user's synthetic claims.
+// Returns the stored row.
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
+	if err := stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, act); err != nil {
+		return domain.Artifact{}, err
+	}
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
 		if err != nil {
@@ -772,9 +801,9 @@ func (r *relayRuntime) TaskOwnRepo(ctx context.Context, owner, repo string) (boo
 	return res.IsTaskRepo, nil
 }
 
-func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (r *relayRuntime) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
 	var res conversationWorktreeResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
+	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
@@ -812,8 +841,8 @@ func (r *relayRuntime) InsertConversationWorktree(ctx context.Context, row domai
 	return res.Inserted, res.WinningPath, nil
 }
 
-func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repoID, ref string) error {
-	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteConversationWorktree, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+func (r *relayRuntime) DeleteConversationWorktree(ctx context.Context, repositoryID, ref string) error {
+	return r.conn.call(ctx, agentproc.RelayNamespaceCore, opDeleteConversationWorktree, deleteConversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, nil)
 }
 
 func (r *relayRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {

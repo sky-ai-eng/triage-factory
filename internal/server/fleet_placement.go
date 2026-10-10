@@ -17,7 +17,7 @@ import (
 // *placement.Resolver: compute the full candidate order for a key,
 // even when the layer is advisory-off, so an operator can preview placement.
 type placementResolver interface {
-	Explain(ctx context.Context, orgID, keyKind, keyValue string) (placement.Plan, error)
+	Explain(ctx context.Context, orgID, keyKind, host, keyValue string) (placement.Plan, error)
 }
 
 // SetPlacementResolver wires the rendezvous resolver that backs GET
@@ -53,6 +53,7 @@ type placementExplainDTO struct {
 	Enabled      bool                    `json:"enabled"`
 	OrgID        string                  `json:"org_id"`
 	KeyKind      string                  `json:"key_kind"`
+	Host         string                  `json:"host"`
 	KeyValue     string                  `json:"key_value"`
 	PreferredSet []string                `json:"preferred_set"`
 	Candidates   []placementCandidateDTO `json:"candidates"`
@@ -66,7 +67,8 @@ type placementExplainDTO struct {
 // liveness) — the same order the claim honors. Org-admin gated on the ?org=
 // query (a dedicated fleet operator identity is a later ticket);
 // the answer names executor instance ids for the caller's own org's work, so
-// org-admin is the right scope until then.
+// org-admin is the right scope until then. The key is the repository on the
+// org's current GitHub host, whose override (if any) is the one shown.
 //
 // GET /api/fleet/placement?org=<uuid>&repo=<owner/repo>[&kind=repo]
 func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
@@ -120,7 +122,12 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	plan, err := s.placement.Explain(r.Context(), orgID, kind, keyValue)
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "fleet-placement", err)
+		return
+	}
+	plan, err := s.placement.Explain(r.Context(), orgID, kind, host, keyValue)
 	if err != nil {
 		internalError(w, "fleet-placement", err)
 		return
@@ -130,6 +137,7 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		Enabled:      plan.Enabled,
 		OrgID:        plan.OrgID,
 		KeyKind:      plan.KeyKind,
+		Host:         plan.Host,
 		KeyValue:     plan.KeyValue,
 		PreferredSet: plan.PreferredSet,
 		AgingSeconds: plan.Aging.Seconds(),

@@ -50,15 +50,15 @@ func TestReachableRepos_SQLite(t *testing.T) {
 			TrackRepo: func(t *testing.T, owner, repo string) {
 				t.Helper()
 				if _, err := conn.Exec(
-					`INSERT INTO repositories (id, owner, repo, source) VALUES (?, ?, ?, 'github') ON CONFLICT DO NOTHING`,
-					uuid.NewString(), owner, repo,
+					`INSERT INTO repositories (id, host, owner, repo, source) VALUES (?, ?, ?, ?, 'github') ON CONFLICT DO NOTHING`,
+					uuid.NewString(), dbtest.TestGitHubHost, owner, repo,
 				); err != nil {
 					t.Fatalf("seed repositories: %v", err)
 				}
 				var repositoryID string
 				if err := conn.QueryRow(
-					`SELECT id FROM repositories WHERE LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)`,
-					owner, repo,
+					`SELECT id FROM repositories WHERE host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)`,
+					dbtest.TestGitHubHost, owner, repo,
 				).Scan(&repositoryID); err != nil {
 					t.Fatalf("resolve repository id: %v", err)
 				}

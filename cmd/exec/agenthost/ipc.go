@@ -254,9 +254,9 @@ func (c *IPCClient) TeamTracksRepo(ctx context.Context, owner, repo string) (boo
 	return res.Tracks, nil
 }
 
-func (c *IPCClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
+func (c *IPCClient) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
 	var res conversationWorktreeResult
-	if err := c.call(ctx, methodGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, &res); err != nil {
+	if err := c.call(ctx, methodGetConversationWorktreeByRepoRef, conversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, &res); err != nil {
 		return nil, err
 	}
 	return res.Worktree, nil
@@ -278,8 +278,8 @@ func (c *IPCClient) InsertConversationWorktree(ctx context.Context, row domain.C
 	return res.Inserted, res.WinningPath, nil
 }
 
-func (c *IPCClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.call(ctx, methodDeleteConversationWorktreeByRepoRef, deleteConversationWorktreeByRepoRefArgs{RepoID: repoID, Ref: ref}, nil)
+func (c *IPCClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) error {
+	return c.call(ctx, methodDeleteConversationWorktreeByRepoRef, deleteConversationWorktreeByRepoRefArgs{RepositoryID: repositoryID, Ref: ref}, nil)
 }
 
 // WorkspaceRoots asks the daemon for the run root's two views. This transport

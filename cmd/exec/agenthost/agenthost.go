@@ -263,10 +263,10 @@ type Client interface {
 	// gate `workspace add` applies (alongside the org-configured check) so it
 	// only materializes repos the proxy will then authorize pushes to.
 	TeamTracksRepo(ctx context.Context, owner, repo string) (bool, error)
-	GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error)
+	GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error)
 	ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error)
 	InsertConversationWorktree(ctx context.Context, row domain.ConversationWorktree) (inserted bool, winningPath string, err error)
-	DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error
+	DeleteConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) error
 
 	// WorkspaceRoots returns the run root in both path namespaces: hostRoot is
 	// the directory as the HOST filesystem knows it (what conversation_worktrees rows

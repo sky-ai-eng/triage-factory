@@ -229,6 +229,60 @@ func TestGitHubAppsStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	}
 }
 
+// TestGitHubAppsStore_Postgres_ListInstallationsOnHostUnderClaims runs the
+// app-pool host-scoped read the way a request handler does: under a member's
+// claims. The conformance suite wires both pools to the admin connection, so
+// only this proves the read answers under RLS — the member sees their org's
+// rows on the host asked about, and a member of another org sees none of them.
+func TestGitHubAppsStore_Postgres_ListInstallationsOnHostUnderClaims(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgA, userA := seedPgOrgAndUserForGitHubApps(t, h)
+	orgB, userB := seedPgOrgAndUserForGitHubApps(t, h)
+	admin := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	const hostA, hostB = "https://ghe.old.example.com", "https://ghe.new.example.com"
+	for _, inst := range []domain.OrgGitHubAppInstallation{
+		{InstallationID: "1", OrgID: orgA, AccountType: "Organization", AccountLogin: "acme", GitHubHost: hostA},
+		{InstallationID: "2", OrgID: orgA, AccountType: "Organization", AccountLogin: "acme", GitHubHost: hostB},
+		{InstallationID: "3", OrgID: orgB, AccountType: "Organization", AccountLogin: "acme", GitHubHost: hostB},
+	} {
+		if _, err := admin.GitHubApps.UpsertInstallation(ctx, inst); err != nil {
+			t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
+		}
+	}
+
+	if err := h.WithUser(t, userA, orgA, func(tx *sql.Tx) error {
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
+		got, err := stores.GitHubApps.ListInstallationsOnHost(ctx, orgA, hostB)
+		if err != nil {
+			return fmt.Errorf("ListInstallationsOnHost: %w", err)
+		}
+		if len(got) != 1 || got[0].InstallationID != "2" {
+			t.Errorf("member of org A on host B = %+v; want installation 2 alone", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser userA/orgA: %v", err)
+	}
+
+	if err := h.WithUser(t, userB, orgB, func(tx *sql.Tx) error {
+		stores := pgstore.NewForTx(tx, pgtest.SecretKey)
+		got, err := stores.GitHubApps.ListInstallationsOnHost(ctx, orgA, hostB)
+		if err != nil {
+			return fmt.Errorf("ListInstallationsOnHost: %w", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("member of org B reading org A on host B = %+v; want none (cross-org)", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser userB/orgB: %v", err)
+	}
+}
+
 // TestGitHubAppsStore_Postgres_NonAdminWriteDenied proves that a
 // non-admin member (role='member') cannot INSERT into org_github_apps.
 func TestGitHubAppsStore_Postgres_NonAdminWriteDenied(t *testing.T) {

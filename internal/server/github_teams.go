@@ -69,14 +69,10 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 	}); err != nil {
 		return nil, err
 	}
-	if creds.GitHubPAT == "" || creds.GitHubURL == "" {
+	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		return nil, errNoGitHub
 	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-	return ghclient.NewClient(baseURL, creds.GitHubPAT).WithOrg(orgID).ListMyTeamsDetailed(ctx)
+	return ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID).ListMyTeamsDetailed(ctx)
 }
 
 // userTeamsMulti reconstructs the caller's teams in multi mode. The
@@ -105,7 +101,7 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		}
 		// Unwindowed for the same reason as the group candidates: this
 		// derives a set from the whole registry rather than browsing it.
-		repos, _, lerr = tx.Repos.List(ctx, orgID, db.Unwindowed)
+		repos, _, lerr = tx.Repos.List(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL), db.Unwindowed)
 		return lerr
 	}); err != nil {
 		return nil, err

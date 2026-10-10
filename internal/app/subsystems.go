@@ -100,7 +100,7 @@ func (a *App) buildAI() {
 	// clones per-run inside the sandbox, so there's nothing to warm here.
 	if a.local() {
 		a.profiler.SetOnCycleComplete(func(orgID string) {
-			bootstrapBareClones(a.stores.Repos, a.stores.Secrets)
+			bootstrapBareClones(a.stores.Repos, a.stores.Orgs, a.stores.Secrets)
 		})
 	}
 	// SetProfilerTrigger: same relay-wrapper reasoning as SetScorerTrigger
@@ -115,7 +115,7 @@ func (a *App) buildAI() {
 	// reconcile on one tenant can't head-of-line-block another. The shared
 	// Reconciler is also handed to the server for the Tier-2 run-scoped refresh
 	// endpoint, so foreground and background reconciliation run one code path.
-	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.wsHub)
+	reconciler := reconcile.NewReconciler(a.ghResolver, a.stores.Artifacts, a.stores.Orgs, a.wsHub)
 	a.reconcilerCore = reconciler
 	a.reconciler = reconcile.NewManager(reconciler)
 	a.srv.SetReconciler(reconciler)

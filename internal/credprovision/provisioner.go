@@ -24,6 +24,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -388,7 +389,11 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	// operation, not just on a blip: a "selected repositories" App install 422s
 	// a mint naming a repo outside its grant, which would otherwise abort every
 	// conversation for that org. The next refresh sweep re-mints.
-	if owner, names := cliChannelScope(m.taskPrimaryRepo(ctx, orgID, taskID), repoIDs); owner != "" {
+	primary := ""
+	if host, err := db.OrgGitHubHostSystem(ctx, m.stores.Orgs, orgID); err == nil {
+		primary = m.taskPrimaryRepo(ctx, orgID, taskID, host)
+	}
+	if owner, names := cliChannelScope(primary, repoIDs); owner != "" {
 		cliTok, err := scoped.TokenForReposScoped(ctx, orgID, owner, names, nil)
 		switch {
 		case err != nil:
@@ -466,9 +471,20 @@ func cliChannelScope(primaryRepo string, repoIDs []string) (owner string, repoNa
 // tokens stay per-repo scoped (resolveGitHub), and pushes remain gated by the
 // conversation_worktrees ledger a `workspace add` creates. The boundary is the team's
 // own tracked repos — never another team's, never another org's.
+//
+// Every repo is checked against the team's tracking on the org's current GitHub
+// host, the host the bundle's tokens are minted on: a repository the team
+// tracked on a host the org has left is not one this bundle can reach. A task
+// or checkout on another host is dropped rather than resolved by name, and it
+// still anchors the conversation, so a conversation anchored only on another
+// host gets no repositories rather than the team's whole tracked set.
 func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, conversationID string) ([]string, error) {
 	if m.stores.TeamGitHubRepos == nil {
 		return nil, nil
+	}
+	host, err := db.OrgGitHubHostSystem(ctx, m.stores.Orgs, orgID)
+	if err != nil {
+		return nil, err
 	}
 	seen := map[string]bool{}
 	var out []string
@@ -481,16 +497,36 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		if !ok {
 			return
 		}
-		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, owner, repo)
+		tracks, err := m.stores.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, host, owner, repo)
 		if err != nil || !tracks {
 			return
 		}
 		seen[key] = true
 		out = append(out, repoID)
 	}
+	// A checkout names its repository by registry id. The bundle reaches
+	// owner/repo on host, so a checkout counts only when it is of that host's
+	// row; one of the same owner/repo on another host is another repository. A
+	// row this cannot confirm is treated the same way.
+	anchoredElsewhere := false
+	onHost := func(w domain.ConversationWorktree) bool {
+		if m.stores.Repos == nil || w.RepositoryID == "" {
+			return false
+		}
+		owner, repo, ok := strings.Cut(w.RepoID, "/")
+		if !ok {
+			return false
+		}
+		row, err := m.stores.Repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+		return err == nil && row != nil && row.ID == w.RepositoryID
+	}
 
-	if repoID := m.taskPrimaryRepo(ctx, orgID, taskID); repoID != "" {
-		add(repoID)
+	if repoID, scope := m.taskGitHubRepo(ctx, orgID, taskID); repoID != "" {
+		if scope == host {
+			add(repoID)
+		} else {
+			anchoredElsewhere = true
+		}
 	}
 	if m.stores.ConversationWorktrees != nil {
 		rows, err := m.stores.ConversationWorktrees.ListSystem(ctx, orgID, conversationID)
@@ -509,15 +545,19 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 			rows = append(rows, taskRows...)
 		}
 		for _, w := range rows {
-			add(w.RepoID)
+			if onHost(w) {
+				add(w.RepoID)
+			} else {
+				anchoredElsewhere = true
+			}
 		}
 	}
 
 	// Unanchored conversation: no task-repo, no worktree. Grant the team's tracked set
 	// (already the tracking source of truth, so no per-repo TracksRepoSystem
 	// re-check) rather than shipping a bundle with no GitHub credential at all.
-	if len(out) == 0 {
-		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID)
+	if len(out) == 0 && !anchoredElsewhere {
+		tracked, err := m.stores.TeamGitHubRepos.ListForTeamSystem(ctx, teamID, host)
 		if err != nil {
 			return nil, fmt.Errorf("list team tracked repos: %w", err)
 		}
@@ -528,30 +568,48 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 	return out, nil
 }
 
-// taskPrimaryRepo resolves a GitHub task's own target repo as "owner/repo"
-// from its entity source id ("owner/repo#42" for a PR/issue task) — the
-// same parse delegate.ownerRepoForTask uses, duplicated here rather
-// than exported since it's a two-line string split and importing
-// internal/delegate from here would be a layering inversion (delegate is
-// the executor-side consumer, not something the brain-side provisioner
-// should depend on). "" for a non-GitHub task (e.g. Jira) or a malformed id.
-func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID string) string {
-	if m.stores.Tasks == nil || taskID == "" {
+// taskPrimaryRepo is taskGitHubRepo's repo when the task's entity was polled
+// from host — a pull request from another GitHub host is about another
+// repository, whatever its name — and "" otherwise.
+func (m *Manager) taskPrimaryRepo(ctx context.Context, orgID, taskID, host string) string {
+	repo, scope := m.taskGitHubRepo(ctx, orgID, taskID)
+	if scope != host {
 		return ""
+	}
+	return repo
+}
+
+// taskGitHubRepo resolves a GitHub task's own target repo as "owner/repo"
+// from its entity source id ("owner/repo#42" for a PR/issue task), and the
+// GitHub host its entity was polled from (the entity's scope; "" when the
+// entity cannot be read). It uses the same parse delegate.ownerRepoForTask
+// uses, duplicated here rather than exported since it's a two-line string
+// split and importing internal/delegate from here would be a layering
+// inversion (delegate is the executor-side consumer, not something the
+// brain-side provisioner should depend on). "" for a non-GitHub task (e.g.
+// Jira) or a malformed id.
+func (m *Manager) taskGitHubRepo(ctx context.Context, orgID, taskID string) (repo, scope string) {
+	if m.stores.Tasks == nil || taskID == "" {
+		return "", ""
 	}
 	task, err := m.stores.Tasks.GetSystem(ctx, orgID, taskID)
 	if err != nil || task == nil || task.EntitySource != "github" {
-		return ""
+		return "", ""
+	}
+	if m.stores.Entities != nil {
+		if entity, err := m.stores.Entities.GetSystem(ctx, orgID, task.EntityID); err == nil && entity != nil {
+			scope = entity.Scope
+		}
 	}
 	repoStr := task.EntitySourceID
 	if idx := strings.LastIndex(repoStr, "#"); idx >= 0 {
 		repoStr = repoStr[:idx]
 	}
-	owner, repo, ok := strings.Cut(repoStr, "/")
-	if !ok || owner == "" || repo == "" {
-		return ""
+	o, r, ok := strings.Cut(repoStr, "/")
+	if !ok || o == "" || r == "" {
+		return "", ""
 	}
-	return repoStr
+	return repoStr, scope
 }
 
 // resolveJira resolves the org's Jira service credential to its raw,

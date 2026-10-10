@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
@@ -34,11 +35,12 @@ func TestResolver_RateLimitFor_RecordsPerOrgFromLiveCalls(t *testing.T) {
 		nil,
 	)
 
+	host := domain.GitHubHost(srv.URL)
 	reader, ok := r.(RateLimitReader)
 	if !ok {
 		t.Fatal("production resolver must implement RateLimitReader")
 	}
-	if _, ok := reader.RateLimitFor("org-1"); ok {
+	if _, ok := reader.RateLimitFor("org-1", host); ok {
 		t.Fatal("expected no observation before any call")
 	}
 
@@ -50,7 +52,7 @@ func TestResolver_RateLimitFor_RecordsPerOrgFromLiveCalls(t *testing.T) {
 		t.Fatalf("probe: %v", err)
 	}
 
-	st, ok := reader.RateLimitFor("org-1")
+	st, ok := reader.RateLimitFor("org-1", host)
 	if !ok {
 		t.Fatal("expected an observation after one call")
 	}
@@ -66,7 +68,67 @@ func TestResolver_RateLimitFor_RecordsPerOrgFromLiveCalls(t *testing.T) {
 
 	// A distinct org must not see org-1's observation — the registry is
 	// per-org, not process-global.
-	if _, ok := reader.RateLimitFor("org-2"); ok {
+	if _, ok := reader.RateLimitFor("org-2", host); ok {
 		t.Error("org-2 should have no rate-limit observation")
+	}
+}
+
+// TestResolver_RateLimitFor_KeyedByHost pins that a budget observed on one
+// GitHub host is never reported for another: each deployment meters its own,
+// so an org repointed from host A to host B reads B's budget (none yet), not
+// A's last answer, and each host's observation stays under its own key.
+func TestResolver_RateLimitFor_KeyedByHost(t *testing.T) {
+	serve := func(remaining string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-RateLimit-Remaining", remaining)
+			w.Header().Set("X-RateLimit-Reset", "1783303600")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("[]"))
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	srvA := serve("4000")
+	srvB := serve("17")
+	onA, onB := domain.GitHubHost(srvA.URL), domain.GitHubHost(srvB.URL)
+
+	orgs := &fakeOrgs{base: srvA.URL}
+	r := newTestResolver(
+		// No github_url secret: the PAT is used on whatever host the org
+		// resolves to, so the same resolver can observe both hosts.
+		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: nil},
+		orgs,
+		&fakeAgents{},
+		nil,
+	)
+	reader := r.(RateLimitReader)
+
+	probe := func() {
+		t.Helper()
+		client, err := r.ClientFor(context.Background(), "org-1", "acme")
+		if err != nil {
+			t.Fatalf("ClientFor: %v", err)
+		}
+		if _, err := client.Get(context.Background(), "/probe"); err != nil {
+			t.Fatalf("probe: %v", err)
+		}
+	}
+
+	probe()
+	if st, ok := reader.RateLimitFor("org-1", onA); !ok || st.Remaining != 4000 {
+		t.Fatalf("host A = (%+v, %v), want remaining 4000", st, ok)
+	}
+	if st, ok := reader.RateLimitFor("org-1", onB); ok {
+		t.Fatalf("host B reported %+v before any call reached it; host A's budget must not answer for it", st)
+	}
+
+	orgs.base = srvB.URL
+	probe()
+	if st, ok := reader.RateLimitFor("org-1", onB); !ok || st.Remaining != 17 {
+		t.Fatalf("host B = (%+v, %v), want remaining 17", st, ok)
+	}
+	if st, ok := reader.RateLimitFor("org-1", onA); !ok || st.Remaining != 4000 {
+		t.Fatalf("host A = (%+v, %v) after a call on host B, want its own remaining 4000", st, ok)
 	}
 }

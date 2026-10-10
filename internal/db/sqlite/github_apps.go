@@ -152,7 +152,7 @@ func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error 
 // sqliteGitHubAppInstallationColumns is the canonical projection of an
 // org_github_app_installations row, in the order scanSQLiteGitHubAppInstallation
 // reads them — everything but removed_at, which the domain type omits (see
-// MarkInstallationRemoved). ListInstallationsForOrg SELECTs it and
+// MarkInstallationRemoved). listInstallations SELECTs it and
 // UpsertInstallation / SetInstallationSuspension / MarkInstallationRemoved
 // RETURN it, so the write shape cannot drift from the read shape.
 const sqliteGitHubAppInstallationColumns = `installation_id, org_id, account_type, account_id, account_login,
@@ -182,18 +182,52 @@ func scanSQLiteGitHubAppInstallation(scan func(...any) error) (domain.OrgGitHubA
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT `+sqliteGitHubAppInstallationColumns+`
+	return s.listInstallations(ctx, orgID, nil)
+}
+
+// ListInstallationsForOrgSystem is identical to ListInstallationsForOrg in
+// local mode — single conn, no RLS, no claims — but exists so system callers
+// use the same interface shape they would in multi mode.
+func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+	return s.listInstallations(ctx, orgID, nil)
+}
+
+func (s *gitHubAppsStore) ListInstallationsOnHost(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(githubHost)
+	return s.listInstallations(ctx, orgID, &key)
+}
+
+// ListInstallationsOnHostSystem is identical to ListInstallationsOnHost in
+// local mode, for the same reason as ListInstallationsForOrgSystem.
+func (s *gitHubAppsStore) ListInstallationsOnHostSystem(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(githubHost)
+	return s.listInstallations(ctx, orgID, &key)
+}
+
+// listInstallations reads the org's active installations: on every host when
+// hostKey is nil, else on the one host *hostKey names (an InstallationHostKey,
+// so "" matches nothing).
+func (s *gitHubAppsStore) listInstallations(ctx context.Context, orgID string, hostKey *string) ([]domain.OrgGitHubAppInstallation, error) {
+	out := make([]domain.OrgGitHubAppInstallation, 0)
+	if hostKey != nil && *hostKey == "" {
+		return out, nil
+	}
+	query := `
+		SELECT ` + sqliteGitHubAppInstallationColumns + `
 		  FROM org_github_app_installations
-		 WHERE org_id = ? AND removed_at IS NULL
-		 ORDER BY account_login
-	`, orgID)
+		 WHERE org_id = ? AND removed_at IS NULL`
+	args := []any{orgID}
+	if hostKey != nil {
+		query += ` AND github_host = ?`
+		args = append(args, *hostKey)
+	}
+	rows, err := s.q.QueryContext(ctx, query+`
+		 ORDER BY account_login, github_host, installation_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list org_github_app_installations: %w", err)
 	}
 	defer rows.Close()
 
-	out := make([]domain.OrgGitHubAppInstallation, 0)
 	for rows.Next() {
 		inst, err := scanSQLiteGitHubAppInstallation(rows.Scan)
 		if err != nil {
@@ -202,13 +236,6 @@ func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID str
 		out = append(out, inst)
 	}
 	return out, rows.Err()
-}
-
-// ListInstallationsForOrgSystem is identical to ListInstallationsForOrg in
-// local mode — single conn, no RLS, no claims — but exists so the
-// credential resolver uses the same interface shape it would in multi mode.
-func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return s.ListInstallationsForOrg(ctx, orgID)
 }
 
 // InstallationOwnerSystem answers the bind ceremony's uniqueness question. At
@@ -391,26 +418,6 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 	return removed, nil
 }
 
-func (s *gitHubAppsStore) activeInstallationIDs(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.q.QueryContext(ctx, `
-		SELECT installation_id FROM org_github_app_installations
-		 WHERE org_id = ? AND removed_at IS NULL
-	`, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("read active installations: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgID string) error {
 	var appID, pemRef, baseURL string
 	// No active gate: a staged App (active=0, mid PAT→App switch) must still
@@ -438,10 +445,13 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	if err := s.clearAppUnusable(ctx, orgID, appID); err != nil {
 		return err
 	}
-	active, err := s.activeInstallationIDs(ctx, orgID)
+	live, err := s.listInstallations(ctx, orgID, nil)
 	if err != nil {
 		return err
 	}
+	// The removal diff covers the rows on the host this listing came from and
+	// no others: see InstallationIDsOnHost.
+	active := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
 	return db.ReconcileInstallations(insts, active,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
@@ -510,7 +520,7 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 		return fmt.Errorf("refresh managed installations: org %s is on credential class %q", orgID, class)
 	}
 
-	active, err := s.activeInstallationIDs(ctx, orgID)
+	live, err := s.listInstallations(ctx, orgID, nil)
 	if err != nil {
 		return err
 	}
@@ -518,15 +528,19 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	// a bind, and there is nothing a listing could tell us about it: no row to
 	// refresh, and creating one is the thing this method may never do. Answered
 	// without spending the API call.
-	if len(active) == 0 {
+	if len(live) == 0 {
 		return nil
 	}
-
-	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, active)
+	// The bound set is the rows on the org's own host. A row on another host is
+	// a different deployment's installation whose id this listing may reuse for
+	// someone else's (see InstallationIDsOnHost); RefreshBoundInstallations
+	// still refuses the org when its host is not the deployment App's.
+	bound := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
+	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, bound)
 	if err != nil {
 		return err
 	}
-	return db.ReconcileInstallations(insts, active,
+	return db.ReconcileInstallations(insts, bound,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
 	)
@@ -556,13 +570,13 @@ func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, de
 }
 
 // managedInstallationSets reads every managed workspace's live bound
-// installation ids alongside the GitHub base URL the org lists against — the
-// rows the cadence pass may refresh, grouped by org. An org with nothing bound
-// contributes no set: there is no row for the pass to write to, which is the
-// invariant stated as a query.
+// installations — id and host — alongside the GitHub base URL the org lists
+// against, grouped by org; ScanManagedInstallationSets keeps as Bound the ones
+// on the org's own host. An org with nothing bound contributes no set: there is
+// no row for the pass to write to, which is the invariant stated as a query.
 func (s *gitHubAppsStore) managedInstallationSets(ctx context.Context) ([]db.ManagedInstallationSet, error) {
 	rows, err := s.q.QueryContext(ctx, `
-		SELECT st.org_id, COALESCE(es.base_url, ''), i.installation_id
+		SELECT st.org_id, COALESCE(es.base_url, ''), i.installation_id, i.github_host
 		  FROM org_settings st
 		  JOIN org_github_app_installations i ON i.org_id = st.org_id AND i.removed_at IS NULL
 		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'

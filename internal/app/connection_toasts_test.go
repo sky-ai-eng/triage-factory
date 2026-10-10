@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/ai"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -96,7 +97,7 @@ func TestPollFailure_NoToast(t *testing.T) {
 
 	stores, conn := openConnectionTestStores(t)
 	org := runmode.LocalDefaultOrgID
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), org, runmode.LocalDefaultTeamID,
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(context.Background(), org, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 		[]domain.TeamGitHubRepo{{Owner: "octo", Repo: "a"}}); err != nil {
 		t.Fatalf("track repo: %v", err)
 	}

@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
 // ErrUnknownGitHubCredentialClass is returned by githubCredentialClass when the
@@ -44,4 +47,40 @@ func (s *Server) githubCredentialClass(ctx context.Context, orgID string) (domai
 		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownGitHubCredentialClass, orgID, set.GitHubCredentialClass)
 	}
 	return set.GitHubCredentialClass, nil
+}
+
+// errGitHubHostHasCredential refuses moving an org's GitHub host while a GitHub
+// credential is connected. A token or an App works only on the GitHub that
+// issued it, so the org's host is the only record of which GitHub a credential
+// belongs to, and it cannot change under one.
+var errGitHubHostHasCredential = errors.New("a GitHub credential only works on the GitHub that issued it — disconnect it before changing the GitHub URL")
+
+// githubCredentialConnected names the GitHub credential org has connected, in
+// the words an admin would use to go find it, or "" when it has none: a token,
+// its own App registration (staged or active), or a binding to the
+// deployment's App. The token is read through tx, so a caller inside a write
+// sees the secret store that write sees.
+func (s *Server) githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID string) (string, error) {
+	creds, err := integrations.Load(ctx, tx.Secrets, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github token: %w", err)
+	}
+	if creds.GitHubPAT != "" {
+		return "this workspace's GitHub token", nil
+	}
+	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github app registration: %w", err)
+	}
+	if app != nil {
+		return "this workspace's GitHub App", nil
+	}
+	managed, err := s.managedInstallationsInTheWay(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	if managed {
+		return "the deployment's GitHub App", nil
+	}
+	return "", nil
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -67,7 +68,7 @@ func TestTeamGitHubRepos_ReplaceForTeam_AppPath(t *testing.T) {
 	save := func(user, team string, repos ...domain.TeamGitHubRepo) {
 		t.Helper()
 		if err := stores.Tx.WithTx(ctx, orgA, user, func(tx db.TxStores) error {
-			return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, team, repos)
+			return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, team, dbtest.TestGitHubHost, repos)
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam(%s): %v", team, err)
 		}
@@ -119,7 +120,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerScoped_RLS(t *testing.T) {
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
 			return e
 		}); err != nil {
 			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
@@ -175,7 +176,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) 
 
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "Acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
@@ -185,7 +186,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) 
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgA, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
 			return e
 		}); err != nil {
 			t.Fatalf("TracksRepoViewerAdminScoped(%s, %s/%s): %v", userID, owner, repo, err)
@@ -197,7 +198,7 @@ func TestTeamGitHubRepos_Postgres_TracksRepoViewerAdminScoped_RLS(t *testing.T) 
 		var got bool
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, owner, repo)
+			got, e = tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgA, dbtest.TestGitHubHost, owner, repo)
 			return e
 		}); err != nil {
 			t.Fatalf("TracksRepoViewerScoped(%s, %s/%s): %v", userID, owner, repo, err)
@@ -254,13 +255,13 @@ func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
 
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA,
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("ReplaceForTeam: %v", err)
 	}
 
-	got, err := stores.Repos.GetByRefSystem(ctx, orgA, domain.RepoRefFromSlug("acme/api"))
+	got, err := stores.Repos.GetByRefSystem(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
 	if err != nil || got == nil {
 		t.Fatalf("GetSystem after tracking: got=%v err=%v — tracking must create the row immediately", got, err)
 	}
@@ -283,7 +284,7 @@ func TestTeamGitHubRepos_TrackedRowCarriesIdentity(t *testing.T) {
 		t.Fatalf("read surrogate id: %v", err)
 	}
 	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB,
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, dbtest.TestGitHubHost,
 			[]domain.TeamGitHubRepo{{Owner: "Acme", Repo: "API"}})
 	}); err != nil {
 		t.Fatalf("teamB ReplaceForTeam: %v", err)

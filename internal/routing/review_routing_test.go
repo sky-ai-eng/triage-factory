@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -231,7 +232,7 @@ func TestReviewRequested_TeamRoutesToMappedTFTeams(t *testing.T) {
 
 	teamA := runmode.LocalDefaultTeamID
 	teamBackend := seedTeam(t, database, "backend-tf")
-	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, []domain.TeamGitHubGroup{
+	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)
@@ -267,7 +268,7 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	teamBackend := seedTeam(t, database, "backend-tf")
 	seedUserOnTeam(t, database, teamAlice, "alice")
 	seedUserOnTeam(t, database, teamBob, "bob")
-	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, []domain.TeamGitHubGroup{
+	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)

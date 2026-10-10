@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -110,7 +111,7 @@ func TestCheckPush_UnprofiledRepoStillRefusesMain(t *testing.T) {
 func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 	stores := newPolicyStores(t)
 	if _, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "octo", Repo: "repo",
+		Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "repo",
 		DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed repository: %v", err)
@@ -118,6 +119,34 @@ func TestCheckPush_ProfiledDefaultBranchIsProtected(t *testing.T) {
 	if got := runCheckPush(policyHost(stores, false), stores,
 		[]string{"--remote", "https://github.com/octo/repo.git"}, prePushStdin("refs/heads/trunk")); got != ExitRefused {
 		t.Errorf("exit = %d, want %d (the repository's default branch is protected)", got, ExitRefused)
+	}
+}
+
+// TestCheckPush_ProtectsTheRepositoryOnTheOrgsHost: the remote is on the org's
+// current GitHub host, so the repository whose branches it protects is that
+// host's row. The same owner/repo on the host the org left is a different
+// repository, and its default branch is not protected here.
+func TestCheckPush_ProtectsTheRepositoryOnTheOrgsHost(t *testing.T) {
+	const ghe = "https://github.corp.example.com"
+	stores := newPolicyStores(t)
+	ctx := context.Background()
+	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ghe})
+	for _, r := range []domain.Repository{
+		{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "repo", DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t"},
+		{Host: ghe, Owner: "octo", Repo: "repo", DefaultBranch: "release", CloneURL: "https://y", ProfileText: "t"},
+	} {
+		if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, r); err != nil {
+			t.Fatalf("seed repository on %s: %v", r.Host, err)
+		}
+	}
+	host := policyHost(stores, false)
+	remote := []string{"--remote", ghe + "/octo/repo.git"}
+
+	if got := runCheckPush(host, stores, remote, prePushStdin("refs/heads/release")); got != ExitRefused {
+		t.Errorf("push to release = %d, want %d (the default branch of the repository on the org's host)", got, ExitRefused)
+	}
+	if got := runCheckPush(host, stores, remote, prePushStdin("refs/heads/trunk")); got != 0 {
+		t.Errorf("push to trunk = %d, want 0 (trunk is the default branch of the same name on %s, another repository)", got, dbtest.TestGitHubHost)
 	}
 }
 

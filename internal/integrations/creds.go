@@ -437,7 +437,9 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // resolution decides: every arm below mirrors github.activeApp, and the PAT
 // signal stands exactly where that would actually borrow a PAT.
 //
-//	pat          the PAT is the credential. It answers.
+//	pat          the PAT is the credential. It answers — when it was validated
+//	             on the org's current host (GitHubPATUsable), since the
+//	             resolver sends it nowhere else.
 //	byo_app      a live App answers; a registered-but-staged one is the middle
 //	             of a PAT→App switch, where the PAT is still what resolves, so
 //	             there the PAT answers.
@@ -453,12 +455,13 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // when the question was "would this workspace's credential system use it".
 //
 // The managed arm asks the one question that has an answer here: has this
-// workspace bound the shared App to any account? The App itself is a deployment
-// fact — configured in the operator's environment, not in anything this
-// function can read — so what makes it READY FOR THIS ORG is the bind, which is
-// also the only thing the org can do about it. Zero installations is a
-// workspace that has connected nothing, which is exactly what the setup step
-// exists to prompt.
+// workspace bound the shared App to any account on its current GitHub host? The
+// App itself is a deployment fact — configured in the operator's environment,
+// not in anything this function can read — so what makes it READY FOR THIS ORG
+// is the bind, which is also the only thing the org can do about it. Zero
+// installations on the host is a workspace that has connected nothing it can
+// use, which is exactly what the setup step exists to prompt; a binding left on
+// a host the org has moved off resolves nothing.
 //
 // A failed read is an ERROR, never a false. Reporting one as "not connected"
 // is indistinguishable to the caller from the real answer, and a caller that
@@ -480,15 +483,15 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return creds.GitHubPAT != "", nil
+		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrg(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHost(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return creds.GitHubPAT != "", nil
+		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
@@ -517,20 +520,42 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return creds.GitHubPAT != "", nil
+		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrgSystem(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHostSystem(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return creds.GitHubPAT != "", nil
+		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
 		return false, nil
 	}
+}
+
+// GitHubPATHostMatches reports whether an org PAT validated on boundURL — the
+// KeyGitHubURL value its bind stored beside it — may be sent to base. A PAT is
+// a credential for one GitHub deployment, so it is sent only to the host it
+// was validated on, compared as GitHubHost values. A PAT with no host recorded
+// beside it is used on the org's host as it resolves, which is the host its
+// bind would have recorded.
+func GitHubPATHostMatches(boundURL, base string) bool {
+	return boundURL == "" || domain.GitHubHost(boundURL) == domain.GitHubHost(base)
+}
+
+// GitHubPATUsable reports whether creds hold an org PAT that may be sent to the
+// org's GitHub host, where orgBase is org_settings.github_base_url. An empty
+// orgBase resolves to the URL stored beside the PAT, as the resolver resolves
+// it, so only a setting naming another host refuses the PAT. A PAT that fails
+// this is bound but unusable: the org has to rebind it on its current host.
+func GitHubPATUsable(creds auth.Credentials, orgBase string) bool {
+	if creds.GitHubPAT == "" {
+		return false
+	}
+	return orgBase == "" || GitHubPATHostMatches(creds.GitHubURL, orgBase)
 }
 
 // GitHubKeys returns the org GitHub credential's keys in the order ClearGitHub

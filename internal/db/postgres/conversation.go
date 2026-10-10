@@ -1748,12 +1748,14 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		           SELECT 1 FROM artifacts a
 		           WHERE a.org_id = $1 AND a.conversation_id = r.id
 		             AND a.kind = $6 AND a.state = $7 AND a.target = $8
+		             AND a.scope = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
 		       )
 		       OR EXISTS (
 		           SELECT 1
 		           FROM conversation_worktrees w
 		           JOIN repositories repo ON repo.org_id = $1 AND repo.id = w.repository_id
 		           WHERE w.org_id = $1 AND w.conversation_id = r.id
+		             AND repo.host = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
 		             AND (
 		                  (LOWER(repo.owner || '/' || repo.repo) = LOWER($4) AND w.ref = $9)
 		                  OR (w.ref = $10 AND (

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -90,14 +91,14 @@ func (r *teamPRsRig) seedTrackedPR(t *testing.T, orgID, teamID, login string, nu
 		VALUES ($1, $2, 'github', $3, 'pr', $4, '', $5::jsonb, $6, $6, 'https://github.com')
 	`, uuid.New().String(), orgID, fmt.Sprintf("%s/%s#%d", owner, repo, number), snap.Title, string(blob), now)
 	pgtest.MustExec(t, r.h.AdminDB, `
-		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
+		INSERT INTO repositories (org_id, source, host, owner, repo) VALUES ($1, 'github', $2, $3, $4)
 		ON CONFLICT DO NOTHING
-	`, orgID, owner, repo)
+	`, orgID, dbtest.TestGitHubHost, owner, repo)
 	pgtest.MustExec(t, r.h.AdminDB, `
 		INSERT INTO team_github_repos (team_id, repository_id, org_id)
-		VALUES ($1, (SELECT id FROM repositories WHERE org_id = $2 AND owner = $3 AND repo = $4), $2)
+		VALUES ($1, (SELECT id FROM repositories WHERE org_id = $2 AND host = $3 AND owner = $4 AND repo = $5), $2)
 		ON CONFLICT (team_id, repository_id) DO NOTHING
-	`, teamID, orgID, owner, repo)
+	`, teamID, orgID, dbtest.TestGitHubHost, owner, repo)
 }
 
 // bindIdentity binds login for userID on the org's effective GitHub host — the

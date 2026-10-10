@@ -951,12 +951,8 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		return out, false
 	}
 
-	// Fall back to SecretStore URLs when org_settings is empty — covers an
-	// install whose URL lives only in the credential bundle.
-	ghBaseURL := orgSet.GitHubBaseURL
-	if ghBaseURL == "" {
-		ghBaseURL = creds.GitHubURL
-	}
+	// The Jira service credential's client reads the site stored beside it, so
+	// the read shows that site when org_settings carries none.
 	jiraBaseURL := orgSet.JiraBaseURL
 	if jiraBaseURL == "" {
 		jiraBaseURL = creds.JiraURL
@@ -973,7 +969,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 	_, hasJiraCred := integrations.JiraSystemConfig(creds)
 
 	return orgSettingsResponse{
-		GitHubBaseURL:       ghBaseURL,
+		GitHubBaseURL:       orgSet.GitHubBaseURL,
 		GitHubPollInterval:  orgSet.GitHubPollInterval.String(),
 		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
 		HasGitHubPAT:        creds.GitHubPAT != "",
@@ -1066,6 +1062,18 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// A save that names github_base_url holds the lock every GitHub credential
+	// transition takes, from the check below to the write, so a credential
+	// cannot be bound between the check that the host may move and the move.
+	if len(req.GitHubBaseURL) > 0 {
+		release, err := s.acquireKeyedLock(r.Context(), &s.githubAppRegMu, githubAppRegRMWLockSalt, orgID)
+		if err != nil {
+			internalError(w, "settings/org", err)
+			return
+		}
+		defer release()
+	}
+
 	// ONE transaction for the read-modify-write, with the concurrency guard in
 	// the write itself. It used to span two — read the row, mutate in Go, write
 	// it back — so two admins saving different sections of the settings page
@@ -1109,6 +1117,20 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 				return fmt.Errorf("%w: disconnect %s first", errLLMAuthMethodHasCredentials, strings.Join(bound, " and "))
 			}
 		}
+		// The GitHub host moves only while no GitHub credential is connected:
+		// a token or an App works only on the GitHub that issued it, so the
+		// org's host is the one place a credential's host is recorded. Compared
+		// as stored, which is canonical, so re-sending the current value under
+		// another spelling is not a move.
+		if cur.GitHubBaseURL != prevOrgSet.GitHubBaseURL {
+			connected, err := s.githubCredentialConnected(r.Context(), tx, orgID)
+			if err != nil {
+				return err
+			}
+			if connected != "" {
+				return fmt.Errorf("%s is connected: %w", connected, errGitHubHostHasCredential)
+			}
+		}
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
 		return err
 	})
@@ -1122,6 +1144,15 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// rejects.
 		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
 			Reason: httpx.ReasonInvalidField, Message: err.Error(), Field: "llm_auth_method",
+		})
+		return
+	}
+	if errors.Is(err, errGitHubHostHasCredential) {
+		// 409, beside the other refusals this route makes over the state of
+		// the org's GitHub connection: the value is legal, the connection in
+		// place is what stands in the way, and disconnecting it is the fix.
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonConflict, Message: err.Error(), Field: "github_base_url",
 		})
 		return
 	}
@@ -1151,9 +1182,10 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 	linearChanged := orgSet.LinearPollInterval != prevOrgSet.LinearPollInterval
 
 	if ghChanged && s.onGitHubChanged != nil {
-		s.MarkJiraRestarted(r.Context(), orgID)
+		s.MarkGitHubRestarted(r.Context(), orgID)
 		go s.onGitHubChanged(orgID)
-	} else if jiraChanged && s.onJiraChanged != nil {
+	}
+	if jiraChanged && s.onJiraChanged != nil {
 		s.MarkJiraRestarted(r.Context(), orgID)
 		go s.onJiraChanged(orgID)
 	}
@@ -1192,9 +1224,10 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 // resolveOrgSettingsPatch validates the body once and returns the mutation it
 // describes. Two statuses for two fault classes, exactly as the team sibling:
 // shape and vocabulary answer 400, a well-formed value outside its band answers
-// 422. Checks that need the world rather than the body — the App-registration
-// gate on clearing the GitHub host, the SSH preflight — run here too, before
-// any transaction is open, because one of them takes fifteen seconds.
+// 422. A check that needs the world rather than the body — the SSH preflight —
+// runs here too, before any transaction is open, because it takes fifteen
+// seconds. The GitHub host's own check runs inside the write, against the row
+// it lands on (handleOrgSettingsPatch).
 //
 // On any failure the response is already written and ok is false.
 func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request, orgID string, req orgSettingsPatch) (apply func(*domain.OrgSettings), ok bool) {
@@ -1227,17 +1260,15 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	// both declare a host today, so the check always passes for them; a
 	// future kind added to this route inherits the refusal for free rather
 	// than needing its own copy of it.
-	clearingGitHubHost := false
 	for _, f := range []struct {
 		raw   json.RawMessage
 		field string
 		kind  string
-		clear *bool // set true when this field is the one being cleared
 		set   func(*domain.OrgSettings, string)
 	}{
-		{req.GitHubBaseURL, "github_base_url", eventsource.KindGitHub, &clearingGitHubHost,
+		{req.GitHubBaseURL, "github_base_url", eventsource.KindGitHub,
 			func(o *domain.OrgSettings, v string) { o.GitHubBaseURL = v }},
-		{req.JiraBaseURL, "jira_base_url", eventsource.KindJira, nil,
+		{req.JiraBaseURL, "jira_base_url", eventsource.KindJira,
 			func(o *domain.OrgSettings, v string) { o.JiraBaseURL = v }},
 	} {
 		v, st := httpx.PatchString(&shape, f.raw, f.field)
@@ -1251,9 +1282,6 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 		apply := f.set
 		switch st {
 		case httpx.PatchClear:
-			if f.clear != nil {
-				*f.clear = true
-			}
 			set(func(o *domain.OrgSettings) { apply(o, "") })
 		case httpx.PatchSet:
 			// Non-empty hosts go through the same validator + canonicalizer the
@@ -1474,39 +1502,6 @@ func (s *Server) resolveOrgSettingsPatch(w http.ResponseWriter, r *http.Request,
 	}
 	if ranges.Flush(w, http.StatusUnprocessableEntity) {
 		return nil, false
-	}
-
-	// Blanking the host while an App registration exists is REFUSED. The
-	// resolver's base lookup falls org_settings → the github_url secret →
-	// github.com, so an empty column silently re-points a GHES org's App at
-	// github.com: wrong host, no error, nothing in any log.
-	//
-	// Refused rather than skipped, which is where this differs from the PAT
-	// unbind's identical hazard. There, clearing the host is a side effect of
-	// unbinding a token, so quietly keeping it is right. Here the clear IS the
-	// request, and answering "saved" for work we declined to do is the
-	// parse-and-drop bug in another costume.
-	//
-	// Re-targeting to a different NON-empty host stays allowed: that's a real
-	// move during a GHES domain change, and whatever breaks is at least the
-	// value the admin typed rather than a default they never chose.
-	//
-	// GitHub-only: jira.CanonicalHost returns ok=false on a blank base URL, so
-	// the Jira surfaces fail loudly instead of resolving somewhere wrong.
-	if clearingGitHubHost {
-		app, err := s.githubApps.GetForOrgSystem(r.Context(), orgID)
-		if err != nil {
-			internalError(w, "settings/org", err)
-			return nil, false
-		}
-		if app != nil {
-			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
-				Reason:  httpx.ReasonConflict,
-				Message: "this workspace's GitHub App is registered against this host — remove the App before clearing it",
-				Field:   "github_base_url",
-			})
-			return nil, false
-		}
 	}
 
 	if !s.orgSettingsSSHPreflight(w, r, orgID, mutators) {

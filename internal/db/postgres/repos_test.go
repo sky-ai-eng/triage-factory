@@ -57,6 +57,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 
 	// Seed a repo into orgA only.
 	if _, err := stores.Repos.Upsert(ctx, orgA, domain.Repository{
+		Host:  dbtest.TestGitHubHost,
 		Owner: "octo", Repo: "widget",
 		Description: "orgA widget", ProfileText: "orgA body",
 		DefaultBranch: "main",
@@ -65,14 +66,14 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// Get(orgB, octo/widget) must return nil despite the row existing.
-	if got, err := stores.Repos.GetByRef(ctx, orgB, domain.RepoRefFromSlug("octo/widget")); err != nil {
+	if got, err := stores.Repos.GetByRef(ctx, orgB, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); err != nil {
 		t.Fatalf("Get cross-org: %v", err)
 	} else if got != nil {
 		t.Errorf("orgB Get returned orgA repo %s", got.ID)
 	}
 
 	// List cross-org must return empty.
-	got, total, err := stores.Repos.List(ctx, orgB, db.ListOpts{Limit: 50})
+	got, total, err := stores.Repos.List(ctx, orgB, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 	if err != nil {
 		t.Fatalf("List cross-org: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	}
 
 	// CountConfigured cross-org must report 0.
-	if n, _ := stores.Repos.CountConfigured(ctx, orgB); n != 0 {
+	if n, _ := stores.Repos.CountConfigured(ctx, orgB, dbtest.TestGitHubHost); n != 0 {
 		t.Errorf("orgB CountConfigured = %d, want 0", n)
 	}
 
@@ -90,22 +91,22 @@ func TestRepositoryStore_Postgres_CrossOrgLeakage(t *testing.T) {
 	// only shape of this attack that survives the split: a caller who has
 	// somehow learned the handle still cannot reach across the tenant, and
 	// gets told the row does not exist rather than silently writing nothing.
-	rowA, err := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget"))
+	rowA, err := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget"))
 	if err != nil || rowA == nil {
 		t.Fatalf("read orgA's row: got=%v err=%v", rowA, err)
 	}
 	if _, err := stores.Repos.UpdateBaseBranch(ctx, orgB, rowA.ID, "hack"); !errors.Is(err, db.ErrNoSuchRepository) {
 		t.Errorf("cross-org UpdateBaseBranch = %v, want db.ErrNoSuchRepository", err)
 	}
-	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.BaseBranch != "" {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); got.BaseBranch != "" {
 		t.Errorf("orgA's BaseBranch was mutated by orgB UpdateBaseBranch: got %q", got.BaseBranch)
 	}
 
 	// UpdateCloneStatus cross-org must not touch orgA's row.
-	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
+	if _, err := stores.Repos.UpdateCloneStatusByRef(ctx, orgB, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "octo", Repo: "widget"}, "failed", "hack", "other"); err != nil {
 		t.Fatalf("UpdateCloneStatus cross-org: %v", err)
 	}
-	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/widget")); got.CloneStatus == "failed" {
+	if got, _ := stores.Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/widget")); got.CloneStatus == "failed" {
 		t.Errorf("orgA's CloneStatus was mutated by orgB UpdateCloneStatus: got %q", got.CloneStatus)
 	}
 }
@@ -131,6 +132,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 	ctx := context.Background()
 	if _, err := stores.Repos.UpsertSystem(ctx, orgA, domain.Repository{
+		Host:  dbtest.TestGitHubHost,
 		Owner: "octo", Repo: "rls",
 		Description: "orgA rls repo", ProfileText: "body",
 		DefaultBranch: "main",
@@ -140,7 +142,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("same_org_user_can_read", func(t *testing.T) {
 		err := h.WithUser(t, alice, orgA, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -156,7 +158,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 
 	t.Run("cross_org_read_filtered", func(t *testing.T) {
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
-			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug("octo/rls"))
+			got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.GetByRef(ctx, orgA, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "octo/rls"))
 			if err != nil {
 				return fmt.Errorf("Get: %w", err)
 			}
@@ -177,6 +179,7 @@ func TestRepositoryStore_Postgres_CrossOrgRLSDenied(t *testing.T) {
 		// is the expected outcome.
 		err := h.WithUser(t, bob, orgB, func(tx *sql.Tx) error {
 			_, e := pgstore.NewForTx(tx, pgtest.SecretKey).Repos.Upsert(ctx, orgA, domain.Repository{
+				Host:  dbtest.TestGitHubHost,
 				Owner: "octo", Repo: "rls-write",
 				Description: "x", ProfileText: "x", DefaultBranch: "main",
 			})
@@ -212,12 +215,12 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 
 	// teamA tracks acme/api; teamB tracks acme/web.
 	if err := stores.Tx.WithTx(ctx, orgA, alice, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "api"}})
 	}); err != nil {
 		t.Fatalf("track acme/api for teamA: %v", err)
 	}
 	if err := stores.Tx.WithTx(ctx, orgA, bob, func(tx db.TxStores) error {
-		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "web"}})
+		return tx.TeamGitHubRepos.ReplaceForTeam(ctx, orgA, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "acme", Repo: "web"}})
 	}); err != nil {
 		t.Fatalf("track acme/web for teamB: %v", err)
 	}
@@ -227,7 +230,7 @@ func TestRepositoryStore_Postgres_ListTeamScoped_RLS(t *testing.T) {
 		var got []domain.Repository
 		if err := stores.Tx.WithTx(ctx, orgA, userID, func(tx db.TxStores) error {
 			var e error
-			got, _, e = tx.Repos.ListTeamScoped(ctx, orgA, db.ListOpts{Limit: 50})
+			got, _, e = tx.Repos.ListTeamScoped(ctx, orgA, dbtest.TestGitHubHost, db.ListOpts{Limit: 50})
 			return e
 		}); err != nil {
 			t.Fatalf("ListTeamScoped(%s): %v", userID, err)
@@ -292,6 +295,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	write("Upsert (insert arm)", func(tx db.TxStores) error {
 		var e error
 		created, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Host:  dbtest.TestGitHubHost,
 			Owner: "Acme", Repo: "Api",
 			ProfileText: "v1", DefaultBranch: "main", ExternalID: "1296269",
 			ProfiledAt: &profiled,
@@ -303,6 +307,7 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	write("Upsert (update arm)", func(tx db.TxStores) error {
 		var e error
 		updated, e = tx.Repos.Upsert(ctx, orgID, domain.Repository{
+			Host:  dbtest.TestGitHubHost,
 			Owner: "acme", Repo: "api",
 			ProfileText: "v2", DefaultBranch: "main",
 			ProfiledAt: &profiled,
@@ -324,13 +329,35 @@ func TestRepositoryStore_Postgres_ReturnedRow_AppPool(t *testing.T) {
 	var stamped *domain.Repository
 	write("UpdateCloneStatusByRef", func(tx db.TxStores) error {
 		var e error
-		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
+		stamped, e = tx.Repos.UpdateCloneStatusByRef(ctx, orgID, domain.RepoRef{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api"}, "failed", "boom", "ssh")
 		return e
 	})
 	if stamped == nil {
 		t.Fatal("UpdateCloneStatusByRef returned no row for a repository the caller can see")
 	}
 	dbtest.AssertWriteReturnedStoredRow(t, "UpdateCloneStatusByRef (app pool)", *stamped, read(created.ID))
+}
+
+// TestRepositoryStore_Postgres_UpsertReturnedRowConformance runs the
+// host-carrying upsert's returned-row suite inside a claims-carrying
+// transaction on the app pool, so every arm's RETURNING — and the id-rule
+// subquery it evaluates — answers under the repositories RLS policy rather
+// than on a BYPASSRLS connection.
+func TestRepositoryStore_Postgres_UpsertReturnedRowConformance(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID, _ := seedPgRepoOrg(t, h)
+
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		store := pgstore.NewForTx(tx, pgtest.SecretKey).Repos
+		dbtest.RunRepositoryUpsertReturnedRowConformance(t, func(t *testing.T) (db.RepositoryStore, string) {
+			t.Helper()
+			return store, orgID
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("WithUser: %v", err)
+	}
 }
 
 func repoIDs(profiles []domain.Repository) []string {

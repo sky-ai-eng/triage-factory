@@ -377,3 +377,61 @@ func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 		t.Fatalf("no-credential PUT = %d, want 200 (fail-open); body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestTeamRepos_OperateOnTheCurrentHostOnly pins that a team's tracked set is
+// per GitHub host. Once the org points at another host, the GET lists only that
+// host's tracking (none yet), a PUT records the new host's set without pruning
+// the old host's rows, and pointing the org back shows the old set unchanged.
+// No credentials are bound, so the reachability gate fails open and the test is
+// about the host alone.
+func TestTeamRepos_OperateOnTheCurrentHostOnly(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	srv := newTestServer(t)
+	const route = "/api/teams/default/github-repos"
+	put := func(slugs ...string) {
+		t.Helper()
+		if rec := doJSON(t, srv, http.MethodPut, route, map[string]any{"repos": slugs}); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %v = %d, want 200; body=%s", slugs, rec.Code, rec.Body.String())
+		}
+	}
+	get := func() []string {
+		t.Helper()
+		rec := doJSON(t, srv, http.MethodGet, route, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp teamReposResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Repos
+	}
+
+	put("acme/api", "acme/web")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
+		t.Fatalf("tracked on the default host = %v, want [acme/api acme/web]", got)
+	}
+
+	setOrgGitHubBase(t, srv, "https://ghe.example.com")
+	if got := get(); len(got) != 0 {
+		t.Fatalf("tracked on the new host = %v, want none: the old host's tracking is not this host's", got)
+	}
+	// acme/api again on purpose: the same name on another host is another
+	// repository.
+	put("acme/api", "ghe/tool")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "ghe/tool"}) {
+		t.Errorf("tracked on the new host = %v, want [acme/api ghe/tool]", got)
+	}
+	onNew, err := srv.allStores.TeamGitHubRepos.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID, "https://ghe.example.com")
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(onNew) != 2 {
+		t.Errorf("rows stored on the new host = %+v, want 2", onNew)
+	}
+
+	setOrgGitHubBase(t, srv, "")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
+		t.Errorf("tracked back on the default host = %v, want the original [acme/api acme/web] unpruned", got)
+	}
+}

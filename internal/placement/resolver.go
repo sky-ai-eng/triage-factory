@@ -18,9 +18,10 @@ type InstanceLister interface {
 
 // OverrideReader is the placement_overrides read the resolver needs.
 // Satisfied by db.PlacementOverrideStore. Returns (nil, nil) for a key with
-// no override — the common case.
+// no override — the common case. host is the GitHub host the repository a
+// repo key names lives on.
 type OverrideReader interface {
-	Get(ctx context.Context, orgID, keyKind, keyValue string) (*domain.PlacementOverride, error)
+	Get(ctx context.Context, orgID, keyKind, host, keyValue string) (*domain.PlacementOverride, error)
 }
 
 // Config tunes the resolver + the two-tier claim it feeds. The zero value
@@ -124,6 +125,7 @@ type Plan struct {
 	Enabled    bool
 	OrgID      string
 	KeyKind    string
+	Host       string // the GitHub host of the key's repository: whose override applies
 	KeyValue   string
 	Candidates []Candidate // full order, eligible first (rendezvous), then excluded
 	// PreferredSet is the ordered preferred instance ids (pin, or top-K).
@@ -153,16 +155,16 @@ func (p Plan) PreferredForConversation(conversationID string) string {
 	}
 }
 
-// Resolve computes the Plan for (orgID, keyKind, keyValue), used at enqueue
+// Resolve computes the Plan for (orgID, keyKind, host, keyValue), used at enqueue
 // to stamp a conversation. A disabled resolver short-circuits to a plan with no
 // preferred set (callers stamp nothing). Any store error is returned; the
 // caller decides whether to proceed with no affinity (enqueue does — a failed
 // placement read must never block minting work).
-func (r *Resolver) Resolve(ctx context.Context, orgID, keyKind, keyValue string) (Plan, error) {
+func (r *Resolver) Resolve(ctx context.Context, orgID, keyKind, host, keyValue string) (Plan, error) {
 	if !r.Enabled() {
-		return Plan{OrgID: orgID, KeyKind: keyKind, KeyValue: keyValue, Aging: r.cfg.Aging, Liveness: r.cfg.Liveness}, nil
+		return Plan{OrgID: orgID, KeyKind: keyKind, Host: host, KeyValue: keyValue, Aging: r.cfg.Aging, Liveness: r.cfg.Liveness}, nil
 	}
-	return r.computePlan(ctx, orgID, keyKind, keyValue)
+	return r.computePlan(ctx, orgID, keyKind, host, keyValue)
 }
 
 // Explain computes the Plan the same way Resolve does but ALWAYS evaluates the
@@ -170,15 +172,16 @@ func (r *Resolver) Resolve(ctx context.Context, orgID, keyKind, keyValue string)
 // explainer (GET /api/fleet/placement) can preview exactly who would own a key
 // before the layer is switched on. The plan's Enabled field still reports the
 // live config, so the caller can tell an advisory-off view from a live one.
-func (r *Resolver) Explain(ctx context.Context, orgID, keyKind, keyValue string) (Plan, error) {
-	return r.computePlan(ctx, orgID, keyKind, keyValue)
+func (r *Resolver) Explain(ctx context.Context, orgID, keyKind, host, keyValue string) (Plan, error) {
+	return r.computePlan(ctx, orgID, keyKind, host, keyValue)
 }
 
-func (r *Resolver) computePlan(ctx context.Context, orgID, keyKind, keyValue string) (Plan, error) {
+func (r *Resolver) computePlan(ctx context.Context, orgID, keyKind, host, keyValue string) (Plan, error) {
 	plan := Plan{
 		Enabled:  r.Enabled(),
 		OrgID:    orgID,
 		KeyKind:  keyKind,
+		Host:     host,
 		KeyValue: keyValue,
 		Aging:    r.cfg.Aging,
 		Liveness: r.cfg.Liveness,
@@ -195,7 +198,7 @@ func (r *Resolver) computePlan(ctx context.Context, orgID, keyKind, keyValue str
 
 	var override *domain.PlacementOverride
 	if r.overrides != nil {
-		ov, err := r.overrides.Get(ctx, orgID, keyKind, keyValue)
+		ov, err := r.overrides.Get(ctx, orgID, keyKind, host, keyValue)
 		if err != nil {
 			return plan, err
 		}
@@ -332,7 +335,10 @@ func containsCandidate(cs []Candidate, id string) bool {
 // keyFor builds the rendezvous key string. orgID is folded in so two orgs
 // that share a repo name never rendezvous onto the same owner, and the kind
 // separates the key's namespace from any future one. The 0x1f unit
-// separator keeps the three fields unambiguous.
+// separator keeps the three fields unambiguous. The host is not folded in:
+// it decides which override applies, and two hosts' same-named repositories
+// sharing a preferred owner costs nothing, while folding it in would move
+// every key's owner.
 func keyFor(orgID, keyKind, keyValue string) string {
 	return orgID + "\x1f" + keyKind + "\x1f" + keyValue
 }

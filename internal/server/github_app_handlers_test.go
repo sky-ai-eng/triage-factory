@@ -19,7 +19,7 @@ import (
 
 // fakeGitHubAppsStore stands in for the real store so the refresh handler's
 // branches can be driven directly: GetForOrgSystem decides the 404, the two
-// reconciles decide the 502, and ListInstallationsForOrgSystem supplies the
+// reconciles decide the 502, and ListInstallationsOnHostSystem supplies the
 // post-reconcile installations. The embedded interface is nil, so any method
 // the handler doesn't call panics — which keeps the fake honest about the
 // surface the handler actually depends on.
@@ -60,8 +60,24 @@ func (f *fakeGitHubAppsStore) RefreshManagedInstallations(_ context.Context, _ s
 	return f.managedErr
 }
 
-func (f *fakeGitHubAppsStore) ListInstallationsForOrgSystem(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
-	return f.insts, f.listErr
+// ListInstallationsOnHostSystem answers like the store: the rows on host, and
+// nothing for an empty host. A fixture installation that names no GitHubHost is
+// on the org's current host, the only host the handlers ask about.
+func (f *fakeGitHubAppsStore) ListInstallationsOnHostSystem(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 // TestGitHubAppStatus_LocalMode_NoApp returns app:null + empty

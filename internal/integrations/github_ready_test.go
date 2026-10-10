@@ -13,6 +13,7 @@ import (
 type readyOrgs struct {
 	db.OrgsStore
 	class domain.GitHubCredentialClass
+	base  string // org_settings.github_base_url
 	err   error
 }
 
@@ -20,7 +21,7 @@ func (o readyOrgs) GetSettings(context.Context, string) (domain.OrgSettings, err
 	if o.err != nil {
 		return domain.OrgSettings{}, o.err
 	}
-	return domain.OrgSettings{GitHubCredentialClass: o.class}, nil
+	return domain.OrgSettings{GitHubCredentialClass: o.class, GitHubBaseURL: o.base}, nil
 }
 
 func (o readyOrgs) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
@@ -41,12 +42,25 @@ func (a readyApps) GetForOrgSystem(ctx context.Context, orgID string) (*domain.O
 	return a.GetForOrg(ctx, orgID)
 }
 
-func (a readyApps) ListInstallationsForOrg(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.insts, nil
+// ListInstallationsOnHost answers like the store: the rows on host, and
+// nothing for an empty host. A fixture installation that names no GitHubHost is
+// on the org's current host, the only host GitHubReady asks about.
+func (a readyApps) ListInstallationsOnHost(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range a.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
-func (a readyApps) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.ListInstallationsForOrg(ctx, orgID)
+func (a readyApps) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	return a.ListInstallationsOnHost(ctx, orgID, host)
 }
 
 // TestGitHubReady_EveryCredentialClass walks all three classes through the
@@ -178,6 +192,45 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 	}
 }
 
+// TestGitHubReady_ManagedBindOnAnotherHostIsNotReady: a managed workspace is
+// ready when it has bound an account on its current GitHub host, because those
+// are the installations its resolution mints from. A bind left on a host the
+// org has moved off resolves nothing here, so it reads as connecting nothing.
+func TestGitHubReady_ManagedBindOnAnotherHostIsNotReady(t *testing.T) {
+	ctx := context.Background()
+	const current = "https://ghe.new.example.com"
+	onOld := domain.OrgGitHubAppInstallation{InstallationID: "456", AccountLogin: "acme", GitHubHost: "https://ghe.old.example.com"}
+	onCurrent := domain.OrgGitHubAppInstallation{InstallationID: "789", AccountLogin: "acme", GitHubHost: current}
+
+	for _, tc := range []struct {
+		name  string
+		insts []domain.OrgGitHubAppInstallation
+		want  bool
+	}{
+		{"bound only on the old host", []domain.OrgGitHubAppInstallation{onOld}, false},
+		{"bound on both hosts", []domain.OrgGitHubAppInstallation{onOld, onCurrent}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: domain.GitHubCredentialClassManagedApp, base: current + "/"}
+			apps := readyApps{insts: tc.insts}
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", auth.Credentials{})
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", auth.Credentials{})
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
+	}
+}
+
 // TestGitHubReady_ReadFailureIsAnError pins that a backend fault stays a fault.
 // Reporting one as "not connected" is indistinguishable to the caller from the
 // real answer, and would send a founder back through setup over a store blip.
@@ -185,5 +238,106 @@ func TestGitHubReady_ReadFailureIsAnError(t *testing.T) {
 	boom := errors.New("settings store unavailable")
 	if _, err := GitHubReady(context.Background(), readyOrgs{err: boom}, readyApps{}, "org-1", auth.Credentials{}); !errors.Is(err, boom) {
 		t.Errorf("err = %v; want the settings read error to propagate", err)
+	}
+}
+
+// TestGitHubPATHostMatches is the truth table for the host check every PAT read
+// makes: the PAT is sent only to the host recorded beside it, both sides
+// compared as GitHubHost values, and a PAT with no recorded host is used on
+// whatever host the org resolves to.
+func TestGitHubPATHostMatches(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		bound, base  string
+		wantSendable bool
+	}{
+		{"same host", "https://ghe.example.com", "https://ghe.example.com", true},
+		{"trailing slash on the bound url", "https://ghe.example.com/", "https://ghe.example.com", true},
+		{"trailing slashes on the base", "https://ghe.example.com", "https://ghe.example.com//", true},
+		{"another host", "https://ghe.example.com", "https://github.com", false},
+		{"another GHES path mount", "https://ghe.example.com/a", "https://ghe.example.com/b", false},
+		// An empty base is the deployment default, github.com in a test process.
+		{"empty base is the default host", "https://github.com", "", true},
+		{"empty base, PAT bound on GHES", "https://ghe.example.com", "", false},
+		// No host recorded: nothing to disagree with.
+		{"no bound host", "", "https://ghe.example.com", true},
+		{"no bound host, empty base", "", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GitHubPATHostMatches(tc.bound, tc.base); got != tc.wantSendable {
+				t.Errorf("GitHubPATHostMatches(%q, %q) = %v; want %v", tc.bound, tc.base, got, tc.wantSendable)
+			}
+		})
+	}
+}
+
+// TestGitHubPATUsable is the truth table for the readiness half of the same
+// rule. An empty org setting resolves to the URL stored beside the PAT, so
+// only a setting that names another host makes a bound PAT unusable.
+func TestGitHubPATUsable(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		creds   auth.Credentials
+		orgBase string
+		want    bool
+	}{
+		{"no pat", auth.Credentials{GitHubURL: "https://github.com"}, "https://github.com", false},
+		{"no pat, no host", auth.Credentials{}, "", false},
+		{"pat on its own host", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "https://ghe.example.com", true},
+		{"pat on its own host, slashes differ", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com/"}, "https://ghe.example.com", true},
+		{"pat bound on another host", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "https://github.com", false},
+		{"pat with no bound host", auth.Credentials{GitHubPAT: "ghp_x"}, "https://ghe.example.com", true},
+		// No setting: the org resolves to the PAT's own URL, so it matches by
+		// construction even for a GHES PAT.
+		{"empty org setting", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := GitHubPATUsable(tc.creds, tc.orgBase); got != tc.want {
+				t.Errorf("GitHubPATUsable(%+v, %q) = %v; want %v", tc.creds, tc.orgBase, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitHubReady_PATBoundOnAnotherHostIsNotReady pins the gate on the PAT
+// arms: a PAT validated on a host other than the org's current one is a
+// credential the resolver refuses to send, so the org reads as not connected
+// until it is rebound — on the pat class and in the staged window of a
+// PAT-to-App switch alike, through both doors.
+func TestGitHubReady_PATBoundOnAnotherHostIsNotReady(t *testing.T) {
+	ctx := context.Background()
+	staged := &domain.OrgGitHubApp{Active: false, ClientID: "Iv1.byo"}
+	creds := auth.Credentials{GitHubPAT: "ghp_present", GitHubURL: "https://ghe.old.example.com"}
+
+	for _, tc := range []struct {
+		name  string
+		class domain.GitHubCredentialClass
+		app   *domain.OrgGitHubApp
+		base  string
+		want  bool
+	}{
+		{"pat class, host moved", domain.GitHubCredentialClassPAT, nil, "https://github.com", false},
+		{"pat class, same host", domain.GitHubCredentialClassPAT, nil, "https://ghe.old.example.com/", true},
+		{"byo app staged behind the pat, host moved", domain.GitHubCredentialClassBYOApp, staged, "https://github.com", false},
+		{"byo app staged behind the pat, same host", domain.GitHubCredentialClassBYOApp, staged, "https://ghe.old.example.com", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: tc.class, base: tc.base}
+			apps := readyApps{app: tc.app}
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
 	}
 }

@@ -153,11 +153,12 @@ func TestHandlePRCoherence_MaterializedHeadBranchTargetsOtherEntity(t *testing.T
 	seedConversation(t, database, "branch-worker", "sess", "/tmp/branch-worker")
 	setConversationStatus(t, database, "branch-worker", "open")
 	stores := testSpawnerStores(database)
-	if _, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{Owner: "fork", Repo: "r", CloneURL: "https://example.com/fork/r.git"}); err != nil {
+	forkRepo, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{Host: dbtest.TestGitHubHost, Owner: "fork", Repo: "r", CloneURL: "https://example.com/fork/r.git"})
+	if err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "branch-worker", RepoID: "fork/r", Path: "/tmp/branch-worker/fork/r", Ref: worktree.CheckoutRefSlug("feature/coherence"),
+		ConversationID: "branch-worker", RepositoryID: forkRepo.ID, Path: "/tmp/branch-worker/fork/r", Ref: worktree.CheckoutRefSlug("feature/coherence"),
 	}); err != nil {
 		t.Fatalf("seed branch worktree: %v", err)
 	}
@@ -181,11 +182,12 @@ func TestHandlePRCoherence_PendingReviewAndPRCheckoutTargetOtherEntities(t *test
 
 	seedConversation(t, database, "pr-worker", "sess", "/tmp/pr-worker")
 	setConversationStatus(t, database, "pr-worker", "open")
-	if _, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{Owner: "o", Repo: "r", CloneURL: "https://example.com/o/r.git"}); err != nil {
+	prRepo, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{Host: dbtest.TestGitHubHost, Owner: "o", Repo: "r", CloneURL: "https://example.com/o/r.git"})
+	if err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 	if _, _, err := stores.ConversationWorktrees.InsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ConversationWorktree{
-		ConversationID: "pr-worker", RepoID: "o/r", Path: "/tmp/pr-worker/o/r", Ref: worktree.PRRefSlug(7),
+		ConversationID: "pr-worker", RepositoryID: prRepo.ID, Path: "/tmp/pr-worker/o/r", Ref: worktree.PRRefSlug(7),
 	}); err != nil {
 		t.Fatalf("seed PR worktree: %v", err)
 	}

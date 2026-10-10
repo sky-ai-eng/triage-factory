@@ -294,7 +294,7 @@ func StartReaper(ctx context.Context, policy Policy, interval time.Duration) {
 }
 
 // scanBares walks every cache root and returns one entry per bare
-// (owner/repo .git dir) with its on-disk size and effective last-used
+// (<repository id>.git dir) with its on-disk size and effective last-used
 // time. The root walk SkipDirs at each .git boundary so it doesn't
 // recurse looking for (impossible) nested bares; the per-bare footprint
 // is then summed by dirSize, which does traverse that bare's tree.
@@ -372,20 +372,19 @@ func dirSize(dir string) int64 {
 	return total
 }
 
-// ownerRepoFromBareDir recovers (owner, repo) from a bare clone path of
-// the form <...>/<owner>/<repo>.git. Used to take the per-repo lock
+// repositoryIDFromBareDir recovers the repository id from a bare clone path
+// of the form <...>/<repository id>.git. Used to take the per-repo lock
 // before evicting.
-func ownerRepoFromBareDir(dir string) (owner, repo string, ok bool) {
+func repositoryIDFromBareDir(dir string) (string, bool) {
 	base := filepath.Base(dir)
 	if !strings.HasSuffix(base, ".git") {
-		return "", "", false
+		return "", false
 	}
-	repo = strings.TrimSuffix(base, ".git")
-	owner = filepath.Base(filepath.Dir(dir))
-	if owner == "" || owner == "." || owner == string(filepath.Separator) || repo == "" {
-		return "", "", false
+	id := strings.TrimSuffix(base, ".git")
+	if !validRepositoryID(id) {
+		return "", false
 	}
-	return owner, repo, true
+	return id, true
 }
 
 // bareHasLiveWorktrees reports whether bareDir has any linked worktree
@@ -426,11 +425,11 @@ func bareHasLiveWorktrees(bareDir string) bool {
 // — the bare stays. Returns the bytes reclaimed, or 0 when the bare was
 // skipped (in use) or already gone.
 func evictBare(entry bareEntry) int64 {
-	owner, repo, ok := ownerRepoFromBareDir(entry.dir)
+	id, ok := repositoryIDFromBareDir(entry.dir)
 	if !ok {
 		return 0
 	}
-	mu := lockRepo(owner, repo)
+	mu := lockRepo(id)
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -452,12 +451,12 @@ func evictBare(entry bareEntry) int64 {
 	removeRegisteredWorktrees(entry.dir)
 	size := dirSize(entry.dir)
 	if err := os.RemoveAll(entry.dir); err != nil {
-		worktreeLog.Error("evict bare failed", "owner", owner, "repo", repo, "error", err)
+		worktreeLog.Error("evict bare failed", "repository_id", id, "error", err)
 		return 0
 	}
 	forgetBare(entry.dir)
 	worktreeLog.Debug("evicted bare",
-		"owner", owner, "repo", repo, "bytes", size, "idle", time.Since(entry.lastUsed).Round(time.Second))
+		"repository_id", id, "bytes", size, "idle", time.Since(entry.lastUsed).Round(time.Second))
 	return size
 }
 
