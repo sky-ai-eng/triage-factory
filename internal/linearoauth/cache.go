@@ -49,6 +49,9 @@ var errEnvelopeMoved = errors.New("linearoauth: refused refresh token is no long
 // while the envelope still names the install it was minted for (its
 // install_id). A new install or a disconnect anywhere in the deployment is
 // therefore seen on the next read, with no invalidation message to deliver.
+// The envelope also carries the access token the last refresh minted, so a
+// cache with nothing of its own (a new process, a host-CLI exec verb) serves
+// that one while it has headroom rather than refreshing.
 //
 // A singleflight keyed by org coalesces one process's concurrent refreshes.
 // Every write — the rotation write-back and a revoke — holds the org's
@@ -117,7 +120,7 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	if ct, ok := c.fresh(orgID, cred.InstallID); ok {
+	if ct, ok := c.fresh(orgID, cred); ok {
 		return ct.accessToken, ct.expiresAt, nil
 	}
 
@@ -143,16 +146,25 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 	}
 }
 
-// fresh is the cached token for orgID when it was minted for the install
-// installID names and has headroom left.
-func (c *TokenCache) fresh(orgID, installID string) (cachedToken, bool) {
+// fresh is a token for the install cred names with headroom left: the one
+// this cache holds, else the one stored in the envelope, which this cache then
+// holds too.
+func (c *TokenCache) fresh(orgID string, cred linear.InstallCredential) (cachedToken, bool) {
+	horizon := c.timeNow().Add(refreshSkew)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ct, ok := c.cache[orgID]
-	if !ok || ct.installID != installID || !c.timeNow().Add(refreshSkew).Before(ct.expiresAt) {
+	if ct, ok := c.cache[orgID]; ok && ct.installID == cred.InstallID && horizon.Before(ct.expiresAt) {
+		return ct, true
+	}
+	if cred.AccessToken == "" || cred.AccessTokenExpiresUnix == 0 {
 		return cachedToken{}, false
 	}
-	return ct, true
+	stored := cachedToken{installID: cred.InstallID, accessToken: cred.AccessToken, expiresAt: time.Unix(cred.AccessTokenExpiresUnix, 0)}
+	if !horizon.Before(stored.expiresAt) {
+		return cachedToken{}, false
+	}
+	c.cache[orgID] = stored
+	return stored, true
 }
 
 // readEnvelope reads and parses the org's install envelope, returning the raw
@@ -186,7 +198,7 @@ func (c *TokenCache) readEnvelope(ctx context.Context, orgID string) (linear.Ins
 func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, error) {
 	// Re-checked under the flight: a sibling caller may have just refreshed.
 	if cred, _, err := c.readEnvelope(ctx, orgID); err == nil {
-		if ct, ok := c.fresh(orgID, cred.InstallID); ok {
+		if ct, ok := c.fresh(orgID, cred); ok {
 			return ct, nil
 		}
 	}
@@ -269,9 +281,12 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID string) (_ cachedTok
 
 	// The write-back lands only over the envelope this refresh read, and
 	// before the cache, so a crash after it still leaves a live refresh token
-	// for the next refresh.
+	// for the next refresh. It stores the new access token too, for every
+	// other process to use until it expires.
 	rotated := cred
 	rotated.RefreshToken = tok.RefreshToken
+	rotated.AccessToken = tok.AccessToken
+	rotated.AccessTokenExpiresUnix = tok.ExpiresAt.Unix()
 	env, err := linear.MarshalInstallCredential(rotated)
 	if err != nil {
 		return cachedToken{}, cred, raw, err

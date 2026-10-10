@@ -230,6 +230,64 @@ func TestTokenCache_RotationWriteBack(t *testing.T) {
 	}
 }
 
+// TestTokenCache_ColdCacheUsesTheStoredToken is the one-process-per-call case
+// (an exec verb run from the host CLI): a cache with nothing of its own serves
+// the access token the last refresh stored, rather than refreshing and
+// rotating the refresh token on every call, and refreshes only once that token
+// is inside the skew.
+func TestTokenCache_ColdCacheUsesTheStoredToken(t *testing.T) {
+	r := newRig(t)
+	if _, _, err := r.cache().AccessTokenForOrg(context.Background(), cOrg); err != nil {
+		t.Fatalf("first process: %v", err)
+	}
+	stored, _ := storedInstall(t, r.secrets)
+	if stored.AccessToken != "acc-1" || stored.AccessTokenExpiresUnix != installedAt.Add(24*time.Hour).Unix() {
+		t.Fatalf("stored access token = (%q, %d), want acc-1 expiring in 24h", stored.AccessToken, stored.AccessTokenExpiresUnix)
+	}
+
+	r.clock = installedAt.Add(time.Hour)
+	for i := range 3 {
+		access, exp, err := r.cache().AccessTokenForOrg(context.Background(), cOrg)
+		if err != nil {
+			t.Fatalf("cold process %d: %v", i, err)
+		}
+		if access != "acc-1" || !exp.Equal(installedAt.Add(24*time.Hour)) {
+			t.Errorf("cold process %d = (%q, %v), want the stored acc-1", i, access, exp)
+		}
+	}
+	if n := r.ref.calls.Load(); n != 1 {
+		t.Errorf("refreshes = %d, want 1: cold processes must not rotate a token that is still good", n)
+	}
+
+	r.clock = installedAt.Add(24*time.Hour - 30*time.Second)
+	if access, _, _ := r.cache().AccessTokenForOrg(context.Background(), cOrg); access != "acc-2" {
+		t.Errorf("cold read inside the refresh skew = %q, want a fresh acc-2", access)
+	}
+	if stored, _ := storedInstall(t, r.secrets); stored.AccessToken != "acc-2" || stored.RefreshToken != "ref-2" {
+		t.Errorf("stored after the second refresh = (%q, %q), want acc-2 and ref-2", stored.AccessToken, stored.RefreshToken)
+	}
+}
+
+// TestTokenCache_StoredTokenIsTheInstallsOwn pins that a stored token is
+// served for the install whose envelope carries it and no other: a new
+// install's envelope arrives with its own token, or none, never the previous
+// install's.
+func TestTokenCache_StoredTokenIsTheInstallsOwn(t *testing.T) {
+	r := newRig(t)
+	cache := r.cache()
+	if _, _, err := cache.AccessTokenForOrg(context.Background(), cOrg); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	seedInstall(t, r.secrets, "ref-10", "inst-2")
+	access, _, err := cache.AccessTokenForOrg(context.Background(), cOrg)
+	if err != nil {
+		t.Fatalf("after reinstall: %v", err)
+	}
+	if access != "acc-11" {
+		t.Errorf("after reinstall = %q, want acc-11 refreshed off the new install", access)
+	}
+}
+
 func TestTokenCache_CachesWithinExpiry(t *testing.T) {
 	r := newRig(t)
 	cache := r.cache()

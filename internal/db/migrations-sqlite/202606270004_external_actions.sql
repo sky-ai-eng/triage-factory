@@ -13,7 +13,8 @@
 -- can't diverge from the action; the bot funnels record alongside the artifact
 -- upsert under the same pool routing. action is a free-text discriminator
 -- (domain.Action* — extensible, no CHECK). credential names the org credential
--- used (github_app | jira_org). from_state/to_state carry a transition's
+-- used (domain.Credential* — the GitHub App or PAT, the org's Jira or Linear
+-- service identity, the Slack bot, or none). from_state/to_state carry a transition's
 -- endpoints. run_id is the producing run (the agent's, or the drafter's for an
 -- approval); actor_user_id is the human authorizer/initiator (NULL for an
 -- autonomous system write). detail_json carries the per-action payload.

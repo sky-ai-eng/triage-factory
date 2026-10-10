@@ -71,8 +71,11 @@ type LinearSearchRequest struct {
 // newLinearResolver builds the org-credential resolver the local resolver path
 // reads through, serving both org credential shapes: an api_key, and an app
 // install whose access token the token cache refreshes off the install's
-// rotating refresh token. The cache converges with the server's and the
-// poller's own caches the way linearoauth.TokenCache describes.
+// rotating refresh token. A cache starts empty in every host-CLI invocation,
+// which is one process per verb, and serves the access token the install's
+// envelope stores until it expires, so a verb refreshes only when no process
+// has a live token. It converges with the server's and the poller's caches the
+// way linearoauth.TokenCache describes.
 //
 // Only local mode reaches it — in multi mode the daemon is always the run's
 // credential sidecar, whose verbs go through proxyCreds — and in local mode the
