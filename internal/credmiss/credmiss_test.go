@@ -22,6 +22,8 @@ func TestStatus(t *testing.T) {
 		credbundle.MissNoCLIToken:         http.StatusForbidden,
 		credbundle.MissNoJiraCredential:   http.StatusForbidden,
 		credbundle.MissNoLinearCredential: http.StatusForbidden,
+
+		credbundle.MissLinearCredentialUnresolved: http.StatusBadGateway,
 	}
 	for reason, status := range want {
 		if got := Status(reason); got != status {
@@ -54,6 +56,9 @@ func TestRespond(t *testing.T) {
 		msg, _ := body["message"].(string)
 		if want := "testproxy: no credential for this request (no_repo_token)"; msg != want {
 			t.Errorf("message = %q, want %q", msg, want)
+		}
+		if reason, _ := body["reason"].(string); reason != credbundle.MissNoRepoToken {
+			t.Errorf("reason = %q, want %q", reason, credbundle.MissNoRepoToken)
 		}
 		for _, leak := range []string{"4242", "secret-widgets"} {
 			if strings.Contains(rec.Body.String(), leak) {

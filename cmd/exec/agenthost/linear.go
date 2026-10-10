@@ -2,10 +2,12 @@ package agenthost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
@@ -126,7 +128,8 @@ func (c *LocalClient) linearSystemClient(ctx context.Context) (*linearclient.Cli
 	return client, nil
 }
 
-func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (*linearclient.Issue, error) {
+func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *linearclient.Issue, err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -141,7 +144,8 @@ func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (*linear
 	return got, nil
 }
 
-func (c *LocalClient) LinearListStates(ctx context.Context, issue string) ([]linearclient.WorkflowState, error) {
+func (c *LocalClient) LinearListStates(ctx context.Context, issue string) (_ []linearclient.WorkflowState, err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -153,7 +157,8 @@ func (c *LocalClient) LinearListStates(ctx context.Context, issue string) ([]lin
 	return client.ListWorkflowStates(ctx, got.Team.ID)
 }
 
-func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string) (linearclient.WorkflowState, error) {
+func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string) (_ linearclient.WorkflowState, err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return linearclient.WorkflowState{}, err
@@ -178,7 +183,8 @@ func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string)
 	return target, nil
 }
 
-func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) (string, error) {
+func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) (_ string, err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return "", err
@@ -195,7 +201,8 @@ func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) 
 	return commentID, nil
 }
 
-func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) error {
+func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) (err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return err
@@ -216,7 +223,8 @@ func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) error 
 	return nil
 }
 
-func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) error {
+func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return err
@@ -233,7 +241,8 @@ func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) error {
 	return nil
 }
 
-func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (*linearclient.Issue, error) {
+func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (_ *linearclient.Issue, err error) {
+	defer explainLinearError(&err)
 	if strings.TrimSpace(req.Title) == "" {
 		return nil, errors.New("title is required")
 	}
@@ -275,7 +284,8 @@ func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIss
 	return created, nil
 }
 
-func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) error {
+func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) (err error) {
+	defer explainLinearError(&err)
 	if edit.IsEmpty() {
 		return errors.New("no fields to update")
 	}
@@ -315,7 +325,8 @@ func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit 
 	return nil
 }
 
-func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string) error {
+func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string) (err error) {
+	defer explainLinearError(&err)
 	if strings.TrimSpace(parent) == "" {
 		return errors.New("parent is required")
 	}
@@ -339,7 +350,8 @@ func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string)
 	return nil
 }
 
-func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, priority int) error {
+func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, priority int) (err error) {
+	defer explainLinearError(&err)
 	if err := validateLinearPriority(priority); err != nil {
 		return err
 	}
@@ -359,7 +371,8 @@ func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, prior
 	return nil
 }
 
-func (c *LocalClient) LinearListChildren(ctx context.Context, issue string) ([]linearclient.ChildIssue, error) {
+func (c *LocalClient) LinearListChildren(ctx context.Context, issue string) (_ []linearclient.ChildIssue, err error) {
+	defer explainLinearError(&err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -367,7 +380,8 @@ func (c *LocalClient) LinearListChildren(ctx context.Context, issue string) ([]l
 	return client.ListChildren(ctx, issue)
 }
 
-func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest) ([]linearclient.Issue, error) {
+func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest) (_ []linearclient.Issue, err error) {
+	defer explainLinearError(&err)
 	if req.Max < 1 || req.Max > LinearSearchMaxResults {
 		return nil, fmt.Errorf("max %d out of range 1-%d", req.Max, LinearSearchMaxResults)
 	}
@@ -427,6 +441,57 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 		out = out[:req.Max]
 	}
 	return out, nil
+}
+
+// errLinearUnresolved is the answer to a Linear verb on a run whose bundle the
+// brain sealed without the org's Linear credential because it could not
+// resolve one (an outage at Linear's token endpoint). The brain retries on
+// each re-seal while the run continues, so it says when to try again and what
+// to do if Linear stays unavailable.
+var errLinearUnresolved = errors.New("no Linear credential is available to this run for now: Triage Factory could not obtain the organization's Linear credential when it prepared this run, and keeps trying while the run continues. " +
+	"Retry this command in a few minutes. If it still fails, carry on without Linear and say in your summary which Linear actions you could not take")
+
+// linearRefusedGuidance prefixes Linear refusing the org's credential.
+const linearRefusedGuidance = "Linear refused the organization's credential. If the organization connected Linear as an app, its access token may have just expired and is renewed automatically, so retry this command in a few minutes. " +
+	"If it keeps failing, the credential was revoked and an org admin has to reconnect Linear in Settings; carry on without Linear and say in your summary which Linear actions you could not take"
+
+// explainLinearError turns the ways a Linear verb fails for want of a usable
+// credential into guidance the agent can act on, in place of an HTTP status
+// and a proxy's error body. The run's sidecar proxy names a missing credential
+// by reason (credmiss), and those are matched first: the proxy answers "none
+// configured" with a JSON 403, which the client would otherwise read as Linear
+// refusing the credential. Every other error is left as it is.
+func explainLinearError(errp *error) {
+	err := *errp
+	if err == nil {
+		return
+	}
+	var se *linearclient.StatusError
+	if errors.As(err, &se) {
+		switch credentialMissReason(se.Body) {
+		case credbundle.MissNoLinearCredential:
+			*errp = errLinearNotConfigured
+			return
+		case credbundle.MissLinearCredentialUnresolved:
+			*errp = errLinearUnresolved
+			return
+		}
+	}
+	if errors.Is(err, linearclient.ErrUnauthorized) {
+		*errp = fmt.Errorf("%s (%w)", linearRefusedGuidance, err)
+	}
+}
+
+// credentialMissReason reads the reason a credential proxy's miss answer
+// carries (credmiss), or "" for any other body.
+func credentialMissReason(body string) string {
+	var miss struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal([]byte(body), &miss) != nil {
+		return ""
+	}
+	return miss.Reason
 }
 
 // findLinearTeam resolves a team key to the team. ListTeams narrows by a

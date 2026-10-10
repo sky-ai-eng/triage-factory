@@ -2,6 +2,7 @@ package runsidecar
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -132,34 +133,82 @@ func TestRuntime_LinearAPIProxyInjectsBundleAuth(t *testing.T) {
 	}
 }
 
-// TestRuntime_LinearAPIProxyRequiresCredential pins that bring-up fails when
-// the orchestrator asks for the Linear proxy and the bundle carries no Linear
-// credential, and that the proxies bound before it are torn down rather than
-// left serving a run that never starts.
-func TestRuntime_LinearAPIProxyRequiresCredential(t *testing.T) {
-	orch, rt := dialRuntime(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
+// TestRuntime_LinearAPIProxyStartsWithoutCredential pins the degraded run: a
+// Linear run whose bundle carries no Linear credential still comes up, its
+// proxy answers each request with which miss it is — none configured (403) or
+// not resolved for this seal (502, which a re-seal can change) — in the
+// reason field the agenthost turns into guidance, and the first re-seal that
+// carries the credential is used from the next request on.
+func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
+	gotAuth := make(chan string, 8)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"viewer":{"id":"app-user"}}}`))
+	}))
+	defer upstream.Close()
+	prev := linearUpstream
+	linearUpstream = upstream.URL
+	t.Cleanup(func() { linearUpstream = prev })
 
-	b := &credbundle.Bundle{LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"}}
-	if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, b)}, nil); err != nil {
-		t.Fatalf("relay bundle: %v", err)
+	orch, rt := dialRuntime(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	relay := func(b *credbundle.Bundle) {
+		t.Helper()
+		b.LLM = map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"}
+		if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, b)}, nil); err != nil {
+			t.Fatalf("relay bundle: %v", err)
+		}
 	}
+
+	relay(&credbundle.Bundle{})
 	var res sidecarproto.StartProxiesResult
-	err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
+	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
 		HostVethIP:       "127.0.0.1",
 		LinearAPIEnabled: true,
-	}, &res)
-	if err == nil {
-		t.Fatal("start proxies succeeded with no Linear credential in the bundle")
+	}, &res); err != nil {
+		t.Fatalf("start proxies without a Linear credential: %v", err)
 	}
-	if !strings.Contains(err.Error(), credbundle.ErrNoLinearCredential.Error()) {
-		t.Errorf("error %q does not name the missing Linear credential", err)
+	if res.LinearAPIURL == "" {
+		t.Fatalf("no linear api proxy coordinates: %+v", res)
 	}
-	rt.mu.Lock()
-	defer rt.mu.Unlock()
-	if rt.proxied || rt.linearAPI != nil {
-		t.Errorf("a failed bring-up left state behind: proxied=%v linearAPI=%v", rt.proxied, rt.linearAPI)
+
+	expectMiss := func(wantStatus int, wantReason string) {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, res.LinearAPIURL+"/graphql", strings.NewReader(`{"query":"{ viewer { id } }"}`))
+		req.Header.Set("Authorization", "Bearer "+res.LinearAPIToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("request through the proxy: %v", err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&body)
+		if resp.StatusCode != wantStatus || body.Reason != wantReason {
+			t.Errorf("miss = (%d, %q), want (%d, %q)", resp.StatusCode, body.Reason, wantStatus, wantReason)
+		}
+		select {
+		case got := <-gotAuth:
+			t.Errorf("a request with no credential reached upstream with Authorization %q", got)
+		default:
+		}
+	}
+
+	expectMiss(http.StatusForbidden, credbundle.MissNoLinearCredential)
+
+	relay(&credbundle.Bundle{Unresolved: []string{"linear"}})
+	expectMiss(http.StatusBadGateway, credbundle.MissLinearCredentialUnresolved)
+
+	relay(&credbundle.Bundle{Linear: &credbundle.LinearCreds{AuthMethod: string(linear.AuthMethodAPIKey), APIKey: "lin_api_REALKEY"}})
+	client := linear.NewClient(linear.ProxyPlaceholder(res.LinearAPIURL, res.LinearAPIToken))
+	if _, err := client.Viewer(ctx); err != nil {
+		t.Fatalf("Viewer after the re-seal: %v", err)
+	}
+	if got := <-gotAuth; got != "lin_api_REALKEY" {
+		t.Errorf("upstream Authorization after the re-seal = %q, want the key", got)
 	}
 }
 
@@ -181,6 +230,10 @@ func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 
 	if _, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrNoBundle) {
 		t.Errorf("no bundle: error %v, want ErrNoBundle", err)
+	}
+	hold(&credbundle.Bundle{Unresolved: []string{"linear"}})
+	if _, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrLinearCredentialUnresolved) {
+		t.Errorf("unresolved for this seal: error %v, want ErrLinearCredentialUnresolved", err)
 	}
 	for _, tc := range []struct {
 		name string

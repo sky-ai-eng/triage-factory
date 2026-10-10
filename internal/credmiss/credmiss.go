@@ -27,8 +27,10 @@ import (
 // GitHub client read it as a refusal rather than an outage, and the remedy is
 // a different action (a `workspace add`, which waits for its own re-seal, or
 // an admin binding the credential), never the same request again. A missing
-// bundle may still arrive and an expiring token may be refreshed, so those
-// keep the 502 a retry answers, as does any failure without a named reason.
+// bundle may still arrive, an expiring token may be refreshed, and a
+// credential the brain could not resolve for this seal may arrive with the
+// next one, so those keep the 502 a retry answers, as does any failure without
+// a named reason.
 func Status(reason string) int {
 	switch reason {
 	case credbundle.MissNoRepoToken, credbundle.MissNoCLIToken, credbundle.MissNoJiraCredential, credbundle.MissNoLinearCredential:
@@ -60,9 +62,12 @@ func NewResponder(proxy, conversationID string, log *slog.Logger) *Responder {
 
 // body is the answer's shape. `message` is the member gh prints and GitHub API
 // clients read, and a JSON body is what lets an HTTP client tell this 403
-// apart from the HTML page a proxy in front of an outage returns.
+// apart from the HTML page a proxy in front of an outage returns. `reason` is
+// the same closed-vocabulary value on its own, for a client that turns it
+// into guidance of its own (the agenthost's Linear verbs).
 type body struct {
 	Message string `json:"message"`
+	Reason  string `json:"reason"`
 }
 
 // Respond answers a request whose credential lookup failed with err.
@@ -73,7 +78,7 @@ func (r *Responder) Respond(w http.ResponseWriter, err error) {
 			"proxy", r.proxy, "conversation", r.conversationID, "reason", reason)
 	}
 	// Marshalling a struct of one string cannot fail.
-	b, _ := json.Marshal(body{Message: r.proxy + ": no credential for this request (" + reason + ")"})
+	b, _ := json.Marshal(body{Message: r.proxy + ": no credential for this request (" + reason + ")", Reason: reason})
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(Status(reason))

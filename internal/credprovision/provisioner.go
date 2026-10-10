@@ -239,8 +239,16 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 		bundle.Jira = jc
 	}
 
+	// Unlike the halves above, a failure here degrades rather than failing the
+	// seal. An app install's credential can need a refresh from Linear's token
+	// endpoint, and an outage there would otherwise stop this org's claims from
+	// starting and its in-flight runs' GitHub tokens from being re-minted. The
+	// bundle records the gap instead, so the run's Linear verbs answer that
+	// Linear is unavailable for now, and the next re-seal tries again.
 	if lc, err := m.resolveLinear(ctx, orgID); err != nil {
-		return fmt.Errorf("credprovision: resolve linear credentials for org %s: %w", orgID, err)
+		log.Warn("resolve the org's Linear credential failed; sealing the bundle without it, and the run's Linear verbs will report Linear unavailable until a re-seal resolves it",
+			"org", orgID, "conversation", conversationID, "error", err)
+		bundle.Unresolved = append(bundle.Unresolved, eventsource.KindLinear)
 	} else {
 		bundle.Linear = lc
 	}
@@ -601,7 +609,8 @@ func (m *Manager) resolveJira(ctx context.Context, orgID string) (*credbundle.Ji
 
 // resolveLinear resolves the org's Linear service credential to the fields
 // the sidecar's Linear proxy injects: nil when the org has no Linear
-// configured (not an error, as with Jira). An app-installed org seals the
+// configured (not an error, as with Jira), and an error the caller degrades on
+// for anything else. An app-installed org seals the
 // access token the shared token cache holds, which it refreshes first when
 // the one it has is about to expire, with that token's expiry. The install's
 // refresh token never enters the bundle. The refresh sweep's re-provision

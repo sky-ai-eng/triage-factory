@@ -107,7 +107,7 @@ func TestManager_resolveLinear(t *testing.T) {
 		}
 	})
 
-	t.Run("a failed mint fails the provision", func(t *testing.T) {
+	t.Run("a failed mint is an error for the caller to degrade on", func(t *testing.T) {
 		mintErr := errors.New("linear token endpoint: 503")
 		m := &Manager{linearResolver: linearResolverFor(appInstall, &installTokens{err: mintErr})}
 		got, err := m.resolveLinear(ctx, "org-1")
@@ -170,14 +170,17 @@ func (noLLM) ResolveForBundle(context.Context, string, string, string) (llmcred.
 
 // TestProvisionForConversation_SealsLinear runs a whole provision and opens
 // what it wrote with the claim's own key, the way the run's sidecar does: an
-// app-installed org's bundle carries an access token that is still live, and
-// an org with no Linear credential carries no Linear half at all.
+// app-installed org's bundle carries an access token that is still live, an
+// org with no Linear credential carries no Linear half at all, and a Linear
+// credential that fails to resolve still seals the rest of the bundle, with
+// the gap recorded.
 func TestProvisionForConversation_SealsLinear(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		values map[string]string
-		tokens *installTokens
-		want   func(t *testing.T, got *credbundle.LinearCreds)
+		name           string
+		values         map[string]string
+		tokens         *installTokens
+		want           func(t *testing.T, got *credbundle.LinearCreds)
+		wantUnresolved bool
 	}{
 		{
 			name:   "app install",
@@ -203,6 +206,17 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 					t.Errorf("Linear = %+v, want nil for an org with no Linear credential", got)
 				}
 			},
+		},
+		{
+			name:   "token endpoint down",
+			values: map[string]string{integrations.KeyLinearAuthMethod: string(linear.AuthMethodAppInstall)},
+			tokens: &installTokens{err: errors.New("linear token endpoint: 503")},
+			want: func(t *testing.T, got *credbundle.LinearCreds) {
+				if got != nil {
+					t.Errorf("Linear = %+v, want nil when the credential could not be resolved", got)
+				}
+			},
+			wantUnresolved: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -243,6 +257,9 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				t.Fatalf("Unmarshal: %v", err)
 			}
 			tc.want(t, bundle.Linear)
+			if got := bundle.IsUnresolved("linear"); got != tc.wantUnresolved {
+				t.Errorf("Unresolved = %v, want linear listed: %v", bundle.Unresolved, tc.wantUnresolved)
+			}
 		})
 	}
 }

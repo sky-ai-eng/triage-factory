@@ -13,7 +13,11 @@ var (
 	ErrNoCLIToken         = errors.New("credbundle: no gh CLI token")
 	ErrNoJiraCredential   = errors.New("credbundle: no Jira credential")
 	ErrNoLinearCredential = errors.New("credbundle: no Linear credential")
-	ErrTokenExpiring      = errors.New("credbundle: token expired or about to expire")
+	// ErrLinearCredentialUnresolved is a bundle with no Linear credential
+	// because the brain could not resolve one for this seal (Bundle.Unresolved),
+	// not because the org has none. A later re-seal may carry it.
+	ErrLinearCredentialUnresolved = errors.New("credbundle: Linear credential unresolved for this seal")
+	ErrTokenExpiring              = errors.New("credbundle: token expired or about to expire")
 )
 
 // The closed vocabulary MissReason answers in. Every value is safe to show the
@@ -25,8 +29,10 @@ const (
 	MissNoCLIToken         = "no_cli_token"
 	MissNoJiraCredential   = "no_jira_credential"
 	MissNoLinearCredential = "no_linear_credential"
-	MissTokenExpiring      = "token_expiring"
-	MissOther              = "other"
+	// MissLinearCredentialUnresolved is ErrLinearCredentialUnresolved.
+	MissLinearCredentialUnresolved = "linear_credential_unresolved"
+	MissTokenExpiring              = "token_expiring"
+	MissOther                      = "other"
 )
 
 // MissReason maps a credential-lookup error to the closed vocabulary above. An
@@ -43,6 +49,8 @@ func MissReason(err error) string {
 		return MissNoJiraCredential
 	case errors.Is(err, ErrNoLinearCredential):
 		return MissNoLinearCredential
+	case errors.Is(err, ErrLinearCredentialUnresolved):
+		return MissLinearCredentialUnresolved
 	case errors.Is(err, ErrTokenExpiring):
 		return MissTokenExpiring
 	default:

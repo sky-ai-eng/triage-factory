@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
@@ -666,16 +667,13 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID str
 var linearUpstream = strings.TrimSuffix(linear.DefaultEndpoint, "/graphql")
 
 // startLinearAPIProxy binds a Linear GraphQL credential proxy on the veth IP.
-// It refuses to start without a Linear credential in the held bundle, as the
-// Jira proxy does: the orchestrator asks for this proxy only on a run about a
-// Linear issue, so a bundle without the credential is a fault to surface at
-// bring-up rather than on the agent's first verb. The injected auth is
-// resolved per request (linearAuthHeader), not captured here.
+// Unlike the Jira proxy it starts whether or not the held bundle carries a
+// Linear credential. The brain seals a bundle without one when it could not
+// resolve the credential (Bundle.Unresolved), and a run should not fail to
+// start over a source it may never use, nor stay without Linear once a
+// re-seal brings the credential. The injected auth is resolved per request
+// (linearAuthHeader), so each request answers with the bundle held then.
 func (r *credRuntime) startLinearAPIProxy(hostVethIP, conversationID string) (*apiproxy.Server, string, string, error) {
-	bundle := r.currentBundle()
-	if bundle == nil || bundle.Linear == nil {
-		return nil, "", "", fmt.Errorf("runsidecar: linear api proxy requested: %w", credbundle.ErrNoLinearCredential)
-	}
 	token, err := randomToken()
 	if err != nil {
 		return nil, "", "", err
@@ -710,6 +708,9 @@ func (r *credRuntime) linearAuthHeader(context.Context) (string, error) {
 	}
 	lc := bundle.Linear
 	if lc == nil {
+		if bundle.IsUnresolved(eventsource.KindLinear) {
+			return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrLinearCredentialUnresolved)
+		}
 		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrNoLinearCredential)
 	}
 	switch linear.AuthMethod(lc.AuthMethod) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
@@ -698,4 +702,69 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// TestLinearVerbs_CredentialFailuresExplainThemselves pins what the agent reads
+// when a Linear verb cannot use a credential. The fake proxy answers through
+// credmiss itself, the contract the sidecar's Linear proxy uses, so a change
+// to that answer's shape breaks this test rather than the agent's guidance.
+func TestLinearVerbs_CredentialFailuresExplainThemselves(t *testing.T) {
+	shortLinearBackoff(t)
+	cases := []struct {
+		name    string
+		answer  func(w http.ResponseWriter)
+		want    string
+		wantErr error
+	}{
+		{
+			name: "org has no Linear credential",
+			answer: func(w http.ResponseWriter) {
+				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w, credbundle.ErrNoLinearCredential)
+			},
+			want: errLinearNotConfigured.Error(),
+		},
+		{
+			name: "credential not resolved for this seal",
+			answer: func(w http.ResponseWriter) {
+				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w, credbundle.ErrLinearCredentialUnresolved)
+			},
+			want: errLinearUnresolved.Error(),
+		},
+		{
+			name: "Linear refuses the credential",
+			answer: func(w http.ResponseWriter) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required","extensions":{"code":"AUTHENTICATION_ERROR"}}]}`))
+			},
+			want:    "Linear refused the organization's credential",
+			wantErr: linearclient.ErrUnauthorized,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { tc.answer(w) }))
+			defer proxy.Close()
+			lc := NewLocal(db.Stores{}, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-miss"})
+			lc.proxyCreds = &ProxyCredentials{LinearAPIURL: proxy.URL, LinearAPIToken: fakeLinearPlaceholer}
+
+			_, err := lc.LinearAddComment(context.Background(), "ENG-7", "hi")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v, want one containing %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "HTTP ") {
+				t.Errorf("err %q still reads as an HTTP status", err)
+			}
+			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Errorf("err %v no longer matches %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// shortLinearBackoff shortens the Linear client's retry backoff for the test, so a
+// 502 the client retries does not wait out the production schedule.
+func shortLinearBackoff(t *testing.T) {
+	t.Helper()
+	linearclient.SetRetryBackoffForTest(t, time.Millisecond)
 }
