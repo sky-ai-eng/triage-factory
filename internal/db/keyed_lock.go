@@ -5,9 +5,16 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"sync"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
+
+// unlockTimeout bounds the advisory unlock. A stalled database would otherwise
+// hold the release, and the key's gate with it, so every caller queued on the
+// key would wait on the stall; past it the session is discarded, which ends
+// the lock just as surely.
+const unlockTimeout = 5 * time.Second
 
 // AcquireKeyedLock serializes a critical section keyed on key (an org id, ...)
 // across the whole deployment, not just this process.
@@ -28,8 +35,8 @@ import (
 // independent transactions (and work between them); a pg_advisory_xact_lock
 // would release at the first one's commit and stop covering the rest.
 //
-// A connection whose lock or unlock call fails is discarded rather than
-// returned to the pool — forced closed via conn.Raw + driver.ErrBadConn,
+// A connection whose lock or unlock call fails, or whose unlock outlasts
+// unlockTimeout, is discarded rather than returned to the pool — forced closed via conn.Raw + driver.ErrBadConn,
 // since (*sql.Conn).Close alone only pools it. A cancelled lock call may have
 // been granted by the server before the cancellation reached it, and an
 // unlock can fail on a healthy session (a server-side statement_timeout
@@ -74,7 +81,9 @@ func AcquireKeyedLock(ctx context.Context, database *sql.DB, local *sync.Map, sa
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			if _, uerr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, key, salt); uerr != nil {
+			uctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
+			defer cancel()
+			if _, uerr := conn.ExecContext(uctx, `SELECT pg_advisory_unlock(hashtextextended($1, $2))`, key, salt); uerr != nil {
 				discardConn(conn)
 			} else {
 				_ = conn.Close()

@@ -645,6 +645,12 @@ func TestLinearApp_ImportValidatesEveryField(t *testing.T) {
 	if len(items) != 2 || items[0].Reason != httpx.ReasonOutOfRange || items[0].Field != "client_id" || items[1].Field != "client_secret" {
 		t.Errorf("over-long credentials: errors = %+v, want both fields named out of range", items)
 	}
+
+	// The cap counts characters, as its message says, not bytes.
+	wide := strings.Repeat("é", linearAppCredentialMaxLen)
+	if rec := doJSON(t, r.s, http.MethodPost, linearAppPath(), map[string]any{"client_id": wide, "client_secret": wide}); rec.Code != http.StatusOK {
+		t.Errorf("credentials of exactly the cap in two-byte characters: %d %s, want 200", rec.Code, rec.Body.String())
+	}
 }
 
 // TestLinearApp_ChangesThatStrandTheInstallAreRefused: while an install minted

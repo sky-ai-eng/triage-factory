@@ -254,10 +254,10 @@ func (s *Server) handleLinearAppImport(w http.ResponseWriter, r *http.Request) {
 	if clientSecret == "" {
 		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonMissingField, Message: "A Linear OAuth app client secret is required.", Field: "client_secret"})
 	}
-	if len(clientID) > linearAppCredentialMaxLen {
+	if utf8.RuneCountInString(clientID) > linearAppCredentialMaxLen {
 		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_id must be at most %d characters", linearAppCredentialMaxLen), Field: "client_id"})
 	}
-	if len(clientSecret) > linearAppCredentialMaxLen {
+	if utf8.RuneCountInString(clientSecret) > linearAppCredentialMaxLen {
 		faults = append(faults, httpx.ErrorItem{Reason: httpx.ReasonOutOfRange, Message: fmt.Sprintf("client_secret must be at most %d characters", linearAppCredentialMaxLen), Field: "client_secret"})
 	}
 	if len(faults) > 0 {
