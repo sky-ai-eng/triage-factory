@@ -585,10 +585,10 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // asked whether it meant to.
 //
 // "Expects an artifact" is deliberately narrow — the terminal step of a run
-// against a GitHub or Jira entity, the shape whose whole point is to leave
-// something behind. A non-terminal step is excluded because a later step
-// owns the blueprint's terminal external action, which is what its addendum
-// tells it.
+// against a GitHub, Jira or Linear entity, the shape whose whole point is to
+// leave something behind. A non-terminal step is excluded because a later
+// step owns the blueprint's terminal external action, which is what its
+// addendum tells it.
 //
 // Asking twice about the same silence would be badgering — the model already
 // answered. Asking again after a human has intervened is not: the premise
@@ -598,7 +598,7 @@ const artifactNudgeNote = artifactNudgeTag + "\n" +
 // what makes the behavior identical whether the engagement is the first or a
 // crash's successor.
 func (s *Spawner) artifactContractNudge(orgID, conversationID string, task domain.Task, cfg runConfig) func(context.Context, int, string) string {
-	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira")
+	expects := cfg.appendSysPrompt == "" && (task.EntitySource == "github" || task.EntitySource == "jira" || task.EntitySource == "linear")
 	if !expects || s.artifacts == nil {
 		return nil
 	}

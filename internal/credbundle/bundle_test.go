@@ -16,7 +16,8 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 				"acme/widgets": {Token: "ghs_abc"},
 			},
 		},
-		Jira: &JiraCreds{URL: "https://acme.atlassian.net", AuthMethod: "cloud", Email: "bot@acme.com", APIToken: "tok"},
+		Jira:   &JiraCreds{URL: "https://acme.atlassian.net", AuthMethod: "cloud", Email: "bot@acme.com", APIToken: "tok"},
+		Linear: &LinearCreds{AuthMethod: "app_install", AccessToken: "lin_oauth_abc", ExpiresUnix: 1752300000},
 	}
 	data, err := b.Marshal()
 	if err != nil {
@@ -34,6 +35,37 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	}
 	if got.Jira == nil || got.Jira.APIToken != "tok" {
 		t.Fatalf("jira round trip mismatch: %+v", got.Jira)
+	}
+	if got.Linear == nil || *got.Linear != *b.Linear {
+		t.Fatalf("linear round trip mismatch: %+v", got.Linear)
+	}
+}
+
+// TestLinearCreds_WireShape pins the sealed JSON of each Linear shape: the
+// sidecar that opens a bundle may be a different build from the brain that
+// sealed it, so the member names are a wire contract, and a bundle with no
+// Linear half carries no member at all.
+func TestLinearCreds_WireShape(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		linear *LinearCreds
+		want   string
+	}{
+		{"absent", nil, `{"boot_epoch":1}`},
+		{"api key", &LinearCreds{AuthMethod: "api_key", APIKey: "lin_api_x"},
+			`{"boot_epoch":1,"linear":{"auth_method":"api_key","api_key":"lin_api_x"}}`},
+		{"app install", &LinearCreds{AuthMethod: "app_install", AccessToken: "tok", ExpiresUnix: 1752300000},
+			`{"boot_epoch":1,"linear":{"auth_method":"app_install","access_token":"tok","expires_unix":1752300000}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := (&Bundle{BootEpoch: 1, Linear: tc.linear}).Marshal()
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			if got := string(data); got != tc.want {
+				t.Errorf("sealed JSON = %s, want %s", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -20,7 +20,8 @@ import (
 // instantly instead of standing up a database inside the fuzz loop.
 //
 // The two repo-gate reads answer permissively so the gh verbs get PAST the gate
-// and actually build a client — the point is to reach the fan-out, and a gate
+// and actually build a client, and the source-policy read answers "on" so the
+// Jira and Linear verbs do too — the point is to reach the fan-out, and a gate
 // that denied everything would fuzz one error path forty times. Every other op
 // fails, which is a shape the verbs must handle anyway (an orchestrator that
 // went away mid-run).
@@ -30,6 +31,8 @@ func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) e
 	switch op {
 	case opTeamTracksRepo:
 		return fuzzRelayResult(out, teamTracksRepoResult{Tracks: true})
+	case opSourceDisabled:
+		return fuzzRelayResult(out, sourceDisabledResult{Disabled: false})
 	case opListConversationWorktrees:
 		return fuzzRelayResult(out, conversationWorktreesResult{Worktrees: []domain.ConversationWorktree{
 			{ConversationID: "conv-fuzz", RepoID: "o/r", Ref: "refs/heads/topic", Path: "/work/o-r"},
@@ -99,6 +102,8 @@ func FuzzHandleConn(f *testing.F) {
 		GitHubAPIToken: "placeholder",
 		JiraAPIURL:     upstream.URL,
 		JiraAPIToken:   "placeholder",
+		LinearAPIURL:   upstream.URL,
+		LinearAPIToken: "placeholder",
 	})
 
 	// Seeds cover the shapes an agent's tool call actually produces — one per
@@ -119,6 +124,13 @@ func FuzzHandleConn(f *testing.F) {
 		{methodGithubDownloadArtifact, `{"owner":"o","repo":"r","path":"actions/runs/1/logs","max_bytes":9223372036854775807}`},
 		{methodJiraSearchIssues, `{"jql":"project = X","fields":["summary"],"max_results":-1}`},
 		{methodJiraUpdateIssue, `{"key":"SKY-1","fields":{"summary":"s"}}`},
+		{methodLinearGetIssue, `{"issue":"ENG-1"}`},
+		{methodLinearTransition, `{"issue":"ENG-1","state":"Done"}`},
+		{methodLinearAddComment, `{"issue":"ENG-1","body":"b"}`},
+		{methodLinearCreateIssue, `{"team_key":"ENG","title":"t","parent":"ENG-2","priority":9,"labels":["bug",""]}`},
+		{methodLinearUpdateIssue, `{"issue":"ENG-1","edit":{"title":"","priority":-3,"add_labels":["x"]}}`},
+		{methodLinearSetPriority, `{"issue":"ENG-1","priority":2}`},
+		{methodLinearSearch, `{"team_key":"ENG","states":["Todo"],"assignee":"me","max":-1}`},
 		{methodMemoryLoad, `{"source":"github","source_id":"o/r#1","limit":-5}`},
 		{methodCallExtension, `{"namespace":"n","method":"m","args":{"a":1}}`},
 		{methodUpsertArtifact, `{"artifact":{"provider":"github","kind":"comment","target":"o/r#1"}}`},

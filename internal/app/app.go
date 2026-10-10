@@ -39,6 +39,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/instance"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/lease"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/marketplacestats"
 	"github.com/sky-ai-eng/triage-factory/internal/memoryprovision"
@@ -117,6 +118,10 @@ type App struct {
 
 	// Per-org run-credential seam shared by every AI feature.
 	ghResolver ghclient.Resolver
+	// linearResolver resolves an org's Linear service credential, over the
+	// process's one app-install token cache. The poller and the credential
+	// provisioner share it (buildRunCredentials).
+	linearResolver linear.Resolver
 	// deploymentApp is the deployment's shared GitHub App, read once from the
 	// environment in buildRunCredentials; the zero App when none is configured.
 	deploymentApp githubapp.DeploymentApp

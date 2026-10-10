@@ -39,8 +39,10 @@ The org's Linear connection lives under these keys:
 - `linear_auth_method` — which shape the connection takes: `api_key`, or
   `app_install` for Triage Factory installed as an app.
 - `linear_app_install` — an app install's refresh token, with the workspace,
-  app user and OAuth app it belongs to. Triage Factory renews it every time it
-  refreshes the app user's access token.
+  app user and OAuth app it belongs to, and the app user's current access
+  token. Triage Factory renews both every time it refreshes the access token,
+  and every Triage Factory process uses the stored access token until it
+  expires.
 - `linear_bound_as` — who the credential belongs to (the key's owner, or the
   installed app user) and its workspace's name, recorded when it was connected
   so Settings can show them. Not a secret; it is stored here so it is written

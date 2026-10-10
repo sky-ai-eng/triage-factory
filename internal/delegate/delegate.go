@@ -946,6 +946,28 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 	}, nil
 }
 
+// setupLinear prepares the run-root for a Linear delegation, exactly as
+// setupJira does for a Jira one: no repo is pre-cloned, the agent reads the
+// issue through `triagefactory exec linear` and materializes the repo(s) it
+// needs via `workspace add`, and the run-root is its session cwd. See
+// setupJira.
+func (s *Spawner) setupLinear(ctx context.Context, orgID, conversationID, claimID, rootKey, creatorUserID string, task domain.Task) (runConfig, error) {
+	runRoot, err := freshRunRoot(rootKey)
+	if err != nil {
+		return runConfig{}, fmt.Errorf("create run root: %w", err)
+	}
+	if err := s.setWorktreePath(context.Background(), orgID, conversationID, claimID, runRoot); err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		delegateLog.Warn("set worktree_path for Linear conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
+	}
+
+	return runConfig{
+		orgID:    orgID,
+		scope:    fmt.Sprintf("Linear issue: %s", task.EntitySourceID),
+		toolsRef: s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindLinear),
+		runRoot:  runRoot,
+	}, nil
+}
+
 // setupSlack prepares the run-root for a Slack-thread delegation
 // (TFAC-591). Mirrors setupJira: no repo is pre-cloned, the agent acquires
 // repo(s) on demand via `triagefactory exec workspace add` (TFAC-498), and

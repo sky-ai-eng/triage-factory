@@ -78,12 +78,22 @@ func ParseUserCredential(raw string) (UserCredential, error) {
 // keeps it and a new install changes it, so a cached access token learns the
 // install it was minted for has been replaced, and a removal names the one
 // install it read.
+//
+// AccessToken and AccessTokenExpiresUnix are the access token the last refresh
+// (or the install's code exchange) minted and its Unix-second expiry. They are
+// stored so that every process reading the envelope can use the token until it
+// expires instead of refreshing for itself: each refresh rotates the refresh
+// token, and a process that starts cold, such as an exec verb run from the
+// host CLI, would otherwise refresh on every call. Empty in an envelope
+// written before they were stored, which the next refresh fills in.
 type InstallCredential struct {
-	InstallID    string `json:"install_id"`
-	WorkspaceID  string `json:"workspace_id"`
-	AppUserID    string `json:"app_user_id"`
-	RefreshToken string `json:"refresh_token"`
-	ClientID     string `json:"client_id"`
+	InstallID              string `json:"install_id"`
+	WorkspaceID            string `json:"workspace_id"`
+	AppUserID              string `json:"app_user_id"`
+	RefreshToken           string `json:"refresh_token"`
+	ClientID               string `json:"client_id"`
+	AccessToken            string `json:"access_token,omitempty"`
+	AccessTokenExpiresUnix int64  `json:"access_token_expires_unix,omitempty"`
 }
 
 // MarshalInstallCredential renders an InstallCredential for storage.

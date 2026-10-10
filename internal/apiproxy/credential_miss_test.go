@@ -39,11 +39,19 @@ func (s *switchableErr) get() error {
 	return s.err
 }
 
-// TestCredentialMiss pins the answer to a failed credential lookup for both
-// providers: the status says whether a retry can help, the JSON message names
+// TestCredentialMiss pins the answer to a failed credential lookup for every
+// provider: the status says whether a retry can help, the JSON message names
 // the reason and nothing more, and the operator gets one Warn per reason
 // however often the caller retries.
 func TestCredentialMiss(t *testing.T) {
+	// Each provider's requests go to a path it forwards: Linear forwards only
+	// its GraphQL endpoint, and anything else is refused before a credential
+	// is looked up, so a miss could not happen there.
+	missPath := map[apiproxy.Provider]string{
+		apiproxy.ProviderGitHub: "/repos/acme/hidden-widgets/pulls/1",
+		apiproxy.ProviderJira:   "/repos/acme/hidden-widgets/pulls/1",
+		apiproxy.ProviderLinear: "/graphql",
+	}
 	providers := map[apiproxy.Provider]func(upstream string, src *switchableErr) apiproxy.Config{
 		apiproxy.ProviderGitHub: func(upstream string, src *switchableErr) apiproxy.Config {
 			return apiproxy.Config{
@@ -67,6 +75,17 @@ func TestCredentialMiss(t *testing.T) {
 				ConversationID: "conv-miss",
 			}
 		},
+		apiproxy.ProviderLinear: func(upstream string, src *switchableErr) apiproxy.Config {
+			return apiproxy.Config{
+				Provider: apiproxy.ProviderLinear,
+				Upstream: upstream,
+				AuthHeaderSource: func(context.Context) (string, error) {
+					return "", src.get()
+				},
+				IncomingToken:  "run-placeholder",
+				ConversationID: "conv-miss",
+			}
+		},
 	}
 	cases := []struct {
 		sentinel error
@@ -77,6 +96,7 @@ func TestCredentialMiss(t *testing.T) {
 		{credbundle.ErrNoRepoToken, "no_repo_token", http.StatusForbidden},
 		{credbundle.ErrNoCLIToken, "no_cli_token", http.StatusForbidden},
 		{credbundle.ErrNoJiraCredential, "no_jira_credential", http.StatusForbidden},
+		{credbundle.ErrNoLinearCredential, "no_linear_credential", http.StatusForbidden},
 		{credbundle.ErrTokenExpiring, "token_expiring", http.StatusBadGateway},
 		{errors.New("resolver outage"), "other", http.StatusBadGateway},
 	}
@@ -97,7 +117,7 @@ func TestCredentialMiss(t *testing.T) {
 				// both, so the name has to say which one answered.
 				name := "apiproxy-" + string(provider)
 				for range 3 {
-					status, msg, raw := doMiss(t, proxyURL)
+					status, msg, raw := doMiss(t, proxyURL, missPath[provider])
 					if status != tc.status {
 						t.Errorf("status = %d, want %d", status, tc.status)
 					}
@@ -120,8 +140,8 @@ func TestCredentialMiss(t *testing.T) {
 					second = credbundle.ErrNoRepoToken
 				}
 				src.set(second)
-				doMiss(t, proxyURL)
-				doMiss(t, proxyURL)
+				doMiss(t, proxyURL, missPath[provider])
+				doMiss(t, proxyURL, missPath[provider])
 
 				logged := logs.String()
 				if n := strings.Count(logged, "credential lookup failed"); n != 2 {
@@ -145,11 +165,12 @@ func TestCredentialMiss(t *testing.T) {
 	}
 }
 
-// doMiss sends one request naming a repository that must never reach the log,
-// and returns the status, the decoded message and the raw body.
-func doMiss(t *testing.T, proxyURL string) (int, string, string) {
+// doMiss sends one request to path, which for the REST providers names a
+// repository that must never reach the log, and returns the status, the
+// decoded message and the raw body.
+func doMiss(t *testing.T, proxyURL, path string) (int, string, string) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodGet, proxyURL+"/repos/acme/hidden-widgets/pulls/1", nil)
+	req, _ := http.NewRequest(http.MethodGet, proxyURL+path, nil)
 	req.Header.Set("Authorization", "Bearer run-placeholder")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

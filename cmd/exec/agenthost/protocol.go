@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
 // Wire format: length-prefixed JSON frames.
@@ -372,6 +373,68 @@ type jiraIssueTypesResult struct {
 	IssueTypes []jiraclient.IssueType `json:"issue_types"`
 }
 
+// --- linear (exec linear issue ...) ---
+//
+// Args/result envelopes for the host-routed Linear surface, on the Jira
+// surface's terms: the daemon (or the in-process LocalClient) builds the org's
+// service-identity client and makes the call, and a failure crosses as the
+// response Error string verbatim. The linearclient result types carry JSON tags,
+// and the request types (LinearCreateIssueRequest, LinearIssueEdit,
+// LinearSearchRequest) are their own wire shapes.
+
+type linearIssueArgs struct {
+	Issue string `json:"issue"`
+}
+
+type linearTransitionArgs struct {
+	Issue string `json:"issue"`
+	State string `json:"state"`
+}
+
+type linearCommentArgs struct {
+	Issue string `json:"issue"`
+	Body  string `json:"body"`
+}
+
+type linearUpdateIssueArgs struct {
+	Issue string          `json:"issue"`
+	Edit  LinearIssueEdit `json:"edit"`
+}
+
+type linearSetParentArgs struct {
+	Issue  string `json:"issue"`
+	Parent string `json:"parent"`
+}
+
+type linearSetPriorityArgs struct {
+	Issue    string `json:"issue"`
+	Priority int    `json:"priority"`
+}
+
+type linearIssueResult struct {
+	Issue *linearclient.Issue `json:"issue,omitempty"`
+}
+
+type linearIssuesResult struct {
+	Issues []linearclient.Issue `json:"issues"`
+}
+
+type linearStatesResult struct {
+	States []linearclient.WorkflowState `json:"states"`
+}
+
+type linearStateResult struct {
+	State linearclient.WorkflowState `json:"state"`
+}
+
+type linearCommentResult struct {
+	CommentID string `json:"comment_id"`
+}
+
+type linearChildrenResult struct {
+	Children []linearclient.ChildIssue `json:"children"`
+}
+
 // --- github (exec gh pr / actions ...) ---
 //
 // Args/result envelopes for the host-routed GitHub surface. The daemon
@@ -688,6 +751,19 @@ const (
 	methodJiraListPriorities = "JiraListPriorities"
 	methodJiraSetPriority    = "JiraSetPriority"
 	methodJiraListIssueTypes = "JiraListIssueTypes"
+
+	methodLinearGetIssue     = "LinearGetIssue"
+	methodLinearListStates   = "LinearListStates"
+	methodLinearTransition   = "LinearTransition"
+	methodLinearAddComment   = "LinearAddComment"
+	methodLinearAssignSelf   = "LinearAssignSelf"
+	methodLinearUnassign     = "LinearUnassign"
+	methodLinearCreateIssue  = "LinearCreateIssue"
+	methodLinearUpdateIssue  = "LinearUpdateIssue"
+	methodLinearSetParent    = "LinearSetParent"
+	methodLinearSetPriority  = "LinearSetPriority"
+	methodLinearListChildren = "LinearListChildren"
+	methodLinearSearch       = "LinearSearch"
 
 	methodGithubGetPR            = "GithubGetPR"
 	methodGithubGetPRDiff        = "GithubGetPRDiff"

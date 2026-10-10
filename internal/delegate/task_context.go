@@ -72,6 +72,8 @@ func BuildTaskContext(task domain.Task, metadataJSON, skeleton string, artifacts
 	case "jira":
 		add("Issue", task.EntitySourceID)
 		add("Project", projectFromJiraKey(task.EntitySourceID))
+	case "linear":
+		add("Issue", task.EntitySourceID)
 	}
 
 	var meta map[string]any

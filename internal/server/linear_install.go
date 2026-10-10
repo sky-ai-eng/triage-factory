@@ -373,11 +373,13 @@ func (s *Server) storeLinearInstall(ctx context.Context, orgID, userID string, a
 		}
 		rowWritten = true
 		envelope, err := linear.MarshalInstallCredential(linear.InstallCredential{
-			InstallID:    installID,
-			WorkspaceID:  org.ID,
-			AppUserID:    viewer.ID,
-			RefreshToken: tok.RefreshToken,
-			ClientID:     app.ClientID,
+			InstallID:              installID,
+			WorkspaceID:            org.ID,
+			AppUserID:              viewer.ID,
+			RefreshToken:           tok.RefreshToken,
+			ClientID:               app.ClientID,
+			AccessToken:            tok.AccessToken,
+			AccessTokenExpiresUnix: tok.ExpiresAt.Unix(),
 		})
 		if err != nil {
 			return err

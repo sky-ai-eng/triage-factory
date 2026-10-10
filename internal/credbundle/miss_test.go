@@ -18,6 +18,8 @@ func TestMissReason(t *testing.T) {
 		{credbundle.ErrNoRepoToken, credbundle.MissNoRepoToken},
 		{credbundle.ErrNoCLIToken, credbundle.MissNoCLIToken},
 		{credbundle.ErrNoJiraCredential, credbundle.MissNoJiraCredential},
+		{credbundle.ErrNoLinearCredential, credbundle.MissNoLinearCredential},
+		{credbundle.ErrLinearCredentialUnresolved, credbundle.MissLinearCredentialUnresolved},
 		{credbundle.ErrTokenExpiring, credbundle.MissTokenExpiring},
 	}
 	for _, tc := range cases {

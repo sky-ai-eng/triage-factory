@@ -44,6 +44,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
 // DefaultSocketPath is the in-sandbox bind-mount destination for the
@@ -328,6 +329,33 @@ type Client interface {
 	JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error)
 	JiraSetPriority(ctx context.Context, key, priority string) error
 	JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error)
+
+	// --- linear (exec linear issue ...) ---
+	//
+	// The Linear counterpart of the Jira surface above, on the same terms: the
+	// daemon builds the org's service-identity client (ForSystem locally, the
+	// sidecar's GraphQL proxy in multi mode) and makes the call, so the sandbox
+	// never holds a Linear credential, and every write is attributed to the
+	// org's Linear identity. An issue is named by its identifier ("ENG-123")
+	// or its UUID wherever one is taken. The ops speak the agent's vocabulary
+	// — a state name, a team key, label names — and resolve it to Linear's ids
+	// host-side, so one verb is one call over the socket.
+	LinearGetIssue(ctx context.Context, issue string) (*linearclient.Issue, error)
+	LinearListStates(ctx context.Context, issue string) ([]linearclient.WorkflowState, error)
+	// LinearTransition moves the issue to the state of its team named state
+	// (a state name, matched case-insensitively, or a state id) and returns
+	// the state it moved to.
+	LinearTransition(ctx context.Context, issue, state string) (linearclient.WorkflowState, error)
+	// LinearAddComment returns the new comment's id.
+	LinearAddComment(ctx context.Context, issue, body string) (string, error)
+	LinearAssignSelf(ctx context.Context, issue string) error
+	LinearUnassign(ctx context.Context, issue string) error
+	LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (*linearclient.Issue, error)
+	LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) error
+	LinearSetParent(ctx context.Context, issue, parent string) error
+	LinearSetPriority(ctx context.Context, issue string, priority int) error
+	LinearListChildren(ctx context.Context, issue string) ([]linearclient.ChildIssue, error)
+	LinearSearch(ctx context.Context, req LinearSearchRequest) ([]linearclient.Issue, error)
 
 	// --- github (exec gh pr / actions ...) ---
 	//
