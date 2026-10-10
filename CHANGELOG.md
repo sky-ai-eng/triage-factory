@@ -1,5 +1,40 @@
 # Changelog
 
+## [1.16.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.15.0...v1.16.0) (2026-10-10)
+
+
+### Features
+
+* **jira:** env-only headless setup for Jira Cloud (TFAC-1050) ([#1159](https://github.com/sky-ai-eng/triage-factory/issues/1159)) ([f9e432d](https://github.com/sky-ai-eng/triage-factory/commit/f9e432dec8c923dd5dbcdc206d1371d2cc4e7d51))
+* **jira:** key Jira issues on their issue id and follow key changes as renames (TFAC-1061) ([#1177](https://github.com/sky-ai-eng/triage-factory/issues/1177)) ([ebc7d1f](https://github.com/sky-ai-eng/triage-factory/commit/ebc7d1f2754a07594775b24b2e7fb94dffd95286))
+* **linear:** bind the org's Linear API key, turn the event source on, and add it to Settings and the setup wizard (TFAC-1021) ([#1166](https://github.com/sky-ai-eng/triage-factory/issues/1166)) ([ea82020](https://github.com/sky-ai-eng/triage-factory/commit/ea8202084d5d1bf07ae1e0f1e88341800a195b49))
+* **linear:** GraphQL client, LinearSnapshot and the org api_key credential core (TFAC-1018) ([#1155](https://github.com/sky-ai-eng/triage-factory/issues/1155)) ([8a4c41e](https://github.com/sky-ai-eng/triage-factory/commit/8a4c41ec9f22bcb038f2c6b41971df4c52b26fe3))
+* **linear:** install Triage Factory as a Linear app and keep its rotating token (TFAC-1022) ([#1180](https://github.com/sky-ai-eng/triage-factory/issues/1180)) ([7cd4ff7](https://github.com/sky-ai-eng/triage-factory/commit/7cd4ff72f344886182fd706cad489a0df3ed96c0))
+* **linear:** key Linear issues on their UUID, scope every entity, and follow identifier changes as renames (TFAC-1060) ([#1174](https://github.com/sky-ai-eng/triage-factory/issues/1174)) ([1e46f93](https://github.com/sky-ai-eng/triage-factory/commit/1e46f93f11195330c63346cf12fe1916c2c10a82))
+* **linear:** poll Linear as an event source — tracker, poller, events catalog, routing gates and belt (TFAC-1020) ([#1164](https://github.com/sky-ai-eng/triage-factory/issues/1164)) ([9269495](https://github.com/sky-ai-eng/triage-factory/commit/92694957fbdac7e96948451f599f8f2e79a33fc9))
+* **linear:** team tracking rules, the team-to-Linear-team write, and the picker and states routes (TFAC-1019) ([#1162](https://github.com/sky-ai-eng/triage-factory/issues/1162)) ([494afb5](https://github.com/sky-ai-eng/triage-factory/commit/494afb5c1106d3d42382ef0f66040525a05d7844))
+* **linear:** user_linear_identities, the UsersStore Linear methods, and /api/me + roster exposure (TFAC-90) ([#1160](https://github.com/sky-ai-eng/triage-factory/issues/1160)) ([fb7f529](https://github.com/sky-ai-eng/triage-factory/commit/fb7f52925db669ea44766a4141d942b8340e82a1))
+* **local:** configure GitHub and Jira only in the UI; drop the TRIAGE_FACTORY_* overlay and TF_HEADLESS (TFAC-1057) ([#1169](https://github.com/sky-ai-eng/triage-factory/issues/1169)) ([f83bfab](https://github.com/sky-ai-eng/triage-factory/commit/f83bfabeee096e1800722ee8cc7dbbfbc99b407c))
+
+
+### Bug Fixes
+
+* **credentials:** Jira and GitHub credential handlers write only the host they own, and restore the keychain when they fail (TFAC-1058) ([#1173](https://github.com/sky-ai-eng/triage-factory/issues/1173)) ([54722e7](https://github.com/sky-ai-eng/triage-factory/commit/54722e7b3644a5d595f7deff57bf82ba422b5300))
+* **credentials:** LLM credential handlers write only the ref they own, and restore the keychain when they fail (TFAC-1059) ([#1175](https://github.com/sky-ai-eng/triage-factory/issues/1175)) ([c03c24c](https://github.com/sky-ai-eng/triage-factory/commit/c03c24c6a8dd9dee00c4f09988ac735d7ab11f7b))
+* **delegate:** a verdict parks the conversation open; the blueprint run says whether the work is done (TFAC-1052) ([#1157](https://github.com/sky-ai-eng/triage-factory/issues/1157)) ([ea4993f](https://github.com/sky-ai-eng/triage-factory/commit/ea4993f236c0e4f199df82a235c05579cff699be))
+* **delegate:** an envelope that stays invalid aborts the blueprint and parks the conversation open (TFAC-1053) ([#1170](https://github.com/sky-ai-eng/triage-factory/issues/1170)) ([850904b](https://github.com/sky-ai-eng/triage-factory/commit/850904b5789bd42669f15b71718b0f0881dbd906))
+* **deps:** bump Go to 1.26.9 and golang.org/x/net to v0.60.0 for vulnerability fixes ([#1178](https://github.com/sky-ai-eng/triage-factory/issues/1178)) ([004bc67](https://github.com/sky-ai-eng/triage-factory/commit/004bc671d9125a0f74d9eb31b02b1c4c4c505af1))
+* **github:** detect an App deleted on GitHub or a rejected App key, stop polling, and say so in Settings (TFAC-958) ([#1154](https://github.com/sky-ai-eng/triage-factory/issues/1154)) ([f33c792](https://github.com/sky-ai-eng/triage-factory/commit/f33c792e900998d127228738f74401c8c8fcef64))
+* **github:** retry a response body that breaks off mid-read, and classify one on a success (TFAC-1054) ([#1161](https://github.com/sky-ai-eng/triage-factory/issues/1161)) ([5665f9b](https://github.com/sky-ai-eng/triage-factory/commit/5665f9bae604d2cf05efb793116e5b827a66e2b2))
+* **jira:** address the picker reads at the org and gate them on membership (TFAC-1055) ([#1172](https://github.com/sky-ai-eng/triage-factory/issues/1172)) ([0e8dd7a](https://github.com/sky-ai-eng/triage-factory/commit/0e8dd7abcad26955f4ab0a9d8a93f3d24b3b7e81))
+* **jira:** retry a response body that breaks off mid-read, like a dropped connection (TFAC-1051) ([#1158](https://github.com/sky-ai-eng/triage-factory/issues/1158)) ([2ead582](https://github.com/sky-ai-eng/triage-factory/commit/2ead5823f92062db81f726450eeb82c56ca79f15))
+* **slack:** follow a channel's id change so its threads keep matching (TFAC-1063) ([#1176](https://github.com/sky-ai-eng/triage-factory/issues/1176)) ([0aac476](https://github.com/sky-ai-eng/triage-factory/commit/0aac476c57756fe824ec055ebe893d5a5aee9917))
+
+
+### Reverts
+
+* drop the env-var credentials that never shipped (Jira Cloud, Linear) ([#1168](https://github.com/sky-ai-eng/triage-factory/issues/1168)) ([7c9a80d](https://github.com/sky-ai-eng/triage-factory/commit/7c9a80ddf48c6673942ccdd4e742267a04332ace))
+
 ## [1.15.0](https://github.com/sky-ai-eng/triage-factory/compare/v1.14.2...v1.15.0) (2026-10-05)
 
 
