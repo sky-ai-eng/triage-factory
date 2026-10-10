@@ -65,6 +65,12 @@ var errOrgManagedInTheWay = errors.New("org rides the deployment app with a live
 // rows have all been removed (an uninstall reported by webhook, say) is free to
 // bind a PAT and become the plain PAT workspace it already effectively is.
 //
+// Rows on every host count. The class is the org's, not a host's: a live
+// managed row the org left on a GitHub it has moved off is still a row under
+// the managed class, and binding another credential beside it is the
+// disagreement this guard exists to prevent. The disconnect verbs below remove
+// those rows too.
+//
 // An unknown class is refused as an error rather than read as "not managed":
 // the caller cannot know whether rows under a class this build cannot name are
 // in the way, and the doors already treat an unknown class as a reason not to
@@ -201,6 +207,8 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Every host's rows: leaving the class has to take all of them, and the
+	// narrowed verb may drop a row left on a GitHub the org has moved off.
 	live, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)

@@ -292,6 +292,21 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 	userID := ClaimsFrom(r.Context()).Subject
 
+	// The PR is on the org's current GitHub host — the client below is built
+	// for it — so that host scopes both the audit row and the entity patched
+	// after the write. It is read before the mutation, so a failed read
+	// refuses the request before GitHub changes rather than after.
+	var orgSet domain.OrgSettings
+	if err := dh.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID)
+		return e
+	}); err != nil {
+		internalError(w, "dashboard", err)
+		return
+	}
+	host := domain.EntityScope("github", orgSet)
+
 	// Repo-scoped mutation: resolve on the whole owner/repo so a selective App
 	// install that doesn't cover this repo falls through to the PAT instead of
 	// minting a token that 403s on the draft toggle (see handleDashboardPRStatus).
@@ -329,10 +344,11 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	}
 	recordExternalActionBestEffort(r.Context(), dh.tx, orgID, userID, domain.ExternalAction{
 		Provider:    domain.ArtifactProviderGitHub,
+		Scope:       host,
 		Action:      draftAction,
 		Target:      fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID:  strconv.Itoa(number),
-		URL:         domain.GitHubPullURL(owner+"/"+repo, number),
+		URL:         domain.GitHubPullURLBase(host, owner+"/"+repo, number),
 		FromState:   draftFrom,
 		ToState:     draftTo,
 		ActorUserID: userID,
@@ -351,11 +367,7 @@ func (dh *dashboardHandler) handleDashboardPRDraft(w http.ResponseWriter, r *htt
 	// when I dragged the card."
 	sourceID := fmt.Sprintf("%s/%s#%d", owner, repo, number)
 	if patchErr := dh.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
-		orgSet, err := tx.Orgs.GetSettings(r.Context(), orgID)
-		if err != nil {
-			return err
-		}
-		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, domain.EntityScope("github", orgSet), sourceID, draft)
+		return patchPRSnapshotDraft(r.Context(), tx.Entities, orgID, host, sourceID, draft)
 	}); patchErr != nil {
 		dashboardLog.Warn("failed to patch snapshot after draft toggle", "source_id", sourceID, "error", patchErr)
 	}

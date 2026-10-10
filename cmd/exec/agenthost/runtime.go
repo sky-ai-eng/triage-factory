@@ -521,15 +521,19 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 	)
 }
 
-// UpsertArtifact stamps the run identity onto a and upserts it, composing the
-// branch-push external action into the SAME write (TFAC-483). Event-triggered
-// runs route admin-pool; manual runs wrap in the kicking-off user's synthetic
-// claims. Returns the stored row.
+// UpsertArtifact stamps the run identity and the org's current scope
+// (stampScopeInfo) onto a and upserts it, composing the branch-push external
+// action into the SAME write (TFAC-483). Event-triggered runs route
+// admin-pool; manual runs wrap in the kicking-off user's synthetic claims.
+// Returns the stored row.
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
+	if err := stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, act); err != nil {
+		return domain.Artifact{}, err
+	}
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
 		if err != nil {

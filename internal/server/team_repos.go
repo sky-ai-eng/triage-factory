@@ -459,11 +459,12 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		clients = append(clients, ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID))
 	}
 
-	// App installation sources, one client per installed account. Each
+	// App installation sources, one client per account installed on the org's
+	// current host — the installations the resolver mints from. Each
 	// installation token can reach a distinct repo set; probing all of them
 	// preserves the old union reachability.
 	if s.ghResolver != nil && s.githubApps != nil {
-		insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+		insts, err := s.installationsOnOrgHost(ctx, orgID)
 		if err == nil {
 			for _, inst := range insts {
 				client, err := s.ghResolver.ClientFor(ctx, orgID, inst.AccountLogin)

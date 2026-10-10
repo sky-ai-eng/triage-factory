@@ -282,12 +282,14 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		return pickerPreflight{}, false
 	}
 	if class.AppTier() {
-		// An App with at least one installation is usable by definition — the
-		// installations ARE the reach, whether the App is the workspace's own or
-		// the deployment's shared one. A read failure here is carried rather than
-		// refused: reporting it would mean claiming "not installed", which only a
-		// successful read of zero installations can support.
-		insts, err := s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+		// An App with at least one installation on the org's current host is
+		// usable by definition — the installations ARE the reach, whether the App
+		// is the workspace's own or the deployment's shared one. One left on a
+		// host the org has moved off reaches nothing the picker lists. A read
+		// failure here is carried rather than refused: reporting it would mean
+		// claiming "not installed", which only a successful read of zero
+		// installations can support.
+		insts, err := s.installationsOnOrgHost(r.Context(), orgID)
 		if err != nil {
 			reposLog.Warn("list installations failed; serving the mirror if there is one", "org", orgID, "error", err)
 			return pickerPreflight{class: class, err: err}, true

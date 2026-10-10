@@ -64,11 +64,63 @@ func (s *stubWorktrees) RecordForClaimSystem(context.Context, string, string, do
 	panic("unexpected RecordForClaimSystem")
 }
 
+// credWaitHost is the org's GitHub host in these tests.
+const credWaitHost = "https://github.com"
+
+// The registry rows the wait resolves a name to: the task repository and a
+// second repository on the org's host, and a repository of the task
+// repository's name on another host.
+const (
+	credWaitRepoID      = "repo-tf"
+	credWaitOtherRepoID = "repo-other"
+	credWaitGHERepoID   = "repo-ghe-tf"
+)
+
+// stubOrgSettings answers the settings read the org's GitHub host comes from.
+type stubOrgSettings struct {
+	db.OrgsStore
+	base string
+}
+
+func (s stubOrgSettings) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{GitHubBaseURL: s.base}, nil
+}
+
+// stubRepos is the registry's name lookup: a host must match exactly and a
+// name case-insensitively, as the stores key them.
+type stubRepos struct {
+	db.RepositoryStore
+	rows []domain.Repository
+}
+
+func (s stubRepos) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
+	for _, r := range s.rows {
+		if r.Host == ref.Host && strings.EqualFold(r.Owner, ref.Owner) && strings.EqualFold(r.Repo, ref.Repo) {
+			return &r, nil
+		}
+	}
+	return nil, nil
+}
+
+// credWaitStores wires the reservation ledger rows beside the org settings and
+// registry the wait resolves the checkout's repository through.
+func credWaitStores(rows []domain.ConversationWorktree) db.Stores {
+	return db.Stores{
+		ConversationWorktrees: &stubWorktrees{rows: rows},
+		Orgs:                  stubOrgSettings{base: credWaitHost},
+		Repos: stubRepos{rows: []domain.Repository{
+			{ID: credWaitRepoID, Host: credWaitHost, Owner: "sky-ai-eng", Repo: "triage-factory"},
+			{ID: credWaitOtherRepoID, Host: credWaitHost, Owner: "sky-ai-eng", Repo: "other"},
+			{ID: credWaitGHERepoID, Host: "https://ghe.example.com", Owner: "sky-ai-eng", Repo: "triage-factory"},
+		}},
+	}
+}
+
 // credWaitServer builds a RelayServer whose reservation ledger holds rows and
 // whose sealed bundle reports sealedAt (zero ⇒ no bundle provisioned yet).
 func credWaitServer(t *testing.T, rows []domain.ConversationWorktree, sealedAt func() time.Time) (*RelayServer, *int32) {
 	t.Helper()
-	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
+	stores := credWaitStores(rows)
 	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	var relayed int32
 	srv.SetCredentialRefresh(&CredentialRefresh{
@@ -114,7 +166,7 @@ func TestAwaitCredentialsForRepo_NoReservationDoesNotWait(t *testing.T) {
 // wait clears on its first read.
 func TestAwaitCredentialsForRepo_RepeatAddDoesNotWait(t *testing.T) {
 	reserved := time.Now().Add(-time.Hour)
-	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: reserved}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
 	srv, relayed := credWaitServer(t, rows, func() time.Time { return reserved.Add(time.Minute) })
 
 	start := time.Now()
@@ -136,7 +188,7 @@ func TestAwaitCredentialsForRepo_RepeatAddDoesNotWait(t *testing.T) {
 // the wait never sees, and cannot see, what the bundle contains.
 func TestAwaitCredentialsForRepo_WaitsForASealAfterTheReservation(t *testing.T) {
 	reserved := time.Now()
-	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: reserved}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
 
 	// Starts stale (sealed before the reservation); the brain's re-seal lands
 	// mid-wait.
@@ -169,9 +221,9 @@ func TestAwaitCredentialsForRepo_SecondRefInAHeldRepoDoesNotWait(t *testing.T) {
 	first := time.Now().Add(-time.Hour)
 	second := time.Now()
 	rows := []domain.ConversationWorktree{
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: first},
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "pr-42", CreatedAt: second},
-		{RepoID: "sky-ai-eng/other", Ref: "default", CreatedAt: second.Add(time.Hour)},
+		{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: first},
+		{RepositoryID: credWaitRepoID, Ref: "pr-42", CreatedAt: second},
+		{RepositoryID: credWaitOtherRepoID, Ref: "default", CreatedAt: second.Add(time.Hour)},
 	}
 	// Sealed after the repo joined the set, before the second ref was reserved
 	// — which is exactly the bundle that already covers this repo.
@@ -195,8 +247,8 @@ func TestAwaitCredentialsForRepo_SecondRefInAHeldRepoDoesNotWait(t *testing.T) {
 func TestAwaitCredentialsForRepo_FirstReservationStillGates(t *testing.T) {
 	first := time.Now()
 	rows := []domain.ConversationWorktree{
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: first},
-		{RepoID: "sky-ai-eng/triage-factory", Ref: "pr-42", CreatedAt: first.Add(time.Minute)},
+		{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: first},
+		{RepositoryID: credWaitRepoID, Ref: "pr-42", CreatedAt: first.Add(time.Minute)},
 	}
 	srv, _ := credWaitServer(t, rows, func() time.Time { return first.Add(-time.Minute) })
 
@@ -216,7 +268,7 @@ func TestAwaitCredentialsForRepo_TimesOutNamingTheRepo(t *testing.T) {
 		t.Fatalf("workspaceCredWaitTimeout = %s; the op must fail inside 15s, well within the executor's awaiting-credentials deadline", workspaceCredWaitTimeout)
 	}
 	reserved := time.Now()
-	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: reserved}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
 	// The brain never provisions: no bundle at all.
 	srv, relayed := credWaitServer(t, rows, func() time.Time { return time.Time{} })
 
@@ -244,8 +296,8 @@ func TestAwaitCredentialsForRepo_TimesOutNamingTheRepo(t *testing.T) {
 // what holds the token the clone authenticates with.
 func TestAwaitCredentialsForRepo_RelayFailureFailsTheOp(t *testing.T) {
 	reserved := time.Now()
-	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: reserved}}
-	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
+	stores := credWaitStores(rows)
 	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 	srv.SetCredentialRefresh(&CredentialRefresh{
 		SealedAt: func(context.Context) (time.Time, bool, error) { return reserved.Add(time.Second), true, nil },
@@ -259,20 +311,81 @@ func TestAwaitCredentialsForRepo_RelayFailureFailsTheOp(t *testing.T) {
 }
 
 // TestRepoReservedAt_MatchesCaseInsensitively pins the spelling seam: the
-// reservation records the agent's casing while the checkout op carries the
-// repository row's, so a case difference must not read as "no reservation" and skip
-// the wait entirely.
+// agent's casing of a name may differ from the registry's, and the name must
+// still resolve to the repository the reservation was written for rather than
+// read as "no reservation" and skip the wait entirely.
 func TestRepoReservedAt_MatchesCaseInsensitively(t *testing.T) {
 	reserved := time.Now()
-	rows := []domain.ConversationWorktree{{RepoID: "Sky-AI-Eng/Triage-Factory", Ref: "default", CreatedAt: reserved}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
 	srv, _ := credWaitServer(t, rows, func() time.Time { return time.Time{} })
 
-	at, ok, err := srv.repoReservedAt(context.Background(), "sky-ai-eng/triage-factory")
+	at, ok, err := srv.repoReservedAt(context.Background(), "Sky-AI-Eng", "Triage-Factory")
 	if err != nil || !ok {
-		t.Fatalf("repoReservedAt: ok=%v err=%v, want the differently-cased row matched", ok, err)
+		t.Fatalf("repoReservedAt: ok=%v err=%v, want the differently-cased name matched", ok, err)
 	}
 	if !at.Equal(reserved) {
 		t.Errorf("repoReservedAt = %s, want %s", at, reserved)
+	}
+}
+
+// TestRepoReservedAt_MatchesTheCurrentHostsRepositoryRow pins that a
+// reservation is matched on the repository row id the ledger is keyed by, and
+// that the name resolves on the org's current GitHub host: a reservation for
+// the same owner/repo on another host is another repository's, and a row whose
+// slug reads the same but whose id names another repository is not this one's.
+func TestRepoReservedAt_MatchesTheCurrentHostsRepositoryRow(t *testing.T) {
+	older := time.Now().Add(-time.Hour)
+	current := time.Now()
+	rows := []domain.ConversationWorktree{
+		{RepositoryID: credWaitGHERepoID, RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: older},
+		{RepositoryID: credWaitOtherRepoID, RepoID: "sky-ai-eng/triage-factory", Ref: "pr-1", CreatedAt: older},
+		{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: current},
+	}
+	srv, _ := credWaitServer(t, rows, func() time.Time { return time.Time{} })
+
+	at, ok, err := srv.repoReservedAt(context.Background(), "sky-ai-eng", "triage-factory")
+	if err != nil || !ok {
+		t.Fatalf("repoReservedAt: ok=%v err=%v, want the current host's row matched", ok, err)
+	}
+	if !at.Equal(current) {
+		t.Errorf("repoReservedAt = %s, want %s — the older reservations belong to other repositories", at, current)
+	}
+
+	onlyElsewhere := []domain.ConversationWorktree{
+		{RepositoryID: credWaitGHERepoID, RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: older},
+	}
+	srv, _ = credWaitServer(t, onlyElsewhere, func() time.Time { return time.Time{} })
+	if _, ok, err := srv.repoReservedAt(context.Background(), "sky-ai-eng", "triage-factory"); err != nil || ok {
+		t.Errorf("repoReservedAt with only another host's reservation: ok=%v err=%v, want no reservation", ok, err)
+	}
+}
+
+// TestAwaitCredentialsForRepo_ReservationOnAnotherHostDoesNotWait: a
+// reservation for the same owner/repo on another GitHub host widened nothing
+// for the current host's repository, so the checkout waits for no re-seal.
+func TestAwaitCredentialsForRepo_ReservationOnAnotherHostDoesNotWait(t *testing.T) {
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitGHERepoID, Ref: "default", CreatedAt: time.Now()}}
+	srv, relayed := credWaitServer(t, rows, func() time.Time { return time.Time{} })
+
+	start := time.Now()
+	if err := srv.awaitCredentialsForRepo(context.Background(), "sky-ai-eng", "triage-factory"); err != nil {
+		t.Fatalf("wait returned %v, want nil — nothing on the current host was reserved", err)
+	}
+	if elapsed := time.Since(start); elapsed > workspaceCredPollInterval {
+		t.Errorf("wait took %s; with no reservation there is no seal to wait for", elapsed)
+	}
+	if got := atomic.LoadInt32(relayed); got != 0 {
+		t.Errorf("relayed %d bundles, want 0", got)
+	}
+}
+
+// TestRepoReservedAt_NameWithNoRegistryRowHasNoReservation: a name the current
+// host's registry does not hold has no row id to have been reserved under.
+func TestRepoReservedAt_NameWithNoRegistryRowHasNoReservation(t *testing.T) {
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: time.Now()}}
+	srv, _ := credWaitServer(t, rows, func() time.Time { return time.Time{} })
+	if _, ok, err := srv.repoReservedAt(context.Background(), "sky-ai-eng", "unknown"); err != nil || ok {
+		t.Errorf("repoReservedAt for an unregistered name: ok=%v err=%v, want no reservation", ok, err)
 	}
 }
 
@@ -282,8 +395,8 @@ func TestRepoReservedAt_MatchesCaseInsensitively(t *testing.T) {
 // had left.
 func TestAwaitCredentialsForRepo_RelayGetsItsOwnBudget(t *testing.T) {
 	reserved := time.Now()
-	rows := []domain.ConversationWorktree{{RepoID: "sky-ai-eng/triage-factory", Ref: "default", CreatedAt: reserved}}
-	stores := db.Stores{ConversationWorktrees: &stubWorktrees{rows: rows}}
+	rows := []domain.ConversationWorktree{{RepositoryID: credWaitRepoID, Ref: "default", CreatedAt: reserved}}
+	stores := credWaitStores(rows)
 	srv := NewRelayServer(stores, ConversationInfo{OrgID: "org", ConversationID: "conv"}, nil)
 
 	var relayDeadline time.Duration

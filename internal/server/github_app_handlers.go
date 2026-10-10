@@ -113,10 +113,12 @@ func installationSettingsURL(inst domain.OrgGitHubAppInstallation) string {
 }
 
 // newGitHubAppStatusResponse assembles the read-only status payload from the
-// org's credential class, a loaded App registration, its installations, and the
-// registrant's display name. Shared by the member-readable status GET
-// (handleGitHubAppStatus) and the admin-only refresh POST
-// (handleGitHubAppInstallationsRefresh) so the two can never drift in shape.
+// org's credential class, a loaded App registration, its installations on the
+// org's current GitHub host, and the registrant's display name. Shared by the
+// member-readable status GET (handleGitHubAppStatus), the admin-only refresh
+// POST (handleGitHubAppInstallationsRefresh) and the import response, so they
+// can never drift in shape — and every caller reads the installations on the
+// current host, since those are the accounts the panel says the App reaches.
 // registeredByName may be empty when the registrant is unknown or the lookup
 // was skipped. connectCallbackURL is the org's Connect OAuth redirect_uri (or
 // "" when no deployment identity is configured), carried so the import/connect
@@ -277,7 +279,9 @@ func (s *Server) handleGitHubAppStatus(w http.ResponseWriter, r *http.Request) {
 		if lerr != nil {
 			return lerr
 		}
-		insts, lerr = tx.GitHubApps.ListInstallationsForOrg(ctx, orgID)
+		// The installations on the host the same settings row names: the ones
+		// the org's App reaches now (see ListInstallationsOnHost).
+		insts, lerr = tx.GitHubApps.ListInstallationsOnHost(ctx, orgID, db.EffectiveGitHubHost(set.GitHubBaseURL))
 		return lerr
 	}); err != nil {
 		internalError(w, "github-app", err)
@@ -423,7 +427,7 @@ func (s *Server) handleGitHubAppInstallationsRefresh(w http.ResponseWriter, r *h
 			return
 		}
 	}
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	insts, err := s.installationsOnOrgHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-app", err)
 		return

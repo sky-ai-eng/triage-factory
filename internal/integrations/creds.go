@@ -455,12 +455,13 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // when the question was "would this workspace's credential system use it".
 //
 // The managed arm asks the one question that has an answer here: has this
-// workspace bound the shared App to any account? The App itself is a deployment
-// fact — configured in the operator's environment, not in anything this
-// function can read — so what makes it READY FOR THIS ORG is the bind, which is
-// also the only thing the org can do about it. Zero installations is a
-// workspace that has connected nothing, which is exactly what the setup step
-// exists to prompt.
+// workspace bound the shared App to any account on its current GitHub host? The
+// App itself is a deployment fact — configured in the operator's environment,
+// not in anything this function can read — so what makes it READY FOR THIS ORG
+// is the bind, which is also the only thing the org can do about it. Zero
+// installations on the host is a workspace that has connected nothing it can
+// use, which is exactly what the setup step exists to prompt; a binding left on
+// a host the org has moved off resolves nothing.
 //
 // A failed read is an ERROR, never a false. Reporting one as "not connected"
 // is indistinguishable to the caller from the real answer, and a caller that
@@ -484,7 +485,7 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 		// org resolves through until the cutover flips it.
 		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrg(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHost(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}
@@ -521,7 +522,7 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 		// org resolves through until the cutover flips it.
 		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrgSystem(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHostSystem(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}

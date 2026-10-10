@@ -42,12 +42,25 @@ func (a readyApps) GetForOrgSystem(ctx context.Context, orgID string) (*domain.O
 	return a.GetForOrg(ctx, orgID)
 }
 
-func (a readyApps) ListInstallationsForOrg(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.insts, nil
+// ListInstallationsOnHost answers like the store: the rows on host, and
+// nothing for an empty host. A fixture installation that names no GitHubHost is
+// on the org's current host, the only host GitHubReady asks about.
+func (a readyApps) ListInstallationsOnHost(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range a.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
-func (a readyApps) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.ListInstallationsForOrg(ctx, orgID)
+func (a readyApps) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	return a.ListInstallationsOnHost(ctx, orgID, host)
 }
 
 // TestGitHubReady_EveryCredentialClass walks all three classes through the
@@ -169,6 +182,45 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 				t.Errorf("GitHubReady = %v with a PAT in the store; want %v", got, tc.want)
 			}
 			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
+	}
+}
+
+// TestGitHubReady_ManagedBindOnAnotherHostIsNotReady: a managed workspace is
+// ready when it has bound an account on its current GitHub host, because those
+// are the installations its resolution mints from. A bind left on a host the
+// org has moved off resolves nothing here, so it reads as connecting nothing.
+func TestGitHubReady_ManagedBindOnAnotherHostIsNotReady(t *testing.T) {
+	ctx := context.Background()
+	const current = "https://ghe.new.example.com"
+	onOld := domain.OrgGitHubAppInstallation{InstallationID: "456", AccountLogin: "acme", GitHubHost: "https://ghe.old.example.com"}
+	onCurrent := domain.OrgGitHubAppInstallation{InstallationID: "789", AccountLogin: "acme", GitHubHost: current}
+
+	for _, tc := range []struct {
+		name  string
+		insts []domain.OrgGitHubAppInstallation
+		want  bool
+	}{
+		{"bound only on the old host", []domain.OrgGitHubAppInstallation{onOld}, false},
+		{"bound on both hosts", []domain.OrgGitHubAppInstallation{onOld, onCurrent}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: domain.GitHubCredentialClassManagedApp, base: current + "/"}
+			apps := readyApps{insts: tc.insts}
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", auth.Credentials{})
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", auth.Credentials{})
 			if err != nil {
 				t.Fatalf("GitHubReadySystem: %v", err)
 			}

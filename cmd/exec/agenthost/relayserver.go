@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
@@ -527,7 +526,7 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 		return nil
 	}
 	repoID := owner + "/" + repo
-	reservedAt, ok, err := s.repoReservedAt(ctx, repoID)
+	reservedAt, ok, err := s.repoReservedAt(ctx, owner, repo)
 	if err != nil {
 		return fmt.Errorf("agenthost: read worktree reservations for %s: %w", repoID, err)
 	}
@@ -574,8 +573,8 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 	}
 }
 
-// repoReservedAt reports when repoID entered this run's authorized repo set —
-// the OLDEST conversation_worktrees row the run holds for it.
+// repoReservedAt reports when owner/repo entered this run's authorized repo
+// set — the OLDEST conversation_worktrees row the run holds for it.
 //
 // Oldest, not newest, because the two ledgers are keyed differently:
 // reservations are per (repo, ref) while credentials are per repo (the
@@ -585,19 +584,30 @@ func (s *RelayServer) awaitCredentialsForRepo(ctx context.Context, owner, repo s
 // row would make a run's second checkout in a repo it already holds sit out a
 // re-seal that changes nothing.
 //
-// Repo ids are compared case-insensitively because the reservation records the
-// agent's spelling while the checkout op carries the repository row's — the same
-// rule the insert's doorbell gate uses, so the two halves agree on what counts
-// as the same repo.
-func (s *RelayServer) repoReservedAt(ctx context.Context, repoID string) (time.Time, bool, error) {
+// A ledger row names its repository by registry row id, so owner/repo is
+// resolved to the row on the org's current GitHub host (GetRepo, which matches
+// the name case-insensitively) and the rows are matched on that id, as
+// authorizeRepo matches them. A reservation of the same name on another host is
+// another repository's and widened nothing for this one.
+func (s *RelayServer) repoReservedAt(ctx context.Context, owner, repo string) (time.Time, bool, error) {
 	rows, err := s.rt.ListConversationWorktrees(ctx)
 	if err != nil {
 		return time.Time{}, false, err
 	}
+	if len(rows) == 0 {
+		return time.Time{}, false, nil
+	}
+	row, err := s.rt.GetRepo(ctx, owner+"/"+repo)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("resolve %s/%s: %w", owner, repo, err)
+	}
+	if row == nil {
+		return time.Time{}, false, nil
+	}
 	var oldest time.Time
 	found := false
 	for _, w := range rows {
-		if !strings.EqualFold(w.RepoID, repoID) {
+		if w.RepositoryID != row.ID {
 			continue
 		}
 		if !found || w.CreatedAt.Before(oldest) {

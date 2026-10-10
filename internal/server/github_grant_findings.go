@@ -107,12 +107,13 @@ func (s *Server) grantFindingsClass(w http.ResponseWriter, r *http.Request) (org
 	return orgID, class, true
 }
 
-// liveInstallationsByID indexes the org's live installations so a finding row
-// can name the account and settings page of the installation it belongs to.
-// System read: the admin gate authorized orgID, and the mirror the findings
-// come from is read the same way.
-func (s *Server) liveInstallationsByID(ctx context.Context, orgID string) (map[string]domain.OrgGitHubAppInstallation, error) {
-	insts, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
+// liveInstallationsByID indexes the org's live installations on host so a
+// finding row can name the account and settings page of the installation it
+// belongs to. The findings themselves are read on host, so this is the set
+// their installation ids come from. System read: the admin gate authorized
+// orgID, and the mirror the findings come from is read the same way.
+func (s *Server) liveInstallationsByID(ctx context.Context, orgID, host string) (map[string]domain.OrgGitHubAppInstallation, error) {
+	insts, err := s.githubApps.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +161,7 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 		httpx.WriteList(w, page, items, total)
 		return
 	}
-	byID, err := s.liveInstallationsByID(ctx, orgID)
+	byID, err := s.liveInstallationsByID(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-grant", err)
 		return
@@ -218,7 +219,7 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 		httpx.WriteList(w, page, items, total)
 		return
 	}
-	byID, err := s.liveInstallationsByID(ctx, orgID)
+	byID, err := s.liveInstallationsByID(ctx, orgID, host)
 	if err != nil {
 		internalError(w, "github-grant", err)
 		return

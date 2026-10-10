@@ -200,13 +200,13 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 // This wraps s.githubApps, which is NOT the store a handler's own
 // tx.GitHubApps calls run against inside s.tx.WithTx — WithTx builds a fresh
 // TxStores straight off the *sql.Tx, so a hook here only reaches the
-// pre-transaction reads (GetForOrgSystem, ListInstallationsForOrgSystem), never
+// pre-transaction reads (GetForOrgSystem, ListInstallationsOnHostSystem), never
 // a write made through tx. See setActiveReturnsNilTx below for the shape that
 // reaches inside the transaction.
 type ghAppsRaceHook struct {
 	db.GitHubAppsStore
 	afterGet  func() // fires once, after the first GetForOrgSystem
-	afterList func() // fires once, after the first ListInstallationsForOrgSystem
+	afterList func() // fires once, after the first ListInstallationsOnHostSystem
 	getOnce   sync.Once
 	listOnce  sync.Once
 }
@@ -219,8 +219,8 @@ func (g *ghAppsRaceHook) GetForOrgSystem(ctx context.Context, orgID string) (*do
 	return app, err
 }
 
-func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	insts, err := g.GitHubAppsStore.ListInstallationsForOrgSystem(ctx, orgID)
+func (g *ghAppsRaceHook) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	insts, err := g.GitHubAppsStore.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err == nil && g.afterList != nil {
 		g.listOnce.Do(g.afterList)
 	}

@@ -46,9 +46,25 @@ func (f *fakeApps) BackfillInstallationsFromAPI(_ context.Context, _ string) err
 	return f.backfillErr
 }
 
-func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+// ListInstallationsOnHostSystem answers like the store: the live rows on host,
+// and nothing for an empty host. A fixture installation that names no
+// GitHubHost is on the org's current host, the only host the pass asks about.
+func (f *fakeApps) ListInstallationsOnHostSystem(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
 	f.listedAfterBackfill = f.backfillCalls > 0
-	return f.installs, f.listErr
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.installs {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 // fakeMirror records every write so a test can assert not just what the mirror
@@ -110,11 +126,23 @@ func (f *fakeMirror) ReachableSlugsSystem(context.Context, string, string, domai
 	panic("grantmirror must not read the write gate's slug set")
 }
 
+// testHost is the GitHub host fakeGrants resolves for when a test names none.
+const testHost = "https://ghe.current.example.com"
+
 // fakeGrants answers per account login: a grant, whether the listing was
-// complete, and an error.
+// complete, and an error. host is the org's GitHub host it reports, testHost
+// when empty.
 type fakeGrants struct {
 	byLogin    map[string]grantAnswer
 	resolveErr map[string]error
+	host       string
+}
+
+func (f fakeGrants) githubHostFor(context.Context, string) (string, error) {
+	if f.host != "" {
+		return f.host, nil
+	}
+	return testHost, nil
 }
 
 type grantAnswer struct {
@@ -574,3 +602,58 @@ func TestRunOrg_UnresolvableClassStopsThePass(t *testing.T) {
 		t.Error("the pass proceeded past an unresolvable class; want nothing asked and nothing written")
 	}
 }
+
+// TestRunOrg_ReconcilesOnlyTheCurrentHostsInstallations: an org that moved to
+// another GitHub holds an installation for the same account login on both
+// hosts. The grant client is resolved by login on the current host, so walking
+// the old host's installation would read the current one's grant and write it
+// under the old installation's id. Only the current host's installation is
+// reconciled; the old one's mirror is not touched.
+func TestRunOrg_ReconcilesOnlyTheCurrentHostsInstallations(t *testing.T) {
+	old := live("1", "acme")
+	old.GitHubHost = "https://ghe.old.example.com"
+	current := live("2", "acme")
+	current.GitHubHost = testHost
+
+	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{old, current}}
+	mirror := newFakeMirror()
+	mirror.rows["1"] = []string{"acme/legacy"}
+	grants := fakeGrants{byLogin: map[string]grantAnswer{
+		"acme": {repos: []github.UserRepo{repo("acme/api", 10)}, complete: true},
+	}}
+
+	if err := newReconciler(apps, mirror, grants).RunOrg(context.Background(), testOrg); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if mirror.replaces != 1 {
+		t.Errorf("mirror written %d times; want 1 — the current host's installation only", mirror.replaces)
+	}
+	if got := mirror.rows["2"]; len(got) != 1 || got[0] != "acme/api" {
+		t.Errorf("installation 2 mirror = %v; want [acme/api]", got)
+	}
+	if got := mirror.rows["1"]; len(got) != 1 || got[0] != "acme/legacy" {
+		t.Errorf("installation 1 mirror = %v; want [acme/legacy] untouched — it is on a host the org has left", got)
+	}
+}
+
+// TestRunOrg_NoHostReconcilesNothing: an org that resolves no GitHub host has
+// no installation the pass may walk, however many the mirror holds.
+func TestRunOrg_NoHostReconcilesNothing(t *testing.T) {
+	apps := &fakeApps{app: activeApp(), installs: []domain.OrgGitHubAppInstallation{live("1", "acme")}}
+	mirror := newFakeMirror()
+	grants := noHostGrants{fakeGrants{byLogin: map[string]grantAnswer{
+		"acme": {repos: []github.UserRepo{repo("acme/api", 10)}, complete: true},
+	}}}
+
+	if err := newReconciler(apps, mirror, grants).RunOrg(context.Background(), testOrg); err != nil {
+		t.Fatalf("RunOrg: %v", err)
+	}
+	if mirror.replaces != 0 {
+		t.Errorf("mirror written %d times for an org with no host; want 0", mirror.replaces)
+	}
+}
+
+// noHostGrants is fakeGrants for an org whose host resolves to nothing.
+type noHostGrants struct{ fakeGrants }
+
+func (noHostGrants) githubHostFor(context.Context, string) (string, error) { return "", nil }

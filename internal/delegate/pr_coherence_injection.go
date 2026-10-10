@@ -143,12 +143,13 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 		return
 	}
 
-	headRepo, headRef := parsed.repo, ""
+	headRepo, headRef, scope := parsed.repo, "", ""
 	if s.entities != nil {
 		entity, loadErr := s.entities.GetSystem(ctx, evt.OrgID, entityID)
 		if loadErr != nil {
 			delegateLog.Warn("PR coherence injection: load entity snapshot failed", "entity", entityID, "error", loadErr)
 		} else if entity != nil {
+			scope = entity.Scope
 			var snapshot domain.PRSnapshot
 			if json.Unmarshal([]byte(entity.SnapshotJSON), &snapshot) == nil {
 				headRef = snapshot.HeadRef
@@ -180,7 +181,7 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 	// whatever the checkout is anchored at.
 	var anchored map[string]bool
 	if original.EventType == domain.EventGitHubPRNewCommits {
-		anchored = s.reviewsAnchoredAtHead(ctx, evt.OrgID, domain.ReviewTarget(parsed.repo, parsed.prNumber), parsed.headSHA)
+		anchored = s.reviewsAnchoredAtHead(ctx, evt.OrgID, scope, domain.ReviewTarget(parsed.repo, parsed.prNumber), parsed.headSHA)
 	}
 
 	body := parsed.injectionBody(original.EventType)
@@ -207,14 +208,18 @@ func (s *Spawner) HandlePRCoherence(evt domain.Event) {
 // worktree HEAD, which TF does not track as a column and which may live on
 // another executor.
 //
-// Best-effort: a lookup failure returns no suppressions, so every target gets
-// the note. A spurious "re-pull" is harmless; a missed advance leaves the
-// agent working against a diff that moved.
-func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, target, headSHA string) map[string]bool {
-	if s.artifacts == nil || headSHA == "" {
+// The reviews are read on scope, the PR entity's GitHub host: the same target
+// on another host is another pull request.
+//
+// Best-effort: a lookup failure, or an entity whose scope could not be read,
+// returns no suppressions, so every target gets the note. A spurious
+// "re-pull" is harmless; a missed advance leaves the agent working against a
+// diff that moved.
+func (s *Spawner) reviewsAnchoredAtHead(ctx context.Context, orgID, scope, target, headSHA string) map[string]bool {
+	if s.artifacts == nil || headSHA == "" || scope == "" {
 		return nil
 	}
-	reviews, err := s.artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, target)
+	reviews, err := s.artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, scope, target)
 	if err != nil {
 		delegateLog.Warn("PR coherence injection: lookup pending reviews failed", "target", target, "error", err)
 		return nil
