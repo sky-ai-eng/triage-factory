@@ -174,17 +174,17 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		}
 
 		// The placement override — human intent, keyed by slug.
-		if stale, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, renameOldSlug); stale != nil {
+		if stale, _ := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameOldSlug); stale != nil {
 			t.Errorf("placement override still keyed on the old slug: %+v", stale)
 		}
-		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, renameNewSlug)
+		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug)
 		if err != nil || ov == nil {
 			t.Fatalf("PlacementOverrides.Get(new) = %v, %v; want the moved pin", ov, err)
 		}
 		if ov.Replicas != 3 {
 			t.Errorf("placement replicas = %d, want 3 — the pin moves, its content does not", ov.Replicas)
 		}
-		if other, _ := s.PlacementOverrides.Get(ctx, orgID, "hostgroup", renameOldSlug); other == nil {
+		if other, _ := s.PlacementOverrides.Get(ctx, orgID, "hostgroup", TestGitHubHost, renameOldSlug); other == nil {
 			t.Errorf("the other-kind override moved; only key_kind='repo' rows hold a slug")
 		}
 	})
@@ -703,7 +703,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		// An artifact of a repository no registry row answers to any more —
 		// the audit record outlives whatever row it was produced under.
 		orphan, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 			Target: domain.PullRequestTarget("octo/api", 18), ExternalID: "18",
 			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("octo/api", 18),
 		})
@@ -719,7 +719,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("seed the renaming repository: %v", err)
 		}
 		live, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 			Target: domain.PullRequestTarget("octo/legacy", 18), ExternalID: "18",
 			State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey("octo/legacy", 18),
 		})
@@ -766,7 +766,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 		fx := seedRenameFixture(t, s, orgID, seed, "orphan")
 
 		if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: renameNewSlug, Replicas: 9,
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: renameNewSlug, Replicas: 9,
 		}); err != nil {
 			t.Fatalf("seed target placement override: %v", err)
 		}
@@ -782,7 +782,7 @@ func RunRepoRenameConformance(t *testing.T, mk RepoRenameFactory) {
 			t.Fatalf("outcome = %+v, want the rename to go through", out)
 		}
 
-		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, renameNewSlug)
+		ov, err := s.PlacementOverrides.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, renameNewSlug)
 		if err != nil || ov == nil {
 			t.Fatalf("PlacementOverrides.Get(new) = %v, %v; want the moved pin", ov, err)
 		}
@@ -948,7 +948,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	movedActionKey := "rename-moved-" + suffix
 	neighbourActionKey := "rename-neighbour-" + suffix
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-		TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
 		Target: renameOldSlug + "#18", ExternalID: "18",
 		URL:        "https://github.com/" + renameOldSlug + "/pull/18",
 		Credential: domain.CredentialGitHubApp, DedupKey: movedActionKey,
@@ -957,7 +957,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed moved action: %v", err)
 	}
 	if err := s.ExternalActions.RecordSystem(ctx, orgID, domain.ExternalAction{
-		TeamID: seed.TeamID, Provider: "github", Action: domain.ActionPRCreated,
+		TeamID: seed.TeamID, Provider: "github", Scope: TestGitHubHost, Action: domain.ActionPRCreated,
 		Target: renameNeighbourSlug + "#4", ExternalID: "4",
 		URL:        "https://github.com/" + renameNeighbourSlug + "/pull/4",
 		Credential: domain.CredentialGitHubApp, DedupKey: neighbourActionKey,
@@ -966,7 +966,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 
 	prArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget(renameOldSlug, 18), ExternalID: "18",
 		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameOldSlug, 18),
 	})
@@ -974,7 +974,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed pr artifact: %v", err)
 	}
 	branchArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGit, Kind: domain.ArtifactKindBranch,
+		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGit, Kind: domain.ArtifactKindBranch, Scope: TestGitHubHost,
 		Target: renameOldSlug, ExternalID: branchRef, State: domain.ArtifactStateBranchPushed,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderGit, domain.ArtifactKindBranch, renameOldSlug, branchRef),
 	})
@@ -982,7 +982,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 		t.Fatalf("seed branch artifact: %v", err)
 	}
 	neighbourArtifact, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
-		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+		TeamID: seed.TeamID, Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest, Scope: TestGitHubHost,
 		Target: domain.PullRequestTarget(renameNeighbourSlug, 4), ExternalID: "4",
 		State: domain.ArtifactStatePROpen, DedupKey: domain.PullRequestDedupKey(renameNeighbourSlug, 4),
 	})
@@ -991,7 +991,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	}
 
 	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-		OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: renameOldSlug, Replicas: 3,
+		OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: renameOldSlug, Replicas: 3,
 	}); err != nil {
 		t.Fatalf("seed placement override: %v", err)
 	}
@@ -999,7 +999,7 @@ func seedRenameFixture(t *testing.T, s db.Stores, orgID string, seed RepoRenameS
 	// sharing the same key_value column proves the rename only rewrites
 	// key_kind='repo' rows.
 	if _, err := s.PlacementOverrides.Upsert(ctx, domain.PlacementOverride{
-		OrgID: orgID, KeyKind: "hostgroup", KeyValue: renameOldSlug, Replicas: 2,
+		OrgID: orgID, KeyKind: "hostgroup", Host: TestGitHubHost, KeyValue: renameOldSlug, Replicas: 2,
 	}); err != nil {
 		t.Fatalf("seed other-kind placement override: %v", err)
 	}

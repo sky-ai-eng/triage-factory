@@ -103,7 +103,9 @@ func testAppPEM(t *testing.T) string {
 //   - the since-stamp holds while the reason repeats and restarts when it
 //     changes;
 //   - a successful listing clears the reason;
-//   - none of the failure arms touches the installation mirror.
+//   - none of the failure arms touches the installation mirror;
+//   - a successful listing's removal diff covers the rows on the host it
+//     listed and leaves another host's rows alone.
 func RunGitHubAppUnusableConformance(t *testing.T, mk GitHubAppUnusableFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -251,6 +253,45 @@ func RunGitHubAppUnusableConformance(t *testing.T, mk GitHubAppUnusableFactory) 
 		}
 		if n := activeInstallations(t, store, orgID); n != 1 {
 			t.Errorf("installation mirror holds %d active rows after recovery; want 1", n)
+		}
+	})
+
+	t.Run("the removal diff stays on the listed host", func(t *testing.T) {
+		// The listing reports installation 11. A row on the listed host it does
+		// not report is gone from GitHub and is soft-removed; a row on another
+		// GitHub is one this listing says nothing about, and stays live.
+		store, seed := mk(t)
+		_, base := newFakeAppGitHub(t)
+		orgID := seed.Org(t)
+		seed.App(t, orgID, "777", testAppPEM(t), base)
+		for _, inst := range []domain.OrgGitHubAppInstallation{
+			{InstallationID: "33", OrgID: orgID, AccountType: "Organization", AccountLogin: "gone", GitHubHost: base},
+			{InstallationID: "22", OrgID: orgID, AccountType: "Organization", AccountLogin: "elsewhere", GitHubHost: "https://ghe.other.test"},
+		} {
+			if _, err := store.UpsertInstallation(ctx, inst); err != nil {
+				t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
+			}
+		}
+
+		if err := store.BackfillInstallationsFromAPI(ctx, orgID); err != nil {
+			t.Fatalf("BackfillInstallationsFromAPI: %v", err)
+		}
+		insts, err := store.ListInstallationsForOrgSystem(ctx, orgID)
+		if err != nil {
+			t.Fatalf("ListInstallationsForOrgSystem: %v", err)
+		}
+		live := map[string]string{}
+		for _, inst := range insts {
+			live[inst.InstallationID] = inst.GitHubHost
+		}
+		if _, ok := live["11"]; !ok {
+			t.Errorf("live rows = %v; want the listed installation 11", live)
+		}
+		if _, ok := live["33"]; ok {
+			t.Errorf("live rows = %v; want 33 removed — the listed host no longer reports it", live)
+		}
+		if live["22"] != "https://ghe.other.test" {
+			t.Errorf("live rows = %v; want 22 still live on https://ghe.other.test", live)
 		}
 	})
 }

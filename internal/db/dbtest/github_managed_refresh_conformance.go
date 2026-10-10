@@ -376,6 +376,65 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}
 	})
 
+	t.Run("ARowOnAnotherHostIsNeitherMatchedNorRemoved", func(t *testing.T) {
+		// The workspace is on the deployment's GitHub and also holds a live row
+		// on another one — left there when the deployment's default moved, say.
+		// GitHub numbers installations per deployment, so the listing here can
+		// carry that row's id for an unrelated installation. Matching on the id
+		// alone would refresh the row into another tenant's installation;
+		// diffing against it would soft-remove a row the listing never covered.
+		// Neither happens: the other host's row is exactly as it was.
+		store, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		body := listing(acct{111, "acme-renamed"}, acct{222, "stranger"})
+		base, _ := fakeGitHub(t, http.StatusOK, &body)
+		seed.Class(t, org, domain.GitHubCredentialClassManagedApp, base)
+		const other = "https://ghe.other.test"
+		bind(t, store, org, "111", db.EffectiveGitHubHost(base), "acme")
+		bind(t, store, org, "222", other, "old-acct")
+
+		if err := store.RefreshManagedInstallations(ctx, org, deployment); err != nil {
+			t.Fatalf("RefreshManagedInstallations: %v", err)
+		}
+		insts, err := store.ListInstallationsForOrgSystem(ctx, org)
+		if err != nil {
+			t.Fatalf("ListInstallationsForOrgSystem: %v", err)
+		}
+		byID := map[string]domain.OrgGitHubAppInstallation{}
+		for _, inst := range insts {
+			byID[inst.InstallationID] = inst
+		}
+		if got := byID["111"]; got.AccountLogin != "acme-renamed" {
+			t.Errorf("row 111 AccountLogin = %q; want %q — the row on the listed host still refreshes", got.AccountLogin, "acme-renamed")
+		}
+		got, ok := byID["222"]
+		if !ok || got.GitHubHost != other || got.AccountLogin != "old-acct" {
+			t.Errorf("row 222 = %+v (live=%v); want it live on %s as old-acct, untouched", got, ok, other)
+		}
+	})
+
+	t.Run("OnlyRowsOnAnotherHostAsksGitHubNothing", func(t *testing.T) {
+		// On the deployment's GitHub the workspace has bound nothing, so there
+		// is nothing a listing could refresh — the same answer, and the same
+		// request saved, as a workspace with no rows at all.
+		store, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		body := listing(acct{222, "stranger"})
+		base, calls := fakeGitHub(t, http.StatusOK, &body)
+		seed.Class(t, org, domain.GitHubCredentialClassManagedApp, base)
+		bind(t, store, org, "222", "https://ghe.other.test", "old-acct")
+
+		if err := store.RefreshManagedInstallations(ctx, org, deployment); err != nil {
+			t.Fatalf("RefreshManagedInstallations: %v", err)
+		}
+		if got := calls.Load(); got != 0 {
+			t.Errorf("listing fetched %d times with nothing bound on the deployment's GitHub; want 0", got)
+		}
+		if got := liveIDs(t, store, org); len(got) != 1 || got[0] != "222" {
+			t.Errorf("live installations = %v; want [222] untouched", got)
+		}
+	})
+
 	t.Run("OffHostListsOnlyLiveManagedRowsElsewhere", func(t *testing.T) {
 		// The boot warning's read. The deployment App is on one GitHub — the
 		// deployment default — and a managed row keyed under any other string

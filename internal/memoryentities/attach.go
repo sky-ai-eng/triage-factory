@@ -42,12 +42,13 @@ var attachLog = logging.Component("memoryentities")
 // with no '#N') maps to no entity and is skipped.
 //
 // A produced entity is keyed under its source's current scope in the org
-// (entityscope.Of); an artifact whose source has no scope there, because it is
-// not configured, attaches nothing. A Jira artifact resolves through the issue
-// id its dedup key records (domain.ArtifactEntityIdentity), and attaches
-// nothing when the key names no id — it was recorded before Jira artifacts were
-// keyed on one — or names another site than the org's current one. Its target
-// can be older than the entity's key, so the entity is never renamed from it.
+// (entityscope.Of); an artifact recorded in another scope, or whose source has
+// no scope there because it is not configured, attaches nothing. A Jira
+// artifact resolves through the issue id its dedup key records
+// (domain.ArtifactEntityIdentity), and attaches nothing when the key names no
+// id — it was recorded before Jira artifacts were keyed on one — or names
+// another site than the org's current one. Its target can be older than the
+// entity's key, so the entity is never renamed from it.
 //
 // A nil store is an absent capability, not an error, and the two cases are not
 // the same: a nil TaskMemory is nowhere to write, so nothing is attached at all
@@ -87,7 +88,7 @@ func Attach(ctx context.Context, stores db.Stores, orgID, conversationID, primar
 				"conversation", conversationID, "provider", a.Provider, "target", a.Target, "error", err)
 			continue
 		}
-		if scope == "" || (keyScope != "" && keyScope != scope) {
+		if scope == "" || a.Scope != scope || (keyScope != "" && keyScope != scope) {
 			continue
 		}
 		ref.Scope = scope
