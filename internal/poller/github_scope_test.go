@@ -15,6 +15,7 @@ import (
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -204,4 +205,106 @@ func TestBackfillUserDashboard_OnlyOnTheOrgsCurrentHost(t *testing.T) {
 	if len(users.marked) != 1 || users.marked[0] != current {
 		t.Errorf("markers stamped on %v, want [%s]", users.marked, current)
 	}
+}
+
+// targetRecordingResolver is freshClientPerCallResolver that records every
+// account ClientFor is asked to resolve, so a test can see which installations
+// a cycle walked.
+type targetRecordingResolver struct {
+	*freshClientPerCallResolver
+	mu      sync.Mutex
+	targets []string
+}
+
+func (r *targetRecordingResolver) ClientFor(ctx context.Context, orgID, target string) (*ghclient.Client, error) {
+	r.mu.Lock()
+	r.targets = append(r.targets, target)
+	r.mu.Unlock()
+	return r.freshClientPerCallResolver.ClientFor(ctx, orgID, target)
+}
+
+// TestRunGitHubCycleForOrg_WalksOnlyTheCurrentHostsInstallations: an org that
+// moved to another GitHub and holds an installation for one account login on
+// both hosts polls through the current host's installation once, and never
+// walks the old host's. With only the old host's installation left, the App is
+// installed on no accounts here: the cycle reports that, naming the host, and
+// makes no request.
+func TestRunGitHubCycleForOrg_WalksOnlyTheCurrentHostsInstallations(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	current := dbpkg.EffectiveGitHubHost("")
+
+	run := func(t *testing.T, installs ...domain.OrgGitHubAppInstallation) (targets []string, requests int, reported []error) {
+		t.Helper()
+		database := newMigratedSQLiteForPoller(t)
+		stores := sqlitestore.New(database)
+		org := runmode.LocalDefaultOrgID
+		trackRepos(t, stores, org, []string{"acme/r1"})
+		seedBYOAppCredentialClass(t, stores, org)
+
+		var mu sync.Mutex
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			requests++
+			mu.Unlock()
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/graphql"):
+				_, _ = w.Write([]byte(`{"data":{"nodes":[]}}`))
+			case strings.Contains(r.URL.Path, "/installation/repositories"):
+				_, _ = w.Write([]byte(`{"total_count": 1, "repositories": [{"full_name": "acme/r1"}]}`))
+			case strings.Contains(r.URL.Path, "/pulls"):
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`[]`))
+			default:
+				t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				http.Error(w, "unexpected", http.StatusNotFound)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		resolver := &targetRecordingResolver{freshClientPerCallResolver: &freshClientPerCallResolver{url: srv.URL}}
+		m := &Manager{
+			database: database, pub: &capturingPublisher{},
+			tasks: stores.Tasks, entities: stores.Entities, eventQueue: stores.EventQueue,
+			repos: stores.Repos, orgs: stores.Orgs,
+			apps: &fakeInstallsStore{
+				app:      &domain.OrgGitHubApp{OrgID: org, AppID: "1", Active: true},
+				installs: installs,
+			},
+			resolver: resolver,
+			OnError:  func(_, _ string, err error) { reported = append(reported, err) },
+		}
+		m.runGitHubCycleForOrg(context.Background(), org)
+
+		mu.Lock()
+		defer mu.Unlock()
+		return resolver.targets, requests, reported
+	}
+
+	t.Run("both hosts", func(t *testing.T) {
+		targets, requests, reported := run(t,
+			domain.OrgGitHubAppInstallation{InstallationID: "1", AccountLogin: "acme", GitHubHost: otherGitHubHost},
+			domain.OrgGitHubAppInstallation{InstallationID: "2", AccountLogin: "acme", GitHubHost: current},
+		)
+		if len(targets) != 1 || targets[0] != "acme" {
+			t.Errorf("resolved clients for %v, want [acme] once — the old host's installation is not walked", targets)
+		}
+		if requests == 0 {
+			t.Error("the current host's installation made no request; want it polled")
+		}
+		if len(reported) != 0 {
+			t.Errorf("reported %v, want no degraded report", reported)
+		}
+	})
+
+	t.Run("old host only", func(t *testing.T) {
+		targets, requests, reported := run(t,
+			domain.OrgGitHubAppInstallation{InstallationID: "1", AccountLogin: "acme", GitHubHost: otherGitHubHost},
+		)
+		if len(targets) != 0 || requests != 0 {
+			t.Errorf("resolved %v and made %d requests, want neither — nothing is installed on this host", targets, requests)
+		}
+		if len(reported) != 1 || !strings.Contains(reported[0].Error(), "installed on no accounts on "+current) {
+			t.Errorf("reported %v, want one report that the App is installed on no accounts on %s", reported, current)
+		}
+	})
 }

@@ -518,6 +518,10 @@ func TestCanonicalHostAndKey(t *testing.T) {
 		{"https://jira.example.com", "https://jira.example.com", true, "jira_token/https://jira.example.com"},
 		{"https://jira.example.com/", "https://jira.example.com", true, "jira_token/https://jira.example.com"},
 		{"  https://jira.example.com  ", "https://jira.example.com", true, "jira_token/https://jira.example.com"},
+		// Scheme and authority fold to lowercase, so a capitalisation-only
+		// edit of jira_base_url keys the same credential; the context path
+		// keeps its case.
+		{"HTTPS://Jira.Example.COM:8443/Jira/", "https://jira.example.com:8443/Jira", true, "jira_token/https://jira.example.com:8443/Jira"},
 		{"", "", false, ""},
 		{"ftp://nope", "", false, ""},
 		{"not-a-url", "", false, ""},

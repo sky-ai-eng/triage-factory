@@ -70,7 +70,7 @@ func (f *fakeResolver) OrgIdentityFor(ctx context.Context, orgID string) (string
 // fakeInstallsStore embeds db.GitHubAppsStore (nil) and overrides the reads
 // runGitHubCycleForOrg reaches in multi mode: GetForOrgSystem (the App
 // registration, consulted by orgHasRegisteredApp to gate the App-vs-PAT path)
-// and ListInstallationsForOrgSystem. A nil app field means "no App registered".
+// and ListInstallationsOnHostSystem. A nil app field means "no App registered".
 type fakeInstallsStore struct {
 	db.GitHubAppsStore
 	app      *domain.OrgGitHubApp
@@ -81,8 +81,22 @@ func (f *fakeInstallsStore) GetForOrgSystem(ctx context.Context, orgID string) (
 	return f.app, nil
 }
 
-func (f *fakeInstallsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return append([]domain.OrgGitHubAppInstallation(nil), f.installs...), nil
+// ListInstallationsOnHostSystem answers like the store, with one fixture
+// convenience: an installation that names no GitHubHost is on the org's
+// current host, which is the only host the poller asks about. One that names a
+// host is on that host alone, and an empty host matches nothing.
+func (f *fakeInstallsStore) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.installs {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 // pollerTestServer is the shared GitHub stub: /installation/repositories 403s

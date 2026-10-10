@@ -81,10 +81,6 @@ export interface WizardState {
   // rotation says which bot it's swapping out. Empty in App mode (the App's bot
   // login resolves from the registration) and before any bind.
   githubPatLogin: string
-  // The host the stored org PAT was validated on, set only when that is not the
-  // org's GitHub host: the token is not used there, and Settings asks for a
-  // replacement. Empty when the token is usable or none is bound.
-  githubPatRebindHost: string
   // GitHub access is satisfied by ANY means — a stored/typed PAT or a
   // registered App — so the GitHub step reads the server's folded github_ready
   // signal rather than re-deriving it. Drives the step's isComplete (GitHub is

@@ -314,10 +314,9 @@ func (a *App) wireCloneStatusCallback() {
 			// endpoint to explain a clone that never spoke SSH would name a
 			// cause the operator cannot act on.
 			//
-			// Use the configured GitHub host so GHE installs probe the right
-			// SSH endpoint, not github.com.
-			creds, _ := integrations.Load(context.Background(), a.stores.Secrets, runmode.LocalDefaultOrgID)
-			sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
+			// The org's GitHub host, so GHE installs probe the right SSH
+			// endpoint, not github.com.
+			sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
 			sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
 				kind = "ssh"

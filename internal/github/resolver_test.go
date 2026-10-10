@@ -49,11 +49,26 @@ func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitH
 	return f.app, nil
 }
 
-func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+// ListInstallationsOnHostSystem answers like the store: the live rows on host,
+// and nothing for an empty host. A fixture installation that names no
+// GitHubHost is on the org's current host — the host every production writer
+// stamps — and the resolver asks only about that host, so it answers for any
+// non-empty host asked. One that names a host is on that host alone.
+func (f *fakeApps) ListInstallationsOnHostSystem(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.insts, nil
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 type fakeOrgs struct {

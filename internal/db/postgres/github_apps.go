@@ -185,12 +185,23 @@ func (s *gitHubAppsStore) DeleteForOrg(ctx context.Context, orgID string) error 
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	insts, err := listInstallations(ctx, s.app, orgID)
+	insts, err := listInstallations(ctx, s.app, orgID, nil)
 	return insts, wrapAppPoolPermErr(err, "github_apps.ListInstallationsForOrg")
 }
 
 func (s *gitHubAppsStore) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return listInstallations(ctx, s.admin, orgID)
+	return listInstallations(ctx, s.admin, orgID, nil)
+}
+
+func (s *gitHubAppsStore) ListInstallationsOnHost(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(githubHost)
+	insts, err := listInstallations(ctx, s.app, orgID, &key)
+	return insts, wrapAppPoolPermErr(err, "github_apps.ListInstallationsOnHost")
+}
+
+func (s *gitHubAppsStore) ListInstallationsOnHostSystem(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(githubHost)
+	return listInstallations(ctx, s.admin, orgID, &key)
 }
 
 // InstallationOwnerSystem answers the bind ceremony's uniqueness question:
@@ -279,22 +290,28 @@ func scanGitHubAppInstallation(row interface{ Scan(...any) error }) (domain.OrgG
 	return inst, nil
 }
 
-// listInstallations reads the org's active installations on the given
-// pool. ListInstallationsForOrg passes the app pool (claims-checked
-// request path); ListInstallationsForOrgSystem passes the admin pool
-// (claims-free resolver / poller path). The query is identical — only
-// the RLS identity context differs.
-func listInstallations(ctx context.Context, q queryer, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
+// listInstallations reads the org's active installations on the given pool:
+// on every host when hostKey is nil, else on the one host *hostKey names (an
+// InstallationHostKey, so "" matches nothing). ListInstallationsForOrg and
+// ListInstallationsOnHost pass the app pool (claims-checked request path);
+// their System twins pass the admin pool (claims-free resolver / poller path).
+// The query is identical — only the RLS identity context differs.
+func listInstallations(ctx context.Context, q queryer, orgID string, hostKey *string) ([]domain.OrgGitHubAppInstallation, error) {
 	out := make([]domain.OrgGitHubAppInstallation, 0)
-	if !isValidUUID(orgID) {
+	if !isValidUUID(orgID) || (hostKey != nil && *hostKey == "") {
 		return out, nil
 	}
-	rows, err := q.QueryContext(ctx, `
-		SELECT `+pgGitHubAppInstallationColumns+`
+	query := `
+		SELECT ` + pgGitHubAppInstallationColumns + `
 		  FROM org_github_app_installations
-		 WHERE org_id = $1 AND removed_at IS NULL
-		 ORDER BY account_login
-	`, orgID)
+		 WHERE org_id = $1 AND removed_at IS NULL`
+	args := []any{orgID}
+	if hostKey != nil {
+		query += ` AND github_host = $2`
+		args = append(args, *hostKey)
+	}
+	rows, err := q.QueryContext(ctx, query+`
+		 ORDER BY account_login, github_host, installation_id`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list org_github_app_installations: %w", err)
 	}
@@ -472,29 +489,6 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 	return removed, nil
 }
 
-// activeInstallationIDs reads the org's live installation IDs on the admin
-// pool — the system-context counterpart of ListInstallationsForOrg, used by
-// the backfill reconcile (which has no JWT claims).
-func (s *gitHubAppsStore) activeInstallationIDs(ctx context.Context, orgID string) ([]string, error) {
-	rows, err := s.admin.QueryContext(ctx, `
-		SELECT installation_id FROM org_github_app_installations
-		 WHERE org_id = $1 AND removed_at IS NULL
-	`, orgID)
-	if err != nil {
-		return nil, fmt.Errorf("read active installations: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	return out, rows.Err()
-}
-
 func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgID string) error {
 	if !isValidUUID(orgID) {
 		return nil
@@ -525,10 +519,13 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	if err := s.clearAppUnusable(ctx, orgID, appID); err != nil {
 		return err
 	}
-	active, err := s.activeInstallationIDs(ctx, orgID)
+	live, err := listInstallations(ctx, s.admin, orgID, nil)
 	if err != nil {
 		return err
 	}
+	// The removal diff covers the rows on the host this listing came from and
+	// no others: see InstallationIDsOnHost.
+	active := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
 	return db.ReconcileInstallations(insts, active,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
@@ -611,7 +608,7 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 		return fmt.Errorf("refresh managed installations: org %s is on credential class %q", orgID, class)
 	}
 
-	active, err := s.activeInstallationIDs(ctx, orgID)
+	live, err := listInstallations(ctx, s.admin, orgID, nil)
 	if err != nil {
 		return err
 	}
@@ -619,15 +616,19 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	// a bind, and there is nothing a listing could tell us about it: no row to
 	// refresh, and creating one is the thing this method may never do. Answered
 	// without spending the API call.
-	if len(active) == 0 {
+	if len(live) == 0 {
 		return nil
 	}
-
-	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, active)
+	// The bound set is the rows on the org's own host. A row on another host is
+	// a different deployment's installation whose id this listing may reuse for
+	// someone else's (see InstallationIDsOnHost); RefreshBoundInstallations
+	// still refuses the org when its host is not the deployment App's.
+	bound := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
+	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, bound)
 	if err != nil {
 		return err
 	}
-	return db.ReconcileInstallations(insts, active,
+	return db.ReconcileInstallations(insts, bound,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
 		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
 	)
@@ -656,13 +657,13 @@ func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, de
 }
 
 // managedInstallationSets reads every managed workspace's live bound
-// installation ids alongside the GitHub base URL the org lists against — the
-// rows the cadence pass may refresh, grouped by org. An org with nothing bound
-// contributes no set: there is no row for the pass to write to, which is the
-// invariant stated as a query.
+// installations — id and host — alongside the GitHub base URL the org lists
+// against, grouped by org; ScanManagedInstallationSets keeps as Bound the ones
+// on the org's own host. An org with nothing bound contributes no set: there is
+// no row for the pass to write to, which is the invariant stated as a query.
 func (s *gitHubAppsStore) managedInstallationSets(ctx context.Context) ([]db.ManagedInstallationSet, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT st.org_id, COALESCE(es.base_url, ''), i.installation_id
+		SELECT st.org_id, COALESCE(es.base_url, ''), i.installation_id, i.github_host
 		  FROM org_settings st
 		  JOIN org_github_app_installations i ON i.org_id = st.org_id AND i.removed_at IS NULL
 		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'

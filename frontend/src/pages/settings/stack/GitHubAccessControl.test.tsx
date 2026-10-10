@@ -197,13 +197,7 @@ describe('GitHubAccessControl · PAT rotation', () => {
       expect(credMocks.connectGitHubPAT).toHaveBeenCalledWith('org-1', 'ghp_new')
     })
     await waitFor(() => expect(reload).toHaveBeenCalled())
-    // A token just bound is bound on the saved host, so any rebind notice for
-    // the token it replaced is cleared along with it.
-    expect(patch).toHaveBeenCalledWith({
-      hasGitHubPat: true,
-      githubPatLogin: 'acme-bot-2',
-      githubPatRebindHost: '',
-    })
+    expect(patch).toHaveBeenCalledWith({ hasGitHubPat: true, githubPatLogin: 'acme-bot-2' })
   })
 
   it('requires acknowledging repositories the replacement can no longer reach', async () => {
@@ -259,30 +253,6 @@ describe('GitHubAccessControl · PAT rotation', () => {
     expect(await screen.findByText('GitHub: bad credentials')).toBeInTheDocument()
     expect(patch).not.toHaveBeenCalled()
     expect(reload).not.toHaveBeenCalled()
-  })
-})
-
-// A PAT is only sent to the host it was validated on. When the workspace's
-// GitHub URL has moved since, the token is still stored but unused, and the
-// PAT view says so, naming the host the token belongs to and the host the
-// workspace is on now.
-describe('GitHubAccessControl · a token bound on another host', () => {
-  it('names the host the token was connected on and the current one', () => {
-    renderControl({
-      githubPatRebindHost: 'https://ghe.old.example.com',
-      org: { ...initialWizardState().org, github_url: 'https://github.com' },
-    })
-    const notice = screen.getByText(/This token was connected on/)
-    expect(notice).toHaveTextContent('https://ghe.old.example.com')
-    expect(notice).toHaveTextContent('not on https://github.com')
-    // The way out is the ordinary rotation, still offered beside it.
-    expect(screen.getByRole('button', { name: 'Replace token…' })).toBeInTheDocument()
-  })
-
-  it('says nothing when the token is usable on the current host', () => {
-    renderControl({ githubPatRebindHost: '' })
-    expect(screen.getByText('@acme-bot')).toBeInTheDocument()
-    expect(screen.queryByText(/This token was connected on/)).not.toBeInTheDocument()
   })
 })
 

@@ -620,12 +620,12 @@ func (r *resolver) orgContextFor(ctx context.Context, orgID string) (orgGitHubCo
 }
 
 // credentialClassFor reads the credential class, for the two entry points that
-// need the host on some arms only (HasAnyCredential, OrgIdentityFor). Resolving
-// a base an arm would discard can cost an extra secret read, so they don't go
-// through orgContextFor. The hostResolver it returns derives the host from the
-// same settings row on first call and remembers it, so an arm that does need
-// the host pays at most baseFrom's secret read and never a second settings
-// read.
+// decide on the class before they know whether they need the host
+// (HasAnyCredential, OrgIdentityFor). Resolving a base an arm would discard can
+// cost an extra secret read, so they don't go through orgContextFor. The
+// hostResolver it returns derives the host from the same settings row on first
+// call and remembers it, so an arm that does need the host pays at most
+// baseFrom's secret read and never a second settings read.
 func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain.GitHubCredentialClass, hostResolver, error) {
 	set, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -648,10 +648,12 @@ func (r *resolver) credentialClassFor(ctx context.Context, orgID string) (domain
 
 // hostResolver defers resolving the org's GitHub host to the arm that needs
 // one: the managed arm, since establishing the deployment App's identity is a
-// call to a particular GitHub, and the PAT arm, since a PAT is used only on the
-// host it was bound on. The two entry points that read the class first
-// (HasAnyCredential, OrgIdentityFor) resolve no host on any other arm, which
-// would cost a possible secret read for a value they discard.
+// call to a particular GitHub; the PAT arm, since a PAT is used only on the
+// host it was bound on; and HasAnyCredential's App arm, since an installation
+// serves only the host it lives on. OrgIdentityFor's own-App arm resolves none
+// — the bot identity is the App's, not any installation's — and an arm that
+// fails on the class resolves none either; for those a host would cost a
+// possible secret read for a value they discard.
 type hostResolver func() (string, error)
 
 // fixedHost is the resolver for the entry points that already resolved the
@@ -808,7 +810,7 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 // TokenCache with ClientFor so the API client and the host-side git clone
 // resolve identically.
 func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(target))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(target))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -863,7 +865,7 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resol
 // written there would later be served to an unscoped caller. A scoped mint is
 // ~once per (run, repo); the gitproxy keeps its own per-repo cache.
 func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -986,7 +988,7 @@ func (r *resolver) TokenForReposScoped(ctx context.Context, orgID, owner string,
 // installation TokenCache (keyed by installation only) so a scoped token is
 // never served to an unscoped caller.
 func (r *resolver) appReposScopedToken(ctx context.Context, orgID string, app resolvedApp, owner string, repos []string, base string, permissions map[string]string) (githubapp.Token, error) {
-	inst, err := r.installationFor(ctx, orgID, accountByLogin(owner))
+	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(owner))
 	if err != nil {
 		return githubapp.Token{}, err
 	}
@@ -1036,13 +1038,14 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 // HasAnyCredential reports whether the org has any usable GitHub credential
 // without minting a repo-scoped token (see the ScopedResolver interface doc).
 // App XOR PAT (see activeApp): an active App's credential is usable iff it has
-// at least one installation to mint from — a present PAT is NOT a fallback for
-// an active-App org. Only a no-active-App org's usability turns on the PAT. A
-// PAT-tier read error propagates so a transient secret-store outage isn't
-// misreported as "no credential".
+// at least one installation on the org's GitHub host to mint from — a present
+// PAT is NOT a fallback for an active-App org, and an installation left on a
+// host the org has moved off mints nothing here. Only a no-active-App org's
+// usability turns on the PAT. A read error on either tier propagates so a
+// transient store outage isn't misreported as "no credential".
 func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, error) {
-	// Class first: only the managed and PAT arms need the host, so it is
-	// resolved on demand from the same settings row.
+	// Class first: a staged BYO App needs no host to answer, so it is resolved
+	// on demand from the same settings row.
 	class, host, err := r.credentialClassFor(ctx, orgID)
 	if err != nil {
 		return false, err
@@ -1052,7 +1055,11 @@ func (r *resolver) HasAnyCredential(ctx context.Context, orgID string) (bool, er
 		return false, err
 	}
 	if app.present() {
-		insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+		base, err := host()
+		if err != nil {
+			return false, err
+		}
+		insts, err := r.apps.ListInstallationsOnHostSystem(ctx, orgID, installationHost(base))
 		if err != nil {
 			return false, fmt.Errorf("list installations for org %s: %w", orgID, err)
 		}
@@ -1244,6 +1251,14 @@ func (a accountRef) String() string {
 // are case-insensitive, so the compare is too), which is the whole of the
 // behaviour for a ref with no id.
 //
+// Only installations on host are candidates — the GitHub the token is minted
+// against (installationHost of the resolution's base). An org that moves to
+// another GitHub keeps the old host's rows live, and neither half of an
+// account ref means anything across deployments: a login on one host may be an
+// unrelated account on another, and account and installation ids are numbered
+// per deployment. A target with no installation on host is ErrNoGitHubCredentials
+// however many the org holds elsewhere, and an empty host selects nothing.
+//
 // An empty ref means "no specific account", which one installation can answer
 // for and several cannot: with exactly one there is nothing to choose between,
 // so it is returned; with more than one the call is ambiguous and the error
@@ -1251,8 +1266,8 @@ func (a accountRef) String() string {
 // name an account rather than a workspace missing a credential. Guessing is not
 // an option on offer — a token minted from the wrong account either 422s at
 // GitHub or, worse, succeeds against somebody else's repositories.
-func (r *resolver) installationFor(ctx context.Context, orgID string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
-	insts, err := r.apps.ListInstallationsForOrgSystem(ctx, orgID)
+func (r *resolver) installationFor(ctx context.Context, orgID, host string, target accountRef) (domain.OrgGitHubAppInstallation, error) {
+	insts, err := r.apps.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err != nil {
 		// A read failure is not a missing credential, and saying so would be
 		// the same misreport the ambiguous case is: it sends a user to
@@ -1268,7 +1283,7 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 			return insts[0], nil
 		}
 		if len(insts) > 1 {
-			return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations to choose from", ErrAmbiguousInstallation, orgID, len(insts))
+			return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: %d installations on %s to choose from", ErrAmbiguousInstallation, orgID, len(insts), host)
 		}
 	}
 	if target.ID != "" {
@@ -1291,7 +1306,19 @@ func (r *resolver) installationFor(ctx context.Context, orgID string, target acc
 			return in, nil
 		}
 	}
-	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s", ErrNoGitHubCredentials, orgID, target)
+	return domain.OrgGitHubAppInstallation{}, fmt.Errorf("%w: org=%s: app has no installation for %s on %q", ErrNoGitHubCredentials, orgID, target, host)
+}
+
+// installationHost is the github_host an installation must carry to serve a
+// resolution against base: base's GitHubHost, or "" for an empty base, which
+// no installation carries. baseFrom has already resolved the deployment
+// default by the time a base reaches here, so an empty one is a resolution
+// that found no host, and it selects nothing rather than the default's rows.
+func installationHost(base string) string {
+	if base == "" {
+		return ""
+	}
+	return domain.GitHubHost(base)
 }
 
 // installationToken returns a cached token for the installation or mints a

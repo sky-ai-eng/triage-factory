@@ -474,8 +474,9 @@ type ConversationStore interface {
 	// one PR event. Relevance is entity-, review-, or checkout-level; EventID
 	// excludes a conversation whose same-task additive path already recorded
 	// the event as injected. A checkout matches only when its repository is on
-	// the PR entity's own GitHub host (its scope): the same slug on another
-	// host is another repository. Admin-pool only: the coherence subscriber
+	// the PR entity's own GitHub host (its scope), and a pending review only
+	// when the review artifact is recorded in that scope: the same slug on
+	// another host is another repository. Admin-pool only: the coherence subscriber
 	// has no viewer claims and must see every relevant team conversation in
 	// the org.
 	ListPRCoherenceTargetsSystem(ctx context.Context, orgID string, query PRCoherenceTargetQuery) ([]domain.PRCoherenceTarget, error)

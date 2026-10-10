@@ -96,19 +96,48 @@ type GitHubAppsStore interface {
 	DeleteForOrg(ctx context.Context, orgID string) error
 
 	// ListInstallationsForOrg returns the org's active App
-	// installations (removed_at IS NULL), ordered by account_login.
-	// Empty slice when the org has no App or no live installations.
+	// installations (removed_at IS NULL) on every GitHub host, ordered by
+	// account_login. Empty slice when the org has no App or no live
+	// installations.
+	//
+	// Every host is the right answer only for a caller whose subject is every
+	// row the org holds — a teardown that removes them all, or a guard asking
+	// whether any live row exists under the org's credential class. A caller
+	// choosing an installation to act through, or counting what the org can act
+	// through, reads ListInstallationsOnHost instead.
 	ListInstallationsForOrg(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
 
 	// ListInstallationsForOrgSystem mirrors ListInstallationsForOrg but
-	// routes through the admin pool in Postgres — no JWT claims required.
-	// The credential resolver (internal/github) calls this to pick the
-	// right installation for a target account, and it runs from both the
-	// claims-bearing request path and the claims-free poller, so it must
-	// not depend on request.jwt.claims. Same active-only (removed_at IS
-	// NULL) contract and ordering as the app-pool variant. SQLite
-	// collapses to the same query.
+	// routes through the admin pool in Postgres — no JWT claims required,
+	// for system callers and for request handlers whose org an admin gate
+	// already authorized. Same every-host, active-only (removed_at IS NULL)
+	// contract and ordering as the app-pool variant. SQLite collapses to the
+	// same query.
 	ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error)
+
+	// ListInstallationsOnHost returns the org's active installations on one
+	// GitHub deployment — github_host equal to githubHost, normalized the way
+	// UpsertInstallation normalizes the column (InstallationHostKey) — ordered
+	// by account_login.
+	//
+	// An installation serves the org only on the host it lives on. An org that
+	// points its base URL at another GitHub keeps the previous host's rows, and
+	// an account login or an installation id on one host names nothing on
+	// another, so every read that picks an installation to act through, or
+	// counts what the org can act through now, asks about the org's current
+	// host through this method.
+	//
+	// An empty githubHost matches no row. It is a caller that resolved no
+	// host, and answering it with the deployment default's rows would act on
+	// a GitHub nobody chose.
+	ListInstallationsOnHost(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error)
+
+	// ListInstallationsOnHostSystem mirrors ListInstallationsOnHost on the
+	// admin pool in Postgres — no JWT claims required. The credential resolver
+	// (internal/github) selects installations through it, from both the
+	// claims-bearing request path and the claims-free poller, so it must not
+	// depend on request.jwt.claims. SQLite collapses to the same query.
+	ListInstallationsOnHostSystem(ctx context.Context, orgID, githubHost string) ([]domain.OrgGitHubAppInstallation, error)
 
 	// InstallationOwnerSystem reports which org holds installationID on
 	// githubHost as a LIVE installation (removed_at IS NULL), or "" when none
@@ -236,8 +265,10 @@ type GitHubAppsStore interface {
 	// workspace that brought its OWN App: it mints an App JWT from the org's
 	// App PEM (read via SecretStore.GetSystem), calls GET
 	// {apiBase}/app/installations, upserts every installation returned, and
-	// soft-removes any active row GitHub no longer reports (so a missed
-	// installation.deleted webhook or an API-only deployment converges). It
+	// soft-removes any active row on the listed host that GitHub no longer
+	// reports (so a missed installation.deleted webhook or an API-only
+	// deployment converges). Rows on another host are outside the diff: a
+	// listing of one GitHub says nothing about another's installations. It
 	// DISCOVERS, and may, because the org's own App key is the tenant boundary:
 	// that key lists the installations of that App and no others, so every
 	// installation it returns unambiguously belongs to orgID. A no-op when the
@@ -290,13 +321,16 @@ type GitHubAppsStore interface {
 	// workspace's.
 	//
 	// Concretely it lists GET {apiBase}/app/installations under the deployment
-	// key, keeps only the installations this org has already bound, and applies
-	// that filtered set: account_login, account_id, the suspension pair and
-	// repository_selection converge on the bound rows, and a bound installation
-	// GitHub no longer reports is soft-removed, cascading to its reachable-repo
-	// rows exactly as MarkInstallationRemoved does. Every other tenant's
-	// installation in that listing is left entirely alone — not written and
-	// removed, never written.
+	// key, keeps only the installations this org has already bound on its own
+	// host, and applies that filtered set: account_login, account_id, the
+	// suspension pair and repository_selection converge on the bound rows, and a
+	// bound installation GitHub no longer reports is soft-removed, cascading to
+	// its reachable-repo rows exactly as MarkInstallationRemoved does. Every
+	// other tenant's installation in that listing is left entirely alone — not
+	// written and removed, never written. So is every row the org holds on
+	// another host: its id names a different installation there, and matching
+	// it against this listing would claim whichever installation here carries
+	// the same number.
 	//
 	// deployment is a parameter rather than an ambient read because the
 	// deployment App is operator environment config read once at boot and handed
@@ -324,11 +358,12 @@ type GitHubAppsStore interface {
 	// lists once, and fans the answer out to the orgs that bound each
 	// installation (db.RefreshManagedInstallationSets holds the mechanics).
 	//
-	// Same invariants as the sibling, held by the same filter: bound rows
-	// converge — account login and id, the suspension pair, repository_selection
-	// — and a bound installation GitHub no longer reports is soft-removed with
-	// its reachable-repo cascade; an installation no workspace bound is never
-	// written; a failed listing changes nothing; a managed workspace whose
+	// Same invariants as the sibling, held by the same filter: bound rows on the
+	// workspace's own host converge — account login and id, the suspension pair,
+	// repository_selection — and a bound installation GitHub no longer reports
+	// is soft-removed with its reachable-repo cascade; an installation no
+	// workspace bound is never written, nor is a row on another host; a failed
+	// listing changes nothing; a managed workspace whose
 	// base URL resolves to a GitHub other than the deployment's is skipped
 	// with its rows untouched and the mismatch carried to the returned error
 	// (db.ErrManagedWorkspaceOnOtherGitHub). A workspace on any other class
@@ -350,6 +385,42 @@ type GitHubAppsStore interface {
 	// Exempt from the returned-row rule for the same reason as the two above: a
 	// whole set reconciled from a provider enumeration names no row.
 	RefreshAllManagedInstallations(ctx context.Context, deployment githubapp.DeploymentApp) error
+}
+
+// InstallationHostKey is the github_host value a host-scoped installation read
+// compares against: githubHost normalized as UpsertInstallation normalizes the
+// column (EffectiveGitHubHost), or "" when githubHost names no GitHub at all —
+// empty, or nothing but slashes. "" matches no row: EffectiveGitHubHost would
+// resolve it to the deployment default, and a read that selects what to act
+// through must not guess a host the caller never resolved. Both dialects key
+// ListInstallationsOnHost(System) through it, so the two cannot disagree on
+// what a host argument means.
+func InstallationHostKey(githubHost string) string {
+	if NormalizeGitHubHost(githubHost) == "" {
+		return ""
+	}
+	return EffectiveGitHubHost(githubHost)
+}
+
+// InstallationIDsOnHost returns the installation ids of the rows in insts whose
+// github_host is githubHost (InstallationHostKey), in order. The installation
+// reconciles diff a listing of one GitHub against this: a listing says which
+// installations that GitHub still reports and nothing about another
+// deployment's, whose ids are numbered independently — matching one host's
+// listing against another host's id would refresh a row with a different
+// installation's account, or soft-remove a row the listing never covered.
+func InstallationIDsOnHost(insts []domain.OrgGitHubAppInstallation, githubHost string) []string {
+	key := InstallationHostKey(githubHost)
+	var out []string
+	if key == "" {
+		return out
+	}
+	for _, inst := range insts {
+		if inst.GitHubHost == key {
+			out = append(out, inst.InstallationID)
+		}
+	}
+	return out
 }
 
 // ErrGitHubAppExists is returned by CreateForOrg when the org already

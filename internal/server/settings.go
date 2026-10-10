@@ -605,25 +605,25 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 		notFound(w, "route")
 		return
 	}
-	// Probe target tracks the configured GitHub base URL so the Test
-	// SSH button on the Settings page works for GHE deployments. We
-	// load creds (not settings) because creds.GitHubURL is the URL the
-	// user actually authenticates against; org_settings.github_base_url
-	// mirrors it but the SecretStore copy is the source of truth.
-	// Wrapped in WithTx so the org_secrets read sees claims and matches
-	// the rest of the settings surface.
+	// Probe target tracks the org's GitHub base URL so the Test SSH button on
+	// the Settings page works for GHE deployments. Read under the request's
+	// claims, like the rest of the settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
-	var creds auth.Credentials
+	var orgSet domain.OrgSettings
 	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr
 	}); err != nil {
-		internalError(w, "settings", fmt.Errorf("load integration credentials: %w", err))
+		internalError(w, "settings", fmt.Errorf("load org settings: %w", err))
 		return
 	}
-	sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
+	if orgSet.GitHubBaseURL == "" {
+		writeNotConfigured(w, "set this workspace's GitHub URL before testing SSH")
+		return
+	}
+	sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()

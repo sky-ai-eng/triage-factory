@@ -56,9 +56,10 @@ const (
 
 // CanonicalHost canonicalizes an org's configured Jira base URL into the value
 // the per-user credential is keyed under ("jira_token/<host>") AND the origin a
-// per-user Client talks to. It trims a trailing slash + surrounding whitespace
-// and requires a real http(s) origin; ok=false on an empty ("Jira not
-// configured") or malformed base URL. This is the single source of truth the
+// per-user Client talks to. It is the ghbase.CanonicalBaseURL form (whitespace
+// and trailing slashes trimmed, scheme and authority lowercased, the context
+// path's case kept) and requires a real http(s) origin; ok=false on an empty
+// ("Jira not configured") or malformed base URL. This is the single source of truth the
 // bind flow (server.resolveJiraHost) and this resolver both compose, so a
 // stored credential always reads back under the key it was written with.
 //

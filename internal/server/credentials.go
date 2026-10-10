@@ -230,8 +230,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		"setup_step":     setupStep,
 	}
 
-	if creds.GitHubURL != "" {
-		result["github_url"] = creds.GitHubURL
+	if orgSet.GitHubBaseURL != "" {
+		result["github_url"] = orgSet.GitHubBaseURL
 	}
 	if creds.JiraURL != "" {
 		result["jira_url"] = creds.JiraURL

@@ -429,7 +429,7 @@ func (s *Server) handleGitHubAccessSwitchToPAT(w http.ResponseWriter, r *http.Re
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Save the PAT first: an aborted teardown then leaves the org on a
 		// working PAT with the App intact — recoverable from either side.
-		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubURL: base, GitHubPAT: pat}); err != nil {
+		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("save pat: %w", err)
 		}
 		// The PAT is now the org's GitHub identity (the App is torn down below) —

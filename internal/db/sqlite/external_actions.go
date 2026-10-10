@@ -30,7 +30,7 @@ var _ db.ExternalActionStore = (*externalActionStore)(nil)
 // moved the object, the captured url otherwise — so every feed's link resolves
 // without any reader knowing the pointer column exists.
 const externalActionColumns = `
-	id, org_id, COALESCE(team_id, ''), provider, action, target,
+	id, org_id, COALESCE(team_id, ''), provider, scope, action, target,
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
 	credential, dedup_key, COALESCE(detail_json, ''), occurred_at
@@ -38,6 +38,9 @@ const externalActionColumns = `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
 	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	if err := db.RequireExternalObjectScope(e.Scope); err != nil {
 		return err
 	}
 	id := e.ID
@@ -54,12 +57,12 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 	}
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO external_actions
-			(id, org_id, team_id, provider, action, target, external_id, url,
+			(id, org_id, team_id, provider, scope, action, target, external_id, url,
 			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(org_id, dedup_key) DO NOTHING
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING
 	`,
-		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Action, e.Target,
+		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Scope, e.Action, e.Target,
 		nullIfEmpty(e.ExternalID), nullIfEmpty(e.URL), nullIfEmpty(e.FromState),
 		nullIfEmpty(e.ToState), nullIfEmpty(e.ConversationID), nullIfEmpty(e.ActorUserID),
 		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON),
@@ -218,7 +221,7 @@ func scanExternalActionRows(rows *sql.Rows) ([]domain.ExternalAction, error) {
 // unifies *sql.Row and *sql.Rows.
 func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
-		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Action, &e.Target,
+		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
 		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
 	)

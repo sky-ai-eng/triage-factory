@@ -2,13 +2,41 @@ package ghbase
 
 import "testing"
 
+// TestCanonicalBaseURL pins the one canonical spelling of a GitHub host or Jira
+// site: scheme and authority fold to lowercase, the path keeps its case, and
+// whitespace and trailing slashes are trimmed.
+func TestCanonicalBaseURL(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"https://github.com", "https://github.com"},
+		{"https://GitHub.com", "https://github.com"},
+		{"HTTPS://GITHUB.COM/", "https://github.com"},
+		{"  https://GHE.Acme.com//  ", "https://ghe.acme.com"},
+		{"https://GHE.acme.com:8443", "https://ghe.acme.com:8443"},
+		{"https://GHE.acme.com/GitHub/Path", "https://ghe.acme.com/GitHub/Path"},
+		{"https://GHE.acme.com:8443/GitHub/", "https://ghe.acme.com:8443/GitHub"},
+		{"http://[::1]:8080/Ctx", "http://[::1]:8080/Ctx"},
+		{"https://Ünicode.Example.com", "https://Ünicode.example.com"},
+		{"GHE.acme.com/Path", "GHE.acme.com/Path"},
+		{"", ""},
+		{"   ", ""},
+		{"/", ""},
+	}
+	for _, tt := range tests {
+		if got := CanonicalBaseURL(tt.in); got != tt.want {
+			t.Errorf("CanonicalBaseURL(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestResolveBaseURL(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"", "https://github.com"},
+		{"   ", "https://github.com"},
 		{"https://github.com", "https://github.com"},
 		{"https://github.com/", "https://github.com"},
 		{"https://github.acme.com", "https://github.acme.com"},
 		{"https://github.acme.com/", "https://github.acme.com"},
+		{"https://GitHub.Acme.com/Ctx/", "https://github.acme.com/Ctx"},
 	}
 	for _, tt := range tests {
 		if got := ResolveBaseURL(tt.in); got != tt.want {
@@ -33,6 +61,11 @@ func TestAPIBase(t *testing.T) {
 		{"https://api.octocorp.ghe.com", "https://api.octocorp.ghe.com"},
 		// Defensive: a github.com base carrying a port still resolves public.
 		{"https://github.com:443", "https://api.github.com"},
+		// The host class is read from the canonical form, so capitalisation
+		// does not move a host into another class.
+		{"https://GitHub.com", "https://api.github.com"},
+		{"https://OctoCorp.GHE.com", "https://api.octocorp.ghe.com"},
+		{"https://GitHub.Acme.com/Ctx", "https://github.acme.com/Ctx/api/v3"},
 	}
 	for _, tt := range tests {
 		if got := APIBase(tt.in); got != tt.want {
@@ -93,6 +126,7 @@ func TestParseDefaultBaseURL(t *testing.T) {
 		"https://ghe.example.com":        "https://ghe.example.com",
 		"https://ghe.example.com/":       "https://ghe.example.com",
 		" https://ghe.example.com/git/ ": "https://ghe.example.com/git",
+		"https://GHE.Example.com/Git/":   "https://ghe.example.com/Git",
 		"http://localhost:3000":          "http://localhost:3000",
 	}
 	for in, want := range good {

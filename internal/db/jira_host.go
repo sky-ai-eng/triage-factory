@@ -1,26 +1,19 @@
 package db
 
-import "strings"
+import "github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 
-// NormalizeJiraHost trims surrounding whitespace and a trailing slash so the
-// (user_id, jira_base_url) key in user_jira_identities matches regardless of
-// the exact form a caller passes. Reads and writes both normalize, so they
-// agree by construction.
+// NormalizeJiraHost puts a Jira site into the ghbase.CanonicalBaseURL form so
+// the (user_id, jira_base_url) key in user_jira_identities matches whatever
+// spelling a caller passes. Reads and writes both normalize, so they agree by
+// construction.
 //
-// This is deliberately the trailing-slash/whitespace half of
-// jira.CanonicalHost — and ONLY that half. The store can't call
-// jira.CanonicalHost directly (internal/jira imports internal/db, so the
-// reverse would cycle), so the normalization the store keys on lives here.
-// For any well-formed base URL the two agree by construction:
-// jira.CanonicalHost returns strings.TrimRight(strings.TrimSpace(orgBase),
-// "/") on its success path, identical to this. The extra scheme/host
-// validation jira.CanonicalHost layers on top only decides whether Jira is
-// configured at all (the capture/status surfaces gate on its ok bool); it
-// doesn't change the stored key. So a credential keyed under
+// jira.CanonicalHost (through domain.JiraHost) returns the same form on its
+// success path, so a credential keyed under
 // "jira_token/<jira.CanonicalHost(orgBase)>" and an identity row keyed under
-// NormalizeJiraHost(orgBase) land on the same host string, keeping access and
-// identity in lockstep. Case is preserved — Server/DC path-based
-// hosts are case-sensitive below the authority, matching NormalizeGitHubHost.
+// NormalizeJiraHost(orgBase) land on the same site string. The store cannot
+// call jira.CanonicalHost (internal/jira imports internal/db), and does not
+// need its extra check: whether the value is a real http(s) origin decides
+// only whether Jira is configured at all, never the key.
 func NormalizeJiraHost(host string) string {
-	return strings.TrimRight(strings.TrimSpace(host), "/")
+	return ghbase.CanonicalBaseURL(host)
 }

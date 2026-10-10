@@ -93,8 +93,49 @@ func ParseDefaultBaseURL(raw string) (string, error) {
 	return base, nil
 }
 
+// CanonicalBaseURL returns the spelling a GitHub or Jira base URL is stored and
+// compared under: surrounding whitespace and trailing slashes trimmed, and the
+// scheme and authority (host and port) lowercased, because both compare
+// case-insensitively. The path keeps its case byte for byte, because a GHES or
+// Jira Data Center context path may be case-sensitive. A value without "://"
+// has no authority to find and is only trimmed.
+//
+// It is the one canonicalizer: every GitHub host and Jira site a row is keyed
+// under, and every lookup of one, passes through it, so two spellings of one
+// server are one key. It does not validate; NormalizeBaseURL validates and
+// then calls it.
+//
+// Lowercasing is ASCII only. DNS names compare case-insensitively in ASCII
+// alone, and the SQLite migration that rewrites stored hosts into this form
+// (202610100002_host_case.sql) folds with lower(), which covers exactly that
+// range; the two must agree on every stored value.
+func CanonicalBaseURL(raw string) string {
+	s := strings.TrimRight(strings.TrimSpace(raw), "/")
+	sep := strings.Index(s, "://")
+	if sep < 0 {
+		return s
+	}
+	rest := s[sep+len("://"):]
+	end := strings.IndexByte(rest, '/')
+	if end < 0 {
+		end = len(rest)
+	}
+	cut := sep + len("://") + end
+	return asciiLower(s[:cut]) + s[cut:]
+}
+
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
 // NormalizeBaseURL validates a user-entered GitHub/Jira base URL and returns its
-// canonical form (scheme://host[/path], trailing slash trimmed). One function
+// canonical form (CanonicalBaseURL of scheme://host[/path]). One function
 // for the reachability probe, for the settings write that persists the same
 // value, and for the deployment default, so a URL one door accepts is exactly
 // the one the others hold. A base URL must parse, use http or https, and carry
@@ -122,16 +163,16 @@ func NormalizeBaseURL(raw string) (string, bool) {
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", false
 	}
-	return strings.TrimRight(u.Scheme+"://"+u.Host+u.Path, "/"), true
+	return CanonicalBaseURL(u.Scheme + "://" + u.Host + u.Path), true
 }
 
 // ResolveBaseURL normalizes a per-org GitHub base URL into the user-facing
-// web base github.NewClient expects. Empty (not configured) maps to the
-// deployment default; a configured base is returned trimmed of trailing
-// slashes.
+// web base github.NewClient expects, which is also the host GitHub rows are
+// keyed under. Empty (not configured) maps to the deployment default; a
+// configured base is returned in its CanonicalBaseURL form.
 func ResolveBaseURL(orgBase string) string {
-	if orgBase != "" {
-		return strings.TrimRight(orgBase, "/")
+	if base := CanonicalBaseURL(orgBase); base != "" {
+		return base
 	}
 	return DefaultBaseURL()
 }
@@ -147,18 +188,16 @@ func ResolveBaseURL(orgBase string) string {
 //   - everything else (GHES) → {base}/api/v3, the path-mounted REST root on
 //     the same (typically private) host.
 //
-// An empty base is the deployment default's API base — the same answer
-// ResolveBaseURL gives for an org that configured nothing.
+// The base goes through ResolveBaseURL first, so an empty base is the
+// deployment default's API base, and "https://GitHub.com" is the public host
+// like any other spelling of it.
 //
 // This is the only API-mount derivation in the repo: the client, the App JWT
 // mint endpoint, the credential validator, the reachability probe and the
 // sidecar's proxies all read it, so nothing can disagree about where an org's
 // API lives.
 func APIBase(base string) string {
-	base = strings.TrimRight(base, "/")
-	if base == "" {
-		base = DefaultBaseURL()
-	}
+	base = ResolveBaseURL(base)
 	if base == GitHubCom {
 		return "https://api.github.com"
 	}

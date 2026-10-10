@@ -69,15 +69,10 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 	}); err != nil {
 		return nil, err
 	}
-	// A PAT bound on another host is never sent to this one.
-	if creds.GitHubURL == "" || !integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
+	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		return nil, errNoGitHub
 	}
-	baseURL := orgSet.GitHubBaseURL
-	if baseURL == "" {
-		baseURL = creds.GitHubURL
-	}
-	return ghclient.NewClient(baseURL, creds.GitHubPAT).WithOrg(orgID).ListMyTeamsDetailed(ctx)
+	return ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID).ListMyTeamsDetailed(ctx)
 }
 
 // userTeamsMulti reconstructs the caller's teams in multi mode. The

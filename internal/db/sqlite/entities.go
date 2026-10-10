@@ -458,10 +458,10 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 			}
 			return fmt.Errorf("rename entity %s -> %s: %w", row.key, newKey, err)
 		}
-		if err := rewriteEntityArtifacts(ctx, tx, source, domain.EntityArtifactResource(source, scope, externalID), row.key, newKey); err != nil {
+		if err := rewriteEntityArtifacts(ctx, tx, source, scope, domain.EntityArtifactResource(source, scope, externalID), row.key, newKey); err != nil {
 			return err
 		}
-		if err := rewriteEntityActionURLs(ctx, tx, source, row.url, url); err != nil {
+		if err := rewriteEntityActionURLs(ctx, tx, source, scope, row.url, url); err != nil {
 			return err
 		}
 		out = domain.EntityRenameOutcome{Renamed: true, EntityID: row.id, From: row.key, To: newKey, PollSeq: pollSeq}
@@ -473,19 +473,19 @@ func (s *entityStore) RenameSystem(ctx context.Context, orgID, source, scope, ex
 	return out, nil
 }
 
-// rewriteEntityArtifacts moves the Target of the source's artifacts keyed on
-// the entity's id off the old key. resource is the dedup-key segment that id
-// is written as (domain.EntityArtifactResource); the key carries it, so it
-// does not move. The SQL over-approximates and domain.ArtifactKeyHasResource
-// decides.
-func rewriteEntityArtifacts(ctx context.Context, q queryer, source, resource, from, to string) error {
+// rewriteEntityArtifacts moves the Target of the source's artifacts in the
+// entity's scope keyed on the entity's id off the old key. resource is the
+// dedup-key segment that id is written as (domain.EntityArtifactResource); the
+// key carries it, so it does not move. The SQL over-approximates and
+// domain.ArtifactKeyHasResource decides.
+func rewriteEntityArtifacts(ctx context.Context, q queryer, source, scope, resource, from, to string) error {
 	if resource == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, dedup_key FROM artifacts
-		WHERE provider = ? AND target = ? AND instr(dedup_key, ?) > 0`,
-		source, from, resource)
+		WHERE provider = ? AND scope = ? AND target = ? AND instr(dedup_key, ?) > 0`,
+		source, scope, from, resource)
 	if err != nil {
 		return err
 	}
@@ -516,18 +516,18 @@ func rewriteEntityArtifacts(ctx context.Context, q queryer, source, resource, fr
 	return nil
 }
 
-// rewriteEntityActionURLs moves the audit ledger's pointer for actions whose
-// link resolves to the entity's old url. Only current_url is written; the
-// record of the act is not. The pointer's current value is the rewrite base,
-// so consecutive renames chain.
-func rewriteEntityActionURLs(ctx context.Context, q queryer, source, from, to string) error {
+// rewriteEntityActionURLs moves the audit ledger's pointer for actions in the
+// entity's scope whose link resolves to the entity's old url. Only current_url
+// is written; the record of the act is not. The pointer's current value is the
+// rewrite base, so consecutive renames chain.
+func rewriteEntityActionURLs(ctx context.Context, q queryer, source, scope, from, to string) error {
 	if from == "" || to == "" || from == to {
 		return nil
 	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE provider = ? AND substr(COALESCE(current_url, url, ''), 1, length(?)) = ?`,
-		source, from, from)
+		WHERE provider = ? AND scope = ? AND substr(COALESCE(current_url, url, ''), 1, length(?)) = ?`,
+		source, scope, from, from)
 	if err != nil {
 		return err
 	}
@@ -833,11 +833,11 @@ func (s *entityStore) MergeDuplicateEntitiesSystem(ctx context.Context, orgID, e
 			}
 		}
 		kept, dropped := db.DuplicateEntityMergedKeys(survivor, loser)
-		if err := rewriteEntityArtifacts(ctx, q, survivor.Source,
+		if err := rewriteEntityArtifacts(ctx, q, survivor.Source, survivor.Scope,
 			domain.EntityArtifactResource(survivor.Source, survivor.Scope, kept.ExternalID), dropped.SourceID, kept.SourceID); err != nil {
 			return err
 		}
-		return rewriteEntityActionURLs(ctx, q, survivor.Source, dropped.URL, kept.URL)
+		return rewriteEntityActionURLs(ctx, q, survivor.Source, survivor.Scope, dropped.URL, kept.URL)
 	})
 	if err != nil {
 		return "", err

@@ -46,6 +46,11 @@ type ExternalAction struct {
 	// consts). A branch push is a github action even though its artifact provider
 	// is "git".
 	Provider string `json:"provider"`
+	// Scope is the provider namespace the acted-on object lives in, as on an
+	// Artifact (ExternalObjectScope): the GitHub host, the Jira site, the
+	// Linear workspace id, SlackScope, NetworkScope. Target and DedupKey are
+	// only unique inside it. Required on every write.
+	Scope string `json:"scope"`
 	// Action is the discriminator — one of the Action* consts below. Free text
 	// (extensible — no CHECK constraint on the column).
 	Action string `json:"action"`
@@ -458,17 +463,19 @@ type ExternalActionListOpts struct {
 // lands in.
 func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR artifact carries its html_url; a review artifact carries none (its
-	// target is the PR), so fall back to the PR web URL from the target — the
-	// audit row links somewhere rather than render non-clickable.
+	// target is the PR), so fall back to the PR web URL from the target on the
+	// artifact's host — the audit row links somewhere rather than render
+	// non-clickable.
 	url := art.URL
 	if url == "" {
 		if owner, repo, number, ok := ParsePRTarget(art.Target); ok {
-			url = GitHubPullURL(owner+"/"+repo, number)
+			url = GitHubPullURLBase(art.Scope, owner+"/"+repo, number)
 		}
 	}
 	return ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       ArtifactProviderGitHub,
+		Scope:          art.Scope,
 		Action:         action,
 		Target:         art.Target,
 		ExternalID:     art.ExternalID,

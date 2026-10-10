@@ -141,45 +141,51 @@ func RewriteArtifactDedupKey(key, oldSlug, newSlug string) (string, bool) {
 	return provider + ":" + kind + ":" + rewritten, true
 }
 
-// RewriteRepoURL rewrites the repository slug inside a provider web URL —
-// "<scheme>://<host>/<owner>/<repo>[/...]". The slug sits mid-path rather than
-// at the head of the string, so this cannot share RewriteRepoSlugPrefix: the
-// match is positional on the URL's first two path segments and nowhere else,
-// because a host ("octo.api") or a later segment (a branch named after the
+// RewriteRepoURL rewrites the repository slug inside a link on host, a
+// GitHubHost value: "<host>/<owner>/<repo>[/...]", where host carries the
+// scheme, the authority and any context path. The slug is the two path
+// segments right after the host's own path, and only those: a host
+// ("octo.api"), a context path, or a later segment (a branch named after the
 // repository, ".../tree/octo/api") can spell the slug without referring to it.
 //
-// Reports false — with s returned unchanged — for anything that is not an
-// absolute URL whose path leads with the old slug at a segment boundary. A
-// value TF never learned, or one already pointing elsewhere, is left exactly
-// as it stands; nothing is ever synthesized from the slug.
-func RewriteRepoURL(rawURL, oldSlug, newSlug string) (string, bool) {
-	if rawURL == "" || oldSlug == "" {
+// Reports false — with rawURL returned unchanged — for a link that is not on
+// host (GitHubURLOnHost) or whose path does not continue with the old slug at
+// a segment boundary. A value TF never learned, or one already pointing
+// elsewhere, is left exactly as it stands; nothing is ever synthesized from
+// the slug.
+func RewriteRepoURL(rawURL, host, oldSlug, newSlug string) (string, bool) {
+	if oldSlug == "" || !GitHubURLOnHost(rawURL, host) {
+		return rawURL, false
+	}
+	h, err := url.Parse(host)
+	if err != nil {
 		return rawURL, false
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil {
 		return rawURL, false
 	}
-	p := u.Path
-	if len(p) < 1+len(oldSlug) || p[0] != '/' {
+	prefix := strings.TrimRight(h.Path, "/") + "/"
+	if !strings.HasPrefix(u.Path, prefix) {
 		return rawURL, false
 	}
-	if !strings.EqualFold(p[1:1+len(oldSlug)], oldSlug) {
+	p := u.Path[len(prefix):]
+	if len(p) < len(oldSlug) || !strings.EqualFold(p[:len(oldSlug)], oldSlug) {
 		return rawURL, false
 	}
-	rest := p[1+len(oldSlug):]
+	rest := p[len(oldSlug):]
 	if rest != "" && rest[0] != '/' {
 		return rawURL, false
 	}
-	u.Path = "/" + newSlug + rest
+	u.Path = prefix + newSlug + rest
 	u.RawPath = ""
 	return u.String(), true
 }
 
 // GitHubURLOnHost reports whether rawURL is a link on host, a GitHubHost value
 // (scheme, authority and any context path, with no trailing slash). It is how a
-// record that carries a link but no scope column — an artifact, an audit-ledger
-// entry — is placed on a GitHub deployment. The scheme and authority compare
+// stored link is placed on a GitHub deployment before anything in it is read
+// as an owner/repo (RewriteRepoURL). The scheme and authority compare
 // case-insensitively, as URLs define them. The context path compares exactly:
 // GitHubHost keeps it as configured, a server may treat paths case-sensitively,
 // and every other host comparison is exact. An empty host or link, or one

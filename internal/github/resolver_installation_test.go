@@ -11,6 +11,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
+// testInstallHost is the host the direct installationFor calls below select
+// on. Their fixtures name no host, which the fake store reads as the org's
+// current host, so every one of them is on it.
+const testInstallHost = "https://ghe.example.test"
+
 // installOnAccount is installOn plus the account's numeric id and an explicit
 // installation id, so a test can stage two installations whose logins collide.
 func installOnAccount(installationID, accountID, login string) domain.OrgGitHubAppInstallation {
@@ -47,7 +52,7 @@ func installResolver(t *testing.T, insts ...domain.OrgGitHubAppInstallation) (*r
 func TestInstallationFor_ResolvesRenamedAccountByID(t *testing.T) {
 	r, gh := installResolver(t, installOnAccount("456", "1234", "acme"))
 
-	inst, err := r.installationFor(context.Background(), "org-1", accountRef{ID: "1234", Login: "acme-corp"})
+	inst, err := r.installationFor(context.Background(), "org-1", testInstallHost, accountRef{ID: "1234", Login: "acme-corp"})
 	if err != nil {
 		t.Fatalf("installationFor for a renamed account: %v", err)
 	}
@@ -77,7 +82,7 @@ func TestInstallationFor_LoginMatchWhenEitherSideHasNoID(t *testing.T) {
 			{Login: "ACME"},             // ... in another capitalisation
 			{ID: "1234", Login: "acme"}, // caller knows the id, the row does not
 		} {
-			inst, err := r.installationFor(context.Background(), "org-1", target)
+			inst, err := r.installationFor(context.Background(), "org-1", testInstallHost, target)
 			if err != nil || inst.InstallationID != "456" {
 				t.Errorf("installationFor(%s) = (%q, %v); want (456, nil)", target, inst.InstallationID, err)
 			}
@@ -86,7 +91,7 @@ func TestInstallationFor_LoginMatchWhenEitherSideHasNoID(t *testing.T) {
 
 	t.Run("TargetHasNoID", func(t *testing.T) {
 		r, _ := installResolver(t, installOnAccount("456", "1234", "acme"))
-		inst, err := r.installationFor(context.Background(), "org-1", accountByLogin("acme"))
+		inst, err := r.installationFor(context.Background(), "org-1", testInstallHost, accountByLogin("acme"))
 		if err != nil || inst.InstallationID != "456" {
 			t.Errorf("installationFor(login-only) = (%q, %v); want (456, nil)", inst.InstallationID, err)
 		}
@@ -115,7 +120,7 @@ func TestInstallationFor_CollidingLoginsNeverCrossResolve(t *testing.T) {
 		{"the account now holding the handle", accountRef{ID: "5678", Login: "acme"}, "789"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			inst, err := r.installationFor(context.Background(), "org-1", tc.target)
+			inst, err := r.installationFor(context.Background(), "org-1", testInstallHost, tc.target)
 			if err != nil {
 				t.Fatalf("installationFor(%s): %v; want %s", tc.target, err, tc.want)
 			}
@@ -161,7 +166,7 @@ func TestInstallationFor_Selection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r, _ := installResolver(t, tc.insts...)
-			inst, err := r.installationFor(context.Background(), "org-1", tc.target)
+			inst, err := r.installationFor(context.Background(), "org-1", testInstallHost, tc.target)
 
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
@@ -193,7 +198,7 @@ func TestInstallationFor_AmbiguityNamesTheCount(t *testing.T) {
 		installOnAccount("789", "5678", "globex"),
 		installOnAccount("012", "9012", "initech"),
 	)
-	_, err := r.installationFor(context.Background(), "org-1", accountRef{})
+	_, err := r.installationFor(context.Background(), "org-1", testInstallHost, accountRef{})
 	if !errors.Is(err, ErrAmbiguousInstallation) {
 		t.Fatalf("installationFor(empty target) err = %v; want ErrAmbiguousInstallation", err)
 	}
@@ -218,7 +223,7 @@ func TestInstallationFor_ReadFailurePropagates(t *testing.T) {
 		nil,
 	).(*resolver)
 
-	_, err := r.installationFor(context.Background(), "org-1", accountByLogin("acme"))
+	_, err := r.installationFor(context.Background(), "org-1", testInstallHost, accountByLogin("acme"))
 	if !errors.Is(err, errMirrorDown) {
 		t.Fatalf("installationFor err = %v; want the read failure in the chain", err)
 	}
@@ -289,5 +294,200 @@ func TestResolver_MintsForAnInstallationMirroredWithoutAnAccountID(t *testing.T)
 	}
 	if gh.lastProbe != "Bearer ghs_minted" {
 		t.Errorf("client carried %q, want the minted App token", gh.lastProbe)
+	}
+}
+
+// installHostA is the GitHub an org was on before its settings moved it to the
+// host its test server stands for. Nothing listens there, and nothing may be
+// minted for it.
+const installHostA = "https://ghe.old.example.com"
+
+// installOnHost is installOnAccount on an explicit GitHub host.
+func installOnHost(installationID, accountID, login, host string) domain.OrgGitHubAppInstallation {
+	inst := installOnAccount(installationID, accountID, login)
+	inst.GitHubHost = host
+	return inst
+}
+
+// hostEntryPoints is every public resolution that mints from an installation,
+// each named so a failure says which door let the wrong host through. They
+// all act on acme/api, so one fixture serves them all.
+func hostEntryPoints(ctx context.Context) map[string]func(r Resolver) error {
+	return map[string]func(r Resolver) error{
+		"ClientFor": func(r Resolver) error {
+			_, err := r.ClientFor(ctx, "org-1", "acme")
+			return err
+		},
+		"ClientForRepo": func(r Resolver) error {
+			_, err := r.ClientForRepo(ctx, "org-1", "acme", "api")
+			return err
+		},
+		"ClientForRepoWithIdentity": func(r Resolver) error {
+			_, _, err := r.(RepoIdentityResolver).ClientForRepoWithIdentity(ctx, "org-1", "acme", "api")
+			return err
+		},
+		"ClientForRepoScoped": func(r Resolver) error {
+			_, _, err := r.(ScopedRepoResolver).ClientForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			return err
+		},
+		"TokenFor": func(r Resolver) error {
+			_, err := r.TokenFor(ctx, "org-1", "acme")
+			return err
+		},
+		"TokenForRepoScoped": func(r Resolver) error {
+			_, err := r.(ScopedResolver).TokenForRepoScoped(ctx, "org-1", "acme", "api", nil)
+			return err
+		},
+		"TokenForReposScoped": func(r Resolver) error {
+			_, err := r.(ScopedResolver).TokenForReposScoped(ctx, "org-1", "acme", []string{"api"}, nil)
+			return err
+		},
+	}
+}
+
+// hostResolverOn builds a resolver for an org whose settings name gh's host,
+// with insts mirrored, and a PAT in the store that an active-App org must
+// never fall back to.
+func hostResolverOn(t *testing.T, gh *ghTestServer, insts ...domain.OrgGitHubAppInstallation) Resolver {
+	t.Helper()
+	gh.installRepos = []string{"acme/api"}
+	return newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t), integrations.KeyGitHubPAT: "ghp_test"}},
+		&fakeApps{app: activeApp(), insts: insts},
+		&fakeOrgs{base: gh.srv.URL},
+		&fakeAgents{},
+		nil,
+	)
+}
+
+// TestResolver_SelectsInstallationsOnTheOrgsHostOnly pins the rule for an org
+// that has moved to another GitHub and holds an installation for the same
+// account login on both: every resolution on the new host mints from the new
+// host's installation and never from the old one's. A login names an account
+// on one deployment only, and the old installation's id means a different
+// installation on the new host — minting it there acts as whichever account
+// holds that number.
+func TestResolver_SelectsInstallationsOnTheOrgsHostOnly(t *testing.T) {
+	ctx := context.Background()
+	for name, resolve := range hostEntryPoints(ctx) {
+		t.Run(name, func(t *testing.T) {
+			gh := newGHTestServer(t)
+			hostB := domain.GitHubHost(gh.srv.URL)
+			r := hostResolverOn(t, gh,
+				installOnHost("111", "1000", "acme", installHostA),
+				installOnHost("222", "2000", "acme", hostB),
+			)
+			if err := resolve(r); err != nil {
+				t.Fatalf("%s on host B: %v", name, err)
+			}
+			if got, want := gh.minted(), []string{"222"}; !slices.Equal(got, want) {
+				t.Errorf("%s minted for installations %v; want %v — host B's installation, never host A's", name, got, want)
+			}
+		})
+	}
+
+	t.Run("HasAnyCredential", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := hostResolverOn(t, gh,
+			installOnHost("111", "1000", "acme", installHostA),
+			installOnHost("222", "2000", "acme", domain.GitHubHost(gh.srv.URL)),
+		)
+		if ok, err := r.(ScopedResolver).HasAnyCredential(ctx, "org-1"); err != nil || !ok {
+			t.Errorf("HasAnyCredential = (%v, %v); want (true, nil)", ok, err)
+		}
+	})
+
+	t.Run("NoTarget", func(t *testing.T) {
+		// One installation on the org's host is one installation to choose
+		// from, whatever the org holds elsewhere: the empty target resolves to
+		// it rather than reporting the two rows as ambiguous.
+		gh := newGHTestServer(t)
+		r := hostResolverOn(t, gh,
+			installOnHost("111", "1000", "acme", installHostA),
+			installOnHost("222", "2000", "acme", domain.GitHubHost(gh.srv.URL)),
+		)
+		if _, err := r.ClientFor(ctx, "org-1", ""); err != nil {
+			t.Fatalf("ClientFor(no target): %v", err)
+		}
+		if got, want := gh.minted(), []string{"222"}; !slices.Equal(got, want) {
+			t.Errorf("minted for installations %v; want %v", got, want)
+		}
+	})
+}
+
+// TestResolver_InstallationOnlyOnAnotherHostIsNoCredential is the other half:
+// with the account installed only on the host the org left, a resolution on
+// the new host has no installation to mint from. That is the no-credential
+// error — the App reaches nothing here — not an ambiguity, not the PAT the org
+// still holds, and never a mint of the old host's installation id.
+func TestResolver_InstallationOnlyOnAnotherHostIsNoCredential(t *testing.T) {
+	ctx := context.Background()
+	for name, resolve := range hostEntryPoints(ctx) {
+		t.Run(name, func(t *testing.T) {
+			gh := newGHTestServer(t)
+			r := hostResolverOn(t, gh, installOnHost("111", "1000", "acme", installHostA))
+			err := resolve(r)
+			if !errors.Is(err, ErrNoGitHubCredentials) {
+				t.Fatalf("%s on host B with only host A's installation: err = %v; want ErrNoGitHubCredentials", name, err)
+			}
+			if errors.Is(err, ErrAmbiguousInstallation) {
+				t.Errorf("%s err = %v; a missing installation is not an ambiguous one", name, err)
+			}
+			if got := gh.minted(); len(got) != 0 {
+				t.Errorf("%s minted for installations %v; want none", name, got)
+			}
+		})
+	}
+
+	t.Run("HasAnyCredential", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := hostResolverOn(t, gh, installOnHost("111", "1000", "acme", installHostA))
+		if ok, err := r.(ScopedResolver).HasAnyCredential(ctx, "org-1"); err != nil || ok {
+			t.Errorf("HasAnyCredential = (%v, %v); want (false, nil) — an installation on another host mints nothing here", ok, err)
+		}
+	})
+
+	t.Run("NoTarget", func(t *testing.T) {
+		gh := newGHTestServer(t)
+		r := hostResolverOn(t, gh, installOnHost("111", "1000", "acme", installHostA))
+		if _, err := r.ClientFor(ctx, "org-1", ""); !errors.Is(err, ErrNoGitHubCredentials) {
+			t.Errorf("ClientFor(no target) err = %v; want ErrNoGitHubCredentials", err)
+		}
+	})
+}
+
+// TestInstallationFor_AccountIDsAreHostScoped pins the id half of the rule. An
+// account id is GitHub's per-deployment number, so the same id on two hosts is
+// two accounts: the target's id selects among the installations on the host
+// asked about, and a row on another host whose id matches answers nothing —
+// even when its login matches too.
+func TestInstallationFor_AccountIDsAreHostScoped(t *testing.T) {
+	const hostB = "https://ghe.new.example.com"
+	r, _ := installResolver(t,
+		installOnHost("111", "1000", "acme", installHostA),
+		installOnHost("222", "1000", "globex", hostB),
+	)
+	inst, err := r.installationFor(context.Background(), "org-1", hostB, accountRef{ID: "1000", Login: "acme"})
+	if err != nil {
+		t.Fatalf("installationFor on host B: %v", err)
+	}
+	if inst.InstallationID != "222" {
+		t.Errorf("installationFor on host B = %q; want 222 — account 1000 on host B, not host A's acme", inst.InstallationID)
+	}
+}
+
+// TestInstallationFor_EmptyHostSelectsNothing pins the empty host as "no host
+// resolved" rather than the deployment default: nothing is selected, whatever
+// the mirror holds, and the answer is the no-credential one.
+func TestInstallationFor_EmptyHostSelectsNothing(t *testing.T) {
+	r, _ := installResolver(t,
+		installOnAccount("456", "1234", "acme"),
+		installOnHost("789", "5678", "acme", domain.GitHubHost("")),
+	)
+	if _, err := r.installationFor(context.Background(), "org-1", "", accountByLogin("acme")); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("installationFor on an empty host err = %v; want ErrNoGitHubCredentials", err)
+	}
+	if got := installationHost(""); got != "" {
+		t.Errorf("installationHost(\"\") = %q; want \"\" — an empty base resolves no host", got)
 	}
 }

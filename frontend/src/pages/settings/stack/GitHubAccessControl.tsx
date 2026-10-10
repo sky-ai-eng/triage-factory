@@ -322,7 +322,7 @@ export default function GitHubAccessControl({
     toast.success(bound ? `${verb} — as @${bound}` : verb)
     // Optimistic so the idle view names the new account immediately; reload
     // confirms it from the server.
-    ctx.patch({ hasGitHubPat: true, githubPatLogin: bound, githubPatRebindHost: '' })
+    ctx.patch({ hasGitHubPat: true, githubPatLogin: bound })
     reset()
     reload()
   }
@@ -462,7 +462,6 @@ export default function GitHubAccessControl({
       githubAppSlug: '',
       hasGitHubPat: false,
       githubPatLogin: '',
-      githubPatRebindHost: '',
     })
     return true
   }
@@ -709,7 +708,6 @@ export default function GitHubAccessControl({
                 githubAppSlug: '',
                 hasGitHubPat: true,
                 githubPatLogin: phase.login,
-                githubPatRebindHost: '',
               })
               reset()
               reload()
@@ -909,13 +907,6 @@ export default function GitHubAccessControl({
             ) : null}
             . Switch to a GitHub App to {appPitch}.
           </p>
-          {s.githubPatRebindHost && (
-            <p className="text-body leading-relaxed text-alarm">
-              This token was connected on {s.githubPatRebindHost}, not on{' '}
-              {s.org.github_url || 'https://github.com'}. It is not used on another host, so GitHub
-              polling and agent runs have no credential until you replace it.
-            </p>
-          )}
           <div className="flex flex-wrap items-center gap-2">
             {/* Rotation lives beside the switch, not inside it: replacing an
                 expired or revoked token is routine hygiene, and routing it

@@ -81,12 +81,13 @@ func TestForSystem_CloudKeysMatchIntegrations(t *testing.T) {
 // TestCanonicalHostMatchesNormalizeJiraHost closes the second drift gap the
 // import cycle creates: db.NormalizeJiraHost (which keys every
 // user_jira_identities row) can't call jira.CanonicalHost (internal/jira
-// imports internal/db, so the reverse would cycle), so it reimplements the
-// trailing-slash + whitespace trim by hand. NormalizeJiraHost's doc reasons
-// in prose that the two agree on CanonicalHost's success path; this pins it in
-// code. A silent change to either trim would route a captured identity under a
-// host the read side never looks up, with no compile error. This external test
-// package sits outside the cycle, so it can hold both sides together.
+// imports internal/db, so the reverse would cycle), so it reaches the shared
+// canonicalizer (ghbase.CanonicalBaseURL) on its own. NormalizeJiraHost's doc
+// reasons in prose that the two agree on CanonicalHost's success path; this
+// pins it in code. A silent change to either side would route a captured
+// identity under a host the read side never looks up, with no compile error.
+// This external test package sits outside the cycle, so it can hold both sides
+// together.
 func TestCanonicalHostMatchesNormalizeJiraHost(t *testing.T) {
 	// Inputs CanonicalHost accepts (real http(s) origin): the normalized host
 	// it returns must equal what NormalizeJiraHost keys the row under.
@@ -97,6 +98,8 @@ func TestCanonicalHostMatchesNormalizeJiraHost(t *testing.T) {
 		"  https://jira.example.com  ",
 		" https://site.atlassian.net/ ",
 		"http://localhost:8080/",
+		"https://Jira.Example.com",
+		"HTTPS://JIRA.EXAMPLE.COM:8443/Jira/",
 	}
 	for _, in := range valid {
 		canon, ok := jira.CanonicalHost(in)

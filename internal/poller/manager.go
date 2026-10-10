@@ -774,16 +774,21 @@ func (m *Manager) runGitHubCycleForOrg(ctx context.Context, orgID string) {
 	// it failed to deliver. An org that missed its `created` delivery then read
 	// as installed on no accounts forever: degraded below, cycle skipped, repo
 	// picker blank, with nothing on a timer to correct it.
-	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
+	//
+	// The installations on the org's current host only: those are the ones the
+	// resolver mints from, and an installation left on a host the org has moved
+	// off reaches none of the repositories this cycle polls.
+	installs, err := m.apps.ListInstallationsOnHostSystem(ctx, orgID, scope)
 	if err != nil {
 		githubLog.Warn("list installations failed", "org", orgID, "error", err)
 	}
 
-	// Active App installed on no accounts. Under XOR there is no PAT to fall
-	// back to, so this is a degraded-health condition, not a silent skip:
-	// surface it and skip the cycle rather than polling as some other identity.
+	// Active App installed on no accounts on this host. Under XOR there is no
+	// PAT to fall back to, so this is a degraded-health condition, not a silent
+	// skip: surface it and skip the cycle rather than polling as some other
+	// identity.
 	if len(installs) == 0 {
-		degraded := errors.New("github app is active but installed on no accounts")
+		degraded := fmt.Errorf("github app is active but installed on no accounts on %s", scope)
 		span.SetStatus(codes.Error, "app installed on no accounts")
 		githubLog.ErrorContext(ctx, "skipping cycle", "org", orgID, "error", degraded)
 		m.reportError("github", orgID, degraded)

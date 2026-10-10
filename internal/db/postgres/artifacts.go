@@ -42,7 +42,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // an empty string so the scan targets are plain strings, the same shape
 // pgConversationColumns uses.
 const pgArtifactColumns = `
-	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, target,
+	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, scope, target,
 	COALESCE(external_id, ''), COALESCE(url, ''), state, dedup_key,
 	COALESCE(details_json, ''), created_at, updated_at
 `
@@ -74,23 +74,27 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.upsert(ctx, s.admin, orgID, a)
 }
 
-// InsertArtifactIfAbsentSystem inserts a only when no (org_id, dedup_key) row
-// exists — ON CONFLICT DO NOTHING — on the admin pool (BYPASSRLS; the reconciler
+// InsertArtifactIfAbsentSystem inserts a only when no (org_id, scope,
+// dedup_key) row exists — ON CONFLICT DO NOTHING — on the admin pool
+// (BYPASSRLS; the reconciler
 // backstop has no JWT-claims context). Returns whether a row was inserted:
 // RowsAffected is 1 on insert, 0 when a row already existed. See the interface
 // doc for why this never-overwrite path (not UpsertSystem) is what the backstop
 // needs. org_id stays bound as defense in depth.
 func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID string, a domain.Artifact) (bool, error) {
+	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
+		return false, err
+	}
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
-			 external_id, url, state, dedup_key, details_json, updated_at)
+			 external_id, url, state, dedup_key, details_json, updated_at, scope)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
-		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now())
-		ON CONFLICT (org_id, dedup_key) DO NOTHING`,
+		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13)
+		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING`,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
-		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON,
+		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
 	)
 	if err != nil {
 		return false, err
@@ -103,11 +107,14 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 }
 
 func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a domain.Artifact) (domain.Artifact, error) {
-	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
-	// from the proposed row (EXCLUDED.*) and bumps updated_at; id/created_at
-	// on the existing row are preserved. provider/kind are deliberately NOT
-	// updated: they are encoded into dedup_key (the conflict target), so a
-	// conflicting row that disagreed on them would be keyed wrong — the
+	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
+		return domain.Artifact{}, err
+	}
+	// ON CONFLICT(org_id, scope, dedup_key) updates the documented mutable
+	// fields from the proposed row (EXCLUDED.*) and bumps updated_at;
+	// id/created_at on the existing row are preserved. provider/kind/scope are
+	// deliberately NOT updated: they are encoded into the conflict target, so
+	// a conflicting row that disagreed on them would be keyed wrong — the
 	// insert side pins them, the update side leaves them. A caller-supplied
 	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
 	// back to gen_random_uuid() server-side.
@@ -138,11 +145,11 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
-			 external_id, url, state, dedup_key, details_json, updated_at)
+			 external_id, url, state, dedup_key, details_json, updated_at, scope)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
-		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now())
-		ON CONFLICT (org_id, dedup_key) DO UPDATE SET
+		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13)
+		ON CONFLICT (org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(EXCLUDED.target, ''), artifacts.target),
@@ -153,7 +160,7 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 			updated_at   = now()
 		RETURNING `+pgArtifactColumns,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
-		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON,
+		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
 	)
 	var out domain.Artifact
 	if err := scanArtifact(row, &out); err != nil {
@@ -284,15 +291,18 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 // PR coherence feed — a background eventbus subscriber with no JWT-claims
 // context that must see every team's pending review drafts anchored to the PR
 // (the head-SHA change is org-wide, not team-scoped). Filters to pending review
-// drafts on the given PR target. org_id stays in the WHERE clause as defense in
-// depth.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error) {
+// drafts on the given PR target on scope's host. org_id stays in the WHERE
+// clause as defense in depth.
+func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
 	rows, err := s.admin.QueryContext(ctx, `
 		SELECT `+pgArtifactColumns+`
 		FROM artifacts
-		WHERE org_id = $1 AND kind = $2 AND state = $3 AND target = $4
+		WHERE org_id = $1 AND kind = $2 AND state = $3 AND scope = $4 AND target = $5
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, target)
+	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +502,7 @@ type rowScanner interface {
 
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	return sc.Scan(
-		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
+		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
 		&a.ExternalID, &a.URL, &a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	)
 }

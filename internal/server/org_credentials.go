@@ -188,9 +188,7 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{
-			GitHubURL: baseURL, GitHubPAT: pat,
-		}); err != nil {
+		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("store credential: %w", err)
 		}
 		// The org credential's OWN login, so the resolver can stamp the org

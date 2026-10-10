@@ -1748,6 +1748,7 @@ func (s *conversationStore) ListPRCoherenceTargetsSystem(ctx context.Context, or
 		           SELECT 1 FROM artifacts a
 		           WHERE a.org_id = $1 AND a.conversation_id = r.id
 		             AND a.kind = $6 AND a.state = $7 AND a.target = $8
+		             AND a.scope = (SELECT pe.scope FROM entities pe WHERE pe.org_id = $1 AND pe.id = $2)
 		       )
 		       OR EXISTS (
 		           SELECT 1

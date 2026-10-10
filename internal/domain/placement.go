@@ -27,8 +27,12 @@ const (
 //
 // A pin takes precedence over a replica count when both are somehow set.
 type PlacementOverride struct {
-	OrgID    string
-	KeyKind  string // PlacementKindRepo
+	OrgID   string
+	KeyKind string // PlacementKindRepo
+	// Host is the GitHub host (GitHubHost) the repository named by KeyValue
+	// lives on. An owner/repo is only unique within one host, so a pin is for
+	// one host's repository and a rename moves only that host's pins.
+	Host     string
 	KeyValue string // "owner/repo" for repo keys
 
 	// PinnedInstanceID names the instance this key is pinned to, or "" for

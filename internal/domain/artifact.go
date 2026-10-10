@@ -12,10 +12,10 @@ import (
 // review, a Jira/Linear issue, a comment). One row per external object;
 // the (Provider, Kind) pair discriminates the shape. See TFAC-455.
 //
-// Artifacts are deduped on (OrgID, DedupKey) so the same logical object
+// Artifacts are deduped on (OrgID, Scope, DedupKey) so the same logical object
 // upserts to one row no matter which capture writer (exec choke point,
 // pre-push hook, git-proxy backstop, reconciliation) saw it first.
-// Build the key with ArtifactDedupKey.
+// Build the key with ArtifactDedupKey and the scope with ExternalObjectScope.
 //
 // TeamID is denormalized from the owning conversation so reads scope by team
 // exactly like conversations. ConversationID is nullable (empty string here) so
@@ -33,6 +33,13 @@ type Artifact struct {
 	// ArtifactProvider* / ArtifactKind* consts.
 	Provider string `json:"provider"`
 	Kind     string `json:"kind"`
+
+	// Scope is the provider namespace the object lives in, the value an
+	// entity of the same provider is scoped under: the GitHub host for a
+	// github or git artifact, the Jira site, the Linear workspace id,
+	// SlackScope. Target and DedupKey are only unique inside it. Required on
+	// every write.
+	Scope string `json:"scope"`
 
 	// Target is the resource key: 'owner/repo', 'owner/repo#123',
 	// or a Jira-style issue key (e.g. 'PROJ-123'). ExternalID is the provider-native id of the backing
@@ -218,11 +225,11 @@ func ArtifactProviders() []string {
 //     issue, and the issue's UUID for anything on a Linear issue. Never a
 //     Jira key or a Linear identifier: a move or a key rename changes it, and
 //     another site or workspace in the same org can have an issue under the
-//     same one. A Jira issue id repeats across sites, which is why its
-//     resource carries the site too; a Linear UUID is unique across
-//     workspaces on its own. Either way the org-wide key cannot merge two
-//     sites' or workspaces' artifacts, and an entity rename moves the row's
-//     Target without touching its key (EntityArtifactResource).
+//     same one. The key is unique only within the row's Scope, so two
+//     sites' or workspaces' artifacts never share a row; a Jira resource
+//     carries the site as well, which is the shape stored keys hold. An
+//     entity rename moves the row's Target without touching its key
+//     (EntityArtifactResource).
 //   - anchor: an optional stable sub-discriminator appended when resource
 //     alone isn't unique — a branch ref for a branch, a PR whose number
 //     isn't known yet (see below), or a comment's id on its issue. Empty when
@@ -286,8 +293,7 @@ func ParseJiraIssueResource(resource string) (site, issueID string, ok bool) {
 // entity carrying (source, scope, externalID) are keyed under: the issue's
 // site and id for Jira (JiraIssueResource), the provider id itself for every
 // other source. "" when there is no id. It is what an entity rename matches
-// artifacts by, so it never names a display key: the dedup key is org-wide and
-// says nothing else about which scope a row belongs to.
+// artifacts by, inside the entity's scope, so it never names a display key.
 func EntityArtifactResource(source, scope, externalID string) string {
 	if externalID == "" {
 		return ""

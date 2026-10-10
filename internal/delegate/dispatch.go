@@ -768,6 +768,30 @@ func (s *Spawner) dispatchClaimedConversation(ctx context.Context, conv *domain.
 	}
 	conv.Model = model
 
+	// A GitHub task's pull request must be on the org's current GitHub host:
+	// the credential resolve, the fetch, the clone and a workspace restore
+	// below all go to that host, and would fill the pull request's bare clone
+	// with another host's same-named repository. Checked here, ahead of both
+	// the resume path and the bring-up, so a refused run makes no network
+	// call. The refusal is settled, like the model refusal above.
+	refusal, err := s.githubHostRefusal(gateCtx, orgID, *task)
+	if err != nil {
+		if fencedAtGate() {
+			return
+		}
+		s.failEngagement(conv.ID, err)
+		s.handlePreAgentFailure(orgID, br, *conv, err)
+		return
+	}
+	if refusal != nil {
+		if fencedAtGate() {
+			return
+		}
+		s.failEngagement(conv.ID, refusal)
+		s.disposeOfHostRefusal(orgID, br, *conv, refusal)
+		return
+	}
+
 	// Resume-by-enqueue: queued input means this claim is NOT a
 	// fresh/crash-reclaimed blueprint step — it's a parked/terminal-resumable
 	// run woken by a user message and re-queued onto its own row

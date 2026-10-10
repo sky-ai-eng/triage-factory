@@ -455,15 +455,8 @@ func (s *Server) reachabilityClients(ctx context.Context, orgID, userID string) 
 		orgSet, e = tx.Orgs.GetSettings(ctx, orgID)
 		return e
 	})
-	// A PAT bound on another host is never sent to this one.
-	if integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
-		baseURL := orgSet.GitHubBaseURL
-		if baseURL == "" {
-			baseURL = creds.GitHubURL
-		}
-		if baseURL != "" {
-			clients = append(clients, ghclient.NewClient(baseURL, creds.GitHubPAT).WithOrg(orgID))
-		}
+	if creds.GitHubPAT != "" && orgSet.GitHubBaseURL != "" {
+		clients = append(clients, ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID))
 	}
 
 	// App installation sources, one client per installed account. Each

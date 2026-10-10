@@ -35,21 +35,23 @@ var _ db.PlacementOverrideStore = (*placementOverrideStore)(nil)
 // reads SELECT it and Upsert RETURNs it, so the write shape cannot drift from
 // the read shape. COALESCE keeps a NULL pin scanning as the empty string the
 // domain type carries.
-const pgPlacementOverrideColumns = `org_id, key_kind, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at`
+const pgPlacementOverrideColumns = `org_id, key_kind, host, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at`
 
 func scanPlacementOverride(scan func(...any) error) (domain.PlacementOverride, error) {
 	var ov domain.PlacementOverride
-	err := scan(&ov.OrgID, &ov.KeyKind, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
+	err := scan(&ov.OrgID, &ov.KeyKind, &ov.Host, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
 	return ov, err
 }
 
-func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, keyValue string) (*domain.PlacementOverride, error) {
-	var ov domain.PlacementOverride
-	err := s.admin.QueryRowContext(ctx, `
-		SELECT org_id, key_kind, key_value, COALESCE(pinned_instance_id, ''), replicas, updated_at
+func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, host, keyValue string) (*domain.PlacementOverride, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
+	ov, err := scanPlacementOverride(s.admin.QueryRowContext(ctx, `
+		SELECT `+pgPlacementOverrideColumns+`
 		FROM placement_overrides
-		WHERE org_id = $1 AND key_kind = $2 AND key_value = $3
-	`, orgID, keyKind, keyValue).Scan(&ov.OrgID, &ov.KeyKind, &ov.KeyValue, &ov.PinnedInstanceID, &ov.Replicas, &ov.UpdatedAt)
+		WHERE org_id = $1 AND key_kind = $2 AND host = $3 AND key_value = $4
+	`, orgID, keyKind, host, keyValue).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -64,7 +66,7 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 		SELECT `+pgPlacementOverrideColumns+`
 		FROM placement_overrides
 		WHERE org_id = $1
-		ORDER BY key_kind, key_value
+		ORDER BY key_kind, host, key_value
 	`, orgID)
 	if err != nil {
 		return nil, wrapAdminPoolPermErr(err, "placement_overrides.List")
@@ -82,25 +84,31 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 }
 
 func (s *placementOverrideStore) Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error) {
+	if err := db.RequireRepoHost(ov.Host); err != nil {
+		return domain.PlacementOverride{}, err
+	}
 	stored, err := scanPlacementOverride(s.admin.QueryRowContext(ctx, `
-		INSERT INTO placement_overrides (org_id, key_kind, key_value, pinned_instance_id, replicas, updated_at)
-		VALUES ($1, $2, $3, NULLIF($4, ''), $5, now())
-		ON CONFLICT (org_id, key_kind, key_value) DO UPDATE SET
+		INSERT INTO placement_overrides (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
+		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6, now())
+		ON CONFLICT (org_id, key_kind, host, key_value) DO UPDATE SET
 			pinned_instance_id = EXCLUDED.pinned_instance_id,
 			replicas           = EXCLUDED.replicas,
 			updated_at         = now()
 		RETURNING `+pgPlacementOverrideColumns,
-		ov.OrgID, ov.KeyKind, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas).Scan)
+		ov.OrgID, ov.KeyKind, ov.Host, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas).Scan)
 	if err != nil {
 		return domain.PlacementOverride{}, wrapAdminPoolPermErr(err, "placement_overrides.Upsert")
 	}
 	return stored, nil
 }
 
-func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, keyValue string) (bool, error) {
+func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, host, keyValue string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	res, err := s.admin.ExecContext(ctx, `
-		DELETE FROM placement_overrides WHERE org_id = $1 AND key_kind = $2 AND key_value = $3
-	`, orgID, keyKind, keyValue)
+		DELETE FROM placement_overrides WHERE org_id = $1 AND key_kind = $2 AND host = $3 AND key_value = $4
+	`, orgID, keyKind, host, keyValue)
 	if err != nil {
 		return false, wrapAdminPoolPermErr(err, "placement_overrides.Delete")
 	}

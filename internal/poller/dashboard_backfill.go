@@ -135,9 +135,10 @@ func (m *Manager) runDashboardBackfill(ctx context.Context, orgID, scope, login 
 		return err
 	}
 
-	// App path: search per installation over its grant intersection, mirroring
-	// runGitHubCycleForOrg so reach matches the poll cycle's exactly.
-	installs, err := m.apps.ListInstallationsForOrgSystem(ctx, orgID)
+	// App path: search per installation on the org's host over its grant
+	// intersection, mirroring runGitHubCycleForOrg so reach matches the poll
+	// cycle's exactly.
+	installs, err := m.apps.ListInstallationsOnHostSystem(ctx, orgID, scope)
 	if err != nil {
 		return err
 	}

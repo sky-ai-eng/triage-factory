@@ -2,10 +2,26 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
+
+// ErrExternalObjectScopeRequired refuses an artifact or audit-ledger write
+// with no scope. A dedup key and a target are only unique within a provider
+// namespace, so a row without one would not say which object it records.
+var ErrExternalObjectScopeRequired = errors.New("external object scope is required")
+
+// RequireExternalObjectScope refuses an empty scope with
+// ErrExternalObjectScopeRequired. Both dialects' artifact and external-action
+// writes call it before touching the database.
+func RequireExternalObjectScope(scope string) error {
+	if scope == "" {
+		return ErrExternalObjectScopeRequired
+	}
+	return nil
+}
 
 // ArtifactStore owns the artifacts table — the single durable,
 // conversation-attributed, polymorphic record of everything a conversation
@@ -20,13 +36,15 @@ import (
 // and stays in the WHERE/INSERT clause as defense in depth alongside RLS;
 // SQLite asserts it equals runmode.LocalDefaultOrgID. See TFAC-455.
 type ArtifactStore interface {
-	// Upsert inserts the artifact or, on a (org_id, dedup_key) conflict,
-	// updates the existing row's mutable fields (state, target,
+	// Upsert inserts the artifact or, on a (org_id, scope, dedup_key)
+	// conflict, updates the existing row's mutable fields (state, target,
 	// details_json, conversation_id, team_id, updated_at). This is the one writer all
 	// of Sub-epic A shares: the same PR seen via exec and again via
 	// reconciliation lands on one row. Returns the stored row with id and
 	// timestamps populated. a.ID may be empty (both impls generate a uuid); a
-	// non-empty a.ID is honored on insert and ignored on update.
+	// non-empty a.ID is honored on insert and ignored on update. An empty
+	// a.Scope is refused with ErrExternalObjectScopeRequired: the same dedup
+	// key in two scopes is two objects.
 	//
 	// external_id and url are preserve-on-empty: an upsert that leaves them
 	// empty keeps whatever the row already holds rather than blanking it.
@@ -56,7 +74,7 @@ type ArtifactStore interface {
 	UpsertSystem(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error)
 
 	// InsertArtifactIfAbsentSystem inserts a only when no artifact with its
-	// (org_id, dedup_key) already exists — ON CONFLICT DO NOTHING — and reports
+	// (org_id, scope, dedup_key) already exists — ON CONFLICT DO NOTHING — and reports
 	// whether a row was actually inserted (false when one was already present,
 	// changing nothing). Unlike UpsertSystem it NEVER overwrites an existing
 	// row's state/details, so a discovery pass can record an object it found
@@ -130,7 +148,8 @@ type ArtifactStore interface {
 
 	// ListPendingReviewsByTargetSystem returns every PENDING review artifact
 	// (Kind=review, State=pending) whose Target is the given PR resource key
-	// (owner/repo#number), across every team in the org, newest first. It backs
+	// (owner/repo#number) in scope (the PR's GitHub host), across every team
+	// in the org, newest first. It backs
 	// the PR coherence feed's freshness gate: on a head advance, the in-flight
 	// review drafts anchored to that PR say which conversations already recorded
 	// the new head and so are not behind it. "Pending" — not yet submitted or
@@ -144,7 +163,7 @@ type ArtifactStore interface {
 	// the PR (the event is org-wide, not team-scoped). org_id stays bound in the
 	// WHERE clause as defense in depth. Identical to a plain org read in SQLite
 	// (single-tenant, no RLS).
-	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error)
+	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error)
 
 	// ListByConversationSystem is the admin-pool (BYPASSRLS) variant of ListByConversation for
 	// system-service readers that hold a real (org_id) identity but no

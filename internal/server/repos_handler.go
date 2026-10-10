@@ -324,13 +324,9 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		internalError(w, "repos", err)
 		return pickerPreflight{}, false
 	}
-	if creds.GitHubPAT == "" || (orgSet.GitHubBaseURL == "" && creds.GitHubURL == "") {
+	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
 		writeNotConfigured(w, "GitHub is not connected for this workspace")
-		return pickerPreflight{}, false
-	}
-	if !integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
-		writeNotConfigured(w, "the GitHub token was connected on another GitHub host; reconnect it on "+db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		return pickerPreflight{}, false
 	}
 	return pickerPreflight{class: class}, true
