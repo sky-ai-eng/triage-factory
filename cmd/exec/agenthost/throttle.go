@@ -11,8 +11,8 @@ import (
 // <= 0 disables the gate entirely.
 const envMaxUpstreamConcurrency = "TF_AGENTHOST_MAX_UPSTREAM_CONCURRENCY"
 
-// defaultMaxUpstreamConcurrency bounds how many upstream (Jira / GitHub) REST
-// calls one run's agent may have in flight at once, per upstream.
+// defaultMaxUpstreamConcurrency bounds how many upstream (Jira / Linear /
+// GitHub) API calls one run's agent may have in flight at once, per upstream.
 //
 // Every delegated run has its own agenthost daemon (one socket per run is the
 // isolation boundary), so this is a per-run governor: it caps a single agent's
@@ -26,24 +26,28 @@ const envMaxUpstreamConcurrency = "TF_AGENTHOST_MAX_UPSTREAM_CONCURRENCY"
 const defaultMaxUpstreamConcurrency = 8
 
 // upstreamKind identifies which shared upstream a dispatch method calls, for
-// concurrency accounting. Jira and GitHub are gated separately so a burst
-// against one can't starve calls to the other (independent accounts, limits).
+// concurrency accounting. Each upstream is gated separately so a burst
+// against one can't starve calls to another (independent accounts, limits).
 type upstreamKind int
 
 const (
 	upstreamNone upstreamKind = iota
 	upstreamJira
+	upstreamLinear
 	upstreamGitHub
 )
 
 // upstreamForMethod classifies a dispatch method by the upstream it hits. The
-// method constants are namespaced by prefix ("Jira*" / "Github*"), so a new
+// method constants are namespaced by prefix ("Jira*" / "Linear*" /
+// "Github*"), so a new
 // verb is classified automatically; every other method (DB/core ops, git
 // checkout via the git proxy) is upstreamNone and never gated here.
 func upstreamForMethod(method string) upstreamKind {
 	switch {
 	case strings.HasPrefix(method, "Jira"):
 		return upstreamJira
+	case strings.HasPrefix(method, "Linear"):
+		return upstreamLinear
 	case strings.HasPrefix(method, "Github"):
 		return upstreamGitHub
 	default:
@@ -58,6 +62,7 @@ func upstreamForMethod(method string) upstreamKind {
 // operator who set the limit to 0) simply doesn't throttle.
 type upstreamThrottle struct {
 	jira   chan struct{}
+	linear chan struct{}
 	github chan struct{}
 }
 
@@ -67,6 +72,7 @@ func newUpstreamThrottle(limit int) *upstreamThrottle {
 	}
 	return &upstreamThrottle{
 		jira:   make(chan struct{}, limit),
+		linear: make(chan struct{}, limit),
 		github: make(chan struct{}, limit),
 	}
 }
@@ -78,6 +84,8 @@ func (t *upstreamThrottle) slots(up upstreamKind) chan struct{} {
 	switch up {
 	case upstreamJira:
 		return t.jira
+	case upstreamLinear:
+		return t.linear
 	case upstreamGitHub:
 		return t.github
 	default:

@@ -56,13 +56,13 @@ var subcommandRegistry = map[string]Subcommand{}
 // built-in switch cases in Handle, plus the help flags, none of which a
 // registered verb may shadow.
 var reservedSubcommandNames = map[string]bool{
-	"gh": true, "jira": true, "workspace": true, "memory": true, "--help": true, "-h": true,
+	"gh": true, "jira": true, "linear": true, "workspace": true, "memory": true, "--help": true, "-h": true,
 }
 
 // RegisterSubcommand registers an exec verb family under name. Called from an
 // ee package's init(). Panics on empty/duplicate name, a name colliding with
-// a built-in switch case ("gh", "jira", "workspace", "memory", "--help",
-// "-h"), a nil runner, or empty help text — an undocumented family must fail
+// a built-in switch case ("gh", "jira", "linear", "workspace", "memory",
+// "--help", "-h"), a nil runner, or empty help text — an undocumented family must fail
 // at boot, not surface as a verb `--help` cannot explain.
 func RegisterSubcommand(name string, sub Subcommand) {
 	if name == "" {

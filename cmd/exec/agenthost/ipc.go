@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
 // dialTimeout caps how long the client waits for the daemon to accept
@@ -418,6 +419,88 @@ func (c *IPCClient) JiraListIssueTypes(ctx context.Context, project string) ([]j
 		return nil, err
 	}
 	return res.IssueTypes, nil
+}
+
+// --- linear ---
+//
+// Thin RPCs like the Jira ones above: the daemon resolves the org's Linear
+// client host-side, so the sandbox holds no credential, and an error arrives
+// as the daemon's own message.
+
+func (c *IPCClient) LinearGetIssue(ctx context.Context, issue string) (*linearclient.Issue, error) {
+	var res linearIssueResult
+	if err := c.call(ctx, methodLinearGetIssue, linearIssueArgs{Issue: issue}, &res); err != nil {
+		return nil, err
+	}
+	return res.Issue, nil
+}
+
+func (c *IPCClient) LinearListStates(ctx context.Context, issue string) ([]linearclient.WorkflowState, error) {
+	var res linearStatesResult
+	if err := c.call(ctx, methodLinearListStates, linearIssueArgs{Issue: issue}, &res); err != nil {
+		return nil, err
+	}
+	return res.States, nil
+}
+
+func (c *IPCClient) LinearTransition(ctx context.Context, issue, state string) (linearclient.WorkflowState, error) {
+	var res linearStateResult
+	if err := c.call(ctx, methodLinearTransition, linearTransitionArgs{Issue: issue, State: state}, &res); err != nil {
+		return linearclient.WorkflowState{}, err
+	}
+	return res.State, nil
+}
+
+func (c *IPCClient) LinearAddComment(ctx context.Context, issue, body string) (string, error) {
+	var res linearCommentResult
+	if err := c.call(ctx, methodLinearAddComment, linearCommentArgs{Issue: issue, Body: body}, &res); err != nil {
+		return "", err
+	}
+	return res.CommentID, nil
+}
+
+func (c *IPCClient) LinearAssignSelf(ctx context.Context, issue string) error {
+	return c.call(ctx, methodLinearAssignSelf, linearIssueArgs{Issue: issue}, nil)
+}
+
+func (c *IPCClient) LinearUnassign(ctx context.Context, issue string) error {
+	return c.call(ctx, methodLinearUnassign, linearIssueArgs{Issue: issue}, nil)
+}
+
+func (c *IPCClient) LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (*linearclient.Issue, error) {
+	var res linearIssueResult
+	if err := c.call(ctx, methodLinearCreateIssue, req, &res); err != nil {
+		return nil, err
+	}
+	return res.Issue, nil
+}
+
+func (c *IPCClient) LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) error {
+	return c.call(ctx, methodLinearUpdateIssue, linearUpdateIssueArgs{Issue: issue, Edit: edit}, nil)
+}
+
+func (c *IPCClient) LinearSetParent(ctx context.Context, issue, parent string) error {
+	return c.call(ctx, methodLinearSetParent, linearSetParentArgs{Issue: issue, Parent: parent}, nil)
+}
+
+func (c *IPCClient) LinearSetPriority(ctx context.Context, issue string, priority int) error {
+	return c.call(ctx, methodLinearSetPriority, linearSetPriorityArgs{Issue: issue, Priority: priority}, nil)
+}
+
+func (c *IPCClient) LinearListChildren(ctx context.Context, issue string) ([]linearclient.ChildIssue, error) {
+	var res linearChildrenResult
+	if err := c.call(ctx, methodLinearListChildren, linearIssueArgs{Issue: issue}, &res); err != nil {
+		return nil, err
+	}
+	return res.Children, nil
+}
+
+func (c *IPCClient) LinearSearch(ctx context.Context, req LinearSearchRequest) ([]linearclient.Issue, error) {
+	var res linearIssuesResult
+	if err := c.call(ctx, methodLinearSearch, req, &res); err != nil {
+		return nil, err
+	}
+	return res.Issues, nil
 }
 
 // --- github ---

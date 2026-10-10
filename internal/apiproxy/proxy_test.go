@@ -143,6 +143,20 @@ func TestNewValidation(t *testing.T) {
 			wantErr: "TokenSource is only for ProviderGitHub",
 		},
 		{
+			name: "linear https upstream ok",
+			cfg:  apiproxy.Config{Provider: apiproxy.ProviderLinear, Upstream: "https://api.linear.app", AuthHeaderSource: validHeaderSource},
+		},
+		{
+			name:    "linear without AuthHeaderSource rejected",
+			cfg:     apiproxy.Config{Provider: apiproxy.ProviderLinear, Upstream: "https://api.linear.app"},
+			wantErr: `AuthHeaderSource is required for provider "linear"`,
+		},
+		{
+			name:    "linear with TokenSource rejected",
+			cfg:     apiproxy.Config{Provider: apiproxy.ProviderLinear, Upstream: "https://api.linear.app", AuthHeaderSource: validHeaderSource, TokenSource: validTokenSource},
+			wantErr: "TokenSource is only for ProviderGitHub",
+		},
+		{
 			name:    "unknown provider rejected",
 			cfg:     apiproxy.Config{Provider: "gitlab", Upstream: "https://gitlab.example.com"},
 			wantErr: "unsupported provider",
@@ -408,6 +422,118 @@ func TestJiraInjection(t *testing.T) {
 				t.Errorf("upstream Authorization = %q, want %q", got, tt.wantAuth)
 			}
 		})
+	}
+}
+
+// TestLinearInjection pins both Linear credential shapes on the one path
+// the provider forwards: a personal API key goes upstream as the whole
+// Authorization value, an app user's access token as a Bearer, and the
+// GraphQL document itself passes through untouched.
+func TestLinearInjection(t *testing.T) {
+	tests := []struct {
+		name     string
+		value    string
+		wantAuth string
+	}{
+		{name: "api key", value: "lin_api_realkey", wantAuth: "lin_api_realkey"},
+		{name: "app access token", value: "Bearer lin_oauth_access", wantAuth: "Bearer lin_oauth_access"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &upstreamRecord{}
+			upstream := fakeUpstream(rec)
+			defer upstream.Close()
+
+			proxyURL := startProxy(t, apiproxy.Config{
+				Provider: apiproxy.ProviderLinear,
+				Upstream: upstream.URL,
+				AuthHeaderSource: func(context.Context) (string, error) {
+					return tt.value, nil
+				},
+				IncomingToken: "run-placeholder",
+			})
+
+			const doc = `{"query":"query { viewer { id } }"}`
+			req, _ := http.NewRequest(http.MethodPost, proxyURL+"/graphql", strings.NewReader(doc))
+			req.Header.Set("Authorization", "Bearer run-placeholder")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("proxy roundtrip: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.StatusCode)
+			}
+
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			if rec.path != "/graphql" {
+				t.Errorf("upstream path = %q, want /graphql", rec.path)
+			}
+			if got := rec.header.Get("Authorization"); got != tt.wantAuth {
+				t.Errorf("upstream Authorization = %q, want %q", got, tt.wantAuth)
+			}
+			if rec.body != doc {
+				t.Errorf("upstream body = %q, want %q", rec.body, doc)
+			}
+		})
+	}
+}
+
+// TestLinearRefusesOtherPaths pins that the Linear credential can only reach
+// the GraphQL endpoint: any other path on the upstream host is 404 before a
+// credential is resolved, so neither the source nor the upstream is touched.
+// A caller without the placeholder still gets 401, so the path set is not
+// disclosed to it.
+func TestLinearRefusesOtherPaths(t *testing.T) {
+	rec := &upstreamRecord{}
+	upstream := fakeUpstream(rec)
+	defer upstream.Close()
+
+	var sourceCalls atomic.Int64
+	proxyURL := startProxy(t, apiproxy.Config{
+		Provider: apiproxy.ProviderLinear,
+		Upstream: upstream.URL,
+		AuthHeaderSource: func(context.Context) (string, error) {
+			sourceCalls.Add(1)
+			return "lin_api_realkey", nil
+		},
+		IncomingToken: "run-placeholder",
+	})
+
+	do := func(path, placeholder string) int {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPost, proxyURL+path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+placeholder)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("proxy roundtrip %s: %v", path, err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	for _, path := range []string{"/", "/graphql/", "/graphqlx", "/oauth/token", "/oauth/revoke", "/api/graphql", "/graphql/../oauth/token"} {
+		if got := do(path, "run-placeholder"); got != http.StatusNotFound {
+			t.Errorf("POST %s = %d, want 404", path, got)
+		}
+	}
+	if got := do("/oauth/token", "sibling-run-token"); got != http.StatusUnauthorized {
+		t.Errorf("wrong placeholder on a refused path = %d, want 401", got)
+	}
+	if n := sourceCalls.Load(); n != 0 {
+		t.Errorf("AuthHeaderSource calls = %d, want 0 (a refused path must not resolve a credential)", n)
+	}
+	if n := rec.hits.Load(); n != 0 {
+		t.Errorf("upstream hits = %d, want 0", n)
+	}
+
+	if got := do("/graphql", "run-placeholder"); got != http.StatusOK {
+		t.Fatalf("POST /graphql = %d, want 200", got)
+	}
+	if n := sourceCalls.Load(); n != 1 {
+		t.Errorf("AuthHeaderSource calls after the GraphQL request = %d, want 1", n)
 	}
 }
 

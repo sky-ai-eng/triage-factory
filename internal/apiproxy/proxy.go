@@ -1,6 +1,6 @@
-// Package apiproxy is a per-run HTTP intermediary that holds a REST API
-// credential — GitHub's or Jira's — on the trusted side and exposes only
-// a base URL plus a per-run placeholder token to the caller.
+// Package apiproxy is a per-run HTTP intermediary that holds an API
+// credential — GitHub's, Jira's or Linear's — on the trusted side and
+// exposes only a base URL plus a per-run placeholder token to the caller.
 //
 // # The threat it addresses
 //
@@ -32,6 +32,14 @@
 // this proxy that split, Config.AuthHeaderSource returns the complete
 // Authorization header value; the JiraBasic / JiraBearer constructors
 // pin the two documented encodings so the wiring can't get them wrong.
+//
+// Linear's two credential shapes differ the same way: a personal API key
+// is the whole Authorization value with no scheme, an app user's OAuth
+// access token is a Bearer (see internal/linear). It takes the same
+// AuthHeaderSource. Linear is a GraphQL API with one endpoint, so the
+// proxy forwards exactly one path, /graphql, and answers any other path
+// 404 before it resolves a credential: the credential can reach that
+// endpoint and nothing else on the upstream host.
 //
 // # Trust model on the local hop
 //
@@ -84,7 +92,16 @@ const (
 	// ProviderJira injects the complete Authorization value produced by
 	// Config.AuthHeaderSource — Basic for Cloud, Bearer for Data Center.
 	ProviderJira Provider = "jira"
+
+	// ProviderLinear injects the complete Authorization value produced by
+	// Config.AuthHeaderSource — a bare API key, or Bearer for an app user's
+	// access token — and forwards only the GraphQL endpoint (linearPath).
+	ProviderLinear Provider = "linear"
 )
+
+// linearPath is the one request path ProviderLinear forwards: Linear's
+// GraphQL endpoint, where internal/linear's client sends every request.
+const linearPath = "/graphql"
 
 // TokenSource supplies the real GitHub token for one request's target
 // repo. owner/repo are parsed from the request path when it carries the
@@ -98,12 +115,13 @@ const (
 type TokenSource func(ctx context.Context, owner, repo string) (string, error)
 
 // AuthHeaderSource supplies the complete Authorization header value for
-// the Jira upstream — scheme included, e.g. "Basic <b64>" or
-// "Bearer <pat>". Returning the full value (rather than a bare token
-// plus a mode enum) keeps the Cloud-vs-Data-Center split out of the
-// proxy; internal/jira already owns that mapping, and the JiraBasic /
-// JiraBearer constructors cover the static cases. An error (or an empty
-// value) is answered as a credential miss (internal/credmiss).
+// the Jira or Linear upstream — scheme included where the credential has
+// one, e.g. "Basic <b64>", "Bearer <pat>", or a Linear API key alone.
+// Returning the full value (rather than a bare token plus a mode enum)
+// keeps each provider's credential shapes out of the proxy; internal/jira
+// and internal/linear already own those mappings, and the JiraBasic /
+// JiraBearer constructors cover Jira's static cases. An error (or an
+// empty value) is answered as a credential miss (internal/credmiss).
 //
 // Called once per request with no proxy-side caching. Must be safe for
 // concurrent use.
@@ -133,11 +151,12 @@ type Config struct {
 	Provider Provider
 
 	// Upstream is the absolute URL of the real API — e.g.
-	// "https://api.github.com", a GHES REST root "{ghes}/api/v3", or the
-	// Jira Cloud gateway "https://api.atlassian.com/ex/jira/{cloud_id}". A
-	// base PATH is honored (SetURL joins it ahead of the incoming request
-	// path), which is what lets a caller point its REST client at the bare
-	// proxy URL and reach a path-mounted upstream: the client sends
+	// "https://api.github.com", a GHES REST root "{ghes}/api/v3", the Jira
+	// Cloud gateway "https://api.atlassian.com/ex/jira/{cloud_id}", or
+	// Linear's "https://api.linear.app". A base PATH is honored (SetURL
+	// joins it ahead of the incoming request path), which is what lets a
+	// caller point its REST client at the bare proxy URL and reach a
+	// path-mounted upstream: the client sends
 	// "/repos/o/r" or "/rest/api/3/…" and the proxy prepends the upstream's
 	// "/api/v3" or "/ex/jira/{id}". Query / fragment are still rejected —
 	// the incoming request owns those.
@@ -149,9 +168,9 @@ type Config struct {
 	// wiring bug best caught at construction.
 	TokenSource TokenSource
 
-	// AuthHeaderSource resolves the full Jira Authorization value per
-	// request (see the type doc). Required for ProviderJira; must be nil
-	// otherwise.
+	// AuthHeaderSource resolves the full Authorization value per request
+	// (see the type doc). Required for ProviderJira and ProviderLinear;
+	// must be nil for ProviderGitHub.
 	AuthHeaderSource AuthHeaderSource
 
 	// AllowNonLoopback opts into binding Start on a non-loopback address.
@@ -167,9 +186,9 @@ type Config struct {
 	// IncomingToken, when non-empty, is the per-run secret every request
 	// must present before the proxy resolves a credential or forwards
 	// anything. The caller generates a fresh random token per run, sets
-	// it here, and configures that run's REST clients with the same value
+	// it here, and configures that run's API clients with the same value
 	// as their credential — so it arrives as "Authorization: Bearer
-	// <token>" (the GitHub client and Jira Data Center shapes) or as the
+	// <token>" (the GitHub, Jira Data Center and Linear shapes) or as the
 	// Basic-auth password (the Jira Cloud shape). The proxy compares the
 	// presented value constant-time and returns 401 on mismatch.
 	//
@@ -223,11 +242,11 @@ func New(cfg Config) (*Server, error) {
 			return nil, errors.New("apiproxy: TokenSource is required for ProviderGitHub")
 		}
 		if cfg.AuthHeaderSource != nil {
-			return nil, errors.New("apiproxy: AuthHeaderSource is only for ProviderJira")
+			return nil, errors.New("apiproxy: AuthHeaderSource is only for ProviderJira and ProviderLinear")
 		}
-	case ProviderJira:
+	case ProviderJira, ProviderLinear:
 		if cfg.AuthHeaderSource == nil {
-			return nil, errors.New("apiproxy: AuthHeaderSource is required for ProviderJira")
+			return nil, fmt.Errorf("apiproxy: AuthHeaderSource is required for provider %q", cfg.Provider)
 		}
 		if cfg.TokenSource != nil {
 			return nil, errors.New("apiproxy: TokenSource is only for ProviderGitHub")
@@ -315,6 +334,13 @@ func (s *Server) Handler() http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// A path the provider does not serve is refused before any
+		// credential is resolved, so the credential can only ever be
+		// attached to a request for one of them.
+		if !s.pathAllowed(r.URL.Path) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		value, err := s.authHeaderValue(r.Context(), r.URL.Path)
 		if err != nil {
 			// The answer names the reason and nothing else: the underlying
@@ -335,9 +361,9 @@ func (s *Server) Handler() http.Handler {
 
 // callerAuthorized reports whether the request presents the per-run
 // IncomingToken. The placeholder arrives in whichever shape the caller's
-// client emits — "Bearer <token>" (GitHub, Jira Data Center) or as the
-// Basic-auth password (Jira Cloud) — so both are accepted; the Basic
-// username is irrelevant and only the password is validated.
+// client emits — "Bearer <token>" (GitHub, Jira Data Center, Linear) or
+// as the Basic-auth password (Jira Cloud) — so both are accepted; the
+// Basic username is irrelevant and only the password is validated.
 //
 // subtle.ConstantTimeCompare can't be byte-probed for an equal-length
 // wrong guess; it short-circuits on a length mismatch, which covers the
@@ -359,9 +385,21 @@ func (s *Server) callerAuthorized(r *http.Request) bool {
 	return subtle.ConstantTimeCompare([]byte(presented), []byte(s.cfg.IncomingToken)) == 1
 }
 
+// pathAllowed reports whether the provider forwards a request for path.
+// Linear forwards its GraphQL endpoint alone. GitHub and Jira forward any
+// path: their REST surfaces span many, and what bounds the credential
+// there is its own scope (a repo-scoped token, the Jira identity's
+// permissions).
+func (s *Server) pathAllowed(path string) bool {
+	if s.cfg.Provider == ProviderLinear {
+		return path == linearPath
+	}
+	return true
+}
+
 // authHeaderValue resolves the real Authorization value for one request,
 // provider-shaped: GitHub selects a token by the repo the path targets;
-// Jira delegates the whole value to the source. An empty result is
+// Jira and Linear delegate the whole value to the source. An empty result is
 // treated as a source failure — the proxy never forwards a request it
 // could not authenticate upstream, because an anonymous GitHub call
 // would not 401 but silently succeed against public data with wrong
@@ -378,7 +416,7 @@ func (s *Server) authHeaderValue(ctx context.Context, path string) (string, erro
 			return "", errors.New("token source returned empty token")
 		}
 		return "Bearer " + tok, nil
-	case ProviderJira:
+	case ProviderJira, ProviderLinear:
 		value, err := s.cfg.AuthHeaderSource(ctx)
 		if err != nil {
 			return "", fmt.Errorf("auth header source: %w", err)

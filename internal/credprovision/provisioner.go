@@ -1,6 +1,6 @@
 // Package credprovision is the brain-side half of TFAC-614's sealed
 // per-claim credential channel: it resolves a claimed conversation's
-// LLM/GitHub/Jira credentials (using the real, key-bearing secret store only the brain
+// LLM/GitHub/Jira/Linear credentials (using the real, key-bearing secret store only the brain
 // holds), seals them to the claiming executor's published X25519 public
 // key (credseal), and writes the result to claim_credentials for that
 // executor to unseal.
@@ -27,6 +27,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"go.opentelemetry.io/otel/codes"
@@ -67,13 +68,14 @@ type jiraSystemResolver interface {
 }
 
 // Manager resolves and seals per-claim credential bundles. Holds the real,
-// key-bearing db.Stores (brain-side only) plus the GitHub/Jira resolvers
-// built against it.
+// key-bearing db.Stores (brain-side only) plus the GitHub/Jira/Linear
+// resolvers built against it.
 type Manager struct {
-	stores       db.Stores
-	ghResolver   ghclient.Resolver
-	jiraResolver jira.Resolver
-	llm          llmResolver
+	stores         db.Stores
+	ghResolver     ghclient.Resolver
+	jiraResolver   jira.Resolver
+	linearResolver linear.Resolver
+	llm            llmResolver
 }
 
 // NewManager builds a Manager against stores — a brain-capable role's
@@ -84,15 +86,24 @@ type Manager struct {
 // egress network condition); for every other mode it passes the stored
 // material through. nil falls back to agentproc's raw-secret resolution (no
 // role support) — only for callers that don't wire llmcred.
-func NewManager(stores db.Stores, llm llmResolver) *Manager {
+//
+// linearResolver resolves the org's Linear service credential. It is passed
+// in rather than built here because an app-installed org's access token comes
+// from a token cache (linearoauth.TokenCache) that refreshes it and rotates
+// the install's refresh token, and the poller and this provisioner share one
+// such cache, so an org's token is refreshed once for both rather than once
+// each. It must serve the app_install shape (linear.NewResolverWithInstall);
+// nil seals no Linear credential.
+func NewManager(stores db.Stores, llm llmResolver, linearResolver linear.Resolver) *Manager {
 	return &Manager{
 		stores: stores,
 		// Deployment App from the env, same as the API server's resolver: this is
 		// the brain-side resolver that seals a run's git credential, so a managed
 		// org's run gets a token minted from the shared App rather than nothing.
-		ghResolver:   ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil, ghclient.WithDeploymentAppFromEnv()),
-		jiraResolver: jira.NewResolver(stores.Secrets, stores.Orgs),
-		llm:          llm,
+		ghResolver:     ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil, ghclient.WithDeploymentAppFromEnv()),
+		jiraResolver:   jira.NewResolver(stores.Secrets, stores.Orgs),
+		linearResolver: linearResolver,
+		llm:            llm,
 	}
 }
 
@@ -228,7 +239,13 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 		bundle.Jira = jc
 	}
 
-	// Every first-class provider beyond the built-in GitHub/Jira (Slack, and
+	if lc, err := m.resolveLinear(ctx, orgID); err != nil {
+		return fmt.Errorf("credprovision: resolve linear credentials for org %s: %w", orgID, err)
+	} else {
+		bundle.Linear = lc
+	}
+
+	// Every first-class provider beyond the built-in GitHub/Jira/Linear (Slack, and
 	// any future one) resolves its own sealed keyed set through its registered
 	// resolver — the brain never imports the provider package, so core stays
 	// free of provider-specific credential symbols. A provider with nothing
@@ -580,4 +597,38 @@ func (m *Manager) resolveJira(ctx context.Context, orgID string) (*credbundle.Ji
 		APIToken:   cred.APIToken,
 		PAT:        cred.PAT,
 	}, nil
+}
+
+// resolveLinear resolves the org's Linear service credential to the fields
+// the sidecar's Linear proxy injects: nil when the org has no Linear
+// configured (not an error, as with Jira). An app-installed org seals the
+// access token the shared token cache holds, which it refreshes first when
+// the one it has is about to expire, with that token's expiry. The install's
+// refresh token never enters the bundle. The refresh sweep's re-provision
+// reaches here too, so a long run's bundle picks up each token the cache
+// moves on to.
+func (m *Manager) resolveLinear(ctx context.Context, orgID string) (*credbundle.LinearCreds, error) {
+	if m.linearResolver == nil {
+		return nil, nil
+	}
+	cred, err := m.linearResolver.ResolveSystemCredential(ctx, orgID)
+	if err != nil {
+		if errors.Is(err, linear.ErrNoLinearSystemCredential) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := &credbundle.LinearCreds{AuthMethod: string(cred.Method)}
+	switch cred.Method {
+	case linear.AuthMethodAPIKey:
+		out.APIKey = cred.APIKey
+	case linear.AuthMethodAppInstall:
+		out.AccessToken = cred.AccessToken
+		if !cred.ExpiresAt.IsZero() {
+			out.ExpiresUnix = cred.ExpiresAt.Unix()
+		}
+	default:
+		return nil, fmt.Errorf("linear credential for org %s has unknown auth method %q", orgID, cred.Method)
+	}
+	return out, nil
 }

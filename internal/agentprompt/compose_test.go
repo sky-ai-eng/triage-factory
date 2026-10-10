@@ -150,8 +150,10 @@ func TestStaticPrompts_CoversEveryManifestSpec(t *testing.T) {
 // prompt text, which is worse than dead code: it reads like it is in effect.
 func TestBlocks_NoOrphans(t *testing.T) {
 	referenced := map[string]bool{
-		blockToolsGitHub: true,
-		blockToolsJira:   true,
+		blockToolsGitHub:    true,
+		blockToolsJira:      true,
+		blockToolsLinear:    true,
+		blockToolsWorkspace: true,
 	}
 	for _, spec := range allSpecs() {
 		paths, err := manifest(spec)

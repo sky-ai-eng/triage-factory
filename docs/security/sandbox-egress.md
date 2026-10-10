@@ -19,6 +19,12 @@ sandbox pool, sibling gateways. No lane, entry, or profile can widen it.
 | **Fetch relay** | Host-side HTTP relay; redirects resolved on the host, every hop denylist-vetted | Registries that redirect artifacts into shared multi-tenant storage hostnames | Catalog entry — `internal/egressrelay/catalog.go` |
 | **Credential** | Per-run credential-injecting proxies (git, LLM, `gh`) | Authenticated egress | Its own design; see `privilege-separation.md` |
 
+The API proxies behind the `tfac exec` verbs (GitHub REST, Jira REST, Linear
+GraphQL) are not lanes: the jail never reaches their upstreams, because a verb
+rides the agenthost socket to the run's sidecar, whose daemon calls the proxy
+that sidecar owns. Supporting a new verb-backed provider such as Linear adds no
+allowlist entry.
+
 Two constraints shape the whole design. The tunnel never terminates TLS,
 so it can act only on hostnames — content integrity belongs to the package
 managers' own verification (lockfile hashes, go.sum), never to us. And a
