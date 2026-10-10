@@ -119,6 +119,15 @@ jobs:
           sudo install -D -m 0755 "/tmp/gh_${ver}_linux_amd64/bin/gh" /opt/tf/bin/gh
           /opt/tf/bin/gh --version
 
+      # The test images come from their GHCR copies (mirror-images.yml) rather
+      # than Docker Hub; an image with no copy is pulled from Docker Hub as
+      # before.
+      - name: Pull test images from the mirror
+        if: steps.docs.outputs.only != 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/ci-images.sh prefetch tests
+
       # gotestsum wraps `go test` so individually failed tests are re-run
       # (up to twice) in a fresh process before the job is marked failed.
       # This is the backstop for infra-level flakes — e.g. the shared
@@ -139,15 +148,6 @@ jobs:
       # package binaries sharing four runner cores, the largest packages run
       # for minutes; 20m leaves them headroom while keeping the deadlock
       # backstop the flag exists for.
-      # The test images come from their GHCR copies (mirror-images.yml) rather
-      # than Docker Hub; an image with no copy is pulled from Docker Hub as
-      # before.
-      - name: Pull test images from the mirror
-        if: steps.docs.outputs.only != 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/ci-images.sh prefetch tests
-
       - name: Go test
         if: steps.docs.outputs.only != 'true'
         run: go run gotest.tools/gotestsum@v1.13.0 --format standard-quiet --rerun-fails=2 --rerun-fails-max-failures=15 --packages=./... -- -race -timeout 20m
@@ -227,6 +227,12 @@ jobs:
         if: steps.gate.outputs.run == 'true'
         run: mkdir -p frontend/dist && echo "not built for the timezone job" > frontend/dist/index.html
 
+      - name: Pull test images from the mirror
+        if: steps.gate.outputs.run == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/ci-images.sh prefetch tests
+
       # No -race here, deliberately. A data race does not depend on the
       # process's timezone, and the `test` job above already runs the detector
       # over identical code — so every second spent on it here is the same
@@ -238,12 +244,6 @@ jobs:
       # fail rather than burn the job's wall clock), but the 20m the `test` job
       # needs is sized for -race on shared cores; without it these runs are far
       # under that, and 10m is still generous headroom.
-      - name: Pull test images from the mirror
-        if: steps.gate.outputs.run == 'true'
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./scripts/ci-images.sh prefetch tests
-
       - name: Go test (TZ=${{ matrix.tz }})
         if: steps.gate.outputs.run == 'true'
         env:

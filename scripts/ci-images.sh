@@ -18,8 +18,9 @@
 #   tests    the pgtest image, the storage test's SeaweedFS image, and the
 #            Ryuk image of the pinned testcontainers-go (pgtest relies on Ryuk
 #            to remove each test binary's containers, so it stays on in CI)
-#   compose  the image: lines of docker-compose.yml and the FROM lines of
-#            docker/Dockerfile (what scripts/compose-smoke.sh pulls and builds)
+#   compose  the image: lines of docker-compose.yml, and the FROM lines and
+#            # syntax= frontend of docker/Dockerfile (what
+#            scripts/compose-smoke.sh pulls and builds)
 #
 # prefetch never fails its job: an image with no copy is left for testcontainers
 # or compose to pull from Docker Hub, as they would without this script.
@@ -74,51 +75,69 @@ compose_refs() {
     refs=$(grep -vxF -f <(printf '%s\n' "$stages") <<<"$refs" || true)
   fi
   echo "$refs"
+  # BuildKit pulls the frontend a syntax directive names before it reads the
+  # file. A directive is valid only in the comments that open the file.
+  sed -nE '1,/^[^#]/s/^#[[:space:]]*syntax=([^[:space:]]+).*/\1/p' docker/Dockerfile
 }
 
 # list_refs prints the Docker Hub refs of the groups named, deduplicated. A ref
-# naming another registry is not Docker Hub's to limit, so it is left out; a
+# naming another registry is not Docker Hub's to limit, so it is left out. A
 # ref this cannot read (a build arg, say) fails, so a declaration this script
-# no longer understands is noticed instead of silently dropped.
+# no longer understands is noticed instead of silently dropped; so does a ref
+# pinned by digest, which docker tag cannot name, so prefetch could never
+# serve it. Failures are returned rather than left to set -e, so they hold
+# in a caller's if or || too.
 list_refs() {
-  local groups=("$@") g ref first
+  local groups=("$@") g out refs="" ref first
   [ ${#groups[@]} -gt 0 ] || groups=(tests compose)
-  {
-    for g in "${groups[@]}"; do
-      case $g in
-        tests) tests_refs ;;
-        compose) compose_refs ;;
-        *) die "unknown group: $g (want tests or compose)" ;;
-      esac
-    done
-  } | sort -u | while read -r ref; do
+  for g in "${groups[@]}"; do
+    case $g in
+      tests) out=$(tests_refs) || return 1 ;;
+      compose) out=$(compose_refs) || return 1 ;;
+      *)
+        echo "ci-images: unknown group: $g (want tests or compose)" >&2
+        return 1
+        ;;
+    esac
+    refs+="${out}"$'\n'
+  done
+  # Fed by process substitution rather than a pipe, so the loop runs in this
+  # shell and its return is the function's.
+  while read -r ref; do
+    [ -n "$ref" ] || continue
     case $ref in
-      *'$'*) die "cannot read image ref: $ref" ;;
+      *'$'*)
+        echo "ci-images: cannot read image ref: $ref" >&2
+        return 1
+        ;;
+      *@*)
+        echo "ci-images: a ref pinned by digest is not supported: $ref" >&2
+        return 1
+        ;;
     esac
     first=${ref%%/*}
     if [ "$first" != "$ref" ] && { [[ $first == *.* ]] || [[ $first == *:* ]] || [ "$first" = localhost ]; }; then
       continue
     fi
     echo "$ref"
-  done
+  done < <(sort -u <<<"$refs")
 }
 
 # mirror_ref maps a Docker Hub ref to its copy, spelling out library/ for an
 # official image: node:22-alpine -> $MIRROR/library/node:22-alpine.
 mirror_ref() {
-  local ref=$1 name
-  name=${ref%%[:@]*}
-  [[ $name == */* ]] || name=library/$name
-  echo "${MIRROR}/${name}${ref#"${ref%%[:@]*}"}"
+  local ref=$1 name path
+  name=${ref%%:*}
+  path=$name
+  [[ $path == */* ]] || path=library/$path
+  echo "${MIRROR}/${path}${ref#"$name"}"
 }
 
-# pinned is a ref whose tag names one release (15.1.0.147, v2.189.0) or a
-# digest. Its copy is never refreshed, which spares Docker Hub a request per
-# image per run; a tag that tracks releases (22-alpine, 3.20) is re-checked.
+# pinned is a ref whose tag names one release (15.1.0.147, v2.189.0). Its copy
+# is never refreshed, which spares Docker Hub a request per image per run; a
+# tag that tracks releases (22-alpine, 3.20) is re-checked.
 pinned() {
-  local ref=$1
-  [[ $ref == *@sha256:* ]] && return 0
-  [[ ${ref##*:} =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]
+  [[ ${1##*:} =~ ^v?[0-9]+\.[0-9]+\.[0-9]+ ]]
 }
 
 sync_mirror() {
@@ -153,7 +172,7 @@ sync_mirror() {
 }
 
 prefetch() {
-  local refs ref src registry=${MIRROR%%/*}
+  local refs ref src err registry=${MIRROR%%/*}
   if ! refs=$(list_refs "$@"); then
     echo "::warning::ci-images: cannot list the images; Docker Hub will be used for all of them"
     return 0
@@ -164,10 +183,11 @@ prefetch() {
   fi
   for ref in $refs; do
     src=$(mirror_ref "$ref")
-    if docker pull -q "$src" >/dev/null 2>&1 && docker tag "$src" "$ref"; then
+    # stderr alone is kept, for the warning to say why a pull failed.
+    if err=$(docker pull -q "$src" 2>&1 >/dev/null) && err=$(docker tag "$src" "$ref" 2>&1); then
       echo "  ✓ ${ref} (from ${src})"
     else
-      echo "::warning::ci-images: no copy of ${ref} at ${src}; Docker Hub will be used"
+      echo "::warning::ci-images: cannot use ${src} for ${ref} (${err%%$'\n'*}); Docker Hub will be used"
     fi
   done
 }
