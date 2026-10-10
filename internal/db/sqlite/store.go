@@ -123,6 +123,8 @@ func New(conn *sql.DB) db.Stores {
 		// conformance suite runs against both dialects.
 		GitHubPendingBinds: newGitHubPendingBindStore(conn),
 		JiraApps:           newJiraAppsStore(conn),
+		LinearApps:         newLinearAppsStore(conn),
+		LinearInstalls:     newLinearInstallsStore(conn),
 		// ShippedDefaults is what BootstrapNewOrg/BootstrapNewTeam call.
 		// Phase 3 (handlers) reuses the eventHandlers store built above
 		// instead of duplicating its Seed SQL.

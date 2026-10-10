@@ -91,6 +91,25 @@ type SecretStore interface {
 	// process, so a forged delivery for another org simply fails
 	// verification.
 	GetSystem(ctx context.Context, orgID, key string) (string, error)
+	// PutSystemIfValue replaces an org-scoped secret WITHOUT a request JWT,
+	// and only while its stored value is still old, reporting whether it did.
+	// It writes nothing when the secret is absent. The write-side mirror of
+	// GetSystem for system code that rotates an org credential it read: the
+	// Linear app install's token cache, whose refresh token Linear rotates on
+	// every refresh. A value replaced since it was read — another process's
+	// rotation, a new install, a disconnect's delete — is never overwritten.
+	//
+	// The comparison and the write are one step against every other writer of
+	// the row. Same pool and discipline as GetSystem; request handlers stay on
+	// Put. Exempt from the returned-row rule, same reason as Put.
+	PutSystemIfValue(ctx context.Context, orgID, key, old, value, description string) (swapped bool, err error)
+	// DeleteSystemIfValue removes an org-scoped secret WITHOUT a request JWT,
+	// and only while its stored value is still value, reporting whether it
+	// did — the org-scope sibling of DeleteUserSystemIfValue, for system code
+	// that has learned the credential it read is dead (Linear refusing an app
+	// install's refresh token). A value replaced since it was read is left
+	// alone and deleted=false. Same pool and discipline as PutSystemIfValue.
+	DeleteSystemIfValue(ctx context.Context, orgID, key, value string) (deleted bool, err error)
 
 	// Delete removes a secret. Returns ok=false when no row
 	// matched, matching the pattern of other "did the write land"

@@ -26,4 +26,9 @@ func TestSecretKeyLiteralsMatchIntegrations(t *testing.T) {
 			"the uninstall sweep would miss the real jira_oauth_client_secret keychain entry",
 			integrations.KeyJiraOAuthClientSecret, jiraOAuthClientSecretKey)
 	}
+	if integrations.KeyLinearOAuthClientSecret != linearOAuthClientSecretKey {
+		t.Errorf("linear oauth secret drift: integrations.KeyLinearOAuthClientSecret=%q, server.linearOAuthClientSecretKey=%q\n"+
+			"the uninstall sweep would miss the real linear_oauth_client_secret keychain entry",
+			integrations.KeyLinearOAuthClientSecret, linearOAuthClientSecretKey)
+	}
 }

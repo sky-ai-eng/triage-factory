@@ -135,6 +135,8 @@ func (s *Store) txStoresFromTx(tx *sql.Tx) db.TxStores {
 		TeamGitHubRepos:          newTeamGitHubReposStore(tx, tx),
 		GitHubApps:               newGitHubAppsStore(tx, newSecretStore()),
 		JiraApps:                 newJiraAppsStore(tx),
+		LinearApps:               newLinearAppsStore(tx),
+		LinearInstalls:           newLinearInstallsStore(tx),
 		ShippedDefaults:          newTxShippedDefaultsStore(tx, newEventHandlerStore(tx)),
 		Invites:                  newInvitesStore(tx, tx),
 		SystemLLMRuns:            newSystemLLMRunStore(tx),

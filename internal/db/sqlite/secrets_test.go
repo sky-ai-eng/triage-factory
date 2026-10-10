@@ -383,3 +383,50 @@ func TestSecretStore_SQLite_DeleteUserSystemIfValue(t *testing.T) {
 		t.Fatal("a non-local org was accepted")
 	}
 }
+
+// TestSecretStore_SQLite_OrgCompareAndSwap pins the two org-scope system
+// doors: each writes only while the entry still holds the value the caller
+// read, and neither writes an absent entry.
+func TestSecretStore_SQLite_OrgCompareAndSwap(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	const key = "linear_app_install"
+
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, org, key, "", "envelope_v1", ""); err != nil || swapped {
+		t.Fatalf("swap of an absent entry = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if got, _ := stores.Secrets.GetSystem(ctx, org, key); got != "" {
+		t.Fatalf("an absent entry was written: %q", got)
+	}
+	if err := stores.Secrets.Put(ctx, org, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, org, key, "envelope_v0", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap naming a value the entry no longer holds = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if swapped, err := stores.Secrets.PutSystemIfValue(ctx, org, key, "envelope_v1", "envelope_v2", ""); err != nil || !swapped {
+		t.Fatalf("swap naming the held value = (%v, %v), want (true, nil)", swapped, err)
+	}
+	if got, err := stores.Secrets.Get(ctx, org, key); err != nil || got != "envelope_v2" {
+		t.Fatalf("value after the swap = (%q, %v), want envelope_v2", got, err)
+	}
+
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, org, key, "envelope_v1"); err != nil || deleted {
+		t.Fatalf("delete naming a value the entry no longer holds = (%v, %v), want (false, nil)", deleted, err)
+	}
+	if deleted, err := stores.Secrets.DeleteSystemIfValue(ctx, org, key, "envelope_v2"); err != nil || !deleted {
+		t.Fatalf("delete naming the held value = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if got, err := stores.Secrets.GetSystem(ctx, org, key); err != nil || got != "" {
+		t.Fatalf("value after the delete = (%q, %v), want none", got, err)
+	}
+	if _, err := stores.Secrets.PutSystemIfValue(ctx, "22222222-2222-2222-2222-222222222222", key, "a", "b", ""); err == nil {
+		t.Fatal("PutSystemIfValue accepted a non-local org")
+	}
+	if _, err := stores.Secrets.DeleteSystemIfValue(ctx, "22222222-2222-2222-2222-222222222222", key, "x"); err == nil {
+		t.Fatal("DeleteSystemIfValue accepted a non-local org")
+	}
+}

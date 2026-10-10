@@ -320,6 +320,15 @@ type Stores struct {
 	// in local mode for the local-supplied BYO app.
 	JiraApps JiraAppsStore
 
+	// LinearApps owns the org_linear_apps table — the org's own Linear OAuth
+	// app, the JiraApps sibling with the same pool split.
+	LinearApps LinearAppsStore
+
+	// LinearInstalls owns the org_linear_installs table — the workspace that
+	// installed the org's resolved Linear app. Admin pool only in Postgres;
+	// see the interface comment.
+	LinearInstalls LinearInstallsStore
+
 	// Invites owns the org_invites table — TF-owned, link-based org
 	// invitations (TFAC-416). App pool for the admin-facing create/list/
 	// revoke (RLS gates on org-admin); admin pool for the redeem reads
@@ -555,6 +564,8 @@ type TxStores struct {
 	TeamGitHubRepos          TeamGitHubReposStore
 	GitHubApps               GitHubAppsStore
 	JiraApps                 JiraAppsStore
+	LinearApps               LinearAppsStore
+	LinearInstalls           LinearInstallsStore
 	ShippedDefaults          ShippedDefaultsStore
 	Invites                  InvitesStore
 	SystemLLMRuns            SystemLLMRunStore

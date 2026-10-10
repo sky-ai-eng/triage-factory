@@ -36,12 +36,16 @@ Either way, credentials entered in Settings persist across restarts. See
 The org's Linear connection lives under these keys:
 
 - `linear_api_key` — the personal API key the workspace connected with.
-- `linear_auth_method` — which shape the connection takes. `api_key` is the
-  only one Settings binds today.
-- `linear_app_install` — reserved for connecting Linear by installing an app
-  instead of pasting a key. Nothing writes it yet.
-- `linear_bound_as` — who the key belonged to and its workspace's name, recorded
-  when it was connected so Settings can show them. Not a secret; it is stored
-  here so it is written and removed with the key.
+- `linear_auth_method` — which shape the connection takes: `api_key`, or
+  `app_install` for Triage Factory installed as an app.
+- `linear_app_install` — an app install's refresh token, with the workspace,
+  app user and OAuth app it belongs to. Triage Factory renews it every time it
+  refreshes the app user's access token.
+- `linear_bound_as` — who the credential belongs to (the key's owner, or the
+  installed app user) and its workspace's name, recorded when it was connected
+  so Settings can show them. Not a secret; it is stored here so it is written
+  and removed with the credential.
 
-Disconnecting Linear in Settings removes all four.
+Disconnecting Linear in Settings removes all four. The Linear OAuth app the
+install runs against keeps its client secret under `linear_oauth_client_secret`,
+which removing the app in Settings deletes.

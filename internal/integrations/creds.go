@@ -100,6 +100,8 @@ const legacyGitHubUsername = "github_username"
 //     agentproc.TestAnthropicKeyMatchesIntegrations).
 //   - KeyJiraOAuthClientSecret: internal/server.jiraOAuthClientSecretKey
 //     (pinned by server.TestSecretKeyLiteralsMatchIntegrations).
+//   - KeyLinearOAuthClientSecret: internal/server.linearOAuthClientSecretKey
+//     (pinned by the same test), whose companion is the org_linear_apps row.
 //
 // agentproc's anthropic_auth_token / anthropic_base_url are intentionally NOT
 // here: they are read-only resolver inputs with no local-mode write path (no
@@ -112,8 +114,9 @@ const legacyGitHubUsername = "github_username"
 // (agentproc.TestBedrockKeysMatchIntegrations /
 // server.TestSecretKeyLiteralsMatchIntegrations).
 const (
-	KeyAnthropicAPIKey       = "anthropic_api_key"
-	KeyJiraOAuthClientSecret = "jira_oauth_client_secret"
+	KeyAnthropicAPIKey         = "anthropic_api_key"
+	KeyJiraOAuthClientSecret   = "jira_oauth_client_secret"
+	KeyLinearOAuthClientSecret = "linear_oauth_client_secret"
 
 	KeyAWSAccessKeyID        = "aws_access_key_id"
 	KeyAWSSecretAccessKey    = "aws_secret_access_key"
@@ -180,7 +183,7 @@ func AllKeys() []string {
 // sweeping. Keep scripts/clean-slate.sh's hardcoded keychain list in sync with
 // this function.
 func AllLocalSweepKeys() []string {
-	return append(append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret), BedrockKeys()...)
+	return append(append(AllKeys(), KeyAnthropicAPIKey, KeyJiraOAuthClientSecret, KeyLinearOAuthClientSecret), BedrockKeys()...)
 }
 
 // GitHubAppKeyset is the trio of keychain/vault keys one registered GitHub App
@@ -282,6 +285,9 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 	get(KeyJiraAuthMethod, &creds.JiraAuthMethod)
 	get(KeyLinearAPIKey, &creds.LinearAPIKey)
 	get(KeyLinearAuthMethod, &creds.LinearAuthMethod)
+	var install string
+	get(KeyLinearAppInstall, &install)
+	creds.LinearAppInstalled = install != ""
 	if len(errs) > 0 {
 		return creds, errors.Join(errs...)
 	}
@@ -324,6 +330,9 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 	get(KeyJiraAuthMethod, &creds.JiraAuthMethod)
 	get(KeyLinearAPIKey, &creds.LinearAPIKey)
 	get(KeyLinearAuthMethod, &creds.LinearAuthMethod)
+	var install string
+	get(KeyLinearAppInstall, &install)
+	creds.LinearAppInstalled = install != ""
 	if len(errs) > 0 {
 		return creds, errors.Join(errs...)
 	}
@@ -401,15 +410,17 @@ func LinearSystemConfig(c auth.Credentials) (linear.Config, bool) {
 }
 
 // LinearSystemConfigured reports whether the org has a Linear service
-// credential: a key under an api_key marker or no marker, or an app_install
-// marker. Whether an install's envelope is present and still mints is the
-// resolver's to answer, so a configured org can still fail to resolve.
+// credential: a key under an api_key marker or no marker, or an install
+// envelope under an app_install marker. An app_install marker with no envelope
+// is an install Linear revoked, which reads as not configured. Whether a
+// stored envelope still mints is the resolver's to answer, so a configured
+// org can still fail to resolve.
 func LinearSystemConfigured(c auth.Credentials) bool {
 	switch linear.AuthMethod(c.LinearAuthMethod) {
 	case linear.AuthMethodAPIKey, "":
 		return c.LinearAPIKey != ""
 	case linear.AuthMethodAppInstall:
-		return true
+		return c.LinearAppInstalled
 	default:
 		return false
 	}
