@@ -80,18 +80,23 @@ func hostWriteCases() []hostWriteCase {
 		githubHost = "https://ghe.example.com"
 	)
 	seedJira := func(t *testing.T, s *Server) string {
-		seedOrgCreds(t, s, auth.Credentials{JiraURL: jiraHost, JiraPAT: "jira_old", JiraAuthMethod: string(jira.AuthMethodDCPAT)})
+		seedOrgCreds(t, s, auth.Credentials{JiraPAT: "jira_old", JiraAuthMethod: string(jira.AuthMethodDCPAT)})
 		seedSourceHost(t, s, eventsource.KindJira, jiraHost)
 		return jiraHost
 	}
 	return []hostWriteCase{
 		{
-			// A Data Center org rebinding as Cloud: the bind writes the Cloud
-			// keys and deletes the PAT, so a restore has both kinds of write to
-			// undo.
+			// An org on one Jira site with no service credential, its members
+			// binding their own, connecting one on another site: the bind
+			// writes the credential's keys and moves the site, so a restore has
+			// keys to remove and a host to keep. A connected org cannot move
+			// sites by binding (TestJiraConnect_AReplacementStaysOnTheConnectedSite).
 			name: "jira bind",
 			kind: eventsource.KindJira,
-			seed: seedJira,
+			seed: func(t *testing.T, s *Server) string {
+				seedSourceHost(t, s, eventsource.KindJira, jiraHost)
+				return jiraHost
+			},
 			call: func(t *testing.T, s *Server) (*httptest.ResponseRecorder, string) {
 				stub := jiraCloudMyselfStub(t, `{"accountId":"cloud-bot","displayName":"Cloud Bot"}`, nil)
 				rec := doJSON(t, s, http.MethodPut, jiraCredentialRoute(), map[string]any{
@@ -314,7 +319,7 @@ func TestCredentialHostWrite_MultiMode_StaleSettingsSaveConflicts(t *testing.T) 
 		creds             auth.Credentials
 	}{
 		{"jira unbind", eventsource.KindJira, "/jira/access/credential",
-			auth.Credentials{JiraURL: host, JiraPAT: "jira_old", JiraAuthMethod: string(jira.AuthMethodDCPAT)}},
+			auth.Credentials{JiraPAT: "jira_old", JiraAuthMethod: string(jira.AuthMethodDCPAT)}},
 		{"github pat unbind", eventsource.KindGitHub, "/github/pat",
 			auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}},
 	} {

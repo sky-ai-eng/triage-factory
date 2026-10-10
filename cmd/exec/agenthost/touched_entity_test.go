@@ -173,7 +173,7 @@ func TestRecordTouch_LiveWiring_CreatesEntityOnOrgWrite(t *testing.T) {
 				t.Fatalf("JiraCreateIssue: %v", err)
 			}
 
-			ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-1")
+			ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, "SKY-1")
 			if err != nil {
 				t.Fatalf("GetBySource: %v", err)
 			}

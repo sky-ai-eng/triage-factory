@@ -59,15 +59,15 @@ const (
 	testUserID = "user-1"
 )
 
-// TestForSystem_BuildsOrgClient pins the system path: the org's jira_url +
-// jira_pat secrets become a Bearer client that talks to the org host.
+// TestForSystem_BuildsOrgClient pins the system path: the org's Jira site
+// (org_settings.jira_base_url) and jira_pat secret become a Bearer client that
+// talks to that site.
 func TestForSystem_BuildsOrgClient(t *testing.T) {
 	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
 	secrets := &fakeSecrets{sys: map[string]string{
-		keyJiraURL: srv.URL,
 		keyJiraPAT: "org-pat",
 	}}
-	r := NewResolver(secrets, &fakeOrgs{})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -82,17 +82,20 @@ func TestForSystem_BuildsOrgClient(t *testing.T) {
 }
 
 // TestForSystem_MissingCredential pins ErrNoJiraSystemCredential when either
-// half (URL or PAT) is absent — the poller/exec "not configured" boundary.
+// half (site or PAT) is absent — the poller/exec "not configured" boundary.
 func TestForSystem_MissingCredential(t *testing.T) {
-	cases := map[string]map[string]string{
-		"both empty":    {},
-		"url only":      {keyJiraURL: "https://jira.example.com"},
-		"pat only":      {keyJiraPAT: "org-pat"},
-		"malformed url": {keyJiraURL: "not-a-url", keyJiraPAT: "org-pat"},
+	cases := map[string]struct {
+		site string
+		sys  map[string]string
+	}{
+		"both empty":     {},
+		"site only":      {site: "https://jira.example.com"},
+		"pat only":       {sys: map[string]string{keyJiraPAT: "org-pat"}},
+		"malformed site": {site: "not-a-url", sys: map[string]string{keyJiraPAT: "org-pat"}},
 	}
-	for name, sys := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			r := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{})
+			r := NewResolver(&fakeSecrets{sys: tc.sys}, &fakeOrgs{jiraBase: tc.site})
 			_, err := r.ForSystem(context.Background(), testOrgID)
 			if !errors.Is(err, ErrNoJiraSystemCredential) {
 				t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
@@ -101,32 +104,37 @@ func TestForSystem_MissingCredential(t *testing.T) {
 	}
 }
 
-// TestForSystem_BackendError propagates a secret-store read error rather than
-// misreporting it as "not configured".
+// TestForSystem_BackendError propagates a secret-store or settings read error
+// rather than misreporting it as "not configured".
 func TestForSystem_BackendError(t *testing.T) {
 	sentinel := errors.New("vault down")
-	r := NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{})
-	_, err := r.ForSystem(context.Background(), testOrgID)
-	if !errors.Is(err, sentinel) {
-		t.Errorf("ForSystem err = %v, want the backend error", err)
-	}
-	if errors.Is(err, ErrNoJiraSystemCredential) {
-		t.Errorf("a backend read error must not collapse to ErrNoJiraSystemCredential")
+	for name, r := range map[string]Resolver{
+		"secrets":  NewResolver(&fakeSecrets{sysErr: sentinel}, &fakeOrgs{jiraBase: "https://jira.example.com"}),
+		"settings": NewResolver(&fakeSecrets{sys: map[string]string{keyJiraPAT: "org-pat"}}, &fakeOrgs{err: sentinel}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := r.ForSystem(context.Background(), testOrgID)
+			if !errors.Is(err, sentinel) {
+				t.Errorf("ForSystem err = %v, want the backend error", err)
+			}
+			if errors.Is(err, ErrNoJiraSystemCredential) {
+				t.Errorf("a backend read error must not collapse to ErrNoJiraSystemCredential")
+			}
+		})
 	}
 }
 
-// TestForSystem_CanonicalizesBaseURL proves ForSystem runs the stored jira_url
+// TestForSystem_CanonicalizesBaseURL proves ForSystem runs the org's Jira site
 // through CanonicalHost, so the system client talks to the same trimmed origin
-// a per-user client would even when the secret carries stray whitespace or a
-// trailing slash. The leading space alone would make http.NewRequest fail if it
-// weren't trimmed.
+// a per-user client would even when the stored value carries stray whitespace
+// or a trailing slash. The leading space alone would make http.NewRequest fail
+// if it weren't trimmed.
 func TestForSystem_CanonicalizesBaseURL(t *testing.T) {
 	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
 	secrets := &fakeSecrets{sys: map[string]string{
-		keyJiraURL: "  " + srv.URL + "/  ",
 		keyJiraPAT: "org-pat",
 	}}
-	c, err := NewResolver(secrets, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+	c, err := NewResolver(secrets, &fakeOrgs{jiraBase: "  " + srv.URL + "/  "}).ForSystem(context.Background(), testOrgID)
 	if err != nil {
 		t.Fatalf("ForSystem: %v", err)
 	}
@@ -144,12 +152,11 @@ func TestForSystem_CanonicalizesBaseURL(t *testing.T) {
 func TestForSystem_BuildsCloudClient(t *testing.T) {
 	srv, rec := captureServer(t, `{"key":"PROJ-1"}`)
 	secrets := &fakeSecrets{sys: map[string]string{
-		keyJiraURL:        srv.URL,
 		keyJiraAuthMethod: string(AuthMethodCloudAPIToken),
 		keyJiraEmail:      "bot@acme.com",
 		keyJiraAPIToken:   "cloud-token",
 	}}
-	r := NewResolver(secrets, &fakeOrgs{})
+	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
 
 	c, err := r.ForSystem(context.Background(), testOrgID)
 	if err != nil {
@@ -173,13 +180,13 @@ func TestForSystem_BuildsCloudClient(t *testing.T) {
 // to a DC PAT for a Cloud-marked org.
 func TestForSystem_CloudMissingCredential(t *testing.T) {
 	cases := map[string]map[string]string{
-		"no email or token": {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken)},
-		"token only":        {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraAPIToken: "t"},
-		"email only":        {keyJiraURL: "https://acme.atlassian.net", keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraEmail: "e@x.com"},
+		"no email or token": {keyJiraAuthMethod: string(AuthMethodCloudAPIToken)},
+		"token only":        {keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraAPIToken: "t"},
+		"email only":        {keyJiraAuthMethod: string(AuthMethodCloudAPIToken), keyJiraEmail: "e@x.com"},
 	}
 	for name, sys := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{}).ForSystem(context.Background(), testOrgID)
+			_, err := NewResolver(&fakeSecrets{sys: sys}, &fakeOrgs{jiraBase: "https://acme.atlassian.net"}).ForSystem(context.Background(), testOrgID)
 			if !errors.Is(err, ErrNoJiraSystemCredential) {
 				t.Errorf("ForSystem err = %v, want ErrNoJiraSystemCredential", err)
 			}
@@ -217,7 +224,7 @@ func TestForUser_UsesUserToken(t *testing.T) {
 	secrets := &fakeSecrets{
 		// Org service cred present — if ForUser ever fell back to it, the
 		// captured header below would read "Bearer org-pat" and fail.
-		sys:  map[string]string{keyJiraURL: srv.URL, keyJiraPAT: "org-pat"},
+		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(srv.URL): "user-pat"},
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: srv.URL})
@@ -259,7 +266,6 @@ func TestForUser_CloudEnvelope(t *testing.T) {
 		// 127.0.0.1, which host-shape-classifies as DC) so the cloud user cred is
 		// usable for it.
 		sys: map[string]string{
-			keyJiraURL:        srv.URL,
 			keyJiraPAT:        "org-pat",
 			keyJiraAuthMethod: string(AuthMethodCloudAPIToken),
 		},
@@ -317,7 +323,7 @@ func TestForUser_CloudEnvelopeIncomplete(t *testing.T) {
 	}
 	const base = "https://acme.atlassian.net"
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: base, keyJiraPAT: "org-pat"},
+		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
@@ -356,7 +362,7 @@ func TestForUser_StaleCrossScheme_NoClient(t *testing.T) {
 				t.Fatalf("MarshalUserCredential: %v", err)
 			}
 			secrets := &fakeSecrets{
-				sys:  map[string]string{keyJiraURL: tc.host, keyJiraAuthMethod: string(tc.marker)},
+				sys:  map[string]string{keyJiraAuthMethod: string(tc.marker)},
 				user: map[string]string{UserTokenKey(tc.host): env},
 			}
 			r := NewResolver(secrets, &fakeOrgs{jiraBase: tc.host})
@@ -381,7 +387,7 @@ func TestForUser_UnknownMethod_Errors(t *testing.T) {
 		t.Fatalf("MarshalUserCredential: %v", err)
 	}
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: base, keyJiraPAT: "org-pat"},
+		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: base})
@@ -454,7 +460,7 @@ func TestParseUserCredential(t *testing.T) {
 // cred is present — the resolver must never silently act as the bot.
 func TestForUser_AbsentCredential_NoOrgFallback(t *testing.T) {
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: "https://jira.example.com", keyJiraPAT: "org-pat"},
+		sys:  map[string]string{keyJiraPAT: "org-pat"},
 		user: map[string]string{}, // no user token stored
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: "https://jira.example.com"})
@@ -568,7 +574,7 @@ func TestForUser_CloudOAuthEnvelope(t *testing.T) {
 		t.Fatalf("MarshalUserCredential: %v", err)
 	}
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}
@@ -608,7 +614,7 @@ func TestForUser_CloudOAuth_NoSource(t *testing.T) {
 		Method: AuthMethodCloudOAuth, CloudID: "cloud-9", RefreshToken: "r1",
 	})
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	r := NewResolver(secrets, &fakeOrgs{jiraBase: base}) // no OAuth source
@@ -628,7 +634,7 @@ func TestForUser_CloudOAuthIncomplete(t *testing.T) {
 	const base = "https://acme.atlassian.net"
 	env, _ := MarshalUserCredential(UserCredential{Method: AuthMethodCloudOAuth, CloudID: "cloud-9"})
 	secrets := &fakeSecrets{
-		sys:  map[string]string{keyJiraURL: base, keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
+		sys:  map[string]string{keyJiraAuthMethod: string(AuthMethodCloudOAuth)},
 		user: map[string]string{UserTokenKey(base): env},
 	}
 	src := &fakeOAuthSource{cloudID: "cloud-9", access: "acc-tok"}

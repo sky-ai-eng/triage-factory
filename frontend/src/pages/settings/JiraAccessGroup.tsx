@@ -44,7 +44,8 @@ interface JiraAccessValue {
  * showBaseUrl (default true) mirrors GitHubAccessGroup: the setup wizard
  * confirms the Jira URL in its own reachability sub-step and feeds it in via
  * `value.jira_url`, so it suppresses the field here and renders this group as
- * the PAT-auth sub-step alone.
+ * the PAT-auth sub-step alone. Settings suppresses it while replacing a
+ * connected credential, which stays on the connected site.
  *
  * bare (default false) drops the carded `<Section>` chrome + heading and uses
  * the flush glass field material, so the setup wizard and the redesigned

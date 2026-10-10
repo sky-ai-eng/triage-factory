@@ -67,11 +67,12 @@ func (s *Server) connectCallbackURL(orgID string) string {
 // resolveGitHubHost returns the org's GitHub base URL resolved to the
 // canonical value user_github_identities rows are keyed under for that org —
 // the *same* value the PAT writer (settings_handlers) and the
-// factory/me/settings readers key on: orgSet.GitHubBaseURL (the store trims a
-// trailing slash via NormalizeGitHubHost), with an empty config resolving to
-// github.com exactly as the login_claim writer does. Connect (writer) and the
-// identity-status gate (reader) both route through here, so the (user, host)
-// key always agrees with the other sites — crucially including a base URL
+// factory/me/settings readers key on: orgSet.GitHubBaseURL in its canonical
+// form (ghbase.CanonicalBaseURL: trailing slashes trimmed, scheme and host
+// lowercased), with an empty config resolving to the deployment default.
+// Connect (writer) and the identity-status gate (reader) both route through
+// here, so the (user, host) key always agrees with the other sites —
+// crucially including a base URL
 // that carries a path, which a bare-origin derivation would silently strip
 // (writing/reading a different key than everyone else).
 //
@@ -91,7 +92,7 @@ func resolveGitHubHost(orgBase string) (string, bool) {
 // same canonical host, for callers that hold only an orgID. It is the fetching
 // sibling of resolveGitHubHost and lands on the identical string for any base
 // URL that resolveGitHubHost accepts — db.EffectiveGitHubHost applies the same
-// two rules (trim trailing slashes; an unset setting is the deployment default), and
+// two rules (the canonical form; an unset setting is the deployment default), and
 // is what the poller and the routing subscribers already key on.
 //
 // It does NOT re-validate the base URL the way resolveGitHubHost does. That

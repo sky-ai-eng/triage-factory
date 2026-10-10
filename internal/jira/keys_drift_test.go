@@ -2,8 +2,8 @@ package jira_test
 
 // External test package (jira_test) on purpose: it imports internal/integrations,
 // which transitively imports internal/jira (integrations → auth → jira). That's
-// the exact cycle that forces jira.keyJiraURL/keyJiraPAT to be hand-copied from
-// integrations.KeyJiraURL/KeyJiraPAT instead of imported. An external test
+// the exact cycle that forces jira.keyJiraPAT and its siblings to be hand-copied
+// from integrations.KeyJiraPAT and its siblings instead of imported. An external test
 // package sits outside that cycle, so it can hold both sides together and prove
 // they still agree.
 
@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
@@ -19,7 +20,7 @@ import (
 // keyedSecrets is a SecretStore stub whose GetSystem reads from a map keyed by
 // the integrations.Key* constants — so a value stored under integrations' public
 // keys is exactly what ForSystem looks up via its own (unexported,
-// cycle-dodging) keyJiraURL/keyJiraPAT.
+// cycle-dodging) keyJiraPAT and siblings.
 type keyedSecrets struct {
 	db.SecretStore
 	vals map[string]string
@@ -29,25 +30,30 @@ func (k keyedSecrets) GetSystem(_ context.Context, _ string, key string) (string
 	return k.vals[key], nil
 }
 
-// stubOrgs satisfies the resolver's OrgsStore dependency; ForSystem never reads
-// it (only ForUser does), so the embedded nil is never dereferenced.
-type stubOrgs struct{ db.OrgsStore }
+// stubOrgs answers the org's Jira site, which ForSystem reads from settings.
+type stubOrgs struct {
+	db.OrgsStore
+	site string
+}
+
+func (s stubOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{JiraBaseURL: s.site}, nil
+}
 
 // TestForSystem_KeysMatchIntegrations closes the drift gap the import cycle
-// creates: jira.keyJiraURL/keyJiraPAT are hand-copied from
-// integrations.KeyJiraURL/KeyJiraPAT. A silent rename of either side would make
-// ForSystem read under the wrong key and always return ErrNoJiraSystemCredential
-// with no compile error — storing under the integrations keys and resolving
-// through ForSystem proves the two stay in lockstep.
+// creates: jira.keyJiraPAT is hand-copied from integrations.KeyJiraPAT. A silent
+// rename of either side would make ForSystem read under the wrong key and
+// always return ErrNoJiraSystemCredential with no compile error — storing under
+// the integrations key and resolving through ForSystem proves the two stay in
+// lockstep.
 func TestForSystem_KeysMatchIntegrations(t *testing.T) {
 	secrets := keyedSecrets{vals: map[string]string{
-		integrations.KeyJiraURL: "https://jira.example.com",
 		integrations.KeyJiraPAT: "tok",
 	}}
-	c, err := jira.NewResolver(secrets, stubOrgs{}).ForSystem(context.Background(), "org-1")
+	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://jira.example.com"}).ForSystem(context.Background(), "org-1")
 	if err != nil {
 		t.Fatalf("ForSystem with integrations-keyed secrets: %v\n"+
-			"jira.keyJiraURL/keyJiraPAT have drifted from integrations.KeyJiraURL/KeyJiraPAT", err)
+			"jira.keyJiraPAT has drifted from integrations.KeyJiraPAT", err)
 	}
 	if c == nil {
 		t.Fatal("ForSystem returned a nil client")
@@ -63,12 +69,11 @@ func TestForSystem_KeysMatchIntegrations(t *testing.T) {
 // would make ForSystem return ErrNoJiraSystemCredential with no compile error.
 func TestForSystem_CloudKeysMatchIntegrations(t *testing.T) {
 	secrets := keyedSecrets{vals: map[string]string{
-		integrations.KeyJiraURL:        "https://acme.atlassian.net",
 		integrations.KeyJiraEmail:      "bot@acme.com",
 		integrations.KeyJiraAPIToken:   "tok",
 		integrations.KeyJiraAuthMethod: string(jira.AuthMethodCloudAPIToken),
 	}}
-	c, err := jira.NewResolver(secrets, stubOrgs{}).ForSystem(context.Background(), "org-1")
+	c, err := jira.NewResolver(secrets, stubOrgs{site: "https://acme.atlassian.net"}).ForSystem(context.Background(), "org-1")
 	if err != nil {
 		t.Fatalf("ForSystem with integrations-keyed cloud secrets: %v\n"+
 			"jira.keyJira{Email,APIToken,AuthMethod} have drifted from integrations.KeyJira*", err)

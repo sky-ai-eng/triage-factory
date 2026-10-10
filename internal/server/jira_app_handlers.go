@@ -31,7 +31,7 @@ import (
 // jiraOAuthClientSecretKey is the org-scoped secret key the Atlassian OAuth
 // app's client_secret is custodied under. One app per org, so a fixed key
 // (unlike the GitHub App's per-app-id keys) is sufficient. Sits alongside the
-// other org-level jira_* secret keys (jira_url, jira_pat, …).
+// other org-level jira_* secret keys (jira_pat, jira_auth_method, …).
 const jiraOAuthClientSecretKey = "jira_oauth_client_secret"
 
 // jiraConnectCallbackURL is the absolute redirect_uri the Atlassian OAuth app

@@ -743,13 +743,10 @@ func (r *Router) jiraAssigneeUsers(ctx context.Context, orgID string, evt domain
 	// way the capture paths stored it, so the raw org_settings value resolves
 	// the identities bound under the canonical host.
 	//
-	// org_settings.jira_base_url is the right (and only correct) host key here,
-	// NOT the integrations creds.JiraURL the poller falls back to: Jira identity
-	// capture (handleJiraIdentityPAT) refuses to bind unless jira_base_url
-	// resolves to a valid host (jira.CanonicalHost), so every user_jira_identities
-	// row is keyed under NormalizeJiraHost(jira_base_url). Keying the reverse
-	// lookup off creds.JiraURL would only matter when jira_base_url is empty —
-	// and then no identity exists to find, so the two are never out of step.
+	// org_settings.jira_base_url is the org's Jira site and the only host key:
+	// Jira identity capture (handleJiraIdentityPAT) refuses to bind unless
+	// jira_base_url resolves to a valid host (jira.CanonicalHost), so every
+	// user_jira_identities row is keyed under NormalizeJiraHost(jira_base_url).
 	// An empty host (Jira not configured for identity) therefore resolves
 	// nobody, correctly: there are no member identities to route to.
 	userIDs, err := r.users.UserIDsForJiraAccountSystem(ctx, orgSet.JiraBaseURL, m.AssigneeAccountID)

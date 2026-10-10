@@ -39,6 +39,8 @@ func (s *Server) acquireKeyedLock(ctx context.Context, mu *sync.Map, salt int64,
 //	    id, session; githubInstallationBindLockSalt)
 //	10 — internal/linearoauth                     (org id, session;
 //	    CredentialLockSalt)
+//	11 — this file                                (org id, session;
+//	    jiraCredentialLockSalt)
 //	0x43484944 ("CHID") — ee/slack/store/pg                   (org id, xact;
 //	    exclusive to move, shared to settle; channelMoveLockSalt)
 //	0x53454154 ("SEAT") — internal/db/postgres/auth_events.go (seat period, xact)
@@ -63,6 +65,10 @@ const (
 	// the org lock, and nothing waits on an org lock while holding this one, so
 	// no cycle can form.
 	githubInstallationBindLockSalt int64 = 9
+
+	// jiraCredentialLockSalt namespaces the org's Jira credential lock
+	// (lockJiraCredential).
+	jiraCredentialLockSalt int64 = 11
 )
 
 // lockLinearCredential takes orgID's Linear credential lock (see
@@ -71,4 +77,13 @@ const (
 // which relies on it.
 func (s *Server) lockLinearCredential(ctx context.Context, orgID string) (release func(), err error) {
 	return s.linearCredentialLock.Lock(ctx, orgID)
+}
+
+// lockJiraCredential takes orgID's Jira credential lock. Every writer of the
+// org's Jira service credential holds it (guardJiraWrite), and so does a
+// settings save that names jira_base_url: the site may move only while no
+// service credential is stored, and the lock keeps a credential from being
+// bound between that check and the move.
+func (s *Server) lockJiraCredential(ctx context.Context, orgID string) (release func(), err error) {
+	return s.acquireKeyedLock(ctx, &s.jiraCredentialMu, jiraCredentialLockSalt, orgID)
 }

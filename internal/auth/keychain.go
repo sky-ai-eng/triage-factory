@@ -22,7 +22,6 @@ const service = "triagefactory"
 type Credentials struct {
 	GitHubURL string
 	GitHubPAT string
-	JiraURL   string
 	JiraPAT   string
 
 	// Jira Cloud service credential (Basic auth, REST v3). JiraEmail +

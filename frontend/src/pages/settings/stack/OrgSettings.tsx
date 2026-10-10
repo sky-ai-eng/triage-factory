@@ -646,6 +646,11 @@ export default function OrgSettings({
                 connected={false}
                 orgId={orgId}
                 deployment={draft.jiraDeployment}
+                // A replacement stays on the connected site: a Jira credential
+                // works only on the site that issued it, so moving sites is a
+                // disconnect and a fresh connect, and the server refuses a
+                // replacement that names another site.
+                showBaseUrl={!jiraRebinding}
                 bare
               />
             )}

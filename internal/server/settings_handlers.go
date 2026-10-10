@@ -951,13 +951,6 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		return out, false
 	}
 
-	// The Jira service credential's client reads the site stored beside it, so
-	// the read shows that site when org_settings carries none.
-	jiraBaseURL := orgSet.JiraBaseURL
-	if jiraBaseURL == "" {
-		jiraBaseURL = creds.JiraURL
-	}
-
 	memberCount, err := s.az.OrgMemberCount(r.Context(), orgID, userID)
 	if err != nil {
 		internalError(w, "settings/org", err)
@@ -966,7 +959,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 
 	// Marker-based "is Jira connected" (matches the integrations-status signal),
 	// so a Cloud org with no PAT still reports a stored credential.
-	_, hasJiraCred := integrations.JiraSystemConfig(creds)
+	_, hasJiraCred := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 
 	return orgSettingsResponse{
 		GitHubBaseURL:       orgSet.GitHubBaseURL,
@@ -974,7 +967,7 @@ func (s *Server) readOrgSettings(w http.ResponseWriter, r *http.Request, orgID, 
 		GitHubCloneProtocol: defaultedCloneProtocolView(orgSet.GitHubCloneProtocol),
 		HasGitHubPAT:        creds.GitHubPAT != "",
 		GitHubPATLogin:      ghPATLogin,
-		JiraBaseURL:         jiraBaseURL,
+		JiraBaseURL:         orgSet.JiraBaseURL,
 		JiraPollInterval:    orgSet.JiraPollInterval.String(),
 		LinearPollInterval:  orgSet.LinearPollInterval.String(),
 		HasJiraCredential:   hasJiraCred,
@@ -1073,6 +1066,17 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		}
 		defer release()
 	}
+	// The same for jira_base_url and the org's Jira credential lock. Taken
+	// after the GitHub lock when both are named; nothing holding the Jira lock
+	// waits on the GitHub one.
+	if len(req.JiraBaseURL) > 0 {
+		release, err := s.lockJiraCredential(r.Context(), orgID)
+		if err != nil {
+			internalError(w, "settings/org", err)
+			return
+		}
+		defer release()
+	}
 
 	// ONE transaction for the read-modify-write, with the concurrency guard in
 	// the write itself. It used to span two — read the row, mutate in Go, write
@@ -1086,6 +1090,13 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 			return fmt.Errorf("load org settings: %w", err)
 		}
 		prevOrgSet = cur
+		// A save loaded before another write is answered as stale before
+		// anything else is checked: the checks below judge the row this save
+		// never saw, and the caller has to reload either way. The versioned
+		// write below is still what enforces it.
+		if cur.Version != *req.Version {
+			return db.ErrOrgSettingsVersion
+		}
 		apply(&cur)
 		// A background-jobs model whose provider this org has not connected is
 		// a model its next cycle would refuse, so it is not worth storing —
@@ -1123,12 +1134,24 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// as stored, which is canonical, so re-sending the current value under
 		// another spelling is not a move.
 		if cur.GitHubBaseURL != prevOrgSet.GitHubBaseURL {
-			connected, err := s.githubCredentialConnected(r.Context(), tx, orgID)
+			connected, err := githubCredentialConnected(r.Context(), tx, orgID)
 			if err != nil {
 				return err
 			}
 			if connected != "" {
 				return fmt.Errorf("%s is connected: %w", connected, errGitHubHostHasCredential)
+			}
+		}
+		// The Jira site, likewise, moves only while no Jira service credential
+		// is stored. Per-user Jira credentials are keyed by site, so they do
+		// not hold it in place.
+		if cur.JiraBaseURL != prevOrgSet.JiraBaseURL {
+			creds, err := integrations.Load(r.Context(), tx.Secrets, orgID)
+			if err != nil {
+				return fmt.Errorf("load jira credential: %w", err)
+			}
+			if _, connected := integrations.JiraSystemConfig(creds, prevOrgSet.JiraBaseURL); connected {
+				return fmt.Errorf("the org's Jira credential is connected to %s: %w", prevOrgSet.JiraBaseURL, errJiraSiteHasCredential)
 			}
 		}
 		orgSet, err = tx.Orgs.UpdateSettingsVersioned(r.Context(), orgID, cur, *req.Version)
@@ -1153,6 +1176,12 @@ func (s *Server) handleOrgSettingsPatch(w http.ResponseWriter, r *http.Request) 
 		// place is what stands in the way, and disconnecting it is the fix.
 		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 			Reason: httpx.ReasonConflict, Message: err.Error(), Field: "github_base_url",
+		})
+		return
+	}
+	if errors.Is(err, errJiraSiteHasCredential) {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason: httpx.ReasonConflict, Message: err.Error(), Field: "jira_base_url",
 		})
 		return
 	}

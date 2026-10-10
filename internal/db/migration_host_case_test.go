@@ -193,7 +193,7 @@ func TestMigrate_HostCaseSettlesCollisions(t *testing.T) {
 	if n := count(`SELECT COUNT(*) FROM reachable_repositories`); n != 1 {
 		t.Errorf("reachable rows = %d, want 1", n)
 	}
-	if got := readString(`SELECT refreshed_at FROM reachable_scopes WHERE credential_class = 'pat' AND scope = ?`, canon); got != "2026-02-01 00:00:00.000" {
+	if got := readString(`SELECT strftime('%Y-%m-%d', refreshed_at) FROM reachable_scopes WHERE credential_class = 'pat' AND scope = ?`, canon); got != "2026-02-01" {
 		t.Errorf("reachable scope kept refreshed_at %q, want the most recent", got)
 	}
 	if n := count(`SELECT COUNT(*) FROM reachable_scopes`); n != 1 {

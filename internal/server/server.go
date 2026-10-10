@@ -169,16 +169,16 @@ type Server struct {
 	// as. auth.ValidateLinear in production; tests point it at a fake GraphQL
 	// endpoint.
 	validateLinear func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error)
-	// jiraCredentialMu, anthropicCredentialMu and bedrockCredentialMu
+	// anthropicCredentialMu and bedrockCredentialMu
 	// serialize each credential's local-mode bind and unbind across snapshot,
 	// transaction and restore (guardLocalSecretWrite). The keychain sits
 	// outside the SQLite transaction, so two overlapping writes could
 	// otherwise snapshot the same prior key and the one that fails would
-	// restore it over the one that committed. GitHub and Linear need no mutex
-	// of their own: every GitHub credential transition holds githubAppRegMu
-	// for the org, and every Linear writer, the token cache's rotation
-	// included, holds linearCredentialLock.
-	jiraCredentialMu      sync.Mutex
+	// restore it over the one that committed. GitHub, Jira and Linear need no
+	// mutex of their own: every GitHub credential transition holds
+	// githubAppRegMu for the org, every Jira one jiraCredentialMu, and every
+	// Linear writer, the token cache's rotation included, holds
+	// linearCredentialLock.
 	anthropicCredentialMu sync.Mutex
 	bedrockCredentialMu   sync.Mutex
 	// linearCredentialLock is the per-org lock every writer of an org's
@@ -313,6 +313,11 @@ type Server struct {
 	// acquireKeyedLock takes a Postgres session-scoped advisory lock instead.
 	// Reach it only through acquireKeyedLock.
 	githubAppRegMu sync.Map // map[orgID]chan struct{}, db.AcquireKeyedLock's gates
+
+	// jiraCredentialMu is the local-mode half of the org's Jira credential
+	// lock (lockJiraCredential), the same mechanism as githubAppRegMu. Reach
+	// it only through lockJiraCredential.
+	jiraCredentialMu sync.Map // map[orgID]chan struct{}, db.AcquireKeyedLock's gates
 
 	// githubInstallationBindMu is the same mechanism over a different keyspace:
 	// one installation on one GitHub host, rather than one workspace. The
@@ -1185,7 +1190,7 @@ func (s *Server) routes() {
 		tx: s.tx, az: s.az,
 		bedrockRole:         func() bedrockRoleResolver { return s.bedrockRole },
 		kickJira:            s.kickJiraChanged,
-		guardJiraWrite:      s.guardLocalJiraWrite,
+		guardJiraWrite:      s.guardJiraWrite,
 		guardAnthropicWrite: s.guardLocalAnthropicWrite,
 		guardBedrockWrite:   s.guardLocalBedrockWrite,
 		kickMemoryBacklog:   func(orgID string) { s.kickMemoryOwed(orgID, "") },

@@ -44,7 +44,6 @@ func TestLoadSave_Roundtrip(t *testing.T) {
 	want := auth.Credentials{
 		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
-		JiraURL:   "https://jira.example.com",
 		JiraPAT:   "jira-test",
 	}
 	if err := integrations.Save(ctx, stores.Secrets, org, want); err != nil {
@@ -74,7 +73,6 @@ func TestSave_SkipsEmptyValues(t *testing.T) {
 		t.Fatalf("seed Save: %v", err)
 	}
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		JiraURL: "https://jira.example.com",
 		JiraPAT: "jira-test",
 	}); err != nil {
 		t.Fatalf("Save jira-only: %v", err)
@@ -99,7 +97,6 @@ func TestClearGitHub_LeavesJira(t *testing.T) {
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
-		JiraURL:   "https://jira.example.com",
 		JiraPAT:   "jira-test",
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -114,7 +111,7 @@ func TestClearGitHub_LeavesJira(t *testing.T) {
 	if got.GitHubURL != "" || got.GitHubPAT != "" {
 		t.Errorf("GitHub creds survived ClearGitHub: %+v", got)
 	}
-	if got.JiraURL == "" || got.JiraPAT == "" {
+	if got.JiraPAT == "" {
 		t.Errorf("Jira creds disappeared after ClearGitHub: %+v", got)
 	}
 }
@@ -127,7 +124,6 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
-		JiraURL:   "https://jira.example.com",
 		JiraPAT:   "jira-test",
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -139,7 +135,7 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.JiraURL != "" || got.JiraPAT != "" {
+	if got.JiraPAT != "" {
 		t.Errorf("Jira creds survived ClearJira: %+v", got)
 	}
 	if got.GitHubURL == "" || got.GitHubPAT == "" {
@@ -156,7 +152,6 @@ func TestLoadSave_CloudRoundtrip(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
-		JiraURL:        "https://acme.atlassian.net",
 		JiraEmail:      "bot@acme.com",
 		JiraAPIToken:   "cloud-token",
 		JiraAuthMethod: "cloud_api_token",
@@ -184,7 +179,6 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL:      "https://github.example.com",
 		GitHubPAT:      "ghp-test",
-		JiraURL:        "https://acme.atlassian.net",
 		JiraEmail:      "bot@acme.com",
 		JiraAPIToken:   "cloud-token",
 		JiraAuthMethod: "cloud_api_token",
@@ -198,7 +192,7 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.JiraURL != "" || got.JiraEmail != "" || got.JiraAPIToken != "" || got.JiraAuthMethod != "" {
+	if got.JiraEmail != "" || got.JiraAPIToken != "" || got.JiraAuthMethod != "" {
 		t.Errorf("Jira cloud creds survived ClearJira: %+v", got)
 	}
 	if got.GitHubURL == "" || got.GitHubPAT == "" {
@@ -208,12 +202,13 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 
 // TestJiraSystemConfig pins the request-path creds→config builder: the marker
 // routes Cloud (Basic, REST v3) vs DC (Bearer, REST v2); an empty marker falls
-// back to host-shape detection; and ok=false when the URL or the scheme's
+// back to host-shape detection; and ok=false when the site or the scheme's
 // credential half is missing. It's the request-path mirror of the resolver's
 // ForSystem routing, so a Cloud org's status/stock reads build the right client.
 func TestJiraSystemConfig(t *testing.T) {
 	cases := []struct {
 		name       string
+		site       string
 		creds      auth.Credentials
 		wantOK     bool
 		wantDeploy jira.Deployment
@@ -221,45 +216,44 @@ func TestJiraSystemConfig(t *testing.T) {
 	}{
 		{
 			name: "cloud marker",
+			site: "https://acme.atlassian.net/",
 			creds: auth.Credentials{
-				JiraURL: "https://acme.atlassian.net/", JiraEmail: "bot@acme.com",
-				JiraAPIToken: "tok", JiraAuthMethod: "cloud_api_token",
+				JiraEmail: "bot@acme.com", JiraAPIToken: "tok", JiraAuthMethod: "cloud_api_token",
 			},
 			wantOK: true, wantDeploy: jira.DeploymentCloud, wantVer: jira.APIv3,
 		},
 		{
-			name: "dc marker",
-			creds: auth.Credentials{
-				JiraURL: "https://jira.corp.example", JiraPAT: "pat", JiraAuthMethod: "dc_pat",
-			},
+			name:   "dc marker",
+			site:   "https://jira.corp.example",
+			creds:  auth.Credentials{JiraPAT: "pat", JiraAuthMethod: "dc_pat"},
 			wantOK: true, wantDeploy: jira.DeploymentDataCenter, wantVer: jira.APIv2,
 		},
 		{
-			name: "empty marker, cloud host inferred",
-			creds: auth.Credentials{
-				JiraURL: "https://acme.atlassian.net", JiraEmail: "bot@acme.com", JiraAPIToken: "tok",
-			},
+			name:   "empty marker, cloud host inferred",
+			site:   "https://acme.atlassian.net",
+			creds:  auth.Credentials{JiraEmail: "bot@acme.com", JiraAPIToken: "tok"},
 			wantOK: true, wantDeploy: jira.DeploymentCloud, wantVer: jira.APIv3,
 		},
 		{
 			name:       "empty marker, dc host inferred",
-			creds:      auth.Credentials{JiraURL: "https://jira.corp.example", JiraPAT: "pat"},
+			site:       "https://jira.corp.example",
+			creds:      auth.Credentials{JiraPAT: "pat"},
 			wantOK:     true,
 			wantDeploy: jira.DeploymentDataCenter, wantVer: jira.APIv2,
 		},
-		{name: "no url", creds: auth.Credentials{JiraPAT: "pat"}, wantOK: false},
+		{name: "no site", creds: auth.Credentials{JiraPAT: "pat"}, wantOK: false},
+		{name: "malformed site", site: "jira.corp.example", creds: auth.Credentials{JiraPAT: "pat"}, wantOK: false},
 		{
-			name: "cloud marker missing token",
-			creds: auth.Credentials{
-				JiraURL: "https://acme.atlassian.net", JiraEmail: "bot@acme.com", JiraAuthMethod: "cloud_api_token",
-			},
+			name:   "cloud marker missing token",
+			site:   "https://acme.atlassian.net",
+			creds:  auth.Credentials{JiraEmail: "bot@acme.com", JiraAuthMethod: "cloud_api_token"},
 			wantOK: false,
 		},
-		{name: "dc missing pat", creds: auth.Credentials{JiraURL: "https://jira.corp.example"}, wantOK: false},
+		{name: "dc missing pat", site: "https://jira.corp.example", wantOK: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, ok := integrations.JiraSystemConfig(tc.creds)
+			cfg, ok := integrations.JiraSystemConfig(tc.creds, tc.site)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
@@ -287,7 +281,6 @@ func TestLoadSystem_Roundtrip(t *testing.T) {
 	want := auth.Credentials{
 		GitHubURL:      "https://github.example.com",
 		GitHubPAT:      "ghp-test",
-		JiraURL:        "https://acme.atlassian.net",
 		JiraEmail:      "bot@acme.com",
 		JiraAPIToken:   "cloud-token",
 		JiraAuthMethod: "cloud_api_token",
@@ -570,7 +563,6 @@ func TestClearLinear_LeavesGitHubAndJira(t *testing.T) {
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
 		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
-		JiraURL:   "https://jira.example.com",
 		JiraPAT:   "jira-test",
 	}); err != nil {
 		t.Fatalf("Save: %v", err)

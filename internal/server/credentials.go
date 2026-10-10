@@ -217,7 +217,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// connected. cfg.Deployment is the authoritative Cloud-vs-DC answer (from the
 	// marker), surfaced below so the frontend seeds its deployment picker without
 	// re-guessing from the host shape (which is wrong for Cloud custom domains).
-	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds)
+	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 
 	result := map[string]any{
 		"configured":     tenantExists,
@@ -233,8 +233,8 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	if orgSet.GitHubBaseURL != "" {
 		result["github_url"] = orgSet.GitHubBaseURL
 	}
-	if creds.JiraURL != "" {
-		result["jira_url"] = creds.JiraURL
+	if orgSet.JiraBaseURL != "" {
+		result["jira_url"] = orgSet.JiraBaseURL
 	}
 	if jiraConnected {
 		result["jira_deployment"] = string(jiraCfg.Deployment)

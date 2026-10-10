@@ -391,11 +391,11 @@ func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
 	s := newTestServer(t)
 
 	const host = "https://jira.example.com"
+	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": host})
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{JiraURL: host, JiraPAT: "jira_old"}); err != nil {
+		auth.Credentials{JiraPAT: "jira_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": host})
 
 	rec := doJSON(t, s, http.MethodDelete, jiraCredentialRoute(), nil)
 	if rec.Code != http.StatusOK {
@@ -431,7 +431,7 @@ func TestDangerZoneClear_AuditsEveryBoundCredential(t *testing.T) {
 
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: "https://github.com", GitHubPAT: "ghp_x",
-		JiraURL: "https://jira.example.com", JiraPAT: "jira_x",
+		JiraPAT: "jira_x",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}

@@ -1509,13 +1509,6 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		return
 	}
 	rules := m.loadJiraRules(ctx, orgID)
-	baseURL := orgSet.JiraBaseURL
-	if baseURL == "" {
-		baseURL = creds.JiraURL
-		// The issues come from the site the fallback names, so that is the
-		// site they are keyed under too.
-		orgSet.JiraBaseURL = baseURL
-	}
 	scope := domain.EntityScope("jira", orgSet)
 	// "Configured" is decided by the auth-method marker (via JiraSystemConfig),
 	// not key presence: a configured org has a URL plus the scheme's secret
@@ -1524,7 +1517,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 	// below, so the two can't disagree. Skip silently when unconfigured or
 	// rules are missing — adding/removing a tenant's Jira config doesn't need
 	// a poller restart this way.
-	_, configured := integrations.JiraSystemConfig(creds)
+	_, configured := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 	// Only ARMED projects can be polled: the discovery JQL is built from
 	// pickup and done members, so a watched-but-unmapped project has nothing
 	// to ask about. That already fell out of the merge below producing empty
@@ -1563,7 +1556,7 @@ func (m *Manager) runJiraCycleForOrg(ctx context.Context, sysResolver jiraclient
 		m.reportError("jira", orgID, cerr)
 		return
 	}
-	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, baseURL, projects); err != nil {
+	if _, err := m.trackerForOrg(orgID).RefreshJira(ctx, scope, client, orgSet.JiraBaseURL, projects); err != nil {
 		span.SetStatus(codes.Error, "refresh")
 		jiraLog.Log(ctx, upstream.LogLevel(err, slog.LevelError), "tracker error", "org", orgID, "error", err)
 		m.reportError("jira", orgID, err)

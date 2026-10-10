@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -99,10 +100,10 @@ func newTestServerWithTx(t *testing.T, wrap func(db.TxRunner) db.TxRunner) *Serv
 func configureEventSources(t *testing.T, s *Server) {
 	t.Helper()
 	keyring.MockInit()
+	seedSourceHost(t, s, eventsource.KindJira, "https://jira.example.com")
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
 		GitHubURL: "https://github.com",
 		GitHubPAT: "ghp-fixture",
-		JiraURL:   "https://jira.example.com",
 		JiraPAT:   "jira-fixture",
 	}); err != nil {
 		t.Fatalf("configure event sources: %v", err)

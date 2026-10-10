@@ -32,3 +32,20 @@ describe('JiraAccessGroup · connected actions', () => {
     expect(screen.getByRole('button', { name: 'Disconnect' })).toBeInTheDocument()
   })
 })
+
+describe('JiraAccessGroup · credential fields', () => {
+  it('shows the base URL unless the container supplies it', () => {
+    const props = {
+      value: { jira_url: '', jira_pat: '', jira_email: '', jira_api_token: '' },
+      onChange: () => {},
+      connected: false,
+      orgId: 'org-1',
+      deployment: 'data_center' as const,
+      bare: true,
+    }
+    const { rerender } = render(<JiraAccessGroup {...props} />)
+    expect(screen.getByPlaceholderText('https://jira.yourcompany.com')).toBeInTheDocument()
+    rerender(<JiraAccessGroup {...props} showBaseUrl={false} />)
+    expect(screen.queryByPlaceholderText('https://jira.yourcompany.com')).not.toBeInTheDocument()
+  })
+})

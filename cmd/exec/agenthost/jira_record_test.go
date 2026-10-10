@@ -14,7 +14,6 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
-	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -34,11 +33,11 @@ func fakeJiraIssueID(key string) string {
 	return "1" + strings.Repeat("0", max(0, 4-len(n))) + n
 }
 
-// fakeJiraIssueDedupKey is the dedup key of the issue artifact for key on the
-// test site.
-func fakeJiraIssueDedupKey(key string) string {
+// fakeJiraIssueDedupKey is the dedup key of the issue artifact for key on
+// site, the fake Jira's URL the recording stores make the org's Jira site.
+func fakeJiraIssueDedupKey(site, key string) string {
 	return domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue,
-		domain.JiraIssueResource(testScope("jira"), fakeJiraIssueID(key)), "")
+		domain.JiraIssueResource(site, fakeJiraIssueID(key)), "")
 }
 
 // startFakeJira stands a minimal Jira REST backend covering the mutating verbs
@@ -101,7 +100,7 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
-	recordJiraSiteForTest(t, conn)
+	recordJiraSite(t, conn, jiraURL)
 
 	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(
@@ -111,7 +110,7 @@ func newJiraRecordingStoresConn(t *testing.T, jiraURL string, eventTriggered boo
 	}
 
 	stores := sqlitestore.New(conn)
-	stores.Secrets = fakeJiraSecrets{url: jiraURL, pat: "org-pat"}
+	stores.Secrets = fakeJiraSecrets{pat: "org-pat"}
 	info := ConversationInfo{
 		OrgID:            runmode.LocalDefaultOrgID,
 		TeamID:           runmode.LocalDefaultTeamID,
@@ -158,7 +157,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				a := arts[0]
 				if a.Provider != domain.ArtifactProviderJira || a.Kind != domain.ArtifactKindIssue ||
 					a.Target != "SKY-1" || a.ExternalID != "10001" || a.State != domain.ArtifactStateIssueCreated ||
-					a.DedupKey != fakeJiraIssueDedupKey("SKY-1") {
+					a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-1") {
 					t.Errorf("create artifact mismatch: %+v", a)
 				}
 				if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -180,7 +179,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
 					t.Errorf("transition artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"status":"Done"`) {
@@ -204,7 +203,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				if a.Kind != domain.ArtifactKindComment || a.Target != "SKY-9" ||
 					a.ExternalID != "10042" || a.State != domain.ArtifactStateCommentPosted ||
 					a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
-						domain.JiraIssueResource(testScope("jira"), "10009"), "10042") {
+						domain.JiraIssueResource(jira.URL, "10009"), "10042") {
 					t.Errorf("comment artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, "looks good to me") {
@@ -226,7 +225,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
 					t.Errorf("assign artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"assignee":"self"`) {
@@ -252,7 +251,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				a := arts[0]
 				if a.Kind != domain.ArtifactKindIssue || a.Target != "SKY-9" ||
-					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey("SKY-9") {
+					a.State != domain.ArtifactStateIssueUpdated || a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") {
 					t.Errorf("update artifact mismatch: %+v", a)
 				}
 				if !strings.Contains(a.DetailsJSON, `"summary"`) || !strings.Contains(a.DetailsJSON, `"priority"`) {
@@ -270,7 +269,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
 				if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindIssue ||
-					arts[0].DedupKey != fakeJiraIssueDedupKey("SKY-9") || arts[0].State != domain.ArtifactStateIssueUpdated {
+					arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") || arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-parent artifact mismatch: %+v", arts)
 				}
 				if !strings.Contains(arts[0].DetailsJSON, `"parent":"SKY-1"`) {
@@ -287,7 +286,7 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 					t.Fatalf("JiraSetPriority: %v", err)
 				}
 				arts := listConversationArtifacts(t, stores, info.ConversationID)
-				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey("SKY-9") ||
+				if len(arts) != 1 || arts[0].DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-9") ||
 					arts[0].State != domain.ArtifactStateIssueUpdated {
 					t.Fatalf("set-priority artifact mismatch: %+v", arts)
 				}
@@ -299,15 +298,12 @@ func TestLocalClient_JiraActions_RecordArtifacts(t *testing.T) {
 	}
 }
 
-// TestLocalClient_JiraArtifactURLs_WhenSiteConfigured pins that with the org's
-// Jira site URL set, issue artifacts carry {site}/browse/<KEY> and comment
+// TestLocalClient_JiraArtifactURLs_WhenSiteConfigured pins that issue
+// artifacts carry {site}/browse/<KEY> on the org's Jira site and comment
 // artifacts carry the focusedCommentId deep link.
 func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 	jira := startFakeJira(t)
 	stores, info := newJiraRecordingStores(t, jira.URL, true)
-	dbtest.SeedOrgSettings(t, stores.Orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{
-		JiraBaseURL: "https://acme.atlassian.net",
-	})
 	client := NewLocal(stores, info)
 	ctx := context.Background()
 
@@ -321,11 +317,11 @@ func TestLocalClient_JiraArtifactURLs_WhenSiteConfigured(t *testing.T) {
 	for _, a := range listConversationArtifacts(t, stores, info.ConversationID) {
 		switch a.Kind {
 		case domain.ArtifactKindIssue:
-			if a.URL != "https://acme.atlassian.net/browse/SKY-7" {
+			if a.URL != jira.URL+"/browse/SKY-7" {
 				t.Errorf("issue url = %q", a.URL)
 			}
 		case domain.ArtifactKindComment:
-			if a.URL != "https://acme.atlassian.net/browse/SKY-7?focusedCommentId=10042" {
+			if a.URL != jira.URL+"/browse/SKY-7?focusedCommentId=10042" {
 				t.Errorf("comment url = %q", a.URL)
 			}
 		}
@@ -380,13 +376,13 @@ func TestLocalClient_JiraTransitionThenComment_DedupsIssue(t *testing.T) {
 		switch a.Kind {
 		case domain.ArtifactKindIssue:
 			issues++
-			if a.DedupKey != fakeJiraIssueDedupKey("SKY-5") {
+			if a.DedupKey != fakeJiraIssueDedupKey(jira.URL, "SKY-5") {
 				t.Errorf("issue dedup_key = %q", a.DedupKey)
 			}
 		case domain.ArtifactKindComment:
 			comments++
 			if a.DedupKey != domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindComment,
-				domain.JiraIssueResource(testScope("jira"), "10005"), "10042") {
+				domain.JiraIssueResource(jira.URL, "10005"), "10042") {
 				t.Errorf("comment dedup_key = %q", a.DedupKey)
 			}
 		default:

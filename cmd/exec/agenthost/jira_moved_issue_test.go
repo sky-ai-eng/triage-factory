@@ -55,7 +55,7 @@ func TestLocalClient_JiraWriteOnAnOldKey_ResolvesTheExistingEntity(t *testing.T)
 	jira := startMovedIssueJira(t)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
-	site := testScope("jira")
+	site := jira.URL
 	existing, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", site+"/browse/NEW-7")
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestLocalClient_JiraReadOnAnOldKey_RenamesTheEntity(t *testing.T) {
 	jira := startMovedIssueJira(t)
 	_, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
-	site := testScope("jira")
+	site := jira.URL
 	stale, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "OLD-7", "10007", "issue", "Moved", site+"/browse/OLD-7")
 	if err != nil {
 		t.Fatal(err)
@@ -118,7 +118,7 @@ func TestLocalClient_MemoryLoad_OldJiraKeyFindsTheEntity(t *testing.T) {
 	jira := startMovedIssueJira(t)
 	conn, stores, info := newJiraRecordingStoresConn(t, jira.URL, true)
 	ctx := context.Background()
-	site := testScope("jira")
+	site := jira.URL
 	ent, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID, "jira", site, "NEW-7", "10007", "issue", "Moved", "")
 	if err != nil {
 		t.Fatal(err)

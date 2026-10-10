@@ -179,34 +179,30 @@ func TestRunJiraCycleForOrg_PolicyReadFails_SkipsRatherThanPolls(t *testing.T) {
 	}
 }
 
-// jiraSecrets answers a Data Center service credential for site and nothing
-// else.
+// jiraSecrets answers a Data Center service credential and nothing else.
 type jiraSecrets struct {
 	dbpkg.SecretStore
-	site string
 }
 
-func (s jiraSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
-	switch key {
-	case integrations.KeyJiraURL:
-		return s.site, nil
-	case integrations.KeyJiraPAT:
+func (jiraSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
+	if key == integrations.KeyJiraPAT {
 		return "pat", nil
 	}
 	return "", nil
 }
 
 // TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed: once the
-// org's Jira credential names another site, the issues the old site left tracked
+// org's Jira site is another site, the issues the old site left tracked
 // retire with scope_changed even when no project is armed on the new one, and
 // without a Jira call. The resolver is nil, so reaching it would panic.
 func TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed(t *testing.T) {
 	recorder := recordSpans(t)
 	database := newMigratedSQLiteForPoller(t)
-	// The org has no Jira base URL of its own, so the credential's URL names
-	// the site.
 	const site = "https://new.example.com"
 	stores := sqlitestore.New(database)
+	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", site); err != nil {
+		t.Fatal(err)
+	}
 	stale, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://old.example.com", "ENG-1", "10001", "issue", "Old", "")
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +211,7 @@ func TestRunJiraCycleForOrg_AnotherSitesRowsRetireWithNothingArmed(t *testing.T)
 	m := &Manager{
 		database: database, pub: published,
 		tasks: stores.Tasks, entities: stores.Entities, repos: stores.Repos, eventQueue: stores.EventQueue,
-		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{site: site},
+		orgs: stores.Orgs, users: stores.Users, secrets: jiraSecrets{},
 		jiraRules:    stores.JiraStatusRules,
 		EventSources: stores.OrgEventSources,
 	}

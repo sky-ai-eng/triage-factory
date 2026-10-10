@@ -26,12 +26,11 @@ import (
 // credential class this build does not understand.
 var credsLog = logging.Component("integrations")
 
-// The four well-known integration secret keys. The local SQLite shim
-// uses these names verbatim as keychain entry keys.
+// The well-known integration secret keys. The local SQLite shim uses these
+// names verbatim as keychain entry keys.
 const (
 	KeyGitHubURL = "github_url"
 	KeyGitHubPAT = "github_pat"
-	KeyJiraURL   = "jira_url"
 	KeyJiraPAT   = "jira_pat"
 )
 
@@ -71,6 +70,13 @@ const (
 // sweep this key so an upgrade from an older install leaves no orphan
 // keychain row.
 const legacyJiraDisplayName = "jira_display_name"
+
+// legacyJiraURL is the key a local install kept its Jira site under, beside
+// the service credential. An org's Jira site is org_settings.jira_base_url
+// alone: boot moves a stored value there (AdoptSavedJiraSite), and ClearJira
+// and the uninstall sweep remove the key so an install that never booted this
+// build leaves no orphan keychain row.
+const legacyJiraURL = "jira_url"
 
 // legacyGitHubUsername is the legacy key that held the org bot's GitHub login
 // in the keychain. GitHub identity moved into the users.github_username
@@ -163,9 +169,9 @@ func BedrockKeys() []string {
 func AllKeys() []string {
 	return []string{
 		KeyGitHubURL, KeyGitHubPAT,
-		KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
+		KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
 		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs,
-		legacyJiraDisplayName, legacyGitHubUsername,
+		legacyJiraDisplayName, legacyJiraURL, legacyGitHubUsername,
 	}
 }
 
@@ -278,7 +284,6 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 	}
 	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
-	get(KeyJiraURL, &creds.JiraURL)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
@@ -323,7 +328,6 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 	}
 	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
-	get(KeyJiraURL, &creds.JiraURL)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
@@ -350,7 +354,6 @@ func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Cred
 	pairs := []struct{ key, value string }{
 		{KeyGitHubURL, c.GitHubURL},
 		{KeyGitHubPAT, c.GitHubPAT},
-		{KeyJiraURL, c.JiraURL},
 		{KeyJiraPAT, c.JiraPAT},
 		{KeyJiraEmail, c.JiraEmail},
 		{KeyJiraAPIToken, c.JiraAPIToken},
@@ -368,16 +371,17 @@ func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Cred
 }
 
 // JiraSystemConfig builds the jira.Config for an org's stored Jira service
-// credential from an already-loaded Credentials bundle, routed by the
-// auth-method marker (Cloud API token vs DC PAT) via jira.DeploymentForMarker.
-// It is the request-path analog of jira.Resolver.ForSystem for handlers that
-// already hold a Credentials bundle (read under the caller's claims), so they
-// don't re-read the secrets through the admin-pool resolver or re-implement the
-// Cloud-vs-DC branch. The base URL is canonicalized so the client talks to the
-// same origin the resolver would. ok=false when no usable credential is present
-// — no URL, or the scheme's credential half is missing.
-func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
-	host, ok := jira.CanonicalHost(c.JiraURL)
+// credential from an already-loaded Credentials bundle and the org's Jira site
+// (org_settings.jira_base_url), routed by the auth-method marker (Cloud API
+// token vs DC PAT) via jira.DeploymentForMarker. It is the request-path analog
+// of jira.Resolver.ForSystem for handlers that already hold a Credentials
+// bundle (read under the caller's claims), so they don't re-read the secrets
+// through the admin-pool resolver or re-implement the Cloud-vs-DC branch. The
+// site is canonicalized so the client talks to the same origin the resolver
+// would. ok=false when no usable credential is present — no site, or the
+// scheme's credential half is missing.
+func JiraSystemConfig(c auth.Credentials, site string) (jira.Config, bool) {
+	host, ok := jira.CanonicalHost(site)
 	if !ok {
 		return jira.Config{}, false
 	}
@@ -567,10 +571,11 @@ func GitHubKeys() []string {
 }
 
 // JiraKeys returns the org Jira credential's keys in the order ClearJira
-// deletes them, legacy jira_display_name included (see legacyJiraDisplayName
-// above). Writers take them in this order, for the reason GitHubKeys gives.
+// deletes them, the legacy jira_url and jira_display_name included (see
+// legacyJiraURL and legacyJiraDisplayName above). Writers take them in this
+// order, for the reason GitHubKeys gives.
 func JiraKeys() []string {
-	return []string{KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName}
+	return []string{legacyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName}
 }
 
 // LinearKeys returns the org Linear credential's keys in the order ClearLinear

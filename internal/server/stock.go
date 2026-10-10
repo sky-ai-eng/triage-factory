@@ -145,7 +145,7 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 	// "Configured" reads the auth-method marker (via JiraSystemConfig), not key
 	// presence, so DC and Cloud orgs both gate correctly and consistently with
 	// the resolver.
-	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
+	if _, ok := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL); !ok || len(jiraRules) == 0 || localAccountID == "" {
 		writeNotConfigured(w, "Jira not configured")
 		return
 	}
@@ -217,12 +217,8 @@ func (s *Server) handleJiraStockGet(w http.ResponseWriter, r *http.Request) {
 		}
 
 		var parentURL string
-		jiraBase := orgSet.JiraBaseURL
-		if jiraBase == "" {
-			jiraBase = creds.JiraURL
-		}
-		if snap.ParentKey != "" && jiraBase != "" {
-			parentURL = strings.TrimRight(jiraBase, "/") + "/browse/" + snap.ParentKey
+		if snap.ParentKey != "" && orgSet.JiraBaseURL != "" {
+			parentURL = strings.TrimRight(orgSet.JiraBaseURL, "/") + "/browse/" + snap.ParentKey
 		}
 
 		projectKey := projectFromKey(snap.Key)
@@ -448,6 +444,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	// fire under the user's claims — mirrors handleJiraStockGet.
 	var (
 		creds                            auth.Credentials
+		orgSet                           domain.OrgSettings
 		teamID                           string
 		jiraRules                        []domain.JiraProjectStatusRules
 		localAccountID, localDisplayName string
@@ -460,6 +457,10 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		if e != nil {
 			return fmt.Errorf("load integration credentials: %w", e)
 		}
+		orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID)
+		if e != nil {
+			return fmt.Errorf("load org settings: %w", e)
+		}
 		teamID, e = teamscope.ResolveActing(r.Context(), tx.Teams, tx.Users, orgID, userID, req.TeamID)
 		if e != nil {
 			return e
@@ -468,10 +469,8 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 		if e != nil {
 			return fmt.Errorf("list jira rules: %w", e)
 		}
-		// Jira identity is host-scoped: creds.JiraURL mirrors
-		// org_settings.jira_base_url (both set from the same field), so it
-		// is the canonical host this identity was captured under.
-		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, creds.JiraURL)
+		// Jira identity is host-scoped: look it up for the org's Jira site.
+		localAccountID, localDisplayName, e = tx.Users.GetJiraIdentity(r.Context(), userID, orgSet.JiraBaseURL)
 		return e
 	}); err != nil {
 		if teamscope.WriteIfSelectionError(w, err) {
@@ -485,7 +484,7 @@ func (s *Server) applyStockAction(w http.ResponseWriter, r *http.Request, action
 	// "Configured" reads the auth-method marker (via JiraSystemConfig), not key
 	// presence, so DC and Cloud orgs both gate correctly and consistently with
 	// the resolver.
-	if _, ok := integrations.JiraSystemConfig(creds); !ok || len(jiraRules) == 0 || localAccountID == "" {
+	if _, ok := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL); !ok || len(jiraRules) == 0 || localAccountID == "" {
 		writeNotConfigured(w, "Jira not configured")
 		return
 	}

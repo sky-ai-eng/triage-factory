@@ -15,6 +15,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -533,17 +534,23 @@ func TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK: moving an App org to a
-// different non-empty host is a legitimate GHES domain change and stays
-// allowed. The guard is aimed at the silent-default case, not at host edits.
-func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
+// TestOrgSettingsPatch_RetargetGitHubURLWithApp_409: an App works only on the
+// GitHub that registered it, so moving an App org to another host is refused
+// like clearing it is. Moving hosts is a disconnect and a fresh connect.
+func TestOrgSettingsPatch_RetargetGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
 	seedLocalApp(t, s, true)
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+	rec := patchOrgSettings(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if e := firstError(t, rec); e.Field != "github_base_url" {
+		t.Errorf("error = %+v, want it on github_base_url", e)
+	}
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
@@ -551,8 +558,8 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
 		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
 		t.Fatalf("read github base_url: %v", err)
 	}
-	if stored != "https://new.example.com" {
-		t.Errorf("github base_url = %q, want the retargeted host", stored)
+	if stored != "https://old.example.com" {
+		t.Errorf("github base_url = %q, want the host the App is on", stored)
 	}
 }
 
@@ -835,10 +842,10 @@ func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity is the disconnect
-// mirror of the GitHub URL-clear test: clearing the org's Jira URL is an
-// access change (PAT_1) and must NOT wipe the user's now-independent Jira
-// identity. Per-user Jira access is cleared only by its own surface.
+// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity: clearing the
+// org's Jira URL on an org with no service credential (its members bind their
+// own) must NOT wipe the user's independent Jira identity. Per-user Jira
+// access is cleared only by its own surface.
 func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -846,14 +853,11 @@ func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	ctx := t.Context()
 	const host = "https://jira.example.com"
 
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
+	seedSourceHost(t, s, eventsource.KindJira, host)
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, host, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	// Disconnect the org's Jira access: clear the Jira URL.
 	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": nil})
 
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, host)
@@ -878,7 +882,8 @@ func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	const host = "https://jira.example.com"
 
 	// The org has a Jira PAT (the thing we'll clear)...
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
+	seedSourceHost(t, s, eventsource.KindJira, host)
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraPAT: "org-pat"}); err != nil {
 		t.Fatalf("seed org creds: %v", err)
 	}
 	// ...and the caller has bound their own per-user credential, as the bind

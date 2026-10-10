@@ -49,10 +49,17 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 // org without one has nowhere to record a Jira issue the exec verbs touch.
 func recordJiraSiteForTest(t *testing.T, conn *sql.DB) {
 	t.Helper()
+	recordJiraSite(t, conn, testScope("jira"))
+}
+
+// recordJiraSite makes site the local org's Jira site, the one its service
+// credential talks to.
+func recordJiraSite(t *testing.T, conn *sql.DB, site string) {
+	t.Helper()
 	if _, err := conn.Exec(`
 		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
 		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
-	`, runmode.LocalDefaultOrgID, testScope("jira")); err != nil {
+	`, runmode.LocalDefaultOrgID, site); err != nil {
 		t.Fatalf("record jira site: %v", err)
 	}
 }
@@ -383,6 +390,7 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	// UpsertArtifact routes through the same withWrite branch the retired
 	// pending-PR writer used: a synthetic-claims tx for a manual conversation.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Provider: domain.ArtifactProviderGitHub,
 		Kind:     domain.ArtifactKindPullRequest,
 		Target:   "octocat/hello#1",
 		State:    domain.ArtifactStatePRDraft,
@@ -414,6 +422,7 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Provider: domain.ArtifactProviderGitHub,
 		Kind:     domain.ArtifactKindPullRequest,
 		Target:   "octocat/hello#2",
 		State:    domain.ArtifactStatePRDraft,

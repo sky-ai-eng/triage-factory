@@ -359,7 +359,7 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	// In local mode the keychain sits outside the transaction, so a failure
 	// after the clear puts the credential back: the request reports the
 	// disconnect failed, so the org must still be connected.
-	restore, unlock, err := s.guardLocalJiraWrite(ctx, orgID)
+	restore, unlock, err := s.guardJiraWrite(ctx, orgID)
 	if err != nil {
 		internalError(w, "jira-access", err)
 		return

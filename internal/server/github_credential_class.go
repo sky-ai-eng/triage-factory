@@ -57,10 +57,10 @@ var errGitHubHostHasCredential = errors.New("a GitHub credential only works on t
 
 // githubCredentialConnected names the GitHub credential org has connected, in
 // the words an admin would use to go find it, or "" when it has none: a token,
-// its own App registration (staged or active), or a binding to the
-// deployment's App. The token is read through tx, so a caller inside a write
-// sees the secret store that write sees.
-func (s *Server) githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID string) (string, error) {
+// its own App registration (staged or active), or an installation of an App
+// bound to it. Every read goes through tx, so a caller inside a write sees the
+// rows that write sees and holds no second connection while it does.
+func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID string) (string, error) {
 	creds, err := integrations.Load(ctx, tx.Secrets, orgID)
 	if err != nil {
 		return "", fmt.Errorf("read github token: %w", err)
@@ -68,18 +68,18 @@ func (s *Server) githubCredentialConnected(ctx context.Context, tx db.TxStores, 
 	if creds.GitHubPAT != "" {
 		return "this workspace's GitHub token", nil
 	}
-	app, err := s.githubApps.GetForOrgSystem(ctx, orgID)
+	app, err := tx.GitHubApps.GetForOrg(ctx, orgID)
 	if err != nil {
 		return "", fmt.Errorf("read github app registration: %w", err)
 	}
 	if app != nil {
 		return "this workspace's GitHub App", nil
 	}
-	managed, err := s.managedInstallationsInTheWay(ctx, orgID)
+	installs, err := tx.GitHubApps.ListInstallationsForOrg(ctx, orgID)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("read github app installations: %w", err)
 	}
-	if managed {
+	if len(installs) > 0 {
 		return "the deployment's GitHub App", nil
 	}
 	return "", nil

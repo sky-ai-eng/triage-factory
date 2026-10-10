@@ -46,6 +46,13 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		if a.spawner != nil {
 			a.spawner.RekeyWorkspaceBlobsToTask(ctx, runmode.LocalDefaultOrgID)
 		}
+		// A local install may hold its Jira site in the keychain beside the
+		// credential, where nothing reads it. It moves into org_settings here,
+		// before the first poll resolves a Jira client. A failure leaves the key
+		// for the next boot and the org on whatever site its settings name.
+		if err := integrations.AdoptSavedJiraSite(ctx, a.stores.Secrets, a.stores.Orgs, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
+			serverLog.Warn("could not move the saved Jira site into org settings", "error", err)
+		}
 		a.importLocalSkills(ctx)
 	}
 }
