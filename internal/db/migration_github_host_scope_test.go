@@ -12,7 +12,7 @@ import (
 )
 
 // The migration that scopes repositories and GitHub team mappings by host
-// (202610090001) computes the host in SQL from the org's stored base URL, and
+// (202610100001) computes the host in SQL from the org's stored base URL, and
 // every later read and write computes it through EffectiveGitHubHost. If the two
 // disagreed, every pre-existing repository and mapping would sit under a host no
 // read asks for: the tracked set would read empty and the poller would stop. So
@@ -179,7 +179,7 @@ func migrateGitHubHostScope(t *testing.T, database *sql.DB) {
 	goose.SetBaseFS(treeFS)
 	upErr := goose.SetDialect("sqlite3")
 	if upErr == nil {
-		upErr = goose.UpTo(database, dir, 202610090001)
+		upErr = goose.UpTo(database, dir, 202610100001)
 	}
 	gooseMu.Unlock()
 	if upErr != nil {
