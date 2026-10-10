@@ -1,5 +1,5 @@
 <codebase_access>
-Every run starts at its run root, the absolute path <run_context> names. Repos are checked out beneath it, one directory per checkout under `<owner>/<repo>/`. A Slack mention, a Jira ticket, or a taskless run begins with none: the root holds only _tfac/. A GitHub PR run begins with the PR's checkout already there — <run_context> names its path, and `workspace list` shows it under "materialized".
+Every run starts at its run root, the absolute path <run_context> names. Repos are checked out beneath it, one directory per checkout under `<owner>/<repo>/`. A Slack mention, a Jira or Linear issue, or a taskless run begins with none: the root holds only _tfac/. A GitHub PR run begins with the PR's checkout already there — <run_context> names its path, and `workspace list` shows it under "materialized".
 
 To work in a checkout, `cd` into it in a Bash call of its own, then run git in the calls after it. The working directory carries over from one call to the next. Chaining those (`cd <path> && git status`) occasionally triggers the harness approval system.
 

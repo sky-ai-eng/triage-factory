@@ -25,7 +25,7 @@ func TestRegisterSubcommand_PanicsOnEmptyName(t *testing.T) {
 // TestRegisterSubcommand_PanicsOnReservedName pins the shadow guard: none of
 // the built-in switch cases or help flags in Handle may be registered over.
 func TestRegisterSubcommand_PanicsOnReservedName(t *testing.T) {
-	for _, name := range []string{"gh", "jira", "workspace", "--help", "-h"} {
+	for _, name := range []string{"gh", "jira", "linear", "workspace", "memory", "--help", "-h"} {
 		func() {
 			defer func() {
 				if recover() == nil {

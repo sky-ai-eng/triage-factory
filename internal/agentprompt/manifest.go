@@ -64,8 +64,10 @@ const (
 	blockIsolationMulti = "guardrails/multi.txt"
 
 	// per-run injected, not manifest-composed (see toolsref.go)
-	blockToolsGitHub = "tools/github.txt"
-	blockToolsJira   = "tools/jira.txt"
+	blockToolsGitHub    = "tools/github.txt"
+	blockToolsJira      = "tools/jira.txt"
+	blockToolsLinear    = "tools/linear.txt"
+	blockToolsWorkspace = "tools/workspace.txt"
 )
 
 // gitAccessFor and isolationFor are the two mode arms. They are separate

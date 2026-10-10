@@ -16,6 +16,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/execflags"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/gh"
 	jiraexec "github.com/sky-ai-eng/triage-factory/cmd/exec/jira"
+	linearexec "github.com/sky-ai-eng/triage-factory/cmd/exec/linear"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/memory"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/prog"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/workspace"
@@ -155,6 +156,21 @@ func dispatch(args []string, buildAgentHost func() agenthost.Client) {
 		defer func() { _ = host.Close() }()
 		jiraexec.Handle(host, cmdArgs)
 
+	case "linear":
+		// Linear calls route through the agenthost client exactly as the jira
+		// branch's do: the daemon (or, on the host CLI, the in-process
+		// LocalClient) resolves the org's service credential and makes the
+		// call, so the jail never holds a Linear credential. Writes are
+		// attributed to the org's Linear identity by design; user-attributed
+		// Linear writes are the server-side handlers.
+		if isHelp(cmdArgs, linearexec.ValueFlags) {
+			linearexec.Handle(nil, cmdArgs)
+			return
+		}
+		host := buildAgentHost()
+		defer func() { _ = host.Close() }()
+		linearexec.Handle(host, cmdArgs)
+
 	case "workspace":
 		// No credentials needed — workspace acts on the agenthost client
 		// (DB + filesystem on the host CLI, IPC + filesystem in the jail).
@@ -289,30 +305,41 @@ func hostHelpKinds() []string {
 // the same answer the run's <tools> prompt section derives from. nil means
 // unresolved and renders the full surface. Non-nil filters the index:
 // gh/workspace/memory are always listed (GitHub is a required source, the
-// other two are sourceless); Jira, a core source that is never unlicensed, is
-// listed with a not-currently-available note when absent (explained means not
-// yet); a registered family whose SourceKind is absent is omitted outright —
+// other two are sourceless); Jira and Linear, core sources that are never
+// unlicensed, are listed with a not-currently-available note when absent
+// (explained means not yet); a registered family whose SourceKind is absent is
+// omitted outright —
 // it may be unlicensed, and an unlicensed surface degrades to absence, the
 // same rule every other gate applies. Index-only either way: an omitted
 // family's own `--help` still answers, because the verbs are compiled in and
 // "unknown command" for a real name sends a caller hunting for a typo.
 func helpText(prefix string, kinds []string) string {
-	sections := []string{gh.HelpText, jiraHelpSection(kinds), workspace.HelpText, memory.HelpText}
+	sections := []string{
+		gh.HelpText,
+		coreSourceHelpSection(kinds, eventsource.KindJira, jiraexec.HelpText),
+		coreSourceHelpSection(kinds, eventsource.KindLinear, linearexec.HelpText),
+		workspace.HelpText, memory.HelpText,
+	}
 	sections = append(sections, registeredHelpSections(kinds)...)
 	return fmt.Sprintf("Usage: %s <command> [args]\n\n%s\n\nCommands print their result to stdout on success and errors to stderr. Most commands print JSON; workspace add prints a raw path.\n", prefix, strings.Join(sections, "\n\n"))
 }
 
-// jiraUnavailableNote rides under the Jira section when the availability
-// resolve answered and Jira was not in it. Its job is to stop an agent from
-// telling a user it can work a ticket and discovering the refusal mid-task:
-// the absence is always something an admin can fix, so the note says so.
-const jiraUnavailableNote = "  NOTE: Jira is not currently available for this org (not configured, or turned\n  off by an admin) — these commands will refuse until it is set up."
+// unavailableNote rides under a core source's section when the availability
+// resolve answered and the source was not in it. Its job is to stop an agent
+// from telling a user it can work a ticket and discovering the refusal
+// mid-task: the absence is always something an admin can fix, so the note says
+// so.
+func unavailableNote(kind string) string {
+	return "  NOTE: " + eventsource.Label(kind) + " is not currently available for this org (not configured, or turned\n  off by an admin) — these commands will refuse until it is set up."
+}
 
-func jiraHelpSection(kinds []string) string {
-	if kinds == nil || slices.Contains(kinds, eventsource.KindJira) {
-		return jiraexec.HelpText
+// coreSourceHelpSection is a core source's help section, with unavailableNote
+// under it when kinds resolved without the source.
+func coreSourceHelpSection(kinds []string, kind, help string) string {
+	if kinds == nil || slices.Contains(kinds, kind) {
+		return help
 	}
-	return jiraexec.HelpText + "\n\n" + jiraUnavailableNote
+	return help + "\n\n" + unavailableNote(kind)
 }
 
 // registeredHelpSections returns the registered families' help sections in

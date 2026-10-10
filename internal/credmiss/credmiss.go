@@ -22,8 +22,8 @@ import (
 // Status is the HTTP status a credential miss is answered with.
 //
 // A run's bundle carries the credentials it was provisioned for, so a request
-// for a repository it has no token for, or for a gh or Jira credential the org
-// never supplied, misses on every retry. Those answer 403: git and every
+// for a repository it has no token for, or for a gh, Jira or Linear credential
+// the org never supplied, misses on every retry. Those answer 403: git and every
 // GitHub client read it as a refusal rather than an outage, and the remedy is
 // a different action (a `workspace add`, which waits for its own re-seal, or
 // an admin binding the credential), never the same request again. A missing
@@ -31,7 +31,7 @@ import (
 // keep the 502 a retry answers, as does any failure without a named reason.
 func Status(reason string) int {
 	switch reason {
-	case credbundle.MissNoRepoToken, credbundle.MissNoCLIToken, credbundle.MissNoJiraCredential:
+	case credbundle.MissNoRepoToken, credbundle.MissNoCLIToken, credbundle.MissNoJiraCredential, credbundle.MissNoLinearCredential:
 		return http.StatusForbidden
 	default:
 		return http.StatusBadGateway

@@ -27,8 +27,9 @@ type SealedBundleBody struct {
 // StartProxiesBody is KindStartProxies' request payload: the host-side veth
 // IP the sidecar binds its proxies on, and which optional proxies this run
 // needs. The LLM + egress proxies are always started; git/github-REST/
-// jira-REST are started only when the run touches those surfaces (a
-// Jira-only run needs no git proxy; a GitHub-only run needs no Jira proxy).
+// jira-REST/linear-GraphQL are started only when the run touches those
+// surfaces (a Jira-only run needs no git proxy; a GitHub-only run needs no
+// Jira or Linear proxy).
 type StartProxiesBody struct {
 	// HostVethIP is the 10.42.<idx>.1 address the sandbox's netns reaches via
 	// its default route — the proxies bind here, never loopback, so the
@@ -59,6 +60,13 @@ type StartProxiesBody struct {
 	// the bundle's Jira credential, so no auth material crosses here.
 	JiraAPIEnabled  bool   `json:"jira_api_enabled,omitempty"`
 	JiraAPIUpstream string `json:"jira_api_upstream,omitempty"`
+
+	// LinearAPIEnabled requests the Linear GraphQL credential proxy for the
+	// agenthost linear verbs. There is no upstream field: Linear serves every
+	// workspace from one endpoint, so the sidecar always forwards to it, and
+	// it resolves the injected auth (a bare API key or an app user's Bearer
+	// access token) from the bundle's Linear credential.
+	LinearAPIEnabled bool `json:"linear_api_enabled,omitempty"`
 
 	// GHChannelEnabled requests the real-gh credential-injector proxy — the
 	// TLS listener the sandboxed `gh` binary reaches via GH_HOST, holding only a
@@ -127,6 +135,11 @@ type StartProxiesResult struct {
 	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy.
 	JiraAPIURL   string `json:"jira_api_url,omitempty"`
 	JiraAPIToken string `json:"jira_api_token,omitempty"`
+
+	// LinearAPIURL / LinearAPIToken are the same for the Linear GraphQL
+	// proxy. Empty when LinearAPIEnabled was false.
+	LinearAPIURL   string `json:"linear_api_url,omitempty"`
+	LinearAPIToken string `json:"linear_api_token,omitempty"`
 
 	// JiraDeployment classifies the org's Jira backend (a jira.Deployment
 	// value) so the orchestrator's proxy client picks the REST version the

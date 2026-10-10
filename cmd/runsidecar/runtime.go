@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -57,6 +59,7 @@ type credRuntime struct {
 	proxies    *agentproc.RunProxyHandle
 	githubAPI  *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
 	jiraAPI    *apiproxy.Server      // Jira REST credential proxy; nil unless requested
+	linearAPI  *apiproxy.Server      // Linear GraphQL credential proxy; nil unless requested
 	ghInjector *ghinjector.Server    // real-gh credential-injector proxy; nil unless requested
 	agentHost  *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
 	proxied    bool                  // guards against a duplicate StartProxies
@@ -227,8 +230,8 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// single classification answers for all of them.
 	result.GitHubCredential = bundle.GitHub.Credential()
 
-	// The GitHub/Jira REST credential proxies the orchestrator's own GetPR +
-	// agenthost verbs route through: the orchestrator holds only the
+	// The GitHub/Jira/Linear API credential proxies the orchestrator's own
+	// GetPR + agenthost verbs route through: the orchestrator holds only the
 	// placeholder, the sidecar injects the real token on the upstream hop. On
 	// any failure here, tear down what already bound so a half-started run
 	// leaks no listener.
@@ -254,6 +257,21 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.JiraAPIURL, result.JiraAPIToken = url, token
 		result.JiraDeployment = string(deployment)
 	}
+	if req.LinearAPIEnabled {
+		srv, url, token, aerr := r.startLinearAPIProxy(req.HostVethIP, conversationID)
+		if aerr != nil {
+			_ = handle.Shutdown(ctx)
+			if r.githubAPI != nil {
+				_ = r.githubAPI.Shutdown(ctx)
+			}
+			if r.jiraAPI != nil {
+				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			return nil, aerr
+		}
+		r.linearAPI = srv
+		result.LinearAPIURL, result.LinearAPIToken = url, token
+	}
 
 	// The real-gh credential-injector proxy: the TLS listener the sandboxed gh
 	// reaches via GH_HOST, injecting the team-set-scoped token upstream while the
@@ -269,6 +287,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 			if r.jiraAPI != nil {
 				_ = r.jiraAPI.Shutdown(ctx)
 			}
+			if r.linearAPI != nil {
+				_ = r.linearAPI.Shutdown(ctx)
+			}
 			return nil, gerr
 		}
 		result.GHChannelHost, result.GHChannelToken = host, token
@@ -278,8 +299,8 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// orchestrator (the relocation): the hostile-input parser now runs in the
 	// per-run jail, holding no db.Stores and no secret store. Its LocalClient's
 	// DB effects relay to the orchestrator over the supervision channel; its
-	// gh/jira verbs build clients against the REST proxies just bound above, so
-	// the real credential never leaves this process's proxy hop.
+	// gh/jira/linear verbs build clients against the API proxies just bound
+	// above, so the real credential never leaves this process's proxy hop.
 	if req.AgentHost != nil {
 		if aerr := r.startAgentHost(req.AgentHost, result); aerr != nil {
 			_ = handle.Shutdown(ctx)
@@ -288,6 +309,9 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 			}
 			if r.jiraAPI != nil {
 				_ = r.jiraAPI.Shutdown(ctx)
+			}
+			if r.linearAPI != nil {
+				_ = r.linearAPI.Shutdown(ctx)
 			}
 			if r.ghInjector != nil {
 				_ = r.ghInjector.Shutdown(ctx)
@@ -306,7 +330,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 
 // startAgentHost binds the relocated exec-verb socket server: a Server whose
 // per-request LocalClient runs over a relay runtime (every DB effect relays to
-// the orchestrator) and whose gh/jira verbs route through the REST proxies this
+// the orchestrator) and whose gh/jira/linear verbs route through the proxies this
 // sidecar just bound (holding only per-run placeholders). It creates the
 // /run/tf/<conversationID>.sock the broker bind-mounts into the jail and grants it to the
 // sandbox group — the same grant the orchestrator used to do, now owned by this
@@ -329,6 +353,8 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		JiraAPIURL:       proxies.JiraAPIURL,
 		JiraAPIToken:     proxies.JiraAPIToken,
 		JiraDeployment:   proxies.JiraDeployment,
+		LinearAPIURL:     proxies.LinearAPIURL,
+		LinearAPIToken:   proxies.LinearAPIToken,
 		GitProxyURL:      proxies.GitProxyURL,
 		GitProxyToken:    proxies.GitProxyToken,
 	}
@@ -633,6 +659,84 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID str
 	return srv, "http://" + addr, token, deployment, nil
 }
 
+// linearUpstream is the origin the Linear proxy forwards to: Linear's API
+// host, which serves every workspace, so neither the bundle nor the frame
+// names it. The path is the GraphQL endpoint the client posts to, which the
+// proxy forwards alone. A var only so a test can point the proxy at a fake.
+var linearUpstream = strings.TrimSuffix(linear.DefaultEndpoint, "/graphql")
+
+// startLinearAPIProxy binds a Linear GraphQL credential proxy on the veth IP.
+// It refuses to start without a Linear credential in the held bundle, as the
+// Jira proxy does: the orchestrator asks for this proxy only on a run about a
+// Linear issue, so a bundle without the credential is a fault to surface at
+// bring-up rather than on the agent's first verb. The injected auth is
+// resolved per request (linearAuthHeader), not captured here.
+func (r *credRuntime) startLinearAPIProxy(hostVethIP, conversationID string) (*apiproxy.Server, string, string, error) {
+	bundle := r.currentBundle()
+	if bundle == nil || bundle.Linear == nil {
+		return nil, "", "", fmt.Errorf("runsidecar: linear api proxy requested: %w", credbundle.ErrNoLinearCredential)
+	}
+	token, err := randomToken()
+	if err != nil {
+		return nil, "", "", err
+	}
+	srv, err := apiproxy.New(apiproxy.Config{
+		Provider:         apiproxy.ProviderLinear,
+		Upstream:         linearUpstream,
+		IncomingToken:    token,
+		AllowNonLoopback: true,
+		ConversationID:   conversationID,
+		AuthHeaderSource: r.linearAuthHeader,
+	})
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: construct linear api proxy: %w", err)
+	}
+	addr, err := srv.Start(net.JoinHostPort(hostVethIP, "0"))
+	if err != nil {
+		return nil, "", "", fmt.Errorf("runsidecar: start linear api proxy: %w", err)
+	}
+	return srv, "http://" + addr, token, nil
+}
+
+// linearAuthHeader is the Linear proxy's AuthHeaderSource: the Authorization
+// value for the held bundle's Linear credential, read on every request so a
+// bundle the brain re-seals mid-run is used from the next request on. A
+// personal API key is the whole value, with no scheme; an app install's
+// access token is a Bearer.
+func (r *credRuntime) linearAuthHeader(context.Context) (string, error) {
+	bundle := r.currentBundle()
+	if bundle == nil {
+		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrNoBundle)
+	}
+	lc := bundle.Linear
+	if lc == nil {
+		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrNoLinearCredential)
+	}
+	switch linear.AuthMethod(lc.AuthMethod) {
+	case linear.AuthMethodAPIKey:
+		if lc.APIKey == "" {
+			return "", fmt.Errorf("runsidecar: linear api proxy, empty api key: %w", credbundle.ErrNoLinearCredential)
+		}
+		return lc.APIKey, nil
+	case linear.AuthMethodAppInstall:
+		if lc.AccessToken == "" {
+			return "", fmt.Errorf("runsidecar: linear api proxy, empty access token: %w", credbundle.ErrNoLinearCredential)
+		}
+		// The token's expiry is not checked here. An expired one is forwarded,
+		// Linear refuses it, and the verb reports linear.ErrUnauthorized.
+		//
+		// TODO(TFAC-86): nothing re-mints this token ahead of its expiry. The
+		// brain's refresh sweep re-seals the bundle on its own cadence with
+		// whatever access token the shared cache holds, and the cache serves a
+		// token until a minute before it expires, so once per token lifetime
+		// (24h) a run in flight holds an expired token, and its Linear verbs
+		// are refused, until a re-seal after the expiry carries a refreshed one.
+		return "Bearer " + lc.AccessToken, nil
+	default:
+		return "", fmt.Errorf("runsidecar: linear api proxy: unknown auth method %q", lc.AuthMethod)
+	}
+}
+
 // randomToken mints a per-run placeholder the orchestrator presents to a
 // sidecar API proxy. Non-secret — the proxy authenticates the caller against
 // it, but the real credential is injected upstream and never travels here.
@@ -763,9 +867,10 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	handle := r.proxies
 	githubAPI := r.githubAPI
 	jiraAPI := r.jiraAPI
+	linearAPI := r.linearAPI
 	ghInjector := r.ghInjector
 	agentHost := r.agentHost
-	r.proxies, r.githubAPI, r.jiraAPI, r.ghInjector, r.agentHost = nil, nil, nil, nil, nil
+	r.proxies, r.githubAPI, r.jiraAPI, r.linearAPI, r.ghInjector, r.agentHost = nil, nil, nil, nil, nil, nil
 	r.mu.Unlock()
 	// Drain the socket server first (unblocks its accept loop + removes the
 	// socket file) so a graceful teardown leaves no stale /run/tf socket. A
@@ -784,6 +889,9 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	}
 	if jiraAPI != nil {
 		_ = jiraAPI.Shutdown(ctx)
+	}
+	if linearAPI != nil {
+		_ = linearAPI.Shutdown(ctx)
 	}
 	if ghInjector != nil {
 		_ = ghInjector.Shutdown(ctx)

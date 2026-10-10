@@ -5,9 +5,9 @@ import "testing"
 // TestEntityRefForExternal pins the (provider, target) → entity natural-key
 // mapping shared by the exec-touch resolver and the conversation-end produced-artifact
 // attach: GitHub targets must parse as owner/repo#N (repo-level coordinates
-// map to nothing), Jira targets are issue keys and need the issue's id, Slack
-// targets are a SlackSourceID, and every other provider or empty key is
-// skipped (ok=false).
+// map to nothing), Jira targets are issue keys and need the issue's id, Linear
+// targets are issue identifiers and need the issue's UUID, Slack targets are a
+// SlackSourceID, and every other provider or empty key is skipped (ok=false).
 func TestEntityRefForExternal(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -93,10 +93,25 @@ func TestEntityRefForExternal(t *testing.T) {
 			provider: ArtifactProviderSlack, target: "",
 		},
 		{
+			name:     "linear issue identifier → issue entity",
+			provider: ArtifactProviderLinear, target: "ENG-42", externalID: "2a7e6b0c-uuid",
+			wantOK: true, wantSource: ArtifactProviderLinear, wantKind: "issue",
+		},
+		{
+			// An identifier alone can name another issue once the one it named
+			// moved team, so nothing is resolved — or minted — without the UUID.
+			name:     "linear identifier without an issue uuid skipped",
+			provider: ArtifactProviderLinear, target: "ENG-42",
+		},
+		{
+			name:     "linear empty target skipped",
+			provider: ArtifactProviderLinear, target: "  ", externalID: "2a7e6b0c-uuid",
+		},
+		{
 			// PR-shaped target under an unmapped provider — proves the skip is
 			// on the provider (default arm), not the target shape.
 			name:     "unmapped provider skipped",
-			provider: ArtifactProviderLinear, target: "octo/repo#9",
+			provider: ArtifactProviderGit, target: "octo/repo#9",
 		},
 	}
 
@@ -114,7 +129,7 @@ func TestEntityRefForExternal(t *testing.T) {
 				return
 			}
 			wantExternalID := ""
-			if tc.provider == ArtifactProviderJira {
+			if tc.provider == ArtifactProviderJira || tc.provider == ArtifactProviderLinear {
 				wantExternalID = tc.externalID
 			}
 			if ref.ExternalID != wantExternalID {

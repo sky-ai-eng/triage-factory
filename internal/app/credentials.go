@@ -9,6 +9,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/linearoauth"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
 	"github.com/sky-ai-eng/triage-factory/internal/modelcatalog"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -41,6 +43,9 @@ import (
 //   - ghResolver picks the right GitHub credential (App-installation token
 //     → org PAT) per (org, target). Shared by the poller, spawner, and repo
 //     profiler.
+//
+//   - linearResolver resolves an org's Linear service credential, either
+//     shape. Shared by the poller and the credential provisioner.
 func (a *App) buildRunCredentials() error {
 	if !a.local() {
 		a.runSecrets = agentproc.NewSystemSecretsReader(a.stores.Secrets)
@@ -88,6 +93,17 @@ func (a *App) buildRunCredentials() error {
 	a.deploymentApp = deployment
 	a.ghResolver = ghclient.NewResolver(a.stores.Secrets, a.stores.GitHubApps, a.stores.Orgs, a.stores.Agents, nil,
 		ghclient.WithDeploymentApp(deployment))
+	// An installed org acts as its app user through an access token that this
+	// cache refreshes, rotating the install's refresh token as it does. The
+	// poller and the credential provisioner both resolve through it, so the
+	// brain refreshes an org's token once for both rather than once each. The
+	// server holds a cache of its own, and the two converge (see
+	// linearoauth.TokenCache); this one writes under the same credential lock
+	// as the server's handlers.
+	linearApps := linear.NewOAuthAppResolver(a.stores.LinearApps, a.stores.Secrets, linear.DeploymentOAuthAppFromEnv())
+	linearTokens := linearoauth.NewTokenCache(linearoauth.NewMinter(), linearApps, a.stores.Secrets, a.stores.LinearInstalls,
+		linearoauth.NewCredentialLock(a.database))
+	a.linearResolver = linear.NewResolverWithInstall(a.stores.Secrets, a.stores.Orgs, linearTokens)
 	return nil
 }
 

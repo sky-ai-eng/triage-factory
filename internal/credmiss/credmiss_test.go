@@ -15,12 +15,13 @@ import (
 
 func TestStatus(t *testing.T) {
 	want := map[string]int{
-		credbundle.MissNoBundle:         http.StatusBadGateway,
-		credbundle.MissTokenExpiring:    http.StatusBadGateway,
-		credbundle.MissOther:            http.StatusBadGateway,
-		credbundle.MissNoRepoToken:      http.StatusForbidden,
-		credbundle.MissNoCLIToken:       http.StatusForbidden,
-		credbundle.MissNoJiraCredential: http.StatusForbidden,
+		credbundle.MissNoBundle:           http.StatusBadGateway,
+		credbundle.MissTokenExpiring:      http.StatusBadGateway,
+		credbundle.MissOther:              http.StatusBadGateway,
+		credbundle.MissNoRepoToken:        http.StatusForbidden,
+		credbundle.MissNoCLIToken:         http.StatusForbidden,
+		credbundle.MissNoJiraCredential:   http.StatusForbidden,
+		credbundle.MissNoLinearCredential: http.StatusForbidden,
 	}
 	for reason, status := range want {
 		if got := Status(reason); got != status {

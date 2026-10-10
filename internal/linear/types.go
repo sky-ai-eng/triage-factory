@@ -85,30 +85,40 @@ type Label struct {
 	Name string `json:"name"`
 }
 
-// Issue is a Linear issue as the IssueFields fragment selects it.
+// Issue is a Linear issue as the IssueFields fragment selects it. Its JSON
+// names are Linear's own field names, like the types it is built from, since
+// an agent reads it as the output of an exec verb.
 type Issue struct {
-	ID, Identifier, Title, Description, URL string
+	ID          string `json:"id"`
+	Identifier  string `json:"identifier"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
 
 	// Priority is 0 (no priority), 1 (urgent), 2 (high), 3 (normal) or
 	// 4 (low); PriorityLabel is Linear's rendering of it.
-	Priority      int
-	PriorityLabel string
+	Priority      int    `json:"priority"`
+	PriorityLabel string `json:"priorityLabel"`
 
-	State    WorkflowState
-	Assignee *User
-	Creator  *User
-	Parent   *IssueRef
-	Team     Team
+	State    WorkflowState `json:"state"`
+	Assignee *User         `json:"assignee"`
+	Creator  *User         `json:"creator"`
+	Parent   *IssueRef     `json:"parent"`
+	Team     Team          `json:"team"`
 	// Labels are label names, sorted.
-	Labels []string
+	Labels []string `json:"labels"`
 
 	// The timestamps are RFC 3339, or "" when unset.
-	CreatedAt, UpdatedAt, CompletedAt, CanceledAt, ArchivedAt string
-	Trashed                                                   bool
+	CreatedAt   string `json:"createdAt"`
+	UpdatedAt   string `json:"updatedAt"`
+	CompletedAt string `json:"completedAt,omitempty"`
+	CanceledAt  string `json:"canceledAt,omitempty"`
+	ArchivedAt  string `json:"archivedAt,omitempty"`
+	Trashed     bool   `json:"trashed"`
 
 	// LastComment is the newest comment, nil when there is none.
-	LastComment *CommentRef
-	Children    []ChildIssue
+	LastComment *CommentRef  `json:"lastComment"`
+	Children    []ChildIssue `json:"children"`
 }
 
 // IssuePage is one page of issues. EndCursor resumes the search while

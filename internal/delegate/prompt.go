@@ -352,13 +352,14 @@ func (s *Spawner) resolveBranchTemplate(ctx context.Context, task domain.Task) s
 }
 
 // renderBranchTemplate substitutes the literal "<ticket-id>" in a branch-name
-// template with the run's ticket id when one is known — the Jira issue key. For
+// template with the run's ticket id when one is known — the Jira issue key or
+// the Linear issue identifier. For
 // runs with no ticket (GitHub PR, taskless), the placeholder is left verbatim
 // so the agent fills in a sensible identifier itself. This is envelope guidance
 // only; the push gate authorizes whatever branch the worktree lands on, so a
 // branch named off-template is never blocked.
 func renderBranchTemplate(tmpl string, task domain.Task) string {
-	if task.EntitySource == "jira" && task.EntitySourceID != "" {
+	if (task.EntitySource == "jira" || task.EntitySource == "linear") && task.EntitySourceID != "" {
 		return strings.ReplaceAll(tmpl, "<ticket-id>", task.EntitySourceID)
 	}
 	return tmpl

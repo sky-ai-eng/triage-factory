@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/review"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -72,8 +73,16 @@ type LocalClient struct {
 	// LocalClient is single-goroutine (see the type doc), so no lock.
 	ghClients map[string]repoClient
 
-	// proxyCreds, when set (TF_ROLE=executor), routes gh/jira verbs through the
-	// run's credential-sidecar REST proxies instead of resolving real tokens.
+	// linearResolver resolves the org's Linear service credential on the
+	// resolver path (linearSystemClient). The daemon hands every request the
+	// Server's one resolver, so a run's verbs share its app-install token
+	// cache; nil until first use otherwise, and never reached when proxyCreds
+	// is set.
+	linearResolver linearclient.Resolver
+
+	// proxyCreds, when set (TF_ROLE=executor), routes gh/jira/linear verbs
+	// through the run's credential-sidecar proxies instead of resolving real
+	// tokens.
 	// Set by the daemon's dispatch from the Server's own coordinates; nil on
 	// all/local where the resolver path is used.
 	proxyCreds *ProxyCredentials
@@ -915,7 +924,7 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	if err := client.TransitionTo(ctx, key, jiraclient.Status{Name: status}); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, jiraDetailsJSON(map[string]any{"status": status}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueTransitioned, domain.ArtifactStateIssueUpdated, status, artifactDetailsJSON(map[string]any{"status": status}))
 	return nil
 }
 
@@ -948,7 +957,7 @@ func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
 	if err := client.AssignToSelf(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": "self"}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueAssigned, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"assignee": "self"}))
 	return nil
 }
 
@@ -960,7 +969,7 @@ func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
 	if err := client.Unassign(ctx, key); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"assignee": nil}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"assignee": nil}))
 	return nil
 }
 
@@ -985,7 +994,7 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	if err := client.UpdateIssue(ctx, key, fields); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"fields": updatedFieldNames(fields)}))
 	return nil
 }
 
@@ -997,7 +1006,7 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	if err := client.SetParent(ctx, key, parentKey); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"parent": parentKey}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"parent": parentKey}))
 	return nil
 }
 
@@ -1033,7 +1042,7 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	if err := client.SetPriority(ctx, key, priority); err != nil {
 		return err
 	}
-	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", jiraDetailsJSON(map[string]any{"priority": priority}))
+	c.recordJiraIssue(ctx, client, key, domain.ActionIssueUpdated, domain.ArtifactStateIssueUpdated, "", artifactDetailsJSON(map[string]any{"priority": priority}))
 	return nil
 }
 
@@ -1160,7 +1169,7 @@ func (c *LocalClient) recordJiraComment(ctx context.Context, client *jiraclient.
 			"conversation", c.info.ConversationID, "issue", key)
 		return
 	}
-	detail := jiraDetailsJSON(map[string]any{"body": jiraBodySnippet(body)})
+	detail := artifactDetailsJSON(map[string]any{"body": artifactBodySnippet(body)})
 	ref := c.resolveJiraIssue(ctx, client, key)
 	resource := ""
 	if ref.ID != "" {
@@ -1239,11 +1248,11 @@ func (c *LocalClient) jiraCommentURL(ctx context.Context, key, commentID string)
 	return fmt.Sprintf("%s/browse/%s?focusedCommentId=%s", base, key, commentID)
 }
 
-// jiraDetailsJSON marshals a small kind-specific payload for an artifact's
+// artifactDetailsJSON marshals a small kind-specific payload for an artifact's
 // details_json. Returns "" (→ SQL NULL) on an empty map or a marshal error —
 // details are descriptive metadata, never load-bearing, so a failure here must
 // not break recording.
-func jiraDetailsJSON(m map[string]any) string {
+func artifactDetailsJSON(m map[string]any) string {
 	if len(m) == 0 {
 		return ""
 	}
@@ -1280,9 +1289,9 @@ func updatedFieldNames(f jiraclient.UpdateIssueFields) []string {
 	return names
 }
 
-// jiraBodySnippet trims a comment body to a short, stored-once reference for
+// artifactBodySnippet trims a comment body to a short, stored-once reference for
 // the artifact's details_json. Rune-aware so a multibyte char isn't split.
-func jiraBodySnippet(body string) string {
+func artifactBodySnippet(body string) string {
 	const max = 200
 	body = strings.TrimSpace(body)
 	r := []rune(body)

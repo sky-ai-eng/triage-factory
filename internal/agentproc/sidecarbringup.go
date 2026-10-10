@@ -133,6 +133,11 @@ type SidecarBringUpParams struct {
 	JiraAPIEnabled  bool
 	JiraAPIUpstream string
 
+	// LinearAPIEnabled requests the Linear GraphQL credential proxy (agenthost
+	// linear verbs). It takes no upstream: the sidecar forwards to Linear's one
+	// API host and injects the API key or app access token from the bundle.
+	LinearAPIEnabled bool
+
 	// GHChannelEnabled requests the real-gh credential-injector proxy (the TLS
 	// listener the sandboxed gh reaches via GH_HOST). It shares the REST base
 	// the GitHub proxy derives from the bundle, and derives the GraphQL
@@ -218,6 +223,7 @@ func BringUpRunSidecar(ctx context.Context, sc sandbox.LaunchedSidecar, provisio
 		GitHubAPIEnabled:    params.GitHubAPIEnabled,
 		JiraAPIEnabled:      params.JiraAPIEnabled,
 		JiraAPIUpstream:     params.JiraAPIUpstream,
+		LinearAPIEnabled:    params.LinearAPIEnabled,
 		GHChannelEnabled:    params.GHChannelEnabled,
 		AgentHost:           params.AgentHost,
 	}

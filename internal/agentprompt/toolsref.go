@@ -11,29 +11,44 @@ import (
 // a manifest section: the caller picks the set and appends it as the <tools>
 // section of the per-run tail, which the harness blocks point at.
 //
-// Core's two sets are embedded from the same blocks tree as everything else.
+// Core's sets are embedded from the same blocks tree as everything else.
 // Non-core sources register at init, which is the whole reason the registry
 // exists: ee/ cannot be imported by core, so an ee package contributes its
 // text inward instead of core reaching outward for it.
+//
+// The issue trackers share one more block, the workspace materialization: a
+// run on a tracker issue starts with no checkout, and how to get one is the
+// same whichever tracker the issue lives in. It is its own file so a set
+// naming both trackers carries it once.
 
-// The two core references are resolved once at init, not per call. Every run
-// dispatch reads them (a Jira run reads both), and they never vary — so they
-// behave like the plain package-level strings they replaced, with no embed
-// read, copy, or concatenation on the dispatch path.
-
-// githubTools / jiraTools are the resolved reference texts. Package-level so a
+// The core blocks are resolved once at init, not per call. Every run dispatch
+// reads them (a Jira run reads three), and they never vary, so there is no
+// embed read, copy, or concatenation on the dispatch path. Package-level so a
 // missing block fails at process start rather than on the first dispatch.
 var (
-	githubTools = block(blockToolsGitHub) + "\n"
-	jiraTools   = block(blockToolsJira) + "\n"
+	githubTools    = block(blockToolsGitHub)
+	jiraTools      = block(blockToolsJira)
+	linearTools    = block(blockToolsLinear)
+	workspaceTools = block(blockToolsWorkspace)
+
+	githubReference = githubTools + "\n"
+	jiraReference   = jiraTools + "\n\n" + workspaceTools + "\n"
+	linearReference = linearTools + "\n\n" + workspaceTools + "\n"
 )
 
 // GitHubToolsReference is the agent-facing docs for the `exec gh` verb family.
-func GitHubToolsReference() string { return githubTools }
+func GitHubToolsReference() string { return githubReference }
 
 // JiraToolsReference is the agent-facing docs for the `exec jira` verb family
-// plus the per-run workspace materialization every codebase-less run needs.
-func JiraToolsReference() string { return jiraTools }
+// plus the per-run workspace materialization every codebase-less run needs:
+// what ToolsReferenceForSources composes for a set naming Jira alone, with a
+// trailing newline.
+func JiraToolsReference() string { return jiraReference }
+
+// LinearToolsReference is the agent-facing docs for the `exec linear` verb
+// family plus the per-run workspace materialization, under the same contract
+// as JiraToolsReference.
+func LinearToolsReference() string { return linearReference }
 
 // toolsReferenceRegistry is the process-global map of non-core entity sources
 // (e.g. "slack") to their agent-facing tools-reference text. Same no-mutex
@@ -48,17 +63,17 @@ var toolsReferenceRegistry = map[string]string{}
 // — a double-source collision or a stale rename — never a legitimate ee
 // contribution.
 var coreToolsReferenceSources = map[string]bool{
-	"github": true, "jira": true,
+	"github": true, "jira": true, "linear": true,
 }
 
 // RegisterToolsReference registers the tools-reference text for a non-core
 // entity source (e.g. "slack"). Called from an ee package's init(); panics
 // on empty source/text, a duplicate source, or a core source ("github",
-// "jira") — a wiring bug that must fail at boot, not silently degrade a
-// run's tool docs. Registered text is literal, like the embedded blocks: write
-// `triagefactory exec <verb>` (the prompt builder points it at the run's
-// binary), and name a per-run fact by pointing at the section of the prompt
-// that carries it.
+// "jira", "linear") — a wiring bug that must fail at boot, not silently
+// degrade a run's tool docs. Registered text is literal, like the embedded
+// blocks: write `triagefactory exec <verb>` (the prompt builder points it at
+// the run's binary), and name a per-run fact by pointing at the section of the
+// prompt that carries it.
 func RegisterToolsReference(source, text string) {
 	if source == "" {
 		panic("agentprompt.RegisterToolsReference: source must not be empty")
@@ -93,6 +108,13 @@ func RegisterToolsReference(source, text string) {
 // Order is canonical, not the caller's: core first, then registered sources
 // alphabetically, deduplicated. Two callers assembling the same set produce the
 // same bytes, which is what keeps a cached prefix cached.
+//
+// The workspace block closes the core group: it follows the tracker blocks,
+// which say how to read the issue while it says how to get the code the issue
+// concerns, and it precedes every registered source. Its inclusion is decided
+// by core sources alone, so placing it inside the core group means a
+// registered source's presence never moves it: the core portion of the
+// section is byte-identical whatever ee has registered.
 func ToolsReferenceForSources(kinds []string) string {
 	seen := make(map[string]bool, len(kinds))
 	var core, registered []string
@@ -108,17 +130,25 @@ func ToolsReferenceForSources(kinds []string) string {
 			registered = append(registered, k)
 		}
 	}
-	slices.Sort(core) // "github" before "jira"
+	slices.Sort(core) // "github", then "jira", then "linear"
 	slices.Sort(registered)
 
-	parts := make([]string, 0, len(core)+len(registered))
+	parts := make([]string, 0, len(core)+1+len(registered))
+	tracker := false
 	for _, k := range core {
 		switch k {
 		case "github":
-			parts = append(parts, strings.TrimSpace(githubTools))
+			parts = append(parts, githubTools)
 		case "jira":
-			parts = append(parts, strings.TrimSpace(jiraTools))
+			parts = append(parts, jiraTools)
+			tracker = true
+		case "linear":
+			parts = append(parts, linearTools)
+			tracker = true
 		}
+	}
+	if tracker {
+		parts = append(parts, workspaceTools)
 	}
 	for _, k := range registered {
 		parts = append(parts, strings.TrimSpace(toolsReferenceRegistry[k]))

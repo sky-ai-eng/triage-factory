@@ -56,20 +56,22 @@ func NormalizeJiraKey(key string) string {
 // where it is the target folded to its canonical spelling), ExternalID is the
 // provider id the entity is identified by, and kind is the entities.kind.
 // ok=false for anything the touched/produced rule skips — a repo-level GitHub
-// target (owner/repo with no '#N'), an empty key, a Jira coordinate with no
-// issue id, or an unmapped provider — so the caller resolves, creates, and
-// records nothing.
+// target (owner/repo with no '#N'), an empty key, a Jira or Linear coordinate
+// with no issue id, or an unmapped provider — so the caller resolves, creates,
+// and records nothing.
 //
 // It is the single home of the (provider, target) → entity mapping shared by
 // the exec-funnel touch resolver (resolveTouchedEntityInfo) and the
 // conversation-end produced-artifact attach (memoryentities.Attach). GitHub
-// targets must parse as owner/repo#N; Jira targets are issue keys; Slack
-// targets are a SlackSourceID channel/root_ts.
+// targets must parse as owner/repo#N; Jira targets are issue keys; Linear
+// targets are issue identifiers; Slack targets are a SlackSourceID
+// channel/root_ts.
 //
-// A Jira coordinate needs externalID, the issue's numeric id: an issue key
-// changes when the issue moves or its project's key is renamed, so an entity
-// found or created on the key alone can be another issue's, or a second row
-// for this one. GitHub and Slack ignore externalID.
+// A Jira coordinate needs externalID, the issue's numeric id, and a Linear
+// coordinate the issue's UUID: an issue key changes when the issue moves or
+// its project's (or team's) key is renamed, so an entity found or created on
+// the key alone can be another issue's, or a second row for this one. GitHub
+// and Slack ignore externalID.
 //
 // NOTE: this assumes every GitHub target is a PR (kind="pr"). Exec only writes
 // PRs/reviews today, so that holds — but a GitHub *issue* shares the
@@ -95,6 +97,15 @@ func EntityRefForExternal(provider, target, externalID string) (ref EntityRef, k
 			return EntityRef{}, "", false
 		}
 		return EntityRef{Source: provider, SourceID: key, ExternalID: externalID}, "issue", true
+	case ArtifactProviderLinear:
+		// The identifier is the key a person reads and the UUID is the
+		// identity; an identifier alone can name another issue once the one it
+		// named moved, so nothing is resolved without the UUID.
+		identifier := strings.TrimSpace(target)
+		if identifier == "" || externalID == "" {
+			return EntityRef{}, "", false
+		}
+		return EntityRef{Source: provider, SourceID: identifier, ExternalID: externalID}, "issue", true
 	case ArtifactProviderSlack:
 		if target == "" {
 			return EntityRef{}, "", false
