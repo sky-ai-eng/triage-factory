@@ -443,7 +443,8 @@ CREATE TABLE public.external_actions (
     org_id uuid NOT NULL,
     team_id uuid,
     provider text NOT NULL,
-    scope text NOT NULL,
+    scope text NOT NULL
+        CONSTRAINT external_actions_scope_check CHECK (scope <> ''),
     action text NOT NULL,
     target text NOT NULL,
     external_id text,
@@ -910,7 +911,8 @@ CREATE TABLE public.repositories (
     owner text NOT NULL,
     repo text NOT NULL,
     source text DEFAULT 'github'::text NOT NULL,
-    host text NOT NULL,
+    host text NOT NULL
+        CONSTRAINT repositories_host_check CHECK (host <> ''),
     external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
@@ -945,7 +947,8 @@ CREATE TABLE public.artifacts (
     team_id uuid NOT NULL,
     provider text NOT NULL,
     kind text NOT NULL,
-    scope text NOT NULL,
+    scope text NOT NULL
+        CONSTRAINT artifacts_scope_check CHECK (scope <> ''),
     target text NOT NULL,
     external_id text,
     url text,

@@ -218,6 +218,11 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 	// sibling verb routes (archive, restore, revoke), so there is no payload
 	// schema for a caller to get wrong.
 	orgID := OrgIDFrom(r.Context())
+	// An org with no GitHub URL has nothing to refresh, so asking for a
+	// refresh is answered as the other writes that need a host answer it.
+	if _, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos"); !ok {
+		return
+	}
 	if s.reachTrigger == nil {
 		// No refresh manager wired: this process cannot ask for one and must not
 		// report that it did. 503 rather than 500 — it is a capability this
