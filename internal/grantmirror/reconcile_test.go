@@ -84,7 +84,7 @@ func newFakeMirror() *fakeMirror {
 	return &fakeMirror{rows: map[string][]string{}, classes: map[string]domain.GitHubCredentialClass{}}
 }
 
-func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _ string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error {
+func (f *fakeMirror) ReplaceForInstallationSystem(_ context.Context, _ string, class domain.GitHubCredentialClass, _, installationID string, repos []domain.ReachableRepository) error {
 	f.replaces++
 	if f.err != nil {
 		return f.err
@@ -440,9 +440,9 @@ type capturingMirror struct {
 	onReplace func([]domain.ReachableRepository)
 }
 
-func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error {
+func (c *capturingMirror) ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, githubHost, installationID string, repos []domain.ReachableRepository) error {
 	c.onReplace(repos)
-	return c.fakeMirror.ReplaceForInstallationSystem(ctx, orgID, class, installationID, repos)
+	return c.fakeMirror.ReplaceForInstallationSystem(ctx, orgID, class, githubHost, installationID, repos)
 }
 
 func TestSplitFullName(t *testing.T) {

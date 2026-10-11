@@ -313,8 +313,8 @@ func TestGitHubAppStatus_MultiMode(t *testing.T) {
 	seedPGBYOAppCredentialClass(t, rig, orgA.String())
 	if _, err := rig.h.AdminDB.Exec(`
 		INSERT INTO org_github_app_installations
-			(installation_id, org_id, account_type, account_login)
-		VALUES ('inst-1', $1, 'Organization', 'acme-eng')
+			(installation_id, org_id, account_type, account_login, github_host)
+		VALUES ('inst-1', $1, 'Organization', 'acme-eng', 'https://github.com')
 	`, orgA.String()); err != nil {
 		t.Fatalf("seed installation: %v", err)
 	}

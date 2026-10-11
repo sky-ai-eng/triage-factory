@@ -3658,9 +3658,9 @@ CREATE POLICY org_github_apps_delete ON public.org_github_apps FOR DELETE TO tf_
     USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
--- installation_id is unique only within one GitHub host, and per-org GHES bases
--- mean two orgs' numeric ids can overlap, so the PK is composite and github_host
--- records which GitHub the row came from. account_id is GitHub's numeric id for
+-- GitHub numbers installations per deployment, so an installation id names one
+-- installation only together with the host it lives on, and github_host is part
+-- of the key. account_id is GitHub's numeric id for
 -- the installed-on account, stored as text; it survives a rename, so credential
 -- resolution matches on it while account_login is what the UI renders. Nullable:
 -- an older row resolves by login until a reconcile or webhook fills it in.
@@ -3671,10 +3671,11 @@ CREATE TABLE public.org_github_app_installations (
     account_id text,
     account_login text NOT NULL,
     -- The GitHub deployment this installation lives on, normalized like every
-    -- other host key here (EffectiveGitHubHost): trailing slashes trimmed, an
-    -- unconfigured base URL resolving to https://github.com, and any path
-    -- component KEPT so a GHES mount path keys the same host as its identity rows.
-    github_host text DEFAULT 'https://github.com'::text NOT NULL,
+    -- other host key here (InstallationHostKey): canonical case, trailing
+    -- slashes trimmed, and any path component KEPT so a GHES mount path keys the
+    -- same host as its identity rows. No default: a row names the host it was
+    -- listed on.
+    github_host text NOT NULL,
     installed_at timestamp with time zone DEFAULT now() NOT NULL,
     removed_at timestamp with time zone,
     -- An account owner can suspend an installation without uninstalling it: the
@@ -3698,7 +3699,7 @@ CREATE TABLE public.org_github_app_installations (
 );
 
 ALTER TABLE ONLY public.org_github_app_installations
-    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, installation_id);
+    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, github_host, installation_id);
 
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
@@ -3706,9 +3707,7 @@ ALTER TABLE ONLY public.org_github_app_installations
 -- At most one active install per account on each GitHub deployment, without
 -- overwriting history: an uninstall stamps removed_at, a reinstall inserts a
 -- fresh installation_id. github_host is in the key because a login is unique
--- only within one deployment: an org that moves to another GitHub keeps the old
--- host's rows live, and binds the new host's installation for an account of the
--- same name beside them.
+-- only within one deployment: the same login on two GitHubs names two accounts.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
     ON public.org_github_app_installations (org_id, github_host, account_login)
     WHERE (removed_at IS NULL);
@@ -3798,11 +3797,14 @@ CREATE TABLE public.reachable_repositories (
         CONSTRAINT reachable_repositories_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
     -- The credential INSTANCE the reach was observed through — the scope one
-    -- refresh replaces atomically. Both App classes hang off the installation
-    -- row, which records its GitHub deployment and cascades on uninstall; the
-    -- PAT tier has none, so it carries the host directly.
+    -- refresh replaces atomically. Every row carries the GitHub it was observed
+    -- on. An App row also names its installation, and (org_id, host,
+    -- installation_id) is that installation's key, so the row hangs off the
+    -- installation on its own host and cascades with it; the PAT tier has no
+    -- installation, and its host alone is its scope.
     installation_id text,
-    host text,
+    host text NOT NULL
+        CONSTRAINT reachable_repositories_host_check CHECK (host <> ''),
     -- The issuing provider, carried so the registry join is written against the
     -- registry's own key (org_id, source, lower(owner), lower(repo)). Not part of
     -- this table's key: every row here is reached through a GitHub credential.
@@ -3825,31 +3827,32 @@ CREATE TABLE public.reachable_repositories (
     -- When the refresh that wrote this row ran: a staleness gate for the
     -- re-enumeration TTL and the write gate choosing cache over upstream probe.
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- Exactly one scope column per class: with both, a row has two answers to
-    -- what one refresh replaces; with neither, it can never be replaced.
+    -- An installation exactly when the class has one: an App row without one
+    -- could never be replaced, and a PAT row with one would have two answers to
+    -- what one refresh replaces.
     CONSTRAINT reachable_repositories_scope_check
-        CHECK ((credential_class IN ('byo_app', 'managed_app') AND installation_id IS NOT NULL AND host IS NULL)
-            OR (credential_class = 'pat' AND installation_id IS NULL AND host IS NOT NULL))
+        CHECK ((credential_class IN ('byo_app', 'managed_app') AND installation_id IS NOT NULL)
+            OR (credential_class = 'pat' AND installation_id IS NULL))
 );
 
 ALTER TABLE ONLY public.reachable_repositories
     ADD CONSTRAINT reachable_repositories_installation_fkey
-    FOREIGN KEY (org_id, installation_id)
-    REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
+    FOREIGN KEY (org_id, host, installation_id)
+    REFERENCES public.org_github_app_installations (org_id, github_host, installation_id) ON DELETE CASCADE;
 
 -- The natural key per scope shape, case-folded like repositories_identity:
 -- GitHub identifiers are case-insensitive, so a case-sensitive index behind a
 -- case-insensitive guard admits duplicates when two writers race. Two partial
--- indexes, not one over coalesce(installation_id, host), which would collide.
+-- indexes, one per scope shape.
 --
 -- Both App classes share the App predicate rather than taking an index each:
--- the key already contains installation_id, an installation belongs to exactly
+-- the key already contains the installation, an installation belongs to exactly
 -- one App, and an org holds one class at a time, so a cross-class collision on
--- the same installation id is not constructible. A class outside both
+-- the same installation is not constructible. A class outside both
 -- predicates would carry no uniqueness constraint at all, and the writer's
 -- ON CONFLICT DO NOTHING would have no conflict to detect.
 CREATE UNIQUE INDEX reachable_repositories_app_identity
-    ON public.reachable_repositories USING btree (org_id, installation_id, lower(owner), lower(repo))
+    ON public.reachable_repositories USING btree (org_id, host, installation_id, lower(owner), lower(repo))
     WHERE credential_class IN ('byo_app', 'managed_app');
 
 CREATE UNIQUE INDEX reachable_repositories_pat_identity
@@ -3892,22 +3895,25 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_repositories TO t
 -- One row per refresh scope, so "we have not looked yet" is representable: a
 -- scope that legitimately reaches nothing writes zero repository rows, which
 -- row count alone cannot distinguish from an un-run refresh. No FK — scope
--- holds an installation id for byo_app and a host for pat, so there is no
--- single parent. App-pool members read; every app-pool write is denied.
+-- holds an installation id for the App classes and a host for pat, so there is
+-- no single parent; removing an installation deletes its markers in the same
+-- transaction. App-pool members read; every app-pool write is denied.
 CREATE TABLE public.reachable_scopes (
     org_id uuid NOT NULL,
     credential_class text NOT NULL
         CONSTRAINT reachable_scopes_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
-    -- The credential instance one refresh replaces: the installation id for the
-    -- App classes, the host for pat. Reads join it to the installation to place
-    -- an App scope on its GitHub host.
+    -- The GitHub the scope is on, and the credential instance one refresh
+    -- replaces there: the installation id for the App classes, the host again
+    -- for pat.
+    host text NOT NULL
+        CONSTRAINT reachable_scopes_host_check CHECK (host <> ''),
     scope text NOT NULL,
     refreshed_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY public.reachable_scopes
-    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, scope);
+    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, host, scope);
 
 ALTER TABLE public.reachable_scopes ENABLE ROW LEVEL SECURITY;
 

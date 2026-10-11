@@ -127,5 +127,5 @@ func (s *Server) handleDeploymentGitHubWebhook(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	s.applyWebhookDelivery(w, r, orgID, eventName, d)
+	s.applyWebhookDelivery(w, r, orgID, host, eventName, d)
 }

@@ -51,11 +51,13 @@ func TestMigrate_ReachableRepoCache(t *testing.T) {
 		t.Fatalf("seed installation: %v", err)
 	}
 
+	// Up to the mirror and no further: a later migration keys the reach rows
+	// by host, and this case pins the shape the mirror itself created.
 	gooseMu.Lock()
-	upErr := goose.Up(database, dir)
+	upErr := goose.UpTo(database, dir, 202608150007)
 	gooseMu.Unlock()
 	if upErr != nil {
-		t.Fatalf("goose.Up: %v", upErr)
+		t.Fatalf("goose.UpTo: %v", upErr)
 	}
 
 	var (

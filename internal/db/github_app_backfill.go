@@ -248,14 +248,14 @@ type ManagedInstallationSet struct {
 // until the next cycle.
 //
 // upsert writes one row (its OrgID already stamped); markRemoved soft-removes
-// one of orgID's installations. Both are the store's own pool-bound writers,
-// as with ReconcileInstallations.
+// one of orgID's installations on the host listed. Both are the store's own
+// pool-bound writers, as with ReconcileInstallations.
 func RefreshManagedInstallationSets(
 	ctx context.Context,
 	deployment githubapp.DeploymentApp,
 	sets []ManagedInstallationSet,
 	upsert func(domain.OrgGitHubAppInstallation) error,
-	markRemoved func(orgID, installationID string) error,
+	markRemoved func(orgID, githubHost, installationID string) error,
 ) error {
 	var firstErr error
 	fail := func(err error) {
@@ -301,7 +301,7 @@ func RefreshManagedInstallationSets(
 		orgID := set.OrgID
 		err := ReconcileInstallations(kept, set.Bound,
 			upsert,
-			func(installationID string) error { return markRemoved(orgID, installationID) },
+			func(installationID string) error { return markRemoved(orgID, deploymentHost, installationID) },
 		)
 		if err != nil {
 			fail(fmt.Errorf("reconcile managed installations for org %s: %w", orgID, err))

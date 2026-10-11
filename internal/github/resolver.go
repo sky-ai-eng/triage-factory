@@ -1179,9 +1179,9 @@ func (a accountRef) String() string {
 // behaviour for a ref with no id.
 //
 // Only installations on host are candidates — the GitHub the token is minted
-// against (installationHost of the resolution's base). An org that moves to
-// another GitHub keeps the old host's rows live, and neither half of an
-// account ref means anything across deployments: a login on one host may be an
+// against (installationHost of the resolution's base). A row on another host is
+// another GitHub's installation, and neither half of an account ref means
+// anything across deployments: a login on one host may be an
 // unrelated account on another, and account and installation ids are numbered
 // per deployment. A target with no installation on host is ErrNoGitHubCredentials
 // however many the org holds elsewhere, and an empty host selects nothing.

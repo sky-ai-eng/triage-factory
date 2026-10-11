@@ -158,7 +158,7 @@ func TestRunDeployment_ALostUnsuspendUnblocksTheGrantPass(t *testing.T) {
 	app := testDeploymentApp(t)
 	stores, org := newManagedWorkspace(t, gh.srv.URL)
 	bindInstallation(t, stores, org, gh.srv.URL, "456", "1000", "acme")
-	if _, err := stores.GitHubApps.SetInstallationSuspension(ctx, org, "456", time.Now().Add(-time.Hour), "owner"); err != nil {
+	if _, err := stores.GitHubApps.SetInstallationSuspension(ctx, org, gh.srv.URL, "456", time.Now().Add(-time.Hour), "owner"); err != nil {
 		t.Fatalf("suspend the installation: %v", err)
 	}
 	// GitHub, meanwhile, has lifted it — and no delivery said so.

@@ -59,9 +59,10 @@ import (
 // Reads also take the org's CURRENT GitHub host, for the same reason one level
 // down: a PAT refresh replaces only its own host's rows, and an App's
 // installations keep theirs, so after the org moves to another host the old
-// host's reach is still stored. A PAT row is on the host it carries, an App row
-// on its installation's github_host; rows on any other host are never offered
-// to the picker, admitted by the write gate, counted, or reported.
+// host's reach is still stored. Every row carries the host it was observed on —
+// an App row its installation's, which the foreign key holds it to — and rows
+// on any other host are never offered to the picker, admitted by the write
+// gate, counted, or reported.
 //
 // # Pool split (Postgres)
 //
@@ -78,8 +79,11 @@ import (
 //
 // SQLite collapses to one connection and one org.
 type ReachableReposStore interface {
-	// ReplaceForInstallationSystem replaces one installation's App-tier entries
-	// with repos, atomically: after it returns, the stored set for that scope
+	// ReplaceForInstallationSystem replaces the App-tier entries of the
+	// installation (githubHost, installationID) with repos, atomically — an
+	// installation id names an installation only on its own host, so the host
+	// is half of the scope, and an empty one is refused. After it returns, the
+	// stored set for that scope
 	// equals what was passed — including removals, so a repository revoked from a
 	// selective grant disappears. The same transaction records that this scope
 	// was refreshed, which is what makes a grant of nothing distinguishable from
@@ -88,7 +92,7 @@ type ReachableReposStore interface {
 	// class is the App-tier class the org's entries are keyed under — its own
 	// registration or the deployment's shared App — and it is a parameter rather
 	// than a value read off the rows because the scope marker carries it too:
-	// reachable_scopes is keyed (org_id, credential_class, scope), and a grant of
+	// reachable_scopes is keyed (org_id, credential_class, host, scope), and a grant of
 	// nothing has no row to read a class from. Marking that scope under the wrong
 	// class would leave an org whose grant is legitimately empty reading as
 	// never-refreshed forever. Rows are stamped from it, so a caller cannot hand
@@ -107,7 +111,7 @@ type ReachableReposStore interface {
 	//
 	// Exempt from the returned-row rule: it reconciles a whole cache set in
 	// one transaction, so there is no single row a return value could name.
-	ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, installationID string, repos []domain.ReachableRepository) error
+	ReplaceForInstallationSystem(ctx context.Context, orgID string, class domain.GitHubCredentialClass, githubHost, installationID string, repos []domain.ReachableRepository) error
 
 	// ReplaceForPATSystem is the PAT tier's twin: it replaces the org's ENTIRE
 	// pat-class set with repos observed against host.

@@ -170,7 +170,7 @@ type GitHubAppsStore interface {
 	// ListManagedInstallationsOffHostSystem returns every LIVE installation
 	// row (removed_at IS NULL) held by an org in the managed_app class whose
 	// github_host is not githubHost (normalized as every host key is), ordered
-	// by org then installation id. Empty when every managed row is on that
+	// by org, installation id, then host. Empty when every managed row is on that
 	// host, which is the only healthy state.
 	//
 	// It exists for one reader: the boot warning that names the rows the
@@ -188,11 +188,12 @@ type GitHubAppsStore interface {
 	ListManagedInstallationsOffHostSystem(ctx context.Context, githubHost string) ([]domain.OrgGitHubAppInstallation, error)
 
 	// UpsertInstallation mirrors one installation into
-	// org_github_app_installations. Idempotent on the (org_id,
-	// installation_id) composite key; ON CONFLICT it refreshes the
-	// account fields and clears removed_at, so re-observing (backfill) or
-	// reinstalling (webhook) the same installation revives a
-	// previously-removed row. installed_at is set on first insert and
+	// org_github_app_installations. Idempotent on the (org_id, github_host,
+	// installation_id) key — GitHub numbers installations per deployment, so
+	// the same id on another host is another installation and another row. ON
+	// CONFLICT it refreshes the account fields and clears removed_at, so
+	// re-observing (backfill) or reinstalling (webhook) the same installation
+	// revives a previously-removed row. installed_at is set on first insert and
 	// preserved across upserts (a zero InstalledAt defaults to now()). In
 	// Postgres this writes on the admin pool — tf_app is denied all
 	// writes to this table by RLS.
@@ -204,12 +205,10 @@ type GitHubAppsStore interface {
 	// names the account, and is never re-emptied), while AccountLogin is
 	// overwritten unconditionally so a rename reaches the mirror.
 	//
-	// GitHubHost takes the login's rule too, and is normalized on the way in
-	// (EffectiveGitHubHost): both writers resolve it from the org's
-	// github_base_url, which is the only thing it can be, so the value they
-	// carry is always current. An empty one is an org with no GitHub URL,
-	// which has no installation to record: ErrInstallationHostRequired, and
-	// nothing is written.
+	// GitHubHost is normalized on the way in (EffectiveGitHubHost). Every
+	// writer takes it from the GitHub it listed or was told about. An empty one
+	// names no GitHub, so there is no installation to record:
+	// ErrInstallationHostRequired, and nothing is written.
 	//
 	// The suspension fields are overwritten unconditionally, like the login
 	// and unlike the id: both callers see GitHub's whole answer for the
@@ -238,16 +237,19 @@ type GitHubAppsStore interface {
 	// depends on — RETURNING still hands back that row, since the row exists,
 	// it's simply invisible to the active-only readers. A no-op (nil, nil,
 	// not an error) on an installation the mirror has never seen — the next
-	// reconcile mints the row with the suspension already on it. Admin pool
-	// in Postgres, like the other installation writes.
-	SetInstallationSuspension(ctx context.Context, orgID, installationID string, suspendedAt time.Time, suspendedBy string) (*domain.OrgGitHubAppInstallation, error)
+	// reconcile mints the row with the suspension already on it. Addressed by
+	// the row's whole key, githubHost read as InstallationHostKey, so ""
+	// matches nothing. Admin pool in Postgres, like the other installation
+	// writes.
+	SetInstallationSuspension(ctx context.Context, orgID, githubHost, installationID string, suspendedAt time.Time, suspendedBy string) (*domain.OrgGitHubAppInstallation, error)
 
 	// MarkInstallationRemoved soft-deletes one installation by stamping
 	// removed_at = now() (a no-op — (nil, nil) — on an already-removed or
-	// absent row) and returns the row it just removed. Scoped by orgID as
-	// well as installation_id: installation IDs are unique only per GitHub
-	// host, so the org binding keeps a delete for one tenant from touching
-	// another's same-numbered row. domain.OrgGitHubAppInstallation has no
+	// absent row) and returns the row it just removed. Addressed by the row's
+	// whole key, githubHost read as InstallationHostKey (so "" matches
+	// nothing): installation ids are unique only per GitHub host, so removing
+	// one host's installation leaves another host's same-numbered row, and
+	// another org's, alone. domain.OrgGitHubAppInstallation has no
 	// RemovedAt field — readers filter removed_at IS NULL, so the domain type
 	// stays active-only and this operates at the SQL level; the returned row
 	// is therefore one no ListInstallationsForOrg call will ever find again,
@@ -259,7 +261,7 @@ type GitHubAppsStore interface {
 	// transaction are its cascade, not a second write this return value
 	// speaks to — they're a reach-cache invalidation nothing reads as a
 	// resource of its own. Admin pool in Postgres.
-	MarkInstallationRemoved(ctx context.Context, orgID, installationID string) (*domain.OrgGitHubAppInstallation, error)
+	MarkInstallationRemoved(ctx context.Context, orgID, githubHost, installationID string) (*domain.OrgGitHubAppInstallation, error)
 
 	// BackfillInstallationsFromAPI is the reconcile / system-of-record for a
 	// workspace that brought its OWN App: it mints an App JWT from the org's

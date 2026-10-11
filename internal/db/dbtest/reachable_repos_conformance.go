@@ -132,7 +132,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	t.Run("ReplaceIsGitHubsAnswerIncludingRemovals", func(t *testing.T) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
 		}); err != nil {
@@ -142,7 +142,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// The account owner narrows the selection: web out, worker in. A mirror
 		// that only ever grew would keep reporting reach the App has lost, which
 		// is the failure the whole table exists to prevent.
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "worker", "12"),
 		}); err != nil {
@@ -159,7 +159,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// comparison a rename cannot break.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "424242"),
 			entry(b, "1", "acme", "web", ""), // an entry GitHub sent no id for
 		}); err != nil {
@@ -189,7 +189,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// impossible rather than merely avoided — no writer has to remember.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "Acme", "API", "10"),
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -210,7 +210,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// what the mirror must still hold.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -218,7 +218,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 
 		bad := entry(b, "1", "acme", "web", "11")
 		bad.Source = "gitlab" // not a provider this schema knows
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "worker", "12"),
 			bad,
 		}); err == nil {
@@ -236,18 +236,18 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		install(t, b, "2", "other", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (1): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "2", []domain.ReachableRepository{
 			entry(b, "2", "other", "tool", "20"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
 		}
 
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -262,13 +262,13 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// reconciled a grant has written nothing and been told it succeeded.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "", nil); err == nil {
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "", nil); err == nil {
 			t.Error("ReplaceForInstallationSystem accepted an empty installation id; want an error")
 		}
 
@@ -283,17 +283,17 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		install(t, b, "2", "other", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (1): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "2", []domain.ReachableRepository{
 			entry(b, "2", "other", "tool", "20"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem (2): %v", err)
 		}
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "2"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "2"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -366,7 +366,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		b.TrackRepo(t, "acme", "api")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "secrets", "11"),
 			entry(b, "1", "acme", "payroll", "12"),
@@ -388,7 +388,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
 		b.TrackRepo(t, "Acme", "API")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -409,12 +409,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// as a live security problem.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionAll)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "secrets", "11"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		got, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
@@ -434,7 +434,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "legacy")
 		b.TrackRepo(t, "Acme", "Web") // folds onto the granted acme/web
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
 		}); err != nil {
@@ -456,7 +456,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "legacy")
 		b.TrackRepo(t, "Acme", "Legacy")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -498,7 +498,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "legacy")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -509,7 +509,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("scope drift = %v before removal; want [acme/legacy]", trackedSlugs(drift))
 		}
 
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
@@ -537,7 +537,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		for id, login := range map[string]string{"1": "every", "2": "some", "3": "unknown"} {
 			b.TrackRepo(t, login, "api")
 			b.TrackRepo(t, login, "legacy")
-			if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, id, []domain.ReachableRepository{
+			if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, id, []domain.ReachableRepository{
 				entry(b, id, login, "api", "1"+id),
 			}); err != nil {
 				t.Fatalf("ReplaceForInstallationSystem(%s): %v", id, err)
@@ -566,7 +566,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "stranger", "tool")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -590,7 +590,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "api")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", nil); err != nil {
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", nil); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
 		got, _, err := b.Mirror.ListScopeDriftSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
@@ -611,7 +611,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		for _, r := range []string{"d1", "d2", "d3"} {
 			b.TrackRepo(t, "acme", r)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "r1", "11"),
 			entry(b, "1", "acme", "r2", "12"),
@@ -673,7 +673,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
 		b.TrackRepo(t, "acme", "api")
 		b.TrackRepo(t, "acme", "legacy")
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "secrets", "11"),
 		}); err != nil {
@@ -803,12 +803,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}); err != nil {
 			t.Fatalf("UpsertInstallation(ghe): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "dotcom", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(github.com): %v", err)
 		}
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "https://ghe.internal", "2", []domain.ReachableRepository{
 			entry(b, "2", "acme-ghe", "enterprise", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(ghe): %v", err)
@@ -850,13 +850,97 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		}
 	})
 
+	t.Run("SameInstallationIDOnTwoHostsKeepsTwoGrants", func(t *testing.T) {
+		// GitHub numbers installations per deployment, so installation 3 on two
+		// hosts is two installations, each with its own grant. Neither host's
+		// reach is read as the other's, a replace on one leaves the other's rows
+		// and refresh marker alone, and removing one takes only its own. An
+		// installation that comes back on a host starts from nothing there,
+		// rather than from a grant the other installation was refreshed with.
+		const ghe = "https://ghe.b.test"
+		b := mk(t)
+		install(t, b, "3", "acme", domain.RepositorySelectionSelected)
+		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			InstallationID:      "3",
+			OrgID:               b.OrgID,
+			AccountType:         "Organization",
+			AccountLogin:        "globex",
+			GitHubHost:          ghe,
+			RepositorySelection: domain.RepositorySelectionSelected,
+		}); err != nil {
+			t.Fatalf("UpsertInstallation(3 on %s): %v", ghe, err)
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "3", []domain.ReachableRepository{
+			entry(b, "3", "acme", "dotcom", "10"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(3 on %s): %v", TestGitHubHost, err)
+		}
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, ghe, "3", []domain.ReachableRepository{
+			entry(b, "3", "globex", "enterprise", "10"),
+			entry(b, "3", "globex", "internal", "11"),
+		}); err != nil {
+			t.Fatalf("ReplaceForInstallationSystem(3 on %s): %v", ghe, err)
+		}
+
+		read := func(t *testing.T, host string) ([]string, domain.ReachableCacheState) {
+			t.Helper()
+			rows, _, err := b.Mirror.ListReachableSystem(ctx, b.OrgID, host, byoApp, "", db.Unwindowed)
+			if err != nil {
+				t.Fatalf("ListReachableSystem(%s): %v", host, err)
+			}
+			state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, host, byoApp)
+			if err != nil {
+				t.Fatalf("ReachableStateSystem(%s): %v", host, err)
+			}
+			return slugs(t, rows), state
+		}
+		got, state := read(t, TestGitHubHost)
+		equal(t, "reach on the default host", got, []string{"acme/dotcom"})
+		if !state.Refreshed || state.Count != 1 {
+			t.Errorf("state on the default host = %+v; want refreshed with 1 entry", state)
+		}
+		got, state = read(t, ghe)
+		equal(t, "reach on ghe", got, []string{"globex/enterprise", "globex/internal"})
+		if !state.Refreshed || state.Count != 2 {
+			t.Errorf("state on ghe = %+v; want refreshed with 2 entries", state)
+		}
+		unclaimed, _, err := b.Mirror.ListReachWithoutPurposeSystem(ctx, b.OrgID, TestGitHubHost, byoApp, db.Unwindowed)
+		if err != nil {
+			t.Fatalf("ListReachWithoutPurposeSystem: %v", err)
+		}
+		equal(t, "reach without purpose on the default host", slugs(t, unclaimed), []string{"acme/dotcom"})
+
+		// The default host's installation is uninstalled; the GHES one is not.
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "3"); err != nil {
+			t.Fatalf("MarkInstallationRemoved(3 on %s): %v", TestGitHubHost, err)
+		}
+		got, state = read(t, TestGitHubHost)
+		equal(t, "reach on the default host after its removal", got, []string{})
+		if state.Refreshed {
+			t.Errorf("state on the default host after its removal = %+v; want unrefreshed", state)
+		}
+		got, state = read(t, ghe)
+		equal(t, "reach on ghe after the other host's removal", got, []string{"globex/enterprise", "globex/internal"})
+		if !state.Refreshed || state.Count != 2 {
+			t.Errorf("state on ghe after the other host's removal = %+v; want refreshed with 2 entries", state)
+		}
+
+		// Reinstalled on the default host, it has not been refreshed there yet.
+		install(t, b, "3", "acme", domain.RepositorySelectionSelected)
+		got, state = read(t, TestGitHubHost)
+		equal(t, "reach on the default host after reinstall", got, []string{})
+		if state.Refreshed {
+			t.Errorf("state on the default host after reinstall = %+v; want unrefreshed", state)
+		}
+	})
+
 	t.Run("ClassesDoNotBleedIntoEachOther", func(t *testing.T) {
 		// An org mid-cutover has both answers on file. Every read filters on the
 		// org's CURRENT class, so the other tier's rows are inert rather than
 		// merged in — the union would be a reach the org does not have.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "granted", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
@@ -959,7 +1043,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Errorf("state = %+v before any write; want unknown and empty — the readiness gate keys on it", empty)
 		}
 
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(1): %v", err)
@@ -972,7 +1056,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			t.Fatalf("state = %+v after one scope; want known, one row, and an observed_at", afterFirst)
 		}
 
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "2", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "2", []domain.ReachableRepository{
 			entry(b, "2", "beta", "web", "20"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(2): %v", err)
@@ -997,7 +1081,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// repositories…" forever and asks for a fresh enumeration on every open.
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", nil); err != nil {
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", nil); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem(empty): %v", err)
 		}
 		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
@@ -1021,12 +1105,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		// installation was removed keeps reading as "looked at, found nothing".
 		b := mk(t)
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, byoApp, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, domain.GitHubCredentialClassBYOApp)
@@ -1088,7 +1172,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		const managed = domain.GitHubCredentialClassManagedApp
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 			entry(b, "1", "acme", "web", "11"),
 		}); err != nil {
@@ -1107,9 +1191,9 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 			if row.CredentialClass != managed {
 				t.Errorf("%s came back keyed %q; want %q", row.Slug(), row.CredentialClass, managed)
 			}
-			if row.InstallationID != "1" || row.Host != "" {
-				t.Errorf("%s carries installation %q / host %q; want the installation scope and no host",
-					row.Slug(), row.InstallationID, row.Host)
+			if row.InstallationID != "1" || row.Host != TestGitHubHost {
+				t.Errorf("%s carries installation %q / host %q; want installation 1 on its host %s",
+					row.Slug(), row.InstallationID, row.Host, TestGitHubHost)
 			}
 		}
 
@@ -1143,7 +1227,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		const managed = domain.GitHubCredentialClassManagedApp
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "Acme", "API", "10"),
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
@@ -1167,12 +1251,12 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 		b := mk(t)
 		const managed = domain.GitHubCredentialClassManagedApp
 		install(t, b, "1", "acme", domain.RepositorySelectionSelected)
-		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, "1", []domain.ReachableRepository{
+		if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, managed, TestGitHubHost, "1", []domain.ReachableRepository{
 			entry(b, "1", "acme", "api", "10"),
 		}); err != nil {
 			t.Fatalf("ReplaceForInstallationSystem: %v", err)
 		}
-		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, "1"); err != nil {
+		if _, err := b.Apps.MarkInstallationRemoved(ctx, b.OrgID, TestGitHubHost, "1"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		state, err := b.Mirror.ReachableStateSystem(ctx, b.OrgID, TestGitHubHost, managed)
@@ -1203,7 +1287,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 				case class.AppTier():
 					installationID := fmt.Sprintf("%d", 900+i)
 					install(t, b, installationID, owner, domain.RepositorySelectionSelected)
-					if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, class, installationID,
+					if err := b.Mirror.ReplaceForInstallationSystem(ctx, b.OrgID, class, TestGitHubHost, installationID,
 						[]domain.ReachableRepository{entry(b, installationID, owner, repo, "")}); err != nil {
 						t.Fatalf("ReplaceForInstallationSystem(%s): %v", class, err)
 					}

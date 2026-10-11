@@ -271,7 +271,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted CURRENT_TIMESTAMP")
 	}
 
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, dbtest.TestGitHubHost, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -290,8 +290,8 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	}
 }
 
-// TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the composite
-// (org_id, installation_id) key: the same numeric installation_id under two
+// TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the (org_id,
+// github_host, installation_id) key: the same numeric installation_id under two
 // orgs on two GitHub deployments — the case that is legal, since GitHub numbers
 // installations per deployment and not universally — stays two independent
 // rows, and a delete for one org never touches the other's same-id row. The
@@ -323,7 +323,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 		t.Errorf("orgA = %+v, want one only-in-a row (orgB's same-id upsert leaked)", gotA)
 	}
 
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "https://git.example.com", "900"); err != nil {
 		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {

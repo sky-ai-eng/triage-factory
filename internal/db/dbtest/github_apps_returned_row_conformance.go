@@ -129,7 +129,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		read := func() (*domain.OrgGitHubAppInstallation, error) { return readRaw(instID) }
 
 		suspendedAt := time.Date(2026, 8, 15, 12, 0, 0, 0, time.UTC)
-		suspended, err := store.SetInstallationSuspension(ctx, orgID, instID, suspendedAt, "octocat")
+		suspended, err := store.SetInstallationSuspension(ctx, orgID, TestGitHubHost, instID, suspendedAt, "octocat")
 		if err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
@@ -142,7 +142,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		}
 
 		// The documented no-op: an installation the mirror has never seen.
-		absent, err := store.SetInstallationSuspension(ctx, orgID, "ret-inst-never-seen", suspendedAt, "octocat")
+		absent, err := store.SetInstallationSuspension(ctx, orgID, TestGitHubHost, "ret-inst-never-seen", suspendedAt, "octocat")
 		if err != nil {
 			t.Errorf("SetInstallationSuspension on an unmirrored installation = %v, want nil error", err)
 		}
@@ -161,7 +161,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		}
 		read := func() (*domain.OrgGitHubAppInstallation, error) { return readRaw(instID) }
 
-		removed, err := store.MarkInstallationRemoved(ctx, orgID, instID)
+		removed, err := store.MarkInstallationRemoved(ctx, orgID, TestGitHubHost, instID)
 		if err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
@@ -177,7 +177,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		}
 
 		// The documented no-op: already removed.
-		again, err := store.MarkInstallationRemoved(ctx, orgID, instID)
+		again, err := store.MarkInstallationRemoved(ctx, orgID, TestGitHubHost, instID)
 		if err != nil {
 			t.Errorf("MarkInstallationRemoved on an already-removed row = %v, want nil error", err)
 		}

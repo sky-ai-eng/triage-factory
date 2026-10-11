@@ -474,7 +474,7 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 		if _, err := store.UpsertInstallation(ctx, row(managed, "205", "https://ghe.other.test")); err != nil {
 			t.Fatalf("UpsertInstallation(205): %v", err)
 		}
-		if _, err := store.MarkInstallationRemoved(ctx, managed, "205"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, managed, "https://ghe.other.test", "205"); err != nil {
 			t.Fatalf("MarkInstallationRemoved(205): %v", err)
 		}
 
@@ -495,12 +495,17 @@ func RunGitHubManagedRefreshConformance(t *testing.T, mk GitHubManagedRefreshFac
 			t.Errorf("off-host managed installations = %v; want %v", ids, want)
 		}
 
-		// Re-pointed under the deployment host, nothing is left to warn about.
-		if _, err := store.UpsertInstallation(ctx, row(managed, "201", deploymentHost)); err != nil {
-			t.Fatalf("UpsertInstallation(201 moved): %v", err)
+		// Removed from the other GitHubs, nothing is left to warn about. An id
+		// names an installation only on its own host, so the deployment host's
+		// rows for the same numbers are other installations and stay out of it.
+		if _, err := store.MarkInstallationRemoved(ctx, managed, "https://ghe.other.test", "201"); err != nil {
+			t.Fatalf("MarkInstallationRemoved(201): %v", err)
 		}
-		if _, err := store.UpsertInstallation(ctx, row(managed, "202", deploymentHost)); err != nil {
-			t.Fatalf("UpsertInstallation(202 moved): %v", err)
+		if _, err := store.MarkInstallationRemoved(ctx, managed, deploymentHost+"/enterprise", "202"); err != nil {
+			t.Fatalf("MarkInstallationRemoved(202): %v", err)
+		}
+		if _, err := store.UpsertInstallation(ctx, row(managed, "201", deploymentHost)); err != nil {
+			t.Fatalf("UpsertInstallation(201 on the deployment host): %v", err)
 		}
 		if got, err := store.ListManagedInstallationsOffHostSystem(ctx, deploymentHost); err != nil || len(got) != 0 {
 			t.Errorf("ListManagedInstallationsOffHostSystem after re-keying = (%d rows, %v); want (0, nil)", len(got), err)

@@ -102,7 +102,18 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.applyWebhookDelivery(w, r, orgID, eventName, d)
+	// An installation delivery is applied to the row on the GitHub it came
+	// from, which for an org's own App is the org's configured GitHub. Read
+	// ahead of the dedup gate, so a failed read leaves the delivery unrecorded
+	// and a redelivery can still apply it.
+	var host string
+	if d.install != nil {
+		if host, err = s.orgGitHubHost(r.Context(), orgID); err != nil {
+			internalError(w, "github-webhook", err)
+			return
+		}
+	}
+	s.applyWebhookDelivery(w, r, orgID, host, eventName, d)
 }
 
 // readWebhookDelivery performs the checks both receivers run before either
@@ -198,11 +209,12 @@ func parseVerifiedDelivery(w http.ResponseWriter, r *http.Request, eventName str
 
 // applyWebhookDelivery is the tail both receivers share once the tenant is
 // known: the dedup gate, then the installation-lifecycle write or the bus
-// publish, under orgID. It is the first thing on either route that writes,
-// which is why the gate is its first move — a delivery that reaches here has
-// been verified and structurally validated, and everything it does from here
-// is a side effect the gate has to precede.
-func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, orgID, eventName string, d verifiedDelivery) {
+// publish, under orgID. host is the GitHub an installation delivery came from,
+// and keys the row it writes; it is unused for any other event. It is the first
+// thing on either route that writes, which is why the gate is its first move —
+// a delivery that reaches here has been verified and structurally validated,
+// and everything it does from here is a side effect the gate has to precede.
+func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, orgID, host, eventName string, d verifiedDelivery) {
 	fresh, err := s.githubDeliveries.MarkDeliveredSystem(r.Context(), d.installationID, d.deliveryID)
 	if err != nil {
 		internalError(w, "github-webhook", err)
@@ -221,7 +233,7 @@ func (s *Server) applyWebhookDelivery(w http.ResponseWriter, r *http.Request, or
 	}
 
 	if d.install != nil {
-		s.applyInstallationEvent(w, r, orgID, d.deliveryID, *d.install)
+		s.applyInstallationEvent(w, r, orgID, host, d.deliveryID, *d.install)
 		return
 	}
 
@@ -307,10 +319,13 @@ func parseInstallationWebhook(body []byte) (*installationWebhook, error) {
 // until its natural expiry. Any other action (new_permissions_accepted, …) is
 // published to the bus and acked — the mirror doesn't track those states.
 //
+// host is the GitHub the delivery came from. GitHub numbers installations per
+// deployment, so every write is to the row keyed by host as well as by the id.
+//
 // Every failure here is a store failure, answered 5xx: the payload was
 // validated before the delivery was recorded, so nothing in this function can
 // discover that the delivery was bad.
-func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, deliveryID string, p installationWebhook) {
+func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, orgID, host, deliveryID string, p installationWebhook) {
 	installationID := strconv.FormatInt(p.Installation.ID, 10)
 
 	// A payload that omits the account id (0) writes "" and so leaves any
@@ -323,22 +338,6 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 
 	switch p.Action {
 	case "created":
-		// Which GitHub this installation lives on is the org's configured base
-		// URL — a delivery arrives over the org's own webhook secret, so the
-		// deployment that sent it is the one the org is pointed at. Resolved
-		// here rather than defaulted in the store, because a GHES org whose
-		// host we failed to read would be mirrored as a github.com
-		// installation, which is exactly the confusion the column exists to
-		// prevent. A read failure fails the delivery instead, so no row claims a
-		// host nobody established. Nothing replays that delivery — GitHub does
-		// not auto-retry, and the dedup gate above has already recorded it, so
-		// a manual redelivery is dropped as a duplicate — but the
-		// /app/installations reconcile mints the row on its next pass.
-		host, err := s.orgGitHubHost(r.Context(), orgID)
-		if err != nil {
-			internalError(w, "github-webhook", err)
-			return
-		}
 		// No suspension is carried: a just-created installation is not
 		// suspended, and the upsert writes the zero verbatim — which is what
 		// clears an inherited suspension when this `created` is a RE-install
@@ -362,7 +361,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 	case "deleted":
-		if _, err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, installationID); err != nil {
+		if _, err := s.githubApps.MarkInstallationRemoved(r.Context(), orgID, host, installationID); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
@@ -378,7 +377,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 		if suspendedAt.IsZero() {
 			suspendedAt = time.Now().UTC()
 		}
-		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, host, installationID, suspendedAt, p.Installation.SuspendedBy.Login); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}
@@ -389,7 +388,7 @@ func (s *Server) applyInstallationEvent(w http.ResponseWriter, r *http.Request, 
 		// Restores the prior state exactly: both columns back to NULL, nothing
 		// else on the row touched. No cache work — the installation mints again,
 		// and the entry the suspend dropped is simply re-minted on next use.
-		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, installationID, time.Time{}, ""); err != nil {
+		if _, err := s.githubApps.SetInstallationSuspension(r.Context(), orgID, host, installationID, time.Time{}, ""); err != nil {
 			internalError(w, "github-webhook", err)
 			return
 		}

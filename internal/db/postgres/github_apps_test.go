@@ -349,7 +349,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted now()")
 	}
 
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, dbtest.TestGitHubHost, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	if got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID); len(got) != 0 {
@@ -381,9 +381,9 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	// Same numeric installation_id under both orgs, on two GitHub deployments —
 	// the case that is legal, because GitHub numbers installations per
 	// deployment and not universally. (One host is not: the uniqueness index
-	// refuses it, and the shared host suite pins that.) The composite
-	// (org_id, installation_id) PK must keep these as two independent rows, not
-	// let one overwrite the other.
+	// refuses it, and the shared host suite pins that.) The (org_id,
+	// github_host, installation_id) key must keep these as two independent
+	// rows, not let one overwrite the other.
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 		GitHubHost:     dbtest.TestGitHubHost,
 		InstallationID: "900", OrgID: orgA, AccountType: "User", AccountLogin: "only-in-a",
@@ -407,7 +407,7 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	}
 
 	// A delete for orgB's id=900 must not touch orgA's id=900.
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "https://git.example.com", "900"); err != nil {
 		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {

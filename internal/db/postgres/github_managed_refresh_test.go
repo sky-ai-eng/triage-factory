@@ -96,11 +96,14 @@ func newManagedRefreshFixture(t *testing.T, h *pgtest.Harness) (db.Stores, dbtes
 		Reach: func(t *testing.T, orgID, installationID string) {
 			t.Helper()
 			pgtest.MustExec(t, h.AdminDB, `
-				INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
-				VALUES ($1, 'managed_app', $2, 'reach', 'repo-' || $2)
+				INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo)
+				SELECT org_id, 'managed_app', installation_id, github_host, 'reach', 'repo-' || installation_id
+				  FROM org_github_app_installations WHERE org_id = $1 AND installation_id = $2
 			`, orgID, installationID)
 			pgtest.MustExec(t, h.AdminDB, `
-				INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES ($1, 'managed_app', $2)
+				INSERT INTO reachable_scopes (org_id, credential_class, host, scope)
+				SELECT org_id, 'managed_app', github_host, installation_id
+				  FROM org_github_app_installations WHERE org_id = $1 AND installation_id = $2
 			`, orgID, installationID)
 		},
 		ReachRows: func(t *testing.T, orgID, installationID string) (entries, scopes int) {

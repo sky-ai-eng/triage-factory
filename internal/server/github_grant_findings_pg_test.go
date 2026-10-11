@@ -53,7 +53,7 @@ func TestGitHubGrantFindings_MultiMode_AdminsSeeTheSameBytes(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("upsert installation: %v", err)
 	}
-	if err := rig.srv.reachableRepos.ReplaceForInstallationSystem(ctx, org.String(), domain.GitHubCredentialClassBYOApp, "4242", []domain.ReachableRepository{
+	if err := rig.srv.reachableRepos.ReplaceForInstallationSystem(ctx, org.String(), domain.GitHubCredentialClassBYOApp, "https://github.com", "4242", []domain.ReachableRepository{
 		{OrgID: org.String(), InstallationID: "4242", Owner: "acme", Repo: "api", ExternalID: "10"},
 		{OrgID: org.String(), InstallationID: "4242", Owner: "acme", Repo: "secrets", ExternalID: "11", Private: true},
 	}); err != nil {

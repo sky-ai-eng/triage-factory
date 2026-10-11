@@ -369,7 +369,7 @@ func (r *Reconciler) reconcileInstallation(ctx context.Context, orgID string, cl
 	// The org's own class, not a literal: the same installation loop serves a
 	// workspace on its own App and one on the deployment's, and the class is what
 	// the reads key on.
-	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, class, inst.InstallationID, entries)
+	return r.mirror.ReplaceForInstallationSystem(ctx, orgID, class, inst.GitHubHost, inst.InstallationID, entries)
 }
 
 // splitFullName splits GitHub's "owner/repo" into its halves. It refuses

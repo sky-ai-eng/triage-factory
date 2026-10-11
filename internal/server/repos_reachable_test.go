@@ -629,7 +629,7 @@ func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
 	srv := newTestServer(t)
 	seedManagedWorkspace(t, srv, "111")
 	if err := srv.reachableRepos.ReplaceForInstallationSystem(context.Background(),
-		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, "111",
+		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, seedRepoHost(t, srv), "111",
 		[]domain.ReachableRepository{
 			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "api"},
 			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "web"},

@@ -271,7 +271,7 @@ func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Cont
 		 WHERE removed_at IS NULL
 		   AND github_host <> ?
 		   AND org_id IN (SELECT org_id FROM org_settings WHERE github_credential_class = ?)
-		 ORDER BY org_id, installation_id
+		 ORDER BY org_id, installation_id, github_host
 	`, db.EffectiveGitHubHost(githubHost), string(domain.GitHubCredentialClassManagedApp))
 	if err != nil {
 		return nil, fmt.Errorf("list managed installations off host: %w", err)
@@ -288,7 +288,8 @@ func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Cont
 	return out, rows.Err()
 }
 
-// UpsertInstallation mirrors one installation, idempotent on installation_id.
+// UpsertInstallation mirrors one installation, idempotent on (org_id,
+// github_host, installation_id).
 // installed_at is set only on insert (defaulting to CURRENT_TIMESTAMP for a
 // zero InstalledAt) and preserved on conflict; removed_at is cleared so a
 // reinstall revives the row. account_login is overwritten (a rename must
@@ -296,10 +297,9 @@ func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Cont
 // see the Postgres impl for why. The suspension columns follow the login's
 // rule, not the id's: both callers see GitHub's whole answer, so they land
 // verbatim, and a re-install clears an inherited suspension in the same
-// statement it clears removed_at. github_host takes the login's rule too, and
-// is normalized on the way in so the NOT NULL column can never hold an empty
-// string. repository_selection takes the account id's rule — see the Postgres
-// impl.
+// statement it clears removed_at. github_host is part of the key, normalized
+// on the way in, and refused when empty. repository_selection takes the account
+// id's rule — see the Postgres impl.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) (domain.OrgGitHubAppInstallation, error) {
 	host := db.EffectiveGitHubHost(inst.GitHubHost)
 	if host == "" {
@@ -318,11 +318,10 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 			(installation_id, org_id, account_type, account_id, account_login, github_host,
 			 installed_at, removed_at, suspended_at, suspended_by, repository_selection)
 		VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), NULL, ?, ?, ?)
-		ON CONFLICT(org_id, installation_id) DO UPDATE SET
+		ON CONFLICT(org_id, github_host, installation_id) DO UPDATE SET
 			account_type  = excluded.account_type,
 			account_login = excluded.account_login,
 			account_id    = COALESCE(excluded.account_id, org_github_app_installations.account_id),
-			github_host   = excluded.github_host,
 			removed_at    = NULL,
 			suspended_at  = excluded.suspended_at,
 			suspended_by  = excluded.suspended_by,
@@ -341,7 +340,11 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 // SetInstallationSuspension stamps or clears the suspension columns. Zero
 // suspendedAt clears both (an unsuspend leaves no residue); a non-zero one
 // writes both, with an unnamed suspender landing as NULL rather than "".
-func (s *gitHubAppsStore) SetInstallationSuspension(ctx context.Context, orgID, installationID string, suspendedAt time.Time, suspendedBy string) (*domain.OrgGitHubAppInstallation, error) {
+func (s *gitHubAppsStore) SetInstallationSuspension(ctx context.Context, orgID, githubHost, installationID string, suspendedAt time.Time, suspendedBy string) (*domain.OrgGitHubAppInstallation, error) {
+	host := db.InstallationHostKey(githubHost)
+	if host == "" {
+		return nil, nil
+	}
 	by := nullStringValue(suspendedBy)
 	if suspendedAt.IsZero() {
 		by = nil // no suspender to record on a cleared row
@@ -349,9 +352,9 @@ func (s *gitHubAppsStore) SetInstallationSuspension(ctx context.Context, orgID, 
 	stored, err := scanSQLiteGitHubAppInstallation(s.q.QueryRowContext(ctx, `
 		UPDATE org_github_app_installations
 		   SET suspended_at = ?, suspended_by = ?
-		 WHERE org_id = ? AND installation_id = ?
+		 WHERE org_id = ? AND github_host = ? AND installation_id = ?
 		RETURNING `+sqliteGitHubAppInstallationColumns,
-		nullTimeValue(suspendedAt), by, orgID, installationID).Scan)
+		nullTimeValue(suspendedAt), by, orgID, host, installationID).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -383,15 +386,19 @@ func nullTimeValue(t time.Time) any {
 // reconcile's own soft-remove arm gets the same clear for free. This is the one
 // place outside ReachableReposStore that writes reachable_repositories, and it
 // does so because the two writes are one fact.
-func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, installationID string) (*domain.OrgGitHubAppInstallation, error) {
+func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, githubHost, installationID string) (*domain.OrgGitHubAppInstallation, error) {
+	host := db.InstallationHostKey(githubHost)
+	if host == "" {
+		return nil, nil
+	}
 	var removed *domain.OrgGitHubAppInstallation
 	err := inTx(ctx, s.q, func(tx queryer) error {
 		stored, err := scanSQLiteGitHubAppInstallation(tx.QueryRowContext(ctx, `
 			UPDATE org_github_app_installations
 			   SET removed_at = CURRENT_TIMESTAMP
-			 WHERE org_id = ? AND installation_id = ? AND removed_at IS NULL
+			 WHERE org_id = ? AND github_host = ? AND installation_id = ? AND removed_at IS NULL
 			RETURNING `+sqliteGitHubAppInstallationColumns,
-			orgID, installationID).Scan)
+			orgID, host, installationID).Scan)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil // already removed or never seen — no-op, nothing to cascade
 		}
@@ -401,8 +408,8 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 		removed = &stored
 		if _, err := tx.ExecContext(ctx, `
 			DELETE FROM reachable_repositories
-			 WHERE org_id = ? AND installation_id = ?
-		`, orgID, installationID); err != nil {
+			 WHERE org_id = ? AND host = ? AND installation_id = ?
+		`, orgID, host, installationID); err != nil {
 			return err
 		}
 		// And the scope marker: an installation that reaches nothing must not keep
@@ -412,8 +419,8 @@ func (s *gitHubAppsStore) MarkInstallationRemoved(ctx context.Context, orgID, in
 		classes, classArgs := appTierClassArgs()
 		_, err = tx.ExecContext(ctx, `
 			DELETE FROM reachable_scopes
-			 WHERE org_id = ? AND scope = ? AND credential_class IN (`+classes+`)
-		`, append([]any{orgID, installationID}, classArgs...)...)
+			 WHERE org_id = ? AND host = ? AND scope = ? AND credential_class IN (`+classes+`)
+		`, append([]any{orgID, host, installationID}, classArgs...)...)
 		return err
 	})
 	if err != nil {
@@ -455,10 +462,11 @@ func (s *gitHubAppsStore) BackfillInstallationsFromAPI(ctx context.Context, orgI
 	}
 	// The removal diff covers the rows on the host this listing came from and
 	// no others: see InstallationIDsOnHost.
-	active := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
+	host := db.EffectiveGitHubHost(baseURL)
+	active := db.InstallationIDsOnHost(live, host)
 	return db.ReconcileInstallations(insts, active,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
-		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, host, id); return err },
 	)
 }
 
@@ -539,14 +547,15 @@ func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID
 	// a different deployment's installation whose id this listing may reuse for
 	// someone else's (see InstallationIDsOnHost); RefreshBoundInstallations
 	// still refuses the org when its host is not the deployment App's.
-	bound := db.InstallationIDsOnHost(live, db.EffectiveGitHubHost(baseURL))
+	host := db.EffectiveGitHubHost(baseURL)
+	bound := db.InstallationIDsOnHost(live, host)
 	insts, err := db.RefreshBoundInstallations(ctx, deployment, orgID, baseURL, bound)
 	if err != nil {
 		return err
 	}
 	return db.ReconcileInstallations(insts, bound,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
-		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+		func(id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, host, id); return err },
 	)
 }
 
@@ -569,7 +578,10 @@ func (s *gitHubAppsStore) RefreshAllManagedInstallations(ctx context.Context, de
 	}
 	return db.RefreshManagedInstallationSets(ctx, deployment, sets,
 		func(i domain.OrgGitHubAppInstallation) error { _, err := s.UpsertInstallation(ctx, i); return err },
-		func(orgID, id string) error { _, err := s.MarkInstallationRemoved(ctx, orgID, id); return err },
+		func(orgID, host, id string) error {
+			_, err := s.MarkInstallationRemoved(ctx, orgID, host, id)
+			return err
+		},
 	)
 }
 
@@ -585,7 +597,7 @@ func (s *gitHubAppsStore) managedInstallationSets(ctx context.Context) ([]db.Man
 		  JOIN org_github_app_installations i ON i.org_id = st.org_id AND i.removed_at IS NULL
 		  LEFT JOIN org_event_sources es ON es.org_id = st.org_id AND es.kind = 'github'
 		 WHERE st.github_credential_class = ?
-		 ORDER BY st.org_id, i.installation_id
+		 ORDER BY st.org_id, i.installation_id, i.github_host
 	`, string(domain.GitHubCredentialClassManagedApp))
 	if err != nil {
 		return nil, fmt.Errorf("read managed installation sets: %w", err)
