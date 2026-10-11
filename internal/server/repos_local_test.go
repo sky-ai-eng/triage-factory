@@ -289,6 +289,7 @@ func TestRepoRoutes_NoGitHubURL(t *testing.T) {
 	}{
 		{"picker", http.MethodPost, "/api/github/repos/list", map[string]any{}},
 		{"tracked set PUT", http.MethodPut, "/api/teams/default/github-repos", map[string]any{"repos": []string{"acme/api"}}},
+		{"repo PATCH", http.MethodPatch, "/api/repos/" + repoID, map[string]string{"base_branch": "develop"}},
 	} {
 		rec := doJSON(t, s, tc.method, tc.path, tc.body)
 		if rec.Code != http.StatusConflict || firstErrorReason(t, rec) != httpx.ReasonNotConfigured {

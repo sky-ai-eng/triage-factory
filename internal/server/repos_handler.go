@@ -809,9 +809,8 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
-	host, err := s.orgGitHubHost(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "repos", err)
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
+	if !ok {
 		return
 	}
 	// Resolve the id to a row before the gate, in the same transaction as the
