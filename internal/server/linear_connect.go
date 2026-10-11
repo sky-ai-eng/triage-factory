@@ -241,7 +241,14 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 	}
 	defer release()
 	cred := linear.UserCredential{Method: linear.AuthMethodAPIKey, Token: key}
-	if err := s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer); err != nil {
+	err = s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer)
+	if errors.Is(err, errLinearNotOrgMember) {
+		// Removed while the key was being checked: the answer the route
+		// gives any non-member.
+		notFound(w, "org")
+		return
+	}
+	if err != nil {
 		internalError(w, "linear-identity", err)
 		return
 	}
@@ -440,6 +447,20 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 	// From here the org is the cookie's, and membership is read again rather
 	// than trusted from the start: minutes have passed.
 	orgID := cs.OrgID
+
+	// Taken before the membership read and held until the grant is stored,
+	// for two orderings. A member's removal sweeps their credential under
+	// this lock after the removal commits, so a membership read under it
+	// either sees the removal or comes before a sweep that will see this
+	// bind. And no revoke of another of the user's grants can land between
+	// the exchange that mints this one and its store.
+	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
+	if err != nil {
+		internalError(w, "linear-connect", err)
+		return
+	}
+	defer release()
+
 	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
 	if err != nil {
 		internalError(w, "linear-connect", err)
@@ -488,15 +509,6 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Held from before the exchange mints this grant until it is stored, so
-	// no revoke of another of the user's grants lands in between.
-	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
-	if err != nil {
-		internalError(w, "linear-connect", err)
-		return
-	}
-	defer release()
-
 	tok, err := s.linearOAuthMinter.ExchangeCode(ctx, app, code, s.linearCallbackURL(linearConnectCallbackPath))
 	if err != nil {
 		linearConnectLog.Warn("code exchange failed", "org", orgID, "error", err)
@@ -538,7 +550,13 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		ClientID:     app.ClientID,
 		GrantID:      grantID,
 	}
-	if err := s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer); err != nil {
+	err = s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer)
+	if errors.Is(err, errLinearNotOrgMember) {
+		s.revokeLinearTokens(ctx, orgID, app, tok)
+		redirectLinearConnect(w, r, fallbackOrg, "", "state")
+		return
+	}
+	if err != nil {
 		s.revokeLinearTokens(ctx, orgID, app, tok)
 		internalError(w, "linear-connect", err)
 		return
@@ -552,11 +570,26 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, dest, http.StatusFound)
 }
 
+// errLinearNotOrgMember is a bind whose user is no longer a member of the
+// org by the time it holds their credential lock.
+var errLinearNotOrgMember = errors.New("linear: user is no longer a member of the org")
+
 // storeLinearUserCredential writes a validated credential and the identity it
 // validated as, with the access-log row. A Connect grant the new credential
 // replaces is then revoked in Linear, unless the new one may be that same
 // grant (see supersededLinearGrant). The caller holds the user's credential
 // lock across the call, so the revoke too runs under it.
+//
+// Membership is read again here, under that lock, and a user no longer in
+// the org is errLinearNotOrgMember. The route's own check ran before the
+// lock, and the secret and identity policies key on the claims, not on
+// membership, so a bind racing the user's removal could otherwise write
+// after the removal's sweep (sweepLinearUserCredential) found nothing. Only
+// the access-log row's policy checks membership, which holds only while that
+// row is written in the same transaction, and turns the refusal into a
+// failed request. The sweep takes the same lock after the removal commits,
+// so a read under the lock either sees the removal or comes before a sweep
+// that will see this write.
 func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, workspaceID, urlKey string, cred linear.UserCredential, viewer *auth.LinearUser) error {
 	envelope, err := linear.MarshalUserCredential(cred)
 	if err != nil {
@@ -564,6 +597,14 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 	}
 	key := linear.UserTokenKey(workspaceID)
 	source := string(cred.Method)
+
+	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
+	if err != nil {
+		return fmt.Errorf("check org membership: %w", err)
+	}
+	if !member {
+		return errLinearNotOrgMember
+	}
 
 	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
 	if err != nil {
@@ -662,8 +703,11 @@ func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw s
 // (SyntheticClaimsWithTx): the rows are theirs, and the caller is the admin
 // removing them or the user leaving. The envelope and the identity go in one
 // transaction, so neither outlives the other, and the revoke runs before the
-// lock is released. Best-effort, like the rest of the removal's
-// deprovisioning; a failure is returned for the caller to log.
+// lock is released. It must run after the removal commits: every bind reads
+// membership under the same lock (storeLinearUserCredential), so one that
+// read it before the removal has committed its write by the time this takes
+// the lock, and one after refuses. Best-effort, like the rest of the
+// removal's deprovisioning; a failure is returned for the caller to log.
 func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID string) error {
 	orgSet, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {

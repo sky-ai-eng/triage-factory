@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -924,4 +925,155 @@ func TestLinearIdentity_MultiMode(t *testing.T) {
 	if got := oauth.Revoked(); !slices.Equal(got, []string{"ref-install"}) {
 		t.Errorf("revoked %v on carol's removal, want her refresh token", got)
 	}
+}
+
+// TestLinearIdentity_RemovalRacingABind: a member removed while their bind
+// is in flight ends with no credential, and the bind is refused as a
+// non-member's rather than failing. The route's membership check runs
+// before the user's lock, so the removal lands after it here; the bind reads
+// membership again under the lock instead of relying on the access-log
+// row's policy to abort its transaction.
+func TestLinearIdentity_RemovalRacingABind(t *testing.T) {
+	rig := newAuthRig(t)
+	s := rig.srv
+	whoami := newLinearWhoamiFake(t)
+	s.validateLinear = func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error) {
+		cfg.Endpoint = whoami.URL
+		return auth.ValidateLinear(ctx, cfg)
+	}
+	oauth := newLinearOAuthFake(t)
+	s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(oauth.URL+"/token", oauth.URL+"/revoke")
+	stores := pgstore.New(rig.h.AdminDB, rig.h.AppDB, pgtest.SecretKey)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "alice-org")
+	sidA := rig.signIn(alice)
+	orgPath := "/api/orgs/" + orgA.String()
+	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/access/credential", map[string]any{"api_key": linearOrgKey}, sidA, ""); rec.Code != http.StatusOK {
+		t.Fatalf("org bind: %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := rig.tokensJSON(http.MethodPost, orgPath+"/linear/app", map[string]any{"client_id": "lin-client-1", "client_secret": "s"}, sidA, ""); rec.Code != http.StatusOK {
+		t.Fatalf("register app: %d: %s", rec.Code, rec.Body.String())
+	}
+	addMember := func() (uuid.UUID, string) {
+		t.Helper()
+		u := rig.seedUser()
+		if _, err := rig.h.AdminDB.Exec(`INSERT INTO public.org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+			u.String(), orgA.String()); err != nil {
+			t.Fatalf("seed membership: %v", err)
+		}
+		return u, rig.signIn(u)
+	}
+	stored := func(u uuid.UUID) (secret, identity string) {
+		t.Helper()
+		secret, err := stores.Secrets.GetUserSystem(t.Context(), orgA.String(), u.String(), linear.UserTokenKey(acmeWorkspaceID))
+		if err != nil {
+			t.Fatalf("read secret: %v", err)
+		}
+		identity, _, err = stores.Users.GetLinearIdentitySystem(t.Context(), u.String(), acmeWorkspaceID)
+		if err != nil {
+			t.Fatalf("read identity: %v", err)
+		}
+		return secret, identity
+	}
+	remove := func(u uuid.UUID) *httptest.ResponseRecorder {
+		return rig.tokensJSON(http.MethodDelete, orgPath+"/members/"+u.String(), nil, sidA, "")
+	}
+
+	t.Run("key paste", func(t *testing.T) {
+		carol, sidC := addMember()
+		whoami.setViewerID("lu-carol")
+		// The removal, its sweep included, completes while carol's key is
+		// being validated: after the route let her in, before her bind
+		// takes her lock.
+		var removed *httptest.ResponseRecorder
+		var once sync.Once
+		whoami.mu.Lock()
+		whoami.onCall = func() { once.Do(func() { removed = remove(carol) }) }
+		whoami.mu.Unlock()
+		t.Cleanup(func() {
+			whoami.mu.Lock()
+			whoami.onCall = nil
+			whoami.mu.Unlock()
+		})
+
+		rec := rig.tokensJSON(http.MethodPost, orgPath+"/linear/identity/api-key", map[string]any{"api_key": "lin_api_carol"}, sidC, "")
+		if removed == nil || removed.Code != http.StatusNoContent {
+			t.Fatalf("the removal did not run mid-bind: %+v", removed)
+		}
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("paste after removal = %d %s, want 404", rec.Code, rec.Body.String())
+		}
+		if secret, identity := stored(carol); secret != "" || identity != "" {
+			t.Errorf("after the race carol holds secret %q and identity %q, want neither", secret, identity)
+		}
+	})
+
+	t.Run("connect", func(t *testing.T) {
+		dave, sidD := addMember()
+		whoami.setViewerID("lu-dave")
+		get := func(path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.AddCookie(&http.Cookie{Name: s.sidCookieName(), Value: sidD})
+			if cookie != nil {
+				req.AddCookie(cookie)
+			}
+			rec := httptest.NewRecorder()
+			s.mux.ServeHTTP(rec, req)
+			return rec
+		}
+		start := get(orgPath+"/linear/connect/start", nil)
+		loc, _ := url.Parse(start.Header().Get("Location"))
+		var cookie *http.Cookie
+		for _, c := range start.Result().Cookies() {
+			if c.Name == linearConnectStateCookieName {
+				cookie = c
+			}
+		}
+		if cookie == nil {
+			t.Fatalf("start: %d: %s", start.Code, start.Body.String())
+		}
+
+		// The removal commits while the code is being exchanged; its sweep
+		// waits on dave's lock, which the callback holds.
+		removed := make(chan *httptest.ResponseRecorder, 1)
+		oauth.mu.Lock()
+		oauth.onExchange = func() {
+			go func() { removed <- remove(dave) }()
+			deadline := time.Now().Add(10 * time.Second)
+			for time.Now().Before(deadline) {
+				var n int
+				if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM public.org_memberships WHERE user_id = $1 AND org_id = $2`,
+					dave.String(), orgA.String()).Scan(&n); err == nil && n == 0 {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Error("the removal never committed")
+		}
+		oauth.mu.Unlock()
+		t.Cleanup(func() {
+			oauth.mu.Lock()
+			oauth.onExchange = nil
+			oauth.mu.Unlock()
+		})
+
+		revokedBefore := len(oauth.Revoked())
+		rec := get(linearConnectCallback(url.Values{"code": {"good-code"}, "state": {loc.Query().Get("state")}}), cookie)
+		expectRedirect(t, rec, "error", "state")
+		select {
+		case res := <-removed:
+			if res.Code != http.StatusNoContent {
+				t.Fatalf("removal: %d: %s", res.Code, res.Body.String())
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the removal did not finish")
+		}
+		if secret, identity := stored(dave); secret != "" || identity != "" {
+			t.Errorf("after the race dave holds secret %q and identity %q, want neither", secret, identity)
+		}
+		if got := len(oauth.Revoked()) - revokedBefore; got != 2 {
+			t.Errorf("revoked %d tokens, want the pair minted for the refused bind", got)
+		}
+	})
 }
