@@ -44,6 +44,20 @@ func TestSourceManifest_UsableKinds(t *testing.T) {
 	}
 }
 
+// TestSourceManifest_EntryFor pins the one rule every reader explains a missing
+// credential by: a named entry as it is, an unnamed source as unconfigured.
+func TestSourceManifest_EntryFor(t *testing.T) {
+	m := SourceManifest{"linear": {State: SourceUnresolved, Reason: SourceReasonTokenExpired}}
+	if got := m.EntryFor("linear"); got.State != SourceUnresolved || got.Reason != SourceReasonTokenExpired {
+		t.Errorf("EntryFor(named) = %+v, want the entry", got)
+	}
+	for _, mm := range []SourceManifest{m, nil} {
+		if got := mm.EntryFor("jira"); got.State != SourceUnconfigured || got.Reason != "" {
+			t.Errorf("EntryFor(unnamed) = %+v, want unconfigured", got)
+		}
+	}
+}
+
 // TestSourceManifest_At pins the one transformation a holder of the bundle
 // applies: a sealed credential past its expiry is unresolved, not sealed.
 func TestSourceManifest_At(t *testing.T) {

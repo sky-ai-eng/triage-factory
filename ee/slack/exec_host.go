@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -167,6 +168,12 @@ func (h *slackExecHandler) authorizeFileChannels(ctx context.Context, rt agentho
 func selectBotToken(ctx context.Context, rt agenthost.ExtensionRuntime, ws slackWorkspaceIdentity) (string, error) {
 	raw, err := rt.ProviderCredential(ctx, "slack")
 	if err != nil {
+		// A refusal already names Slack and says what to do about it; a
+		// prefix would only repeat the name.
+		var refusal *agenthost.SourceRefusal
+		if errors.As(err, &refusal) {
+			return "", err
+		}
 		return "", fmt.Errorf("slack: %w", err)
 	}
 	var creds slackBundleCreds

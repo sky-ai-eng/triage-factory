@@ -87,6 +87,17 @@ func (m SourceManifest) Entry(kind string) (SourceEntry, bool) {
 	return e, ok
 }
 
+// EntryFor returns kind's entry, or an unconfigured one when the manifest names
+// none: a manifest that does not mention a source carries no credential for
+// it. Every reader that explains a missing credential from the manifest starts
+// here, so an unnamed source is explained the same way everywhere.
+func (m SourceManifest) EntryFor(kind string) SourceEntry {
+	if e, ok := m[kind]; ok && e.State != "" {
+		return e
+	}
+	return SourceEntry{State: SourceUnconfigured}
+}
+
 // Usable reports whether kind's entry is in a usable state (SourceState.Usable).
 // A kind the manifest does not name is not usable.
 func (m SourceManifest) Usable(kind string) bool {

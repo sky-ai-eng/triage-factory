@@ -132,6 +132,9 @@ type Runtime interface {
 	// the brain sealed at provision time; on all/local it live-resolves through
 	// the provider's registered resolver against the live secret store. Same
 	// shape both ways, so a handler selects identically in either placement.
+	// A set it cannot produce is a *SourceRefusal from the refusal table: the
+	// bundle's manifest says why on the sidecar, and on all/local an empty set
+	// is unconfigured and a failed resolve unresolved.
 	ProviderCredential(ctx context.Context, namespace string) (json.RawMessage, error)
 
 	// CheckEntitlement reports whether the run's org holds the given feature.
@@ -692,10 +695,10 @@ func (r *directRuntime) ProviderCredential(ctx context.Context, namespace string
 	}
 	raw, err := resolver(ctx, r.stores, ProvisionScope{OrgID: r.info.OrgID, TeamID: r.info.TeamID, ConversationID: r.info.ConversationID})
 	if err != nil {
-		return nil, err
+		return nil, resolveFailureRefusal(namespace, r.info.ConversationID, err)
 	}
 	if len(raw) == 0 {
-		return nil, fmt.Errorf("agenthost: no %s credential configured for this run", namespace)
+		return nil, refusalFor(namespace, domain.SourceEntry{State: domain.SourceUnconfigured})
 	}
 	return raw, nil
 }
@@ -909,13 +912,17 @@ func (r *relayRuntime) RelayNotify(_ context.Context, namespace, op string, args
 // ProviderCredential returns the provider's sealed keyed set from the held
 // bundle — the sidecar selects a member locally, never asking the orchestrator
 // for a secret.
+// ProviderCredential reads the provider's sealed set from the held bundle. A
+// set the bundle does not carry is refused from the bundle's manifest, which
+// says why the brain sealed none — the same table every Jira and Linear refusal
+// reads, so a provider's verbs explain a missing credential the same way.
 func (r *relayRuntime) ProviderCredential(_ context.Context, namespace string) (json.RawMessage, error) {
 	if r.held == nil {
-		return nil, fmt.Errorf("agenthost: sidecar holds no provider credentials")
+		return nil, refusalFor(namespace, domain.SourceManifest(nil).EntryFor(namespace))
 	}
 	raw, ok := r.held.ProviderCreds(namespace)
 	if !ok || len(raw) == 0 {
-		return nil, fmt.Errorf("agenthost: no %s credential in the sealed bundle", namespace)
+		return nil, refusalFor(namespace, r.held.Sources().EntryFor(namespace))
 	}
 	return raw, nil
 }

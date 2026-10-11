@@ -892,26 +892,21 @@ func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) err
 // that now names the source usable means it became so after the engagement
 // started, which nothing short of a new engagement changes.
 func (c *LocalClient) refuseWithoutProxy(ctx context.Context, kind string) error {
-	entry := domain.SourceEntry{State: domain.SourceUnconfigured}
-	if m, err := c.rt.SourceManifest(ctx); err == nil {
-		if e, ok := m.Entry(kind); ok {
-			entry = e
-		}
+	var m domain.SourceManifest
+	if got, err := c.rt.SourceManifest(ctx); err == nil {
+		m = got
 	}
+	entry := m.EntryFor(kind)
 	if entry.State.Usable() {
 		return &SourceRefusal{Kind: kind, State: entry.State, Reason: reasonAfterStart}
 	}
-	return &SourceRefusal{Kind: kind, State: entry.State, Reason: entry.Reason}
+	return refusalFor(kind, entry)
 }
 
 // refuseResolveFailure is local mode's refusal for a credential its live
-// resolve could not produce: unresolved, for the reason the error names. The
-// error itself is logged rather than shown, as the brain logs it in multi
-// mode, so the agent reads the same refusal in both.
+// resolve could not produce (resolveFailureRefusal).
 func (c *LocalClient) refuseResolveFailure(kind string, err error) error {
-	agenthostLog.Warn("resolve the org's credential for a verb failed",
-		"source", kind, "conversation", c.info.ConversationID, "error", err)
-	return &SourceRefusal{Kind: kind, State: domain.SourceUnresolved, Reason: UnresolvedReason(err), cause: err}
+	return resolveFailureRefusal(kind, c.info.ConversationID, err)
 }
 
 // explainSourceMiss replaces a verb's error, when it is the source's

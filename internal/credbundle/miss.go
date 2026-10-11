@@ -32,15 +32,10 @@ func (e *SourceMissError) Error() string {
 	return fmt.Sprintf("credbundle: no %s credential (%s)", e.Kind, e.State)
 }
 
-// SourceMiss builds the miss for kind from its manifest entry: the entry's
-// state, or unconfigured when the manifest names no entry for kind — a bundle
-// that does not mention a source carries no credential for it.
+// SourceMiss builds the miss for kind from its manifest entry
+// (domain.SourceManifest.EntryFor).
 func SourceMiss(m domain.SourceManifest, kind string) error {
-	state := domain.SourceUnconfigured
-	if e, ok := m.Entry(kind); ok && e.State != "" {
-		state = e.State
-	}
-	return &SourceMissError{Kind: kind, State: state}
+	return &SourceMissError{Kind: kind, State: m.EntryFor(kind).State}
 }
 
 // The closed vocabulary MissReason answers in. Every value is safe to show the

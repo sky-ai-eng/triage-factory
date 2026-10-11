@@ -291,3 +291,89 @@ func TestSourceVerbs_ProxyMissReadsTheManifestReason(t *testing.T) {
 		}
 	})
 }
+
+// TestRelayRuntime_ProviderCredentialRefusesFromTheManifest pins the sidecar's
+// answer when the held bundle carries no set for a provider: the refusal
+// table's explanation of the provider's manifest entry, read in-process
+// (recordingRelayConn fails the test on any relay), and unconfigured for a
+// provider the manifest does not name.
+func TestRelayRuntime_ProviderCredentialRefusesFromTheManifest(t *testing.T) {
+	info := ConversationInfo{OrgID: "org", ConversationID: "conv"}
+	for _, tc := range []struct {
+		name string
+		held HeldBundle
+		want SourceRefusal
+	}{
+		{
+			name: "unconfigured",
+			held: heldBundleStub{sources: domain.SourceManifest{"slack": {State: domain.SourceUnconfigured}}},
+			want: SourceRefusal{Kind: "slack", State: domain.SourceUnconfigured},
+		},
+		{
+			name: "unresolved for a reason",
+			held: heldBundleStub{sources: domain.SourceManifest{"slack": {State: domain.SourceUnresolved, Reason: domain.SourceReasonResolveFailed}}},
+			want: SourceRefusal{Kind: "slack", State: domain.SourceUnresolved, Reason: domain.SourceReasonResolveFailed},
+		},
+		{
+			name: "turned off",
+			held: heldBundleStub{sources: domain.SourceManifest{"slack": {State: domain.SourceDisabled}}},
+			want: SourceRefusal{Kind: "slack", State: domain.SourceDisabled},
+		},
+		{
+			name: "not named",
+			held: heldBundleStub{sources: domain.SourceManifest{"github": {State: domain.SourceSealed}}},
+			want: SourceRefusal{Kind: "slack", State: domain.SourceUnconfigured},
+		},
+		{
+			name: "no bundle view",
+			held: nil,
+			want: SourceRefusal{Kind: "slack", State: domain.SourceUnconfigured},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := newRelayRuntime(recordingRelayConn{t: t}, info, tc.held)
+			_, err := rt.ProviderCredential(context.Background(), "slack")
+			var got *SourceRefusal
+			if !errors.As(err, &got) {
+				t.Fatalf("ProviderCredential = %v, want a SourceRefusal", err)
+			}
+			if got.Kind != tc.want.Kind || got.State != tc.want.State || got.Reason != tc.want.Reason {
+				t.Errorf("refusal = %+v, want %+v", *got, tc.want)
+			}
+			if err.Error() != tc.want.Error() {
+				t.Errorf("refusal text = %q, want the table's %q", err, tc.want.Error())
+			}
+		})
+	}
+}
+
+// TestDirectRuntime_ProviderCredentialRefusesFromTheTable pins local mode's
+// answer, built at verb time the way Jira and Linear build theirs: a provider
+// resolving no set is unconfigured, and one whose resolve fails is unresolved
+// with the failure still reachable beneath the refusal.
+func TestDirectRuntime_ProviderCredentialRefusesFromTheTable(t *testing.T) {
+	ResetProviders()
+	t.Cleanup(ResetProviders)
+	locked := errors.New("keychain locked")
+	RegisterProviderCredential("chat", func(context.Context, db.Stores, ProvisionScope) (json.RawMessage, error) {
+		return nil, nil
+	})
+	RegisterProviderCredential("pager", func(context.Context, db.Stores, ProvisionScope) (json.RawMessage, error) {
+		return nil, locked
+	})
+	rt := newDirectRuntime(db.Stores{}, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-provider"})
+
+	_, err := rt.ProviderCredential(context.Background(), "chat")
+	var refusal *SourceRefusal
+	if !errors.As(err, &refusal) || refusal.State != domain.SourceUnconfigured {
+		t.Errorf("empty set = %v, want the unconfigured refusal", err)
+	}
+
+	_, err = rt.ProviderCredential(context.Background(), "pager")
+	if !errors.As(err, &refusal) || refusal.State != domain.SourceUnresolved || refusal.Reason != domain.SourceReasonResolveFailed {
+		t.Errorf("failed resolve = %v, want the unresolved refusal", err)
+	}
+	if !errors.Is(err, locked) {
+		t.Errorf("the unresolved refusal %v does not carry the resolve failure beneath it", err)
+	}
+}

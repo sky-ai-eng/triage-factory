@@ -193,6 +193,22 @@ func (e *SourceRefusal) Unwrap() []error {
 	return out
 }
 
+// refusalFor is the refusal that explains kind's manifest entry.
+func refusalFor(kind string, e domain.SourceEntry) *SourceRefusal {
+	return &SourceRefusal{Kind: kind, State: e.State, Reason: e.Reason}
+}
+
+// resolveFailureRefusal is the refusal for a credential a live resolve could not
+// produce: unresolved, for the reason the error names. The error itself is
+// logged rather than shown, as the brain logs it when a seal degrades, so the
+// agent reads the same refusal in both modes; it stays reachable through
+// errors.Is for a caller that needs it.
+func resolveFailureRefusal(kind, conversationID string, err error) *SourceRefusal {
+	agenthostLog.Warn("resolve the org's credential for a verb failed",
+		"source", kind, "conversation", conversationID, "error", err)
+	return &SourceRefusal{Kind: kind, State: domain.SourceUnresolved, Reason: UnresolvedReason(err), cause: err}
+}
+
 // UnresolvedReason is the manifest reason an unresolved source records for the
 // error its credential resolve failed with: a token endpoint that did not
 // renew an access token, or a failure of any other kind.
