@@ -11,12 +11,13 @@ name: refresh-pricing
 # never how cost is computed.
 #
 # Two safety nets sit between fast-moving upstream data and the frozen formula:
-#   - the verification gate (go test -run 'TestPricing|TestCostForUsage' over
-#     internal/inference and internal/modelcatalog) runs HERE, before any PR:
-#     malformed JSON, a model TF offers losing its row or a rate it bills on,
-#     or a cache rate inconsistent with its input rate fails it, and we open a
-#     tracking issue instead of a PR. It checks no specific price — a price
-#     upstream moves is reviewed in the PR's diff.
+#   - the verification gate (go test -run
+#     'TestPricing|TestCostForUsage|TestComputeTextCost' over internal/inference
+#     and internal/modelcatalog) runs HERE, before any PR: malformed JSON, a
+#     model TF offers losing its row or a rate it bills on, a cache rate
+#     inconsistent with its input rate, or a broken cost formula fails it, and
+#     we open a tracking issue instead of a PR. It checks no specific price — a
+#     price upstream moves is reviewed in the PR's diff.
 #   - the script's schema-drift check flags a NEW upstream cost field the
 #     formula doesn't read; when present it opens its own tracking issue so the
 #     unmodeled dimension becomes a reviewed formula change, not silent
@@ -87,7 +88,7 @@ jobs:
       - name: Verify (pricing gate)
         id: gate
         run: |
-          if go test ./internal/inference/ ./internal/modelcatalog/ -run 'TestPricing|TestCostForUsage' > /tmp/gate.log 2>&1; then
+          if go test ./internal/inference/ ./internal/modelcatalog/ -run 'TestPricing|TestCostForUsage|TestComputeTextCost' > /tmp/gate.log 2>&1; then
             echo "ok=1" >> "$GITHUB_OUTPUT"
           else
             echo "ok=0" >> "$GITHUB_OUTPUT"
@@ -106,7 +107,7 @@ jobs:
           BODY_FILE=$(mktemp)
           {
             echo "The daily pricing refresh produced a snapshot that fails the verification gate."
-            echo "The gate checks no specific price, so a price change alone cannot cause this. A model TF offers lost its row or a rate TF bills on, a cache rate no longer matches its model's input rate, or the snapshot no longer parses. If upstream's data is wrong, the refresh should wait for the upstream fix; if a gate assumption no longer holds, update it in internal/modelcatalog/pricing_gate_test.go."
+            echo "The gate checks no specific price, so a price change alone cannot cause this. A model TF offers lost its row or a rate TF bills on, a cache rate no longer matches its model's input rate, or the snapshot no longer parses. If upstream's data is wrong, the refresh should wait for the upstream fix; if a gate assumption no longer holds, update it in internal/modelcatalog/pricing_gate_test.go. A failing TestComputeTextCost test uses synthetic prices, so it is a cost-formula bug on main rather than anything in this snapshot."
             echo
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
@@ -200,7 +201,7 @@ jobs:
             printf '| Refreshed by | [`refresh-pricing` run %s](%s) |\n' "$GITHUB_RUN_ID" "$RUN_URL"
             cat <<'EOF'
 
-          The verification gate (`go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage'`) passed on this snapshot in the workflow run before this PR was updated. It checks that the rows TF bills from are complete and consistent, not what they cost, so review the price diff below.
+          The verification gate (`go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'`) passed on this snapshot in the workflow run before this PR was updated. It checks the cost formula and that the rows TF bills from are complete and consistent, not what they cost, so review the price diff below.
           EOF
             if [ -n "$DRIFT" ]; then
               printf '\n> [!WARNING]\n> **Schema drift:** upstream publishes per-token/cache cost field(s) `computeTextCost` does not read: `%s`.\n' "$DRIFT"

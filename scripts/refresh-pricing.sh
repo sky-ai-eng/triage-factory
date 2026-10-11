@@ -19,10 +19,11 @@
 # Run daily by .github/workflows/refresh-pricing.yml. Three safety nets guard
 # the gap between fast-moving upstream data and the frozen cost formula:
 #   1. The verification gate (go test ./internal/inference
-#      ./internal/modelcatalog -run 'TestPricing|TestCostForUsage') —
-#      malformed JSON, a model TF offers losing its row or a rate it bills on,
-#      or a cache rate inconsistent with its input rate fails it loudly rather
-#      than misbilling quietly. It checks no specific price.
+#      ./internal/modelcatalog -run
+#      'TestPricing|TestCostForUsage|TestComputeTextCost') — malformed JSON, a
+#      model TF offers losing its row or a rate it bills on, a cache rate
+#      inconsistent with its input rate, or a broken cost formula fails it
+#      loudly rather than misbilling quietly. It checks no specific price.
 #   2. The schema-drift check below — a NEW per-token/cache cost field upstream
 #      (a finer context tier, a new cache-TTL bucket) that computeTextCost
 #      doesn't read is flagged so it becomes a reviewed formula change, not
@@ -246,4 +247,4 @@ for model, provider in eligible:
 print("PRICING_ELIGIBLE_MODELS_END")
 PY
 
-echo "Done. Verify with: go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage'"
+echo "Done. Verify with: go test ./internal/inference ./internal/modelcatalog -run 'TestPricing|TestCostForUsage|TestComputeTextCost'"
