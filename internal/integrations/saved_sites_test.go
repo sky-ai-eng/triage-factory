@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -164,5 +166,106 @@ func TestClearJira_SweepsTheSavedSite(t *testing.T) {
 	}
 	if got := getSecret(t, stores.Secrets, savedJiraURLKey); got != "" {
 		t.Errorf("saved jira site survived ClearJira: %q", got)
+	}
+}
+
+// savedGitHubURLKey is the keychain key a local install kept its GitHub host
+// under beside the PAT, spelled out for the same reason as savedJiraURLKey.
+const savedGitHubURLKey = "github_url"
+
+func githubURL(t *testing.T, stores db.Stores) string {
+	t.Helper()
+	set, err := stores.Orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("read settings: %v", err)
+	}
+	return set.GitHubBaseURL
+}
+
+func adoptGitHub(t *testing.T, stores db.Stores) {
+	t.Helper()
+	if err := integrations.AdoptSavedGitHubHost(context.Background(), stores, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("AdoptSavedGitHubHost: %v", err)
+	}
+}
+
+// The URL saved beside the PAT becomes the org's GitHub URL when the setting
+// is empty, in canonical form, and the saved key is gone, so a second boot
+// changes nothing.
+func TestAdoptSavedGitHubHost_MovesTheSavedURLIntoAnEmptySetting(t *testing.T) {
+	stores := openStores(t)
+	putSecret(t, stores.Secrets, savedGitHubURLKey, " https://GHE.Example.com/ ")
+	putSecret(t, stores.Secrets, integrations.KeyGitHubPAT, "ghp-test")
+
+	adoptGitHub(t, stores)
+
+	if got := githubURL(t, stores); got != "https://ghe.example.com" {
+		t.Errorf("github url = %q, want https://ghe.example.com", got)
+	}
+	if got := getSecret(t, stores.Secrets, savedGitHubURLKey); got != "" {
+		t.Errorf("saved github url survived: %q", got)
+	}
+	if got := getSecret(t, stores.Secrets, integrations.KeyGitHubPAT); got != "ghp-test" {
+		t.Errorf("github pat = %q, want it untouched", got)
+	}
+	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "github", "https://other.example.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
+	adoptGitHub(t, stores)
+	if got := githubURL(t, stores); got != "https://other.example.com" {
+		t.Errorf("a second boot moved the github url to %q", got)
+	}
+}
+
+// A set GitHub URL is what every client already talked to, so the saved one
+// never replaces it; the saved key is still deleted.
+func TestAdoptSavedGitHubHost_KeepsASetURL(t *testing.T) {
+	stores := openStores(t)
+	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "github", "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
+	putSecret(t, stores.Secrets, savedGitHubURLKey, "https://ghe.example.com")
+
+	adoptGitHub(t, stores)
+
+	if got := githubURL(t, stores); got != "https://github.com" {
+		t.Errorf("github url = %q, want the set https://github.com", got)
+	}
+	if got := getSecret(t, stores.Secrets, savedGitHubURLKey); got != "" {
+		t.Errorf("saved github url survived: %q", got)
+	}
+}
+
+// With nothing saved, an org already using GitHub was on the deployment's
+// GitHub and is given it; an org using nothing GitHub is left without a URL.
+func TestAdoptSavedGitHubHost_WithNothingSaved(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, stores db.Stores)
+		want string
+	}{
+		{"a stored PAT", func(t *testing.T, stores db.Stores) {
+			putSecret(t, stores.Secrets, integrations.KeyGitHubPAT, "ghp-test")
+		}, "https://github.com"},
+		{"repositories on the deployment's GitHub", func(t *testing.T, stores db.Stores) {
+			if _, err := stores.Repos.Upsert(context.Background(), runmode.LocalDefaultOrgID, domain.Repository{
+				Host: "https://github.com", Owner: "acme", Repo: "api", DefaultBranch: "main",
+			}); err != nil {
+				t.Fatalf("seed repository: %v", err)
+			}
+		}, "https://github.com"},
+		{"nothing GitHub", func(*testing.T, db.Stores) {}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ghbase.SetDefaultBaseURLForTest(t, "")
+			stores := openStores(t)
+			tc.seed(t, stores)
+
+			adoptGitHub(t, stores)
+
+			if got := githubURL(t, stores); got != tc.want {
+				t.Errorf("github url = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
