@@ -36,8 +36,8 @@ var errGrantReplaced = errors.New("linearoauth: user credential replaced during 
 // the envelope its refresh read, under the user's UserCredentialLock, so it
 // never resurrects a disconnected credential or overwrites a newer one. A
 // refresh token Linear refuses with invalid_grant means the user revoked TF's
-// access in Linear: the envelope and the identity row derived from it are
-// removed in one transaction under the same lock, and the user has to
+// access in Linear: the identity row derived from the envelope and then the
+// envelope are removed under the same lock (dropRefused), and the user has to
 // connect again.
 type UserTokenCache struct {
 	minter  refresher
@@ -259,11 +259,17 @@ func (c *UserTokenCache) refreshOnce(ctx context.Context, orgID, userID, workspa
 // dropRefused answers Linear refusing the user's refresh token, refused,
 // which every error it returns wraps. Under the user's credential lock, and
 // only while the stored envelope is still the refused one, it removes the
-// envelope and the identity row derived from it in one transaction as that
-// user, so neither outlives the other: a failure leaves both, and the next
-// read is refused and removes them again. The identity row goes first and the
-// envelope last, because in local mode the keychain delete happens outside the
-// SQLite transaction and only the commit can fail after it.
+// identity row derived from the envelope and then the envelope itself.
+//
+// The order is what keeps the two from drifting apart for good. The envelope
+// is the one whose presence brings a later read back here: the next refresh
+// off it is refused again and this runs again. So it is deleted last, and
+// only once the identity clear has committed. A failure anywhere before that
+// leaves the envelope, and the removal is finished by the next read. Deleting
+// it inside the identity's transaction would not do: in local mode the
+// keychain delete lands outside the SQLite transaction, so a failed commit
+// would roll back the identity clear with the envelope already gone, and
+// nothing would come back to clear the identity.
 func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspaceID, raw string, refused error) error {
 	release, err := c.lock.Lock(ctx, orgID, userID)
 	if err != nil {
@@ -274,7 +280,7 @@ func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspa
 	moved := false
 	err = c.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		// Every writer of the envelope holds the lock, so it cannot change
-		// between this read and the delete.
+		// between this read and the delete below.
 		current, err := tx.Secrets.GetUser(ctx, orgID, userID, key)
 		if err != nil {
 			return fmt.Errorf("read user credential: %w", err)
@@ -286,15 +292,19 @@ func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspa
 		if err := tx.Users.ClearLinearIdentity(ctx, userID, workspaceID); err != nil {
 			return fmt.Errorf("clear linear identity: %w", err)
 		}
-		if _, err := tx.Secrets.DeleteUser(ctx, orgID, userID, key); err != nil {
-			return fmt.Errorf("delete user credential: %w", err)
-		}
 		return nil
 	})
+	if err == nil && !moved {
+		var deleted bool
+		deleted, err = c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, raw)
+		if err == nil && !deleted {
+			moved = true
+		}
+	}
 	switch {
 	case err != nil:
-		// Still dead, so the caller gets the same answer; the envelope and
-		// the identity both stay until the next read removes them.
+		// Still dead, so the caller gets the same answer. The envelope stays
+		// and the next read finishes the removal.
 		cacheLog.Warn("linear refused a user's refresh token and removing it failed",
 			"org", orgID, "user", userID, "workspace", workspaceID, "error", err)
 		return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrNoLinearUserCredential, orgID, userID, refused)

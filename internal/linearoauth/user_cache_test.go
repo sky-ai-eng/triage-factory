@@ -23,6 +23,8 @@ type fakeUserSecrets struct {
 	db.SecretStore
 	mu  sync.Mutex
 	bag map[string]string
+	// deleteErr fails DeleteUserSystemIfValue while set.
+	deleteErr error
 }
 
 func newFakeUserSecrets() *fakeUserSecrets { return &fakeUserSecrets{bag: map[string]string{}} }
@@ -58,6 +60,9 @@ func (f *fakeUserSecrets) DeleteUserSystemIfValue(ctx context.Context, orgID, us
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return false, f.deleteErr
+	}
 	k := userBagKey(orgID, userID, key)
 	if cur, ok := f.bag[k]; !ok || cur != value {
 		return false, nil
@@ -128,17 +133,23 @@ func (f *fakeIdentities) ClearLinearIdentity(_ context.Context, userID, workspac
 
 // fakeTx runs a synthetic-claims transaction over the fake stores, recording
 // whom it ran as. It does not roll back, so a body's write order is what a
-// failure leaves behind.
+// failure leaves behind. A secret write in the body lands at once, as the
+// local keychain's does; commitErr, while set, fails the transaction after
+// the body succeeds, the way a SQLite commit can.
 type fakeTx struct {
 	db.TxRunner
-	secrets *fakeUserSecrets
-	ids     *fakeIdentities
-	as      []string
+	secrets   *fakeUserSecrets
+	ids       *fakeIdentities
+	as        []string
+	commitErr error
 }
 
 func (f *fakeTx) SyntheticClaimsWithTx(_ context.Context, orgID, userID string, fn func(db.TxStores) error) error {
 	f.as = append(f.as, orgID+":"+userID)
-	return fn(db.TxStores{Secrets: f.secrets, Users: f.ids})
+	if err := fn(db.TxStores{Secrets: f.secrets, Users: f.ids}); err != nil {
+		return err
+	}
+	return f.commitErr
 }
 
 func connectEnvelope(t *testing.T, refreshToken, grantID, clientID string) string {
@@ -155,6 +166,7 @@ func connectEnvelope(t *testing.T, refreshToken, grantID, clientID string) strin
 type userRig struct {
 	secrets *fakeUserSecrets
 	ids     *fakeIdentities
+	tx      *fakeTx
 	ref     *graceRefresher
 	clock   time.Time
 	apps    linear.OAuthAppResolver
@@ -163,13 +175,14 @@ type userRig struct {
 func newUserRig(t *testing.T) *userRig {
 	t.Helper()
 	r := &userRig{secrets: newFakeUserSecrets(), ids: &fakeIdentities{}, clock: installedAt, apps: fakeAppResolver{}}
+	r.tx = &fakeTx{secrets: r.secrets, ids: r.ids}
 	r.ref = &graceRefresher{expires: 24 * time.Hour, now: func() time.Time { return r.clock }}
 	r.secrets.set(connectEnvelope(t, "ref-0", uGrant, "client-1"))
 	return r
 }
 
 func (r *userRig) cache() *UserTokenCache {
-	c := newUserTokenCache(r.ref, r.apps, r.secrets, &fakeTx{secrets: r.secrets, ids: r.ids}, NewUserCredentialLock(nil))
+	c := newUserTokenCache(r.ref, r.apps, r.secrets, r.tx, NewUserCredentialLock(nil))
 	c.now = func() time.Time { return r.clock }
 	return c
 }
@@ -473,5 +486,62 @@ func TestUserTokenCache_ConcurrentCallersShareOneRefresh(t *testing.T) {
 	}
 	if n := r.ref.calls.Load(); n != 1 {
 		t.Errorf("refreshes = %d, want 1", n)
+	}
+}
+
+// TestUserTokenCache_FailedCommitKeepsTheEnvelope: the identity clear's
+// transaction failing on commit, after its body ran, leaves the envelope. In
+// local mode that commit rolls the identity clear back, so an envelope deleted
+// inside the body would be gone with the identity still there, and with no
+// envelope no later read would come back to clear it.
+func TestUserTokenCache_FailedCommitKeepsTheEnvelope(t *testing.T) {
+	r := newUserRig(t)
+	r.ref.refuse = map[string]bool{"ref-0": true}
+	r.tx.commitErr = errors.New("commit failed")
+	c := r.cache()
+
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); !ok {
+		t.Fatal("the envelope was deleted although the identity clear did not commit")
+	}
+
+	r.tx.commitErr = nil
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); ok {
+		t.Error("the envelope is still stored after the removal committed")
+	}
+}
+
+// TestUserTokenCache_FailedEnvelopeDeleteIsFinishedByTheNextRead: the
+// envelope delete failing after the identity clear committed leaves the
+// envelope, and the next read, refused again, removes it.
+func TestUserTokenCache_FailedEnvelopeDeleteIsFinishedByTheNextRead(t *testing.T) {
+	r := newUserRig(t)
+	r.ref.refuse = map[string]bool{"ref-0": true}
+	r.secrets.deleteErr = errors.New("keychain locked")
+	c := r.cache()
+
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); !ok {
+		t.Fatal("envelope gone although its delete failed")
+	}
+	if len(r.ids.cleared) != 1 {
+		t.Fatalf("identities cleared = %v, want one", r.ids.cleared)
+	}
+
+	r.secrets.mu.Lock()
+	r.secrets.deleteErr = nil
+	r.secrets.mu.Unlock()
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); ok {
+		t.Error("the envelope survived the next read")
 	}
 }
