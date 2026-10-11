@@ -134,17 +134,39 @@ func TestCostForUsage_CacheWrite1hSplit(t *testing.T) {
 	}
 }
 
-func TestCostForUsage_LongContextTier(t *testing.T) {
-	// Above 200k input, sonnet-4-5 bills input at 6e-06 and output at 2.25e-05.
-	in := 250000
-	out := 1000
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{PromptTokens: in, OutputTokens: out})
-	if !ok {
-		t.Fatal("expected ok")
+// TestComputeTextCost_LongContextTier pins the formula's tier selection against
+// a synthetic price rather than a snapshot row. Which models publish a >200k
+// tier is upstream's data and a refresh may legitimately remove one; how the
+// formula applies a tier is this package's, and must not depend on some model
+// still carrying one.
+func TestComputeTextCost_LongContextTier(t *testing.T) {
+	p := modelPrice{
+		InputCostPerToken:                           f64(3e-06),
+		InputCostPerTokenAbove200k:                  f64(6e-06),
+		OutputCostPerToken:                          f64(1.5e-05),
+		OutputCostPerTokenAbove200k:                 f64(2.25e-05),
+		CacheReadInputTokenCost:                     f64(3e-07),
+		CacheReadInputTokenCostAbove200:             f64(6e-07),
+		CacheCreationInputTokenCostAbove1hr:         f64(6e-06),
+		CacheCreationInputTokenCostAbove1hrAbove200: f64(1.2e-05),
+		// No tiered 5-minute write rate: that bucket bills at its base rate on
+		// both sides of the boundary.
+		CacheCreationInputTokenCost: f64(3.75e-06),
 	}
-	want := float64(in)*6e-06 + float64(out)*2.25e-05
-	if !approxEqual(usd, want) {
-		t.Fatalf("long-context cost = %g, want %g", usd, want)
+
+	// 250k prompt: 200k non-cached, 30k cache read, 20k cache write of which
+	// 5k are 1-hour.
+	above := Usage{PromptTokens: 250000, OutputTokens: 1000, CacheReadTokens: 30000, CacheCreationTokens: 20000, CacheCreationTokens1h: 5000}
+	want := 200000*6e-06 + 30000*6e-07 + 5000*1.2e-05 + 15000*3.75e-06 + 1000*2.25e-05
+	if got := computeTextCost(p, above); !approxEqual(got, want) {
+		t.Errorf("above 200k: cost = %g, want %g", got, want)
+	}
+
+	// The boundary itself is not above it.
+	at := Usage{PromptTokens: 200000, OutputTokens: 1000}
+	want = 200000*3e-06 + 1000*1.5e-05
+	if got := computeTextCost(p, at); !approxEqual(got, want) {
+		t.Errorf("at 200k: cost = %g, want %g", got, want)
 	}
 }
 
