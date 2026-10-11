@@ -59,17 +59,17 @@ const UserCredentialLockSalt int64 = 12
 var localUserCredentialLocks sync.Map
 
 // UserCredentialLock is the per-(org, user) lock every writer of a user's
-// Linear credential holds: the key paste, the Connect callback (from before
-// its code exchange), the disconnect and a member's removal (through their
-// revoke), and UserTokenCache's rotation write-back and its removal of a
-// credential Linear refused. Each of those writes the envelope and the
-// identity row as one step, so a credential and the identity derived from it
-// never come from two different binds, and no revoke lands between another
-// grant's exchange and its store. In multi mode it is a Postgres advisory
-// lock; in local mode a per-key gate. It is not reentrant: a holder must not
-// call linear.Resolver.ForUser for the same user, whose refresh takes it. A
-// holder that needs the org's workspace stable takes CredentialLock after
-// this one, never before.
+// Linear credential holds: the key paste and the Connect callback's store,
+// the disconnect, a member's removal, and UserTokenCache's rotation
+// write-back and its removal of a credential Linear refused. Each of those
+// writes the envelope and the identity row as one step, so a credential and
+// the identity derived from it never come from two different binds. It is
+// held only around database work, never across a call to Linear: in multi
+// mode it is a Postgres session advisory lock, which holds a pool connection
+// for as long as it is held; in local mode a per-key gate. It is not
+// reentrant: a holder must not call linear.Resolver.ForUser for the same
+// user, whose refresh takes it. A holder that needs the org's workspace
+// stable takes CredentialLock after this one, never before.
 type UserCredentialLock struct {
 	db *sql.DB
 }

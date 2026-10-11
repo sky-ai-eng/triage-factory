@@ -41,19 +41,27 @@ import (
 // user travel in an HMAC-signed state cookie.
 //
 // Every writer of a user's credential holds that user's
-// linearoauth.UserCredentialLock across the write, so the envelope and the
-// identity row derived from it always come from the same bind. The lock also
-// spans every grant this file mints or revokes: Connect takes it before the
-// code exchange, and each revoke runs before its caller releases it. Linear
-// has not been shown to keep two grants of one app and one person apart, so a
-// revoke must never land between another Connect's exchange and its store.
+// linearoauth.UserCredentialLock across its database work: the membership
+// read, the workspace read and the write or delete. So the envelope and the
+// identity row derived from it always come from the same bind, and a bind
+// racing the user's removal either sees it or is swept after it. The org's
+// Linear workspace, which keys the credential, can change under any of them:
+// the org's key bind, its install and its unbind all write it while holding
+// the org's Linear credential lock. So a writer here reads the workspace,
+// and writes or deletes under it, while holding that lock too
+// (holdLinearWorkspace), taken after the user lock. Nothing takes the two in
+// the other order.
 //
-// The org's Linear workspace, which keys the credential, can change under
-// any of them: the org's key bind, its install and its unbind all write it
-// while holding the org's Linear credential lock. So a writer here reads the
-// workspace, and writes or deletes under it, while holding that lock too
-// (holdLinearWorkspace), taken after the user lock and released before any
-// call to Linear. Nothing takes the two in the other order.
+// Neither lock is held across a call to Linear (the code exchange, the
+// whoami, a revoke). In multi mode each holds a Postgres connection for as
+// long as it is held, and a slow Linear would otherwise pin the pool. The
+// cost is one race the locks no longer close: Linear has not been shown to
+// keep two grants of one app and one person apart, so a revoke of the grant
+// a user is replacing or withdrawing can land while their own new Connect is
+// between its exchange and its store, and end that grant too. It is the
+// same person racing themselves, and the result repairs itself: the dead
+// grant is refused on its first refresh, removed with its identity, and the
+// gate asks them to connect again.
 //
 // A Connect that does not complete writes nothing and redirects to the gate
 // page with error set to one of:
@@ -241,12 +249,6 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
-	if err != nil {
-		internalError(w, "linear-identity", err)
-		return
-	}
-	defer release()
 	cred := linear.UserCredential{Method: linear.AuthMethodAPIKey, Token: key}
 	urlKey, err := s.storeLinearUserCredential(ctx, orgID, userID, org.ID, cred, viewer)
 	switch {
@@ -265,7 +267,6 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		internalError(w, "linear-identity", err)
 		return
 	}
-	release()
 	linearConnectLog.Info("bound user, api key stored", "org", orgID, "user", userID, "linear_user", viewer.ID, "workspace", org.URLKey)
 	writeJSON(w, http.StatusOK, linearIdentityCaptureResponse{
 		Account:         linearAccountName(viewer.DisplayName, viewer.Name, viewer.ID),
@@ -294,17 +295,15 @@ func (s *Server) handleLinearIdentityDelete(w http.ResponseWriter, r *http.Reque
 	defer release()
 
 	raw, urlKey, err := s.dropLinearUserCredential(ctx, orgID, userID)
+	release()
 	if err != nil {
 		internalError(w, "linear-identity", err)
 		return
 	}
 	if raw != "" {
-		// Under the user lock, so no Connect exchanges or stores between the
-		// delete and the revoke.
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 		linearConnectLog.Info("unbound user", "org", orgID, "user", userID, "workspace", urlKey)
 	}
-	release()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
@@ -415,22 +414,10 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	// From here the org is the cookie's, and membership is read again rather
-	// than trusted from the start: minutes have passed.
+	// than trusted from the start: minutes have passed. This read only
+	// spares a removed member the round trip to Linear; the one that decides
+	// is the store's, under the user's lock.
 	orgID := cs.OrgID
-
-	// Taken before the membership read and held until the grant is stored,
-	// for two orderings. A member's removal sweeps their credential under
-	// this lock after the removal commits, so a membership read under it
-	// either sees the removal or comes before a sweep that will see this
-	// bind. And no revoke of another of the user's grants can land between
-	// the exchange that mints this one and its store.
-	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
-	if err != nil {
-		internalError(w, "linear-connect", err)
-		return
-	}
-	defer release()
-
 	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
 	if err != nil {
 		internalError(w, "linear-connect", err)
@@ -565,8 +552,7 @@ var errLinearWorkspaceChanged = errors.New("linear: the org's linear workspace i
 // install and its unbind), and reads the org's settings with read under it.
 // The workspace it returns stays the org's until release. A per-user writer
 // takes it after its user lock and holds it only around its own read and
-// write, never across a call to Linear, so the org's credential is not held
-// up by one member's OAuth round trip.
+// write, never across a call to Linear.
 func (s *Server) holdLinearWorkspace(ctx context.Context, orgID string, read func(context.Context) (domain.OrgSettings, error)) (domain.OrgSettings, func(), error) {
 	release, err := s.lockLinearCredential(ctx, orgID)
 	if err != nil {
@@ -587,12 +573,11 @@ func (s *Server) holdLinearWorkspace(ctx context.Context, orgID string, read fun
 // when the org has none), so a credential is never stored under a workspace
 // it was not checked against. A Connect grant the new credential replaces is
 // then revoked in Linear, unless the new one may be that same grant (see
-// supersededLinearGrant). The caller holds the user's credential lock across
-// the call, so the revoke too runs under it. It returns the workspace's URL
-// key.
+// supersededLinearGrant), after both locks are released. It returns the
+// workspace's URL key.
 //
-// Membership is read again here, under the user lock, and a user no longer
-// in the org is errLinearNotOrgMember. The route's own check ran before the
+// Membership is read again here, under the user's credential lock, and a
+// user no longer in the org is errLinearNotOrgMember. The route's own check ran before the
 // lock, and the secret and identity policies key on the claims, not on
 // membership, so a bind racing the user's removal could otherwise write
 // after the removal's sweep (sweepLinearUserCredential) found nothing. Only
@@ -608,6 +593,12 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 	}
 	key := linear.UserTokenKey(workspaceID)
 	source := string(cred.Method)
+
+	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
+	if err != nil {
+		return "", err
+	}
+	defer release()
 
 	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
 	if err != nil {
@@ -673,6 +664,7 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 		return "", err
 	}
 	releaseWorkspace()
+	release()
 
 	if old := supersededLinearGrant(prior, priorLinearID, cred, viewer.ID); old != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, old)
@@ -684,7 +676,8 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 // for the org's workspace, read under holdLinearWorkspace, with an audit row
 // when there was a credential. It returns the envelope it removed, for the
 // caller to revoke once the org's lock is released, and the workspace's URL
-// key. The caller holds the user's credential lock.
+// key. The caller holds the user's credential lock, and revokes after
+// releasing it.
 func (s *Server) dropLinearUserCredential(ctx context.Context, orgID, userID string) (raw, urlKey string, err error) {
 	orgSet, releaseWorkspace, err := s.holdLinearWorkspace(ctx, orgID, func(ctx context.Context) (domain.OrgSettings, error) {
 		return s.readLinearOrgSettings(ctx, orgID, userID)
@@ -786,7 +779,7 @@ func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw s
 // (SyntheticClaimsWithTx): the rows are theirs, and the caller is the admin
 // removing them or the user leaving. The workspace is read under
 // holdLinearWorkspace, the envelope and the identity go in one transaction,
-// so neither outlives the other, and the revoke runs before the user lock is
+// so neither outlives the other, and the revoke runs once both locks are
 // released. It must run after the removal commits: every bind reads
 // membership under the same lock (storeLinearUserCredential), so one that
 // read it before the removal has committed its write by the time this takes
@@ -830,6 +823,7 @@ func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID st
 		return err
 	}
 	releaseWorkspace()
+	release()
 	if raw != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 	}

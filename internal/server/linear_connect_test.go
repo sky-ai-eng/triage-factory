@@ -673,23 +673,30 @@ func TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt(t *testing.T) 
 	}
 }
 
-// TestLinearConnect_CallbackMintsOnlyUnderTheUserLock: the code exchange
-// waits for the user's credential lock, so no revoke of another of the
-// user's grants can land between this grant's exchange and its store.
-func TestLinearConnect_CallbackMintsOnlyUnderTheUserLock(t *testing.T) {
+// TestLinearConnect_LinearCallsRunOutsideTheUserLock: with the user's lock
+// held elsewhere, the callback still exchanges its code and checks who it
+// acts as; only the store waits for the lock. In multi mode the lock holds a
+// pool connection, so nothing holds it across a call to Linear.
+func TestLinearConnect_LinearCallsRunOutsideTheUserLock(t *testing.T) {
 	r := newLinearConnectRig(t)
 	cookie, state := r.startConnect(t, "")
-	release, err := r.s.linearUserCredentialLock.Lock(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
-	if err != nil {
-		t.Fatalf("lock: %v", err)
-	}
+	release := r.holdUserLock(t)
+	callsBefore := r.fake.Calls()
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		done <- r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
 	}()
-	time.Sleep(200 * time.Millisecond)
-	if got := r.oauth.Grants(); len(got) != 0 {
-		t.Fatalf("the callback exchanged a code (%v) while the user's lock was held", got)
+	deadline := time.Now().Add(5 * time.Second)
+	for r.fake.Calls() == callsBefore && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !slices.Contains(r.oauth.Grants(), "authorization_code") || r.fake.Calls() == callsBefore {
+		t.Fatalf("the callback did not reach Linear while the user's lock was held elsewhere (grants %v)", r.oauth.Grants())
+	}
+	select {
+	case rec := <-done:
+		t.Fatalf("the callback stored (%d) while the user's lock was held elsewhere", rec.Code)
+	case <-time.After(100 * time.Millisecond):
 	}
 	release()
 	select {
@@ -700,12 +707,14 @@ func TestLinearConnect_CallbackMintsOnlyUnderTheUserLock(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the callback did not finish after the lock was released")
 	}
+	if cred := r.userCredential(t); cred.Method != linear.AuthMethodConnectOAuth {
+		t.Errorf("stored %+v, want the Connect credential", cred)
+	}
 }
 
-// TestLinearIdentity_RevokesUnderTheUserLock: a disconnect's revoke and a
-// replaced grant's revoke both run while the user's lock is held, so no
-// Connect can exchange or store until the revoke is done.
-func TestLinearIdentity_RevokesUnderTheUserLock(t *testing.T) {
+// TestLinearIdentity_RevokesRunOutsideTheUserLock: a disconnect's revoke and
+// a replaced grant's revoke both run after the user's lock is released.
+func TestLinearIdentity_RevokesRunOutsideTheUserLock(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		act  func(r *linearConnectRig) *httptest.ResponseRecorder
@@ -727,8 +736,8 @@ func TestLinearIdentity_RevokesUnderTheUserLock(t *testing.T) {
 			if rec := tc.act(r); rec.Code != http.StatusOK {
 				t.Fatalf("%s: %d: %s", tc.name, rec.Code, rec.Body.String())
 			}
-			if !slices.Equal(heldDuringRevoke, []bool{true}) {
-				t.Errorf("lock held during each revoke = %v, want one revoke under the lock", heldDuringRevoke)
+			if !slices.Equal(heldDuringRevoke, []bool{false}) {
+				t.Errorf("user lock held during each revoke = %v, want one revoke with it free", heldDuringRevoke)
 			}
 		})
 	}
@@ -1034,8 +1043,8 @@ func TestLinearIdentity_RemovalRacingABind(t *testing.T) {
 			t.Fatalf("start: %d: %s", start.Code, start.Body.String())
 		}
 
-		// The removal commits while the code is being exchanged; its sweep
-		// waits on dave's lock, which the callback holds.
+		// The removal, its sweep included, commits while the code is being
+		// exchanged, after the callback's early membership read.
 		removed := make(chan *httptest.ResponseRecorder, 1)
 		oauth.mu.Lock()
 		oauth.onExchange = func() {
@@ -1173,25 +1182,25 @@ func TestLinearIdentity_WorkspaceMovesUnderAWaitingBind(t *testing.T) {
 func TestLinearConnect_WorkspaceMovesDuringTheExchange(t *testing.T) {
 	r := newLinearConnectRig(t)
 	cookie, state := r.startConnect(t, "")
-	var lockFree bool
+	var lockFree, userLockFree bool
 	r.oauth.mu.Lock()
 	r.oauth.onExchange = func() {
-		// The org's lock is free while Linear is being called, so an org
-		// change is never held up by one member's OAuth round trip.
+		// Neither lock is held while Linear is being called.
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		if release, err := r.s.lockLinearCredential(ctx, runmode.LocalDefaultOrgID); err == nil {
 			lockFree = true
 			release()
 		}
+		userLockFree = !r.lockHeldElsewhere(t)
 		r.moveOrgWorkspace(t, betaWorkspace)
 	}
 	r.oauth.mu.Unlock()
 
 	rec := r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
 	expectConnectError(t, rec, "workspace_mismatch", "")
-	if !lockFree {
-		t.Error("the org's Linear lock was held across the code exchange")
+	if !lockFree || !userLockFree {
+		t.Errorf("lock free during the code exchange: org %v, user %v; want both", lockFree, userLockFree)
 	}
 	if got := r.oauth.Revoked(); len(got) != 2 {
 		t.Errorf("revoked %v, want the minted pair", got)
