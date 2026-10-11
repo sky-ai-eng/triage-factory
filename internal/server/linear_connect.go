@@ -48,6 +48,13 @@ import (
 // has not been shown to keep two grants of one app and one person apart, so a
 // revoke must never land between another Connect's exchange and its store.
 //
+// The org's Linear workspace, which keys the credential, can change under
+// any of them: the org's key bind, its install and its unbind all write it
+// while holding the org's Linear credential lock. So a writer here reads the
+// workspace, and writes or deletes under it, while holding that lock too
+// (holdLinearWorkspace), taken after the user lock and released before any
+// call to Linear. Nothing takes the two in the other order.
+//
 // A Connect that does not complete writes nothing and redirects to the gate
 // page with error set to one of:
 //
@@ -241,14 +248,20 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 	}
 	defer release()
 	cred := linear.UserCredential{Method: linear.AuthMethodAPIKey, Token: key}
-	err = s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer)
-	if errors.Is(err, errLinearNotOrgMember) {
+	urlKey, err := s.storeLinearUserCredential(ctx, orgID, userID, org.ID, cred, viewer)
+	switch {
+	case errors.Is(err, errLinearNotOrgMember):
 		// Removed while the key was being checked: the answer the route
 		// gives any non-member.
 		notFound(w, "org")
 		return
-	}
-	if err != nil {
+	case errors.Is(err, errLinearNotConfigured):
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonNotConfigured, Message: "Your workspace hasn't connected Linear yet. Ask an admin to connect it in Workspace Settings first.", Field: "api_key"})
+		return
+	case errors.Is(err, errLinearWorkspaceChanged):
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{Reason: httpx.ReasonUpstreamRejected, Message: "This key belongs to a different Linear workspace than the one connected to Triage Factory.", Field: "api_key"})
+		return
+	case err != nil:
 		internalError(w, "linear-identity", err)
 		return
 	}
@@ -256,7 +269,7 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 	linearConnectLog.Info("bound user, api key stored", "org", orgID, "user", userID, "linear_user", viewer.ID, "workspace", org.URLKey)
 	writeJSON(w, http.StatusOK, linearIdentityCaptureResponse{
 		Account:         linearAccountName(viewer.DisplayName, viewer.Name, viewer.ID),
-		WorkspaceURLKey: orgSet.LinearWorkspaceURLKey,
+		WorkspaceURLKey: urlKey,
 	})
 }
 
@@ -273,66 +286,23 @@ func (s *Server) handleLinearIdentityDelete(w http.ResponseWriter, r *http.Reque
 	}
 	ctx := r.Context()
 
-	orgSet, err := s.readLinearOrgSettings(ctx, orgID, userID)
-	if err != nil {
-		internalError(w, "linear-identity", err)
-		return
-	}
-	workspaceID := orgSet.LinearWorkspaceID
-	if workspaceID == "" {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
-		return
-	}
-	key := linear.UserTokenKey(workspaceID)
-
 	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
 	if err != nil {
 		internalError(w, "linear-identity", err)
 		return
 	}
 	defer release()
-	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
+
+	raw, urlKey, err := s.dropLinearUserCredential(ctx, orgID, userID)
 	if err != nil {
 		internalError(w, "linear-identity", err)
 		return
 	}
-
-	var raw string
-	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		var err error
-		if raw, err = tx.Secrets.GetUser(ctx, orgID, userID, key); err != nil {
-			return fmt.Errorf("read linear credential: %w", err)
-		}
-		if err := tx.Users.ClearLinearIdentity(ctx, userID, workspaceID); err != nil {
-			return fmt.Errorf("clear linear identity: %w", err)
-		}
-		if raw == "" {
-			return nil
-		}
-		if err := tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
-			ActorUserID: userID,
-			Action:      domain.AccessActionCredentialRemoved,
-			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindLinearUser, "", orgSet.LinearWorkspaceURLKey),
-		}); err != nil {
-			return fmt.Errorf("audit credential removal: %w", err)
-		}
-		// Last: in local mode the keychain write is outside the transaction.
-		if _, err := tx.Secrets.DeleteUser(ctx, orgID, userID, key); err != nil {
-			return fmt.Errorf("delete linear credential: %w", err)
-		}
-		return nil
-	}); err != nil {
-		if restore != nil {
-			restore()
-		}
-		internalError(w, "linear-identity", err)
-		return
-	}
 	if raw != "" {
-		// Under the lock, so no Connect exchanges or stores between the
+		// Under the user lock, so no Connect exchanges or stores between the
 		// delete and the revoke.
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
-		linearConnectLog.Info("unbound user", "org", orgID, "user", userID, "workspace", orgSet.LinearWorkspaceURLKey)
+		linearConnectLog.Info("unbound user", "org", orgID, "user", userID, "workspace", urlKey)
 	}
 	release()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
@@ -550,14 +520,21 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		ClientID:     app.ClientID,
 		GrantID:      grantID,
 	}
-	err = s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer)
-	if errors.Is(err, errLinearNotOrgMember) {
-		s.revokeLinearTokens(ctx, orgID, app, tok)
-		redirectLinearConnect(w, r, fallbackOrg, "", "state")
-		return
-	}
+	_, err = s.storeLinearUserCredential(ctx, orgID, userID, org.ID, cred, viewer)
 	if err != nil {
 		s.revokeLinearTokens(ctx, orgID, app, tok)
+	}
+	switch {
+	case errors.Is(err, errLinearNotOrgMember):
+		redirectLinearConnect(w, r, fallbackOrg, "", "state")
+		return
+	case errors.Is(err, errLinearNotConfigured):
+		redirectLinearConnect(w, r, orgID, returnTo, "not_configured")
+		return
+	case errors.Is(err, errLinearWorkspaceChanged):
+		redirectLinearConnect(w, r, orgID, returnTo, "workspace_mismatch")
+		return
+	case err != nil:
 		internalError(w, "linear-connect", err)
 		return
 	}
@@ -574,14 +551,48 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 // org by the time it holds their credential lock.
 var errLinearNotOrgMember = errors.New("linear: user is no longer a member of the org")
 
-// storeLinearUserCredential writes a validated credential and the identity it
-// validated as, with the access-log row. A Connect grant the new credential
-// replaces is then revoked in Linear, unless the new one may be that same
-// grant (see supersededLinearGrant). The caller holds the user's credential
-// lock across the call, so the revoke too runs under it.
+// errLinearNotConfigured is a bind that finds the org with no Linear
+// workspace by the time it holds the workspace stable: it was unbound while
+// the credential was being checked.
+var errLinearNotConfigured = errors.New("linear: the org has no linear workspace")
+
+// errLinearWorkspaceChanged is a bind that finds the org on a different
+// Linear workspace than the one the credential was checked against.
+var errLinearWorkspaceChanged = errors.New("linear: the org's linear workspace is not the credential's")
+
+// holdLinearWorkspace takes the org's Linear credential lock, which every
+// writer of org_settings.linear_workspace_* holds (the org's key bind, its
+// install and its unbind), and reads the org's settings with read under it.
+// The workspace it returns stays the org's until release. A per-user writer
+// takes it after its user lock and holds it only around its own read and
+// write, never across a call to Linear, so the org's credential is not held
+// up by one member's OAuth round trip.
+func (s *Server) holdLinearWorkspace(ctx context.Context, orgID string, read func(context.Context) (domain.OrgSettings, error)) (domain.OrgSettings, func(), error) {
+	release, err := s.lockLinearCredential(ctx, orgID)
+	if err != nil {
+		return domain.OrgSettings{}, nil, err
+	}
+	orgSet, err := read(ctx)
+	if err != nil {
+		release()
+		return domain.OrgSettings{}, nil, fmt.Errorf("read org settings: %w", err)
+	}
+	return orgSet, release, nil
+}
+
+// storeLinearUserCredential writes a credential checked against workspaceID,
+// and the identity it validated as, with the access-log row, keyed by the
+// org's workspace read under holdLinearWorkspace. It refuses when that is no
+// longer workspaceID (errLinearWorkspaceChanged, or errLinearNotConfigured
+// when the org has none), so a credential is never stored under a workspace
+// it was not checked against. A Connect grant the new credential replaces is
+// then revoked in Linear, unless the new one may be that same grant (see
+// supersededLinearGrant). The caller holds the user's credential lock across
+// the call, so the revoke too runs under it. It returns the workspace's URL
+// key.
 //
-// Membership is read again here, under that lock, and a user no longer in
-// the org is errLinearNotOrgMember. The route's own check ran before the
+// Membership is read again here, under the user lock, and a user no longer
+// in the org is errLinearNotOrgMember. The route's own check ran before the
 // lock, and the secret and identity policies key on the claims, not on
 // membership, so a bind racing the user's removal could otherwise write
 // after the removal's sweep (sweepLinearUserCredential) found nothing. Only
@@ -590,25 +601,41 @@ var errLinearNotOrgMember = errors.New("linear: user is no longer a member of th
 // failed request. The sweep takes the same lock after the removal commits,
 // so a read under the lock either sees the removal or comes before a sweep
 // that will see this write.
-func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, workspaceID, urlKey string, cred linear.UserCredential, viewer *auth.LinearUser) error {
+func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, workspaceID string, cred linear.UserCredential, viewer *auth.LinearUser) (string, error) {
 	envelope, err := linear.MarshalUserCredential(cred)
 	if err != nil {
-		return err
+		return "", err
 	}
 	key := linear.UserTokenKey(workspaceID)
 	source := string(cred.Method)
 
 	member, err := s.az.UserHasOrgAccess(ctx, userID, orgID)
 	if err != nil {
-		return fmt.Errorf("check org membership: %w", err)
+		return "", fmt.Errorf("check org membership: %w", err)
 	}
 	if !member {
-		return errLinearNotOrgMember
+		return "", errLinearNotOrgMember
 	}
+
+	orgSet, releaseWorkspace, err := s.holdLinearWorkspace(ctx, orgID, func(ctx context.Context) (domain.OrgSettings, error) {
+		return s.readLinearOrgSettings(ctx, orgID, userID)
+	})
+	if err != nil {
+		return "", err
+	}
+	defer releaseWorkspace()
+	switch orgSet.LinearWorkspaceID {
+	case workspaceID:
+	case "":
+		return "", errLinearNotConfigured
+	default:
+		return "", errLinearWorkspaceChanged
+	}
+	urlKey := orgSet.LinearWorkspaceURLKey
 
 	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var (
@@ -643,13 +670,69 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 		if restore != nil {
 			restore()
 		}
-		return err
+		return "", err
 	}
+	releaseWorkspace()
 
 	if old := supersededLinearGrant(prior, priorLinearID, cred, viewer.ID); old != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, old)
 	}
-	return nil
+	return urlKey, nil
+}
+
+// dropLinearUserCredential removes the caller's own credential and identity
+// for the org's workspace, read under holdLinearWorkspace, with an audit row
+// when there was a credential. It returns the envelope it removed, for the
+// caller to revoke once the org's lock is released, and the workspace's URL
+// key. The caller holds the user's credential lock.
+func (s *Server) dropLinearUserCredential(ctx context.Context, orgID, userID string) (raw, urlKey string, err error) {
+	orgSet, releaseWorkspace, err := s.holdLinearWorkspace(ctx, orgID, func(ctx context.Context) (domain.OrgSettings, error) {
+		return s.readLinearOrgSettings(ctx, orgID, userID)
+	})
+	if err != nil {
+		return "", "", err
+	}
+	defer releaseWorkspace()
+	workspaceID, urlKey := orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey
+	if workspaceID == "" {
+		return "", "", nil
+	}
+	key := linear.UserTokenKey(workspaceID)
+	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
+	if err != nil {
+		return "", "", err
+	}
+	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		if raw, err = tx.Secrets.GetUser(ctx, orgID, userID, key); err != nil {
+			return fmt.Errorf("read linear credential: %w", err)
+		}
+		if err := tx.Users.ClearLinearIdentity(ctx, userID, workspaceID); err != nil {
+			return fmt.Errorf("clear linear identity: %w", err)
+		}
+		if raw == "" {
+			return nil
+		}
+		if err := tx.AccessChangeLog.Record(ctx, orgID, domain.AccessChange{
+			ActorUserID: userID,
+			Action:      domain.AccessActionCredentialRemoved,
+			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindLinearUser, "", urlKey),
+		}); err != nil {
+			return fmt.Errorf("audit credential removal: %w", err)
+		}
+		// Last: in local mode the keychain write is outside the transaction,
+		// so only the commit can fail after it, and the restore covers that.
+		if _, err := tx.Secrets.DeleteUser(ctx, orgID, userID, key); err != nil {
+			return fmt.Errorf("delete linear credential: %w", err)
+		}
+		return nil
+	}); err != nil {
+		if restore != nil {
+			restore()
+		}
+		return "", "", err
+	}
+	return raw, urlKey, nil
 }
 
 // supersededLinearGrant is the prior envelope when it is a Connect grant the
@@ -701,29 +784,32 @@ func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw s
 // for the org's workspace when they leave the org, and revokes a Connect
 // grant. The removal runs after the membership is gone, as the departing user
 // (SyntheticClaimsWithTx): the rows are theirs, and the caller is the admin
-// removing them or the user leaving. The envelope and the identity go in one
-// transaction, so neither outlives the other, and the revoke runs before the
-// lock is released. It must run after the removal commits: every bind reads
+// removing them or the user leaving. The workspace is read under
+// holdLinearWorkspace, the envelope and the identity go in one transaction,
+// so neither outlives the other, and the revoke runs before the user lock is
+// released. It must run after the removal commits: every bind reads
 // membership under the same lock (storeLinearUserCredential), so one that
 // read it before the removal has committed its write by the time this takes
 // the lock, and one after refuses. Best-effort, like the rest of the
 // removal's deprovisioning; a failure is returned for the caller to log.
 func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID string) error {
-	orgSet, err := s.orgs.GetSettingsSystem(ctx, orgID)
-	if err != nil {
-		return fmt.Errorf("read org settings: %w", err)
-	}
-	workspaceID := orgSet.LinearWorkspaceID
-	if workspaceID == "" {
-		return nil
-	}
-	key := linear.UserTokenKey(workspaceID)
-
 	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
 	if err != nil {
 		return err
 	}
 	defer release()
+	orgSet, releaseWorkspace, err := s.holdLinearWorkspace(ctx, orgID, func(ctx context.Context) (domain.OrgSettings, error) {
+		return s.orgs.GetSettingsSystem(ctx, orgID)
+	})
+	if err != nil {
+		return err
+	}
+	defer releaseWorkspace()
+	workspaceID := orgSet.LinearWorkspaceID
+	if workspaceID == "" {
+		return nil
+	}
+	key := linear.UserTokenKey(workspaceID)
 	var raw string
 	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var err error
@@ -743,6 +829,7 @@ func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID st
 	}); err != nil {
 		return err
 	}
+	releaseWorkspace()
 	if raw != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 	}

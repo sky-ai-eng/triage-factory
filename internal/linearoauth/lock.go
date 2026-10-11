@@ -28,9 +28,13 @@ var localCredentialLocks sync.Map
 // check one of them makes — is an install live, which app minted it, is the
 // stored refresh token still the one Linear refused — therefore still holds
 // when its write lands, and local mode's restore of a failed write cannot
-// put back a value another writer has since replaced. In multi mode it is a
-// Postgres advisory lock, so it holds across pods; in local mode it is a
-// per-org gate (db.AcquireKeyedLock).
+// put back a value another writer has since replaced. Because the bind,
+// install and unbind that write org_settings.linear_workspace_* hold it, a
+// writer of a user's credential takes it too, briefly, to read the workspace
+// that keys the credential and write under it; it does so after its
+// UserCredentialLock, the only order the two are ever taken in. In multi mode
+// it is a Postgres advisory lock, so it holds across pods; in local mode it
+// is a per-org gate (db.AcquireKeyedLock).
 type CredentialLock struct {
 	db *sql.DB
 }
@@ -63,7 +67,9 @@ var localUserCredentialLocks sync.Map
 // never come from two different binds, and no revoke lands between another
 // grant's exchange and its store. In multi mode it is a Postgres advisory
 // lock; in local mode a per-key gate. It is not reentrant: a holder must not
-// call linear.Resolver.ForUser for the same user, whose refresh takes it.
+// call linear.Resolver.ForUser for the same user, whose refresh takes it. A
+// holder that needs the org's workspace stable takes CredentialLock after
+// this one, never before.
 type UserCredentialLock struct {
 	db *sql.DB
 }

@@ -1077,3 +1077,231 @@ func TestLinearIdentity_RemovalRacingABind(t *testing.T) {
 		}
 	})
 }
+
+var betaWorkspace = linear.Organization{ID: "org-beta", Name: "Beta", URLKey: "beta"}
+
+// moveOrgWorkspace rebinds the org's key to another workspace, which moves
+// org_settings.linear_workspace_*, and points the whoami fake back at what
+// it answered before, so a user's credential still reads as Acme's.
+func (r *linearConnectRig) moveOrgWorkspace(t *testing.T, to linear.Organization) {
+	t.Helper()
+	r.fake.setWorkspace(to)
+	rec := doJSON(t, r.s, http.MethodPut, linearCredentialPath(), map[string]any{"api_key": "lin_api_org_" + to.URLKey})
+	r.fake.setWorkspace(linear.Organization{ID: acmeWorkspaceID, Name: "Acme", URLKey: acmeWorkspaceURLKey})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("move org workspace: %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := r.orgSettings(t).LinearWorkspaceID; got != to.ID {
+		t.Fatalf("org workspace = %q after the move, want %q", got, to.ID)
+	}
+}
+
+// holdUserLock takes the user's credential lock, as another of their requests
+// would, until the returned release.
+func (r *linearConnectRig) holdUserLock(t *testing.T) func() {
+	t.Helper()
+	release, err := r.s.linearUserCredentialLock.Lock(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	return release
+}
+
+func (r *linearConnectRig) userSecretIn(t *testing.T, workspaceID string) string {
+	t.Helper()
+	v, err := r.stores.Secrets.GetUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, linear.UserTokenKey(workspaceID))
+	if err != nil {
+		t.Fatalf("read user credential: %v", err)
+	}
+	return v
+}
+
+// TestLinearIdentity_WorkspaceMovesUnderAWaitingBind: a key checked against
+// the org's workspace, whose bind then waits on the user's lock while the org
+// moves to another workspace, is refused rather than stored under the
+// workspace the org had when the request began.
+func TestLinearIdentity_WorkspaceMovesUnderAWaitingBind(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		move     func(r *linearConnectRig)
+		wantCode int
+		reason   string
+	}{
+		{"moved", func(r *linearConnectRig) { r.moveOrgWorkspace(t, betaWorkspace) }, http.StatusUnprocessableEntity, "UPSTREAM_REJECTED"},
+		{"unbound", func(r *linearConnectRig) {
+			if rec := doJSON(t, r.s, http.MethodDelete, linearCredentialPath(), nil); rec.Code != http.StatusOK {
+				t.Fatalf("unbind: %d: %s", rec.Code, rec.Body.String())
+			}
+		}, http.StatusConflict, "NOT_CONFIGURED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newLinearConnectRig(t)
+			release := r.holdUserLock(t)
+			callsBefore := r.fake.Calls()
+			done := make(chan *httptest.ResponseRecorder, 1)
+			go func() { done <- r.pasteKey(t, linearUserKey) }()
+			// The paste has checked its key against Acme and is waiting on
+			// the lock.
+			deadline := time.Now().Add(5 * time.Second)
+			for r.fake.Calls() == callsBefore && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			time.Sleep(50 * time.Millisecond)
+			tc.move(r)
+			release()
+
+			rec := <-done
+			if rec.Code != tc.wantCode || errorItems(t, rec)[0].Reason != tc.reason {
+				t.Fatalf("paste = %d %s, want %d %s", rec.Code, rec.Body.String(), tc.wantCode, tc.reason)
+			}
+			for _, ws := range []string{acmeWorkspaceID, betaWorkspace.ID} {
+				if v := r.userSecretIn(t, ws); v != "" {
+					t.Errorf("credential stored under %s: %q", ws, v)
+				}
+			}
+			if id, _, _ := r.identity(t); id != "" {
+				t.Errorf("identity %q stored for the workspace the org left", id)
+			}
+		})
+	}
+}
+
+// TestLinearConnect_WorkspaceMovesDuringTheExchange: the org moving while a
+// Connect's code is exchanged refuses the store as a workspace mismatch and
+// revokes the minted pair, rather than storing the grant under the workspace
+// the callback read first.
+func TestLinearConnect_WorkspaceMovesDuringTheExchange(t *testing.T) {
+	r := newLinearConnectRig(t)
+	cookie, state := r.startConnect(t, "")
+	var lockFree bool
+	r.oauth.mu.Lock()
+	r.oauth.onExchange = func() {
+		// The org's lock is free while Linear is being called, so an org
+		// change is never held up by one member's OAuth round trip.
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if release, err := r.s.lockLinearCredential(ctx, runmode.LocalDefaultOrgID); err == nil {
+			lockFree = true
+			release()
+		}
+		r.moveOrgWorkspace(t, betaWorkspace)
+	}
+	r.oauth.mu.Unlock()
+
+	rec := r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
+	expectConnectError(t, rec, "workspace_mismatch", "")
+	if !lockFree {
+		t.Error("the org's Linear lock was held across the code exchange")
+	}
+	if got := r.oauth.Revoked(); len(got) != 2 {
+		t.Errorf("revoked %v, want the minted pair", got)
+	}
+	for _, ws := range []string{acmeWorkspaceID, betaWorkspace.ID} {
+		if v := r.userSecretIn(t, ws); v != "" {
+			t.Errorf("credential stored under %s: %q", ws, v)
+		}
+	}
+}
+
+// TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn: a disconnect that
+// waits on the user's lock while the org moves withdraws the credential for
+// the workspace the org is on when it runs, not the one it was on when the
+// request arrived.
+func TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn(t *testing.T) {
+	r := newLinearConnectRig(t)
+	ctx := t.Context()
+	for _, ws := range []string{acmeWorkspaceID, betaWorkspace.ID} {
+		if err := r.stores.Secrets.PutUser(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, linear.UserTokenKey(ws), `{"method":"api_key","token":"lin_api_`+ws+`"}`, ""); err != nil {
+			t.Fatalf("seed %s: %v", ws, err)
+		}
+	}
+	release := r.holdUserLock(t)
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- doJSON(t, r.s, http.MethodDelete, linearIdentityPath(), nil) }()
+	time.Sleep(100 * time.Millisecond)
+	r.moveOrgWorkspace(t, betaWorkspace)
+	release()
+
+	if rec := <-done; rec.Code != http.StatusOK {
+		t.Fatalf("DELETE: %d: %s", rec.Code, rec.Body.String())
+	}
+	if v := r.userSecretIn(t, betaWorkspace.ID); v != "" {
+		t.Errorf("the credential for the org's current workspace survived the disconnect: %q", v)
+	}
+	if v := r.userSecretIn(t, acmeWorkspaceID); v == "" {
+		t.Error("the disconnect removed the credential for the workspace the org left")
+	}
+}
+
+// TestLinearIdentity_SweepActsOnTheWorkspaceItRunsIn: a removal whose sweep
+// waits on the member's lock while the org moves to another workspace
+// removes the member's credential for the workspace the org is on when the
+// sweep runs.
+func TestLinearIdentity_SweepActsOnTheWorkspaceItRunsIn(t *testing.T) {
+	rig := newAuthRig(t)
+	s := rig.srv
+	whoami := newLinearWhoamiFake(t)
+	s.validateLinear = func(ctx context.Context, cfg linear.Config) (*auth.LinearUser, *auth.LinearOrganization, error) {
+		cfg.Endpoint = whoami.URL
+		return auth.ValidateLinear(ctx, cfg)
+	}
+	stores := pgstore.New(rig.h.AdminDB, rig.h.AppDB, pgtest.SecretKey)
+
+	alice := rig.seedUser()
+	orgA, _ := rig.seedOrg(alice, "alice-org")
+	sidA := rig.signIn(alice)
+	orgPath := "/api/orgs/" + orgA.String()
+	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/access/credential", map[string]any{"api_key": linearOrgKey}, sidA, ""); rec.Code != http.StatusOK {
+		t.Fatalf("org bind: %d: %s", rec.Code, rec.Body.String())
+	}
+	carol := rig.seedUser()
+	if _, err := rig.h.AdminDB.Exec(`INSERT INTO public.org_memberships (user_id, org_id, role) VALUES ($1, $2, 'member')`,
+		carol.String(), orgA.String()); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	secret := func(ws string) string {
+		t.Helper()
+		v, err := stores.Secrets.GetUserSystem(t.Context(), orgA.String(), carol.String(), linear.UserTokenKey(ws))
+		if err != nil {
+			t.Fatalf("read secret: %v", err)
+		}
+		return v
+	}
+	for _, ws := range []string{acmeWorkspaceID, betaWorkspace.ID} {
+		if err := stores.Secrets.PutUserSystem(t.Context(), orgA.String(), carol.String(), linear.UserTokenKey(ws), `{"method":"api_key","token":"lin_api_`+ws+`"}`, ""); err != nil {
+			t.Fatalf("seed %s: %v", ws, err)
+		}
+	}
+
+	release, err := s.linearUserCredentialLock.Lock(t.Context(), orgA.String(), carol.String())
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- rig.tokensJSON(http.MethodDelete, orgPath+"/members/"+carol.String(), nil, sidA, "") }()
+	// The removal has committed and its sweep waits on carol's lock.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := rig.h.AdminDB.QueryRow(`SELECT count(*) FROM public.org_memberships WHERE user_id = $1 AND org_id = $2`,
+			carol.String(), orgA.String()).Scan(&n); err == nil && n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the removal never committed")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	whoami.setWorkspace(betaWorkspace)
+	if rec := rig.tokensJSON(http.MethodPut, orgPath+"/linear/access/credential", map[string]any{"api_key": "lin_api_org_beta"}, sidA, ""); rec.Code != http.StatusOK {
+		t.Fatalf("move org workspace: %d: %s", rec.Code, rec.Body.String())
+	}
+	release()
+
+	if rec := <-done; rec.Code != http.StatusNoContent {
+		t.Fatalf("remove carol: %d: %s", rec.Code, rec.Body.String())
+	}
+	if v := secret(betaWorkspace.ID); v != "" {
+		t.Errorf("carol's credential for the org's current workspace survived her removal: %q", v)
+	}
+}
