@@ -10,35 +10,11 @@ func singleUserRow() []domain.Message {
 	return []domain.Message{{ID: 1, Role: "user", Content: "hello"}}
 }
 
-// TestPricing_ModelMaxOutputAnchors is part of the datasheet verification
-// gate the refresh workflow runs (`-run TestPricing`), named for it
-// deliberately: the budget policy reads max_output_tokens out of the same
-// snapshot the prices come from, so an upstream re-vendor that drops or moves
-// the field must fail loudly here rather than silently demote every call to
-// the unknown-model fallback.
-func TestPricing_ModelMaxOutputAnchors(t *testing.T) {
-	cases := []struct {
-		model string
-		want  int
-	}{
-		// The two models the native loop actually drives today, plus the
-		// Bedrock inference-profile spelling of the first — the region-prefix
-		// strip must find the same entry.
-		{"claude-opus-5", 128000},
-		{"claude-haiku-4-5", 64000},
-		{"us.anthropic.claude-opus-5", 128000},
-	}
-	for _, tc := range cases {
-		got, ok := ModelMaxOutput(tc.model)
-		if !ok {
-			t.Errorf("ModelMaxOutput(%q): not found in the snapshot", tc.model)
-			continue
-		}
-		if got != tc.want {
-			t.Errorf("ModelMaxOutput(%q) = %d, want %d", tc.model, got, tc.want)
-		}
-	}
-
+// TestModelMaxOutput_UnknownModel: a model the snapshot does not carry reports
+// not-found, so the budget policy takes its unknown-model fallback rather than
+// a number. That every model TF offers records a maximum is checked by
+// modelcatalog's TestPricing_CatalogRates.
+func TestModelMaxOutput_UnknownModel(t *testing.T) {
 	if got, ok := ModelMaxOutput("some-model-nobody-ships"); ok {
 		t.Errorf("an unknown model must report not-found, got %d", got)
 	}
