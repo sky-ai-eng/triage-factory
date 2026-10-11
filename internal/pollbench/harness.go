@@ -200,8 +200,12 @@ func Run(cfg RunConfig) (*Result, error) {
 		}
 		tracked = append(tracked, domain.TeamGitHubRepo{Owner: owner, Repo: repo})
 	}
-	// On the org's GitHub host, which is the host the poller reads the tracked
-	// set on.
+	// The org's GitHub is the fake server: the poller reads the tracked set
+	// and stamps entity scopes on this host, and the resolver sends every
+	// request to it.
+	if _, err := stores.Orgs.SetSourceBaseURL(ctx, orgID, "github", srv.URL()); err != nil {
+		return nil, fmt.Errorf("set github url: %w", err)
+	}
 	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("read github host: %w", err)
