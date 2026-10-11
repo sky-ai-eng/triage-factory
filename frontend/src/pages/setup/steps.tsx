@@ -60,8 +60,10 @@ import { OrgBackgroundJobsModelStep, TeamModelStep } from './ModelStep'
 import { OrgClaudeSourceStep, OrgClaudeKeyStep } from './ClaudeStep'
 import { UserIdentityStep } from './UserIdentityStep'
 import { JiraUserAccessStep } from './JiraUserAccessStep'
+import { LinearUserAccessStep } from './LinearUserAccessStep'
 import { captureGitHubIdentityPat } from '../../lib/githubIdentity'
 import { captureJiraIdentityPat, captureJiraIdentityApiToken } from '../../lib/jiraIdentity'
+import { captureLinearIdentityApiKey } from '../../lib/linearIdentity'
 import {
   getGitHubAppStatus,
   refreshGitHubAppInstallations,
@@ -72,7 +74,7 @@ import {
 import { apiJSON } from '../../lib/apiClient'
 import { modelCatalogEntry, modelDisplayName } from '../../hooks/useModelCatalog'
 import { gateModelSave, offerSweepAfterConnect } from '../../lib/modelGate'
-import type { GitHubIdentityStatus, JiraIdentityStatus } from '../../types'
+import type { GitHubIdentityStatus, JiraIdentityStatus, LinearIdentityStatus } from '../../types'
 import PollerTimingGroup from '../settings/PollerTimingGroup'
 import GitHubTeamGroup from '../settings/GitHubTeamGroup'
 import JiraProjectRulesGroup from '../settings/JiraProjectRulesGroup'
@@ -155,6 +157,10 @@ export const initialWizardState = (): WizardState => ({
   jiraUserPat: '',
   jiraUserEmail: '',
   jiraUserApiToken: '',
+  linearUserConnected: false,
+  linearUserAccount: '',
+  linearUserConnectAvailable: false,
+  linearUserApiKey: '',
   duplicateGitHubToUser: false,
   duplicateJiraToUser: false,
   duplicateLinearToUser: false,
@@ -1144,16 +1150,38 @@ const linearAccessStep: WizardStep = {
   persist: async ({ state, orgId, patch }) => {
     if (state.linearConnected) return
     if (!orgId) throw new Error('No organization context.')
+    const typedKey = state.org.linear_api_key.trim()
     const result = await connectLinear(orgId, state.org.linear_api_key)
     if (!result.ok) throw new Error(result.error)
-    patch({
+    const connected = {
       linearConnected: true,
       linearWorkspaceUrlKey: result.access.workspace_url_key,
       linearBoundAs: boundAsName(result.access),
       linearAuthMethod: result.access.auth_method,
       linearLastError: '',
       org: { ...state.org, linear_api_key: '' },
-    })
+    }
+    // Local-mode convenience, the Jira step's sibling: bind the same key as
+    // the operator's own Linear credential through the user route, so they
+    // don't paste it again on the User step. Best-effort: a failure never
+    // fails the org connect — it pre-fills the User step's draft instead.
+    if (state.isLocal && state.duplicateLinearToUser && typedKey !== '') {
+      try {
+        const id = await captureLinearIdentityApiKey(orgId, typedKey)
+        patch({
+          ...connected,
+          linearUserConnected: true,
+          linearUserAccount: id.account,
+          linearUserApiKey: '',
+        })
+        return
+      } catch {
+        toast.info("Linear connected. We've pre-filled it on the last step — just hit Continue.")
+        patch({ ...connected, linearUserApiKey: typedKey })
+        return
+      }
+    }
+    patch(connected)
   },
   collapsedSummary: (s) =>
     !s.linearConnected
@@ -1747,6 +1775,61 @@ const jiraUserAccessStep: WizardStep = {
   render: (ctx) => <JiraUserAccessStep {...ctx} />,
 }
 
+// loadLinearUserAccess reads the caller's Linear access-binding status (the
+// endpoint the gate polls). `connected` resumes the step complete — a stored
+// credential from a prior session, or a Connect that just came back to
+// /setup. Throws on a hard read failure so the host shows a retry rather than
+// wrongly prompting a connected user to connect again.
+export async function loadLinearUserAccess(ctx: LoadContext): Promise<Partial<WizardState>> {
+  if (!ctx.orgId) throw new Error('No organization context for the Linear access check.')
+  const data = await apiJSON<LinearIdentityStatus>(
+    `/api/orgs/${encodeURIComponent(ctx.orgId)}/linear/identity`,
+  )
+  return {
+    linearUserConnected: data.connected,
+    linearUserAccount: data.account ?? '',
+    linearUserConnectAvailable: data.connect_available,
+  }
+}
+
+// Step · Your Linear access (User section, shown only when Linear is the
+// connected tracker). The Jira user step's sibling: the credential is STORED,
+// because Triage Factory acts as each person in Linear. One-click Connect is
+// an external redirect (LinearUserAccessStep.tsx); the key paste is this
+// step's Continue. Mandatory while visible: a Linear-tracked workspace can't
+// finish setup until the user has bound their own access.
+const linearUserAccessStep: WizardStep = {
+  id: 'user-linear-access',
+  section: 'user',
+  title: 'Your Linear access',
+  advanceOnEnter: true,
+  visible: (s) => linearActive(s),
+  load: loadLinearUserAccess,
+  isComplete: (s) => s.linearUserConnected,
+  validate: (s) => {
+    if (s.linearUserConnected) return null
+    if (s.linearUserApiKey.trim() !== '') return null
+    return s.linearUserConnectAvailable
+      ? 'Connect Linear, or paste your personal Linear API key, to finish.'
+      : 'Paste your personal Linear API key to finish.'
+  },
+  persist: async ({ state, orgId, patch }) => {
+    if (state.linearUserConnected) return
+    if (!orgId) throw new Error('No organization context.')
+    const key = state.linearUserApiKey.trim()
+    if (key === '') throw new Error('Paste your personal Linear API key to finish.')
+    const result = await captureLinearIdentityApiKey(orgId, key)
+    patch({
+      linearUserConnected: true,
+      linearUserAccount: result.account,
+      linearUserApiKey: '',
+    })
+  },
+  collapsedSummary: (s) =>
+    s.linearUserConnected ? `Linear: ${s.linearUserAccount}` : 'Not connected',
+  render: (ctx) => <LinearUserAccessStep {...ctx} />,
+}
+
 // Ordered registry. Section grouping is derived from each step's `section`;
 // the host inserts a divider above the first step of each section. The
 // Jira-projects step is conditionally omitted via its `visible` predicate.
@@ -1783,4 +1866,5 @@ export const WIZARD_STEPS: WizardStep[] = [
   teamModelStep,
   userIdentityStep,
   jiraUserAccessStep,
+  linearUserAccessStep,
 ]

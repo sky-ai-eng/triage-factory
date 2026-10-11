@@ -20,9 +20,10 @@
 import { useState } from 'react'
 import LinearAccessGroup from '../settings/LinearAccessGroup'
 import LinearOAuthAppCard from '../settings/LinearOAuthAppCard'
+import { ReuseCredentialCheckbox } from './parts'
 import type { StepContext } from './types'
 
-export function LinearAccessStep({ state, patch, orgId, hold }: StepContext) {
+export function LinearAccessStep({ state, patch, orgId, hold, isLocal }: StepContext) {
   const [settingUpApp, setSettingUpApp] = useState(false)
   const offerApp = !state.linearConnected && !state.linearInstallAvailable && !!orgId
 
@@ -72,9 +73,17 @@ export function LinearAccessStep({ state, patch, orgId, hold }: StepContext) {
             Install Triage Factory as an app instead of using a personal key
           </button>
         ))}
-      {/* TODO(TFAC-1023): render the local-mode ReuseCredentialCheckbox for
-          duplicateLinearToUser here ("Also use this API key as my own Linear
-          identity") once the Linear user step exists to consume it. */}
+      {/* Local-mode only: also bind the just-typed org key as the operator's
+          own Linear credential, so they don't paste it again on the User
+          step. Shown only while connecting (nothing to reuse once connected). */}
+      {isLocal && !state.linearConnected && (
+        <ReuseCredentialCheckbox
+          checked={state.duplicateLinearToUser}
+          onChange={(v) => patch({ duplicateLinearToUser: v })}
+          label="Also use this API key as my own Linear identity"
+          hint="Saves re-entering it on the “Your Linear access” step. Your key is stored (not just your username) so Triage Factory can act as you in Linear."
+        />
+      )}
     </div>
   )
 }

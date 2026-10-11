@@ -54,6 +54,13 @@ type orgMembersHandler struct {
 	// whose would be no audit at all. Same late-binding and nil-guard shape as
 	// its sibling. Returns the count of revoked rows.
 	revokeUserOrgTokens func(ctx context.Context, targetUserID, orgID, actorUserID string) (int, error)
+	// sweepUserOrgLinear removes a removed member's Linear credential for the
+	// org's workspace, revokes it in Linear when it is a Connect grant, and
+	// clears the identity derived from it (Server.sweepLinearUserCredential).
+	// The credential is the member's access to act as themselves in Linear
+	// through this org, so it goes with the membership. Nil-guarded like its
+	// siblings.
+	sweepUserOrgLinear func(ctx context.Context, orgID, userID string) error
 	// publishKick fans the removal's WS-kick to every OTHER control pod
 	// (TFAC-584), on top of the local ws.CloseUserConnections above. Same
 	// late-binding closure shape as revokeUserOrgSessions — SetWSBackplane
@@ -316,6 +323,14 @@ func (h *orgMembersHandler) handleOrgMemberRemove(w http.ResponseWriter, r *http
 		} else {
 			membershipLog.Info("revoked api tokens on membership removal",
 				"user", targetID, "org", orgID, "n", revoked)
+		}
+	}
+	// And their Linear credential, best-effort and independent of the two
+	// above for the same reasons.
+	if h.sweepUserOrgLinear != nil {
+		if err := h.sweepUserOrgLinear(r.Context(), orgID, targetID); err != nil {
+			membershipLog.Warn("remove linear credential on membership removal failed",
+				"user", targetID, "org", orgID, "error", err)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)

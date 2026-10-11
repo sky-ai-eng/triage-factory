@@ -270,6 +270,22 @@ export interface WizardState {
   jiraUserEmail: string
   jiraUserApiToken: string
 
+  // The signed-in user's own Linear access in the org's Linear workspace — the
+  // Linear sibling of the jiraUser* slices, stored the same way. Seeded from
+  // the Linear identity-status endpoint; drive the Linear user step (shown only
+  // when Linear is the connected tracker).
+  //
+  // Whether a usable Linear credential of the user's own is stored.
+  linearUserConnected: boolean
+  // The bound Linear display name, when connected.
+  linearUserAccount: string
+  // Whether one-click Connect is offerable — a Linear OAuth app resolves for
+  // the org. False means the step offers only the key paste.
+  linearUserConnectAvailable: boolean
+  // The draft personal API key the user pastes; captured (validated → stored
+  // → identity derived) on the step's Continue, then cleared.
+  linearUserApiKey: string
+
   // ── Local-mode credential reuse (the setup-only "use this token as my own
   //    identity too" checkboxes) ──
   // When the operator connects the ORG GitHub PAT (PAT_1) in local mode, reuse
@@ -287,7 +303,8 @@ export interface WizardState {
   // access credential. Same local-only reuse, same default.
   duplicateJiraToUser: boolean
   // The Linear sibling: reuse the org Linear API key as the operator's own
-  // Linear credential. Seeded like the other two; nothing reads it yet.
+  // Linear credential, still an explicit bind through the user's own route.
+  // Same local-only reuse, same default.
   duplicateLinearToUser: boolean
 }
 

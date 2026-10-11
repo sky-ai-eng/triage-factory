@@ -187,6 +187,28 @@ func (*secretStore) PutUserSystem(_ context.Context, orgID, userID, key, value, 
 	return auth.PutSecret(userKeychainKey(userID, key), value)
 }
 
+// PutUserSystemIfValue is the per-user compare-and-swap; PutUserSystem ==
+// PutUser in local mode, and so does this.
+func (*secretStore) PutUserSystemIfValue(_ context.Context, orgID, userID, key, old, value, _ string) (bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	userSecretsMu.Lock()
+	defer userSecretsMu.Unlock()
+	k := userKeychainKey(userID, key)
+	cur, err := auth.GetSecret(k)
+	if err != nil {
+		return false, err
+	}
+	if cur == "" || subtle.ConstantTimeCompare([]byte(cur), []byte(old)) != 1 {
+		return false, nil
+	}
+	if err := auth.PutSecret(k, value); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (*secretStore) GetUser(_ context.Context, orgID, userID, key string) (string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return "", err
@@ -215,10 +237,11 @@ func (*secretStore) DeleteUser(_ context.Context, orgID, userID, key string) (bo
 	return deleteStoredSecret(userKeychainKey(userID, key))
 }
 
-// userSecretsMu makes DeleteUserSystemIfValue's read and delete one step
-// against every other per-user write. The keychain has no compare-and-delete,
-// and local mode is one process per state root, so a lock held by every
-// per-user writer in it is enough.
+// userSecretsMu makes the compare-and-swap doors (PutUserSystemIfValue,
+// DeleteUserSystemIfValue) compare and write as one step against every other
+// per-user write. The keychain has no compare-and-set, and local mode is one
+// process per state root, so a lock held by every per-user writer in it is
+// enough.
 var userSecretsMu sync.Mutex
 
 func (*secretStore) DeleteUserSystemIfValue(_ context.Context, orgID, userID, key, value string) (bool, error) {

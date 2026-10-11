@@ -40,12 +40,34 @@ func UserTokenKey(workspaceID string) string {
 }
 
 // UserCredential is the envelope stored under UserTokenKey. Method is
-// AuthMethodAPIKey (Token is the user's personal key) or
-// AuthMethodConnectOAuth (Token is an access token, RefreshToken renews it).
+// AuthMethodAPIKey, where Token is the user's personal key, or
+// AuthMethodConnectOAuth, where RefreshToken is the durable credential and
+// access tokens are minted from it on demand and never stored. ClientID is
+// the OAuth app that minted the refresh token, whose secret every refresh
+// needs. GrantID names the Connect that created the credential: every
+// rotation keeps it and connecting again replaces it, so a cached access token
+// is served only while the stored credential is still the grant it was minted
+// for.
 type UserCredential struct {
 	Method       AuthMethod `json:"method"`
 	Token        string     `json:"token,omitempty"`
 	RefreshToken string     `json:"refresh_token,omitempty"`
+	ClientID     string     `json:"client_id,omitempty"`
+	GrantID      string     `json:"grant_id,omitempty"`
+}
+
+// Usable reports whether c carries what its method needs: a key for api_key;
+// a refresh token, the app that minted it and its grant for connect_oauth. A
+// method this build does not know is not usable.
+func (c UserCredential) Usable() bool {
+	switch c.Method {
+	case AuthMethodAPIKey:
+		return c.Token != ""
+	case AuthMethodConnectOAuth:
+		return c.RefreshToken != "" && c.ClientID != "" && c.GrantID != ""
+	default:
+		return false
+	}
 }
 
 // MarshalUserCredential renders a UserCredential for storage.
@@ -130,6 +152,14 @@ type InstallTokenSource interface {
 	AccessTokenForOrg(ctx context.Context, orgID string) (accessToken string, expiresAt time.Time, err error)
 }
 
+// UserTokenSource mints the access token of a user's Connect credential for a
+// workspace. internal/linearoauth's UserTokenCache implements it. A user with
+// no usable Connect credential, including one Linear has refused, is
+// ErrNoLinearUserCredential.
+type UserTokenSource interface {
+	AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error)
+}
+
 // SystemCredential is the org's service credential as raw fields rather than
 // a live client, for sealing into a run's credential bundle. Method decides
 // which field is set: APIKey for AuthMethodAPIKey, AccessToken and ExpiresAt
@@ -169,6 +199,7 @@ type resolver struct {
 	secrets db.SecretStore
 	orgs    db.OrgsStore
 	install InstallTokenSource // nil when the app-install shape isn't wired
+	user    UserTokenSource    // nil when the connect_oauth shape isn't wired
 }
 
 // NewResolver builds a Resolver over the secret and org-settings stores. It
@@ -179,9 +210,18 @@ func NewResolver(secrets db.SecretStore, orgs db.OrgsStore) Resolver {
 }
 
 // NewResolverWithInstall builds a Resolver that also resolves the app_install
-// shape, minting the app user's access token through install.
+// shape, minting the app user's access token through install. ForUser answers
+// a user's Connect credential with an error; callers that serve per-user
+// writes use NewResolverWithOAuth.
 func NewResolverWithInstall(secrets db.SecretStore, orgs db.OrgsStore, install InstallTokenSource) Resolver {
 	return &resolver{secrets: secrets, orgs: orgs, install: install}
+}
+
+// NewResolverWithOAuth builds a Resolver that resolves every shape: the
+// app_install org credential through install, and a user's Connect
+// credential through user.
+func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, install InstallTokenSource, user UserTokenSource) Resolver {
+	return &resolver{secrets: secrets, orgs: orgs, install: install, user: user}
 }
 
 // ForSystem builds a client from the org's service credential, counted under
@@ -233,10 +273,11 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 }
 
 // ForUser builds a client from the acting user's own credential for the org's
-// Linear workspace, counted under orgID. With no workspace bound or no stored
-// credential it is ErrNoLinearUserCredential, never a client built from the
-// org's credential instead. A failed read, a corrupt envelope or a method this
-// build does not know is returned as an error of its own.
+// Linear workspace, counted under orgID. With no workspace bound, no stored
+// credential, or a Connect credential Linear has refused it is
+// ErrNoLinearUserCredential, never a client built from the org's credential
+// instead. A failed read, a corrupt envelope or a method this build does not
+// know is returned as an error of its own.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -264,10 +305,14 @@ func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, 
 		}
 		return NewClient(APIKey(cred.Token)).WithOrg(orgID), nil
 	case AuthMethodConnectOAuth:
-		// TODO(TFAC-1023): build a Bearer client from the Connect access token,
-		// refreshing it when it has expired. Until then a connected user
-		// resolves as having no credential.
-		return nil, fmt.Errorf("%w: org=%s user=%s (connect_oauth not supported yet)", ErrNoLinearUserCredential, orgID, userID)
+		if r.user == nil {
+			return nil, fmt.Errorf("resolve linear user credential for org %s user %s: connect_oauth with no user token source wired", orgID, userID)
+		}
+		token, err := r.user.AccessTokenForUser(ctx, orgID, userID, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		return NewClient(Bearer(token)).WithOrg(orgID), nil
 	default:
 		return nil, fmt.Errorf("resolve linear user credential for org %s user %s: unknown credential method %q", orgID, userID, cred.Method)
 	}

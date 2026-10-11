@@ -387,6 +387,33 @@ func RunIdentityRoutingConformance(t *testing.T, mk IdentityRoutingFactory) {
 		}
 	})
 
+	t.Run("ClearLinearIdentitySystem_ClearsOneWorkspace", func(t *testing.T) {
+		stores, seed := mk(t)
+		u := seed.User(t)
+		other := seed.User(t)
+		for _, b := range []struct{ user, ws string }{{u, workspace}, {u, "second-workspace"}, {other, workspace}} {
+			if err := stores.Users.UpsertLinearIdentity(ctx, b.user, b.ws, linearUser, "Aidan", "connect_oauth"); err != nil {
+				t.Fatalf("UpsertLinearIdentity(%s, %s): %v", b.user, b.ws, err)
+			}
+		}
+		if err := stores.Users.ClearLinearIdentitySystem(ctx, u, workspace); err != nil {
+			t.Fatalf("ClearLinearIdentitySystem: %v", err)
+		}
+		if id, _, err := stores.Users.GetLinearIdentitySystem(ctx, u, workspace); err != nil || id != "" {
+			t.Errorf("cleared binding reads %q, %v; want no row", id, err)
+		}
+		// Only that (user, workspace) row goes.
+		if id, _, err := stores.Users.GetLinearIdentitySystem(ctx, u, "second-workspace"); err != nil || id != linearUser {
+			t.Errorf("the user's other workspace reads %q, %v; want %q", id, err, linearUser)
+		}
+		if id, _, err := stores.Users.GetLinearIdentitySystem(ctx, other, workspace); err != nil || id != linearUser {
+			t.Errorf("another user's binding reads %q, %v; want %q", id, err, linearUser)
+		}
+		if err := stores.Users.ClearLinearIdentitySystem(ctx, u, workspace); err != nil {
+			t.Errorf("ClearLinearIdentitySystem(absent): %v", err)
+		}
+	})
+
 	t.Run("UpsertLinearIdentity_Refusals", func(t *testing.T) {
 		stores, seed := mk(t)
 		u := seed.User(t)

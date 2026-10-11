@@ -130,6 +130,9 @@ func (f *fakeSecretStore) GetUserSystem(context.Context, string, string, string)
 func (f *fakeSecretStore) PutUserSystem(context.Context, string, string, string, string, string) error {
 	return nil
 }
+func (f *fakeSecretStore) PutUserSystemIfValue(context.Context, string, string, string, string, string, string) (bool, error) {
+	return false, nil
+}
 func (f *fakeSecretStore) DeleteUser(context.Context, string, string, string) (bool, error) {
 	return false, nil
 }

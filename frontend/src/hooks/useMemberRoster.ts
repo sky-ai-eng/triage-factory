@@ -5,12 +5,14 @@ import { apiErrors } from '../lib/apiClient'
 // RosterMember is the normalized row <MemberRoster> renders, independent of
 // which tier (org or team) the adapter fetched it from. githubUsername /
 // jiraAccountId are null when the member holds no host-scoped identity
-// binding — the "Not connected" readiness state.
+// binding, and linearUserId when they hold none in the org's Linear
+// workspace — the "Not connected" readiness state.
 export interface RosterMember {
   userId: string
   displayName: string
   githubUsername: string | null
   jiraAccountId: string | null
+  linearUserId: string | null
   role: string
   isCurrentUser: boolean
 }

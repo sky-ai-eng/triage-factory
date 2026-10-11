@@ -150,8 +150,9 @@ type Server struct {
 	// from the stores, so it's never nil — handlers don't guard.
 	jiraResolver jira.Resolver
 	// linearResolver resolves the org's Linear service credential for the
-	// Linear picker reads and the team-rules write gate. Built in New, never
-	// nil; tests swap it to point the client at a fake GraphQL endpoint.
+	// Linear picker reads and the team-rules write gate, and a user's own
+	// credential for the writes they make. Built in New, never nil; tests swap
+	// it to point the client at a fake GraphQL endpoint.
 	linearResolver linear.Resolver
 	// linearOAuthApps resolves the Linear OAuth app an org's install ceremony
 	// and its refreshes run against (the org's own row → the deployment app).
@@ -185,6 +186,10 @@ type Server struct {
 	// Linear credential holds, this server's handlers and every token cache
 	// alike (lockLinearCredential).
 	linearCredentialLock *linearoauth.CredentialLock
+	// linearUserCredentialLock is the per-(org, user) lock every writer of a
+	// user's Linear credential holds: the identity handlers, the member
+	// removal sweep and the user token cache.
+	linearUserCredentialLock *linearoauth.UserCredentialLock
 	// jiraApps owns the org_jira_apps table — per-org Atlassian OAuth app
 	// registrations (the BYO-app override / local-supplied app). The settings
 	// handlers read/write it; the resolver reads it (system door) to resolve
@@ -598,13 +603,16 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	// read the org's catalog through ForSystem, whichever shape the org's
 	// service credential takes; an installed org's access token comes from the
 	// token cache, which refreshes it off the install's rotating refresh
-	// token.
+	// token. ForUser resolves a user's pasted key directly and a Connected
+	// user's access token through the user token cache.
 	s.linearOAuthApps = linear.NewOAuthAppResolver(stores.LinearApps, stores.Secrets, linear.DeploymentOAuthAppFromEnv())
 	s.linearOAuthMinter = linearoauth.NewMinter()
 	s.linearInstalls = stores.LinearInstalls
 	s.linearCredentialLock = linearoauth.NewCredentialLock(database)
-	s.linearResolver = linear.NewResolverWithInstall(stores.Secrets, stores.Orgs,
-		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls, s.linearCredentialLock))
+	s.linearUserCredentialLock = linearoauth.NewUserCredentialLock(database)
+	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs,
+		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls, s.linearCredentialLock),
+		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Users, s.linearUserCredentialLock))
 	s.validateLinear = auth.ValidateLinear
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)
@@ -976,6 +984,7 @@ func (s *Server) routes() {
 			}
 			return s.authDeps.apiTokens.RevokeForUserInOrgSystem(ctx, targetUserID, orgID, actorUserID)
 		},
+		sweepUserOrgLinear: s.sweepLinearUserCredential,
 		publishKick: func(ctx context.Context, userID, sid, orgID string, code int, reason string) {
 			if s.wsBackplane != nil {
 				s.wsBackplane.PublishKick(ctx, userID, sid, orgID, code, reason)
@@ -1613,6 +1622,16 @@ func (s *Server) routes() {
 	// owners' Linear apps, so a rename breaks every existing app.
 	s.api("GET /api/orgs/{org_id}/linear/install/start", s.handleLinearInstallStart)
 	s.api("GET /api/linear/install/callback", s.handleLinearInstallCallback)
+	// Per-user Linear access (linear_connect.go): the gate's status read, the
+	// key paste, the user's own disconnect, and one-click Connect. Any org
+	// member binds or withdraws their own. The Connect pair rides s.api for
+	// the install pair's reasons, and its callback path is frozen the same
+	// way: it is the second redirect URI registered on every Linear app.
+	s.api("GET /api/orgs/{org_id}/linear/identity", s.handleLinearIdentityStatus)
+	s.apiMutating("POST /api/orgs/{org_id}/linear/identity/api-key", s.handleLinearIdentityAPIKey)
+	s.apiMutating("DELETE /api/orgs/{org_id}/linear/identity", s.handleLinearIdentityDelete)
+	s.api("GET /api/orgs/{org_id}/linear/connect/start", s.handleLinearConnectStart)
+	s.api("GET /api/linear/connect/callback", s.handleLinearConnectCallback)
 
 	// Per-user Jira access — the Jira sibling of the GitHub identity flow
 	// (jira_connect.go). status reports connected from a STORED credential

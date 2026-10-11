@@ -20,6 +20,7 @@ interface OrgMemberApiRow {
   display_name: string
   github_username: string | null
   jira_account_id: string | null
+  linear_user_id: string | null
   role: string
   is_current_user: boolean
 }
@@ -52,6 +53,7 @@ function useOrgRosterAdapter(orgId: string): MemberRosterAdapter {
           displayName: m.display_name,
           githubUsername: m.github_username,
           jiraAccountId: m.jira_account_id,
+          linearUserId: m.linear_user_id,
           role: m.role,
           isCurrentUser: m.is_current_user,
         }))

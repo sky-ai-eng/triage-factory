@@ -59,6 +59,10 @@ func (disabledSecretStore) PutUserSystem(context.Context, string, string, string
 	return db.ErrSecretStoreUnavailable
 }
 
+func (disabledSecretStore) PutUserSystemIfValue(context.Context, string, string, string, string, string, string) (bool, error) {
+	return false, db.ErrSecretStoreUnavailable
+}
+
 func (disabledSecretStore) DeleteUser(context.Context, string, string, string) (bool, error) {
 	return false, db.ErrSecretStoreUnavailable
 }

@@ -45,3 +45,33 @@ func NewCredentialLock(database *sql.DB) *CredentialLock {
 func (l *CredentialLock) Lock(ctx context.Context, orgID string) (release func(), err error) {
 	return db.AcquireKeyedLock(ctx, l.db, &localCredentialLocks, CredentialLockSalt, orgID)
 }
+
+// UserCredentialLockSalt namespaces UserCredentialLock in Postgres's
+// advisory-lock keyspace; internal/server/advisorylock.go keeps the registry.
+const UserCredentialLockSalt int64 = 12
+
+// localUserCredentialLocks is UserCredentialLock's in-process gates, package
+// state for the reason localCredentialLocks is.
+var localUserCredentialLocks sync.Map
+
+// UserCredentialLock is the per-(org, user) lock every writer of a user's
+// Linear credential holds: the key paste, the Connect callback, the
+// disconnect, a member's removal from the org, and UserTokenCache's rotation
+// write-back and its removal of a credential Linear refused. Each of those
+// writes the envelope and the identity row as one step, so a credential and
+// the identity derived from it never come from two different binds. In multi
+// mode it is a Postgres advisory lock; in local mode a per-key gate.
+type UserCredentialLock struct {
+	db *sql.DB
+}
+
+// NewUserCredentialLock builds the lock over database, which takes the
+// advisory lock in multi mode and is unused in local mode.
+func NewUserCredentialLock(database *sql.DB) *UserCredentialLock {
+	return &UserCredentialLock{db: database}
+}
+
+// Lock takes (orgID, userID)'s lock, returning its idempotent release.
+func (l *UserCredentialLock) Lock(ctx context.Context, orgID, userID string) (release func(), err error) {
+	return db.AcquireKeyedLock(ctx, l.db, &localUserCredentialLocks, UserCredentialLockSalt, orgID+":"+userID)
+}

@@ -42,9 +42,8 @@ types every workflow state, so watching a team maps it for you.
         URL and both redirect URIs filled in
         (`http://localhost:<port>/api/linear/install/callback` and
         `…/api/linear/connect/callback`; Linear accepts `http` for
-        `localhost`). The second is for members connecting their own Linear
-        accounts, which Triage Factory does not offer yet; it is registered now
-        so the app needs no edit later. Create the app.
+        `localhost`). The second is for connecting your own Linear account
+        (step 2). Create the app.
      2. Copy the app's client ID and client secret from its page in Linear,
         paste them into the card, and save. Linear does not hand them back to
         the creation link, so this step is by hand.
@@ -67,20 +66,32 @@ types every workflow state, so watching a team maps it for you.
 
    The API key, the install's refresh token and the OAuth app's client secret
    are stored in the OS keychain (see [Secret storage](secret-storage.md)).
-2. Under the team's **Linear teams** section, the picker lists the Linear teams
+2. Connect your own Linear account. Triage Factory makes every Linear write
+   you start, such as claiming an issue, as you rather than as the
+   workspace's credential, so once the workspace has Linear the app asks for
+   your own credential before it opens (the setup wizard's **Your Linear
+   access** step asks first). Click **Connect Linear** to authorize with
+   Linear (offered when a Linear OAuth app is set up), or paste a personal
+   API key from the same Linear workspace. A key from another workspace is
+   refused. Your key, or the refresh token Connect returns, is stored in the
+   OS keychain. On the setup wizard's Linear access step, **Also use this API
+   key as my own Linear identity** binds the workspace key as yours too. If
+   you revoke Triage Factory's access in Linear, the next write that needs
+   it removes the stored token and the app asks you to connect again.
+3. Under the team's **Linear teams** section, the picker lists the Linear teams
    your credential can see, read live from Linear. Private teams are marked.
-3. **Watch** a team in one click. Its workflow states are read straight away
+4. **Watch** a team in one click. Its workflow states are read straight away
    and its rules are filled in from their types:
    - pickup: every triage, backlog and unstarted state
    - in progress: every started state, moving issues into the first one on the
      board
    - done: every completed and canceled state, moving issues into the first
      completed one
-4. Adjust the mapping if it doesn't suit the team, then **Save**. The pre-fill
+5. Adjust the mapping if it doesn't suit the team, then **Save**. The pre-fill
    only lives in the form until you save. A workflow with no started or no
    completed state can't be filled in, so that team shows *States not mapped*
    until you map it by hand.
-5. Only a saved, fully mapped team is polled. A Linear team is either watched
+6. Only a saved, fully mapped team is polled. A Linear team is either watched
    with nothing mapped or mapped with all three rules; **Save** is blocked on a
    team that is mapped part way, and clearing all three rules leaves it watched.
 

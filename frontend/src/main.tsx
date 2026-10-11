@@ -35,10 +35,12 @@ import Wizard from './pages/setup/Wizard'
 import ConnectGitHub from './pages/ConnectGitHub'
 import GitHubInstalled from './pages/GitHubInstalled'
 import ConnectJira from './pages/ConnectJira'
+import ConnectLinear from './pages/ConnectLinear'
 import Shell from './Shell'
 import AuthGate, {
   RequireGitHubIdentity,
   RequireJiraIdentity,
+  RequireLinearIdentity,
   RequireSetupComplete,
 } from './AuthGate'
 import ToastProvider from './components/Toast/ToastProvider'
@@ -139,13 +141,26 @@ function LocalRoutes() {
           </AuthGate>
         }
       />
+      {/* Linear identity gate page — outside RequireLinearIdentity for the
+          same reason as the Jira one above, and declared before the shell
+          layout so the static /connect-linear suffix wins. */}
+      <Route
+        path="/orgs/:org_id/connect-linear"
+        element={
+          <AuthGate mode="local">
+            <ConnectLinear />
+          </AuthGate>
+        }
+      />
       <Route
         element={
           <AuthGate mode="local">
             <RequireSetupComplete isLocal>
               <RequireGitHubIdentity isLocal>
                 <RequireJiraIdentity isLocal>
-                  <Shell />
+                  <RequireLinearIdentity isLocal>
+                    <Shell />
+                  </RequireLinearIdentity>
                 </RequireJiraIdentity>
               </RequireGitHubIdentity>
             </RequireSetupComplete>
@@ -230,6 +245,17 @@ function MultiRoutes() {
               </AuthGate>
             }
           />
+          {/* Linear onboarding gate page — outside RequireLinearIdentity for
+              the same reason as the Jira one above, and declared before the
+              shell layout so the static /connect-linear suffix wins. */}
+          <Route
+            path="/orgs/:org_id/connect-linear"
+            element={
+              <AuthGate mode="multi">
+                <ConnectLinear />
+              </AuthGate>
+            }
+          />
           {/* Where the deployment GitHub App's install callback lands when no
               bind ceremony started it — installed from the App's public page,
               approved by an owner after a request, reinstalled. Not under
@@ -253,7 +279,9 @@ function MultiRoutes() {
                 <RequireSetupComplete>
                   <RequireGitHubIdentity>
                     <RequireJiraIdentity>
-                      <Shell />
+                      <RequireLinearIdentity>
+                        <Shell />
+                      </RequireLinearIdentity>
                     </RequireJiraIdentity>
                   </RequireGitHubIdentity>
                 </RequireSetupComplete>

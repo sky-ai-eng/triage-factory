@@ -761,6 +761,11 @@ export interface MeResponse {
    *  /rest/api/2/myself; used in UI hints ("Match my issues as
    *  Aidan Allchin"). Absent when Jira not connected. */
   jira_display_name?: string
+  /** The viewer's Linear user id in the active org's Linear workspace. Absent
+   *  when the org has no Linear or the viewer hasn't connected their own. */
+  linear_user_id?: string
+  /** The viewer's Linear display name, beside linear_user_id. */
+  linear_display_name?: string
   orgs: AuthOrg[]
   /** The viewer's own team memberships, across every org they belong to,
    *  each carrying the role they hold there. Membership rows only — a team
@@ -864,6 +869,22 @@ export interface JiraIdentityStatus {
    *  render the right fields — a Cloud org binds an email + API token, a Data
    *  Center org a single PAT. Empty/absent when no Jira host is configured. */
   deployment?: 'cloud' | 'data_center'
+}
+
+/** GET /api/orgs/{org}/linear/identity — the Linear sibling of
+ *  JiraIdentityStatus. Every write a person makes in Linear through Triage
+ *  Factory is made as them, so `connected` reflects a STORED per-user
+ *  credential (a pasted API key or a Connect grant) the server can use. */
+export interface LinearIdentityStatus {
+  connected: boolean
+  /** The bound Linear display name, when connected. */
+  account?: string
+  /** The org's Linear workspace (linear.app/<key>). Empty when the org has no
+   *  Linear, so there is nothing to gate. */
+  workspace_url_key: string
+  /** Whether one-click Connect is offerable — true when a Linear OAuth app
+   *  resolves for the org. False means the surfaces offer only the key paste. */
+  connect_available: boolean
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -1004,6 +1025,9 @@ export interface TeamMember {
   /** Atlassian account ID. Null when this member hasn't
    *  connected Jira yet. */
   jira_account_id: string | null
+  /** Linear user id in the org's Linear workspace. Null when this member
+   *  hasn't connected Linear. */
+  linear_user_id: string | null
   /** Team role: 'admin' | 'member' | 'viewer'. */
   role: string
   is_current_user: boolean

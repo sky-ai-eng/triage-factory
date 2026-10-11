@@ -184,6 +184,19 @@ type SecretStore interface {
 	// value.
 	PutUserSystem(ctx context.Context, orgID, userID, key, value, description string) error
 
+	// PutUserSystemIfValue replaces a per-user secret WITHOUT a request JWT,
+	// and only while its stored value is still old, reporting whether it did.
+	// It writes nothing when the secret is absent. The per-user sibling of
+	// PutSystemIfValue, for system code rotating a credential it read: the
+	// Linear Connect token cache, whose refresh token Linear rotates on every
+	// refresh. A value replaced since it was read — the user connecting again,
+	// pasting a key, or disconnecting — is never overwritten.
+	//
+	// The comparison and the write are one step against every other writer of
+	// the row. Same pool and discipline as PutUserSystem. Exempt from the
+	// returned-row rule, same reason as Put.
+	PutUserSystemIfValue(ctx context.Context, orgID, userID, key, old, value, description string) (swapped bool, err error)
+
 	// DeleteUser removes a per-user secret. Returns ok=false when no
 	// row matched, mirroring Delete. Claims-checked like GetUser.
 	//

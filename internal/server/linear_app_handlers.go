@@ -37,9 +37,6 @@ const linearOAuthClientSecretKey = "linear_oauth_client_secret"
 // and user a ceremony belongs to travel in its signed state cookie.
 const (
 	linearInstallCallbackPath = "/api/linear/install/callback"
-	// TODO(TFAC-1023): nothing serves this path yet; it is the per-user
-	// Connect callback. It is registered now so an app created today needs
-	// no second redirect URI added by hand once Connect ships.
 	linearConnectCallbackPath = "/api/linear/connect/callback"
 )
 

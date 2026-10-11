@@ -27,6 +27,7 @@ var (
 	jiraIdentityLog    = logging.Component("jira-identity")
 	jiraRuleLog        = logging.Component("jira-rule")
 	linearAppLog       = logging.Component("linear-app")
+	linearConnectLog   = logging.Component("linear-connect")
 	linearInstallLog   = logging.Component("linear-install")
 	membershipLog      = logging.Component("membership")
 	orgsLog            = logging.Component("orgs")

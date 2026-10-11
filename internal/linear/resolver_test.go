@@ -151,9 +151,11 @@ type fakeInstallTokens struct {
 	expiresAt time.Time
 	err       error
 	gotOrg    string
+	calls     int
 }
 
 func (f *fakeInstallTokens) AccessTokenForOrg(_ context.Context, orgID string) (string, time.Time, error) {
+	f.calls++
 	f.gotOrg = orgID
 	return f.token, f.expiresAt, f.err
 }
@@ -307,7 +309,6 @@ func TestForUser_MissingIsErrNoUserCredential(t *testing.T) {
 		"org has no workspace": {workspaceID: "", user: map[string]string{UserTokenKey(""): `{"method":"api_key","token":"k"}`}},
 		"nothing stored":       {workspaceID: testWorkspaceID},
 		"empty api key":        {workspaceID: testWorkspaceID, user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"api_key"}`}},
-		"connect_oauth":        {workspaceID: testWorkspaceID, user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","token":"t","refresh_token":"r"}`}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -320,15 +321,93 @@ func TestForUser_MissingIsErrNoUserCredential(t *testing.T) {
 }
 
 func TestForUser_NeverFallsBackToSystem(t *testing.T) {
-	secrets := &fakeSecrets{sys: orgAPIKey(), user: map[string]string{}}
-	r := NewResolver(secrets, &fakeOrgs{workspaceID: testWorkspaceID})
-
-	_, err := r.ForUser(context.Background(), testOrgID, testUserID)
-	if !errors.Is(err, ErrNoLinearUserCredential) {
-		t.Fatalf("ForUser err = %v, want ErrNoLinearUserCredential", err)
+	connected := map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`}
+	cases := map[string]struct {
+		user   map[string]string
+		tokens UserTokenSource
+	}{
+		"nothing stored": {user: map[string]string{}, tokens: &fakeUserTokens{}},
+		// A Connect credential Linear refused, or one whose app no longer
+		// resolves, is as absent as none at all.
+		"connect credential unusable": {user: connected, tokens: &fakeUserTokens{err: fmt.Errorf("%w: refused", ErrNoLinearUserCredential)}},
 	}
-	if len(secrets.sysRead) != 0 {
-		t.Errorf("ForUser read org secrets %v; it must never reach for the org credential", secrets.sysRead)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// The org credential is valid in both shapes, so reaching for
+			// either would succeed.
+			sys := orgAPIKey()
+			for k, v := range orgAppInstall() {
+				sys[k] = v
+			}
+			secrets := &fakeSecrets{sys: sys, user: tc.user}
+			install := &fakeInstallTokens{token: "app-token", expiresAt: time.Now().Add(time.Hour)}
+			r := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, install, tc.tokens)
+
+			_, err := r.ForUser(context.Background(), testOrgID, testUserID)
+			if !errors.Is(err, ErrNoLinearUserCredential) {
+				t.Fatalf("ForUser err = %v, want ErrNoLinearUserCredential", err)
+			}
+			if len(secrets.sysRead) != 0 {
+				t.Errorf("ForUser read org secrets %v; it must never reach for the org credential", secrets.sysRead)
+			}
+			if install.calls != 0 {
+				t.Error("ForUser minted the org's app-install token; it must never reach for the org credential")
+			}
+		})
+	}
+}
+
+// fakeUserTokens is a UserTokenSource answering with token or err, recording
+// what it was asked for.
+type fakeUserTokens struct {
+	token                    string
+	err                      error
+	gotOrg, gotUser, gotWork string
+}
+
+func (f *fakeUserTokens) AccessTokenForUser(_ context.Context, orgID, userID, workspaceID string) (string, error) {
+	f.gotOrg, f.gotUser, f.gotWork = orgID, userID, workspaceID
+	return f.token, f.err
+}
+
+func TestForUser_ConnectOAuthBuildsBearerClient(t *testing.T) {
+	secrets := &fakeSecrets{
+		sys:  orgAPIKey(),
+		user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`},
+	}
+	tokens := &fakeUserTokens{token: "user-access"}
+	c, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil, tokens).ForUser(context.Background(), testOrgID, testUserID)
+	if err != nil {
+		t.Fatalf("ForUser: %v", err)
+	}
+	if got := authorizationOf(t, c); got != "Bearer user-access" {
+		t.Errorf("Authorization = %q, want the user's Connect access token", got)
+	}
+	if c.orgID != testOrgID {
+		t.Errorf("client counts under org %q, want %q", c.orgID, testOrgID)
+	}
+	if tokens.gotOrg != testOrgID || tokens.gotUser != testUserID || tokens.gotWork != testWorkspaceID {
+		t.Errorf("token minted for (%q, %q, %q), want (%q, %q, %q)", tokens.gotOrg, tokens.gotUser, tokens.gotWork, testOrgID, testUserID, testWorkspaceID)
+	}
+}
+
+func TestForUser_ConnectOAuthSourceErrorsPropagate(t *testing.T) {
+	sentinel := errors.New("token endpoint down")
+	secrets := &fakeSecrets{user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`}}
+	_, err := NewResolverWithOAuth(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil, &fakeUserTokens{err: sentinel}).ForUser(context.Background(), testOrgID, testUserID)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("ForUser err = %v, want the source's error", err)
+	}
+	if errors.Is(err, ErrNoLinearUserCredential) {
+		t.Error("an outage must not read as the user having no credential")
+	}
+}
+
+func TestForUser_ConnectOAuthWithoutSourceIsAnError(t *testing.T) {
+	secrets := &fakeSecrets{user: map[string]string{UserTokenKey(testWorkspaceID): `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}`}}
+	_, err := NewResolverWithInstall(secrets, &fakeOrgs{workspaceID: testWorkspaceID}, nil).ForUser(context.Background(), testOrgID, testUserID)
+	if err == nil || errors.Is(err, ErrNoLinearUserCredential) {
+		t.Errorf("ForUser err = %v, want a wiring error that is not ErrNoLinearUserCredential", err)
 	}
 }
 
@@ -371,9 +450,9 @@ func TestForUser_ReadErrorsPropagate(t *testing.T) {
 }
 
 func TestUserCredential_RoundTrip(t *testing.T) {
-	want := UserCredential{Method: AuthMethodConnectOAuth, Token: "t", RefreshToken: "r"}
+	want := UserCredential{Method: AuthMethodConnectOAuth, RefreshToken: "r", ClientID: "c", GrantID: "g"}
 	raw := userEnvelope(t, want)
-	if raw != `{"method":"connect_oauth","token":"t","refresh_token":"r"}` {
+	if raw != `{"method":"connect_oauth","refresh_token":"r","client_id":"c","grant_id":"g"}` {
 		t.Errorf("envelope = %s", raw)
 	}
 	got, err := ParseUserCredential(raw)
@@ -383,6 +462,26 @@ func TestUserCredential_RoundTrip(t *testing.T) {
 	for _, bad := range []string{"", "   ", "lin_api_bare"} {
 		if _, err := ParseUserCredential(bad); err == nil {
 			t.Errorf("ParseUserCredential(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+func TestUserCredential_Usable(t *testing.T) {
+	cases := []struct {
+		cred UserCredential
+		want bool
+	}{
+		{UserCredential{Method: AuthMethodAPIKey, Token: "k"}, true},
+		{UserCredential{Method: AuthMethodAPIKey}, false},
+		{UserCredential{Method: AuthMethodConnectOAuth, RefreshToken: "r", ClientID: "c", GrantID: "g"}, true},
+		{UserCredential{Method: AuthMethodConnectOAuth, ClientID: "c", GrantID: "g"}, false},
+		{UserCredential{Method: AuthMethodConnectOAuth, RefreshToken: "r", GrantID: "g"}, false},
+		{UserCredential{Method: AuthMethodConnectOAuth, RefreshToken: "r", ClientID: "c"}, false},
+		{UserCredential{Method: "saml_v9", Token: "t"}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.cred.Usable(); got != tc.want {
+			t.Errorf("%+v.Usable() = %v, want %v", tc.cred, got, tc.want)
 		}
 	}
 }

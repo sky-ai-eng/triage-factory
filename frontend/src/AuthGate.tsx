@@ -4,6 +4,7 @@ import { useAuth, useOptionalAuth } from './contexts/AuthContext'
 import { useOrgContext, useActiveOrgId } from './contexts/OrgContext'
 import { useGitHubIdentity } from './hooks/useGitHubIdentity'
 import { useJiraIdentity } from './hooks/useJiraIdentity'
+import { useLinearIdentity } from './hooks/useLinearIdentity'
 import { LOCAL_DEFAULT_ORG_ID } from './lib/githubApp'
 
 /**
@@ -223,6 +224,63 @@ export function RequireJiraIdentity({
     const target = location.pathname + location.search
     const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
     return <Navigate to={'/orgs/' + orgId + '/connect-jira' + rt} replace />
+  }
+  return <>{children}</>
+}
+
+/**
+ * RequireLinearIdentity is the Linear sibling of RequireJiraIdentity, composed
+ * inside the shell *after* it (order: org access → GitHub identity → Jira
+ * identity → Linear identity). It blocks the app until the user has a stored
+ * per-user Linear credential for the org's Linear workspace, redirecting to
+ * the Connect page (its own route, NOT behind this gate, so there's no loop)
+ * otherwise.
+ *
+ * Linear is an optional tracker, so the gate self-disables in an org without
+ * it. Both signals come from the one read, /linear/identity:
+ * `workspace_url_key` is the org's Linear workspace (empty ⇒ no Linear,
+ * nothing to gate) and `connected` is whether this user has bound a usable
+ * credential. Fail-closed: a read error is held as a retryable panel, checked
+ * before either signal, so a transient failure never renders the app through.
+ *
+ * Runs in BOTH modes. Multi resolves the active org from OrgContext; local has
+ * no OrgContext, so it passes `isLocal` and the gate keys on the sentinel org.
+ */
+export function RequireLinearIdentity({
+  children,
+  isLocal = false,
+}: {
+  children: React.ReactNode
+  isLocal?: boolean
+}) {
+  const ctxOrgId = useActiveOrgId()
+  const orgId = isLocal ? LOCAL_DEFAULT_ORG_ID : ctxOrgId
+  const location = useLocation()
+  const { state, refresh } = useLinearIdentity(orgId)
+
+  if (!orgId || state.status === 'loading') {
+    return <Loading />
+  }
+  if (state.status === 'error') {
+    return (
+      <div className="min-h-screen bg-ground flex items-center justify-center">
+        <div className="text-center space-y-3">
+          <p className="text-ink-2 text-sm">Couldn&apos;t check your Linear connection.</p>
+          <button type="button" onClick={refresh} className="text-warm text-sm underline">
+            Retry
+          </button>
+        </div>
+      </div>
+    )
+  }
+  // No Linear workspace for this org → nothing to gate.
+  if (state.data.workspace_url_key === '') {
+    return <>{children}</>
+  }
+  if (!state.data.connected) {
+    const target = location.pathname + location.search
+    const rt = target && target !== '/' ? '?return_to=' + encodeURIComponent(target) : ''
+    return <Navigate to={'/orgs/' + orgId + '/connect-linear' + rt} replace />
   }
   return <>{children}</>
 }

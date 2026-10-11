@@ -61,6 +61,37 @@ func TestInstallAuthorizeURL(t *testing.T) {
 	}
 }
 
+func TestConnectAuthorizeURL(t *testing.T) {
+	u, err := url.Parse(ConnectAuthorizeURL(testApp(), "https://tf.example/api/linear/connect/callback", "nonce-2"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if u.Scheme+"://"+u.Host+u.Path != authorizeEndpoint {
+		t.Errorf("endpoint = %s, want %s", u.Scheme+"://"+u.Host+u.Path, authorizeEndpoint)
+	}
+	q := u.Query()
+	for k, want := range map[string]string{
+		"client_id":     "client-123",
+		"redirect_uri":  "https://tf.example/api/linear/connect/callback",
+		"response_type": "code",
+		"scope":         "read,write",
+		"state":         "nonce-2",
+		"prompt":        "consent",
+	} {
+		if got := q.Get(k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	// The user acts as themselves, Linear's default; actor=app would make the
+	// grant the app user's.
+	if q.Has("actor") {
+		t.Errorf("the Connect URL names an actor (%q)", q.Get("actor"))
+	}
+	if q.Has("client_secret") {
+		t.Error("the authorize URL carries the client secret")
+	}
+}
+
 func TestExchangeCode_ParsesTokenPair(t *testing.T) {
 	now := time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)
 	srv, form := formServer(t, http.StatusOK,

@@ -310,6 +310,16 @@ type UsersStore interface {
 	// connection.
 	UserIDsForLinearAccountSystem(ctx context.Context, workspaceID, linearUserID string) ([]string, error)
 
+	// ClearLinearIdentitySystem mirrors ClearLinearIdentity but routes through
+	// the admin pool in Postgres, for callers clearing a binding that is not
+	// their own or that hold no JWT claims: the token cache dropping a
+	// connection Linear refused, and an admin's removal of a member sweeping
+	// that member's binding. SQLite collapses the two variants to one
+	// connection.
+	//
+	// Exempt from the returned-row rule: it is a delete.
+	ClearLinearIdentitySystem(ctx context.Context, userID, workspaceID string) error
+
 	// UserIDsForVerifiedEmailSystem returns the principal user id(s) holding a
 	// VERIFIED login-identity email equal to email (case-insensitive), on the
 	// admin pool — the set-valued formalization of the inline auto-link query the

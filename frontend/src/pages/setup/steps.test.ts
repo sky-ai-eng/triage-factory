@@ -456,6 +456,171 @@ describe('setup — the Linear tracker', () => {
     })
   })
 
+  const linearAccessBody = {
+    connected: true,
+    auth_method: 'api_key',
+    workspace_url_key: 'acme',
+    bound_as: { name: 'ada', display_name: 'Ada' },
+    connect_available: false,
+    using_deployment_default: false,
+  }
+
+  it('shows the user step only once Linear is connected', () => {
+    const picked = { ...initialWizardState(), tracker: 'linear' as const }
+    expect(visibleIds(picked)).not.toContain('user-linear-access')
+    expect(visibleIds({ ...picked, linearConnected: true })).toContain('user-linear-access')
+    expect(visibleIds({ ...initialWizardState(), tracker: 'jira' as const })).not.toContain(
+      'user-linear-access',
+    )
+  })
+
+  it('blocks the user step until the user binds, naming the ways in', () => {
+    const step = stepFor('user-linear-access')
+    const s = { ...initialWizardState(), tracker: 'linear' as const, linearConnected: true }
+    expect(step.isComplete(s)).toBe(false)
+    expect(step.validate?.(s)).toMatch(/Paste your personal Linear API key/)
+    expect(step.validate?.({ ...s, linearUserConnectAvailable: true })).toMatch(
+      /Connect Linear, or paste/,
+    )
+    expect(step.validate?.({ ...s, linearUserApiKey: 'lin_api_mine' })).toBeNull()
+    expect(step.isComplete({ ...s, linearUserConnected: true })).toBe(true)
+  })
+
+  it('binds the pasted key on the user step', async () => {
+    const calls: { url: string; method: string; body: unknown }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({
+          url,
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        return { ok: true, status: 200, ...jsonBody({ account: 'Ada', workspace_url_key: 'acme' }) }
+      }),
+    )
+    const base = initialWizardState()
+    const state: WizardState = {
+      ...base,
+      tracker: 'linear',
+      linearConnected: true,
+      linearUserApiKey: ' lin_api_mine ',
+    }
+    const patched: Partial<WizardState>[] = []
+    await stepFor('user-linear-access').persist({
+      ...orgCtx(state, (p) => patched.push(p)),
+      teamId: 'default',
+      isLocal: false,
+    })
+    expect(calls).toEqual([
+      {
+        url: `/api/orgs/${ORG_ID}/linear/identity/api-key`,
+        method: 'POST',
+        body: { api_key: 'lin_api_mine' },
+      },
+    ])
+    expect(patched.at(-1)).toEqual({
+      linearUserConnected: true,
+      linearUserAccount: 'Ada',
+      linearUserApiKey: '',
+    })
+  })
+
+  // The local-mode reuse: the org key is also bound as the operator's own,
+  // through the user's own route — an explicit bind, not a copy.
+  it('binds the org key as the operator’s own too in local mode, when asked', async () => {
+    const calls: { url: string; method: string; body: unknown }[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        calls.push({
+          url,
+          method: init?.method ?? 'GET',
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        })
+        if (url.endsWith('/linear/identity/api-key')) {
+          return {
+            ok: true,
+            status: 200,
+            ...jsonBody({ account: 'Ada', workspace_url_key: 'acme' }),
+          }
+        }
+        return { ok: true, status: 200, ...jsonBody(linearAccessBody) }
+      }),
+    )
+    const base = initialWizardState()
+    const state: WizardState = {
+      ...base,
+      isLocal: true,
+      duplicateLinearToUser: true,
+      tracker: 'linear',
+      org: { ...base.org, linear_api_key: ' lin_api_x ' },
+    }
+    const patched: Partial<WizardState>[] = []
+    await stepFor('org-linear-access').persist({
+      ...orgCtx(state, (p) => patched.push(p)),
+      teamId: 'default',
+      isLocal: true,
+    })
+    expect(calls.map((c) => [c.method, c.url])).toEqual([
+      ['PUT', `/api/orgs/${ORG_ID}/linear/access/credential`],
+      ['POST', `/api/orgs/${ORG_ID}/linear/identity/api-key`],
+    ])
+    expect(calls[1].body).toEqual({ api_key: 'lin_api_x' })
+    expect(patched.at(-1)).toMatchObject({
+      linearConnected: true,
+      linearUserConnected: true,
+      linearUserAccount: 'Ada',
+    })
+  })
+
+  it('pre-fills the user step when the reuse bind fails, without failing the org connect', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        if (url.endsWith('/linear/identity/api-key')) {
+          return { ok: false, status: 502, ...jsonBody({ errors: [] }) }
+        }
+        return { ok: true, status: 200, ...jsonBody(linearAccessBody) }
+      }),
+    )
+    const base = initialWizardState()
+    const state: WizardState = {
+      ...base,
+      isLocal: true,
+      duplicateLinearToUser: true,
+      tracker: 'linear',
+      org: { ...base.org, linear_api_key: 'lin_api_x' },
+    }
+    const patched: Partial<WizardState>[] = []
+    await stepFor('org-linear-access').persist({
+      ...orgCtx(state, (p) => patched.push(p)),
+      teamId: 'default',
+      isLocal: true,
+    })
+    expect(patched.at(-1)).toMatchObject({ linearConnected: true, linearUserApiKey: 'lin_api_x' })
+    expect(patched.at(-1)?.linearUserConnected).toBeUndefined()
+  })
+
+  it('does not reuse the org key outside local mode', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, ...jsonBody(linearAccessBody) }))
+    vi.stubGlobal('fetch', fetchMock)
+    const base = initialWizardState()
+    const state: WizardState = {
+      ...base,
+      isLocal: false,
+      duplicateLinearToUser: true,
+      tracker: 'linear',
+      org: { ...base.org, linear_api_key: 'lin_api_x' },
+    }
+    await stepFor('org-linear-access').persist({
+      ...orgCtx(state, () => {}),
+      teamId: 'default',
+      isLocal: false,
+    })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('saves only the Linear cadence from its poll step', async () => {
     const bodies = captureSaveBodies()
     await stepFor('org-linear-poller').persist({
