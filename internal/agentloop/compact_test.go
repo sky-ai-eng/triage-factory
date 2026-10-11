@@ -248,7 +248,7 @@ func TestWarmCompactionFailure_ToolCallsHandsOffToForcedShape(t *testing.T) {
 				PromptTokens: 150000, OutputTokens: 500,
 				CacheReadTokens: 120000, CacheCreationTokens: 10000,
 			},
-			model: "claude-sonnet-4-5",
+			model: testParams().Model,
 		},
 		forcedReply("cold analysis", "cold summary"),
 		{text: "done"},

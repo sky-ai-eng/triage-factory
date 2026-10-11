@@ -1,7 +1,9 @@
 package inference
 
 import (
+	"maps"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
@@ -11,25 +13,27 @@ const epsilon = 1e-12
 
 func approxEqual(a, b float64) bool { return math.Abs(a-b) <= epsilon*math.Max(1, math.Abs(b)) }
 
-// expectedPrice is one row of the verification table we author by hand from
-// Anthropic's public pricing page (per-token = per-MTok / 1e6). A drifted or
-// corrupt upstream snapshot must fail this loudly rather than misbill quietly.
-type expectedPrice struct {
-	input, output               float64
-	cacheRead, cache5m, cache1h float64
-	// readMultiple is the cache-read rate as a fraction of input. It is a
-	// per-model column because the family does not share one value.
-	readMultiple float64
-}
-
-// anthropicPublicPrices mirrors https://www.anthropic.com/pricing (standard
-// tier, ≤200k context). Cache writes are the same across the family: 5-minute
-// write = 1.25× input, 1-hour write = 2× input. Cache read is 0.1× input on
-// most models and 0.05× on Opus 5.5, so each row states its own.
-var anthropicPublicPrices = map[string]expectedPrice{
-	"claude-sonnet-4-5": {input: 3e-06, output: 1.5e-05, cacheRead: 3e-07, cache5m: 3.75e-06, cache1h: 6e-06, readMultiple: 0.1},
-	"claude-opus-5-5":   {input: 4e-06, output: 2e-05, cacheRead: 2e-07, cache5m: 5e-06, cache1h: 8e-06, readMultiple: 0.05},
-	"claude-haiku-4-5":  {input: 1e-06, output: 5e-06, cacheRead: 1e-07, cache5m: 1.25e-06, cache1h: 2e-06, readMultiple: 0.1},
+// pricedModel returns a snapshot key whose row carries an input and an output
+// rate, under the given litellm_provider label (any label when empty): the
+// first such key in sorted order, so the choice is stable for a given
+// snapshot. A test that needs a real model takes one this way rather than
+// naming it, because which models the snapshot carries is upstream's data and
+// a refresh may retire any of them. Prices for the models TF offers are
+// checked by modelcatalog's TestPricing_CatalogRates.
+func pricedModel(t *testing.T, provider string) string {
+	t.Helper()
+	table, err := loadPricing()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range slices.Sorted(maps.Keys(table)) {
+		p := table[k]
+		if (provider == "" || p.LiteLLMProvider == provider) && p.InputCostPerToken != nil && p.OutputCostPerToken != nil {
+			return k
+		}
+	}
+	t.Fatalf("snapshot has no priced row for provider %q", provider)
+	return ""
 }
 
 func TestPricingProvenance(t *testing.T) {
@@ -52,99 +56,58 @@ func TestPricing_DatasheetLoads(t *testing.T) {
 	}
 }
 
-// TestPricing_VerificationGate is the guard the ticket requires: the vendored
-// snapshot's spot prices and Anthropic prompt-cache multipliers must match the
-// hand-authored expected table, so a bad upstream re-vendor fails tests loudly.
-func TestPricing_VerificationGate(t *testing.T) {
-	table, err := loadPricing()
-	if err != nil {
-		t.Fatal(err)
+func TestComputeTextCost_CacheWrite1hSplit(t *testing.T) {
+	p := modelPrice{
+		InputCostPerToken:                   f64(2e-06),
+		CacheCreationInputTokenCost:         f64(2.5e-06),
+		CacheCreationInputTokenCostAbove1hr: f64(4e-06),
 	}
-
-	for model, want := range anthropicPublicPrices {
-		t.Run(model, func(t *testing.T) {
-			p, ok := table[model]
-			if !ok {
-				t.Fatalf("model %q missing from snapshot", model)
-			}
-			assertRate(t, "input", p.InputCostPerToken, want.input)
-			assertRate(t, "output", p.OutputCostPerToken, want.output)
-			assertRate(t, "cache_read", p.CacheReadInputTokenCost, want.cacheRead)
-			assertRate(t, "cache_write_5m", p.CacheCreationInputTokenCost, want.cache5m)
-			assertRate(t, "cache_write_1h", p.CacheCreationInputTokenCostAbove1hr, want.cache1h)
-
-			// The prompt-cache multipliers must hold against the snapshot's own
-			// input rate — the load-bearing check the ticket calls out.
-			if !approxEqual(want.cacheRead, want.readMultiple*want.input) {
-				t.Errorf("cache-read multiplier: want %gx input, got %g/%g", want.readMultiple, want.cacheRead, want.input)
-			}
-			if !approxEqual(want.cache5m, 1.25*want.input) {
-				t.Errorf("5m cache-write multiplier: want 1.25x input, got %g/%g", want.cache5m, want.input)
-			}
-			if !approxEqual(want.cache1h, 2*want.input) {
-				t.Errorf("1h cache-write multiplier: want 2x input, got %g/%g", want.cache1h, want.input)
-			}
-		})
-	}
-}
-
-func assertRate(t *testing.T, name string, got *float64, want float64) {
-	t.Helper()
-	if got == nil {
-		t.Fatalf("%s rate missing in snapshot", name)
-	}
-	if !approxEqual(*got, want) {
-		t.Errorf("%s rate: snapshot %g, expected %g", name, *got, want)
-	}
-}
-
-func TestCostForUsage_KnownModel(t *testing.T) {
-	// sonnet-4-5, standard tier. input 1000 (200 cache-read, 100 cache-write
-	// 5m, 700 non-cached), output 500.
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
-		PromptTokens:        1000,
-		OutputTokens:        500,
-		CacheReadTokens:     200,
-		CacheCreationTokens: 100,
-	})
-	if !ok {
-		t.Fatal("expected ok for a known model")
-	}
-	want := 700*3e-06 + 200*3e-07 + 100*3.75e-06 + 500*1.5e-05
-	if !approxEqual(usd, want) {
-		t.Fatalf("cost = %g, want %g", usd, want)
-	}
-}
-
-func TestCostForUsage_CacheWrite1hSplit(t *testing.T) {
-	// 100 cache-write of which 40 are 1-hour (2x) and 60 are 5-minute (1.25x).
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
+	// 100 cache-write of which 40 are 1-hour and 60 are 5-minute.
+	usd := computeTextCost(p, Usage{
 		PromptTokens:          100,
-		CacheReadTokens:       0,
 		CacheCreationTokens:   100,
 		CacheCreationTokens1h: 40,
 	})
-	if !ok {
-		t.Fatal("expected ok")
-	}
 	// nonCached = 100 - 0 - 100 = 0; only the cache-write split bills.
-	want := 40*6e-06 + 60*3.75e-06
+	want := 40*4e-06 + 60*2.5e-06
 	if !approxEqual(usd, want) {
 		t.Fatalf("cost = %g, want %g", usd, want)
 	}
 }
 
-func TestCostForUsage_LongContextTier(t *testing.T) {
-	// Above 200k input, sonnet-4-5 bills input at 6e-06 and output at 2.25e-05.
-	in := 250000
-	out := 1000
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{PromptTokens: in, OutputTokens: out})
-	if !ok {
-		t.Fatal("expected ok")
+// TestComputeTextCost_LongContextTier pins the formula's tier selection against
+// a synthetic price rather than a snapshot row. Which models publish a >200k
+// tier is upstream's data and a refresh may legitimately remove one; how the
+// formula applies a tier is this package's, and must not depend on some model
+// still carrying one.
+func TestComputeTextCost_LongContextTier(t *testing.T) {
+	p := modelPrice{
+		InputCostPerToken:                           f64(3e-06),
+		InputCostPerTokenAbove200k:                  f64(6e-06),
+		OutputCostPerToken:                          f64(1.5e-05),
+		OutputCostPerTokenAbove200k:                 f64(2.25e-05),
+		CacheReadInputTokenCost:                     f64(3e-07),
+		CacheReadInputTokenCostAbove200:             f64(6e-07),
+		CacheCreationInputTokenCostAbove1hr:         f64(6e-06),
+		CacheCreationInputTokenCostAbove1hrAbove200: f64(1.2e-05),
+		// No tiered 5-minute write rate: that bucket bills at its base rate on
+		// both sides of the boundary.
+		CacheCreationInputTokenCost: f64(3.75e-06),
 	}
-	want := float64(in)*6e-06 + float64(out)*2.25e-05
-	if !approxEqual(usd, want) {
-		t.Fatalf("long-context cost = %g, want %g", usd, want)
+
+	// 250k prompt: 200k non-cached, 30k cache read, 20k cache write of which
+	// 5k are 1-hour.
+	above := Usage{PromptTokens: 250000, OutputTokens: 1000, CacheReadTokens: 30000, CacheCreationTokens: 20000, CacheCreationTokens1h: 5000}
+	want := 200000*6e-06 + 30000*6e-07 + 5000*1.2e-05 + 15000*3.75e-06 + 1000*2.25e-05
+	if got := computeTextCost(p, above); !approxEqual(got, want) {
+		t.Errorf("above 200k: cost = %g, want %g", got, want)
+	}
+
+	// The boundary itself is not above it.
+	at := Usage{PromptTokens: 200000, OutputTokens: 1000}
+	want = 200000*3e-06 + 1000*1.5e-05
+	if got := computeTextCost(p, at); !approxEqual(got, want) {
+		t.Errorf("at 200k: cost = %g, want %g", got, want)
 	}
 }
 
@@ -163,7 +126,7 @@ func TestCostForUsage_UnknownModel(t *testing.T) {
 func TestCostForUsage_FreeIsNotUnknown(t *testing.T) {
 	// A genuinely-zero usage on a known model is (0, true) — distinct from an
 	// unknown model's (0, false).
-	usd, ok := CostForUsage("claude-haiku-4-5", Usage{})
+	usd, ok := CostForUsage(pricedModel(t, ""), Usage{})
 	if !ok {
 		t.Fatal("known model with zero usage must still be ok=true")
 	}
@@ -173,19 +136,24 @@ func TestCostForUsage_FreeIsNotUnknown(t *testing.T) {
 }
 
 // TestCostForUsage_CrossProvider proves the package prices any provider's chat
-// models out of the gate, not just Anthropic — an OpenAI and a Gemini model
-// both resolve and compute.
+// models out of the gate, not just Anthropic — an OpenAI and a Gemini row both
+// resolve and compute from their own rates.
 func TestCostForUsage_CrossProvider(t *testing.T) {
-	// gpt-4o: input 2.5e-06, output 1e-05.
-	usd, ok := CostForUsage("gpt-4o", Usage{PromptTokens: 1000, OutputTokens: 500})
-	if !ok {
-		t.Fatal("expected a non-Anthropic chat model (gpt-4o) to be priced")
+	table, err := loadPricing()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := 1000*2.5e-06 + 500*1e-05; !approxEqual(usd, want) {
-		t.Fatalf("gpt-4o cost = %g, want %g", usd, want)
-	}
-	if _, ok := CostForUsage("gemini-2.5-pro", Usage{PromptTokens: 100}); !ok {
-		t.Fatal("expected a Gemini chat model to be priced")
+	for _, provider := range []string{"openai", "gemini"} {
+		model := pricedModel(t, provider)
+		usd, ok := CostForUsage(model, Usage{PromptTokens: 1000, OutputTokens: 500})
+		if !ok {
+			t.Errorf("%s row %q is not priced", provider, model)
+			continue
+		}
+		p := table[model]
+		if want := 1000**p.InputCostPerToken + 500**p.OutputCostPerToken; !approxEqual(usd, want) {
+			t.Errorf("%s cost = %g, want %g", model, usd, want)
+		}
 	}
 }
 

@@ -44,7 +44,7 @@ func TestNativeLoop_LiveSmoke(t *testing.T) {
 
 	model := strings.TrimSpace(os.Getenv("TF_TEST_LOOP_MODEL"))
 	if model == "" {
-		model = "claude-sonnet-4-5"
+		model = "claude-sonnet-5-5"
 	}
 
 	// A worktree with one file the model has to actually read to answer.

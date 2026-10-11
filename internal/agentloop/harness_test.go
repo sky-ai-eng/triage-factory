@@ -480,7 +480,7 @@ func testParams() Params {
 	return Params{
 		OrgID:          "org",
 		ConversationID: "conv",
-		Model:          "claude-sonnet-4-5",
+		Model:          "claude-sonnet-5-5",
 		SystemPrompt:   "system",
 		HasBlueprint:   true,
 	}

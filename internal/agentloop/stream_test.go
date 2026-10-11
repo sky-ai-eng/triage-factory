@@ -77,7 +77,7 @@ func TestStreamWithRetry_RecordsEachAttemptAndEachRetry(t *testing.T) {
 	}}
 	e := newTestEngine(newMemTranscript(), p, newScriptedToolHost())
 
-	req := inference.Request{Provider: inference.ProviderAnthropic, Model: "claude-sonnet-4-5"}
+	req := inference.Request{Provider: inference.ProviderAnthropic, Model: testParams().Model}
 	if _, err := e.streamWithRetry(context.Background(), "org-1", p, req); err != nil {
 		t.Fatalf("streamWithRetry: %v", err)
 	}
