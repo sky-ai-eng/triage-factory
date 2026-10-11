@@ -458,6 +458,21 @@ func TestLinearInstall_Denied(t *testing.T) {
 	r.assertNothingWritten(t)
 }
 
+// TestLinearInstall_OtherOAuthErrorsAreFailures: an OAuth error other than
+// access_denied says nothing about consent, so it reads as a failed install,
+// not a declined one.
+func TestLinearInstall_OtherOAuthErrorsAreFailures(t *testing.T) {
+	for _, oErr := range []string{"server_error", "temporarily_unavailable", "invalid_scope"} {
+		t.Run(oErr, func(t *testing.T) {
+			r := newLinearInstallRig(t)
+			cookie, state := r.start(t)
+			rec := r.get(t, callbackPath(url.Values{"error": {oErr}, "state": {state}}), cookie)
+			expectRedirect(t, rec, "linear_error", "install_failed")
+			r.assertNothingWritten(t)
+		})
+	}
+}
+
 func TestLinearInstall_FailedExchange(t *testing.T) {
 	r := newLinearInstallRig(t)
 	cookie, state := r.start(t)

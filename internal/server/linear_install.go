@@ -38,7 +38,7 @@ import (
 // redirects back with linear_error set to one of:
 //
 //	state           the cookie is missing, expired, forged, or not this caller's
-//	denied          the admin declined consent in Linear
+//	denied          Linear answered access_denied: the admin declined consent
 //	no_app          no Linear OAuth app resolves for the org
 //	install_failed  the code exchange or the identity check failed
 //	workspace_taken the workspace is installed in another org
@@ -202,7 +202,13 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 
 	if oErr := r.URL.Query().Get("error"); oErr != "" {
 		linearInstallLog.Warn("linear oauth error", "linear_error", oErr, "org", orgID)
-		redirectLinearInstallError(w, r, orgID, returnTo, "denied")
+		// Only access_denied is the admin declining; server_error,
+		// temporarily_unavailable and the rest are a failed install.
+		code := "install_failed"
+		if oErr == "access_denied" {
+			code = "denied"
+		}
+		redirectLinearInstallError(w, r, orgID, returnTo, code)
 		return
 	}
 	code := r.URL.Query().Get("code")
