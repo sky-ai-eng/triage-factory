@@ -147,13 +147,17 @@ export default function UserSettingsPage() {
   const accounts = useMemo<Account[]>(() => {
     const list: Account[] = []
     const g = gh.state.status === 'ready' ? gh.state.data : null
-    list.push({
-      id: 'gh',
-      kind: 'github',
-      account: g?.connected && g.login ? '@' + g.login : null,
-      host: g?.host || 'github.com',
-      method: g?.connect_available ? 'app' : 'pat',
-    })
+    // Only when the org has a GitHub host, as for Jira below. Until the read
+    // lands the row stays, so the loading and offline states still show it.
+    if (gh.state.status !== 'ready' || g?.host) {
+      list.push({
+        id: 'gh',
+        kind: 'github',
+        account: g?.connected && g.login ? '@' + g.login : null,
+        host: g?.host,
+        method: g?.connect_available ? 'app' : 'pat',
+      })
+    }
     const j = jira.state.status === 'ready' ? jira.state.data : null
     // Only when the org has a Jira host: a system the org does not reach has
     // no account to hold.

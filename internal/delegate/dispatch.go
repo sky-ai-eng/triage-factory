@@ -551,10 +551,11 @@ func (s *Spawner) waitForDispatcherStop(ctx context.Context) bool {
 
 // dispatchClaimedConversation runs one claimed blueprint step: load its context,
 // rehydrate the shared workspace, materialize the step skill, run the agent,
-// then hand the terminal state to the reactor. Nothing that fails before the
-// agent's first turn ends the conversation — it goes back on the queue for
-// another attempt, and only an exhausted budget decides anything permanent
-// (handlePreAgentFailure).
+// then hand the terminal state to the reactor. A failure before the agent's
+// first turn goes back on the queue for another attempt, and only an exhausted
+// budget decides anything permanent (handlePreAgentFailure). The exceptions
+// are the settled refusals — the model refusal and the GitHub host refusal —
+// which another attempt would only repeat, so they end the conversation.
 //
 // Context split: the pre-agent setup reads honor the dispatcher ctx so a
 // shutdown (or a future timeout) cancels them cleanly — a ctx-cancelled read

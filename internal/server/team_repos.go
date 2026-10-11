@@ -70,8 +70,12 @@ func (s *Server) handleTeamReposGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// No GitHub URL, no host, and so nothing tracked on it.
 	var repos []domain.TeamGitHubRepo
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if host == "" {
+			return nil
+		}
 		var e error
 		repos, e = tx.TeamGitHubRepos.ListForTeam(r.Context(), teamID, host)
 		return e
@@ -132,9 +136,8 @@ func (s *Server) handleTeamReposPut(w http.ResponseWriter, r *http.Request) {
 	// option list to uncheck, yet every Save re-submits it, so the user
 	// could never save a corrected set. Only *newly added* unreachable
 	// repos are a user error worth blocking.
-	host, err := s.orgGitHubHost(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "teams/github-repos", err)
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "teams/github-repos")
+	if !ok {
 		return
 	}
 	var existing []domain.TeamGitHubRepo

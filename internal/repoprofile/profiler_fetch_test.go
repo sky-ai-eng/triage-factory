@@ -196,12 +196,12 @@ func (oneOrgStore) ListActiveSystem(context.Context) ([]string, error) {
 	return []string{"org-1"}, nil
 }
 
-// GetSettingsSystem answers with the settings a local install has: no clone
-// protocol (→ HTTPS) and the background-jobs model the SQLite column default
-// pre-fills. The model is required — a profiling cycle skips without one — so
-// every profiler test needs the row to carry one.
+// GetSettingsSystem answers with the settings a local install on github.com
+// has: no clone protocol (→ HTTPS) and the background-jobs model the SQLite
+// column default pre-fills. The model is required — a profiling cycle skips
+// without one — so every profiler test needs the row to carry one.
 func (oneOrgStore) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{BackgroundJobsModel: domain.LocalBackgroundJobsModel}, nil
+	return domain.OrgSettings{GitHubBaseURL: "https://github.com", BackgroundJobsModel: domain.LocalBackgroundJobsModel}, nil
 }
 
 // fetchRepositoryStore returns a fixed configured-name list and captures every

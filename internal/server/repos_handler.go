@@ -116,6 +116,12 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The org's current GitHub host: the picker offers what the org can reach
+	// there, never what a host it has left could.
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
+	if !ok {
+		return
+	}
 	// The configuration preflight runs BEFORE the mirror read, and it is what
 	// keeps an unconfigured org out of the readiness state: "we have not looked
 	// yet" is a promise that looking will eventually produce something, and for
@@ -126,14 +132,6 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	class := pre.class
-
-	// The org's current GitHub host: the picker offers what the org can reach
-	// there, never what a host it has left could.
-	host, err := s.orgGitHubHost(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "repos", err)
-		return
-	}
 	state, err := s.reachableRepos.ReachableStateSystem(r.Context(), orgID, host, class)
 	if err != nil {
 		reposLog.Error("read reachable repo cache state failed", "org", orgID, "error", err)
@@ -543,6 +541,11 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
+	if host == "" {
+		// No GitHub URL, no host, and so no repository on it.
+		httpx.WriteList(w, page, []repoJSON{}, 0)
+		return
+	}
 
 	var (
 		repos   []domain.Repository
@@ -712,6 +715,9 @@ func (s *Server) handleRepoGetByName(w http.ResponseWriter, r *http.Request) {
 	}
 	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, host, withCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+			if host == "" {
+				return nil, nil // no GitHub URL: no name resolves
+			}
 			// Ref-keyed, not id-keyed: the path segments are the provider's
 			// current NAME for the repository on the org's GitHub host, and
 			// the registry id is a separate handle. GetByRef's (nil, nil)

@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/pressly/goose/v3"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // BootstrapSchemaForTest applies the full schema and seed data to db
@@ -39,6 +40,18 @@ func BootstrapSchemaForTest(db *sql.DB) error {
 		return err
 	}
 	return restoreImage(db, image)
+}
+
+// SetLocalGitHubURLForTest sets the synthetic local org's GitHub URL to url,
+// on a database BootstrapSchemaForTest prepared. A fixture about GitHub rows
+// needs one: every GitHub row is keyed by the org's GitHub, and an org with
+// none has none. Tests-only.
+func SetLocalGitHubURLForTest(db *sql.DB, url string) error {
+	_, err := db.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, runmode.LocalDefaultOrgID, url)
+	return err
 }
 
 // BootstrapTenantlessSchemaForTest is BootstrapSchemaForTest without the

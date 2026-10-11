@@ -557,6 +557,11 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 
 func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 	t.Helper()
+	// The org's Jira site is the one the fixtures' issues are on
+	// (seedJiraConversation): the mirror acts only on its own site.
+	if _, err := testSpawnerStores(database).Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com"); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
 	if _, err := database.Exec(
 		`INSERT INTO jira_project_status_rules
 		   (team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)

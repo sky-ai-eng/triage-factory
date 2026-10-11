@@ -118,6 +118,9 @@ func (s *Server) handleTeamGitHubGroupsGet(w http.ResponseWriter, r *http.Reques
 	}
 	var groups []domain.TeamGitHubGroup
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		if host == "" {
+			return nil // no GitHub URL: no mappings on a host
+		}
 		var e error
 		groups, e = tx.TeamGitHubGroups.ListForTeam(r.Context(), teamID, host)
 		return e
@@ -179,9 +182,8 @@ func (s *Server) handleTeamGitHubGroupsPut(w http.ResponseWriter, r *http.Reques
 
 	// Saved on the org's current GitHub host, which is the host the candidates
 	// were listed from; the team's mappings on any other host are kept.
-	host, err := s.orgGitHubHost(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "teams/github-groups", err)
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "teams/github-groups")
+	if !ok {
 		return
 	}
 	if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -224,6 +226,9 @@ func (s *Server) gitHubGroupCandidates(ctx context.Context, orgID, userID string
 	if err != nil {
 		githubGroupsLog.Error("read github host failed", "error", err)
 		return nil, false
+	}
+	if host == "" {
+		return nil, false // no GitHub URL: no registry to derive owners from
 	}
 	var repos []domain.Repository
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {

@@ -33,7 +33,10 @@ func SeedUser(t *testing.T, h *Harness, displayName string) string {
 
 // SeedOrg inserts a row in orgs with the given slug (also used as name)
 // and owner, returning the new org ID. ownerID must already exist in
-// users (see SeedUser).
+// users (see SeedUser). The org's GitHub URL is https://github.com: every
+// GitHub row an org reads or writes is keyed by its GitHub, and an org with
+// none has no GitHub rows at all. A fixture about an org with no GitHub URL
+// clears it (ClearOrgGitHubURL).
 func SeedOrg(t *testing.T, h *Harness, slug, ownerID string) string {
 	t.Helper()
 	var id string
@@ -42,7 +45,20 @@ func SeedOrg(t *testing.T, h *Harness, slug, ownerID string) string {
 	`, slug, ownerID).Scan(&id); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
+	MustExec(t, h.AdminDB, `
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES ($1, 'github', 'https://github.com')
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, id)
 	return id
+}
+
+// ClearOrgGitHubURL leaves orgID with no GitHub URL, and no per-source GitHub
+// row at all: the state of an org that has not connected GitHub.
+func ClearOrgGitHubURL(t *testing.T, h *Harness, orgID string) {
+	t.Helper()
+	MustExec(t, h.AdminDB, `
+		DELETE FROM org_event_sources WHERE org_id = $1 AND kind = 'github'
+	`, orgID)
 }
 
 // SeedTeam inserts a row in teams with the given slug (also used as
@@ -93,7 +109,7 @@ func SeedRepositoryOnHost(t *testing.T, h *Harness, orgID, host, owner, repo str
 
 // OrgGitHubHost returns orgID's current GitHub host as the stores resolve it:
 // db.EffectiveGitHubHost of the GitHub base URL stored on org_event_sources,
-// which is the deployment default when the org configured none.
+// "" when the org configured none.
 func OrgGitHubHost(t *testing.T, h *Harness, orgID string) string {
 	t.Helper()
 	var base sql.NullString

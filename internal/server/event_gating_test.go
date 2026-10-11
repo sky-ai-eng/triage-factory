@@ -244,6 +244,7 @@ func TestHandleEventHandlerCreate_AllowsGatedEventTypeWithFeature(t *testing.T) 
 
 func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
 	jiraRule := createUserRuleFor(t, s, domain.EventJiraIssueAssigned)
 
@@ -269,6 +270,7 @@ func TestEventHandlerList_DropsGatedKeepsUngated(t *testing.T) {
 
 func TestEventHandlerList_GrantedFeatureKeepsBoth(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	ghRule := createUserRuleFor(t, s, domain.EventGitHubPROpened)
 
 	gateJiraForTest(t)

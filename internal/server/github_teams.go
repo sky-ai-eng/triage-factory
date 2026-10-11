@@ -93,15 +93,16 @@ func (s *Server) userTeamsMulti(ctx context.Context, orgID, userID string) ([]gh
 		if lerr != nil {
 			return lerr
 		}
-		if host, okHost := resolveGitHubHost(orgSet.GitHubBaseURL); okHost {
-			login, lerr = tx.Users.GetGitHubLogin(ctx, userID, host)
-			if lerr != nil {
-				return lerr
-			}
+		host, okHost := resolveGitHubHost(orgSet.GitHubBaseURL)
+		if !okHost {
+			return nil
+		}
+		if login, lerr = tx.Users.GetGitHubLogin(ctx, userID, host); lerr != nil {
+			return lerr
 		}
 		// Unwindowed for the same reason as the group candidates: this
 		// derives a set from the whole registry rather than browsing it.
-		repos, _, lerr = tx.Repos.List(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL), db.Unwindowed)
+		repos, _, lerr = tx.Repos.List(ctx, orgID, host, db.Unwindowed)
 		return lerr
 	}); err != nil {
 		return nil, err

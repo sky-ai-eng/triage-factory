@@ -52,7 +52,7 @@ func TestRunGitHubCycleForOrg_RetiresAnotherHostsPullRequestsWithNothingTracked(
 	database := newMigratedSQLiteForPoller(t)
 	stores := sqlitestore.New(database)
 	org := runmode.LocalDefaultOrgID
-	current := dbpkg.EffectiveGitHubHost("")
+	current := "https://github.com"
 
 	stale := seedGitHubPR(t, stores, otherGitHubHost, "octo/old", 3)
 	kept := seedGitHubPR(t, stores, current, "octo/live", 4)
@@ -181,7 +181,7 @@ func (s *backfillUsersStore) MarkDashboardBackfilledSystem(_ context.Context, _,
 // is stamped, leaving a bind on the current host free to backfill.
 func TestBackfillUserDashboard_OnlyOnTheOrgsCurrentHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	current := dbpkg.EffectiveGitHubHost("")
+	current := "https://github.com"
 
 	users := &backfillUsersStore{}
 	repos := &recordingRepositoryStore{}
@@ -231,7 +231,7 @@ func (r *targetRecordingResolver) ClientFor(ctx context.Context, orgID, target s
 // makes no request.
 func TestRunGitHubCycleForOrg_WalksOnlyTheCurrentHostsInstallations(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeMulti)
-	current := dbpkg.EffectiveGitHubHost("")
+	current := "https://github.com"
 
 	run := func(t *testing.T, installs ...domain.OrgGitHubAppInstallation) (targets []string, requests int, reported []error) {
 		t.Helper()

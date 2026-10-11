@@ -305,6 +305,9 @@ func reconcileTestStores(t *testing.T) (db.Stores, func(entityID, conversationID
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	stores := sqlitestore.New(conn)
 	ctx := context.Background()
 

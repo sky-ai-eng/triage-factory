@@ -1,9 +1,9 @@
 package dbtest
 
 // TestGitHubHost is the GitHub host the suites write repositories and team
-// tracking under, and the host their reads ask about. It is the host an org with
-// no GitHub base URL configured resolves to (db.EffectiveGitHubHost), so a
-// fixture that seeds an org without one lands on the same host.
+// tracking under, and the host their reads ask about. A suite that reads the
+// org's current host sets it as the org's GitHub URL first: an org with none is
+// on no GitHub.
 const TestGitHubHost = "https://github.com"
 
 // TestOtherGitHubHost is a second GitHub host, for the cases that pin host

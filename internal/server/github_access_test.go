@@ -175,6 +175,7 @@ func seedInstallation(t *testing.T, s *Server, id int64, login string) {
 		OrgID:          runmode.LocalDefaultOrgID,
 		AccountType:    "Organization",
 		AccountLogin:   login,
+		GitHubHost:     seedRepoHost(t, s),
 	}); err != nil {
 		t.Fatalf("seed installation %s: %v", login, err)
 	}
@@ -1101,7 +1102,7 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 		t.Errorf("github_pat_login = %q with nothing bound, want empty", got)
 	}
 
-	gh := githubUserStub(t, "acme-bot")
+	gh := githubTokenStub(t, map[string]string{"ghp_first": "acme-bot", "ghp_second": "acme-bot-2"})
 	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_first"); rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -1109,9 +1110,9 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 		t.Errorf("github_pat_login = %q after bind, want acme-bot", got)
 	}
 
-	// Rotation: same route, a token that authenticates as someone else.
-	rotated := githubUserStub(t, "acme-bot-2")
-	if rec := bindOrgGitHubPAT(t, s, rotated.URL, "ghp_second"); rec.Code != http.StatusOK {
+	// Rotation: same route, same host, a token that authenticates as someone
+	// else.
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_second"}); rec.Code != http.StatusOK {
 		t.Fatalf("pat rotate = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if got := orgPATLogin(t, s); got != "acme-bot-2" {
@@ -1124,68 +1125,6 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	if got := orgPATLogin(t, s); got != "" {
 		t.Errorf("github_pat_login = %q after unbind, want empty", got)
 	}
-}
-
-// TestOrgSettingsGet_ReportsPATHostAndRebind pins the two fields the Settings
-// rebind notice reads. github_pat_host is the host the stored PAT was validated
-// on; github_pat_needs_rebind is true exactly while the org's GitHub host is
-// another one, because TF sends the PAT nowhere else. Moving the setting back
-// to the PAT's host, or clearing it (which resolves to the PAT's own URL),
-// makes the PAT usable again without a rebind.
-func TestOrgSettingsGet_ReportsPATHostAndRebind(t *testing.T) {
-	keyring.MockInit()
-	runmode.SetForTest(t, runmode.ModeLocal)
-	s := newTestServer(t)
-
-	if host, rebind := orgPATHost(t, s); host != "" || rebind {
-		t.Errorf("with nothing bound: github_pat_host = %q, needs_rebind = %v; want empty and false", host, rebind)
-	}
-
-	gh := githubUserStub(t, "acme-bot")
-	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_on_a"); rec.Code != http.StatusOK {
-		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
-	}
-	if host, rebind := orgPATHost(t, s); host != gh.URL || rebind {
-		t.Errorf("on the bound host: github_pat_host = %q, needs_rebind = %v; want %q and false", host, rebind, gh.URL)
-	}
-
-	commitGitHubHost(t, s, "https://ghe.example.com")
-	if host, rebind := orgPATHost(t, s); host != gh.URL || !rebind {
-		t.Errorf("after a host move: github_pat_host = %q, needs_rebind = %v; want %q and true", host, rebind, gh.URL)
-	}
-
-	commitGitHubHost(t, s, gh.URL)
-	if host, rebind := orgPATHost(t, s); host != gh.URL || rebind {
-		t.Errorf("back on the bound host: github_pat_host = %q, needs_rebind = %v; want %q and false", host, rebind, gh.URL)
-	}
-
-	if rec := patchOrgSettings(t, s, map[string]any{"github_base_url": nil}); rec.Code != http.StatusOK {
-		t.Fatalf("clear github_base_url = %d: %s", rec.Code, rec.Body.String())
-	}
-	if _, rebind := orgPATHost(t, s); rebind {
-		t.Error("with the host setting cleared: needs_rebind = true; an empty setting resolves to the PAT's own host")
-	}
-}
-
-// orgPATHost reads github_pat_host and github_pat_needs_rebind off the org
-// settings GET.
-func orgPATHost(t *testing.T, s *Server) (string, bool) {
-	t.Helper()
-	rec := doJSON(t, s, http.MethodGet, orgSettingsPath(), nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET org settings = %d: %s", rec.Code, rec.Body.String())
-	}
-	var out struct {
-		Host   string `json:"github_pat_host"`
-		Rebind *bool  `json:"github_pat_needs_rebind"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode org settings: %v", err)
-	}
-	if out.Rebind == nil {
-		t.Fatalf("github_pat_needs_rebind missing from the settings read: %s", rec.Body.String())
-	}
-	return out.Host, *out.Rebind
 }
 
 // TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly pins kickGitHubChanged:
@@ -1313,8 +1252,12 @@ func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 		t.Errorf("settings version moved %d → %d; the bind writes no settings column", versionAfterCommit, got)
 	}
 
-	// Move the workspace to the other deployment and rotate. The bind must
-	// follow the setting, not the host the previous credential was bound to.
+	// Move the workspace to the other deployment: the token comes off first,
+	// since the URL does not move while a credential is connected, and the
+	// next bind follows the new setting.
+	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("pat unbind = %d, body=%s", rec.Code, rec.Body.String())
+	}
 	before := *firstHits
 	commitGitHubHost(t, s, second.URL)
 	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_two"}); rec.Code != http.StatusOK {
@@ -1329,6 +1272,29 @@ func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 	if *firstHits != before {
 		t.Errorf("the previous host was probed again (%d → %d) — the bind followed the credential's host, not the org's", before, *firstHits)
 	}
+}
+
+// githubTokenStub is githubUserStub answering with the login each token maps
+// to, so a test can rotate the credential on one host.
+func githubTokenStub(t *testing.T, logins map[string]string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		login, ok := logins[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			http.Error(w, "bad credentials", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, login+"@example.com")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // recordingGitHubStub is githubUserStub plus a request counter, so a test can

@@ -69,7 +69,7 @@ func (s *Server) connectCallbackURL(orgID string) string {
 // the *same* value the PAT writer (settings_handlers) and the
 // factory/me/settings readers key on: orgSet.GitHubBaseURL in its canonical
 // form (ghbase.CanonicalBaseURL: trailing slashes trimmed, scheme and host
-// lowercased), with an empty config resolving to the deployment default.
+// lowercased). An org with no GitHub URL has no host: ok=false.
 // Connect (writer) and the identity-status gate (reader) both route through
 // here, so the (user, host) key always agrees with the other sites —
 // crucially including a base URL
@@ -78,10 +78,10 @@ func (s *Server) connectCallbackURL(orgID string) string {
 //
 // gitHubWebOrigin is used only to *validate* the configured base URL is a real
 // http(s) origin; its path-stripped output is intentionally discarded so the
-// returned value matches what the other writers/readers store. ok=false on a
-// malformed base URL.
+// returned value matches what the other writers/readers store. ok=false on an
+// empty or malformed base URL.
 func resolveGitHubHost(orgBase string) (string, bool) {
-	host := ghbase.ResolveBaseURL(orgBase)
+	host := ghbase.CanonicalBaseURL(orgBase)
 	if _, ok := gitHubWebOrigin(host); !ok {
 		return "", false
 	}
@@ -92,8 +92,8 @@ func resolveGitHubHost(orgBase string) (string, bool) {
 // same canonical host, for callers that hold only an orgID. It is the fetching
 // sibling of resolveGitHubHost and lands on the identical string for any base
 // URL that resolveGitHubHost accepts — db.EffectiveGitHubHost applies the same
-// two rules (the canonical form; an unset setting is the deployment default), and
-// is what the poller and the routing subscribers already key on.
+// canonical form, and is what the poller and the routing subscribers already
+// key on. "" for an org with no GitHub URL.
 //
 // It does NOT re-validate the base URL the way resolveGitHubHost does. That
 // gate belongs to the settings writer, and a caller that is recording which
@@ -112,6 +112,26 @@ func (s *Server) orgGitHubHost(ctx context.Context, orgID string) (string, error
 		return "", fmt.Errorf("read github host: %w", err)
 	}
 	return db.EffectiveGitHubHost(set.GitHubBaseURL), nil
+}
+
+// noGitHubURLMessage answers a request that needs the org's GitHub host from
+// an org with no GitHub URL.
+const noGitHubURLMessage = "this workspace has no GitHub URL; an admin sets it in Workspace Settings"
+
+// requireOrgGitHubHost is orgGitHubHost for a route that cannot answer without
+// a host: a read failure is a 500 and an org with no GitHub URL is a 409
+// NOT_CONFIGURED. ok=false means the response is written.
+func (s *Server) requireOrgGitHubHost(ctx context.Context, w http.ResponseWriter, orgID, area string) (string, bool) {
+	host, err := s.orgGitHubHost(ctx, orgID)
+	if err != nil {
+		internalError(w, area, err)
+		return "", false
+	}
+	if host == "" {
+		writeNotConfigured(w, noGitHubURLMessage)
+		return "", false
+	}
+	return host, true
 }
 
 // handleGitHubConnectStart kicks off the user-to-server OAuth dance:
@@ -380,9 +400,9 @@ func (s *Server) handleGitHubIdentityStatus(w http.ResponseWriter, r *http.Reque
 				return lerr
 			}
 		} else {
-			// Malformed host config — surface the raw value for display but
+			// No or malformed host config — surface the value for display but
 			// report not-connected (we can't key a lookup off a bad host).
-			host = ghbase.ResolveBaseURL(orgSet.GitHubBaseURL)
+			host = ghbase.CanonicalBaseURL(orgSet.GitHubBaseURL)
 		}
 		app, lerr := tx.GitHubApps.GetForOrg(r.Context(), orgID)
 		if lerr != nil {

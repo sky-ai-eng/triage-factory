@@ -16,7 +16,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/egressrelay"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/llmproxy"
 )
@@ -181,9 +180,9 @@ type GitProxyConfig struct {
 	// proxy; a zero-expiry token (a PAT) mints once per repo.
 	TokenSource gitproxy.TokenSource
 
-	// Upstream is the real git host base — empty defaults to
-	// the deployment default. Both the proxy's upstream and the insteadOf
-	// rewrite prefix derive from it.
+	// Upstream is the real git host base, the org's GitHub URL. Required:
+	// both the proxy's upstream and the insteadOf rewrite prefix derive from
+	// it.
 	Upstream string
 
 	// RecordPush, when non-nil, is forwarded to the git proxy as its
@@ -266,12 +265,11 @@ func StartGitProxy(ctx context.Context, bindIP string, allowNonLoopback bool, gi
 	if err != nil {
 		return nil, err
 	}
-	// An unset upstream is the deployment's default GitHub — the same answer
-	// an org with no base URL resolves to everywhere else, so the git proxy
-	// and the API client cannot land on different hosts for one org.
+	// The proxy fronts the org's GitHub and no other, so it needs to be told
+	// which: an unset upstream is a caller that resolved no GitHub URL.
 	upstream := git.Upstream
 	if upstream == "" {
-		upstream = ghbase.DefaultBaseURL()
+		return nil, errors.New("managed git proxy: no upstream GitHub URL")
 	}
 	srv, err := gitproxy.New(gitproxy.Config{
 		TokenSource:      git.TokenSource,

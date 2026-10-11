@@ -100,6 +100,7 @@ func TestMigrate_ExternalObjectScopeBackfillMatchesGo(t *testing.T) {
 			}
 
 			migrateExternalObjectScope(t, database)
+			settings.GitHubBaseURL = migratedGitHubBase(settings.GitHubBaseURL)
 
 			for _, p := range providers {
 				want := domain.ExternalObjectScope(p, settings)

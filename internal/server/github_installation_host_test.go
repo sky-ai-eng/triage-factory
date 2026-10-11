@@ -17,19 +17,16 @@ import (
 // already use). Two functions, one answer — otherwise the column cannot be
 // compared against anything and is dead weight.
 //
-// The three classes below are the ones that actually differ in shape: the
-// deployment default (where an unset setting has to land; github.com with the
-// variable unset), a *.ghe.com data-residency
-// tenant (a real host that is not github.com and is not a path mount), and a
-// GHES base carrying a path — the case a bare-origin derivation silently
-// truncates into a different host.
+// The three classes below are the ones that actually differ in shape:
+// github.com, a *.ghe.com data-residency tenant (a real host that is not
+// github.com and is not a path mount), and a GHES base carrying a path — the
+// case a bare-origin derivation silently truncates into a different host.
 func TestGitHubHostNormalizationAgrees(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		base string
 		want string
 	}{
-		{"unset", "", "https://github.com"},
 		{"public", "https://github.com", "https://github.com"},
 		{"public trailing slash", "https://github.com/", "https://github.com"},
 		{"ghe.com tenant", "https://acme.ghe.com", "https://acme.ghe.com"},

@@ -61,10 +61,14 @@ var (
 	// without the GitHub host the repository lives on. A name and a provider
 	// id are each unique only within one host, so a lookup without one names
 	// no repository, and a write without one would key a row under a host no
-	// read asks for. GitHub always has a host (domain.GitHubHost answers the
-	// deployment default for an empty setting), so this is a caller that
-	// forgot to pass it, never an org state.
+	// read asks for. An org with no GitHub URL has no host and no GitHub
+	// rows, so whether the caller forgot the host or is acting for such an
+	// org, nothing is read or written.
 	ErrRepoHostRequired = errors.New("repository host is required")
+
+	// ErrInstallationHostRequired refuses an App installation written without
+	// the GitHub host it lives on (GitHubAppsStore.UpsertInstallation).
+	ErrInstallationHostRequired = errors.New("github app installation host is required")
 )
 
 // RequireRepoHost refuses an empty GitHub host with ErrRepoHostRequired. Both

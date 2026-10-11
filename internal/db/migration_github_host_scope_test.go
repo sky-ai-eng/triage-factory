@@ -8,6 +8,7 @@ import (
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite"
 
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
@@ -57,7 +58,7 @@ func TestMigrate_GitHubHostBackfillMatchesGo(t *testing.T) {
 
 			migrateGitHubHostScope(t, database)
 
-			want := EffectiveGitHubHost(base)
+			want := EffectiveGitHubHost(migratedGitHubBase(base))
 			var repoHost, groupHost string
 			if err := database.QueryRow(`SELECT host FROM repositories WHERE id = 'r1'`).Scan(&repoHost); err != nil {
 				t.Fatalf("read repository host: %v", err)
@@ -185,4 +186,16 @@ func migrateGitHubHostScope(t *testing.T, database *sql.DB) {
 	if upErr != nil {
 		t.Fatalf("goose.UpTo github host scope: %v", upErr)
 	}
+}
+
+// migratedGitHubBase is the GitHub URL an org's migrated rows are keyed
+// under: its own, or, with none set, github.com — the GitHub such an org was
+// on, and the URL boot gives it when it uses GitHub
+// (integrations.AdoptSavedGitHubHost). Go resolves no host for an empty
+// setting, so the migrations and the adoption are what agree on this one.
+func migratedGitHubBase(base string) string {
+	if ghbase.CanonicalBaseURL(base) == "" {
+		return ghbase.GitHubCom
+	}
+	return base
 }

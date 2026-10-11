@@ -78,6 +78,7 @@ func RunGitHubNumericIDConformance(t *testing.T, mk GitHubNumericIDFactory) {
 			AccountType:    "Organization",
 			AccountID:      accountID,
 			AccountLogin:   login,
+			GitHubHost:     TestGitHubHost,
 		}
 	}
 

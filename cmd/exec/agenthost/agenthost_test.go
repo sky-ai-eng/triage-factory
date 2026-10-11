@@ -39,6 +39,7 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 		conn.Close()
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordGitHubURLForTest(t, conn)
 	t.Cleanup(func() { conn.Close() })
 	recordJiraSiteForTest(t, conn)
 	return sqlitestore.New(conn), conn
@@ -50,6 +51,19 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 func recordJiraSiteForTest(t *testing.T, conn *sql.DB) {
 	t.Helper()
 	recordJiraSite(t, conn, testScope("jira"))
+}
+
+// recordGitHubURLForTest makes testScope("github") the local org's GitHub URL:
+// every GitHub write is keyed by the org's GitHub, and an org with none
+// records nothing.
+func recordGitHubURLForTest(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, runmode.LocalDefaultOrgID, testScope("github")); err != nil {
+		t.Fatalf("record github url: %v", err)
+	}
 }
 
 // recordJiraSite makes site the local org's Jira site, the one its service

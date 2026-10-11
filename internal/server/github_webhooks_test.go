@@ -157,6 +157,7 @@ func TestGitHubWebhook_InstallationDeleted_FiresHook(t *testing.T) {
 		OrgID:          runmode.LocalDefaultOrgID,
 		AccountType:    "Organization",
 		AccountLogin:   "acme",
+		GitHubHost:     seedRepoHost(t, s),
 	}); err != nil {
 		t.Fatalf("pre-seed installation: %v", err)
 	}

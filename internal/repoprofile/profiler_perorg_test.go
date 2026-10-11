@@ -91,10 +91,14 @@ func (f *fakeOrgsStore) ListActiveSystem(ctx context.Context) ([]string, error) 
 	return append([]string(nil), f.ids...), nil
 }
 
-// GetSettingsSystem answers each org's GitHub base URL from bases, and the
-// default (no base URL, so the default host) for an org it does not name.
+// GetSettingsSystem answers each org's GitHub base URL from bases, and
+// github.com for an org it does not name.
 func (f *fakeOrgsStore) GetSettingsSystem(_ context.Context, orgID string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{GitHubBaseURL: f.bases[orgID]}, nil
+	base, ok := f.bases[orgID]
+	if !ok {
+		base = "https://github.com"
+	}
+	return domain.OrgSettings{GitHubBaseURL: base}, nil
 }
 
 // recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only

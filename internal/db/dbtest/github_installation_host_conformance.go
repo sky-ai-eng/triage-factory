@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -34,10 +35,10 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //   - github_host round-trips through UpsertInstallation →
 //     ListInstallationsForOrgSystem, path component and all;
 //   - it is normalized on write to the same string every other GitHub host key
-//     in the schema uses, so a trailing slash and an unset base URL cannot
-//     produce a second spelling of one host;
+//     in the schema uses, so a trailing slash cannot produce a second
+//     spelling of one host;
 //   - the column never reads back empty — an installation written without a
-//     host is one whose org configured none, which is the deployment default;
+//     host names no GitHub and is refused;
 //   - it follows the org when a later write reports a different one, like the
 //     login and unlike the account id;
 //   - the negative space this column exists FOR: two orgs on different GitHub
@@ -51,7 +52,7 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //     old host's live row, and one host still refuses the login twice;
 //   - ListInstallationsOnHost(System) reads one deployment's live rows,
 //     normalizes its host argument as the write does, and answers an empty
-//     host with nothing rather than the deployment default's rows.
+//     host with nothing.
 func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHostFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -109,26 +110,22 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 	})
 
-	t.Run("UnsetHostResolvesToTheDeploymentDefault", func(t *testing.T) {
-		// The NOT NULL column's floor: an org that configured no base URL is on
-		// the deployment's default GitHub, so a struct built without a host is
-		// a row under that host — never a NULL and never the empty string,
-		// which is not a host anything can be compared against. Pinned under a
-		// non-github.com default so the assertion cannot pass on the literal:
-		// the store must read the resolved default, not spell github.com.
+	t.Run("UnsetHostIsRefused", func(t *testing.T) {
+		// An installation lives on one GitHub, and a struct without a host
+		// names none: it is refused and nothing is written, whatever the
+		// deployment's default GitHub is — never a row under "" or under a
+		// host the writer did not name.
 		ghbase.SetDefaultBaseURLForTest(t, "https://ghe.default.test")
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
-			t.Fatalf("UpsertInstallation: %v", err)
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); !errors.Is(err, db.ErrInstallationHostRequired) {
+			t.Fatalf("UpsertInstallation with no host = %v; want ErrInstallationHostRequired", err)
 		}
-		if got := only(t, store, org).GitHubHost; got != "https://ghe.default.test" {
-			t.Errorf("GitHubHost = %q for an installation written without one; want the deployment default %q", got, "https://ghe.default.test")
+		if rows, err := store.ListInstallationsForOrgSystem(ctx, org); err != nil || len(rows) != 0 {
+			t.Errorf("installations after a refused write = %+v, %v; want none", rows, err)
 		}
-		// And the lookup normalizes an empty host the same way, so a caller
-		// asking about "the default" finds the row the writer keyed.
-		if got, err := store.InstallationOwnerSystem(ctx, "", "456"); err != nil || got != org {
-			t.Errorf("InstallationOwnerSystem(\"\", 456) = (%q, %v); want (%q, nil)", got, err, org)
+		if got, err := store.InstallationOwnerSystem(ctx, "", "456"); err != nil || got != "" {
+			t.Errorf("InstallationOwnerSystem(\"\", 456) = (%q, %v); want no owner", got, err)
 		}
 	})
 

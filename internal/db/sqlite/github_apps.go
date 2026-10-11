@@ -301,6 +301,10 @@ func (s *gitHubAppsStore) ListManagedInstallationsOffHostSystem(ctx context.Cont
 // string. repository_selection takes the account id's rule — see the Postgres
 // impl.
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) (domain.OrgGitHubAppInstallation, error) {
+	host := db.EffectiveGitHubHost(inst.GitHubHost)
+	if host == "" {
+		return domain.OrgGitHubAppInstallation{}, db.ErrInstallationHostRequired
+	}
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
 		installedAt = sql.NullTime{Time: inst.InstalledAt, Valid: true}
@@ -326,7 +330,7 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 			                                org_github_app_installations.repository_selection)
 		RETURNING `+sqliteGitHubAppInstallationColumns,
 		inst.InstallationID, inst.OrgID, inst.AccountType, nullStringValue(inst.AccountID), inst.AccountLogin,
-		db.EffectiveGitHubHost(inst.GitHubHost), installedAt,
+		host, installedAt,
 		nullTimeValue(inst.SuspendedAt), nullStringValue(inst.SuspendedBy), nullStringValue(selection)).Scan)
 	if err != nil {
 		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("upsert org_github_app_installations: %w", err)

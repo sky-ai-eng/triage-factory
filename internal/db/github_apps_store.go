@@ -207,9 +207,9 @@ type GitHubAppsStore interface {
 	// GitHubHost takes the login's rule too, and is normalized on the way in
 	// (EffectiveGitHubHost): both writers resolve it from the org's
 	// github_base_url, which is the only thing it can be, so the value they
-	// carry is always current and an empty one means "the org configured no
-	// base URL" — the deployment default. That fold is what keeps the NOT NULL column
-	// free of empty strings no matter which writer built the struct.
+	// carry is always current. An empty one is an org with no GitHub URL,
+	// which has no installation to record: ErrInstallationHostRequired, and
+	// nothing is written.
 	//
 	// The suspension fields are overwritten unconditionally, like the login
 	// and unlike the id: both callers see GitHub's whole answer for the
@@ -390,9 +390,8 @@ type GitHubAppsStore interface {
 // InstallationHostKey is the github_host value a host-scoped installation read
 // compares against: githubHost normalized as UpsertInstallation normalizes the
 // column (EffectiveGitHubHost), or "" when githubHost names no GitHub at all —
-// empty, or nothing but slashes. "" matches no row: EffectiveGitHubHost would
-// resolve it to the deployment default, and a read that selects what to act
-// through must not guess a host the caller never resolved. Both dialects key
+// empty, or nothing but slashes. "" matches no row: a read that selects what
+// to act through must not guess a host the caller never resolved. Both dialects key
 // ListInstallationsOnHost(System) through it, so the two cannot disagree on
 // what a host argument means.
 func InstallationHostKey(githubHost string) string {

@@ -354,8 +354,12 @@ func (f *fakeOrgsStore) callCount() int {
 // GetSettingsSystem feeds the cycle's per-org interval read. Returns defaults
 // — the scheduler tests assert cadence via the nextPoll clock, not the exact
 // interval value.
+// GetSettingsSystem answers an org on github.com: a GitHub poll runs only for
+// an org that names its GitHub.
 func (f *fakeOrgsStore) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
-	return domain.DefaultOrgSettings(), nil
+	set := domain.DefaultOrgSettings()
+	set.GitHubBaseURL = "https://github.com"
+	return set, nil
 }
 
 // recordingRepositoryStore embeds db.RepositoryStore as nil and overrides only the

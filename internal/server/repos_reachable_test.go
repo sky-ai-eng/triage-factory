@@ -18,11 +18,11 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
-	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
 
 // The picker and the team-repos write gate both read the reachable-repo mirror
@@ -168,8 +168,8 @@ func newCountingAppGitHub(t *testing.T, reposByInstall map[string][]string) *cou
 // what a PAT-class org is.
 func seedPATOrg(t *testing.T, s *Server, url string) {
 	t.Helper()
+	seedSourceHost(t, s, eventsource.KindGitHub, url)
 	if err := integrations.Save(context.Background(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: url,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -611,6 +611,7 @@ func seedManagedWorkspace(t *testing.T, s *Server, installationIDs ...string) {
 			OrgID:          org,
 			AccountType:    "Organization",
 			AccountLogin:   fmt.Sprintf("acct-%d", i),
+			GitHubHost:     seedRepoHost(t, s),
 		}); err != nil {
 			t.Fatalf("upsert installation %s: %v", id, err)
 		}
@@ -671,30 +672,5 @@ func TestPickerManagedWorkspaceWithNothingBoundIsNotToldToAddAToken(t *testing.T
 	}
 	if body := rec.Body.String(); !strings.Contains(body, "not installed on any account") {
 		t.Errorf("refusal = %s; want the one that names the installation", body)
-	}
-}
-
-// A PAT validated on one GitHub host is refused on the picker once the org
-// points at another: the picker answers 409 NOT_CONFIGURED naming the current
-// host to reconnect on, and the host the PAT was bound on is not enumerated
-// for the org's new one.
-func TestPickerRefusesAPATBoundOnAnotherHost(t *testing.T) {
-	keyring.MockInit()
-	srv := newTestServer(t)
-	gh := newCountingPATGitHub(t, "acme/api")
-	seedPATOrg(t, srv, gh.URL)
-	wireReachRefresh(t, srv)
-	setOrgGitHubBase(t, srv, "https://ghe.example.com")
-
-	rec := doJSON(t, srv, http.MethodPost, "/api/github/repos/list", map[string]any{})
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("picker = %d with the PAT bound on another host; want 409; body=%s", rec.Code, rec.Body.String())
-	}
-	assertFirstError(t, rec, httpx.ReasonNotConfigured, "")
-	if body := rec.Body.String(); !strings.Contains(body, "https://ghe.example.com") {
-		t.Errorf("refusal = %s; want it to name the host to reconnect on", body)
-	}
-	if got := gh.userRepos.Load(); got != 0 {
-		t.Errorf("%d enumerations against the PAT's host for an org on another one; want 0", got)
 	}
 }

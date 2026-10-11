@@ -38,6 +38,7 @@ func TestGatedEventTypes_FeatureGranted_IsEmptyOfThatType(t *testing.T) {
 
 func TestHandleBlueprintsList_HidesBlueprintWithOnlyGatedTrigger(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	gatedBP := createBareBlueprint(t, s, "GatedOnly")
 	attachTrigger(t, s, gatedBP, domain.EventJiraIssueAssigned)
 	ungatedBP := createBareBlueprint(t, s, "Ungated")
@@ -71,6 +72,7 @@ func TestHandleBlueprintsList_HidesBlueprintWithOnlyGatedTrigger(t *testing.T) {
 
 func TestHandleBlueprintsList_GatedBlueprintVisibleWithFeature(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	gatedBP := createBareBlueprint(t, s, "GatedOnly")
 	attachTrigger(t, s, gatedBP, domain.EventJiraIssueAssigned)
 

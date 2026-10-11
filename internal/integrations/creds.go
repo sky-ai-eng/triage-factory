@@ -29,7 +29,6 @@ var credsLog = logging.Component("integrations")
 // The well-known integration secret keys. The local SQLite shim uses these
 // names verbatim as keychain entry keys.
 const (
-	KeyGitHubURL = "github_url"
 	KeyGitHubPAT = "github_pat"
 	KeyJiraPAT   = "jira_pat"
 )
@@ -77,6 +76,13 @@ const legacyJiraDisplayName = "jira_display_name"
 // and the uninstall sweep remove the key so an install that never booted this
 // build leaves no orphan keychain row.
 const legacyJiraURL = "jira_url"
+
+// legacyGitHubURL is the key a local install kept its GitHub host under,
+// beside the PAT. An org's GitHub host is org_settings.github_base_url alone:
+// boot moves a stored value there (AdoptSavedGitHubHost), and ClearGitHub and
+// the uninstall sweep remove the key so an install that never booted this
+// build leaves no orphan keychain row.
+const legacyGitHubURL = "github_url"
 
 // legacyGitHubUsername is the legacy key that held the org bot's GitHub login
 // in the keychain. GitHub identity moved into the users.github_username
@@ -168,10 +174,10 @@ func BedrockKeys() []string {
 // clean-slate uses instead.
 func AllKeys() []string {
 	return []string{
-		KeyGitHubURL, KeyGitHubPAT,
+		KeyGitHubPAT,
 		KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
 		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs,
-		legacyJiraDisplayName, legacyJiraURL, legacyGitHubUsername,
+		legacyJiraDisplayName, legacyJiraURL, legacyGitHubURL, legacyGitHubUsername,
 	}
 }
 
@@ -282,7 +288,6 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 		}
 		*dst = v
 	}
-	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
@@ -326,7 +331,6 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 		}
 		*dst = v
 	}
-	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
@@ -352,7 +356,6 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 // Linear credential and writes none of them.
 func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Credentials) error {
 	pairs := []struct{ key, value string }{
-		{KeyGitHubURL, c.GitHubURL},
 		{KeyGitHubPAT, c.GitHubPAT},
 		{KeyJiraPAT, c.JiraPAT},
 		{KeyJiraEmail, c.JiraEmail},
@@ -441,9 +444,8 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // resolution decides: every arm below mirrors github.activeApp, and the PAT
 // signal stands exactly where that would actually borrow a PAT.
 //
-//	pat          the PAT is the credential. It answers — when it was validated
-//	             on the org's current host (GitHubPATUsable), since the
-//	             resolver sends it nowhere else.
+//	pat          the PAT is the credential. It answers when the org has a
+//	             GitHub URL to send it to (githubPATReady).
 //	byo_app      a live App answers; a registered-but-staged one is the middle
 //	             of a PAT→App switch, where the PAT is still what resolves, so
 //	             there the PAT answers.
@@ -487,7 +489,7 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
+		return githubPATReady(creds, orgSet), nil
 	case domain.GitHubCredentialClassManagedApp:
 		insts, err := apps.ListInstallationsOnHost(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
@@ -495,7 +497,7 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
+		return githubPATReady(creds, orgSet), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
@@ -524,7 +526,7 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
+		return githubPATReady(creds, orgSet), nil
 	case domain.GitHubCredentialClassManagedApp:
 		insts, err := apps.ListInstallationsOnHostSystem(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
@@ -532,7 +534,7 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return GitHubPATUsable(creds, orgSet.GitHubBaseURL), nil
+		return githubPATReady(creds, orgSet), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
@@ -540,34 +542,20 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 	}
 }
 
-// GitHubPATHostMatches reports whether an org PAT validated on boundURL — the
-// KeyGitHubURL value its bind stored beside it — may be sent to base. A PAT is
-// a credential for one GitHub deployment, so it is sent only to the host it
-// was validated on, compared as GitHubHost values. A PAT with no host recorded
-// beside it is used on the org's host as it resolves, which is the host its
-// bind would have recorded.
-func GitHubPATHostMatches(boundURL, base string) bool {
-	return boundURL == "" || domain.GitHubHost(boundURL) == domain.GitHubHost(base)
-}
-
-// GitHubPATUsable reports whether creds hold an org PAT that may be sent to the
-// org's GitHub host, where orgBase is org_settings.github_base_url. An empty
-// orgBase resolves to the URL stored beside the PAT, as the resolver resolves
-// it, so only a setting naming another host refuses the PAT. A PAT that fails
-// this is bound but unusable: the org has to rebind it on its current host.
-func GitHubPATUsable(creds auth.Credentials, orgBase string) bool {
-	if creds.GitHubPAT == "" {
-		return false
-	}
-	return orgBase == "" || GitHubPATHostMatches(creds.GitHubURL, orgBase)
+// githubPATReady reports whether creds hold an org PAT and the org has a
+// GitHub URL to send it to. The URL cannot move while the PAT is bound, so a
+// PAT is always on the org's current host.
+func githubPATReady(creds auth.Credentials, orgSet domain.OrgSettings) bool {
+	return creds.GitHubPAT != "" && orgSet.GitHubBaseURL != ""
 }
 
 // GitHubKeys returns the org GitHub credential's keys in the order ClearGitHub
-// deletes them. A writer of these keys takes them in this order too: Postgres
+// deletes them, the legacy github_url included (see legacyGitHubURL above). A
+// writer of these keys takes them in this order too: Postgres
 // holds each row's lock until commit, so two writers taking the same rows in
 // different orders can deadlock.
 func GitHubKeys() []string {
-	return []string{KeyGitHubURL, KeyGitHubPAT}
+	return []string{legacyGitHubURL, KeyGitHubPAT}
 }
 
 // JiraKeys returns the org Jira credential's keys in the order ClearJira

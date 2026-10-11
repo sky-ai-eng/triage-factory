@@ -22,8 +22,10 @@ func TestNewBranchArtifact_Shape(t *testing.T) {
 	if a.State != ArtifactStateBranchPushed {
 		t.Errorf("state = %q, want pushed", a.State)
 	}
-	if want := "https://github.com/octo/repo/tree/feature/x"; a.URL != want {
-		t.Errorf("url = %q, want %q", a.URL, want)
+	// The constructor has no org context, so no host to link on: the
+	// host-side sink sets the URL (BranchArtifactWebURL).
+	if a.URL != "" {
+		t.Errorf("url = %q, want none until the sink anchors it to the org's host", a.URL)
 	}
 	if want := "git:branch:octo/repo:refs/heads/feature/x"; a.DedupKey != want {
 		t.Errorf("dedup_key = %q, want %q", a.DedupKey, want)
@@ -88,12 +90,12 @@ func TestNewBranchArtifact_URLEscapesBranchSegments(t *testing.T) {
 		{"odd/100%done", "https://github.com/octo/repo/tree/odd/100%25done"},
 	}
 	for _, c := range cases {
-		a, ok := NewBranchArtifact("octo/repo", branchRefPrefix+c.branch, "sha", false)
+		got, ok := BranchArtifactWebURL("https://github.com", "octo/repo", branchRefPrefix+c.branch)
 		if !ok {
-			t.Fatalf("NewBranchArtifact for branch %q: ok=false", c.branch)
+			t.Fatalf("BranchArtifactWebURL for branch %q: ok=false", c.branch)
 		}
-		if a.URL != c.want {
-			t.Errorf("url for branch %q = %q, want %q", c.branch, a.URL, c.want)
+		if got != c.want {
+			t.Errorf("url for branch %q = %q, want %q", c.branch, got, c.want)
 		}
 	}
 }
@@ -101,8 +103,8 @@ func TestNewBranchArtifact_URLEscapesBranchSegments(t *testing.T) {
 // TestBranchArtifactWebURL pins the host-aware builder the artifact sink uses to
 // re-anchor a branch link to the org's own GitHub host: a GHES base is honored
 // (with a trailing slash trimmed and segments still escaped), an empty base
-// falls back to github.com, and a non-branch ref / malformed repo returns
-// ok=false so the sink leaves the existing URL untouched.
+// names no GitHub and builds no link, and a non-branch ref / malformed repo
+// returns ok=false so the sink leaves the existing URL untouched.
 func TestBranchArtifactWebURL(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -115,7 +117,7 @@ func TestBranchArtifactWebURL(t *testing.T) {
 		{"ghes host", "https://ghe.example.com", "octo/repo", branchRefPrefix + "feature/x", "https://ghe.example.com/octo/repo/tree/feature/x", true},
 		{"ghes trailing slash trimmed", "https://ghe.example.com/", "octo/repo", branchRefPrefix + "main", "https://ghe.example.com/octo/repo/tree/main", true},
 		{"ghes escapes segments", "https://ghe.example.com", "octo/repo", branchRefPrefix + "wip/a b", "https://ghe.example.com/octo/repo/tree/wip/a%20b", true},
-		{"empty base falls back to github.com", "", "octo/repo", branchRefPrefix + "main", "https://github.com/octo/repo/tree/main", true},
+		{"empty base builds no link", "", "octo/repo", branchRefPrefix + "main", "", true},
 		{"non-branch ref rejected", "https://ghe.example.com", "octo/repo", "refs/tags/v1", "", false},
 		{"malformed repo rejected", "https://ghe.example.com", "octo", branchRefPrefix + "main", "", false},
 	}

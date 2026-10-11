@@ -119,7 +119,7 @@ func hostWriteCases() []hostWriteCase {
 			name: "github pat unbind",
 			kind: eventsource.KindGitHub,
 			seed: func(t *testing.T, s *Server) string {
-				seedOrgCreds(t, s, auth.Credentials{GitHubURL: githubHost, GitHubPAT: "ghp_old"})
+				seedOrgCreds(t, s, auth.Credentials{GitHubPAT: "ghp_old"})
 				seedSourceHost(t, s, eventsource.KindGitHub, githubHost)
 				return githubHost
 			},
@@ -132,7 +132,7 @@ func hostWriteCases() []hostWriteCase {
 			name: "github app disconnect",
 			kind: eventsource.KindGitHub,
 			seed: func(t *testing.T, s *Server) string {
-				seedOrgCreds(t, s, auth.Credentials{GitHubURL: githubHost})
+				seedOrgCreds(t, s, auth.Credentials{})
 				seedSourceHost(t, s, eventsource.KindGitHub, githubHost)
 				seedLocalApp(t, s, true)
 				return githubHost
@@ -321,7 +321,7 @@ func TestCredentialHostWrite_MultiMode_StaleSettingsSaveConflicts(t *testing.T) 
 		{"jira unbind", eventsource.KindJira, "/jira/access/credential",
 			auth.Credentials{JiraPAT: "jira_old", JiraAuthMethod: string(jira.AuthMethodDCPAT)}},
 		{"github pat unbind", eventsource.KindGitHub, "/github/pat",
-			auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}},
+			auth.Credentials{GitHubPAT: "ghp_old"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			r := newAuthRig(t)

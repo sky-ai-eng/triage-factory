@@ -1,6 +1,6 @@
-// Package ghbase holds the GitHub base-URL derivations — the web base an org
-// configures, the deployment's default for an org that configures none, and
-// the REST API mount that follows from either. It is a leaf: stdlib only, so
+// Package ghbase holds the GitHub base-URL derivations — the canonical form of
+// the web base an org configures, the deployment's default GitHub (where the
+// deployment App lives), and the REST API mount that follows from a web base. It is a leaf: stdlib only, so
 // every package that needs the derivation can import it (internal/auth and
 // internal/db both sit below internal/github, which imports them). One copy,
 // no lockstep to keep.
@@ -17,13 +17,13 @@ import (
 // GitHubCom is the public github.com web base — the literal, for the sites
 // that mean github.com specifically whatever the deployment's default is: the
 // GoTrue GitHub OAuth login provider, the api.github.com mount, the
-// codeload/uploads hosts. Everything that means "the GitHub an org with no
-// base URL is on" reads DefaultBaseURL instead.
+// codeload/uploads hosts. Everything that means "the deployment's GitHub"
+// reads DefaultBaseURL instead.
 const GitHubCom = "https://github.com"
 
-// EnvDefaultBaseURL names the deployment's default GitHub: the web base an org
-// with no github_base_url resolves to, and the GitHub the deployment App lives
-// on. Optional; unset means GitHubCom. Plain config, not a secret, in the same
+// EnvDefaultBaseURL names the deployment's default GitHub: the GitHub the
+// deployment App lives on, and the URL setup offers an org choosing its own.
+// Optional; unset means GitHubCom. Plain config, not a secret, in the same
 // class as the port — read once at boot by InitDefaultBaseURLFromEnv.
 const EnvDefaultBaseURL = "TF_DEFAULT_GITHUB_HOST"
 
@@ -37,9 +37,10 @@ var (
 )
 
 // DefaultBaseURL returns the deployment's default GitHub web base — GitHubCom
-// unless TF_DEFAULT_GITHUB_HOST named another. It is the value a per-org
-// github_base_url overrides and the host the deployment App is on; the two are
-// one fact, which is why there is one variable. Safe from any goroutine.
+// unless TF_DEFAULT_GITHUB_HOST named another. It is the host the deployment
+// App is on and the value setup offers for an org's github_base_url; an org
+// with no github_base_url is not on it, or on any GitHub. Safe from any
+// goroutine.
 func DefaultBaseURL() string {
 	defaultBaseURLInitMu.RLock()
 	defer defaultBaseURLInitMu.RUnlock()
@@ -71,8 +72,8 @@ func InitDefaultBaseURL(base string) error {
 
 // InitDefaultBaseURLFromEnv reads TF_DEFAULT_GITHUB_HOST and installs the
 // deployment default. Unset or blank is GitHubCom; anything else must be a
-// valid web base or boot fails, since a default nobody can resolve against
-// would silently point every unset workspace somewhere wrong.
+// valid web base or boot fails, since a default nobody can reach would leave
+// the deployment App unusable.
 func InitDefaultBaseURLFromEnv() error {
 	return InitDefaultBaseURL(os.Getenv(EnvDefaultBaseURL))
 }
@@ -80,8 +81,8 @@ func InitDefaultBaseURLFromEnv() error {
 // ParseDefaultBaseURL validates a TF_DEFAULT_GITHUB_HOST value and returns its
 // canonical form. Empty (after trimming) is GitHubCom. A non-empty value is held
 // to exactly the rule github_base_url is held to — NormalizeBaseURL — because it
-// is the same kind of value: the default is what an org's own setting replaces,
-// so a shape the setting would refuse is a shape the default must refuse too.
+// is the same kind of value: it is what setup offers as an org's setting, so a
+// shape the setting would refuse is a shape the default must refuse too.
 func ParseDefaultBaseURL(raw string) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return GitHubCom, nil
@@ -166,17 +167,6 @@ func NormalizeBaseURL(raw string) (string, bool) {
 	return CanonicalBaseURL(u.Scheme + "://" + u.Host + u.Path), true
 }
 
-// ResolveBaseURL normalizes a per-org GitHub base URL into the user-facing
-// web base github.NewClient expects, which is also the host GitHub rows are
-// keyed under. Empty (not configured) maps to the deployment default; a
-// configured base is returned in its CanonicalBaseURL form.
-func ResolveBaseURL(orgBase string) string {
-	if base := CanonicalBaseURL(orgBase); base != "" {
-		return base
-	}
-	return DefaultBaseURL()
-}
-
 // APIBase derives the REST API base from a user-facing GitHub web base,
 // covering the three host classes TF supports:
 //
@@ -188,16 +178,19 @@ func ResolveBaseURL(orgBase string) string {
 //   - everything else (GHES) → {base}/api/v3, the path-mounted REST root on
 //     the same (typically private) host.
 //
-// The base goes through ResolveBaseURL first, so an empty base is the
-// deployment default's API base, and "https://GitHub.com" is the public host
-// like any other spelling of it.
+// The base goes through CanonicalBaseURL first, so "https://GitHub.com" is the
+// public host like any other spelling of it. An empty base is no GitHub, and
+// has no API base: "".
 //
 // This is the only API-mount derivation in the repo: the client, the App JWT
 // mint endpoint, the credential validator, the reachability probe and the
 // sidecar's proxies all read it, so nothing can disagree about where an org's
 // API lives.
 func APIBase(base string) string {
-	base = ResolveBaseURL(base)
+	base = CanonicalBaseURL(base)
+	if base == "" {
+		return ""
+	}
 	if base == GitHubCom {
 		return "https://api.github.com"
 	}

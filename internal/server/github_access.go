@@ -649,11 +649,9 @@ func (s *Server) handleGitHubAppDiscard(w http.ResponseWriter, r *http.Request) 
 // the discard refuses a live one — a request that meant one can never do the
 // other, whichever way a concurrent cutover moves the row between the two.
 //
-// The host is cleared because nothing remains that uses it: an App or a PAT
-// carries the host it was bound on, and a workspace with neither resolves the
-// deployment default, as a fresh one does. Leaving a GHES host behind here
-// would have the deployment App refuse the workspace for being on the wrong
-// GitHub, with nothing on that GitHub to show for it. Org-admin only.
+// The host is cleared because nothing remains that uses it: the workspace is
+// back to having no GitHub, as a fresh one has, and sets a URL again when it
+// connects. Org-admin only.
 //
 // POST /api/orgs/{org_id}/github/app/disconnect
 func (s *Server) handleGitHubAppDisconnect(w http.ResponseWriter, r *http.Request) {

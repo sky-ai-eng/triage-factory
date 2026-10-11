@@ -187,8 +187,8 @@ func TestOrgSource_RejectsBadRequests(t *testing.T) {
 	if row, err := store.Get(context.Background(), runmode.LocalDefaultOrgID, "gerrit"); err != nil || row != nil {
 		t.Errorf("Get(gerrit) = %+v, err=%v; want no row", row, err)
 	}
-	if row, err := store.Get(context.Background(), runmode.LocalDefaultOrgID, eventsource.KindGitHub); err != nil || row != nil {
-		t.Errorf("Get(github) = %+v, err=%v; want no row — a required source is refused at the door, never stored and ignored", row, err)
+	if row, err := store.Get(context.Background(), runmode.LocalDefaultOrgID, eventsource.KindGitHub); err != nil || (row != nil && row.Disabled) {
+		t.Errorf("Get(github) = %+v, err=%v; want it not disabled — a required source is refused at the door, never stored and ignored", row, err)
 	}
 }
 

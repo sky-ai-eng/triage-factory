@@ -40,6 +40,9 @@ func newTestStores(t *testing.T) (db.Stores, string) {
 	if _, err := conn.Exec(`INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	// Minimal valid conversation: event-triggered (creator_user_id NULL) + a
 	// non-blueprint origin so the parent-pairing CHECKs don't demand a
 	// task/prompt/blueprint chain. org_id/team_id default to the local
@@ -246,8 +249,8 @@ func TestParseRemoteOwnerRepo(t *testing.T) {
 		// Sandbox git-proxy veth (loopback/private) is trusted regardless of base.
 		{"http://10.42.0.1:38573/octo/repo", "github.com", "octo", "repo", true},
 		{"http://127.0.0.1:9000/octo/repo", ghes, "octo", "repo", true},
-		// Base unresolved ("") falls back to a github.com-only gate.
-		{"https://github.com/octo/repo", "", "octo", "repo", true},
+		// Base unresolved (""): no public host is the org's.
+		{"https://github.com/octo/repo", "", "", "", false},
 		{"https://github.corp.example.com/octo/repo", "", "", "", false},
 		// Unparseable / unsupported shapes -> best-effort skip.
 		{"", "github.com", "", "", false},

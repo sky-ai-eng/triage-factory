@@ -253,6 +253,13 @@ func (r *authRig) seedOrg(ownerID uuid.UUID, slug string) (orgID, teamID uuid.UU
 		ownerID, tID); err != nil {
 		r.t.Fatalf("insert membership: %v", err)
 	}
+	// On github.com, as pgtest.SeedOrg's orgs are: an org reaches these routes
+	// past a setup gate that requires a GitHub URL.
+	if _, err := r.h.AdminDB.Exec(
+		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES ($1, 'github', 'https://github.com')`,
+		oID); err != nil {
+		r.t.Fatalf("insert github url: %v", err)
+	}
 	return uuid.MustParse(oID), uuid.MustParse(tID)
 }
 

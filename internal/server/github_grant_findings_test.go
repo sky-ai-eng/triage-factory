@@ -39,6 +39,7 @@ func seedGrantFixture(t *testing.T, s *Server, selection string) {
 		OrgID:               runmode.LocalDefaultOrgID,
 		AccountType:         "Organization",
 		AccountLogin:        "acme",
+		GitHubHost:          seedRepoHost(t, s),
 		RepositorySelection: selection,
 	}); err != nil {
 		t.Fatalf("upsert installation: %v", err)

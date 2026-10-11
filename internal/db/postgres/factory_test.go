@@ -67,6 +67,10 @@ func seedPgFactoryOrg(t *testing.T, h *pgtest.Harness) (orgID, userID string) {
 	); err != nil {
 		t.Fatalf("seed org: %v", err)
 	}
+	// The org is on github.com, the host its pull request entities are
+	// scoped to.
+	pgtest.MustExec(t, h.AdminDB,
+		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES ($1, 'github', 'https://github.com')`, orgID)
 	if _, err := h.AdminDB.Exec(
 		`INSERT INTO org_memberships (org_id, user_id, role) VALUES ($1, $2, 'owner')`,
 		orgID, userID,

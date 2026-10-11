@@ -148,6 +148,11 @@ func (s *Server) handleGitHubGrantReachWithoutPurposeList(w http.ResponseWriter,
 		internalError(w, "github-grant", err)
 		return
 	}
+	if host == "" {
+		// No GitHub URL: nothing is reachable, so nothing is a finding.
+		httpx.WriteList(w, page, []reachWithoutPurposeItem{}, 0)
+		return
+	}
 	rows, total, err := s.reachableRepos.ListReachWithoutPurposeSystem(ctx, orgID, host, class,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
@@ -205,6 +210,10 @@ func (s *Server) handleGitHubGrantScopeDriftList(w http.ResponseWriter, r *http.
 	host, err := s.orgGitHubHost(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-grant", err)
+		return
+	}
+	if host == "" {
+		httpx.WriteList(w, page, []scopeDriftItem{}, 0)
 		return
 	}
 	rows, total, err := s.reachableRepos.ListScopeDriftSystem(ctx, orgID, host, class,

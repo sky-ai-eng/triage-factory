@@ -389,16 +389,19 @@ func runConversationID(req sidecarproto.StartProxiesBody) string {
 
 // githubUpstreams derives this run's two GitHub hosts from the sealed bundle:
 // the web base the git proxy forwards to, and the REST mount the API proxy and
-// the gh injector prepend. A bundle with no GitHub half (a Jira-only org) — or
-// one whose org never configured a base — answers the deployment default's web
-// base and API mount, which is what an org with no base URL resolves to anyway.
-// Neither is ever empty, so no lane below carries a default of its own.
+// the gh injector prepend. A bundle with no GitHub half carries no GitHub
+// credential, so its lanes forward unauthenticated to the deployment's GitHub
+// (ghbase.DefaultBaseURL). Neither is ever empty, so no lane below carries a
+// default of its own.
 func githubUpstreams(b *credbundle.Bundle) (git, api string) {
 	base := ""
 	if b.GitHub != nil {
-		base = b.GitHub.BaseURL
+		base = ghbase.CanonicalBaseURL(b.GitHub.BaseURL)
 	}
-	return ghbase.ResolveBaseURL(base), ghbase.APIBase(base)
+	if base == "" {
+		base = ghbase.DefaultBaseURL()
+	}
+	return base, ghbase.APIBase(base)
 }
 
 // startGHInjector stands up the real-gh credential-injector proxy: generates the

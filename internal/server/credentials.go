@@ -156,10 +156,12 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 			return e
 		}
 		// Repositories on the org's current GitHub host: one the org tracked on
-		// a host it has left is not a repository it has configured here.
-		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
-		if e != nil {
-			return e
+		// a host it has left is not a repository it has configured here, and
+		// an org with no GitHub URL has configured none.
+		if host := db.EffectiveGitHubHost(orgSet.GitHubBaseURL); host != "" {
+			if repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, host); e != nil {
+				return e
+			}
 		}
 		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
 			return e

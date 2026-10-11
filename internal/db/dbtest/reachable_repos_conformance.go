@@ -66,6 +66,7 @@ func RunReachableReposConformance(t *testing.T, mk ReachableReposFactory) {
 	install := func(t *testing.T, b ReachableReposBackend, installationID, login, selection string) {
 		t.Helper()
 		if _, err := b.Apps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:          TestGitHubHost,
 			InstallationID:      installationID,
 			OrgID:               b.OrgID,
 			AccountType:         "Organization",

@@ -35,9 +35,8 @@ func (s *teamPRStore) TeamPRs(ctx context.Context, orgID, teamID, githubBaseURL 
 
 	// The member leg is a correlated IN rather than a resolved login list:
 	// one statement, and it reads as the join it is. Host resolution matches
-	// the Postgres twin (EffectiveGitHubHost), so an unset github_base_url
-	// looks under the public host where a login-claim binding actually lands
-	// rather than under "".
+	// the Postgres twin (EffectiveGitHubHost); an unset github_base_url is no
+	// host, so no member's login matches.
 	where := `
 		WHERE e.source = 'github' AND ` + sqlitePRStateSnapshotGuard + `
 		  AND (

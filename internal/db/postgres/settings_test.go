@@ -28,6 +28,8 @@ func TestSettingsStores_Postgres(t *testing.T) {
 		t.Helper()
 		h.Reset(t)
 		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "settings-conf")
+		// The suite starts from an org with no settings of its own.
+		pgtest.ClearOrgGitHubURL(t, h, orgID)
 		stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
 		return dbtest.SettingsStores{
 				MultiMode:        true,

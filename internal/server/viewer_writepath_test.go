@@ -15,6 +15,7 @@ import (
 	pgstore "github.com/sky-ai-eng/triage-factory/internal/db/postgres"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -68,13 +69,16 @@ func newViewerRig(t *testing.T) *viewerRig {
 	}
 }
 
-// bindGitHubPAT stores an org GitHub PAT under the founder's claims, making
-// the github event source available to the rig's org.
+// bindGitHubPAT sets the org's GitHub URL and stores an org GitHub PAT under
+// the founder's claims, making the github event source available to the rig's
+// org.
 func (r *viewerRig) bindGitHubPAT(t *testing.T) {
 	t.Helper()
 	if err := r.s.tx.WithTx(t.Context(), r.orgID, r.admin, func(tx db.TxStores) error {
+		if _, err := tx.Orgs.SetSourceBaseURL(t.Context(), r.orgID, eventsource.KindGitHub, "https://github.com"); err != nil {
+			return err
+		}
 		return integrations.Save(t.Context(), tx.Secrets, r.orgID, auth.Credentials{
-			GitHubURL: "https://github.com",
 			GitHubPAT: "ghp-fixture",
 		})
 	}); err != nil {

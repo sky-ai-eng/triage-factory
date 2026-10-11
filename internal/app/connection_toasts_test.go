@@ -39,6 +39,9 @@ func openConnectionTestStores(t *testing.T) (db.Stores, *sql.DB) {
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	return sqlitestore.New(conn), conn
 }
 

@@ -74,9 +74,8 @@ type SubmitInput struct {
 	// WebBase resolves the org's user-facing GitHub host (github.com, a GHES
 	// host, a GHEC data-residency host) for the review's deep link. Called ONLY
 	// after the submit lands — the human path resolves it on a detached context
-	// so a client disconnect mid-submit can't silently downgrade the stamped
-	// link to the deployment default. Nil (or a "" return) yields the
-	// deployment default.
+	// so a client disconnect mid-submit can't silently drop the stamped link.
+	// Nil (or a "" return) yields no link.
 	WebBase func() string
 }
 
@@ -160,10 +159,13 @@ func SubmitStaged(ctx context.Context, gh Submitter, in SubmitInput) (SubmitResu
 	if in.WebBase != nil {
 		webBase = in.WebBase()
 	}
+	link := ""
+	if pull := domain.GitHubPullURLBase(webBase, in.Owner+"/"+in.Repo, in.Number); pull != "" {
+		link = fmt.Sprintf("%s#pullrequestreview-%d", pull, reviewID)
+	}
 	return SubmitResult{
 		ReviewID: reviewID,
 		Event:    submittedEvent,
-		URL: fmt.Sprintf("%s#pullrequestreview-%d",
-			domain.GitHubPullURLBase(webBase, in.Owner+"/"+in.Repo, in.Number), reviewID),
+		URL:      link,
 	}, nil
 }

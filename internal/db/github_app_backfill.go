@@ -198,13 +198,16 @@ func managedHostMismatch(orgID, baseURL string) error {
 	if host == deploymentHost {
 		return nil
 	}
+	if host == "" {
+		host = "no GitHub URL"
+	}
 	return fmt.Errorf("%w: org=%s workspace on %s, deployment app on %s",
 		ErrManagedWorkspaceOnOtherGitHub, orgID, host, deploymentHost)
 }
 
 // ManagedInstallationSet is one managed workspace's bound installation set: the
-// org, its configured base URL ("" for the deployment default — checked against
-// it, never listed against), and the ids of the live installations the bind
+// org, its configured base URL ("" for none, which is not the deployment's
+// GitHub), and the ids of the live installations the bind
 // ceremony wrote for it on the host that base URL resolves to. A workspace with
 // live rows only on other hosts still has a set, with an empty Bound, so a base
 // URL that moved off the deployment's GitHub after the bind is still reported.

@@ -30,9 +30,8 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
 		teamID := firstTeamForOrg(t, h, orgID)
-		// github_base_url unset, the common case: the store resolves it to
-		// the deployment default — github.com here, which is where a login-claim binding lands.
-		return stores.TeamPRs, orgID, teamID, "", newPgTeamPRSeeder(h, orgID, teamID)
+		// The org is on github.com, where a login-claim binding lands.
+		return stores.TeamPRs, orgID, teamID, dbtest.TestGitHubHost, newPgTeamPRSeeder(h, orgID, teamID)
 	})
 
 	// The tracked set is the outer filter, and local mode has no untracked
@@ -58,7 +57,7 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 			Number: 3, Author: "tf-bot", State: "OPEN", Repo: "tf-test/untracked-owned",
 		}, teamID)
 
-		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, "", db.PRListFilter{}, db.Unwindowed)
+		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("TeamPRs: %v", err)
 		}
@@ -91,7 +90,7 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 			Number: 99, Author: "member-a", State: "OPEN", Repo: "tf-test/theirs",
 		}})
 
-		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, "", db.PRListFilter{}, db.Unwindowed)
+		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("TeamPRs: %v", err)
 		}
@@ -132,7 +131,7 @@ func newPgTeamPRSeeder(h *pgtest.Harness, orgID, teamID string) dbtest.TeamPRSee
 			if _, err := h.AdminDB.Exec(`
 				INSERT INTO user_github_identities (user_id, github_base_url, login, source)
 				VALUES ($1, $2, $3, 'connect_oauth')
-			`, id, db.EffectiveGitHubHost(""), login); err != nil {
+			`, id, dbtest.TestGitHubHost, login); err != nil {
 				t.Fatalf("bind identity for %s: %v", login, err)
 			}
 			return id

@@ -178,15 +178,8 @@ export default function GitHubAccessGroup({
             </p>
             {sshTestState.kind === 'ok' && (
               <p className="text-reported text-warm mt-1.5">
-                ✓ SSH preflight succeeded — git@
-                {(() => {
-                  try {
-                    return new URL(value.github_url).hostname || 'github.com'
-                  } catch {
-                    return 'github.com'
-                  }
-                })()}{' '}
-                is reachable with your key.
+                ✓ SSH preflight succeeded — {sshEndpoint(value.github_url)} is reachable with your
+                key.
               </p>
             )}
             {sshTestState.kind === 'fail' && (
@@ -215,4 +208,17 @@ export default function GitHubAccessGroup({
       {showAppPanel && orgId && <GitHubAppPanel orgId={orgId} returnTo="settings" />}
     </>
   )
+}
+
+// sshEndpoint names the SSH endpoint the preflight reached for the org's
+// GitHub URL. The preflight refuses an org with no URL, so the fallback is
+// only for a URL the browser cannot parse.
+function sshEndpoint(githubURL: string): string {
+  try {
+    const host = new URL(githubURL).hostname
+    if (host) return 'git@' + host
+  } catch {
+    // An unparseable URL falls through to the generic name.
+  }
+  return 'the GitHub host'
 }

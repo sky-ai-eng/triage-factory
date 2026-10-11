@@ -250,6 +250,14 @@ func newMigratedSQLiteForPoller(t *testing.T) *sql.DB {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	// The local org is on github.com: a GitHub poll runs only for an org that
+	// names its GitHub, and every fixture here models one that does.
+	if _, err := database.Exec(
+		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', 'https://github.com')`,
+		runmode.LocalDefaultOrgID,
+	); err != nil {
+		t.Fatalf("seed github url: %v", err)
+	}
 	return database
 }
 

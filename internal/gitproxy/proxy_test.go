@@ -595,15 +595,15 @@ func TestProxyRejectsInvalidConfig(t *testing.T) {
 	}
 }
 
-// TestProxyUpstreamDefault pins that an empty Upstream defaults to
-// https://github.com so callers using stock GitHub can omit the field.
-func TestProxyUpstreamDefault(t *testing.T) {
+// TestProxyUpstreamRequired pins that an empty Upstream is refused: the
+// proxy attaches the org's credential to whatever it forwards to, so it never
+// picks a GitHub of its own.
+func TestProxyUpstreamRequired(t *testing.T) {
 	ts := func(ctx context.Context, owner, repo string) (gitproxy.Token, error) {
 		return gitproxy.Token{Value: "x", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
-	_, err := gitproxy.New(gitproxy.Config{TokenSource: ts})
-	if err != nil {
-		t.Errorf("New with empty Upstream: %v; want default to apply", err)
+	if _, err := gitproxy.New(gitproxy.Config{TokenSource: ts}); err == nil {
+		t.Error("New with empty Upstream succeeded; want it refused")
 	}
 }
 

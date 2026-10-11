@@ -97,11 +97,6 @@ var gitproxyLog = logging.Component("gitproxy")
 // against the old token even if the clock skews.
 const refreshThreshold = 5 * time.Minute
 
-// defaultUpstream is the github.com hostname used by git-over-HTTPS.
-// Different from the REST API base (api.github.com); both are
-// configurable but they're not the same thing.
-const defaultUpstream = "https://github.com"
-
 // Token is the contract between the minter and the proxy. The proxy
 // doesn't care how the token was obtained, only that it has a value
 // and (optionally) an expiry. Compatible by-shape with githubapp.Token
@@ -185,7 +180,8 @@ type Config struct {
 	//
 	// Only scheme + host are honored; path / query / fragment are
 	// rejected at construction so a misconfigured caller fails loudly.
-	// Default: defaultUpstream.
+	// Required: the proxy attaches the org's credential to whatever it
+	// forwards to, so it is told exactly where that is.
 	Upstream string
 
 	// AllowNonLoopback opts into binding Start on a non-loopback
@@ -345,7 +341,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	upstream := cfg.Upstream
 	if upstream == "" {
-		upstream = defaultUpstream
+		return nil, errors.New("gitproxy: Upstream is required")
 	}
 	u, err := url.Parse(upstream)
 	if err != nil {

@@ -116,13 +116,20 @@ func (u JiraUser) StableID() string {
 	return jira.StableUserID(u.AccountID, u.Key, "")
 }
 
+// errNoGitHubURL refuses a probe with no GitHub to send the token to.
+var errNoGitHubURL = errors.New("no GitHub URL to check the token against")
+
 // ValidateGitHub checks the PAT against the GitHub API and returns the user
 // info. The API mount comes from ghbase.APIBase — the same derivation the
 // client and the poller use — so a host class the token works against is a
 // host class this probe reaches: notably a *.ghe.com data-residency tenant,
 // whose API lives on an api.* subdomain rather than the GHES /api/v3 path.
 func ValidateGitHub(ctx context.Context, baseURL, pat string) (*GitHubUser, error) {
-	apiURL := ghbase.APIBase(baseURL) + "/user"
+	api := ghbase.APIBase(baseURL)
+	if api == "" {
+		return nil, errNoGitHubURL
+	}
+	apiURL := api + "/user"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {

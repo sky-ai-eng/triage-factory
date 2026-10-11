@@ -154,6 +154,11 @@ func (r *Refresher) RunOrg(ctx context.Context, orgID string, force bool) (bool,
 	if err != nil {
 		return false, err
 	}
+	// An org with no GitHub URL has nothing reachable to mirror and no host
+	// to key rows under.
+	if host == "" {
+		return false, nil
+	}
 
 	state, err := r.mirror.ReachableStateSystem(ctx, orgID, host, class)
 	if err != nil {
@@ -262,12 +267,6 @@ func (r *Refresher) refreshPAT(ctx context.Context, orgID, host string) (bool, e
 	if err != nil {
 		if errors.Is(err, github.ErrNoGitHubCredentials) {
 			reachLog.InfoContext(ctx, "no github credentials; leaving the reachable mirror as it is", "org", orgID)
-			return false, nil
-		}
-		if errors.Is(err, github.ErrPATHostMismatch) {
-			// The PAT was bound on another host; nothing this org can reach on
-			// its current one is known until it is rebound there.
-			reachLog.InfoContext(ctx, "github pat bound on another host; leaving the reachable mirror as it is", "org", orgID, "error", err)
 			return false, nil
 		}
 		return false, fmt.Errorf("resolve github client: %w", err)

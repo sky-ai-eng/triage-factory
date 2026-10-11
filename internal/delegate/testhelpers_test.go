@@ -32,6 +32,9 @@ func newDelegateTestDB(t *testing.T) *sql.DB {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(database, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	return database
 }
 

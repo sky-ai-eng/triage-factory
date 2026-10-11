@@ -120,14 +120,18 @@ func (f *fakeTeamRepos) ListForTeamSystem(_ context.Context, _, host string) ([]
 }
 
 // fakeOrgs answers an org's settings with one GitHub base URL; the zero value
-// is an org on the default host.
+// is an org on github.com.
 type fakeOrgs struct {
 	db.OrgsStore
 	githubBaseURL string
 }
 
 func (f *fakeOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{GitHubBaseURL: f.githubBaseURL}, nil
+	base := f.githubBaseURL
+	if base == "" {
+		base = "https://github.com"
+	}
+	return domain.OrgSettings{GitHubBaseURL: base}, nil
 }
 
 type fakeTasks struct {

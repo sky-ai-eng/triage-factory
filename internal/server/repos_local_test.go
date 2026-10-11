@@ -12,6 +12,8 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
+	"github.com/zalando/go-keyring"
 )
 
 // sameRepoJSON reports whether two serialized rows say the same thing.
@@ -236,7 +238,7 @@ func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
 		t.Errorf("list on the new host = %v, want no rows from the host the org left", listedRepoSlugs(page))
 	}
 
-	setOrgGitHubBase(t, s, "")
+	setOrgGitHubBase(t, s, "https://github.com")
 	rec := doJSON(t, s, http.MethodGet, "/api/repos/"+repoID, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET back on its own host = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -247,5 +249,50 @@ func TestRepoRoutes_RowOnAnotherHostIsInvisible(t *testing.T) {
 	}
 	if got.BaseBranch != "" {
 		t.Errorf("base_branch = %q, want unset: the PATCH refused on the other host must not have written", got.BaseBranch)
+	}
+}
+
+// TestRepoRoutes_NoGitHubURL pins what the repository routes answer for an org
+// with no GitHub URL, which has no host and so no repository on one. The reads
+// answer empty or 404, and a write that has to name a host is refused as a
+// configuration fault rather than failing inside the store.
+func TestRepoRoutes_NoGitHubURL(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	repoID := seedConfiguredRepo(t, s, "acme", "api")
+	setOrgGitHubBase(t, s, "")
+
+	if page := decodeList[repoJSON](t, doJSON(t, s, http.MethodPost, "/api/repos/list", map[string]any{})); len(page.Items) != 0 || page.TotalCount == nil || *page.TotalCount != 0 {
+		t.Errorf("list = %v (total %v), want empty", listedRepoSlugs(page), page.TotalCount)
+	}
+	for _, path := range []string{"/api/repos/" + repoID, "/api/repos/by-name/acme/api"} {
+		if rec := doJSON(t, s, http.MethodGet, path, nil); rec.Code != http.StatusNotFound {
+			t.Errorf("GET %s = %d, want 404; body=%s", path, rec.Code, rec.Body.String())
+		}
+	}
+	rec := doJSON(t, s, http.MethodGet, "/api/teams/default/github-repos", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET tracked set = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var tracked teamReposResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &tracked); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(tracked.Repos) != 0 {
+		t.Errorf("tracked set = %v, want empty", tracked.Repos)
+	}
+
+	for _, tc := range []struct {
+		name, method, path string
+		body               any
+	}{
+		{"picker", http.MethodPost, "/api/github/repos/list", map[string]any{}},
+		{"tracked set PUT", http.MethodPut, "/api/teams/default/github-repos", map[string]any{"repos": []string{"acme/api"}}},
+	} {
+		rec := doJSON(t, s, tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusConflict || firstErrorReason(t, rec) != httpx.ReasonNotConfigured {
+			t.Errorf("%s = %d, want 409 %s; body=%s", tc.name, rec.Code, httpx.ReasonNotConfigured, rec.Body.String())
+		}
 	}
 }

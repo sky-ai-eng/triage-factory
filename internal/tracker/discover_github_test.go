@@ -140,7 +140,7 @@ func TestRefreshGitHub_RESTDiscovery_SeedsEntityAndConditionalSkips(t *testing.T
 // about tracking rather than a listing of the registry.
 func trackRepos(t *testing.T, stores db.Stores, orgID string, names []string) {
 	t.Helper()
-	trackReposOn(t, stores, orgID, db.EffectiveGitHubHost(""), names)
+	trackReposOn(t, stores, orgID, "https://github.com", names)
 }
 
 // trackReposOn is trackRepos on host. Tracking is per host, so each host an

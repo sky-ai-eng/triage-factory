@@ -410,7 +410,7 @@ func TestRepoRoutes_RowOnAnotherHostIsInvisible_Postgres(t *testing.T) {
 		t.Errorf("acme/web base_branch = %q after refused PATCHes, want unset", got)
 	}
 
-	rig.setGitHubHost(t, "")
+	rig.setGitHubHost(t, "https://github.com")
 	if got := listedRepoSlugs(rig.listRepos(t, rig.orgOwner)); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
 		t.Errorf("org owner list back on the original host = %v, want both rows again", got)
 	}

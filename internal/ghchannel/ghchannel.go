@@ -53,7 +53,8 @@ type Config struct {
 	ConversationID string
 
 	// Upstream is the org's real REST API base ("https://api.github.com" or a
-	// GHES "{host}/api/v3"). Empty defaults to api.github.com.
+	// GHES "{host}/api/v3"). Required: the channel attaches the org's
+	// credential, so it is told exactly where that credential goes.
 	Upstream string
 
 	// BinDir is the directory holding the TF-owned gh binary. It is prepended
@@ -124,7 +125,7 @@ func Start(cfg Config) (*Channel, error) {
 	}
 	upstream := cfg.Upstream
 	if upstream == "" {
-		upstream = "https://api.github.com"
+		return nil, fmt.Errorf("ghchannel: Upstream is required")
 	}
 
 	// Pre-flight the state root through the error-returning form: the path

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -61,11 +60,10 @@ func TestHealth_GitHubRateLimit_ReadsFromResolver(t *testing.T) {
 	if _, ok := snap.GitHubRateLimit["org-2"]; ok {
 		t.Error("org-2 should be absent (no observation)")
 	}
-	// Each org's budget is read on its current GitHub host — the default here,
-	// since neither org sets a base URL.
+	// Each org's budget is read on its current GitHub host.
 	for _, org := range []string{"org-1", "org-2"} {
-		if got := resolver.hosts[org]; got != dbpkg.EffectiveGitHubHost("") {
-			t.Errorf("%s budget read on host %q, want %q", org, got, dbpkg.EffectiveGitHubHost(""))
+		if got := resolver.hosts[org]; got != "https://github.com" {
+			t.Errorf("%s budget read on host %q, want https://github.com", org, got)
 		}
 	}
 }

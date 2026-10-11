@@ -94,6 +94,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		read := func() (*domain.OrgGitHubAppInstallation, error) { return readRaw(instID) }
 
 		first, err := store.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: instID, OrgID: orgID, AccountType: "Organization", AccountLogin: "acme-ret",
 		})
 		if err != nil {
@@ -105,6 +106,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 		}
 
 		renamed, err := store.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: instID, OrgID: orgID, AccountType: "Organization", AccountLogin: "acme-ret-renamed",
 		})
 		if err != nil {
@@ -119,6 +121,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 	t.Run("SetInstallationSuspension_returns_the_stored_row", func(t *testing.T) {
 		const instID = "ret-inst-2"
 		if _, err := store.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: instID, OrgID: orgID, AccountType: "Organization", AccountLogin: "beta-ret",
 		}); err != nil {
 			t.Fatalf("seed UpsertInstallation: %v", err)
@@ -151,6 +154,7 @@ func RunGitHubInstallationReturnedRowConformance(t *testing.T, mk GitHubInstalla
 	t.Run("MarkInstallationRemoved_returns_the_row_it_removed", func(t *testing.T) {
 		const instID = "ret-inst-3"
 		if _, err := store.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: instID, OrgID: orgID, AccountType: "Organization", AccountLogin: "gamma-ret",
 		}); err != nil {
 			t.Fatalf("seed UpsertInstallation: %v", err)

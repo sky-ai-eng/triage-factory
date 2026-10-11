@@ -138,11 +138,9 @@ func (s *Server) buildManifestAndState(ctx context.Context, orgID, userID, owner
 		return "", "", "", errOrgManagedInTheWay
 	}
 
-	// Resolve the GitHub web host through the resolver, not the org_settings
-	// column alone: BaseURLFor applies the canonical precedence (settings →
-	// github_url secret → the deployment default), so a GHES / local-mode org whose host
-	// lives only in the credential bundle still targets the right host. A read
-	// failure propagates rather than silently defaulting to github.com.
+	// Resolve the GitHub web host through the resolver, the host every later
+	// call for this App goes to. A workspace with no GitHub URL gets
+	// ErrNoGitHubCredentials, which the launch answers as "set it first".
 	ghBase, err := s.ghResolver.BaseURLFor(ctx, orgID)
 	if err != nil {
 		return "", "", "", fmt.Errorf("resolve github base for org %s: %w", orgID, err)
@@ -400,6 +398,9 @@ func (s *Server) handleGitHubAppRegisterLaunch(w http.ResponseWriter, r *http.Re
 			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo, unknownGitHubClassMessage)
 		case errors.Is(err, errOrgNotFound):
 			s.renderLaunchError(w, http.StatusNotFound, orgID, returnTo, "Workspace not found.")
+		case errors.Is(err, ghclient.ErrNoGitHubCredentials):
+			s.renderLaunchError(w, http.StatusConflict, orgID, returnTo,
+				"Set this workspace's GitHub URL before registering an App: an App works only on the GitHub it is registered on.")
 		case errors.Is(err, errInvalidGitHubBase):
 			githubAppLog.Error("launch: invalid github base url", "org", orgID)
 			s.renderLaunchError(w, http.StatusInternalServerError, orgID, returnTo,
@@ -566,11 +567,13 @@ func (s *Server) handleGitHubAppRegisterCallback(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Resolve the conversion host through the resolver (settings → github_url
-	// secret → the deployment default), not the org_settings column alone, so a GHES /
-	// local-mode org whose host lives only in the credential bundle exchanges the
-	// manifest against the right host.
+	// Resolve the conversion host through the resolver, the same host every
+	// later call for this App goes to.
 	ghBase, err := s.ghResolver.BaseURLFor(r.Context(), orgID)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		writeNotConfigured(w, "set this workspace's GitHub URL before registering an App: an App works only on the GitHub it is registered on")
+		return
+	}
 	if err != nil {
 		internalError(w, "github-app", err)
 		return

@@ -53,6 +53,11 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		if err := integrations.AdoptSavedJiraSite(ctx, a.stores.Secrets, a.stores.Orgs, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
 			serverLog.Warn("could not move the saved Jira site into org settings", "error", err)
 		}
+		// The same for GitHub: an org on GitHub with no GitHub URL set gets
+		// the one it was using, before anything resolves a GitHub client.
+		if err := integrations.AdoptSavedGitHubHost(ctx, a.stores, runmode.LocalDefaultOrgID); err != nil {
+			serverLog.Warn("could not set the GitHub URL the org was using", "error", err)
+		}
 		a.importLocalSkills(ctx)
 	}
 }
@@ -323,15 +328,16 @@ func (a *App) wireCloneStatusCallback() {
 			//
 			// The org's GitHub host, so GHE installs probe the right SSH
 			// endpoint, not github.com.
-			sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
-			sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
-				kind = "ssh"
-				cloneStatusLog.Warn("ssh preflight also failed; kind=ssh", "owner", owner, "repo", repo, "ssh_host", sshHost, "error", perr)
-			} else {
-				cloneStatusLog.Info("ssh preflight passed; kind=other (clone error is on the git side)", "owner", owner, "repo", repo, "ssh_host", sshHost)
+			if sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL); sshHost != "" {
+				sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
+					kind = "ssh"
+					cloneStatusLog.Warn("ssh preflight also failed; kind=ssh", "owner", owner, "repo", repo, "ssh_host", sshHost, "error", perr)
+				} else {
+					cloneStatusLog.Info("ssh preflight passed; kind=other (clone error is on the git side)", "owner", owner, "repo", repo, "ssh_host", sshHost)
+				}
+				cancel()
 			}
-			cancel()
 		}
 
 		row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind)
@@ -366,17 +372,11 @@ func bootstrapBareClones(repos db.RepositoryStore, orgs db.OrgsStore, secrets db
 	// unaffected — this only matters for an org whose clone protocol is https.
 	// Best-effort: a load failure leaves the token empty and falls back to the
 	// prior unauthenticated behavior rather than blocking the warm pass.
-	//
-	// The PAT is offered only on the host it was validated on; elsewhere it
-	// would hand one host's token to another's git server.
 	creds, cerr := integrations.LoadSystem(context.Background(), secrets, runmode.LocalDefaultOrgID)
 	if cerr != nil {
 		worktreeLog.Warn("bootstrap: load credentials failed; HTTPS clones of private repos may fail to warm", "error", cerr)
 	}
-	token := ""
-	if integrations.GitHubPATUsable(creds, orgSet.GitHubBaseURL) {
-		token = creds.GitHubPAT
-	}
+	token := creds.GitHubPAT
 	targets := make([]worktree.BootstrapTarget, 0, len(profiles))
 	for _, p := range profiles {
 		targets = append(targets, worktree.BootstrapTarget{

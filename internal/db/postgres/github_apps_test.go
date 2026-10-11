@@ -328,6 +328,7 @@ func TestGitHubAppsStore_Postgres_InstallationLifecycle(t *testing.T) {
 	defer cancel()
 
 	inst := domain.OrgGitHubAppInstallation{
+		GitHubHost:     dbtest.TestGitHubHost,
 		InstallationID: "555",
 		OrgID:          orgID,
 		AccountType:    "Organization",
@@ -384,6 +385,7 @@ func TestGitHubAppsStore_Postgres_InstallationCrossOrg(t *testing.T) {
 	// (org_id, installation_id) PK must keep these as two independent rows, not
 	// let one overwrite the other.
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+		GitHubHost:     dbtest.TestGitHubHost,
 		InstallationID: "900", OrgID: orgA, AccountType: "User", AccountLogin: "only-in-a",
 	}); err != nil {
 		t.Fatalf("UpsertInstallation orgA: %v", err)
@@ -446,6 +448,7 @@ func TestGitHubAppsStore_Postgres_SetActiveAndDelete(t *testing.T) {
 	// Seed installations, then tear the whole registration down.
 	for _, login := range []string{"acme", "globex"} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     dbtest.TestGitHubHost,
 			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
 		}); err != nil {
 			t.Fatalf("seed installation %s: %v", login, err)

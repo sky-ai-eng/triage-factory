@@ -122,9 +122,8 @@ func (s *Server) handleFleetPlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	host, err := s.orgGitHubHost(r.Context(), orgID)
-	if err != nil {
-		internalError(w, "fleet-placement", err)
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "fleet-placement")
+	if !ok {
 		return
 	}
 	plan, err := s.placement.Explain(r.Context(), orgID, kind, host, keyValue)

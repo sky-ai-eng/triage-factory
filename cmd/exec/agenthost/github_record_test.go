@@ -74,6 +74,7 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordGitHubURLForTest(t, conn)
 
 	const conversationID = "22222222-2222-2222-2222-222222222222"
 	if _, err := conn.Exec(

@@ -480,10 +480,10 @@ func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[s
 
 // TestOrgSettingsPatch_BlankGitHubURLWithApp_409 closes the settings-route half
 // of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
-// unbind: githubBaseFor falls org_settings → github_url secret → the deployment
-// default, so blanking the column while an App is registered silently sends a
-// GHES org's App to a host it is not on. The config route refuses instead of skipping, because here
-// the clear is the request itself, not a side effect of one.
+// unbind: the org's GitHub URL is the only record of the host an App was
+// registered on, so blanking it while an App is registered strands the App.
+// The config route refuses instead of skipping, because here the clear is the
+// request itself, not a side effect of one.
 func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -563,6 +563,37 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithApp_409(t *testing.T) {
 	}
 }
 
+// TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409: a token works only on the
+// GitHub that issued it, so the URL does not move while one is bound.
+func TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	for _, target := range []any{"https://new.example.com", nil} {
+		rec := patchOrgSettings(t, s, map[string]any{"github_base_url": target})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("github_base_url → %v: status = %d, want 409; body=%s", target, rec.Code, rec.Body.String())
+		}
+		if e := firstError(t, rec); e.Field != "github_base_url" {
+			t.Errorf("error = %+v, want it on github_base_url", e)
+		}
+	}
+	var stored string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
+		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+		t.Fatalf("read github base_url: %v", err)
+	}
+	if stored != "https://old.example.com" {
+		t.Errorf("github base_url = %q, want the host the token is on", stored)
+	}
+}
+
 // TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: a workspace bound to
 // the deployment's App holds the host its installations are on, like a token or
 // a registration does — moving off it is refused while one is bound there. An
@@ -626,7 +657,8 @@ func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	ctx := t.Context()
 	const host = "https://github.example.com"
 
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
+	seedSourceHost(t, s, eventsource.KindGitHub, host)
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
 	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "pat"); err != nil {

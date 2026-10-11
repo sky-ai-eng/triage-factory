@@ -42,7 +42,6 @@ func TestLoadSave_Roundtrip(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
-		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
 		JiraPAT:   "jira-test",
 	}
@@ -67,7 +66,6 @@ func TestSave_SkipsEmptyValues(t *testing.T) {
 	// populated. The GitHub PAT must survive — empty values mean
 	// "leave alone."
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-original",
 	}); err != nil {
 		t.Fatalf("seed Save: %v", err)
@@ -95,7 +93,6 @@ func TestClearGitHub_LeavesJira(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
 		JiraPAT:   "jira-test",
 	}); err != nil {
@@ -108,7 +105,7 @@ func TestClearGitHub_LeavesJira(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if got.GitHubURL != "" || got.GitHubPAT != "" {
+	if got.GitHubPAT != "" {
 		t.Errorf("GitHub creds survived ClearGitHub: %+v", got)
 	}
 	if got.JiraPAT == "" {
@@ -122,7 +119,6 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
 		JiraPAT:   "jira-test",
 	}); err != nil {
@@ -138,7 +134,7 @@ func TestClearJira_LeavesGitHub(t *testing.T) {
 	if got.JiraPAT != "" {
 		t.Errorf("Jira creds survived ClearJira: %+v", got)
 	}
-	if got.GitHubURL == "" || got.GitHubPAT == "" {
+	if got.GitHubPAT == "" {
 		t.Errorf("GitHub creds disappeared after ClearJira: %+v", got)
 	}
 }
@@ -177,7 +173,6 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL:      "https://github.example.com",
 		GitHubPAT:      "ghp-test",
 		JiraEmail:      "bot@acme.com",
 		JiraAPIToken:   "cloud-token",
@@ -195,7 +190,7 @@ func TestClearJira_SweepsCloudKeys(t *testing.T) {
 	if got.JiraEmail != "" || got.JiraAPIToken != "" || got.JiraAuthMethod != "" {
 		t.Errorf("Jira cloud creds survived ClearJira: %+v", got)
 	}
-	if got.GitHubURL == "" || got.GitHubPAT == "" {
+	if got.GitHubPAT == "" {
 		t.Errorf("GitHub creds disappeared after ClearJira: %+v", got)
 	}
 }
@@ -279,7 +274,6 @@ func TestLoadSystem_Roundtrip(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	want := auth.Credentials{
-		GitHubURL:      "https://github.example.com",
 		GitHubPAT:      "ghp-test",
 		JiraEmail:      "bot@acme.com",
 		JiraAPIToken:   "cloud-token",
@@ -561,7 +555,6 @@ func TestClearLinear_LeavesGitHubAndJira(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 
 	if err := integrations.Save(ctx, stores.Secrets, org, auth.Credentials{
-		GitHubURL: "https://github.example.com",
 		GitHubPAT: "ghp-test",
 		JiraPAT:   "jira-test",
 	}); err != nil {

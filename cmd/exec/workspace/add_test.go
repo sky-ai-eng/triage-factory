@@ -133,6 +133,9 @@ func newTestDB(t *testing.T) (db.Stores, *db.DB) {
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	return sqlitestore.New(conn), &db.DB{Conn: conn}
 }
 

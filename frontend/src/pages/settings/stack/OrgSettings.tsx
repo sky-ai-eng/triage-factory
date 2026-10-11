@@ -383,7 +383,7 @@ export default function OrgSettings({
       {/* ── GitHub URL ── */}
       <SettingsSection
         title="GitHub URL"
-        summary={hostOf(baseline.org.github_url || 'github.com')}
+        summary={baseline.org.github_url ? hostOf(baseline.org.github_url) : 'Not set'}
         dirty={draft.org.github_url !== baseline.org.github_url}
         saving={isSaving('gh-url')}
         saveDisabled={githubConnected}

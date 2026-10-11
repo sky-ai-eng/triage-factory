@@ -176,7 +176,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		}{
 			{
 				field: "AccountLogin", name: "an account rename",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme", AccountID: "1110"},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme", AccountID: "1110"},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.AccountLogin != "acme-renamed" {
@@ -186,7 +186,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "AccountID", name: "an account id learned late",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.AccountID != "1110" {
@@ -196,7 +196,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "AccountType", name: "an account type corrected",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme", AccountType: "User"},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme", AccountType: "User"},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme", AccountType: "Organization"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.AccountType != "Organization" {
@@ -206,7 +206,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "SuspendedAt", name: "a lost unsuspend delivery",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: "owner"},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: "owner"},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.Suspended() {
@@ -216,7 +216,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "SuspendedAt", name: "a lost suspend delivery",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: "owner"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if !got.SuspendedAt.Equal(suspendedAt) {
@@ -226,7 +226,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "SuspendedBy", name: "the suspending login",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: ""},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: ""},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme", SuspendedAt: suspendedAt, SuspendedBy: "owner"},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.SuspendedBy != "owner" {
@@ -236,7 +236,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			},
 			{
 				field: "RepositorySelection", name: "a grant narrowed all to selected",
-				bound:  domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme", RepositorySelection: domain.RepositorySelectionAll},
+				bound:  domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme", RepositorySelection: domain.RepositorySelectionAll},
 				listed: managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme", RepositorySelection: domain.RepositorySelectionSelected},
 				check: func(t *testing.T, got domain.OrgGitHubAppInstallation) {
 					if got.RepositorySelection != domain.RepositorySelectionSelected {
@@ -311,9 +311,9 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		)
 		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
 		orgs := map[string]string{
-			"111": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "one"}),
-			"222": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "222", AccountLogin: "two"}),
-			"333": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "333", AccountLogin: "three"}),
+			"111": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "one"}),
+			"222": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "222", AccountLogin: "two"}),
+			"333": managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "333", AccountLogin: "three"}),
 		}
 
 		if err := store.RefreshAllManagedInstallations(ctx, deployment); err != nil {
@@ -343,7 +343,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"})
 		base, _ := managedFakeGitHub(t, http.StatusOK, &body)
-		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "222", OrgID: org, AccountLogin: "gone", GitHubHost: db.EffectiveGitHubHost(base)})
 		seed.Reach(t, org, "111")
 		seed.Reach(t, org, "222")
@@ -383,7 +383,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			managedListingItem{ID: 999, AccountID: 9990, AccountLogin: "stranger"},
 		)
 		base, _ := managedFakeGitHub(t, http.StatusOK, &body)
-		bound := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		bound := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 		unbound := seed.Org(t, seed.User(t))
 		seed.Class(t, unbound, domain.GitHubCredentialClassManagedApp, base)
 
@@ -410,7 +410,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 			managedListingItem{ID: 222, AccountID: 2220, AccountLogin: "stranger"},
 		)
 		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
-		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 		const other = "https://ghe.other.test"
 		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "222", OrgID: org, AccountLogin: "old-acct", GitHubHost: other})
 
@@ -465,7 +465,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"})
 		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
-		onDefault := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		onDefault := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 
 		const other = "https://ghe.other.test"
 		elsewhere := seed.Org(t, seed.User(t))
@@ -500,7 +500,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		store, seed := mk(t)
 		body := `{"message":"Bad credentials"}`
 		base, _ := managedFakeGitHub(t, http.StatusUnauthorized, &body)
-		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 
 		if err := store.RefreshAllManagedInstallations(ctx, deployment); err == nil {
 			t.Fatal("RefreshAllManagedInstallations succeeded on a failed listing; want an error")
@@ -546,7 +546,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme-renamed"})
 		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
-		managed := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		managed := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 		byo := seed.Org(t, seed.User(t))
 		seed.Class(t, byo, domain.GitHubCredentialClassBYOApp, base)
 		bind(t, store, domain.OrgGitHubAppInstallation{InstallationID: "555", OrgID: byo, AccountLogin: "own-key", GitHubHost: db.EffectiveGitHubHost(base)})
@@ -572,7 +572,7 @@ func RunGitHubManagedCadenceConformance(t *testing.T, mk GitHubManagedRefreshFac
 		store, seed := mk(t)
 		body := managedListing(t, managedListingItem{ID: 111, AccountID: 1110, AccountLogin: "acme"})
 		base, calls := managedFakeGitHub(t, http.StatusOK, &body)
-		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{InstallationID: "111", AccountLogin: "acme"})
+		org := managedOrg(t, store, seed, base, domain.OrgGitHubAppInstallation{GitHubHost: TestGitHubHost, InstallationID: "111", AccountLogin: "acme"})
 
 		if err := store.RefreshAllManagedInstallations(ctx, githubapp.DeploymentApp{}); err == nil {
 			t.Fatal("RefreshAllManagedInstallations succeeded with no deployment App; want a refusal")

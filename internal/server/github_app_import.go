@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
@@ -311,15 +312,14 @@ func (s *Server) handleGitHubAppImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the org's GitHub base URL through the resolver so the validation
-	// calls below hit the right host. BaseURLFor applies the same precedence the
-	// poller / git paths use — org_settings.github_base_url, then the github_url
-	// secret (load-bearing for GHES / local-mode orgs whose host lives only in
-	// the keychain, with the settings column empty), then public github.com —
-	// and propagates a read error rather than papering a possibly-GHES org over
-	// with github.com. Deriving from org_settings alone would mint the app JWT
-	// against the wrong host for exactly those orgs.
+	// Resolve the org's GitHub URL through the resolver so the validation
+	// calls below hit the host the poller and git paths use. A workspace with
+	// none sets it first: an App is registered on one GitHub.
 	base, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		writeNotConfigured(w, "set this workspace's GitHub URL before connecting an App: an App works only on the GitHub it is registered on")
+		return
+	}
 	if err != nil {
 		internalError(w, "github-app", err)
 		return

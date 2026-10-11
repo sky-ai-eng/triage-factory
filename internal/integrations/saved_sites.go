@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 )
 
@@ -86,4 +87,84 @@ func moveUserJiraToken(ctx context.Context, secrets db.SecretStore, orgID, userI
 		return fmt.Errorf("delete the user's jira token: %w", err)
 	}
 	return nil
+}
+
+// AdoptSavedGitHubHost gives a local org with no GitHub URL the one it was
+// using, and deletes the key a local install kept its GitHub host under
+// beside the PAT (legacyGitHubURL). An org's GitHub host is
+// org_settings.github_base_url alone and nothing derives one, so an org that
+// was on GitHub with the setting empty would otherwise lose it. Boot runs it
+// in local mode; once the setting is set and the key is gone it changes
+// nothing.
+//
+// With the setting empty, the saved URL becomes it when it is a valid GitHub
+// URL. Without one, an org already using GitHub — a PAT, an App registration
+// or installation, or repositories on the deployment's GitHub — was on the
+// deployment's GitHub (ghbase.DefaultBaseURL), and that becomes it. An org
+// using none of them is left with no URL, to set when it connects. A set
+// setting is never changed: it is what every client already talked to.
+func AdoptSavedGitHubHost(ctx context.Context, stores db.Stores, orgID string) error {
+	saved, err := stores.Secrets.GetSystem(ctx, orgID, legacyGitHubURL)
+	if err != nil {
+		return fmt.Errorf("read the saved github url: %w", err)
+	}
+	orgSet, err := stores.Orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return fmt.Errorf("load org settings: %w", err)
+	}
+	if orgSet.GitHubBaseURL == "" {
+		host, ok := ghbase.NormalizeBaseURL(saved)
+		if !ok {
+			inUse, err := usingDefaultGitHub(ctx, stores, orgID)
+			if err != nil {
+				return err
+			}
+			if inUse {
+				host = ghbase.DefaultBaseURL()
+			}
+		}
+		if host != "" {
+			if _, err := stores.Orgs.SetSourceBaseURL(ctx, orgID, "github", host); err != nil {
+				return fmt.Errorf("store the github url: %w", err)
+			}
+		}
+	}
+	if saved != "" {
+		if _, err := stores.Secrets.DeleteSystemIfValue(ctx, orgID, legacyGitHubURL, saved); err != nil {
+			return fmt.Errorf("delete the saved github url: %w", err)
+		}
+	}
+	return nil
+}
+
+// usingDefaultGitHub reports whether an org with no GitHub URL holds anything
+// GitHub: a PAT, an App registration, an App installation, or repositories on
+// the deployment's GitHub, which is where every one of them was used.
+func usingDefaultGitHub(ctx context.Context, stores db.Stores, orgID string) (bool, error) {
+	pat, err := stores.Secrets.GetSystem(ctx, orgID, KeyGitHubPAT)
+	if err != nil {
+		return false, fmt.Errorf("read the github pat: %w", err)
+	}
+	if pat != "" {
+		return true, nil
+	}
+	app, err := stores.GitHubApps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read the github app registration: %w", err)
+	}
+	if app != nil {
+		return true, nil
+	}
+	insts, err := stores.GitHubApps.ListInstallationsForOrgSystem(ctx, orgID)
+	if err != nil {
+		return false, fmt.Errorf("read github app installations: %w", err)
+	}
+	if len(insts) > 0 {
+		return true, nil
+	}
+	repos, err := stores.Repos.ListSystem(ctx, orgID, ghbase.DefaultBaseURL())
+	if err != nil {
+		return false, fmt.Errorf("read repositories: %w", err)
+	}
+	return len(repos) > 0, nil
 }

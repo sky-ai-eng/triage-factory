@@ -365,6 +365,10 @@ func listInstallations(ctx context.Context, q queryer, orgID string, hostKey *st
 // treating that silence as "unknown" would erase a width already learned. NULL
 // therefore means "not established", never "no selection".
 func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.OrgGitHubAppInstallation) (domain.OrgGitHubAppInstallation, error) {
+	host := db.EffectiveGitHubHost(inst.GitHubHost)
+	if host == "" {
+		return domain.OrgGitHubAppInstallation{}, db.ErrInstallationHostRequired
+	}
 	var installedAt sql.NullTime
 	if !inst.InstalledAt.IsZero() {
 		installedAt = sql.NullTime{Time: inst.InstalledAt, Valid: true}
@@ -390,7 +394,7 @@ func (s *gitHubAppsStore) UpsertInstallation(ctx context.Context, inst domain.Or
 			                                org_github_app_installations.repository_selection)
 		RETURNING `+pgGitHubAppInstallationColumns,
 		inst.InstallationID, inst.OrgID, inst.AccountType, nullString(inst.AccountID), inst.AccountLogin,
-		db.EffectiveGitHubHost(inst.GitHubHost), installedAt,
+		host, installedAt,
 		nullTime(inst.SuspendedAt), nullString(inst.SuspendedBy), nullString(selection)))
 	if err != nil {
 		return domain.OrgGitHubAppInstallation{}, fmt.Errorf("upsert org_github_app_installations: %w", err)
@@ -573,8 +577,9 @@ func (s *gitHubAppsStore) clearAppUnusable(ctx context.Context, orgID, appID str
 //
 // The class and the org's GitHub base URL come off one read, as the sibling's
 // registration + base URL do — same admin pool, same LEFT JOIN onto
-// org_event_sources, so a settings row with no per-source override resolves to
-// the deployment default rather than dropping the org.
+// org_event_sources, so a settings row with no per-source override reads as
+// no GitHub URL rather than dropping the org, and is reported as not on the
+// deployment's GitHub.
 func (s *gitHubAppsStore) RefreshManagedInstallations(ctx context.Context, orgID string, deployment githubapp.DeploymentApp) error {
 	// An id that is not a uuid names no org, and an org this method cannot
 	// identify is one it must not reconcile. Refused rather than skipped —

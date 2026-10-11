@@ -51,10 +51,10 @@ const SlackScope = "slack.com"
 // GitHubHost resolves an org's configured github_base_url to the host GitHub
 // objects and identities are keyed under: the ghbase.CanonicalBaseURL form
 // (scheme and authority lowercased, the path's case kept, trailing slashes
-// trimmed), and an empty setting is the deployment's default GitHub
-// (ghbase.DefaultBaseURL — github.com unless the operator named another).
+// trimmed). An empty setting is an org that has not configured GitHub, and its
+// host is empty: no GitHub row is keyed under it.
 func GitHubHost(orgBase string) string {
-	return ghbase.ResolveBaseURL(orgBase)
+	return ghbase.CanonicalBaseURL(orgBase)
 }
 
 // JiraHost canonicalizes an org's configured Jira base URL into the site a

@@ -78,6 +78,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 
 	install := func(orgID, installationID, login string) domain.OrgGitHubAppInstallation {
 		return domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: installationID,
 			OrgID:          orgID,
 			AccountType:    "Organization",
@@ -265,8 +266,8 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		for _, inst := range []domain.OrgGitHubAppInstallation{
-			{InstallationID: "456", OrgID: org, AccountType: "Organization", AccountID: "1234", AccountLogin: "acme"},
-			{InstallationID: "789", OrgID: org, AccountType: "Organization", AccountID: "5678", AccountLogin: "beta"},
+			{InstallationID: "456", OrgID: org, AccountType: "Organization", AccountID: "1234", AccountLogin: "acme", GitHubHost: TestGitHubHost},
+			{InstallationID: "789", OrgID: org, AccountType: "Organization", AccountID: "5678", AccountLogin: "beta", GitHubHost: TestGitHubHost},
 		} {
 			if _, err := store.UpsertInstallation(ctx, inst); err != nil {
 				t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)

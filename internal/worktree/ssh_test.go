@@ -145,20 +145,20 @@ func TestCachedPreflightSSH_PerHostKeying(t *testing.T) {
 	}
 }
 
-func TestCachedPreflightSSH_DefaultHostFallback(t *testing.T) {
+func TestCachedPreflightSSH_RefusesAnEmptyHost(t *testing.T) {
 	resetPreflightCacheForTest(t)
 
-	var lastHost string
-	preflightImpl = func(_ context.Context, host string) error {
-		lastHost = host
+	probed := false
+	preflightImpl = func(context.Context, string) error {
+		probed = true
 		return nil
 	}
 
-	if err := CachedPreflightSSH(context.Background(), ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err := CachedPreflightSSH(context.Background(), ""); err == nil {
+		t.Fatal("CachedPreflightSSH(\"\") = nil, want a refusal: there is no host to probe")
 	}
-	if lastHost != "git@github.com" {
-		t.Errorf("empty host should default to git@github.com, got %q", lastHost)
+	if probed {
+		t.Error("an empty host was probed; it names no GitHub")
 	}
 }
 
@@ -172,9 +172,9 @@ func TestSSHHostFromBaseURL(t *testing.T) {
 		{"github.com with trailing slash", "https://github.com/", "git@github.com"},
 		{"GHE host", "https://github.example.com", "git@github.example.com"},
 		{"GHE with subdir path", "https://corp.example.com/github", "git@corp.example.com"},
-		{"empty falls back", "", "git@github.com"},
-		{"unparseable falls back", "://bad", "git@github.com"},
-		{"no scheme falls back", "github.com", "git@github.com"},
+		{"empty has no host", "", ""},
+		{"unparseable has no host", "://bad", ""},
+		{"no scheme has no host", "github.com", ""},
 		{"http (not https)", "http://github.example.com", "git@github.example.com"},
 		{"with port", "https://github.example.com:8443", "git@github.example.com"},
 		{"with userinfo", "https://user:pass@github.example.com", "git@github.example.com"},

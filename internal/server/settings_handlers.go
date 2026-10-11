@@ -1579,6 +1579,14 @@ func (s *Server) orgSettingsSSHPreflight(w http.ResponseWriter, r *http.Request,
 	}
 
 	sshHost := worktree.SSHHostFromBaseURL(next.GitHubBaseURL)
+	if sshHost == "" {
+		httpx.WriteErrors(w, http.StatusUnprocessableEntity, httpx.ErrorItem{
+			Reason:  httpx.ReasonInvalidField,
+			Message: "SSH cloning needs the workspace's GitHub URL, to check SSH access against — set it first",
+			Field:   "github_clone_protocol",
+		})
+		return false
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	err := worktree.PreflightSSH(ctx, sshHost)
 	cancel()

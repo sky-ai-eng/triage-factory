@@ -75,6 +75,11 @@ func newTestServerWithTx(t *testing.T, wrap func(db.TxRunner) db.TxRunner) *Serv
 	); err != nil {
 		t.Fatalf("seed local team_agents: %v", err)
 	}
+	// Every org that reaches a handler in production has passed a setup gate
+	// that requires a GitHub URL. A fixture about the org with none clears it.
+	if err := db.SetLocalGitHubURLForTest(database, "https://github.com"); err != nil {
+		t.Fatalf("seed github url: %v", err)
+	}
 	stores := sqlitestore.New(database)
 	if wrap != nil {
 		stores.Tx = wrap(stores.Tx)
@@ -101,8 +106,8 @@ func configureEventSources(t *testing.T, s *Server) {
 	t.Helper()
 	keyring.MockInit()
 	seedSourceHost(t, s, eventsource.KindJira, "https://jira.example.com")
+	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: "https://github.com",
 		GitHubPAT: "ghp-fixture",
 		JiraPAT:   "jira-fixture",
 	}); err != nil {

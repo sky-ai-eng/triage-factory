@@ -31,22 +31,20 @@ func (u *hostRecordingUsers) UserIDsForGitHubLoginSystem(_ context.Context, host
 	return []string{"user-1"}, nil
 }
 
-// TestReviewerResolver_SettingsReadFailureFallsBackToTheDeploymentDefault pins
-// the error arm: when the org's settings cannot be read, the reverse identity
-// lookup keys on the deployment's default GitHub — never on "", which no
-// identity row was ever written under and which would route every review
-// request to nobody.
-func TestReviewerResolver_SettingsReadFailureFallsBackToTheDeploymentDefault(t *testing.T) {
+// TestReviewerResolver_SettingsReadFailureResolvesNobody pins the error arm:
+// when the org's settings cannot be read there is no GitHub host to key the
+// reverse identity lookup on, so no identity is consulted and a review request
+// routes to nobody rather than to whoever holds the login on some other GitHub.
+func TestReviewerResolver_SettingsReadFailureResolvesNobody(t *testing.T) {
 	ghbase.SetDefaultBaseURLForTest(t, "https://ghe.default.test")
 	users := &hostRecordingUsers{}
 	m := &Manager{orgs: erroringOrgs{}, users: users}
 
 	resolver := m.reviewerResolver(context.Background(), "org-1", "", nil)
-	if !resolver.KnownUser("octocat") {
-		t.Fatal("KnownUser = false; the fake users store answers for every login")
+	if resolver.KnownUser("octocat") {
+		t.Error("KnownUser = true with no GitHub host to look the login up on")
 	}
-	if len(users.hosts) != 1 || users.hosts[0] != "https://ghe.default.test" {
-		t.Errorf("reverse lookup hosts = %q; want exactly [%q] — the deployment default, not an empty key",
-			users.hosts, "https://ghe.default.test")
+	if len(users.hosts) != 0 {
+		t.Errorf("reverse lookup hosts = %q; want none", users.hosts)
 	}
 }

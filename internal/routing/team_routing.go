@@ -387,10 +387,8 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 			routerLog.Error("review_requested: read org settings for host failed", "error", err)
 			return nil, false, fmt.Errorf("read org settings for github host: %w", err)
 		}
-		// Resolve to the effective host (empty → the deployment default) so the reverse
-		// lookup matches identities captured under the canonical host (the
-		// OAuth login-claim binds to github.com literally); the raw empty
-		// setting would look up host="" and drop the task.
+		// The canonical host, the one identities are captured under. An org
+		// with no GitHub URL has no host and resolves nobody.
 		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 		userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, meta.RequestedLogin)
 		if err != nil {
@@ -537,9 +535,8 @@ func (r *Router) authorTeams(ctx context.Context, orgID string, evt domain.Event
 		routerLog.Error("author-centric owner: read org settings for host failed", "error", err)
 		return nil, fmt.Errorf("read org settings for github host: %w", err)
 	}
-	// Effective host (empty → the deployment default) so the reverse lookup matches
-	// identities captured under the canonical host — the raw empty setting
-	// would look up host="" and resolve nobody.
+	// The canonical host, the one identities are captured under. An org with
+	// no GitHub URL has no host and resolves nobody.
 	host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
 	userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, m.Author)
 	if err != nil {

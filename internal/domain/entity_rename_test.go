@@ -88,8 +88,8 @@ func TestEntityScope(t *testing.T) {
 		}
 	}
 	empty := OrgSettings{}
-	if got := EntityScope("github", empty); got != "https://github.com" {
-		t.Errorf("EntityScope(github, unset) = %q, want the deployment default", got)
+	if got := EntityScope("github", empty); got != "" {
+		t.Errorf("EntityScope(github, unset) = %q, want empty: an org with no GitHub URL is on no GitHub", got)
 	}
 	if got := EntityScope("jira", empty); got != "" {
 		t.Errorf("EntityScope(jira, unset) = %q, want empty", got)

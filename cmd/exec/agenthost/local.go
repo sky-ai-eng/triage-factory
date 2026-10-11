@@ -807,23 +807,43 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 //
 // Branch is the only artifact kind with a synthesized URL: a PR carries GitHub's
 // own html_url and a review's link is resolved server-side, so both already name
-// the right host and pass through untouched. A base-resolve failure keeps the
-// default github.com URL (the link degrades; the record does not), and a
-// non-branch ref leaves the URL as-is rather than clobber it.
+// the right host and pass through untouched. A base-resolve failure drops the
+// synthesized URL (the link goes; the record does not) rather than keep one on
+// a host nobody resolved, and a non-branch ref leaves the URL as-is rather
+// than clobber it.
 func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact) domain.Artifact {
 	if a.Kind != domain.ArtifactKindBranch {
 		return a
 	}
 	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 	if err != nil {
-		agenthostLog.Warn("resolve github base for branch URL failed; keeping default host",
+		agenthostLog.Warn("resolve github base for branch URL failed; recording no link",
 			"conversation", c.info.ConversationID, "target", a.Target, "ref", a.ExternalID, "error", err)
+		a.URL = ""
 		return a
 	}
 	if u, ok := domain.BranchArtifactWebURL(base, a.Target, a.ExternalID); ok {
 		a.URL = u
 	}
 	return a
+}
+
+// githubPullAnchorURL is the web link to an anchor on a pull request on the
+// org's GitHub: "{base}/owner/repo/pull/N#anchor". "" when the org's GitHub
+// URL cannot be resolved; the row is recorded without a link rather than with
+// one on a host nobody resolved.
+func (c *LocalClient) githubPullAnchorURL(ctx context.Context, owner, repo string, number int, anchor string) string {
+	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+	if err != nil {
+		agenthostLog.Warn("resolve github base for an action link failed; recording no link",
+			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "error", err)
+		return ""
+	}
+	pull := domain.GitHubPullURLBase(base, owner+"/"+repo, number)
+	if pull == "" {
+		return ""
+	}
+	return pull + "#" + anchor
 }
 
 // --- jira ---
@@ -1324,9 +1344,8 @@ func (c *LocalClient) githubResolver() ghclient.Resolver {
 // branch-capture gate uses it to decide whether a push's remote belongs to the
 // org's GitHub before recording a branch artifact — local mode's only capture
 // point, where the hook holds this in-process client. Same resolution
-// (org_settings → github_url secret → default) hostAnchorBranchURL uses to
-// anchor the recorded branch link, so the gate and the corrected URL agree on
-// the host.
+// (org_settings.github_base_url) hostAnchorBranchURL uses to anchor the
+// recorded branch link, so the gate and the corrected URL agree on the host.
 func (c *LocalClient) GithubWebHostBase(ctx context.Context) (string, error) {
 	return c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 }
@@ -1692,7 +1711,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 		Action:     domain.ActionReviewDismissed,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID: strconv.Itoa(reviewID),
-		URL:        fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID),
+		URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("pullrequestreview-%d", reviewID)),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
 	})
@@ -2096,7 +2115,7 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 			Action:     domain.ActionCommentPosted,
 			Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 			ExternalID: strconv.Itoa(replyID),
-			URL:        fmt.Sprintf("%s#discussion_r%d", domain.GitHubPullURL(owner+"/"+repo, number), replyID),
+			URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("discussion_r%d", replyID)),
 			Credential: c.githubCredential(),
 			DetailJSON: string(detail),
 		})

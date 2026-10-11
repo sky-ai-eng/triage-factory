@@ -217,6 +217,7 @@ func TestGitHubAppsStore_SQLite_DeleteForOrg(t *testing.T) {
 
 	for _, login := range []string{"acme", "globex"} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     dbtest.TestGitHubHost,
 			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
 		}); err != nil {
 			t.Fatalf("seed installation %s: %v", login, err)
@@ -249,6 +250,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgID)
 
 	inst := domain.OrgGitHubAppInstallation{
+		GitHubHost:     dbtest.TestGitHubHost,
 		InstallationID: "555",
 		OrgID:          orgID,
 		AccountType:    "Organization",
@@ -305,7 +307,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgB)
 
 	for _, tc := range []struct{ org, login, typ, host string }{
-		{orgA, "only-in-a", "User", ""},
+		{orgA, "only-in-a", "User", dbtest.TestGitHubHost},
 		{orgB, "only-in-b", "Organization", "https://git.example.com"},
 	} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{

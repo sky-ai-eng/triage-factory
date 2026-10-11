@@ -99,7 +99,7 @@ func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 		{"unknown class", domain.GitHubCredentialClass("not-a-credential-class"), live, bound, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orgs := readyOrgs{class: tc.class}
+			orgs := readyOrgs{class: tc.class, base: "https://github.com"}
 			apps := readyApps{app: tc.app, insts: tc.insts}
 
 			got, err := GitHubReady(ctx, orgs, apps, "org-1", auth.Credentials{})
@@ -170,7 +170,7 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 		{"unknown class", domain.GitHubCredentialClass("not-a-credential-class"), live, bound, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orgs := readyOrgs{class: tc.class}
+			orgs := readyOrgs{class: tc.class, base: "https://github.com"}
 			apps := readyApps{app: tc.app, insts: tc.insts}
 			creds := auth.Credentials{GitHubPAT: "ghp_present"}
 
@@ -241,73 +241,14 @@ func TestGitHubReady_ReadFailureIsAnError(t *testing.T) {
 	}
 }
 
-// TestGitHubPATHostMatches is the truth table for the host check every PAT read
-// makes: the PAT is sent only to the host recorded beside it, both sides
-// compared as GitHubHost values, and a PAT with no recorded host is used on
-// whatever host the org resolves to.
-func TestGitHubPATHostMatches(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		bound, base  string
-		wantSendable bool
-	}{
-		{"same host", "https://ghe.example.com", "https://ghe.example.com", true},
-		{"trailing slash on the bound url", "https://ghe.example.com/", "https://ghe.example.com", true},
-		{"trailing slashes on the base", "https://ghe.example.com", "https://ghe.example.com//", true},
-		{"another host", "https://ghe.example.com", "https://github.com", false},
-		{"another GHES path mount", "https://ghe.example.com/a", "https://ghe.example.com/b", false},
-		// An empty base is the deployment default, github.com in a test process.
-		{"empty base is the default host", "https://github.com", "", true},
-		{"empty base, PAT bound on GHES", "https://ghe.example.com", "", false},
-		// No host recorded: nothing to disagree with.
-		{"no bound host", "", "https://ghe.example.com", true},
-		{"no bound host, empty base", "", "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := GitHubPATHostMatches(tc.bound, tc.base); got != tc.wantSendable {
-				t.Errorf("GitHubPATHostMatches(%q, %q) = %v; want %v", tc.bound, tc.base, got, tc.wantSendable)
-			}
-		})
-	}
-}
-
-// TestGitHubPATUsable is the truth table for the readiness half of the same
-// rule. An empty org setting resolves to the URL stored beside the PAT, so
-// only a setting that names another host makes a bound PAT unusable.
-func TestGitHubPATUsable(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		creds   auth.Credentials
-		orgBase string
-		want    bool
-	}{
-		{"no pat", auth.Credentials{GitHubURL: "https://github.com"}, "https://github.com", false},
-		{"no pat, no host", auth.Credentials{}, "", false},
-		{"pat on its own host", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "https://ghe.example.com", true},
-		{"pat on its own host, slashes differ", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com/"}, "https://ghe.example.com", true},
-		{"pat bound on another host", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "https://github.com", false},
-		{"pat with no bound host", auth.Credentials{GitHubPAT: "ghp_x"}, "https://ghe.example.com", true},
-		// No setting: the org resolves to the PAT's own URL, so it matches by
-		// construction even for a GHES PAT.
-		{"empty org setting", auth.Credentials{GitHubPAT: "ghp_x", GitHubURL: "https://ghe.example.com"}, "", true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := GitHubPATUsable(tc.creds, tc.orgBase); got != tc.want {
-				t.Errorf("GitHubPATUsable(%+v, %q) = %v; want %v", tc.creds, tc.orgBase, got, tc.want)
-			}
-		})
-	}
-}
-
-// TestGitHubReady_PATBoundOnAnotherHostIsNotReady pins the gate on the PAT
-// arms: a PAT validated on a host other than the org's current one is a
-// credential the resolver refuses to send, so the org reads as not connected
-// until it is rebound — on the pat class and in the staged window of a
-// PAT-to-App switch alike, through both doors.
-func TestGitHubReady_PATBoundOnAnotherHostIsNotReady(t *testing.T) {
+// TestGitHubReady_PATNeedsAGitHubURL pins the gate on the PAT arms: a PAT is
+// sent only to the org's GitHub URL, so an org with none reads as not
+// connected — on the pat class and in the staged window of a PAT-to-App switch
+// alike, through both doors.
+func TestGitHubReady_PATNeedsAGitHubURL(t *testing.T) {
 	ctx := context.Background()
 	staged := &domain.OrgGitHubApp{Active: false, ClientID: "Iv1.byo"}
-	creds := auth.Credentials{GitHubPAT: "ghp_present", GitHubURL: "https://ghe.old.example.com"}
+	creds := auth.Credentials{GitHubPAT: "ghp_present"}
 
 	for _, tc := range []struct {
 		name  string
@@ -316,10 +257,10 @@ func TestGitHubReady_PATBoundOnAnotherHostIsNotReady(t *testing.T) {
 		base  string
 		want  bool
 	}{
-		{"pat class, host moved", domain.GitHubCredentialClassPAT, nil, "https://github.com", false},
-		{"pat class, same host", domain.GitHubCredentialClassPAT, nil, "https://ghe.old.example.com/", true},
-		{"byo app staged behind the pat, host moved", domain.GitHubCredentialClassBYOApp, staged, "https://github.com", false},
-		{"byo app staged behind the pat, same host", domain.GitHubCredentialClassBYOApp, staged, "https://ghe.old.example.com", true},
+		{"pat class, no url", domain.GitHubCredentialClassPAT, nil, "", false},
+		{"pat class, url", domain.GitHubCredentialClassPAT, nil, "https://ghe.example.com", true},
+		{"byo app staged behind the pat, no url", domain.GitHubCredentialClassBYOApp, staged, "", false},
+		{"byo app staged behind the pat, url", domain.GitHubCredentialClassBYOApp, staged, "https://ghe.example.com", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			orgs := readyOrgs{class: tc.class, base: tc.base}
