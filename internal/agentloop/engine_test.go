@@ -451,15 +451,29 @@ func TestRun_EmptyLengthStopEscalationIsClampedToTheModel(t *testing.T) {
 		{text: "done"},
 	}}
 	e := newTestEngine(tr, p, newScriptedToolHost())
-	params := testParams() // claude-sonnet-4-5: 64000 output tokens
-	params.MaxTokens = 40000
+	params := testParams()
+	ceiling := modelCeiling(t, params.Model)
+	// Doubling this overshoots the model's maximum.
+	params.MaxTokens = ceiling * 5 / 8
 
 	if got := e.Run(context.Background(), params); got.Kind != ResultConcluded {
 		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
-	if p.requests[1].MaxTokens != 64000 {
-		t.Errorf("retry max_tokens = %d, want the model's own maximum 64000, not 80000", p.requests[1].MaxTokens)
+	if p.requests[1].MaxTokens != ceiling {
+		t.Errorf("retry max_tokens = %d, want the model's own maximum %d, not %d", p.requests[1].MaxTokens, ceiling, 2*params.MaxTokens)
 	}
+}
+
+// modelCeiling is a model's maximum output as the snapshot records it. Tests
+// about clamping read it rather than restate it, because the number is
+// upstream's data and a refresh may move it.
+func modelCeiling(t *testing.T, model string) int {
+	t.Helper()
+	ceiling, ok := inference.ModelMaxOutput(model)
+	if !ok {
+		t.Fatalf("snapshot records no max output for %q", model)
+	}
+	return ceiling
 }
 
 // TestEscalateMaxTokens pins the clamp arithmetic directly, including the one
@@ -467,18 +481,19 @@ func TestRun_EmptyLengthStopEscalationIsClampedToTheModel(t *testing.T) {
 // enough that doubling it overflows int. A negative cap is not a clamped
 // request, it is a malformed one.
 func TestEscalateMaxTokens(t *testing.T) {
-	const sonnet = "claude-sonnet-4-5" // 64000 output tokens
+	model := testParams().Model
+	ceiling := modelCeiling(t, model)
 	cases := []struct {
 		name    string
 		current int
 		model   string
 		want    int
 	}{
-		{"doubles below the ceiling", 8000, sonnet, 16000},
-		{"clamps at the ceiling", 40000, sonnet, 64000},
-		{"exactly half the ceiling clamps rather than lands on it", 32000, sonnet, 64000},
-		{"an explicit cap already above the ceiling comes back at it", 200000, sonnet, 64000},
-		{"a cap that would overflow the double never goes negative", math.MaxInt, sonnet, 64000},
+		{"doubles below the ceiling", ceiling / 8, model, 2 * (ceiling / 8)},
+		{"clamps at the ceiling", ceiling * 5 / 8, model, ceiling},
+		{"exactly half the ceiling clamps rather than lands on it", ceiling / 2, model, ceiling},
+		{"an explicit cap already above the ceiling comes back at it", ceiling * 3, model, ceiling},
+		{"a cap that would overflow the double never goes negative", math.MaxInt, model, ceiling},
 		{"an unknown model has no ceiling to clamp against", 8000, "some-model-nobody-ships", 8000},
 	}
 	for _, tc := range cases {
@@ -601,9 +616,9 @@ func TestRun_CallsCarryAResolvedTokenCap(t *testing.T) {
 	if got := e.Run(context.Background(), testParams()); got.Kind != ResultConcluded {
 		t.Fatalf("disposition = %v (err: %v)", got.Kind, got.Err)
 	}
-	// Anthropic direct, claude-sonnet-4-5: the model's whole output window.
-	if p.requests[0].MaxTokens != 64000 {
-		t.Errorf("max_tokens = %d, want the resolved per-provider budget 64000", p.requests[0].MaxTokens)
+	// Anthropic direct: the model's whole output window.
+	if want := modelCeiling(t, testParams().Model); p.requests[0].MaxTokens != want {
+		t.Errorf("max_tokens = %d, want the resolved per-provider budget %d", p.requests[0].MaxTokens, want)
 	}
 }
 
@@ -1032,7 +1047,7 @@ func TestRun_RetryIsSameProviderSameModelAndExhaustionFails(t *testing.T) {
 		t.Fatalf("expected 3 attempts, got %d", len(p.requests))
 	}
 	for i, r := range p.requests {
-		if r.Model != "claude-sonnet-4-5" || r.Provider != inference.ProviderAnthropic {
+		if r.Model != testParams().Model || r.Provider != inference.ProviderAnthropic {
 			t.Fatalf("attempt %d changed provider/model (%s/%s) — there is no fallback of any kind", i, r.Provider, r.Model)
 		}
 	}
