@@ -51,6 +51,8 @@ func linearConnectCallback(params url.Values) string {
 // the Acme workspace with an API key.
 type linearConnectRig struct {
 	*linearInstallRig
+	// clientID is the app Connect is expected to authorize against.
+	clientID string
 }
 
 func newLinearConnectRig(t *testing.T) *linearConnectRig {
@@ -59,10 +61,32 @@ func newLinearConnectRig(t *testing.T) *linearConnectRig {
 	base.fake.set("person")
 	base.s.linearResolver = linear.NewResolverWithOAuth(base.stores.Secrets, base.stores.Orgs,
 		linearoauth.NewTokenCache(base.s.linearOAuthMinter, base.s.linearOAuthApps, base.stores.Secrets, base.stores.LinearInstalls, base.s.linearCredentialLock),
-		linearoauth.NewUserTokenCache(base.s.linearOAuthMinter, base.s.linearOAuthApps, base.stores.Secrets, base.stores.Users, base.s.linearUserCredentialLock))
-	r := &linearConnectRig{linearInstallRig: base}
+		linearoauth.NewUserTokenCache(base.s.linearOAuthMinter, base.s.linearOAuthApps, base.stores.Secrets, base.stores.Tx, base.s.linearUserCredentialLock))
+	r := &linearConnectRig{linearInstallRig: base, clientID: "lin-client-1"}
 	r.bind(t, linearOrgKey)
 	return r
+}
+
+// useDeploymentApp gives the server a deployment app beside the org's own,
+// and the resolver the user token cache built over it.
+func (r *linearConnectRig) useDeploymentApp(deployment linear.OAuthApp) {
+	r.s.linearOAuthApps = linear.NewOAuthAppResolver(r.stores.LinearApps, r.stores.Secrets, deployment)
+	r.s.linearResolver = linear.NewResolverWithOAuth(r.stores.Secrets, r.stores.Orgs, nil,
+		linearoauth.NewUserTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.Tx, r.s.linearUserCredentialLock))
+}
+
+// lockHeldElsewhere reports whether the user's credential lock is held now,
+// by trying to take it briefly.
+func (r *linearConnectRig) lockHeldElsewhere(t *testing.T) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	release, err := r.s.linearUserCredentialLock.Lock(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err != nil {
+		return true
+	}
+	release()
+	return false
 }
 
 func (r *linearConnectRig) userSecret(t *testing.T) string {
@@ -166,7 +190,7 @@ func (r *linearConnectRig) startConnect(t *testing.T, returnTo string) (*http.Co
 		t.Fatalf("start redirected to %s, want Linear's authorize page", loc)
 	}
 	q := loc.Query()
-	if q.Has("actor") || q.Get("scope") != "read,write" || q.Get("client_id") != "lin-client-1" ||
+	if q.Has("actor") || q.Get("scope") != "read,write" || q.Get("client_id") != r.clientID ||
 		q.Get("redirect_uri") != "http://localhost:3000/api/linear/connect/callback" {
 		t.Errorf("authorize query = %v, want the user actor, read,write, the org's app and the static callback", q)
 	}
@@ -438,6 +462,16 @@ func TestLinearConnect_Refusals(t *testing.T) {
 		expectConnectError(t, r.get(t, linearConnectCallback(url.Values{"error": {"access_denied"}, "state": {state}}), cookie), "denied", "")
 		r.assertNoUserCredential(t)
 	})
+	// Only access_denied is a refusal; any other OAuth error is a failure to
+	// connect and must not read as cancelled or awaiting approval.
+	for _, oErr := range []string{"server_error", "temporarily_unavailable", "invalid_scope"} {
+		t.Run(oErr, func(t *testing.T) {
+			r := newLinearConnectRig(t)
+			cookie, state := r.startConnect(t, "")
+			expectConnectError(t, r.get(t, linearConnectCallback(url.Values{"error": {oErr}, "state": {state}}), cookie), "connect_failed", "")
+			r.assertNoUserCredential(t)
+		})
+	}
 	t.Run("failed exchange", func(t *testing.T) {
 		r := newLinearConnectRig(t)
 		cookie, state := r.startConnect(t, "")
@@ -580,6 +614,8 @@ func TestLinearConnect_RefusedRefreshClearsTheBinding(t *testing.T) {
 func TestLinearConnect_ConnectedFollowsTheApp(t *testing.T) {
 	r := newLinearConnectRig(t)
 	r.connect(t)
+	// Replacing the org's app overwrites the secret of the app that minted
+	// the grant, so nothing can refresh or revoke it any more.
 	r.registerApp(t, "lin-client-2")
 	if st := r.status(t); st.Connected {
 		t.Errorf("status = %+v; a Connect credential the org's app can no longer refresh must read as not connected", st)
@@ -593,6 +629,107 @@ func TestLinearConnect_ConnectedFollowsTheApp(t *testing.T) {
 	}
 	if st := r.status(t); !st.Connected {
 		t.Error("a pasted key reads as not connected")
+	}
+	// Linear accepts a revoke only from the app that minted the token, and
+	// its secret is gone, so the replaced grant is not revoked with another.
+	if got := r.oauth.Revoked(); len(got) != 0 {
+		t.Errorf("revoked %v with an app that did not mint it", got)
+	}
+}
+
+// TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt: a grant
+// minted by the deployment app stays usable after the org registers its own
+// app, and connecting again through the org's app revokes it with the
+// deployment app, the only one Linear accepts the revoke from.
+func TestLinearConnect_ReplacedGrantRevokedWithTheAppThatMintedIt(t *testing.T) {
+	r := newLinearConnectRig(t)
+	if rec := doJSON(t, r.s, http.MethodDelete, linearAppPath(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("delete app: %d: %s", rec.Code, rec.Body.String())
+	}
+	r.useDeploymentApp(linear.OAuthApp{ClientID: "lin-deploy", ClientSecret: "dep-secret"})
+	r.clientID = "lin-deploy"
+	r.connect(t)
+	if cred := r.userCredential(t); cred.ClientID != "lin-deploy" {
+		t.Fatalf("credential minted by %q, want lin-deploy", cred.ClientID)
+	}
+
+	r.registerApp(t, "lin-client-1")
+	if st := r.status(t); !st.Connected {
+		t.Error("a grant the org can still refresh reads as not connected after it registered its own app")
+	}
+	if _, err := r.s.linearResolver.ForUser(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
+		t.Errorf("ForUser on the deployment app's grant: %v", err)
+	}
+	stored := r.userCredential(t).RefreshToken
+
+	r.clientID = "lin-client-1"
+	r.connect(t)
+	if got := r.oauth.Revoked(); !slices.Equal(got, []string{stored}) {
+		t.Errorf("revoked %v, want the replaced grant's refresh token %q", got, stored)
+	}
+	if got := r.oauth.RevokedBy(); !slices.Equal(got, []string{"lin-deploy"}) {
+		t.Errorf("revoked with %v, want the deployment app that minted it", got)
+	}
+}
+
+// TestLinearConnect_CallbackMintsOnlyUnderTheUserLock: the code exchange
+// waits for the user's credential lock, so no revoke of another of the
+// user's grants can land between this grant's exchange and its store.
+func TestLinearConnect_CallbackMintsOnlyUnderTheUserLock(t *testing.T) {
+	r := newLinearConnectRig(t)
+	cookie, state := r.startConnect(t, "")
+	release, err := r.s.linearUserCredentialLock.Lock(t.Context(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID)
+	if err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if got := r.oauth.Grants(); len(got) != 0 {
+		t.Fatalf("the callback exchanged a code (%v) while the user's lock was held", got)
+	}
+	release()
+	select {
+	case rec := <-done:
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/" {
+			t.Fatalf("callback = %d to %q, want 302 home", rec.Code, rec.Header().Get("Location"))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the callback did not finish after the lock was released")
+	}
+}
+
+// TestLinearIdentity_RevokesUnderTheUserLock: a disconnect's revoke and a
+// replaced grant's revoke both run while the user's lock is held, so no
+// Connect can exchange or store until the revoke is done.
+func TestLinearIdentity_RevokesUnderTheUserLock(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		act  func(r *linearConnectRig) *httptest.ResponseRecorder
+	}{
+		{"disconnect", func(r *linearConnectRig) *httptest.ResponseRecorder {
+			return doJSON(t, r.s, http.MethodDelete, linearIdentityPath(), nil)
+		}},
+		{"key replacing a grant", func(r *linearConnectRig) *httptest.ResponseRecorder {
+			return r.pasteKey(t, linearUserKey)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newLinearConnectRig(t)
+			r.connect(t)
+			var heldDuringRevoke []bool
+			r.oauth.mu.Lock()
+			r.oauth.onRevoke = func() { heldDuringRevoke = append(heldDuringRevoke, r.lockHeldElsewhere(t)) }
+			r.oauth.mu.Unlock()
+			if rec := tc.act(r); rec.Code != http.StatusOK {
+				t.Fatalf("%s: %d: %s", tc.name, rec.Code, rec.Body.String())
+			}
+			if !slices.Equal(heldDuringRevoke, []bool{true}) {
+				t.Errorf("lock held during each revoke = %v, want one revoke under the lock", heldDuringRevoke)
+			}
+		})
 	}
 }
 
@@ -622,7 +759,7 @@ func TestLinearIdentity_MultiMode(t *testing.T) {
 	s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(oauth.URL+"/token", oauth.URL+"/revoke")
 	stores := pgstore.New(rig.h.AdminDB, rig.h.AppDB, pgtest.SecretKey)
 	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs, nil,
-		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Users, s.linearUserCredentialLock))
+		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Tx, s.linearUserCredentialLock))
 
 	alice := rig.seedUser()
 	orgA, _ := rig.seedOrg(alice, "alice-org")

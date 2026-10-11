@@ -66,6 +66,22 @@ func (f *fakeUserSecrets) DeleteUserSystemIfValue(ctx context.Context, orgID, us
 	return true, nil
 }
 
+func (f *fakeUserSecrets) GetUser(ctx context.Context, orgID, userID, key string) (string, error) {
+	return f.GetUserSystem(ctx, orgID, userID, key)
+}
+
+func (f *fakeUserSecrets) DeleteUser(ctx context.Context, orgID, userID, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	k := userBagKey(orgID, userID, key)
+	_, ok := f.bag[k]
+	delete(f.bag, k)
+	return ok, nil
+}
+
 func (f *fakeUserSecrets) set(value string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -91,16 +107,38 @@ func (f *fakeUserSecrets) stored(t *testing.T) (linear.UserCredential, bool) {
 	return cred, true
 }
 
+// fakeIdentities records ClearLinearIdentity calls, failing them while err
+// is set.
 type fakeIdentities struct {
+	db.UsersStore
 	mu      sync.Mutex
 	cleared []string
+	err     error
 }
 
-func (f *fakeIdentities) ClearLinearIdentitySystem(_ context.Context, userID, workspaceID string) error {
+func (f *fakeIdentities) ClearLinearIdentity(_ context.Context, userID, workspaceID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
 	f.cleared = append(f.cleared, userID+":"+workspaceID)
 	return nil
+}
+
+// fakeTx runs a synthetic-claims transaction over the fake stores, recording
+// whom it ran as. It does not roll back, so a body's write order is what a
+// failure leaves behind.
+type fakeTx struct {
+	db.TxRunner
+	secrets *fakeUserSecrets
+	ids     *fakeIdentities
+	as      []string
+}
+
+func (f *fakeTx) SyntheticClaimsWithTx(_ context.Context, orgID, userID string, fn func(db.TxStores) error) error {
+	f.as = append(f.as, orgID+":"+userID)
+	return fn(db.TxStores{Secrets: f.secrets, Users: f.ids})
 }
 
 func connectEnvelope(t *testing.T, refreshToken, grantID, clientID string) string {
@@ -131,7 +169,7 @@ func newUserRig(t *testing.T) *userRig {
 }
 
 func (r *userRig) cache() *UserTokenCache {
-	c := newUserTokenCache(r.ref, r.apps, r.secrets, r.ids, NewUserCredentialLock(nil))
+	c := newUserTokenCache(r.ref, r.apps, r.secrets, &fakeTx{secrets: r.secrets, ids: r.ids}, NewUserCredentialLock(nil))
 	c.now = func() time.Time { return r.clock }
 	return c
 }
@@ -261,6 +299,36 @@ func TestUserTokenCache_RefusedGrantRemovesCredentialAndIdentity(t *testing.T) {
 	}
 }
 
+// TestUserTokenCache_RefusalRemovalIsAllOrNothing: a refused credential whose
+// identity cannot be cleared keeps its envelope too, so the two never
+// disagree, and the next read removes both.
+func TestUserTokenCache_RefusalRemovalIsAllOrNothing(t *testing.T) {
+	r := newUserRig(t)
+	r.ref.refuse = map[string]bool{"ref-0": true}
+	r.ids.err = errors.New("identities down")
+	c := r.cache()
+
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); !ok {
+		t.Fatal("the envelope was removed while its identity stayed")
+	}
+
+	r.ids.mu.Lock()
+	r.ids.err = nil
+	r.ids.mu.Unlock()
+	if _, err := r.token(t, c); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+		t.Fatalf("second err = %v, want ErrNoLinearUserCredential", err)
+	}
+	if _, ok := r.secrets.stored(t); ok {
+		t.Error("the envelope is still stored after the second refusal")
+	}
+	if len(r.ids.cleared) != 1 {
+		t.Errorf("identities cleared = %v, want one", r.ids.cleared)
+	}
+}
+
 func TestUserTokenCache_RefusalOfARotatedTokenRetriesTheStoredOne(t *testing.T) {
 	r := newUserRig(t)
 	r.ref.refuse = map[string]bool{"ref-0": true}
@@ -318,6 +386,39 @@ type noApp struct{}
 
 func (noApp) Resolve(context.Context, string) (linear.OAuthApp, linear.OAuthAppSource, error) {
 	return linear.OAuthApp{}, linear.SourceNone, linear.ErrNoLinearOAuthApp
+}
+
+func (noApp) ResolveClient(context.Context, string, string) (linear.OAuthApp, error) {
+	return linear.OAuthApp{}, linear.ErrNoLinearOAuthApp
+}
+
+// mintingAppStillKnown resolves a different app now, but still knows the one
+// that minted the stored token, the way the deployment app stays known after
+// an org registers its own.
+type mintingAppStillKnown struct{}
+
+func (mintingAppStillKnown) Resolve(context.Context, string) (linear.OAuthApp, linear.OAuthAppSource, error) {
+	return linear.OAuthApp{ClientID: "client-2", ClientSecret: "s2"}, linear.SourceOrgOverride, nil
+}
+
+func (mintingAppStillKnown) ResolveClient(_ context.Context, _ string, clientID string) (linear.OAuthApp, error) {
+	switch clientID {
+	case "client-1", "client-2":
+		return linear.OAuthApp{ClientID: clientID, ClientSecret: "s"}, nil
+	}
+	return linear.OAuthApp{}, linear.ErrNoLinearOAuthApp
+}
+
+func TestUserTokenCache_RefreshesWithTheMintingApp(t *testing.T) {
+	r := newUserRig(t)
+	r.apps = mintingAppStillKnown{}
+	tok, err := r.token(t, r.cache())
+	if err != nil || tok != "acc-1" {
+		t.Fatalf("token = %q, %v; want acc-1 refreshed with the app that minted it", tok, err)
+	}
+	if cred, _ := r.secrets.stored(t); cred.ClientID != "client-1" {
+		t.Errorf("stored client = %q after the refresh, want the minting app kept", cred.ClientID)
+	}
 }
 
 func TestUserTokenCache_NoAppIsNoCredential(t *testing.T) {

@@ -382,10 +382,6 @@ func (s *usersStore) ClearLinearIdentity(ctx context.Context, userID, workspaceI
 	return nil
 }
 
-func (s *usersStore) ClearLinearIdentitySystem(ctx context.Context, userID, workspaceID string) error {
-	return s.ClearLinearIdentity(ctx, userID, workspaceID)
-}
-
 func (s *usersStore) GetLastActingTeam(ctx context.Context, userID string) (string, error) {
 	var teamID sql.NullString
 	err := s.q.QueryRowContext(ctx,

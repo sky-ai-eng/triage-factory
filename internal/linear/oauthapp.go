@@ -59,8 +59,17 @@ const (
 //
 // A system operation: the store reads use the ...System doors, and the orgID
 // is already authorized by the caller.
+//
+// ResolveClient is the app with clientID among those the org can still
+// authenticate as — its own app or the deployment app — whichever tier
+// Resolve would pick now. A token is accepted only with the secret of the app
+// that minted it, so a caller holding a token another app minted refreshes or
+// revokes it with this rather than with Resolve's answer. An app whose
+// secret TF no longer holds (an org app since replaced or deleted) is
+// ErrNoLinearOAuthApp.
 type OAuthAppResolver interface {
 	Resolve(ctx context.Context, orgID string) (OAuthApp, OAuthAppSource, error)
+	ResolveClient(ctx context.Context, orgID, clientID string) (OAuthApp, error)
 }
 
 type oauthAppResolver struct {
@@ -76,26 +85,47 @@ func NewOAuthAppResolver(apps db.LinearAppsStore, secrets db.SecretStore, deploy
 }
 
 func (r *oauthAppResolver) Resolve(ctx context.Context, orgID string) (OAuthApp, OAuthAppSource, error) {
-	// A failed read propagates rather than falling through: a store outage
-	// must not quietly put the org on the deployment app.
-	app, err := r.apps.GetForOrgSystem(ctx, orgID)
+	own, err := r.orgApp(ctx, orgID)
 	if err != nil {
-		return OAuthApp{}, SourceNone, fmt.Errorf("read linear oauth app for org %s: %w", orgID, err)
+		return OAuthApp{}, SourceNone, err
 	}
-	if app != nil && app.ClientID != "" {
-		secret, err := r.secrets.GetSystem(ctx, orgID, app.ClientSecretRef)
-		if err != nil {
-			return OAuthApp{}, SourceNone, fmt.Errorf("read linear oauth client secret for org %s: %w", orgID, err)
-		}
-		if secret != "" {
-			return OAuthApp{ClientID: app.ClientID, ClientSecret: secret}, SourceOrgOverride, nil
-		}
-		// A row whose secret reads empty cannot authenticate anything, so the
-		// org falls through to the deployment app rather than resolving half
-		// a credential.
+	if own.Configured() {
+		return own, SourceOrgOverride, nil
 	}
 	if r.deployment.Configured() {
 		return r.deployment, SourceDeployment, nil
 	}
 	return OAuthApp{}, SourceNone, fmt.Errorf("%w: org=%s", ErrNoLinearOAuthApp, orgID)
+}
+
+func (r *oauthAppResolver) ResolveClient(ctx context.Context, orgID, clientID string) (OAuthApp, error) {
+	own, err := r.orgApp(ctx, orgID)
+	if err != nil {
+		return OAuthApp{}, err
+	}
+	for _, app := range []OAuthApp{own, r.deployment} {
+		if app.Configured() && clientID != "" && app.ClientID == clientID {
+			return app, nil
+		}
+	}
+	return OAuthApp{}, fmt.Errorf("%w: org=%s client_id=%s", ErrNoLinearOAuthApp, orgID, clientID)
+}
+
+// orgApp is the org's own app, the zero app when it has none. A failed read
+// propagates rather than falling through: a store outage must not quietly
+// put the org on the deployment app. A row whose secret reads empty cannot
+// authenticate anything, so it reads as no app rather than half a credential.
+func (r *oauthAppResolver) orgApp(ctx context.Context, orgID string) (OAuthApp, error) {
+	app, err := r.apps.GetForOrgSystem(ctx, orgID)
+	if err != nil {
+		return OAuthApp{}, fmt.Errorf("read linear oauth app for org %s: %w", orgID, err)
+	}
+	if app == nil || app.ClientID == "" {
+		return OAuthApp{}, nil
+	}
+	secret, err := r.secrets.GetSystem(ctx, orgID, app.ClientSecretRef)
+	if err != nil {
+		return OAuthApp{}, fmt.Errorf("read linear oauth client secret for org %s: %w", orgID, err)
+	}
+	return OAuthApp{ClientID: app.ClientID, ClientSecret: secret}, nil
 }

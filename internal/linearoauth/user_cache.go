@@ -19,11 +19,6 @@ import (
 // cached.
 var errGrantReplaced = errors.New("linearoauth: user credential replaced during refresh")
 
-// linearIdentityClearer is the slice of db.UsersStore the cache uses.
-type linearIdentityClearer interface {
-	ClearLinearIdentitySystem(ctx context.Context, userID, workspaceID string) error
-}
-
 // UserTokenCache mints and caches the access token of a user's Connect
 // credential, and writes each rotated refresh token back to the user's
 // envelope. It implements linear.UserTokenSource. Access tokens live only
@@ -42,12 +37,13 @@ type linearIdentityClearer interface {
 // never resurrects a disconnected credential or overwrites a newer one. A
 // refresh token Linear refuses with invalid_grant means the user revoked TF's
 // access in Linear: the envelope and the identity row derived from it are
-// removed together under the same lock, and the user has to connect again.
+// removed in one transaction under the same lock, and the user has to
+// connect again.
 type UserTokenCache struct {
 	minter  refresher
 	apps    linear.OAuthAppResolver
 	secrets db.SecretStore
-	users   linearIdentityClearer
+	tx      db.TxRunner
 	lock    *UserCredentialLock
 
 	// now is injectable for tests; nil is time.Now.
@@ -66,19 +62,19 @@ type cachedUserToken struct {
 }
 
 // NewUserTokenCache builds a UserTokenCache over a minter, the org's OAuth-app
-// resolver, the secret store (the envelope), the users store (clearing a
-// refused credential's identity) and the lock the user's other credential
-// writers hold.
-func NewUserTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, users db.UsersStore, lock *UserCredentialLock) *UserTokenCache {
-	return newUserTokenCache(minter, apps, secrets, users, lock)
+// resolver, the secret store (the envelope), the transaction runner that
+// removes a refused credential with its identity, and the lock the user's
+// other credential writers hold.
+func NewUserTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, tx db.TxRunner, lock *UserCredentialLock) *UserTokenCache {
+	return newUserTokenCache(minter, apps, secrets, tx, lock)
 }
 
-func newUserTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, users linearIdentityClearer, lock *UserCredentialLock) *UserTokenCache {
+func newUserTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, tx db.TxRunner, lock *UserCredentialLock) *UserTokenCache {
 	return &UserTokenCache{
 		minter:  minter,
 		apps:    apps,
 		secrets: secrets,
-		users:   users,
+		tx:      tx,
 		lock:    lock,
 		cache:   make(map[string]cachedUserToken),
 	}
@@ -98,8 +94,9 @@ func userCacheKey(orgID, userID, workspaceID string) string {
 // AccessTokenForUser returns a live access token for the user's Connect
 // credential in workspaceID, refreshing when the cache holds none for the
 // stored grant or the one it holds has less than a minute left. A user with
-// no Connect credential, one minted by an app that no longer resolves for the
-// org, or one Linear has refused is linear.ErrNoLinearUserCredential.
+// no Connect credential, one minted by an app the org can no longer
+// authenticate as, or one Linear has refused is
+// linear.ErrNoLinearUserCredential.
 func (c *UserTokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error) {
 	key := userCacheKey(orgID, userID, workspaceID)
 	cred, _, err := c.readEnvelope(ctx, orgID, userID, workspaceID)
@@ -201,20 +198,16 @@ func (c *UserTokenCache) refreshOnce(ctx context.Context, orgID, userID, workspa
 	if err != nil {
 		return cachedUserToken{}, raw, err
 	}
-	app, _, err := c.apps.Resolve(ctx, orgID)
+	// The refresh token is accepted only with the secret of the app that
+	// minted it, which need not be the app the org resolves to now.
+	app, err := c.apps.ResolveClient(ctx, orgID, cred.ClientID)
 	if errors.Is(err, linear.ErrNoLinearOAuthApp) {
-		// The refresh token is accepted only with the secret of the app that
-		// minted it. It stays stored: the app may come back, and connecting
-		// again or pasting a key replaces it either way.
-		return cachedUserToken{}, raw, fmt.Errorf("%w: org=%s user=%s (no Linear OAuth app resolves for the org; connect again or paste a key)",
-			linear.ErrNoLinearUserCredential, orgID, userID)
+		// It stays stored: connecting again or pasting a key replaces it.
+		return cachedUserToken{}, raw, fmt.Errorf("%w: org=%s user=%s (connected through OAuth app %s, which the org can no longer authenticate as; connect again or paste a key)",
+			linear.ErrNoLinearUserCredential, orgID, userID, cred.ClientID)
 	}
 	if err != nil {
-		return cachedUserToken{}, raw, fmt.Errorf("linearoauth: resolve oauth app for org %s: %w", orgID, err)
-	}
-	if app.ClientID != cred.ClientID {
-		return cachedUserToken{}, raw, fmt.Errorf("%w: org=%s user=%s (connected through OAuth app %s, but app %s resolves now; connect again)",
-			linear.ErrNoLinearUserCredential, orgID, userID, cred.ClientID, app.ClientID)
+		return cachedUserToken{}, raw, fmt.Errorf("linearoauth: resolve oauth app %s for org %s: %w", cred.ClientID, orgID, err)
 	}
 
 	tok, err := c.minter.Refresh(ctx, app, cred.RefreshToken)
@@ -264,33 +257,53 @@ func (c *UserTokenCache) refreshOnce(ctx context.Context, orgID, userID, workspa
 }
 
 // dropRefused answers Linear refusing the user's refresh token, refused,
-// which every error it returns wraps. It holds the user's credential lock from
-// the check that the stored envelope is still the refused one through the
-// removal of both the envelope and the identity row derived from it, so a
-// Connect landing meanwhile is neither deleted nor stripped of its identity.
+// which every error it returns wraps. Under the user's credential lock, and
+// only while the stored envelope is still the refused one, it removes the
+// envelope and the identity row derived from it in one transaction as that
+// user, so neither outlives the other: a failure leaves both, and the next
+// read is refused and removes them again. The identity row goes first and the
+// envelope last, because in local mode the keychain delete happens outside the
+// SQLite transaction and only the commit can fail after it.
 func (c *UserTokenCache) dropRefused(ctx context.Context, orgID, userID, workspaceID, raw string, refused error) error {
 	release, err := c.lock.Lock(ctx, orgID, userID)
 	if err != nil {
 		return fmt.Errorf("linearoauth: lock org %s user %s's linear credential: %w: %w", orgID, userID, err, refused)
 	}
 	defer release()
-	deleted, err := c.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, linear.UserTokenKey(workspaceID), raw)
+	key := linear.UserTokenKey(workspaceID)
+	moved := false
+	err = c.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		// Every writer of the envelope holds the lock, so it cannot change
+		// between this read and the delete.
+		current, err := tx.Secrets.GetUser(ctx, orgID, userID, key)
+		if err != nil {
+			return fmt.Errorf("read user credential: %w", err)
+		}
+		if current != raw {
+			moved = true
+			return nil
+		}
+		if err := tx.Users.ClearLinearIdentity(ctx, userID, workspaceID); err != nil {
+			return fmt.Errorf("clear linear identity: %w", err)
+		}
+		if _, err := tx.Secrets.DeleteUser(ctx, orgID, userID, key); err != nil {
+			return fmt.Errorf("delete user credential: %w", err)
+		}
+		return nil
+	})
 	switch {
 	case err != nil:
-		// Still dead, and connecting again replaces it, so the caller gets
-		// the same answer; only the connection status is behind.
+		// Still dead, so the caller gets the same answer; the envelope and
+		// the identity both stay until the next read removes them.
 		cacheLog.Warn("linear refused a user's refresh token and removing it failed",
 			"org", orgID, "user", userID, "workspace", workspaceID, "error", err)
 		return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrNoLinearUserCredential, orgID, userID, refused)
-	case !deleted:
+	case moved:
 		return fmt.Errorf("%w: %w", errEnvelopeMoved, refused)
 	}
 	c.mu.Lock()
 	delete(c.cache, userCacheKey(orgID, userID, workspaceID))
 	c.mu.Unlock()
-	if err := c.users.ClearLinearIdentitySystem(ctx, userID, workspaceID); err != nil {
-		cacheLog.Warn("removing a refused credential's linear identity failed", "org", orgID, "user", userID, "workspace", workspaceID, "error", err)
-	}
 	cacheLog.Warn("linear refused a user's refresh token: they revoked Triage Factory's access in Linear; removed the credential, so they have to connect again",
 		"org", orgID, "user", userID, "workspace", workspaceID)
 	return fmt.Errorf("%w: org=%s user=%s (refused by linear): %w", linear.ErrNoLinearUserCredential, orgID, userID, refused)

@@ -134,3 +134,48 @@ func TestDeploymentOAuthAppFromEnv_NoneYet(t *testing.T) {
 		t.Errorf("DeploymentOAuthAppFromEnv = %+v, want the zero app", app)
 	}
 }
+
+// TestResolveClient: a token another app minted is answered with that app
+// while the org can still authenticate as it — its own app or the deployment
+// app, whichever Resolve would pick now — and with ErrNoLinearOAuthApp once
+// its secret is gone.
+func TestResolveClient(t *testing.T) {
+	deployment := OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"}
+	withOrgApp := NewOAuthAppResolver(
+		&fakeLinearApps{app: &domain.OrgLinearApp{ClientID: "org-client", ClientSecretRef: linearSecretRef}},
+		&fakeSecrets{sys: map[string]string{linearSecretRef: "org-secret"}},
+		deployment)
+	for _, tc := range []struct {
+		clientID string
+		want     OAuthApp
+	}{
+		{"org-client", OAuthApp{ClientID: "org-client", ClientSecret: "org-secret"}},
+		// The deployment app still authenticates the tokens it minted after
+		// the org registered its own.
+		{"dep-client", deployment},
+	} {
+		got, err := withOrgApp.ResolveClient(context.Background(), testOrgID, tc.clientID)
+		if err != nil || got != tc.want {
+			t.Errorf("ResolveClient(%s) = (%+v, %v), want %+v", tc.clientID, got, err, tc.want)
+		}
+	}
+	for _, clientID := range []string{"replaced-client", ""} {
+		if _, err := withOrgApp.ResolveClient(context.Background(), testOrgID, clientID); !errors.Is(err, ErrNoLinearOAuthApp) {
+			t.Errorf("ResolveClient(%q) err = %v, want ErrNoLinearOAuthApp", clientID, err)
+		}
+	}
+
+	// A row whose secret is gone authenticates nothing.
+	noSecret := NewOAuthAppResolver(
+		&fakeLinearApps{app: &domain.OrgLinearApp{ClientID: "org-client", ClientSecretRef: linearSecretRef}},
+		&fakeSecrets{}, OAuthApp{})
+	if _, err := noSecret.ResolveClient(context.Background(), testOrgID, "org-client"); !errors.Is(err, ErrNoLinearOAuthApp) {
+		t.Errorf("ResolveClient with the secret gone err = %v, want ErrNoLinearOAuthApp", err)
+	}
+
+	sentinel := errors.New("store down")
+	broken := NewOAuthAppResolver(&fakeLinearApps{err: sentinel}, &fakeSecrets{}, deployment)
+	if _, err := broken.ResolveClient(context.Background(), testOrgID, "dep-client"); !errors.Is(err, sentinel) {
+		t.Errorf("ResolveClient over a failed read err = %v, want the read error", err)
+	}
+}

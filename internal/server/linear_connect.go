@@ -42,14 +42,20 @@ import (
 //
 // Every writer of a user's credential holds that user's
 // linearoauth.UserCredentialLock across the write, so the envelope and the
-// identity row derived from it always come from the same bind.
+// identity row derived from it always come from the same bind. The lock also
+// spans every grant this file mints or revokes: Connect takes it before the
+// code exchange, and each revoke runs before its caller releases it. Linear
+// has not been shown to keep two grants of one app and one person apart, so a
+// revoke must never land between another Connect's exchange and its store.
 //
 // A Connect that does not complete writes nothing and redirects to the gate
 // page with error set to one of:
 //
 //	state              the cookie is missing, expired, forged, or not this caller's
-//	denied             the user declined consent in Linear
-//	connect_failed     the code exchange or the identity check failed
+//	denied             Linear answered access_denied: the user declined consent,
+//	                   or their workspace refused the app
+//	connect_failed     any other OAuth error, or the code exchange or the
+//	                   identity check failed
 //	no_app             no Linear OAuth app resolves for the org
 //	not_configured     the org has no Linear workspace
 //	workspace_mismatch the Linear account authorized is in a different workspace
@@ -143,8 +149,10 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	app, appErr := s.resolveLinearApp(ctx, orgID)
-	resp := linearIdentityStatusResponse{WorkspaceURLKey: urlKey, ConnectAvailable: appErr == nil}
+	resp := linearIdentityStatusResponse{
+		WorkspaceURLKey:  urlKey,
+		ConnectAvailable: s.resolveLinearAppSource(ctx, orgID) != linear.SourceNone,
+	}
 	if raw != "" {
 		cred, err := linear.ParseUserCredential(raw)
 		switch {
@@ -155,32 +163,26 @@ func (s *Server) handleLinearIdentityStatus(w http.ResponseWriter, r *http.Reque
 		case !cred.Usable():
 		case cred.Method == linear.AuthMethodAPIKey:
 			resp.Connected = true
-		case errors.Is(appErr, linear.ErrNoLinearOAuthApp):
-			// A Connect refresh token is accepted only with the secret of
-			// the app that minted it; with no app it is dead to TF.
-		case appErr != nil:
-			// Whether the Connect credential still works is unknown, so the
-			// read fails rather than send a connected user to the gate.
-			internalError(w, "linear-identity", appErr)
-			return
 		default:
-			resp.Connected = app.ClientID == cred.ClientID
+			// A Connect refresh token is accepted only with the secret of
+			// the app that minted it: usable while the org can still
+			// authenticate as that app, dead to TF once it cannot.
+			_, err := s.linearOAuthApps.ResolveClient(ctx, orgID, cred.ClientID)
+			switch {
+			case err == nil:
+				resp.Connected = true
+			case !errors.Is(err, linear.ErrNoLinearOAuthApp):
+				// Whether the credential still works is unknown, so the read
+				// fails rather than send a connected user to the gate.
+				internalError(w, "linear-identity", err)
+				return
+			}
 		}
 	}
 	if resp.Connected {
 		resp.Account = account
 	}
 	writeJSON(w, http.StatusOK, resp)
-}
-
-// resolveLinearApp resolves the org's Linear OAuth app, logging a failure
-// other than there being none.
-func (s *Server) resolveLinearApp(ctx context.Context, orgID string) (linear.OAuthApp, error) {
-	app, _, err := s.linearOAuthApps.Resolve(ctx, orgID)
-	if err != nil && !errors.Is(err, linear.ErrNoLinearOAuthApp) {
-		linearConnectLog.Warn("resolve oauth app failed", "org", orgID, "error", err)
-	}
-	return app, err
 }
 
 // handleLinearIdentityAPIKey binds the caller's Linear access from a personal
@@ -232,11 +234,18 @@ func (s *Server) handleLinearIdentityAPIKey(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
+	if err != nil {
+		internalError(w, "linear-identity", err)
+		return
+	}
+	defer release()
 	cred := linear.UserCredential{Method: linear.AuthMethodAPIKey, Token: key}
 	if err := s.storeLinearUserCredential(ctx, orgID, userID, orgSet.LinearWorkspaceID, orgSet.LinearWorkspaceURLKey, cred, viewer); err != nil {
 		internalError(w, "linear-identity", err)
 		return
 	}
+	release()
 	linearConnectLog.Info("bound user, api key stored", "org", orgID, "user", userID, "linear_user", viewer.ID, "workspace", org.URLKey)
 	writeJSON(w, http.StatusOK, linearIdentityCaptureResponse{
 		Account:         linearAccountName(viewer.DisplayName, viewer.Name, viewer.ID),
@@ -312,11 +321,13 @@ func (s *Server) handleLinearIdentityDelete(w http.ResponseWriter, r *http.Reque
 		internalError(w, "linear-identity", err)
 		return
 	}
-	release()
 	if raw != "" {
+		// Under the lock, so no Connect exchanges or stores between the
+		// delete and the revoke.
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 		linearConnectLog.Info("unbound user", "org", orgID, "user", userID, "workspace", orgSet.LinearWorkspaceURLKey)
 	}
+	release()
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
@@ -442,7 +453,14 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 
 	if oErr := r.URL.Query().Get("error"); oErr != "" {
 		linearConnectLog.Warn("linear oauth error", "linear_error", oErr, "org", orgID)
-		redirectLinearConnect(w, r, orgID, returnTo, "denied")
+		// Only access_denied is the user's or their workspace's refusal;
+		// server_error, temporarily_unavailable and the rest are a failure
+		// to connect, and say nothing about consent.
+		code := "connect_failed"
+		if oErr == "access_denied" {
+			code = "denied"
+		}
+		redirectLinearConnect(w, r, orgID, returnTo, code)
 		return
 	}
 	code := r.URL.Query().Get("code")
@@ -469,6 +487,15 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 		internalError(w, "linear-connect", err)
 		return
 	}
+
+	// Held from before the exchange mints this grant until it is stored, so
+	// no revoke of another of the user's grants lands in between.
+	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
+	if err != nil {
+		internalError(w, "linear-connect", err)
+		return
+	}
+	defer release()
 
 	tok, err := s.linearOAuthMinter.ExchangeCode(ctx, app, code, s.linearCallbackURL(linearConnectCallbackPath))
 	if err != nil {
@@ -526,9 +553,10 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 }
 
 // storeLinearUserCredential writes a validated credential and the identity it
-// validated as, with the access-log row, under the user's credential lock. A
-// Connect grant the new credential replaces is revoked in Linear afterwards,
-// unless the new one may be that same grant (see supersededLinearGrant).
+// validated as, with the access-log row. A Connect grant the new credential
+// replaces is then revoked in Linear, unless the new one may be that same
+// grant (see supersededLinearGrant). The caller holds the user's credential
+// lock across the call, so the revoke too runs under it.
 func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, workspaceID, urlKey string, cred linear.UserCredential, viewer *auth.LinearUser) error {
 	envelope, err := linear.MarshalUserCredential(cred)
 	if err != nil {
@@ -537,11 +565,6 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 	key := linear.UserTokenKey(workspaceID)
 	source := string(cred.Method)
 
-	release, err := s.linearUserCredentialLock.Lock(ctx, orgID, userID)
-	if err != nil {
-		return err
-	}
-	defer release()
 	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
 	if err != nil {
 		return err
@@ -581,7 +604,6 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 		}
 		return err
 	}
-	release()
 
 	if old := supersededLinearGrant(prior, priorLinearID, cred, viewer.ID); old != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, old)
@@ -610,9 +632,12 @@ func supersededLinearGrant(prior, priorLinearID string, next linear.UserCredenti
 }
 
 // revokeLinearUserGrant revokes a Connect envelope's refresh token in Linear,
-// with the app that minted it. Best-effort: TF has already forgotten the
-// token, so a failure leaves only a grant nothing uses, which the user ends
-// from their Linear settings. An API key is not revoked: it is the user's own,
+// with the app that minted it, which need not be the app the org resolves to
+// now. Best-effort: TF has already forgotten the token, so a failure leaves
+// only a grant nothing uses, which the user ends from their Linear settings.
+// That includes a grant minted by an app whose secret TF no longer holds (an
+// org app since replaced or deleted): Linear accepts a revoke only from the
+// app that minted the token. An API key is not revoked: it is the user's own,
 // and they may use it elsewhere.
 func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw string) {
 	ctx = context.WithoutCancel(ctx)
@@ -620,9 +645,9 @@ func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw s
 	if err != nil || cred.Method != linear.AuthMethodConnectOAuth || cred.RefreshToken == "" {
 		return
 	}
-	app, _, err := s.linearOAuthApps.Resolve(ctx, orgID)
-	if err != nil || app.ClientID != cred.ClientID {
-		linearConnectLog.Warn("the app that minted the user's grant no longer resolves; it stays until they remove it in Linear",
+	app, err := s.linearOAuthApps.ResolveClient(ctx, orgID, cred.ClientID)
+	if err != nil {
+		linearConnectLog.Warn("the org can no longer authenticate as the app that minted the user's grant; it stays until they remove it in Linear",
 			"org", orgID, "user", userID, "client_id", cred.ClientID, "error", err)
 		return
 	}
@@ -633,10 +658,12 @@ func (s *Server) revokeLinearUserGrant(ctx context.Context, orgID, userID, raw s
 
 // sweepLinearUserCredential removes a user's Linear credential and identity
 // for the org's workspace when they leave the org, and revokes a Connect
-// grant. It runs on the system doors: the caller is the admin removing them,
-// or the user leaving, after the membership is already gone. Best-effort, like
-// the rest of the removal's deprovisioning; a failure is returned for the
-// caller to log.
+// grant. The removal runs after the membership is gone, as the departing user
+// (SyntheticClaimsWithTx): the rows are theirs, and the caller is the admin
+// removing them or the user leaving. The envelope and the identity go in one
+// transaction, so neither outlives the other, and the revoke runs before the
+// lock is released. Best-effort, like the rest of the removal's
+// deprovisioning; a failure is returned for the caller to log.
 func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID string) error {
 	orgSet, err := s.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {
@@ -653,19 +680,25 @@ func (s *Server) sweepLinearUserCredential(ctx context.Context, orgID, userID st
 		return err
 	}
 	defer release()
-	raw, err := s.secrets.GetUserSystem(ctx, orgID, userID, key)
-	if err != nil {
-		return fmt.Errorf("read linear credential: %w", err)
-	}
-	if raw != "" {
-		if _, err := s.secrets.DeleteUserSystemIfValue(ctx, orgID, userID, key, raw); err != nil {
+	var raw string
+	if err := s.tx.SyntheticClaimsWithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var err error
+		if raw, err = tx.Secrets.GetUser(ctx, orgID, userID, key); err != nil {
+			return fmt.Errorf("read linear credential: %w", err)
+		}
+		if err := tx.Users.ClearLinearIdentity(ctx, userID, workspaceID); err != nil {
+			return fmt.Errorf("clear linear identity: %w", err)
+		}
+		if raw == "" {
+			return nil
+		}
+		if _, err := tx.Secrets.DeleteUser(ctx, orgID, userID, key); err != nil {
 			return fmt.Errorf("delete linear credential: %w", err)
 		}
+		return nil
+	}); err != nil {
+		return err
 	}
-	if err := s.users.ClearLinearIdentitySystem(ctx, userID, workspaceID); err != nil {
-		return fmt.Errorf("clear linear identity: %w", err)
-	}
-	release()
 	if raw != "" {
 		s.revokeLinearUserGrant(ctx, orgID, userID, raw)
 	}

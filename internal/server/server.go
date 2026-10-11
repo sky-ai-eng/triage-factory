@@ -612,7 +612,7 @@ func New(database *sql.DB, stores db.Stores) *Server {
 	s.linearUserCredentialLock = linearoauth.NewUserCredentialLock(database)
 	s.linearResolver = linear.NewResolverWithOAuth(stores.Secrets, stores.Orgs,
 		linearoauth.NewTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.LinearInstalls, s.linearCredentialLock),
-		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Users, s.linearUserCredentialLock))
+		linearoauth.NewUserTokenCache(s.linearOAuthMinter, s.linearOAuthApps, stores.Secrets, stores.Tx, s.linearUserCredentialLock))
 	s.validateLinear = auth.ValidateLinear
 	s.onInstallationTokensInvalid = func(orgID, installationID string) {
 		s.ghTokenCache.Invalidate(orgID, installationID)

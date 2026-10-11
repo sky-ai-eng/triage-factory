@@ -33,14 +33,17 @@ import (
 type linearOAuthFake struct {
 	URL string
 
-	mu      sync.Mutex
-	revoked []string
-	refuse  map[string]bool
-	grants  []string
-	codes   int
+	mu        sync.Mutex
+	revoked   []string
+	revokedBy []string
+	refuse    map[string]bool
+	grants    []string
+	codes     int
 	// onExchange runs before a code exchange is answered, outside the fake's
 	// lock: a test's way to change something while a ceremony is mid-flight.
 	onExchange func()
+	// onRevoke is onExchange for a revoke.
+	onRevoke func()
 }
 
 func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
@@ -49,10 +52,13 @@ func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		f.mu.Lock()
-		hook := f.onExchange
+		hook, revokeHook := f.onExchange, f.onRevoke
 		f.mu.Unlock()
 		if hook != nil && r.URL.Path == "/token" && r.PostForm.Get("grant_type") == "authorization_code" {
 			hook()
+		}
+		if revokeHook != nil && r.URL.Path == "/revoke" {
+			revokeHook()
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -60,6 +66,7 @@ func newLinearOAuthFake(t *testing.T) *linearOAuthFake {
 		switch r.URL.Path {
 		case "/revoke":
 			f.revoked = append(f.revoked, r.PostForm.Get("token"))
+			f.revokedBy = append(f.revokedBy, r.PostForm.Get("client_id"))
 			w.WriteHeader(http.StatusOK)
 		case "/token":
 			grant := r.PostForm.Get("grant_type")
@@ -91,6 +98,13 @@ func (f *linearOAuthFake) Revoked() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.revoked...)
+}
+
+// RevokedBy is the client id each revoke authenticated with, in order.
+func (f *linearOAuthFake) RevokedBy() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.revokedBy...)
 }
 
 func (f *linearOAuthFake) Grants() []string {

@@ -393,15 +393,7 @@ func (s *usersStore) UpsertLinearIdentity(ctx context.Context, userID, workspace
 }
 
 func (s *usersStore) ClearLinearIdentity(ctx context.Context, userID, workspaceID string) error {
-	return clearLinearIdentity(ctx, s.q, userID, workspaceID)
-}
-
-func (s *usersStore) ClearLinearIdentitySystem(ctx context.Context, userID, workspaceID string) error {
-	return clearLinearIdentity(ctx, s.admin, userID, workspaceID)
-}
-
-func clearLinearIdentity(ctx context.Context, q queryer, userID, workspaceID string) error {
-	if _, err := q.ExecContext(ctx,
+	if _, err := s.q.ExecContext(ctx,
 		`DELETE FROM user_linear_identities WHERE user_id = $1 AND workspace_id = $2`,
 		userID, workspaceID,
 	); err != nil {
