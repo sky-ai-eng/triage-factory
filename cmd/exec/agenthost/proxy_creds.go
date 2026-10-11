@@ -6,15 +6,18 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
-// errGitHubNotConfigured / errJiraNotConfigured mirror the resolver-path
-// messages (mapGithubResolveErr, jiraSystemClient's ErrNoJiraSystemCredential
-// mapping) so an agent sees the identical guidance whether the daemon resolved
+// errGitHubNotConfigured / errJiraNotConfigured / errLinearNotConfigured
+// mirror the resolver-path messages (mapGithubResolveErr, and the
+// ErrNo*SystemCredential mappings in jiraSystemClient and linearSystemClient)
+// so an agent sees the identical guidance whether the daemon resolved
 // credentials through the run's sidecar proxies or the live secret store.
 var (
 	errGitHubNotConfigured = errors.New("GitHub not configured; run triagefactory and complete setup first")
 	errJiraNotConfigured   = errors.New("no Jira credential configured; run triagefactory and complete setup first")
+	errLinearNotConfigured = errors.New("no Linear credential configured; run triagefactory and complete setup first")
 )
 
 // ProxyCredentials points the executor's agenthost at the run's per-run
@@ -52,6 +55,12 @@ type ProxyCredentials struct {
 	JiraAPIURL     string
 	JiraAPIToken   string
 	JiraDeployment string
+
+	// LinearAPIURL / LinearAPIToken are the same for the Linear GraphQL proxy.
+	// Linear has one endpoint and no deployment flavors, so nothing else is
+	// relayed. Empty on a run with no Linear proxy.
+	LinearAPIURL   string
+	LinearAPIToken string
 
 	// GitProxyURL / GitProxyToken are the run's git-over-HTTPS proxy address and
 	// the per-run placeholder a host-side clone/fetch presents. `workspace add`'s
@@ -104,4 +113,15 @@ func proxyJiraClient(pc *ProxyCredentials) (*jiraclient.Client, error) {
 	}
 	cfg := jiraclient.ProxyPlaceholder(pc.JiraAPIURL, pc.JiraAPIToken, jiraclient.Deployment(pc.JiraDeployment))
 	return jiraclient.NewClient(cfg), nil
+}
+
+// proxyLinearClient builds a Linear client pointed at the sidecar's GraphQL
+// proxy. The client presents the placeholder as a Bearer; the proxy
+// authenticates it and injects the org's real credential (an API key or the
+// app user's access token) on the upstream hop.
+func proxyLinearClient(pc *ProxyCredentials) (*linearclient.Client, error) {
+	if pc == nil || pc.LinearAPIURL == "" {
+		return nil, errLinearNotConfigured
+	}
+	return linearclient.NewClient(linearclient.ProxyPlaceholder(pc.LinearAPIURL, pc.LinearAPIToken)), nil
 }

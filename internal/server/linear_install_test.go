@@ -214,6 +214,22 @@ func (r *linearInstallRig) install(t *testing.T) {
 	r.expectKick(t)
 }
 
+// ageStoredAccessToken moves the stored access token's expiry into the past,
+// which is what a day passing does: the next resolve has to refresh.
+func (r *linearInstallRig) ageStoredAccessToken(t *testing.T) {
+	t.Helper()
+	env, err := linear.ParseInstallCredential(r.secret(t, integrations.KeyLinearAppInstall))
+	if err != nil {
+		t.Fatalf("install envelope: %v", err)
+	}
+	env.AccessTokenExpiresUnix = time.Now().Add(-time.Hour).Unix()
+	raw, err := linear.MarshalInstallCredential(env)
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	r.putSecret(t, integrations.KeyLinearAppInstall, raw)
+}
+
 func (r *linearInstallRig) installRow(t *testing.T) *domain.OrgLinearInstall {
 	t.Helper()
 	inst, err := r.stores.LinearInstalls.GetForOrgSystem(t.Context(), runmode.LocalDefaultOrgID)
@@ -257,6 +273,9 @@ func TestLinearInstall_HappyPath(t *testing.T) {
 	if env.WorkspaceID != "org-acme" || env.AppUserID != "lu-ada" || env.RefreshToken != "ref-install" || env.ClientID != "lin-client-1" {
 		t.Errorf("envelope = %+v, want the workspace, app user, refresh token and client", env)
 	}
+	if env.AccessToken != "acc-install" || time.Until(time.Unix(env.AccessTokenExpiresUnix, 0)) < 23*time.Hour {
+		t.Errorf("envelope access token = (%q, %d), want the exchange's acc-install with its day of life", env.AccessToken, env.AccessTokenExpiresUnix)
+	}
 	if v := r.secret(t, integrations.KeyLinearAPIKey); v != "" {
 		t.Errorf("api key = %q, want none", v)
 	}
@@ -294,9 +313,29 @@ func TestLinearInstall_HappyPath(t *testing.T) {
 		t.Errorf("revoked %v on a clean install, want nothing", revoked)
 	}
 
-	// The install is the org's credential: ForSystem mints from it.
-	if _, err := r.s.linearResolver.ResolveSystemCredential(t.Context(), runmode.LocalDefaultOrgID); err != nil {
+	// The install is the org's credential. Its first access token serves
+	// until it expires, with no refresh; after that the resolve refreshes and
+	// rotates the stored refresh token.
+	cred, err := r.s.linearResolver.ResolveSystemCredential(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
 		t.Fatalf("resolve installed credential: %v", err)
+	}
+	if cred.AccessToken != "acc-install" {
+		t.Errorf("resolved access token = %q, want the install's own acc-install", cred.AccessToken)
+	}
+	if env, _ := linear.ParseInstallCredential(r.secret(t, integrations.KeyLinearAppInstall)); env.RefreshToken != "ref-install" {
+		t.Errorf("stored refresh token = %q, want ref-install: a fresh token needs no refresh", env.RefreshToken)
+	}
+	// Another process, with nothing cached, once the stored token has aged.
+	r.ageStoredAccessToken(t)
+	cold := linear.NewResolverWithInstall(r.stores.Secrets, r.stores.Orgs,
+		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls, r.s.linearCredentialLock))
+	cred, err = cold.ResolveSystemCredential(t.Context(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		t.Fatalf("resolve after the token aged: %v", err)
+	}
+	if cred.AccessToken != "acc-refreshed" {
+		t.Errorf("resolved access token = %q after expiry, want acc-refreshed", cred.AccessToken)
 	}
 	if env, _ := linear.ParseInstallCredential(r.secret(t, integrations.KeyLinearAppInstall)); env.RefreshToken != "ref-refreshed" {
 		t.Errorf("stored refresh token = %q after a refresh, want the rotated one", env.RefreshToken)
@@ -546,6 +585,7 @@ func TestLinearInstall_DisconnectReleasesALeftoverRow(t *testing.T) {
 func TestLinearInstall_RefreshRefusedMarksRemoved(t *testing.T) {
 	r := newLinearInstallRig(t)
 	r.install(t)
+	r.ageStoredAccessToken(t)
 	r.oauth.mu.Lock()
 	r.oauth.refuse["ref-install"] = true
 	r.oauth.mu.Unlock()

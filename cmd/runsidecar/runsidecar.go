@@ -17,6 +17,16 @@
 // `<selfBin> exec *`, so this subcommand is unreachable from inside a jail
 // even if discovered. Undocumented in --help for the same reason.
 //
+// # Linear needs no egress lane
+//
+// The agent's `tfac exec linear` verbs reach Linear without the jail ever
+// talking to api.linear.app. A verb rides the agenthost socket to the daemon
+// this process hosts, and that daemon calls the Linear GraphQL proxy this
+// process also owns, which injects the credential and forwards upstream from
+// outside the jail. The jail's egress allowlist therefore names no Linear host
+// and needs none, so nobody should add a lane for it. The Jira and GitHub REST
+// verbs reach their upstreams the same way.
+//
 // # The goroutine rule for this process
 //
 // Every goroutine spawned in this process's own packages — this one,

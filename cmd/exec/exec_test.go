@@ -39,6 +39,8 @@ func TestHandleSandboxed_NeverOpensLocalState(t *testing.T) {
 		{"gh", "--help"},
 		{"gh", "pr", "--help"},
 		{"jira", "--help"},
+		{"linear", "--help"},
+		{"linear", "issue", "view", "--help"},
 		{"workspace", "--help"},
 		{"memory", "--help"},
 	} {

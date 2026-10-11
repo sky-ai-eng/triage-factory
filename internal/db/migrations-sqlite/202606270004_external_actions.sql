@@ -1,7 +1,7 @@
 -- +goose Up
 -- external_actions (TFAC-483): the append-only audit log of record — one row per
--- external write Triage Factory performs under an ORG-scoped credential (the org
--- GitHub App / the org Jira service account). Both autonomous (bot/system) and
+-- external write Triage Factory performs under an ORG-scoped credential (the
+-- credential column names which). Both autonomous (bot/system) and
 -- human-authorized-but-org-executed (the GitHub approval flow, the board-drag
 -- draft toggle) writes land here; writes performed under an individual user's
 -- OWN credential (the Jira claim/swipe/done/requeue flows) are deliberately
@@ -13,10 +13,12 @@
 -- can't diverge from the action; the bot funnels record alongside the artifact
 -- upsert under the same pool routing. action is a free-text discriminator
 -- (domain.Action* — extensible, no CHECK). credential names the org credential
--- used (github_app | jira_org). from_state/to_state carry a transition's
--- endpoints. run_id is the producing run (the agent's, or the drafter's for an
--- approval); actor_user_id is the human authorizer/initiator (NULL for an
--- autonomous system write). detail_json carries the per-action payload.
+-- used (domain.Credential* — the GitHub App or PAT, the org's Jira or Linear
+-- service identity, the Slack bot, or none). from_state/to_state carry a
+-- transition's endpoints. run_id is the producing run (the agent's, or the
+-- drafter's for an approval); actor_user_id is the human authorizer/initiator
+-- (NULL for an autonomous system write). detail_json carries the per-action
+-- payload.
 --
 -- dedup_key is the natural per-action key. A branch push is the one true
 -- double-capture case — the git pre-push hook AND the git-proxy backstop both

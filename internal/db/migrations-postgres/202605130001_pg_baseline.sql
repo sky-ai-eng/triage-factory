@@ -423,11 +423,12 @@ CREATE TABLE public.access_change_log (
 
 
 -- Append-only audit log of record: one row per external write TF performs under an
--- ORG-scoped credential (org GitHub App, org Jira service account). Writes under an
--- individual user's own credential are excluded. Written in the same transaction as
--- the action wherever that action has a DB state change to compose with.
--- action is a free-text discriminator (app-validated, no CHECK); credential is
--- github_app or jira_org; conversation_id is ON DELETE SET NULL so the row outlives
+-- ORG-scoped credential (org GitHub App or PAT, org Jira or Linear service identity,
+-- Slack bot). Writes under an individual user's own credential are excluded. Written
+-- in the same transaction as the action wherever that action has a DB state change to
+-- compose with. action is a free-text discriminator (app-validated, no CHECK);
+-- credential is a domain.Credential* value (app-validated, no CHECK);
+-- conversation_id is ON DELETE SET NULL so the row outlives
 -- a purge; actor_user_id is the human authorizer, NULL for an autonomous write.
 -- dedup_key is the natural per-action key - a branch push is observed twice (pre-push
 -- hook and git-proxy backstop) and carries a deterministic key so the twin collapses

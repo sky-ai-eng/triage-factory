@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
+	linearclient "github.com/sky-ai-eng/triage-factory/internal/linear"
 )
 
 // strictlyWithin reports whether path is a strict descendant of root — not
@@ -60,9 +61,10 @@ type Server struct {
 	// orchestrator and in the capless per-run jail.
 	rt Runtime
 
-	// stores backs the all/local gh/jira credential resolver only; it is the
-	// zero db.Stores on the executor sidecar (which holds no store — the gh/jira
-	// verbs route through proxyCreds there, so the resolver path is never taken).
+	// stores backs the all/local gh/jira/linear credential resolvers only; it
+	// is the zero db.Stores on the executor sidecar (which holds no store — the
+	// gh/jira/linear verbs route through proxyCreds there, so the resolver path
+	// is never taken).
 	stores db.Stores
 	info   ConversationInfo
 
@@ -86,13 +88,19 @@ type Server struct {
 	// Tests override it to inject a fake covering both tiers.
 	ghResolver ghclient.Resolver
 
-	// proxyCreds points the gh/jira verbs at this run's credential-sidecar REST
+	// linearResolver is the Linear org-credential resolver the linear verbs
+	// build their client from, built once per Server for the same reason as
+	// ghResolver: an app install's access token is refreshed once and shared
+	// across the run's calls. nil on the executor sidecar, where the verbs
+	// route through proxyCreds.
+	linearResolver linearclient.Resolver
+
+	// proxyCreds points the gh/jira/linear verbs at this run's credential-sidecar
 	// proxies — always set in multi mode, where the daemon lives in the
-	// sidecar; nil in local mode. When set, every gh/jira verb builds a client
-	// against the proxy URL holding only a per-run placeholder; the sidecar
-	// injects the real credential on the upstream hop, so this daemon holds
-	// none. nil resolves through ghResolver / the Jira resolver exactly as
-	// before. The coordinates are stable for the run's lifetime (the sidecar's
+	// sidecar; nil in local mode. When set, every gh/jira/linear verb builds a
+	// client against the proxy URL holding only a per-run placeholder; the
+	// sidecar injects the real credential on the upstream hop, so this daemon
+	// holds none. nil resolves through each source's resolver. The coordinates are stable for the run's lifetime (the sidecar's
 	// own TokenSource handles any brain refresh-sweep remint behind the proxy).
 	proxyCreds *ProxyCredentials
 
@@ -115,8 +123,8 @@ type Server struct {
 // from the spawner's per-conversation map — it carries the conversation's owning org
 // and the kicking-off user identity (empty for event-triggered conversations).
 // proxyCreds is non-nil only for a TF_ROLE=executor run; nil disables the
-// proxy branch and every gh/jira verb resolves through ghResolver / the Jira
-// resolver exactly as before.
+// proxy branch and every gh/jira/linear verb resolves through its source's
+// resolver.
 func NewServer(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredentials) *Server {
 	resolver := ghclient.NewResolver(stores.Secrets, stores.GitHubApps, stores.Orgs, stores.Agents, nil)
 	rt := newDirectRuntime(stores, info)
@@ -125,14 +133,15 @@ func NewServer(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredent
 	// daemon already warms, instead of building a second resolver per call.
 	rt.ghResolver = resolver
 	return &Server{
-		rt:           rt,
-		stores:       stores,
-		info:         info,
-		gateWired:    stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
-		ghResolver:   resolver,
-		proxyCreds:   proxyCreds,
-		upstreamGate: newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
-		shutdown:     make(chan struct{}),
+		rt:             rt,
+		stores:         stores,
+		info:           info,
+		gateWired:      stores.TeamGitHubRepos != nil && stores.ConversationWorktrees != nil,
+		ghResolver:     resolver,
+		linearResolver: newLinearResolver(stores),
+		proxyCreds:     proxyCreds,
+		upstreamGate:   newUpstreamThrottle(maxUpstreamConcurrencyFromEnv()),
+		shutdown:       make(chan struct{}),
 	}
 }
 
@@ -149,8 +158,8 @@ func (s *Server) SetGitHubResolver(r ghclient.Resolver) {
 
 // NewServerWithRuntime constructs the executor sidecar's Server: every
 // per-request LocalClient runs its DB effects over rt (the relay runtime — no
-// stores, no DB connection), and the gh/jira verbs route through proxyCreds so
-// the real credential stays behind the sidecar's REST proxies. NO credential
+// stores, no DB connection), and the gh/jira/linear verbs route through
+// proxyCreds so the real credential stays behind the sidecar's proxies. NO credential
 // resolver is constructed — the sidecar holds no secret store, and the resolver
 // would be both dead (proxyCreds win) and impossible (nil stores). Identity
 // comes from the runtime; the repo gate is always wired (the relay serves it).
@@ -390,16 +399,17 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 	// The per-request LocalClient shares the Server's runtime (its DB effects go
 	// direct-to-stores on all/local, or relay to the orchestrator on the
 	// sidecar), its resolver + token cache (all/local only; nil on the sidecar),
-	// and its proxyCreds (executor only — the gh/jira verbs then build clients
-	// against the sidecar's REST proxies holding only placeholders). stores backs
-	// the resolver path alone and is the zero value on the sidecar.
+	// and its proxyCreds (executor only — the gh/jira/linear verbs then build
+	// clients against the sidecar's proxies holding only placeholders). stores
+	// backs the resolver path alone and is the zero value on the sidecar.
 	client := &LocalClient{
-		stores:     s.stores,
-		info:       s.info,
-		rt:         s.rt,
-		ghResolver: s.ghResolver,
-		proxyCreds: s.proxyCreds,
-		gateWired:  s.gateWired,
+		stores:         s.stores,
+		info:           s.info,
+		rt:             s.rt,
+		ghResolver:     s.ghResolver,
+		linearResolver: s.linearResolver,
+		proxyCreds:     s.proxyCreds,
+		gateWired:      s.gateWired,
 	}
 	// Seed the audit credential before any verb runs. On the sidecar this is the
 	// tier it reported off the sealed bundle, so a write that records without
@@ -742,6 +752,120 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 			return nil, err
 		}
 		return jiraIssueTypesResult{IssueTypes: types}, nil
+
+	// --- linear (exec linear issue ...) ---
+
+	case methodLinearGetIssue:
+		var a linearIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issue, err := client.LinearGetIssue(ctx, a.Issue)
+		if err != nil {
+			return nil, err
+		}
+		return linearIssueResult{Issue: issue}, nil
+
+	case methodLinearListStates:
+		var a linearIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		states, err := client.LinearListStates(ctx, a.Issue)
+		if err != nil {
+			return nil, err
+		}
+		return linearStatesResult{States: states}, nil
+
+	case methodLinearTransition:
+		var a linearTransitionArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		state, err := client.LinearTransition(ctx, a.Issue, a.State)
+		if err != nil {
+			return nil, err
+		}
+		return linearStateResult{State: state}, nil
+
+	case methodLinearAddComment:
+		var a linearCommentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		commentID, err := client.LinearAddComment(ctx, a.Issue, a.Body)
+		if err != nil {
+			return nil, err
+		}
+		return linearCommentResult{CommentID: commentID}, nil
+
+	case methodLinearAssignSelf:
+		var a linearIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.LinearAssignSelf(ctx, a.Issue)
+
+	case methodLinearUnassign:
+		var a linearIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.LinearUnassign(ctx, a.Issue)
+
+	case methodLinearCreateIssue:
+		var a LinearCreateIssueRequest
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issue, err := client.LinearCreateIssue(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		return linearIssueResult{Issue: issue}, nil
+
+	case methodLinearUpdateIssue:
+		var a linearUpdateIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.LinearUpdateIssue(ctx, a.Issue, a.Edit)
+
+	case methodLinearSetParent:
+		var a linearSetParentArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.LinearSetParent(ctx, a.Issue, a.Parent)
+
+	case methodLinearSetPriority:
+		var a linearSetPriorityArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, client.LinearSetPriority(ctx, a.Issue, a.Priority)
+
+	case methodLinearListChildren:
+		var a linearIssueArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		children, err := client.LinearListChildren(ctx, a.Issue)
+		if err != nil {
+			return nil, err
+		}
+		return linearChildrenResult{Children: children}, nil
+
+	case methodLinearSearch:
+		var a LinearSearchRequest
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		issues, err := client.LinearSearch(ctx, a)
+		if err != nil {
+			return nil, err
+		}
+		return linearIssuesResult{Issues: issues}, nil
 
 	// --- github: build the org-tiered client host-side (App→PAT), make the
 	// REST call, return the result / error. The per-request LocalClient

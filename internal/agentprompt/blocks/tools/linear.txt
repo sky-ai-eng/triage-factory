@@ -1,0 +1,15 @@
+Linear interactions use `triagefactory exec linear`. Run `triagefactory exec linear --help` for the full command list, and `--help` on any subcommand for details.
+
+Workflows:
+- Inspect an issue: `triagefactory exec linear issue view <ID>`, `triagefactory exec linear issue list-children <ID>`, `triagefactory exec linear issue list-states <ID>`.
+- Mutate an issue: `triagefactory exec linear issue transition`, `triagefactory exec linear issue comment`, `triagefactory exec linear issue assign`, `triagefactory exec linear issue unassign`, `triagefactory exec linear issue edit`, `triagefactory exec linear issue set-priority`, `triagefactory exec linear issue set-parent`.
+- Create issues: `triagefactory exec linear issue create <TEAM-KEY> --title <text>`. Use `--parent <ID>` to create sub-issues.
+- Search: `triagefactory exec linear issue search --team <TEAM-KEY>`, narrowed with `--state <name>` (repeatable), `--assignee me|none`, and `--max <N>` (default 50).
+
+Gotchas:
+- `<ID>` is the issue's identifier (`ENG-123`) or its UUID. Both are accepted anywhere an issue is named, `--parent` included.
+- Priority is a number from 0 to 4: 0 = no priority, 1 = urgent, 2 = high, 3 = normal, 4 = low. 1 is the most urgent; 0 means unset, not lowest.
+- Workflow states are defined per team, so state names differ between teams. `list-states <ID>` lists the states of that issue's team; `transition --state` takes one of those names or a state id.
+- `search` filters on a fixed vocabulary: team, state names, assignee (`me` or `none`), and a result cap. There is no raw query passthrough like Jira's JQL; narrow anything further from the results it returns.
+- Every write acts as the org's Linear identity (a Linear app user, or the owner of the configured API key), not as a person. Comments, transitions, and created issues are attributed to it; `assign` assigns the issue to it, and `search --assignee me` means it.
+- For multi-line `--body` or `--description` arguments, use the same heredoc pattern as GitHub tools.

@@ -49,6 +49,9 @@ var errEnvelopeMoved = errors.New("linearoauth: refused refresh token is no long
 // while the envelope still names the install it was minted for (its
 // install_id). A new install or a disconnect anywhere in the deployment is
 // therefore seen on the next read, with no invalidation message to deliver.
+// The envelope also carries the access token the last refresh minted, so a
+// cache with nothing of its own (a new process, a host-CLI exec verb) serves
+// that one while it has headroom rather than refreshing.
 //
 // A singleflight keyed by org coalesces one process's concurrent refreshes.
 // Every write — the rotation write-back and a revoke — holds the org's
@@ -67,6 +70,10 @@ type TokenCache struct {
 	installs db.LinearInstallsStore
 	lock     *CredentialLock
 
+	// headroom is how much life a token must have left to be served without a
+	// refresh. Never below refreshSkew; see WithHeadroom.
+	headroom time.Duration
+
 	// now is injectable for tests; nil is time.Now.
 	now func() time.Time
 
@@ -82,23 +89,45 @@ type cachedToken struct {
 	expiresAt   time.Time
 }
 
+// Option configures a TokenCache.
+type Option func(*TokenCache)
+
+// WithHeadroom makes the cache refresh a token once it has less than d left,
+// rather than a minute before it expires, for a caller that hands the token to
+// something holding it for up to d: the credential provisioner seals it into a
+// bundle that is not re-sealed for a while. It must stay well under the
+// token's 24-hour life, or every read refreshes. A d below the default is
+// ignored.
+func WithHeadroom(d time.Duration) Option {
+	return func(c *TokenCache) {
+		if d > c.headroom {
+			c.headroom = d
+		}
+	}
+}
+
 // NewTokenCache builds a TokenCache over a minter, the org's OAuth-app
 // resolver (the client credentials a refresh authenticates with), the secret
 // store (the envelope), the installs store (marking a revoked install
 // removed) and the lock the org's other credential writers hold.
-func NewTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock) *TokenCache {
-	return newTokenCache(minter, apps, secrets, installs, lock)
+func NewTokenCache(minter *Minter, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock, opts ...Option) *TokenCache {
+	return newTokenCache(minter, apps, secrets, installs, lock, opts...)
 }
 
-func newTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock) *TokenCache {
-	return &TokenCache{
+func newTokenCache(minter refresher, apps linear.OAuthAppResolver, secrets db.SecretStore, installs db.LinearInstallsStore, lock *CredentialLock, opts ...Option) *TokenCache {
+	c := &TokenCache{
 		minter:   minter,
 		apps:     apps,
 		secrets:  secrets,
 		installs: installs,
 		lock:     lock,
+		headroom: refreshSkew,
 		cache:    make(map[string]cachedToken),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 func (c *TokenCache) timeNow() time.Time {
@@ -110,17 +139,43 @@ func (c *TokenCache) timeNow() time.Time {
 
 // AccessTokenForOrg returns a live access token for the org's app user,
 // refreshing when the cache holds none for the current install or the one it
-// holds is near expiry. An org with no install envelope, or whose install
-// Linear has revoked, is linear.ErrNoLinearSystemCredential.
+// holds has less than the cache's headroom left. An org with no install
+// envelope, or whose install Linear has revoked, is
+// linear.ErrNoLinearSystemCredential.
+//
+// A refresh that fails while the install's current token still has more than
+// a minute left serves that token, so a cache with headroom beyond the default
+// rides out a token-endpoint outage on the token it has.
 func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (string, time.Time, error) {
 	cred, _, err := c.readEnvelope(ctx, orgID)
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	if ct, ok := c.fresh(orgID, cred.InstallID); ok {
+	if ct, ok := c.fresh(orgID, cred, c.headroom); ok {
 		return ct.accessToken, ct.expiresAt, nil
 	}
+	ct, err := c.refreshShared(ctx, orgID)
+	if err == nil {
+		return ct.accessToken, ct.expiresAt, nil
+	}
+	if RefusedGrant(err) || errors.Is(err, linear.ErrNoLinearSystemCredential) {
+		// Revoked, or gone: the token it holds is dead too.
+		return "", time.Time{}, err
+	}
+	// Re-read, so a token is served only for the install stored now.
+	if cred, _, rerr := c.readEnvelope(ctx, orgID); rerr == nil {
+		if held, ok := c.fresh(orgID, cred, refreshSkew); ok {
+			cacheLog.Warn("refreshing the install's access token failed; serving the one it has until it expires",
+				"org", orgID, "expires_at", held.expiresAt, "error", err)
+			return held.accessToken, held.expiresAt, nil
+		}
+	}
+	return "", time.Time{}, err
+}
 
+// refreshShared runs refresh for orgID, coalesced with this process's other
+// callers for the same org.
+func (c *TokenCache) refreshShared(ctx context.Context, orgID string) (cachedToken, error) {
 	// The refresh runs detached from every caller's ctx. Linear may have
 	// rotated the token by the time a caller gives up, and a write-back
 	// abandoned there leaves the old token stored; once it falls out of
@@ -133,26 +188,34 @@ func (c *TokenCache) AccessTokenForOrg(ctx context.Context, orgID string) (strin
 	})
 	select {
 	case <-ctx.Done():
-		return "", time.Time{}, ctx.Err()
+		return cachedToken{}, ctx.Err()
 	case res := <-ch:
 		if res.Err != nil {
-			return "", time.Time{}, res.Err
+			return cachedToken{}, res.Err
 		}
-		ct := res.Val.(cachedToken)
-		return ct.accessToken, ct.expiresAt, nil
+		return res.Val.(cachedToken), nil
 	}
 }
 
-// fresh is the cached token for orgID when it was minted for the install
-// installID names and has headroom left.
-func (c *TokenCache) fresh(orgID, installID string) (cachedToken, bool) {
+// fresh is a token for the install cred names with more than within left: the
+// one this cache holds, else the one stored in the envelope, which this cache
+// then holds too.
+func (c *TokenCache) fresh(orgID string, cred linear.InstallCredential, within time.Duration) (cachedToken, bool) {
+	horizon := c.timeNow().Add(within)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	ct, ok := c.cache[orgID]
-	if !ok || ct.installID != installID || !c.timeNow().Add(refreshSkew).Before(ct.expiresAt) {
+	if ct, ok := c.cache[orgID]; ok && ct.installID == cred.InstallID && horizon.Before(ct.expiresAt) {
+		return ct, true
+	}
+	if cred.AccessToken == "" || cred.AccessTokenExpiresUnix == 0 {
 		return cachedToken{}, false
 	}
-	return ct, true
+	stored := cachedToken{installID: cred.InstallID, accessToken: cred.AccessToken, expiresAt: time.Unix(cred.AccessTokenExpiresUnix, 0)}
+	if !horizon.Before(stored.expiresAt) {
+		return cachedToken{}, false
+	}
+	c.cache[orgID] = stored
+	return stored, true
 }
 
 // readEnvelope reads and parses the org's install envelope, returning the raw
@@ -186,7 +249,7 @@ func (c *TokenCache) readEnvelope(ctx context.Context, orgID string) (linear.Ins
 func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, error) {
 	// Re-checked under the flight: a sibling caller may have just refreshed.
 	if cred, _, err := c.readEnvelope(ctx, orgID); err == nil {
-		if ct, ok := c.fresh(orgID, cred.InstallID); ok {
+		if ct, ok := c.fresh(orgID, cred, c.headroom); ok {
 			return ct, nil
 		}
 	}
@@ -206,8 +269,9 @@ func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, er
 	}
 }
 
-// revokeInstall answers Linear refusing the install's refresh token, refused.
-// It holds the org's credential lock from the check that the stored envelope
+// revokeInstall answers Linear refusing the install's refresh token, refused,
+// which every error it returns wraps, so no caller mistakes a failed removal
+// for a refresh that merely failed to get an answer. It holds the org's credential lock from the check that the stored envelope
 // is still the refused one through both writes, so no rotation, new install
 // or disconnect lands between them. The install is marked removed first and
 // the envelope deleted after, so a failure between them leaves a removed row
@@ -217,7 +281,7 @@ func (c *TokenCache) refresh(ctx context.Context, orgID string) (cachedToken, er
 func (c *TokenCache) revokeInstall(ctx context.Context, orgID string, cred linear.InstallCredential, raw string, refused error) error {
 	release, err := c.lock.Lock(ctx, orgID)
 	if err != nil {
-		return fmt.Errorf("linearoauth: lock org %s's linear credential: %w", orgID, err)
+		return fmt.Errorf("linearoauth: lock org %s's linear credential: %w: %w", orgID, err, refused)
 	}
 	defer release()
 	_, current, err := c.readEnvelope(ctx, orgID)
@@ -225,12 +289,12 @@ func (c *TokenCache) revokeInstall(ctx context.Context, orgID string, cred linea
 	case errors.Is(err, linear.ErrNoLinearSystemCredential):
 		return fmt.Errorf("%w: %w", errInstallReplaced, refused)
 	case err != nil:
-		return err
+		return fmt.Errorf("%w: %w", err, refused)
 	case current != raw:
 		return fmt.Errorf("%w: %w", errEnvelopeMoved, refused)
 	}
 	if _, err := c.installs.MarkRemovedSystem(ctx, orgID, cred.InstallID, domain.LinearInstallRemovedRevoked); err != nil {
-		return fmt.Errorf("linearoauth: mark org %s's revoked install removed: %w", orgID, err)
+		return fmt.Errorf("linearoauth: mark org %s's revoked install removed: %w: %w", orgID, err, refused)
 	}
 	c.forget(orgID)
 	if _, err := c.secrets.DeleteSystemIfValue(ctx, orgID, integrations.KeyLinearAppInstall, raw); err != nil {
@@ -269,9 +333,12 @@ func (c *TokenCache) refreshOnce(ctx context.Context, orgID string) (_ cachedTok
 
 	// The write-back lands only over the envelope this refresh read, and
 	// before the cache, so a crash after it still leaves a live refresh token
-	// for the next refresh.
+	// for the next refresh. It stores the new access token too, for every
+	// other process to use until it expires.
 	rotated := cred
 	rotated.RefreshToken = tok.RefreshToken
+	rotated.AccessToken = tok.AccessToken
+	rotated.AccessTokenExpiresUnix = tok.ExpiresAt.Unix()
 	env, err := linear.MarshalInstallCredential(rotated)
 	if err != nil {
 		return cachedToken{}, cred, raw, err

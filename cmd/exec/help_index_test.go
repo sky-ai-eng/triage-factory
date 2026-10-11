@@ -35,7 +35,7 @@ func TestHelpText_UnresolvedKindsListEverything(t *testing.T) {
 	registerHelpIndexFakes(t)
 	out := helpText("tfac", nil)
 
-	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:"} {
+	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:", "Linear Issue Commands:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("full listing is missing %q", want)
 		}
@@ -48,8 +48,8 @@ func TestHelpText_UnresolvedKindsListEverything(t *testing.T) {
 // TestHelpText_FilteredIndex pins the per-state policy: a registered family
 // whose source is absent from the resolved set is omitted (it may be
 // unlicensed — absence is the rule for unlicensed surfaces everywhere else),
-// a sourceless registered family is always listed, and Jira — core, never
-// unlicensed — stays listed with the not-currently-available note.
+// a sourceless registered family is always listed, and Jira and Linear — core,
+// never unlicensed — stay listed with the not-currently-available note.
 func TestHelpText_FilteredIndex(t *testing.T) {
 	registerHelpIndexFakes(t)
 	out := helpText("tfac", []string{"github"})
@@ -63,8 +63,17 @@ func TestHelpText_FilteredIndex(t *testing.T) {
 	if !strings.Contains(out, "Jira Ticket Commands:") {
 		t.Error("the Jira section must stay listed when jira is unavailable — explained, not hidden")
 	}
-	if !strings.Contains(out, jiraUnavailableNote) {
+	if !strings.Contains(out, unavailableNote("jira")) {
 		t.Error("the Jira section is missing its not-currently-available note")
+	}
+	if !strings.Contains(out, "Linear Issue Commands:") {
+		t.Error("the Linear section must stay listed when linear is unavailable — explained, not hidden")
+	}
+	if !strings.Contains(out, unavailableNote("linear")) {
+		t.Error("the Linear section is missing its not-currently-available note")
+	}
+	if !strings.Contains(unavailableNote("linear"), "Linear is not currently available") {
+		t.Errorf("the Linear note does not name Linear: %q", unavailableNote("linear"))
 	}
 }
 
@@ -73,9 +82,9 @@ func TestHelpText_FilteredIndex(t *testing.T) {
 // in the sections it shares with the unresolved listing.
 func TestHelpText_ResolvedKindsListTheirFamilies(t *testing.T) {
 	registerHelpIndexFakes(t)
-	out := helpText("tfac", []string{"github", "jira", "fakesrc"})
+	out := helpText("tfac", []string{"github", "jira", "linear", "fakesrc"})
 
-	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:"} {
+	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:", "Linear Issue Commands:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("resolved listing is missing %q", want)
 		}
