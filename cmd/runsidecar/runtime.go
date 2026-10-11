@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
@@ -61,8 +62,9 @@ type credRuntime struct {
 	githubBase string             // web base every GitHub lane forwards to; set at proxy start
 	proxies    *agentproc.RunProxyHandle
 	githubAPI  *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
-	jiraAPI    *apiproxy.Server      // Jira REST credential proxy; nil unless requested
-	linearAPI  *apiproxy.Server      // Linear GraphQL credential proxy; nil unless requested
+	jiraAPI    *apiproxy.Server      // Jira REST credential proxy; nil unless the manifest names Jira usable
+	linearAPI  *apiproxy.Server      // Linear GraphQL credential proxy; nil unless the manifest names Linear usable
+	jiraBase   string                // the Jira site the Jira proxy forwards to; set at proxy start
 	ghInjector *ghinjector.Server    // real-gh credential-injector proxy; nil unless requested
 	agentHost  *agenthost.HostDaemon // the relocated exec-verb socket server; nil unless requested
 	proxied    bool                  // guards against a duplicate StartProxies
@@ -241,9 +243,12 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 
 	// The GitHub/Jira/Linear API credential proxies the orchestrator's own
 	// GetPR + agenthost verbs route through: the orchestrator holds only the
-	// placeholder, the sidecar injects the real token on the upstream hop. On
-	// any failure here, tear down what already bound so a half-started run
-	// leaks no listener.
+	// placeholder, the sidecar injects the real token on the upstream hop. The
+	// GitHub one is requested; Jira and Linear start for exactly the sources
+	// the bundle's source manifest names usable — sealed, or unresolved and
+	// awaiting the re-seal that brings the credential — whatever source
+	// triggered the run. On any failure here, tear down what already bound so
+	// a half-started run leaks no listener.
 	if req.GitHubAPIEnabled {
 		srv, url, token, aerr := r.startGitHubAPIProxy(req.HostVethIP, apiUpstream, conversationID)
 		if aerr != nil {
@@ -253,8 +258,8 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		r.githubAPI = srv
 		result.GitHubAPIURL, result.GitHubAPIToken = url, token
 	}
-	if req.JiraAPIEnabled {
-		srv, url, token, deployment, aerr := r.startJiraAPIProxy(req.HostVethIP, req.JiraAPIUpstream, conversationID)
+	if jiraProxyWanted(bundle) {
+		srv, url, token, deployment, aerr := r.startJiraAPIProxy(req.HostVethIP, conversationID)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
 			if r.githubAPI != nil {
@@ -266,7 +271,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 		result.JiraAPIURL, result.JiraAPIToken = url, token
 		result.JiraDeployment = string(deployment)
 	}
-	if req.LinearAPIEnabled {
+	if bundle.Sources.Usable(eventsource.KindLinear) {
 		srv, url, token, aerr := r.startLinearAPIProxy(req.HostVethIP, conversationID)
 		if aerr != nil {
 			_ = handle.Shutdown(ctx)
@@ -367,17 +372,11 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 		GitProxyURL:      proxies.GitProxyURL,
 		GitProxyToken:    proxies.GitProxyToken,
 	}
-	// The provider-credential accessor lets a provider handler (Slack) select
-	// its bot token from the sealed bundle in-process — a live read so a mid-run
-	// brain re-seal is picked up. The orchestrator is never asked for a secret.
-	providerCreds := func(namespace string) (json.RawMessage, bool) {
-		b := r.currentBundle()
-		if b == nil {
-			return nil, false
-		}
-		return b.ProviderCreds(namespace)
-	}
-	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, providerCreds), proxyCreds)
+	// The runtime reads the held bundle in-process: a provider handler (Slack)
+	// selects its bot token from it, and the verbs explain a refusal from its
+	// source manifest — live reads, so a mid-run brain re-seal is picked up.
+	// The orchestrator is never asked for a secret.
+	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, r), proxyCreds)
 	hd, _, err := startAgentHostSocket(srv, info.ConversationID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
@@ -651,39 +650,54 @@ func (r *credRuntime) githubAPIToken(_ context.Context, owner, repo string) (str
 	return tok, nil
 }
 
+// jiraProxyWanted reports whether this run gets a Jira proxy: the bundle's
+// manifest names Jira usable, and the bundle names the Jira site to forward
+// to. The site travels with the credential, so a Jira the brain could not
+// resolve would arrive with no site and no proxy; the brain fails the seal on a
+// Jira resolve failure rather than recording it unresolved, so a usable Jira
+// always carries one.
+func jiraProxyWanted(b *credbundle.Bundle) bool {
+	if !b.Sources.Usable(eventsource.KindJira) {
+		return false
+	}
+	if b.Jira == nil || b.Jira.URL == "" {
+		sidecarLog.Warn("the bundle's source manifest names Jira usable but carries no Jira site; starting no Jira proxy")
+		return false
+	}
+	return true
+}
+
 // startJiraAPIProxy binds a Jira-REST credential proxy on the veth IP,
-// resolving the injected auth (Cloud Basic vs Data Center Bearer) from the
-// bundle's Jira credential. upstream defaults to the bundle's Jira URL. The
-// deployment is returned alongside so the orchestrator's proxy client can speak
-// the same REST version the credential's own backend expects — it is derived
-// here because the bundle that names it opens only in this process.
-func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID string) (*apiproxy.Server, string, string, jira.Deployment, error) {
+// forwarding to the Jira site the held bundle names. The injected auth (Cloud
+// Basic vs Data Center Bearer) is resolved per request (jiraAuthHeader), so
+// each request answers with the bundle held then. The deployment is returned
+// alongside so the orchestrator's proxy client can speak the same REST version
+// the credential's own backend expects — it is derived here because the
+// bundle that names it opens only in this process.
+func (r *credRuntime) startJiraAPIProxy(hostVethIP, conversationID string) (*apiproxy.Server, string, string, jira.Deployment, error) {
 	bundle := r.currentBundle()
 	if bundle == nil || bundle.Jira == nil {
-		return nil, "", "", "", fmt.Errorf("runsidecar: jira api proxy requested: %w", credbundle.ErrNoJiraCredential)
+		return nil, "", "", "", fmt.Errorf("runsidecar: jira api proxy requested: %w", credbundle.SourceMiss(nil, eventsource.KindJira))
 	}
-	if upstream == "" {
-		upstream = bundle.Jira.URL
-	}
-	var auth apiproxy.AuthHeaderSource
+	upstream := bundle.Jira.URL
 	deployment := jira.DeploymentDataCenter
 	if bundle.Jira.AuthMethod == "cloud" {
-		auth = apiproxy.JiraBasic(bundle.Jira.Email, bundle.Jira.APIToken)
 		deployment = jira.DeploymentCloud
-	} else {
-		auth = apiproxy.JiraBearer(bundle.Jira.PAT)
 	}
 	token, err := randomToken()
 	if err != nil {
 		return nil, "", "", "", err
 	}
+	r.mu.Lock()
+	r.jiraBase = upstream
+	r.mu.Unlock()
 	srv, err := apiproxy.New(apiproxy.Config{
 		Provider:         apiproxy.ProviderJira,
 		Upstream:         upstream,
 		IncomingToken:    token,
 		AllowNonLoopback: true,
 		ConversationID:   conversationID,
-		AuthHeaderSource: auth,
+		AuthHeaderSource: r.jiraAuthHeader,
 	})
 	if err != nil {
 		return nil, "", "", "", fmt.Errorf("runsidecar: construct jira api proxy: %w", err)
@@ -695,6 +709,37 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID str
 	return srv, "http://" + addr, token, deployment, nil
 }
 
+// jiraAuthHeader is the Jira proxy's AuthHeaderSource: the Authorization
+// value for the held bundle's Jira credential, read on every request so a
+// bundle the brain re-seals mid-run is used from the next request on. A
+// manifest that no longer names Jira sealed answers with its state. A
+// credential resolved for another Jira site than the one this proxy forwards
+// to is never sent there: the org moved sites since the run started.
+func (r *credRuntime) jiraAuthHeader(ctx context.Context) (string, error) {
+	bundle := r.currentBundle()
+	if bundle == nil {
+		return "", fmt.Errorf("runsidecar: jira api proxy: %w", credbundle.ErrNoBundle)
+	}
+	sources := bundle.Sources.At(time.Now())
+	if e, _ := sources.Entry(eventsource.KindJira); e.State != domain.SourceSealed {
+		return "", fmt.Errorf("runsidecar: jira api proxy: %w", credbundle.SourceMiss(sources, eventsource.KindJira))
+	}
+	jc := bundle.Jira
+	if jc == nil {
+		return "", errors.New("runsidecar: jira api proxy: the manifest names Jira sealed but the bundle carries no Jira credential")
+	}
+	r.mu.Lock()
+	base := r.jiraBase
+	r.mu.Unlock()
+	if jc.URL != base {
+		return "", errors.New("runsidecar: jira api proxy: the held Jira credential is for another Jira site")
+	}
+	if jc.AuthMethod == "cloud" {
+		return apiproxy.JiraBasic(jc.Email, jc.APIToken)(ctx)
+	}
+	return apiproxy.JiraBearer(jc.PAT)(ctx)
+}
+
 // linearUpstream is the origin the Linear proxy forwards to: Linear's API
 // host, which serves every workspace, so neither the bundle nor the frame
 // names it. The path is the GraphQL endpoint the client posts to, which the
@@ -702,12 +747,12 @@ func (r *credRuntime) startJiraAPIProxy(hostVethIP, upstream, conversationID str
 var linearUpstream = strings.TrimSuffix(linear.DefaultEndpoint, "/graphql")
 
 // startLinearAPIProxy binds a Linear GraphQL credential proxy on the veth IP.
-// Unlike the Jira proxy it starts whether or not the held bundle carries a
-// Linear credential. The brain seals a bundle without one when it could not
-// resolve the credential (Bundle.Unresolved), and a run should not fail to
-// start over a source it may never use, nor stay without Linear once a
-// re-seal brings the credential. The injected auth is resolved per request
-// (linearAuthHeader), so each request answers with the bundle held then.
+// It starts whether the bundle's manifest names Linear sealed or unresolved:
+// the brain seals a bundle without the credential when it could not resolve
+// one, and a run should not fail to start over a source it may never use, nor
+// stay without Linear once a re-seal brings the credential. The injected auth
+// is resolved per request (linearAuthHeader), so each request answers with the
+// bundle held then.
 func (r *credRuntime) startLinearAPIProxy(hostVethIP, conversationID string) (*apiproxy.Server, string, string, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -734,42 +779,63 @@ func (r *credRuntime) startLinearAPIProxy(hostVethIP, conversationID string) (*a
 // linearAuthHeader is the Linear proxy's AuthHeaderSource: the Authorization
 // value for the held bundle's Linear credential, read on every request so a
 // bundle the brain re-seals mid-run is used from the next request on. A
-// personal API key is the whole value, with no scheme; an app install's
-// access token is a Bearer.
+// personal API key is the whole value, with no scheme; an app install's access
+// token is a Bearer.
+//
+// A manifest that does not name Linear sealed answers with its state. That
+// includes an access token past its expiry, which the manifest reads as
+// unresolved (domain.SourceManifest.At): the brain seals a token with more life
+// left than the bundle goes between seals, so one past its expiry here means
+// the brain could not refresh it, and the agent is told to retry rather than
+// sent a refusal Linear would give as if the install were gone.
 func (r *credRuntime) linearAuthHeader(context.Context) (string, error) {
 	bundle := r.currentBundle()
 	if bundle == nil {
 		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrNoBundle)
 	}
+	sources := bundle.Sources.At(time.Now())
+	if e, _ := sources.Entry(eventsource.KindLinear); e.State != domain.SourceSealed {
+		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.SourceMiss(sources, eventsource.KindLinear))
+	}
 	lc := bundle.Linear
 	if lc == nil {
-		if bundle.IsUnresolved(eventsource.KindLinear) {
-			return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrLinearCredentialUnresolved)
-		}
-		return "", fmt.Errorf("runsidecar: linear api proxy: %w", credbundle.ErrNoLinearCredential)
+		return "", errors.New("runsidecar: linear api proxy: the manifest names Linear sealed but the bundle carries no Linear credential")
 	}
 	switch linear.AuthMethod(lc.AuthMethod) {
 	case linear.AuthMethodAPIKey:
 		if lc.APIKey == "" {
-			return "", fmt.Errorf("runsidecar: linear api proxy, empty api key: %w", credbundle.ErrNoLinearCredential)
+			return "", errors.New("runsidecar: linear api proxy: empty api key")
 		}
 		return lc.APIKey, nil
 	case linear.AuthMethodAppInstall:
 		if lc.AccessToken == "" {
-			return "", fmt.Errorf("runsidecar: linear api proxy, empty access token: %w", credbundle.ErrNoLinearCredential)
-		}
-		// The brain seals a token with more life left than the bundle goes
-		// between seals, so one past its expiry here means the brain could
-		// not refresh it: Linear's token endpoint was down. That is the
-		// unresolved answer, which tells the agent to retry, rather than
-		// forwarding a token Linear would refuse as if the install were gone.
-		if lc.ExpiresUnix != 0 && !time.Now().Before(time.Unix(lc.ExpiresUnix, 0)) {
-			return "", fmt.Errorf("runsidecar: linear api proxy, access token expired: %w", credbundle.ErrLinearCredentialUnresolved)
+			return "", errors.New("runsidecar: linear api proxy: empty access token")
 		}
 		return "Bearer " + lc.AccessToken, nil
 	default:
 		return "", fmt.Errorf("runsidecar: linear api proxy: unknown auth method %q", lc.AuthMethod)
 	}
+}
+
+// ProviderCreds is the held bundle's sealed keyed set for a provider namespace
+// (agenthost.HeldBundle), read live so a mid-run brain re-seal is picked up.
+func (r *credRuntime) ProviderCreds(namespace string) (json.RawMessage, bool) {
+	b := r.currentBundle()
+	if b == nil {
+		return nil, false
+	}
+	return b.ProviderCreds(namespace)
+}
+
+// Sources is the held bundle's source manifest as it stands now
+// (agenthost.HeldBundle): the exec verbs explain a refusal from it, and the
+// help index annotates itself from it. nil before the first bundle.
+func (r *credRuntime) Sources() domain.SourceManifest {
+	b := r.currentBundle()
+	if b == nil {
+		return nil
+	}
+	return b.Sources.At(time.Now())
 }
 
 // randomToken mints a per-run placeholder the orchestrator presents to a

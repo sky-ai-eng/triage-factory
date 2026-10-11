@@ -254,11 +254,12 @@ Two consequences worth knowing:
   an answer is in scope.** The registration's `HelpText`/`ValueFlags` are what
   the dispatcher serves `--help` from, at every depth and with a nil host —
   exactly the built-ins' contract, so help never needs run identity. The
-  top-level index additionally resolves the org's available source kinds
-  through the run's agenthost (the claim's stamped tools manifest in multi, a
-  live resolve in local — the same answer the run's `<tools>` prompt section
-  derives from) and omits a registered family whose `SourceKind` is not in
-  it; a failed resolve, and an operator's bare terminal, fall back to the
+  top-level index additionally reads the run's source manifest through its
+  agenthost (the sealed bundle's copy in multi, a live resolve in local — the
+  same answer the run's `<tools>` prompt section derives from), omits a
+  registered family whose `SourceKind` is unlicensed or absent from it, and
+  notes any other that is not sealed with the refusal table's line for its
+  state; a failed read, and an operator's bare terminal, fall back to the
   full listing (over-inclusion is the safe direction). The filter is
   index-only: `<name> --help` always answers, and execution stays gated by
   the extension dispatch's entitlement + source-disabled checks.

@@ -63,6 +63,7 @@ const SANDBOXES: FleetSandboxes = {
       id: MEASURED_CLAIM,
       conversation_id: 'run-aaaaaaaa-bbbb',
       org_id: 'org-11111111-2222',
+      executor_id: 'executor-alpha-01',
       claimed_at: '2026-07-30T11:00:00Z',
       released_at: '2026-07-30T11:02:00Z',
       live: false,
@@ -77,11 +78,17 @@ const SANDBOXES: FleetSandboxes = {
       last_activity_at: '2026-07-30T11:01:30Z',
       current_op: 'provider',
       last_checkpoint_at: '2026-07-30T11:01:00Z',
+      sources: {
+        github: { state: 'sealed', expires_at: '2026-07-30T12:00:00Z' },
+        jira: { state: 'disabled' },
+        linear: { state: 'unresolved', reason: 'token_endpoint_unavailable' },
+      },
     },
     {
       id: UNMEASURED_CLAIM,
       conversation_id: 'run-cccccccc-dddd',
       org_id: 'org-33333333-4444',
+      executor_id: 'executor-alpha-01',
       claimed_at: '2026-07-30T11:30:00Z',
       live: true,
       duration_seconds: 1800,
@@ -291,6 +298,11 @@ describe('Fleet sandbox breakdown', () => {
     expect(seriesUrls()[0]).toContain(`/api/fleet/claims/${MEASURED_CLAIM}/series`)
     expect(screen.getByText('Memory · sampled')).toBeInTheDocument()
     expect(screen.getByText('CPU · derived from cumulative')).toBeInTheDocument()
+    // The engagement's source manifest rides the row: what its sandbox held,
+    // and why each other source was absent.
+    expect(screen.getByText('github · sealed')).toBeInTheDocument()
+    expect(screen.getByText('jira · disabled')).toBeInTheDocument()
+    expect(screen.getByText('linear · unresolved · token endpoint unavailable')).toBeInTheDocument()
   })
 
   it('renders a claim with no samples chartless, not as an error', async () => {
@@ -305,6 +317,7 @@ describe('Fleet sandbox breakdown', () => {
       }),
     )
     await screen.findByText('no samples for this sandbox')
+    expect(screen.getByText(/this engagement was never sealed/)).toBeInTheDocument()
     // The row itself survives — a chartless sandbox is not a failed one.
     expect(screen.getByText('2 most recent')).toBeInTheDocument()
     expect(screen.queryByText(/chart is the sampled shape/)).not.toBeInTheDocument()

@@ -971,6 +971,8 @@ type ExecutorClaim struct {
 	ID             string
 	OrgID          string
 	ConversationID string
+	// ExecutorID is the instance that holds (or held) the engagement.
+	ExecutorID string
 
 	// ClaimedAt/ReleasedAt bound the engagement. ReleasedAt nil = still live,
 	// which is also the only shape whose sandbox may still be growing.
@@ -1008,4 +1010,10 @@ type ExecutorClaim struct {
 	// the engagement was ultimately spent on succeeding or failing at.
 	Status      string
 	FailureKind string
+
+	// Sources is the engagement's source manifest as of its latest seal: which
+	// source credentials its sandbox held and why each other one was absent.
+	// Nil for an engagement that was never sealed — every local-mode claim, and
+	// one released before its first bundle.
+	Sources SourceManifest
 }

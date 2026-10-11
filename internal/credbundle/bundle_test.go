@@ -2,6 +2,8 @@ package credbundle
 
 import (
 	"testing"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func TestMarshalUnmarshalRoundTrip(t *testing.T) {
@@ -18,6 +20,10 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 		},
 		Jira:   &JiraCreds{URL: "https://acme.atlassian.net", AuthMethod: "cloud", Email: "bot@acme.com", APIToken: "tok"},
 		Linear: &LinearCreds{AuthMethod: "app_install", AccessToken: "lin_oauth_abc", ExpiresUnix: 1752300000},
+		Sources: domain.SourceManifest{
+			"github": {State: domain.SourceSealed},
+			"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
+		},
 	}
 	data, err := b.Marshal()
 	if err != nil {
@@ -38,6 +44,9 @@ func TestMarshalUnmarshalRoundTrip(t *testing.T) {
 	}
 	if got.Linear == nil || *got.Linear != *b.Linear {
 		t.Fatalf("linear round trip mismatch: %+v", got.Linear)
+	}
+	if e, ok := got.Sources.Entry("linear"); !ok || e != b.Sources["linear"] || got.Sources["github"].State != domain.SourceSealed {
+		t.Fatalf("sources round trip mismatch: %+v", got.Sources)
 	}
 }
 

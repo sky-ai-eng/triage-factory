@@ -586,7 +586,8 @@ func TestLinearVerb_SourceTurnedOff_RefusesBeforeCallingLinear(t *testing.T) {
 
 // TestLinearVerb_NotConfigured pins the agent-facing guidance for an org with
 // no Linear credential, identical on both paths, and that any other resolver
-// failure is reported as itself.
+// failure is the unresolved refusal, carrying the failure beneath it rather
+// than reading as an absent credential.
 func TestLinearVerb_NotConfigured(t *testing.T) {
 	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-nolinear"}
 	ctx := context.Background()
@@ -599,16 +600,23 @@ func TestLinearVerb_NotConfigured(t *testing.T) {
 	for name, lc := range map[string]*LocalClient{"resolver": unconfigured, "proxy": noProxy} {
 		t.Run(name, func(t *testing.T) {
 			_, err := lc.LinearGetIssue(ctx, "ENG-7")
-			if err == nil || err.Error() != errLinearNotConfigured.Error() {
-				t.Errorf("err = %v, want %q", err, errLinearNotConfigured)
+			want := (&SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceUnconfigured}).Error()
+			if err == nil || err.Error() != want {
+				t.Errorf("err = %v, want %q", err, want)
 			}
 		})
 	}
 
+	locked := errors.New("keychain locked")
 	outage := NewLocal(db.Stores{}, info)
-	outage.SetLinearResolver(fakeLinearResolver{err: errors.New("keychain locked")})
-	if _, err := outage.LinearGetIssue(ctx, "ENG-7"); err == nil || !strings.Contains(err.Error(), "keychain locked") {
-		t.Errorf("a resolver outage was reported as %v, want the outage itself", err)
+	outage.SetLinearResolver(fakeLinearResolver{err: locked})
+	_, err := outage.LinearGetIssue(ctx, "ENG-7")
+	var refusal *SourceRefusal
+	if !errors.As(err, &refusal) || refusal.State != domain.SourceUnresolved || refusal.Reason != domain.SourceReasonResolveFailed {
+		t.Fatalf("a resolver outage was reported as %v, want the unresolved refusal", err)
+	}
+	if !errors.Is(err, locked) {
+		t.Errorf("the unresolved refusal %v does not carry the outage beneath it", err)
 	}
 }
 
@@ -725,16 +733,18 @@ func TestLinearVerbs_CredentialFailuresExplainThemselves(t *testing.T) {
 		{
 			name: "org has no Linear credential",
 			answer: func(w http.ResponseWriter) {
-				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w, credbundle.ErrNoLinearCredential)
+				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w,
+					&credbundle.SourceMissError{Kind: eventsource.KindLinear, State: domain.SourceUnconfigured})
 			},
-			want: errLinearNotConfigured.Error(),
+			want: (&SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceUnconfigured}).Error(),
 		},
 		{
 			name: "credential not resolved for this seal",
 			answer: func(w http.ResponseWriter) {
-				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w, credbundle.ErrLinearCredentialUnresolved)
+				credmiss.NewResponder("apiproxy-linear", "conv", slog.New(slog.DiscardHandler)).Respond(w,
+					&credbundle.SourceMissError{Kind: eventsource.KindLinear, State: domain.SourceUnresolved})
 			},
-			want: errLinearUnresolved.Error(),
+			want: (&SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceUnresolved}).Error(),
 		},
 		{
 			name: "Linear refuses the credential",

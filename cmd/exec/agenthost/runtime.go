@@ -153,14 +153,14 @@ type Runtime interface {
 	// is one indexed row against the API round trip it guards.
 	SourceDisabled(ctx context.Context, kind string) (bool, error)
 
-	// AvailableSources answers which event-source kinds the run's org can
-	// reach — the set the top-level exec help filters its command index on.
-	// It relays on the sidecar (every availability input lives behind stores
-	// that process does not hold); the direct runtime answers from the claim's
-	// stamped tools manifest where one exists, else a live system resolve —
-	// the same two-door rule the spawner's toolsReferenceFor reads, so a run's
-	// help index and its <tools> section derive from one answer.
-	AvailableSources(ctx context.Context) ([]string, error)
+	// SourceManifest answers which sources the run can reach and, for each
+	// it cannot, why not — what the exec help index and every source refusal
+	// explain from. On the sidecar it is the held bundle's manifest, read
+	// in-process (the brain sealed it beside the credentials, so the answer
+	// is already here and nothing relays); a sealed credential past its expiry
+	// reads as unresolved. The direct runtime has no bundle and builds the
+	// same entries from a live availability resolve (LiveSourceManifest).
+	SourceManifest(ctx context.Context) (domain.SourceManifest, error)
 }
 
 // ExtensionRuntime is the narrower runtime a provider's sidecar-half handler
@@ -203,7 +203,6 @@ const (
 	opMemoryLoad                       = "memory_load"
 	opCheckEntitlement                 = "check_entitlement"
 	opSourceDisabled                   = "source_disabled"
-	opAvailableSources                 = "available_sources"
 	opReviewPosture                    = "review_posture"
 	// opCreateWorkspaceCheckout materializes a `workspace add` checkout. Unlike
 	// the other core ops it is FS-bearing: the sidecar relays it because it owns
@@ -259,11 +258,10 @@ type sourceDisabledResult struct {
 	Disabled bool `json:"disabled"`
 }
 
-// availableSourcesResult is the available_sources op's (and the matching IPC
-// method's) result — the org's reachable event-source kinds. There are no
+// sourceManifestResult is the SourceManifest IPC method's result. There are no
 // args: identity is bound host-side from the run's ConversationInfo.
-type availableSourcesResult struct {
-	Kinds []string `json:"kinds"`
+type sourceManifestResult struct {
+	Sources domain.SourceManifest `json:"sources"`
 }
 
 // ReviewPostureResolution is what the review-posting decision reads from
@@ -653,28 +651,20 @@ func (r *directRuntime) SourceDisabled(ctx context.Context, kind string) (bool, 
 	return eventsource.Disabled(ctx, r.stores.OrgEventSources, r.info.OrgID, kind)
 }
 
-// AvailableSources resolves the org's reachable source kinds through the same
-// two doors the spawner's toolsReferenceFor reads, in the same order: the
-// claim's stamped tools manifest (claim_credentials.include_tools — the
-// brain's own availability answer, and the only complete one an executor can
-// produce, its secret store being disabled), else a live system resolve. A
-// manifest read that fails hard is logged and falls through rather than
-// failing the caller: on a placement where the live resolve can answer it
-// will, and where it can't the caller's own degrade (an unfiltered help
-// index) is the designed fallback. A nil manifest means the brain stamped no
-// answer and also falls through; an empty non-nil one is a real answer.
-func (r *directRuntime) AvailableSources(ctx context.Context) ([]string, error) {
-	if r.stores.ClaimCredentials != nil {
-		b, found, err := r.stores.ClaimCredentials.Get(ctx, r.info.OrgID, r.info.ConversationID)
-		switch {
-		case err != nil && !errors.Is(err, db.ErrNotApplicableInLocal):
-			agenthostLog.Warn("read the claim's stamped tools manifest failed; falling back to the live availability resolve",
-				"conversation", r.info.ConversationID, "error", err)
-		case err == nil && found && b.IncludeTools != nil:
-			return b.IncludeTools, nil
-		}
+// SourceManifest builds the run's manifest from a live system availability
+// resolve: the direct runtime serves local mode, where no bundle exists and
+// every verb resolves its credential live. The nil-store arm is the test seam
+// every other read here carries; with no stores to resolve through it answers
+// an error, and every caller degrades on one.
+func (r *directRuntime) SourceManifest(ctx context.Context) (domain.SourceManifest, error) {
+	if r.stores.Secrets == nil || r.stores.OrgEventSources == nil || r.stores.Orgs == nil {
+		return nil, errors.New("agenthost: no stores to resolve source availability through")
 	}
-	return eventsource.AvailableKindsSystem(ctx, r.stores, r.info.OrgID)
+	avail, err := eventsource.ResolveSystem(ctx, r.stores, r.info.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	return LiveSourceManifest(avail), nil
 }
 
 // Relay dispatches a provider op locally against db.Stores (all/local), the
@@ -720,15 +710,25 @@ func (r *directRuntime) ProviderCredential(ctx context.Context, namespace string
 type relayRuntime struct {
 	conn relayConn
 	info ConversationInfo
-	// providerCreds reads the current sealed bundle's keyed set for a provider
-	// namespace — a live accessor (not a snapshot) so a mid-run brain re-seal is
-	// picked up. nil when the sidecar was built with no provider credentials.
-	providerCreds providerCredsFunc
+	// held reads the sidecar's current sealed bundle — a live view (not a
+	// snapshot) so a mid-run brain re-seal is picked up. nil when the sidecar
+	// was built with no bundle view.
+	held HeldBundle
 }
 
-// providerCredsFunc reads the sidecar's held bundle for a provider's sealed
-// keyed set. ok=false when the bundle carries none for that namespace.
-type providerCredsFunc func(namespace string) (json.RawMessage, bool)
+// HeldBundle is the sidecar's live view of the sealed bundle it holds, as much
+// of it as the exec verbs read in-process: a provider's sealed keyed set, which
+// only that provider's own handler selects from, and the source manifest
+// sealed beside it. The GitHub, Jira and Linear credentials the proxies inject
+// are not on it; they stay behind the proxies.
+type HeldBundle interface {
+	// ProviderCreds is a provider's sealed keyed set; ok=false when the bundle
+	// carries none for that namespace, or no bundle has arrived.
+	ProviderCreds(namespace string) (json.RawMessage, bool)
+	// Sources is the bundle's source manifest as it stands now
+	// (domain.SourceManifest.At); nil when no bundle has arrived.
+	Sources() domain.SourceManifest
+}
 
 // relayConn is the slice of *sidecarproto.Conn the relayRuntime needs, declared
 // as an interface so a test can drive it without a real supervision channel.
@@ -739,8 +739,8 @@ type relayConn interface {
 	notify(namespace, op string, args any)
 }
 
-func newRelayRuntime(conn relayConn, info ConversationInfo, providerCreds providerCredsFunc) *relayRuntime {
-	return &relayRuntime{conn: conn, info: info, providerCreds: providerCreds}
+func newRelayRuntime(conn relayConn, info ConversationInfo, held HeldBundle) *relayRuntime {
+	return &relayRuntime{conn: conn, info: info, held: held}
 }
 
 func (r *relayRuntime) Info() ConversationInfo { return r.info }
@@ -910,10 +910,10 @@ func (r *relayRuntime) RelayNotify(_ context.Context, namespace, op string, args
 // bundle — the sidecar selects a member locally, never asking the orchestrator
 // for a secret.
 func (r *relayRuntime) ProviderCredential(_ context.Context, namespace string) (json.RawMessage, error) {
-	if r.providerCreds == nil {
+	if r.held == nil {
 		return nil, fmt.Errorf("agenthost: sidecar holds no provider credentials")
 	}
-	raw, ok := r.providerCreds(namespace)
+	raw, ok := r.held.ProviderCreds(namespace)
 	if !ok || len(raw) == 0 {
 		return nil, fmt.Errorf("agenthost: no %s credential in the sealed bundle", namespace)
 	}
@@ -936,12 +936,17 @@ func (r *relayRuntime) SourceDisabled(ctx context.Context, kind string) (bool, e
 	return res.Disabled, nil
 }
 
-func (r *relayRuntime) AvailableSources(ctx context.Context) ([]string, error) {
-	var res availableSourcesResult
-	if err := r.conn.call(ctx, agentproc.RelayNamespaceCore, opAvailableSources, emptyArgs{}, &res); err != nil {
-		return nil, err
+// SourceManifest reads the held bundle's manifest in-process: the brain sealed
+// it beside the credentials, so the orchestrator is never asked.
+func (r *relayRuntime) SourceManifest(context.Context) (domain.SourceManifest, error) {
+	if r.held == nil {
+		return nil, errors.New("agenthost: sidecar holds no credential bundle")
 	}
-	return res.Kinds, nil
+	m := r.held.Sources()
+	if m == nil {
+		return nil, errors.New("agenthost: sidecar holds no credential bundle")
+	}
+	return m, nil
 }
 
 // sidecarRelayConn adapts a live supervision channel to relayConn — the
@@ -975,6 +980,6 @@ func NewDirectRuntime(stores db.Stores, info ConversationInfo) Runtime {
 // every DB effect relays to the orchestrator, the sidecar holds no stores.
 // providerCreds reads the sidecar's held bundle for a provider's sealed keyed
 // set (nil when the run carries no provider credentials).
-func NewRelayRuntime(conn *sidecarproto.Conn, info ConversationInfo, providerCreds func(namespace string) (json.RawMessage, bool)) Runtime {
-	return newRelayRuntime(sidecarRelayConn{conn: conn}, info, providerCreds)
+func NewRelayRuntime(conn *sidecarproto.Conn, info ConversationInfo, held HeldBundle) Runtime {
+	return newRelayRuntime(sidecarRelayConn{conn: conn}, info, held)
 }

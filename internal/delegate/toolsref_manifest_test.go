@@ -7,99 +7,127 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // manifestClaimCredentials is a db.ClaimCredentialsStore whose Get answers
-// with a fixed stamped tools manifest — the executor-path shape, where the
-// brain wrote include_tools beside the sealed bundle at provision time.
+// with a fixed source manifest — the executor-path shape, where the brain
+// wrote the manifest beside the sealed bundle at provision time.
 type manifestClaimCredentials struct {
 	db.ClaimCredentialsStore
-	includeTools []string
+	sources domain.SourceManifest
 }
 
 func (f manifestClaimCredentials) Get(context.Context, string, string) (db.SealedBundle, bool, error) {
-	return db.SealedBundle{IncludeTools: f.includeTools}, true, nil
+	return db.SealedBundle{Sources: f.sources}, true, nil
 }
 
 // manifestSpawner builds a spawner whose claim-credentials read answers with
-// the given stamped manifest.
-func manifestSpawner(t *testing.T, includeTools []string) *Spawner {
+// the given source manifest.
+func manifestSpawner(t *testing.T, sources domain.SourceManifest) *Spawner {
 	t.Helper()
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
-	stores.ClaimCredentials = manifestClaimCredentials{includeTools: includeTools}
+	stores.ClaimCredentials = manifestClaimCredentials{sources: sources}
 	return NewSpawner(database, stores, nil, nil, "claude-sonnet-4-6")
 }
 
-// TestToolsReferenceFor_StampedManifest_ComposesRegisteredSource pins the
-// executor path: a claim whose stamped include_tools names slack documents the
-// registered slack verbs even though the run's own source is github. This is
-// the answer the executor cannot compute itself — the brain stamped it — and
-// it is what puts the slack docs on a GitHub- or Jira-triggered native run.
-func TestToolsReferenceFor_StampedManifest_ComposesRegisteredSource(t *testing.T) {
+// TestSourceDocsFor_UsableSourcesAreDocumented pins the executor path: a
+// GitHub-triggered run whose engagement sealed Jira and Linear is documented
+// both their verbs, and a registered source the manifest names usable joins
+// them — the answer the executor cannot compute itself, so the brain sealed it.
+func TestSourceDocsFor_UsableSourcesAreDocumented(t *testing.T) {
 	t.Cleanup(agentprompt.ResetToolsReferences)
 	agentprompt.RegisterToolsReference("slack", "SLACK VERB DOCS")
 
-	s := manifestSpawner(t, []string{"github", "slack"})
-	got := s.toolsReferenceFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m1", eventsource.KindGitHub)
+	s := manifestSpawner(t, domain.SourceManifest{
+		"github": {State: domain.SourceSealed},
+		"jira":   {State: domain.SourceSealed},
+		"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
+		"slack":  {State: domain.SourceSealed},
+	})
+	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m1", eventsource.KindGitHub)
 
-	if !strings.Contains(got, "exec gh") || !strings.Contains(got, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want both the github and the manifest's slack verbs", got)
+	for _, want := range []string{"exec gh", "exec jira", "exec linear", "SLACK VERB DOCS"} {
+		if !strings.Contains(got.tools, want) {
+			t.Errorf("tools = %q, want it to document %q", got.tools, want)
+		}
+	}
+	if !strings.HasPrefix(got.notes, "Linear: unavailable this run") || strings.Contains(got.notes, "\n") {
+		t.Errorf("notes = %q, want the one unresolved source's line", got.notes)
 	}
 }
 
-// TestToolsReferenceFor_StampedManifest_UnionsTheRunsOwnSource pins the floor
-// under the manifest: the run's own source (and github) stay documented even
-// when the stamp omits them — a run never loses the verbs for the entity that
-// triggered it.
-func TestToolsReferenceFor_StampedManifest_UnionsTheRunsOwnSource(t *testing.T) {
+// TestSourceDocsFor_DisabledSourceIsLeftOut pins decision 5: a source an
+// admin turned off is left out of <tools> even when it is the run's own, and
+// named in a <run_context> note instead, as is every other source the run
+// cannot use. GitHub stays documented whatever the manifest says.
+func TestSourceDocsFor_DisabledSourceIsLeftOut(t *testing.T) {
 	t.Cleanup(agentprompt.ResetToolsReferences)
 	agentprompt.RegisterToolsReference("slack", "SLACK VERB DOCS")
 
-	s := manifestSpawner(t, []string{})
-	got := s.toolsReferenceFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m2", "slack")
+	s := manifestSpawner(t, domain.SourceManifest{
+		"github": {State: domain.SourceUnconfigured},
+		"jira":   {State: domain.SourceDisabled},
+		"linear": {State: domain.SourceUnconfigured},
+		"slack":  {State: domain.SourceUnlicensed},
+	})
+	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m2", eventsource.KindJira)
 
-	if !strings.Contains(got, "exec gh") || !strings.Contains(got, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want the base union (github + the run's own source) over an empty manifest", got)
+	if !strings.Contains(got.tools, "exec gh") {
+		t.Errorf("tools = %q, want the github verbs regardless", got.tools)
+	}
+	for _, absent := range []string{"exec jira", "exec linear", "SLACK VERB DOCS"} {
+		if strings.Contains(got.tools, absent) {
+			t.Errorf("tools = %q, want %q left out", got.tools, absent)
+		}
+	}
+	lines := strings.Split(got.notes, "\n")
+	if len(lines) != 4 {
+		t.Fatalf("notes = %q, want one line per source that is not sealed", got.notes)
+	}
+	for i, prefix := range []string{"GitHub: not set up", "Jira: turned off", "Linear: not set up", "Slack: not enabled"} {
+		if !strings.HasPrefix(lines[i], prefix) {
+			t.Errorf("note %d = %q, want it to start %q", i, lines[i], prefix)
+		}
+	}
+
+	block := runContext("", "/work", "", "", "", got.notes, "")
+	if !strings.Contains(block, "Jira: turned off for this organization") {
+		t.Errorf("<run_context> = %q, want the source notes in it", block)
 	}
 }
 
-// TestToolsReferenceFor_StampedManifest_ExcludesWhatItOmits pins the other
-// direction: a real (non-nil) manifest that omits slack keeps the slack docs
-// out of an unrelated run — the stamp is the org's availability answer, and a
-// source it excludes (unconnected, paused, unlicensed) is not advertised.
-func TestToolsReferenceFor_StampedManifest_ExcludesWhatItOmits(t *testing.T) {
-	t.Cleanup(agentprompt.ResetToolsReferences)
-	agentprompt.RegisterToolsReference("slack", "SLACK VERB DOCS")
-
-	s := manifestSpawner(t, []string{"github"})
-	got := s.toolsReferenceFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m3", eventsource.KindGitHub)
-
-	if strings.Contains(got, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want slack absent when the manifest omits it", got)
+// TestSourceDocsFor_AllSealedSaysNothing pins the quiet case: a run whose
+// every source is sealed carries no source notes.
+func TestSourceDocsFor_AllSealedSaysNothing(t *testing.T) {
+	sealed := domain.SourceEntry{State: domain.SourceSealed}
+	s := manifestSpawner(t, domain.SourceManifest{"github": sealed, "jira": sealed, "linear": sealed})
+	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m3", eventsource.KindGitHub)
+	if got.notes != "" {
+		t.Errorf("notes = %q, want none when every source is sealed", got.notes)
 	}
-	if !strings.Contains(got, "exec gh") {
-		t.Errorf("toolsRef = %q, want the github verbs regardless", got)
+	if strings.Contains(runContext("", "/work", "", "", "", got.notes, ""), "Jira:") {
+		t.Error("<run_context> names a sealed source")
 	}
 }
 
-// TestToolsReferenceFor_NilManifest_FallsThrough pins nil-vs-empty: a row
-// whose writer stamped no answer (include_tools NULL — a failed brain-side
-// resolve) is not an answer of "nothing available", so the resolve falls
-// through to the live claims path and, failing that, the base superset.
-func TestToolsReferenceFor_NilManifest_FallsThrough(t *testing.T) {
+// TestSourceDocsFor_NoManifest_FallsThrough pins the degrade: a row carrying
+// no manifest is not an answer, so the composition falls through to the live
+// resolve and, failing that, the base superset with no notes.
+func TestSourceDocsFor_NoManifest_FallsThrough(t *testing.T) {
 	t.Cleanup(agentprompt.ResetToolsReferences)
 	agentprompt.RegisterToolsReference("slack", "SLACK VERB DOCS")
 
 	s := manifestSpawner(t, nil)
-	got := s.toolsReferenceFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m4", eventsource.KindJira)
+	got := s.sourceDocsFor(context.Background(), runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID, "conv-m4", eventsource.KindJira)
 
-	if !strings.Contains(got, "exec gh") || !strings.Contains(got, "exec jira") {
-		t.Errorf("toolsRef = %q, want the base superset (github + the run's own source)", got)
+	if !strings.Contains(got.tools, "exec gh") {
+		t.Errorf("tools = %q, want the github verbs", got.tools)
 	}
-	if strings.Contains(got, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want no slack docs without an availability answer naming it", got)
+	if strings.Contains(got.tools, "SLACK VERB DOCS") {
+		t.Errorf("tools = %q, want no slack docs without an answer naming it", got.tools)
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -356,29 +357,28 @@ func TestLocalClient_JiraGetIssue_DirectPath(t *testing.T) {
 }
 
 // TestJira_NotConfigured_BothModes pins the friendly mapping: an org with
-// no stored Jira credential yields the same "not configured" guidance the
-// CLI printed pre-refactor — in local mode directly, and over IPC as the
-// response error string.
+// no stored Jira credential yields the refusal table's unconfigured guidance —
+// in local mode directly, and over IPC as the response error string.
 func TestJira_NotConfigured_BothModes(t *testing.T) {
 	info := ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"}
+	want := (&SourceRefusal{Kind: eventsource.KindJira, State: domain.SourceUnconfigured}).Error()
 
-	// Assert on the actionable "run triagefactory" guidance: it's absent
-	// from the raw resolver sentinel ("jira: no system credential for
-	// org: …"), so its presence proves the friendly remap fired rather
+	// The guidance is absent from the raw resolver sentinel ("jira: no system
+	// credential for org: …"), so matching it proves the remap fired rather
 	// than the bare error leaking through.
 	t.Run("local", func(t *testing.T) {
 		client := NewLocal(jiraStores("", ""), info)
 		_, err := client.JiraGetIssue(context.Background(), "PROJ-1")
-		if err == nil || !strings.Contains(err.Error(), "run triagefactory") {
-			t.Fatalf("err = %v, want the friendly 'not configured' guidance", err)
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want %q", err, want)
 		}
 	})
 
 	t.Run("ipc", func(t *testing.T) {
 		client := startJiraDaemon(t, jiraStores("", ""), info)
 		_, err := client.JiraGetIssue(context.Background(), "PROJ-1")
-		if err == nil || !strings.Contains(err.Error(), "run triagefactory") {
-			t.Fatalf("err = %v, want the friendly guidance to cross the wire", err)
+		if err == nil || err.Error() != want {
+			t.Fatalf("err = %v, want the guidance to cross the wire", err)
 		}
 	})
 }
@@ -432,13 +432,13 @@ func TestProxyJiraClient_FollowsRelayedDeployment(t *testing.T) {
 			}))
 			defer jira.Close()
 
-			client, err := proxyJiraClient(&ProxyCredentials{
+			client, ok := proxyJiraClient(&ProxyCredentials{
 				JiraAPIURL:     jira.URL,
 				JiraAPIToken:   "run-placeholder",
 				JiraDeployment: tt.deployment,
 			})
-			if err != nil {
-				t.Fatalf("proxyJiraClient: %v", err)
+			if !ok {
+				t.Fatal("proxyJiraClient found no proxy")
 			}
 			if _, err := client.AddComment(context.Background(), "PROJ-1", "looks good"); err != nil {
 				t.Fatalf("AddComment: %v", err)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/llmcred"
@@ -154,11 +156,14 @@ func (provisionConversations) GetSystem(_ context.Context, _, conversationID str
 
 type provisionClaimCredentials struct {
 	db.ClaimCredentialsStore
-	sealed []byte
+	sealed  []byte
+	sources domain.SourceManifest
+	puts    int
 }
 
-func (f *provisionClaimCredentials) Put(_ context.Context, _, _, _ string, _ int64, sealed []byte, _ []string) error {
-	f.sealed = sealed
+func (f *provisionClaimCredentials) Put(_ context.Context, _, _, _ string, _ int64, sealed []byte, sources domain.SourceManifest) error {
+	f.sealed, f.sources = sealed, sources
+	f.puts++
 	return nil
 }
 
@@ -173,14 +178,14 @@ func (noLLM) ResolveForBundle(context.Context, string, string, string) (llmcred.
 // app-installed org's bundle carries an access token that is still live, an
 // org with no Linear credential carries no Linear half at all, and a Linear
 // credential that fails to resolve still seals the rest of the bundle, with
-// the gap recorded.
+// the gap recorded in its source manifest.
 func TestProvisionForConversation_SealsLinear(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		values         map[string]string
-		tokens         *installTokens
-		want           func(t *testing.T, got *credbundle.LinearCreds)
-		wantUnresolved bool
+		name      string
+		values    map[string]string
+		tokens    *installTokens
+		want      func(t *testing.T, got *credbundle.LinearCreds)
+		wantEntry domain.SourceEntry
 	}{
 		{
 			name:   "app install",
@@ -197,6 +202,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 					t.Errorf("ExpiresUnix = %d, want a time after now", got.ExpiresUnix)
 				}
 			},
+			wantEntry: domain.SourceEntry{State: domain.SourceSealed},
 		},
 		{
 			name:   "unconfigured",
@@ -206,6 +212,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 					t.Errorf("Linear = %+v, want nil for an org with no Linear credential", got)
 				}
 			},
+			wantEntry: domain.SourceEntry{State: domain.SourceUnconfigured},
 		},
 		{
 			name:   "token endpoint down",
@@ -216,7 +223,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 					t.Errorf("Linear = %+v, want nil when the credential could not be resolved", got)
 				}
 			},
-			wantUnresolved: true,
+			wantEntry: domain.SourceEntry{State: domain.SourceUnresolved, Reason: domain.SourceReasonResolveFailed},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,6 +247,7 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				ghResolver:     &fakeScopedResolver{},
 				linearResolver: linear.NewResolverWithInstall(secrets, nil, tc.tokens),
 				llm:            noLLM{},
+				sources:        coreSourcesAvailable,
 			}
 
 			if err := m.ProvisionForConversation(context.Background(), "org-1", "conv-1"); err != nil {
@@ -257,9 +265,23 @@ func TestProvisionForConversation_SealsLinear(t *testing.T) {
 				t.Fatalf("Unmarshal: %v", err)
 			}
 			tc.want(t, bundle.Linear)
-			if got := bundle.IsUnresolved("linear"); got != tc.wantUnresolved {
-				t.Errorf("Unresolved = %v, want linear listed: %v", bundle.Unresolved, tc.wantUnresolved)
+			got := bundle.Sources["linear"]
+			if got.State != tc.wantEntry.State || got.Reason != tc.wantEntry.Reason {
+				t.Errorf("linear entry = %+v, want %+v", got, tc.wantEntry)
+			}
+			if !reflect.DeepEqual(bundle.Sources, claims.sources) {
+				t.Errorf("the sealed copy %+v differs from the claims-row copy %+v", bundle.Sources, claims.sources)
 			}
 		})
 	}
+}
+
+// coreSourcesAvailable answers every core source available, so a provision's
+// entries follow its resolves alone.
+func coreSourcesAvailable(context.Context, string) (eventsource.Availability, error) {
+	return eventsource.Availability{
+		eventsource.NewSource(eventsource.KindGitHub, eventsource.StateAvailable),
+		eventsource.NewSource(eventsource.KindJira, eventsource.StateAvailable),
+		eventsource.NewSource(eventsource.KindLinear, eventsource.StateAvailable),
+	}, nil
 }

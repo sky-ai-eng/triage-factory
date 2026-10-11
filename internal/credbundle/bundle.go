@@ -17,7 +17,6 @@ package credbundle
 import (
 	"encoding/json"
 	"fmt"
-	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -47,14 +46,13 @@ type Bundle struct {
 	Jira   *JiraCreds   `json:"jira,omitempty"`
 	Linear *LinearCreds `json:"linear,omitempty"`
 
-	// Unresolved names the sources (event-source kinds, e.g. "linear") whose
-	// credential the brain tried to resolve for this seal and could not, so
-	// the bundle carries none for them. It is what lets the sidecar tell a run
-	// that a credential is unavailable for now, which a later re-seal can
-	// change, apart from an org that has none at all. Only the Linear half is
-	// sealed this way: a failure resolving it leaves the rest of the bundle
-	// usable rather than failing the whole seal.
-	Unresolved []string `json:"unresolved,omitempty"`
+	// Sources is the engagement's source manifest, the copy the sidecar reads:
+	// which sources this bundle carries a credential for and, for each one it
+	// does not, why not. The brain writes it in the same pass, from the same
+	// value, as the copy on the engagement's claims row. The sidecar starts a
+	// credential proxy for each source it names usable and answers a miss on one
+	// with the source's state.
+	Sources domain.SourceManifest `json:"sources,omitempty"`
 
 	// Providers carries the sealed credential set for each first-class
 	// provider beyond the built-in GitHub/Jira/Linear (Slack, and any future one),
@@ -66,12 +64,6 @@ type Bundle struct {
 	// set through its registered resolver, and the sidecar selects through its
 	// registered handler, with only the JSON envelope crossing core.
 	Providers map[string]json.RawMessage `json:"providers,omitempty"`
-}
-
-// IsUnresolved reports whether the brain failed to resolve kind's credential
-// for this seal (Unresolved).
-func (b *Bundle) IsUnresolved(kind string) bool {
-	return slices.Contains(b.Unresolved, kind)
 }
 
 // ProviderCreds returns the sealed credential set for the named provider and

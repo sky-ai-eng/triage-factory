@@ -808,11 +808,19 @@ type ConversationQueueStore interface {
 
 	// ListActiveNeedingCredentialRefresh returns every conversation with a
 	// live engagement (an unreleased claim not parked in
-	// phase='awaiting_credentials') whose sealed bundle is older than
-	// olderThan — the brain-side refresh sweep's input: GitHub
-	// installation tokens are hour-lived, engagements aren't, so a
-	// long-lived claim's git token needs periodic re-minting.
-	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]AwaitingCredentialsConversation, error)
+	// phase='awaiting_credentials') that holds a sealed bundle the brain
+	// should re-seal now — the brain-side refresh sweep's input. A bundle
+	// qualifies when any one of these holds:
+	//
+	//   - it is older than olderThan: GitHub installation tokens are
+	//     hour-lived, engagements aren't, so a long-lived claim's git token
+	//     needs periodic re-minting;
+	//   - its source manifest names an unresolved source, whose credential
+	//     the next seal may bring, so the engagement is not left waiting out
+	//     the ordinary cadence after the source recovers;
+	//   - its source manifest names a sealed credential expiring before
+	//     expiringBefore, which the ordinary cadence would reach too late.
+	ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan, expiringBefore time.Time) ([]AwaitingCredentialsConversation, error)
 
 	// FleetQueueShares returns the conversation-queue occupancy of every org with any
 	// active or queued work, newest-pressure first — the per-org shares the

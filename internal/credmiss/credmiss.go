@@ -22,18 +22,21 @@ import (
 // Status is the HTTP status a credential miss is answered with.
 //
 // A run's bundle carries the credentials it was provisioned for, so a request
-// for a repository it has no token for, or for a gh, Jira or Linear credential
-// the org never supplied, misses on every retry. Those answer 403: git and every
-// GitHub client read it as a refusal rather than an outage, and the remedy is
-// a different action (a `workspace add`, which waits for its own re-seal, or
-// an admin binding the credential), never the same request again. A missing
-// bundle may still arrive, an expiring token may be refreshed, and a
-// credential the brain could not resolve for this seal may arrive with the
-// next one, so those keep the 502 a retry answers, as does any failure without
-// a named reason.
+// for a repository it has no token for, for a gh credential the org never
+// supplied, or to a source whose manifest entry says it is unconfigured, turned
+// off, unlicensed or withheld, misses on every retry. Those answer 403: git and
+// every API client read it as a refusal rather than an outage, and the remedy
+// is a different action (a `workspace add`, which waits for its own re-seal, or
+// an admin binding the credential or turning the source back on), never the
+// same request again. A missing bundle may still arrive, an expiring token may
+// be refreshed, and an unresolved source's credential may arrive with the next
+// re-seal, so those keep the 502 a retry answers, as does any failure without a
+// named reason.
 func Status(reason string) int {
 	switch reason {
-	case credbundle.MissNoRepoToken, credbundle.MissNoCLIToken, credbundle.MissNoJiraCredential, credbundle.MissNoLinearCredential:
+	case credbundle.MissNoRepoToken, credbundle.MissNoCLIToken,
+		credbundle.MissSourceUnconfigured, credbundle.MissSourceDisabled,
+		credbundle.MissSourceUnlicensed, credbundle.MissSourceWithheld:
 		return http.StatusForbidden
 	default:
 		return http.StatusBadGateway
@@ -63,11 +66,13 @@ func NewResponder(proxy, conversationID string, log *slog.Logger) *Responder {
 // body is the answer's shape. `message` is the member gh prints and GitHub API
 // clients read, and a JSON body is what lets an HTTP client tell this 403
 // apart from the HTML page a proxy in front of an outage returns. `reason` is
-// the same closed-vocabulary value on its own, for a client that turns it
-// into guidance of its own (the agenthost's Linear verbs).
+// the same closed-vocabulary value on its own, and `source` the event-source
+// kind a source miss is about, for a client that turns the pair into guidance
+// of its own (the agenthost's Jira and Linear verbs).
 type body struct {
 	Message string `json:"message"`
 	Reason  string `json:"reason"`
+	Source  string `json:"source,omitempty"`
 }
 
 // Respond answers a request whose credential lookup failed with err.
@@ -77,8 +82,12 @@ func (r *Responder) Respond(w http.ResponseWriter, err error) {
 		r.log.Warn("credential lookup failed",
 			"proxy", r.proxy, "conversation", r.conversationID, "reason", reason)
 	}
-	// Marshalling a struct of one string cannot fail.
-	b, _ := json.Marshal(body{Message: r.proxy + ": no credential for this request (" + reason + ")", Reason: reason})
+	// Marshalling a struct of strings cannot fail.
+	b, _ := json.Marshal(body{
+		Message: r.proxy + ": no credential for this request (" + reason + ")",
+		Reason:  reason,
+		Source:  credbundle.MissSource(err),
+	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(Status(reason))

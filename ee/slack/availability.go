@@ -65,7 +65,7 @@ func availability(ctx context.Context, tx db.TxStores, orgID string) (eventsourc
 
 // availabilitySystem is availability's claims-free twin, registered as the
 // SystemProbe: the same three-way split, read through the admin-pool
-// workspace door for the JWT-less callers eventsource.AvailableKindsSystem
+// workspace door for the JWT-less callers eventsource.ResolveSystem
 // serves. The entitlement read is process-local either way, so only the
 // workspace read changes doors.
 func availabilitySystem(ctx context.Context, stores db.Stores, orgID string) (eventsource.State, error) {

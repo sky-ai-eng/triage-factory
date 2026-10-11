@@ -207,12 +207,12 @@ func (c *IPCClient) DeleteStagedReviewComment(ctx context.Context, commentID str
 	return c.call(ctx, methodDeleteStagedReviewComment, deleteStagedReviewCommentArgs{CommentID: commentID}, nil)
 }
 
-func (c *IPCClient) AvailableSources(ctx context.Context) ([]string, error) {
-	var res availableSourcesResult
-	if err := c.call(ctx, methodAvailableSources, emptyArgs{}, &res); err != nil {
+func (c *IPCClient) SourceManifest(ctx context.Context) (domain.SourceManifest, error) {
+	var res sourceManifestResult
+	if err := c.call(ctx, methodSourceManifest, emptyArgs{}, &res); err != nil {
 		return nil, err
 	}
-	return res.Kinds, nil
+	return res.Sources, nil
 }
 
 func (c *IPCClient) GetConversation(ctx context.Context) (*domain.Conversation, error) {

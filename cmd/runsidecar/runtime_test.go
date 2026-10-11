@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/credseal"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
@@ -579,9 +580,13 @@ func TestRuntime_JiraAPIProxyReportsDeployment(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 
+			// The proxy forwards to the Jira site the bundle names.
+			jc := *tt.jira
+			jc.URL = upstream.URL
 			bundle := &credbundle.Bundle{
-				LLM:  map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
-				Jira: tt.jira,
+				LLM:     map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+				Jira:    &jc,
+				Sources: domain.SourceManifest{"jira": {State: domain.SourceSealed}},
 			}
 			if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
 				t.Fatalf("relay bundle: %v", err)
@@ -589,9 +594,7 @@ func TestRuntime_JiraAPIProxyReportsDeployment(t *testing.T) {
 
 			var res sidecarproto.StartProxiesResult
 			if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-				HostVethIP:      "127.0.0.1",
-				JiraAPIEnabled:  true,
-				JiraAPIUpstream: upstream.URL,
+				HostVethIP: "127.0.0.1",
 			}, &res); err != nil {
 				t.Fatalf("start proxies: %v", err)
 			}

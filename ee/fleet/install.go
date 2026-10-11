@@ -39,11 +39,13 @@ func install(api server.ExtensionAPI) {
 	api.API("GET /api/fleet/instances", h.handleInstances)
 	api.APIMutating("POST /api/fleet/instances/{id}/drain", h.handleDrain)
 	api.API("GET /api/fleet/timeseries", h.handleTimeseries)
-	// The per-executor sandbox breakdown and one sandbox's in-run series —
-	// the operator lens whole-host telemetry can't provide (instance_stats
-	// samples the box, these read per-run cgroups). Both are cross-org reads
-	// authorized by the same operator + FeatureFleet gate as their siblings.
+	// The per-executor sandbox breakdown, one engagement by claim id, and one
+	// sandbox's in-run series — the operator lens whole-host telemetry can't
+	// provide (instance_stats samples the box, these read per-run cgroups and
+	// the engagement's source manifest). All are cross-org reads authorized by
+	// the same operator + FeatureFleet gate as their siblings.
 	api.API("GET /api/fleet/instances/{id}/sandboxes", h.handleInstanceSandboxes)
+	api.API("GET /api/fleet/claims/{id}", h.handleClaim)
 	api.API("GET /api/fleet/claims/{id}/series", h.handleClaimSeries)
 	// The operator backlog (fleet-wide oldest-waiting + per-org shares) is a
 	// distinct surface from core's org-facing GET /api/fleet/queue (the per-org

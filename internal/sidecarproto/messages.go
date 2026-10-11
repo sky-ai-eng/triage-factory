@@ -25,11 +25,13 @@ type SealedBundleBody struct {
 }
 
 // StartProxiesBody is KindStartProxies' request payload: the host-side veth
-// IP the sidecar binds its proxies on, and which optional proxies this run
-// needs. The LLM + egress proxies are always started; git/github-REST/
-// jira-REST/linear-GraphQL are started only when the run touches those
-// surfaces (a Jira-only run needs no git proxy; a GitHub-only run needs no
-// Jira or Linear proxy).
+// IP the sidecar binds its proxies on, and which optional GitHub-side proxies
+// this run needs. The LLM + egress proxies are always started; git and
+// github-REST are started only when the run touches those surfaces (a
+// Jira-only run needs no git proxy). The Jira-REST and Linear-GraphQL proxies
+// are not requested here at all: the sidecar starts one for every source the
+// sealed bundle's source manifest names usable, so which sources a run can
+// reach is decided once, by the brain, beside the credentials themselves.
 type StartProxiesBody struct {
 	// HostVethIP is the 10.42.<idx>.1 address the sandbox's netns reaches via
 	// its default route — the proxies bind here, never loopback, so the
@@ -53,20 +55,6 @@ type StartProxiesBody struct {
 	// hold only a placeholder, never the real token. The REST mount is derived
 	// sidecar-side from the bundle's BaseURL.
 	GitHubAPIEnabled bool `json:"github_api_enabled,omitempty"`
-
-	// JiraAPIEnabled requests the Jira REST credential proxy for the
-	// orchestrator's agenthost jira verbs. Upstream is the org's Jira base;
-	// the sidecar resolves the injected auth (Cloud Basic vs DC Bearer) from
-	// the bundle's Jira credential, so no auth material crosses here.
-	JiraAPIEnabled  bool   `json:"jira_api_enabled,omitempty"`
-	JiraAPIUpstream string `json:"jira_api_upstream,omitempty"`
-
-	// LinearAPIEnabled requests the Linear GraphQL credential proxy for the
-	// agenthost linear verbs. There is no upstream field: Linear serves every
-	// workspace from one endpoint, so the sidecar always forwards to it, and
-	// it resolves the injected auth (a bare API key or an app user's Bearer
-	// access token) from the bundle's Linear credential.
-	LinearAPIEnabled bool `json:"linear_api_enabled,omitempty"`
 
 	// GHChannelEnabled requests the real-gh credential-injector proxy — the
 	// TLS listener the sandboxed `gh` binary reaches via GH_HOST, holding only a
@@ -132,12 +120,14 @@ type StartProxiesResult struct {
 	GitHubAPIURL   string `json:"github_api_url,omitempty"`
 	GitHubAPIToken string `json:"github_api_token,omitempty"`
 
-	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy.
+	// JiraAPIURL / JiraAPIToken are the same for the Jira-REST proxy. Empty
+	// when the bundle's source manifest did not name Jira usable.
 	JiraAPIURL   string `json:"jira_api_url,omitempty"`
 	JiraAPIToken string `json:"jira_api_token,omitempty"`
 
 	// LinearAPIURL / LinearAPIToken are the same for the Linear GraphQL
-	// proxy. Empty when LinearAPIEnabled was false.
+	// proxy. Empty when the bundle's source manifest did not name Linear
+	// usable.
 	LinearAPIURL   string `json:"linear_api_url,omitempty"`
 	LinearAPIToken string `json:"linear_api_token,omitempty"`
 

@@ -289,6 +289,12 @@ func resolveCLIPath(text, binaryPath string) string {
 // An absent fact renders no line: a deployment with no public URL says nothing
 // about a URL rather than offering a blank one.
 //
+// The source notes arrive here for the same reason: which sources this run's
+// sandbox holds a credential for, and why each other one is unavailable, is a
+// fact about one engagement (its source manifest), so a line per source that
+// is not sealed goes here and never into an agentprompt block. A run whose
+// every source is sealed says nothing about sources at all.
+//
 // The knowledge manifest arrives here for exactly that reason: WHICH documents
 // this org happens to hold today is a fact about one run, and the framework
 // blocks that tell the agent knowledge exists have to stay byte-identical
@@ -296,7 +302,7 @@ func resolveCLIPath(text, binaryPath string) string {
 // block, because it is a listing rather than a line — and only when something
 // was actually staged, so a run with no knowledge behind it says nothing about
 // knowledge at all.
-func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, knowledge string) string {
+func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, sourceNotes, knowledge string) string {
 	var lines []string
 	if s := strings.TrimSpace(scope); s != "" {
 		lines = append(lines, s)
@@ -315,6 +321,9 @@ func runContext(scope, runRoot, prCheckout, branchTemplate, runURL, knowledge st
 	}
 	if runURL != "" {
 		lines = append(lines, "Run URL: "+runURL)
+	}
+	if n := strings.TrimSpace(sourceNotes); n != "" {
+		lines = append(lines, n)
 	}
 	if k := strings.TrimSpace(knowledge); k != "" {
 		lines = append(lines, k)

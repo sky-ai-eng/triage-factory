@@ -173,8 +173,8 @@ type Registration struct {
 	Probe Probe
 	// SystemProbe resolves the same state for JWT-less system callers on the
 	// admin pool. Optional: a source that declares none is simply outside
-	// AvailableKindsSystem's answer — never advertised to an agent by the
-	// system path, which is the safe direction for a probe nobody wrote.
+	// ResolveSystem's answer — never described to an agent by the system
+	// path, which is the safe direction for a probe nobody wrote.
 	SystemProbe SystemProbe
 	// MultiOnly omits the source from local-mode reads entirely, for a source
 	// whose backing store or transport cannot exist there. Omission is the
@@ -217,7 +217,7 @@ type declaration struct {
 	probe probeFn
 	// systemProbe is probe's admin-pool twin, nil where no system answer
 	// exists — an unbuilt source, or a registration that declared none. A nil
-	// systemProbe keeps the source out of AvailableKindsSystem's answer.
+	// systemProbe keeps the source out of ResolveSystem's answer.
 	systemProbe systemProbeFn
 	// required marks a source the product is built on, which therefore has no
 	// off switch. It is not a registration option and never will be: a source
@@ -557,24 +557,24 @@ func linearState(ctx context.Context, r *resolver) (State, error) {
 	return StateUnconfigured, nil
 }
 
-// AvailableKindsSystem is AvailableKinds for JWT-less system callers: same
-// question, same precedence, read through the admin-pool `...System` doors
-// with no claims transaction and no user identity. It exists for the brain's
-// credential provisioner, which stamps a claim's cleartext tools manifest
-// (claim_credentials.include_tools) at seal time — the executor composing the
-// run's <tools> section cannot resolve availability itself (its secret store
-// is disabled, and an event-triggered conversation has no user to claim as),
-// so the brain answers here and ships the answer with the bundle.
+// ResolveSystem is Resolve for JWT-less system callers: the same question and
+// precedence, read through the admin-pool `...System` doors with no claims
+// transaction and no user identity. It exists for the brain's credential
+// provisioner, which records each source's state in an engagement's source
+// manifest on every seal: the executor that runs the engagement cannot resolve
+// availability itself (its secret store is disabled, and an event-triggered
+// conversation has no user to claim as), so the brain answers here and ships
+// the answer with the bundle.
 //
-// A source resolves only through a system probe: core's builtins have them, a
+// A source answers only through a system probe: core's builtins have them, a
 // registered source supplies Registration.SystemProbe, and one that doesn't is
-// simply absent from the answer — never advertised on a probe nobody wrote.
-// Any probe failure fails the whole read, per the package's error contract; the
-// provisioner degrades by stamping nothing, which the executor reads as
-// "fall back", never as "nothing is available".
-func AvailableKindsSystem(ctx context.Context, stores db.Stores, orgID string) ([]string, error) {
+// simply absent from the answer, never described on a probe nobody wrote. A
+// source TF has declared but not built has no probe of either kind and is
+// absent too. Any probe failure fails the whole read, per the package's error
+// contract.
+func ResolveSystem(ctx context.Context, stores db.Stores, orgID string) (Availability, error) {
 	r := &systemResolver{stores: stores, orgID: orgID}
-	var out []string
+	var out Availability
 	for _, d := range declarations() {
 		if d.systemProbe == nil {
 			continue
@@ -583,9 +583,7 @@ func AvailableKindsSystem(ctx context.Context, stores db.Stores, orgID string) (
 		if err != nil {
 			return nil, err
 		}
-		if st == StateAvailable {
-			out = append(out, d.kind)
-		}
+		out = append(out, Source{Kind: d.kind, State: st, Disableable: !d.required})
 	}
 	return out, nil
 }

@@ -152,12 +152,7 @@ func (c recordingRelayConn) notify(namespace, op string, _ any) {
 func TestRelayRuntime_ProviderCredentialNeverRelays(t *testing.T) {
 	sentinel := json.RawMessage(`{"bot_token":"xoxb-sealed-in-this-run"}`)
 	rt := newRelayRuntime(recordingRelayConn{t: t}, ConversationInfo{OrgID: "org", ConversationID: "conv"},
-		func(namespace string) (json.RawMessage, bool) {
-			if namespace != "slack" {
-				return nil, false
-			}
-			return sentinel, true
-		})
+		heldBundleStub{providers: map[string]json.RawMessage{"slack": sentinel}})
 
 	got, err := rt.ProviderCredential(context.Background(), "slack")
 	if err != nil {

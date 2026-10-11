@@ -5807,6 +5807,13 @@ CREATE TABLE public.claims (
     -- agent loop's start before the first. NULL for an engagement that does
     -- not checkpoint. Stamped by the renewal only.
     last_checkpoint_at timestamp with time zone,
+    -- The engagement's source manifest: for each event source, whether its
+    -- credential is in the sealed bundle and, when not, why not
+    -- ({"linear": {"state": "unresolved", "reason": "..."}, ...}). Replaced
+    -- by the credential provisioner on every seal, in the statement that
+    -- writes claim_credentials, and kept after teardown deletes that row, so
+    -- it describes the engagement after it ends. NULL = never sealed.
+    source_manifest jsonb,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -5852,13 +5859,12 @@ ALTER TABLE ONLY public.messages
 
 
 -- claim_credentials: the sealed per-claim credential bundle channel. The brain
--- seals an engagement's LLM/GitHub/Jira credentials (credseal, X25519 sealed
--- box) to the claim's published cred_pubkey; one row per claim, replaced
--- wholesale, never merged. boot_epoch and include_tools ride in cleartext
--- beside the blob: the epoch so the executor rejects a bundle sealed for an
--- earlier boot before unsealing, include_tools so it can compose the run's
--- <tools> section from the org's available event-source kinds (NULL = nothing
--- stamped and the reader falls back; '[]' = nothing available).
+-- seals an engagement's LLM/GitHub/Jira/Linear credentials (credseal, X25519
+-- sealed box) to the claim's published cred_pubkey; one row per claim,
+-- replaced wholesale, never merged. boot_epoch rides in cleartext beside the
+-- blob so the executor rejects a bundle sealed for an earlier boot before
+-- unsealing. What the blob holds is described on the claim itself
+-- (claims.source_manifest), written in the same statement.
 --
 -- Admin-pool only, no RLS policy and no app-pool grant: credential-bearing
 -- ciphertext is never a request-handler surface.
@@ -5868,7 +5874,6 @@ CREATE TABLE public.claim_credentials (
     executor_id   text NOT NULL,
     boot_epoch    bigint NOT NULL,
     sealed        bytea NOT NULL,
-    include_tools jsonb,
     created_at    timestamp with time zone DEFAULT now() NOT NULL
 );
 

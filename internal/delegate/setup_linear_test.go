@@ -52,7 +52,7 @@ func TestSetupLinear_RunRootAndTools(t *testing.T) {
 		t.Errorf("scope = %q, want %q", cfg.scope, want)
 	}
 	for _, want := range []string{"triagefactory exec linear issue view", "triagefactory exec gh"} {
-		if !strings.Contains(cfg.toolsRef, want) {
+		if !strings.Contains(cfg.sources.tools, want) {
 			t.Errorf("tools section is missing %q", want)
 		}
 	}

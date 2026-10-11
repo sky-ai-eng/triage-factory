@@ -757,8 +757,8 @@ func (c *LocalClient) TeamTracksRepo(ctx context.Context, owner, repo string) (b
 	return c.rt.TeamTracksRepo(ctx, owner, repo)
 }
 
-func (c *LocalClient) AvailableSources(ctx context.Context) ([]string, error) {
-	return c.rt.AvailableSources(ctx)
+func (c *LocalClient) SourceManifest(ctx context.Context) (domain.SourceManifest, error) {
+	return c.rt.SourceManifest(ctx)
 }
 
 func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
@@ -858,11 +858,16 @@ func (c *LocalClient) githubPullAnchorURL(ctx context.Context, owner, repo strin
 // --- jira ---
 //
 // requireSourceEnabled refuses a credentialed call to a source an org admin has
-// turned off. It sits at the source's credential funnel — today jiraSystemClient,
-// the single point every Jira verb resolves through — rather than on each of the
-// verbs, because a verb that forgot it would be a hole in the switch that
-// nothing else closes, and because being turned off is a fact about the
-// credential rather than about what the caller meant to do with it.
+// turned off. It sits at the source's credential funnel — jiraSystemClient and
+// linearSystemClient, the single points every Jira and Linear verb resolves
+// through — rather than on each of the verbs, because a verb that forgot it
+// would be a hole in the switch that nothing else closes, and because being
+// turned off is a fact about the credential rather than about what the caller
+// meant to do with it.
+//
+// It is the live check, read per call, and it wins over the run's source
+// manifest: an admin turning a source off mid-run takes effect on the next
+// verb, not at the next re-seal.
 //
 // GitHub has no such funnel here and needs none: it cannot be turned off
 // (eventsource.Disableable), because every core surface is built on it.
@@ -876,43 +881,105 @@ func (c *LocalClient) requireSourceEnabled(ctx context.Context, kind string) err
 		return fmt.Errorf("check whether %s is turned off for this organization: %w", eventsource.Label(kind), err)
 	}
 	if off {
-		return eventsource.DisabledError(kind)
+		return &SourceRefusal{Kind: kind, State: domain.SourceDisabled}
 	}
 	return nil
+}
+
+// refuseWithoutProxy is the refusal for a source this engagement has no
+// credential proxy for: the sidecar starts one for every source its bundle's
+// manifest names usable, so the manifest says why there is none. A manifest
+// that now names the source usable means it became so after the engagement
+// started, which nothing short of a new engagement changes.
+func (c *LocalClient) refuseWithoutProxy(ctx context.Context, kind string) error {
+	entry := domain.SourceEntry{State: domain.SourceUnconfigured}
+	if m, err := c.rt.SourceManifest(ctx); err == nil {
+		if e, ok := m.Entry(kind); ok {
+			entry = e
+		}
+	}
+	if entry.State.Usable() {
+		return &SourceRefusal{Kind: kind, State: entry.State, Reason: reasonAfterStart}
+	}
+	return &SourceRefusal{Kind: kind, State: entry.State, Reason: entry.Reason}
+}
+
+// refuseResolveFailure is local mode's refusal for a credential its live
+// resolve could not produce: unresolved, for the reason the error names. The
+// error itself is logged rather than shown, as the brain logs it in multi
+// mode, so the agent reads the same refusal in both.
+func (c *LocalClient) refuseResolveFailure(kind string, err error) error {
+	agenthostLog.Warn("resolve the org's credential for a verb failed",
+		"source", kind, "conversation", c.info.ConversationID, "error", err)
+	return &SourceRefusal{Kind: kind, State: domain.SourceUnresolved, Reason: UnresolvedReason(err), cause: err}
+}
+
+// explainSourceMiss replaces a verb's error, when it is the source's
+// credential proxy answering a miss or the source refusing the credential,
+// with the refusal table's explanation. The proxy names only the state; the
+// reason comes from the manifest entry when that entry is still in the same
+// state. Every other error is left as it is.
+func (c *LocalClient) explainSourceMiss(ctx context.Context, kind string, errp *error) {
+	err := *errp
+	if err == nil {
+		return
+	}
+	var refusal *SourceRefusal
+	if errors.As(err, &refusal) {
+		return
+	}
+	if state, ok := proxyMissState(err, kind); ok {
+		reason := ""
+		if m, merr := c.rt.SourceManifest(ctx); merr == nil {
+			if e, ok := m.Entry(kind); ok && e.State == state {
+				reason = e.Reason
+			}
+		}
+		*errp = &SourceRefusal{Kind: kind, State: state, Reason: reason, cause: err}
+		return
+	}
+	if kind == eventsource.KindLinear && errors.Is(err, linearclient.ErrUnauthorized) {
+		*errp = &SourceRefusal{Kind: kind, State: domain.SourceSealed, Reason: reasonCredentialRefused, cause: err}
+	}
 }
 
 // jiraSystemClient builds the org's bot-attributed Jira client. In multi
 // mode the daemon lives in the run's credential sidecar and proxyCreds is
 // always set, so every Jira verb routes through the sidecar's REST proxy —
 // no secret-store read anywhere in multi (the executor's store is disabled,
-// and the fused single process that once read the live store is gone).
+// and the fused single process that once read the live store is gone). A run
+// with no Jira proxy is refused from its manifest (refuseWithoutProxy).
 // Local mode falls through to the ForSystem resolver over the OS keychain
 // on the user's own machine. Either way the agent process never holds the
 // token.
 //
-// A missing credential maps to a clear "not configured" message (the
-// guidance exec printed before handing off); every other resolver error
-// (a transient vault/keychain outage) propagates so it isn't misreported
-// as "absent". Over IPC the message crosses as the response Error string,
-// so the agent reads the identical text across every mode/role.
+// A missing credential is the unconfigured refusal; every other resolver
+// error (a transient vault/keychain outage) is the unresolved one, so it isn't
+// misreported as absent. Over IPC the refusal crosses as the response Error
+// string, so the agent reads the identical text across every mode/role.
 func (c *LocalClient) jiraSystemClient(ctx context.Context) (*jiraclient.Client, error) {
 	if err := c.requireSourceEnabled(ctx, eventsource.KindJira); err != nil {
 		return nil, err
 	}
 	if c.proxyCreds != nil {
-		return proxyJiraClient(c.proxyCreds)
+		client, ok := proxyJiraClient(c.proxyCreds)
+		if !ok {
+			return nil, c.refuseWithoutProxy(ctx, eventsource.KindJira)
+		}
+		return client, nil
 	}
 	client, err := jiraclient.NewResolver(c.stores.Secrets, c.stores.Orgs).ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, jiraclient.ErrNoJiraSystemCredential) {
-		return nil, errors.New("no Jira credential configured; run triagefactory and complete setup first")
+		return nil, &SourceRefusal{Kind: eventsource.KindJira, State: domain.SourceUnconfigured}
 	}
 	if err != nil {
-		return nil, err
+		return nil, c.refuseResolveFailure(eventsource.KindJira, err)
 	}
 	return client, nil
 }
 
-func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient.Issue, error) {
+func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (_ *jiraclient.Issue, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -933,7 +1000,8 @@ func (c *LocalClient) JiraGetIssue(ctx context.Context, key string) (*jiraclient
 	return issue, nil
 }
 
-func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) error {
+func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -948,7 +1016,8 @@ func (c *LocalClient) JiraTransitionTo(ctx context.Context, key, status string) 
 	return nil
 }
 
-func (c *LocalClient) JiraGetTransitions(ctx context.Context, key string) ([]jiraclient.Transition, error) {
+func (c *LocalClient) JiraGetTransitions(ctx context.Context, key string) (_ []jiraclient.Transition, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -956,7 +1025,8 @@ func (c *LocalClient) JiraGetTransitions(ctx context.Context, key string) ([]jir
 	return client.GetTransitions(ctx, key)
 }
 
-func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) error {
+func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -969,7 +1039,8 @@ func (c *LocalClient) JiraAddComment(ctx context.Context, key, body string) erro
 	return nil
 }
 
-func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
+func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -981,7 +1052,8 @@ func (c *LocalClient) JiraAssignToSelf(ctx context.Context, key string) error {
 	return nil
 }
 
-func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
+func (c *LocalClient) JiraUnassign(ctx context.Context, key string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -993,7 +1065,8 @@ func (c *LocalClient) JiraUnassign(ctx context.Context, key string) error {
 	return nil
 }
 
-func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (string, error) {
+func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, summary, description, parentKey, priority string) (_ string, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return "", err
@@ -1006,7 +1079,8 @@ func (c *LocalClient) JiraCreateIssue(ctx context.Context, project, issueType, s
 	return created.Key, nil
 }
 
-func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) error {
+func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields jiraclient.UpdateIssueFields) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -1018,7 +1092,8 @@ func (c *LocalClient) JiraUpdateIssue(ctx context.Context, key string, fields ji
 	return nil
 }
 
-func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) error {
+func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -1030,7 +1105,8 @@ func (c *LocalClient) JiraSetParent(ctx context.Context, key, parentKey string) 
 	return nil
 }
 
-func (c *LocalClient) JiraGetChildIssues(ctx context.Context, key string) ([]jiraclient.Issue, error) {
+func (c *LocalClient) JiraGetChildIssues(ctx context.Context, key string) (_ []jiraclient.Issue, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -1038,7 +1114,8 @@ func (c *LocalClient) JiraGetChildIssues(ctx context.Context, key string) ([]jir
 	return client.GetChildIssues(ctx, key)
 }
 
-func (c *LocalClient) JiraSearchIssues(ctx context.Context, jql string, fields []string, maxResults int) ([]jiraclient.Issue, error) {
+func (c *LocalClient) JiraSearchIssues(ctx context.Context, jql string, fields []string, maxResults int) (_ []jiraclient.Issue, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -1046,7 +1123,8 @@ func (c *LocalClient) JiraSearchIssues(ctx context.Context, jql string, fields [
 	return client.SearchIssues(ctx, jql, fields, maxResults)
 }
 
-func (c *LocalClient) JiraListPriorities(ctx context.Context) ([]jiraclient.Priority, error) {
+func (c *LocalClient) JiraListPriorities(ctx context.Context) (_ []jiraclient.Priority, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -1054,7 +1132,8 @@ func (c *LocalClient) JiraListPriorities(ctx context.Context) ([]jiraclient.Prio
 	return client.ListPriorities(ctx)
 }
 
-func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string) error {
+func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string) (err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return err
@@ -1066,7 +1145,8 @@ func (c *LocalClient) JiraSetPriority(ctx context.Context, key, priority string)
 	return nil
 }
 
-func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) ([]jiraclient.IssueType, error) {
+func (c *LocalClient) JiraListIssueTypes(ctx context.Context, project string) (_ []jiraclient.IssueType, err error) {
+	defer c.explainSourceMiss(ctx, eventsource.KindJira, &err)
 	client, err := c.jiraSystemClient(ctx)
 	if err != nil {
 		return nil, err
