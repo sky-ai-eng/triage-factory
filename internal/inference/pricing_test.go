@@ -22,12 +22,13 @@ type expectedPrice struct {
 	readMultiple float64
 }
 
-// anthropicPublicPrices mirrors https://www.anthropic.com/pricing (standard
-// tier, ≤200k context). Cache writes are the same across the family: 5-minute
-// write = 1.25× input, 1-hour write = 2× input. Cache read is 0.1× input on
-// most models and 0.05× on Opus 5.5, so each row states its own.
+// anthropicPublicPrices mirrors
+// https://platform.claude.com/docs/en/about-claude/pricing (standard tier).
+// Cache writes are the same across the family: 5-minute write = 1.25× input,
+// 1-hour write = 2× input. Cache read differs by model (0.1× input on Haiku
+// 4.5, 0.05× on the 5.5 models), so each row states its own.
 var anthropicPublicPrices = map[string]expectedPrice{
-	"claude-sonnet-4-5": {input: 3e-06, output: 1.5e-05, cacheRead: 3e-07, cache5m: 3.75e-06, cache1h: 6e-06, readMultiple: 0.1},
+	"claude-sonnet-5-5": {input: 2e-06, output: 1e-05, cacheRead: 1e-07, cache5m: 2.5e-06, cache1h: 4e-06, readMultiple: 0.05},
 	"claude-opus-5-5":   {input: 4e-06, output: 2e-05, cacheRead: 2e-07, cache5m: 5e-06, cache1h: 8e-06, readMultiple: 0.05},
 	"claude-haiku-4-5":  {input: 1e-06, output: 5e-06, cacheRead: 1e-07, cache5m: 1.25e-06, cache1h: 2e-06, readMultiple: 0.1},
 }
@@ -99,9 +100,10 @@ func assertRate(t *testing.T, name string, got *float64, want float64) {
 }
 
 func TestCostForUsage_KnownModel(t *testing.T) {
-	// sonnet-4-5, standard tier. input 1000 (200 cache-read, 100 cache-write
-	// 5m, 700 non-cached), output 500.
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
+	// Standard tier. input 1000 (200 cache-read, 100 cache-write 5m, 700
+	// non-cached), output 500.
+	const model = "claude-sonnet-5-5"
+	usd, ok := CostForUsage(model, Usage{
 		PromptTokens:        1000,
 		OutputTokens:        500,
 		CacheReadTokens:     200,
@@ -110,7 +112,8 @@ func TestCostForUsage_KnownModel(t *testing.T) {
 	if !ok {
 		t.Fatal("expected ok for a known model")
 	}
-	want := 700*3e-06 + 200*3e-07 + 100*3.75e-06 + 500*1.5e-05
+	p := anthropicPublicPrices[model]
+	want := 700*p.input + 200*p.cacheRead + 100*p.cache5m + 500*p.output
 	if !approxEqual(usd, want) {
 		t.Fatalf("cost = %g, want %g", usd, want)
 	}
@@ -118,7 +121,8 @@ func TestCostForUsage_KnownModel(t *testing.T) {
 
 func TestCostForUsage_CacheWrite1hSplit(t *testing.T) {
 	// 100 cache-write of which 40 are 1-hour (2x) and 60 are 5-minute (1.25x).
-	usd, ok := CostForUsage("claude-sonnet-4-5", Usage{
+	const model = "claude-sonnet-5-5"
+	usd, ok := CostForUsage(model, Usage{
 		PromptTokens:          100,
 		CacheReadTokens:       0,
 		CacheCreationTokens:   100,
@@ -128,7 +132,8 @@ func TestCostForUsage_CacheWrite1hSplit(t *testing.T) {
 		t.Fatal("expected ok")
 	}
 	// nonCached = 100 - 0 - 100 = 0; only the cache-write split bills.
-	want := 40*6e-06 + 60*3.75e-06
+	p := anthropicPublicPrices[model]
+	want := 40*p.cache1h + 60*p.cache5m
 	if !approxEqual(usd, want) {
 		t.Fatalf("cost = %g, want %g", usd, want)
 	}
