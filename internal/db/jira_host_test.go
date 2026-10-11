@@ -2,10 +2,9 @@ package db
 
 import "testing"
 
-// TestNormalizeJiraHost locks the trailing-slash + whitespace trim that keys
-// every user_jira_identities row. The whitespace half is the difference from
-// NormalizeGitHubHost (below) and the reason the /api/me host-preference SQL
-// wraps the org host in trim() — see the doc comment on NormalizeJiraHost.
+// TestNormalizeJiraHost locks the canonical form that keys every
+// user_jira_identities row: whitespace and trailing slashes trimmed, scheme and
+// authority lowercased, the context path's case kept.
 func TestNormalizeJiraHost(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"https://jira.example.com", "https://jira.example.com"},
@@ -14,6 +13,8 @@ func TestNormalizeJiraHost(t *testing.T) {
 		{"  https://jira.example.com  ", "https://jira.example.com"},
 		{" https://jira.example.com/ ", "https://jira.example.com"},
 		{"https://site.atlassian.net/", "https://site.atlassian.net"},
+		{"HTTPS://Jira.Example.COM", "https://jira.example.com"},
+		{"https://Jira.Example.com:8443/Jira/Path/", "https://jira.example.com:8443/Jira/Path"},
 		{"", ""},
 		{"   ", ""},
 		{"/", ""},
@@ -25,19 +26,18 @@ func TestNormalizeJiraHost(t *testing.T) {
 	}
 }
 
-// TestNormalizeGitHubHost pins the GitHub counterpart's behavior and, by
-// contrast, documents the deliberate divergence: it trims a trailing slash but
-// NOT surrounding whitespace. That's correct and self-consistent — the
-// /api/me GitHub host-preference subquery uses a bare rtrim(..., '/') with no
-// trim(), so the Go normalizer and the SQL agree by both leaving whitespace
-// alone. (Jira needs trim() on both sides precisely because this one doesn't.)
+// TestNormalizeGitHubHost pins the GitHub counterpart, which is the same
+// canonical form: an empty host stays empty (EffectiveGitHubHost is the
+// variant that resolves it to the deployment default).
 func TestNormalizeGitHubHost(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"https://github.com", "https://github.com"},
 		{"https://github.com/", "https://github.com"},
 		{"https://github.com///", "https://github.com"},
 		{"https://ghe.corp.example.com/", "https://ghe.corp.example.com"},
-		{" https://github.com", " https://github.com"}, // whitespace deliberately preserved
+		{" https://github.com", "https://github.com"},
+		{"https://GitHub.com", "https://github.com"},
+		{"https://GHE.corp.example.com:8443/GitHub/", "https://ghe.corp.example.com:8443/GitHub"},
 		{"", ""},
 	}
 	for _, c := range cases {

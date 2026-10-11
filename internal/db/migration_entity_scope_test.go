@@ -70,12 +70,12 @@ func TestMigrate_EntityScopeBackfillMatchesGo(t *testing.T) {
 			if err := database.QueryRow(`SELECT scope FROM entities WHERE id = 'e1'`).Scan(&got); err != nil {
 				t.Fatalf("read scope: %v", err)
 			}
-			settings := domain.OrgSettings{GitHubBaseURL: base, JiraBaseURL: base}
+			settings := domain.OrgSettings{GitHubBaseURL: migratedGitHubBase(base), JiraBaseURL: base}
 			if want := domain.EntityScope(tc.source, settings); got != want {
 				t.Errorf("migrated scope = %q, domain.EntityScope = %q", got, want)
 			}
 			if tc.source == "github" {
-				if want := EffectiveGitHubHost(base); got != want {
+				if want := EffectiveGitHubHost(migratedGitHubBase(base)); got != want {
 					t.Errorf("migrated scope = %q, EffectiveGitHubHost = %q", got, want)
 				}
 			}

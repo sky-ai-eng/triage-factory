@@ -56,10 +56,22 @@ func (s *Server) guardLocalLinearAppWrite(ctx context.Context, orgID string) (re
 	return s.guardLocalSecretWrite(ctx, nil, orgID, linearOAuthClientSecretKey)
 }
 
-// guardLocalJiraWrite is guardLocalSecretWrite over the Jira credential's
-// keys, for the Jira bind and unbind.
-func (s *Server) guardLocalJiraWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
-	return s.guardLocalSecretWrite(ctx, &s.jiraCredentialMu, orgID, integrations.JiraKeys()...)
+// guardJiraWrite takes the org's Jira credential lock (lockJiraCredential)
+// and then guardLocalSecretWrite over the Jira credential's keys, for the Jira
+// bind and unbind. The lock is held in both modes, since it also orders those
+// writes against a settings save that moves the Jira site; unlock releases
+// it.
+func (s *Server) guardJiraWrite(ctx context.Context, orgID string) (restore, unlock func(), err error) {
+	release, err := s.lockJiraCredential(ctx, orgID)
+	if err != nil {
+		return nil, nil, err
+	}
+	restore, unlockLocal, err := s.guardLocalSecretWrite(ctx, nil, orgID, integrations.JiraKeys()...)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	return restore, func() { unlockLocal(); release() }, nil
 }
 
 // guardLocalAnthropicWrite is guardLocalSecretWrite over the org's Anthropic

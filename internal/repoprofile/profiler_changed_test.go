@@ -180,7 +180,7 @@ type batchRepositoryStore struct {
 	last       map[string]domain.Repository // last upsert per slug (nil-safe via lazy init)
 }
 
-func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string, string) ([]string, error) {
 	return s.names, nil
 }
 
@@ -192,7 +192,7 @@ func (s *batchRepositoryStore) ListTrackedNamesSystem(context.Context, string) (
 // assert against an empty run. ProfiledAt stays unset, so the TTL gate never
 // skips.
 func (s *batchRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
-	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *batchRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
@@ -267,13 +267,13 @@ type changeRepositoryStore struct {
 	upserts   atomic.Int64
 }
 
-func (s *changeRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+func (s *changeRepositoryStore) ListTrackedNamesSystem(context.Context, string, string) ([]string, error) {
 	return s.names, nil
 }
 
 // Same faithful shape as batchRepositoryStore's — see its doc.
 func (s *changeRepositoryStore) GetByRefSystem(_ context.Context, _ string, ref domain.RepoRef) (*domain.Repository, error) {
-	return &domain.Repository{ID: "repo-id-" + ref.Repo, Owner: ref.Owner, Repo: ref.Repo}, nil
+	return &domain.Repository{ID: "repo-id-" + ref.Repo, Host: ref.Host, Owner: ref.Owner, Repo: ref.Repo}, nil
 }
 
 func (s *changeRepositoryStore) UpsertSystem(_ context.Context, _ string, p domain.Repository) (domain.Repository, error) {
@@ -332,7 +332,7 @@ type goneRepositoryStore struct {
 	upserts atomic.Int64
 }
 
-func (s *goneRepositoryStore) ListTrackedNamesSystem(context.Context, string) ([]string, error) {
+func (s *goneRepositoryStore) ListTrackedNamesSystem(context.Context, string, string) ([]string, error) {
 	return s.names, nil
 }
 

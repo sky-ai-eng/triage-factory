@@ -77,7 +77,7 @@ func TestResolver_UnusableAppMintsNothing(t *testing.T) {
 func TestInstallationToken_UnusableAppDropsCachedToken(t *testing.T) {
 	inst := installOn("acme")
 	r, cache, gh := suspensionResolver(t, inst)
-	cache.Set("org-1", inst.InstallationID, githubapp.Token{
+	cache.Set("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID, githubapp.Token{
 		Value:     "ghs_minted_before_the_app_was_deleted",
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -86,7 +86,7 @@ func TestInstallationToken_UnusableAppDropsCachedToken(t *testing.T) {
 	if !errors.Is(err, ErrGitHubAppUnusable) {
 		t.Fatalf("installationToken error = %v; want ErrGitHubAppUnusable", err)
 	}
-	if _, ok := cache.Get("org-1", inst.InstallationID); ok {
+	if _, ok := cache.Get("org-1", domain.GitHubHost(gh.srv.URL), inst.InstallationID); ok {
 		t.Error("the token cached before the App was deleted is still in the cache; want it invalidated")
 	}
 }

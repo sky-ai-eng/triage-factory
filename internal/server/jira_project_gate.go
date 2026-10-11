@@ -301,19 +301,26 @@ func sameStatusSet(ids []string, stored []domain.JiraStatusRef) bool {
 func (s *Server) jiraGateClient(w http.ResponseWriter, r *http.Request, orgID, userID string) (*jira.Client, bool) {
 	// Read through the app pool inside WithTx so the org_secrets read runs
 	// under the caller's claims.
-	var creds auth.Credentials
+	var (
+		creds  auth.Credentials
+		orgSet domain.OrgSettings
+	)
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
 		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		if lerr != nil {
 			return fmt.Errorf("load integration credentials: %w", lerr)
 		}
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
+		if lerr != nil {
+			return fmt.Errorf("load org settings: %w", lerr)
+		}
 		return nil
 	}); err != nil {
 		internalError(w, "settings/team/jira-projects", err)
 		return nil, false
 	}
-	cfg, ok := integrations.JiraSystemConfig(creds)
+	cfg, ok := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 	if !ok {
 		writeNotConfigured(w, "Jira is not connected for this workspace, so a project or a status mapping cannot be added")
 		return nil, false

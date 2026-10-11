@@ -114,6 +114,12 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'A pull request was closed without merging',
     color: 'bg-slate-500/10 text-slate-600',
   },
+  'github:pr:unreachable': {
+    label: 'Unreachable',
+    description:
+      'Triage Factory no longer follows this pull request — the workspace now points at another GitHub host',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
 
   // --- Jira ---
   'jira:issue:body_updated': {

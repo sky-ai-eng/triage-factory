@@ -78,6 +78,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 
 	install := func(orgID, installationID, login string) domain.OrgGitHubAppInstallation {
 		return domain.OrgGitHubAppInstallation{
+			GitHubHost:     TestGitHubHost,
 			InstallationID: installationID,
 			OrgID:          orgID,
 			AccountType:    "Organization",
@@ -114,7 +115,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
 
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
@@ -161,11 +162,11 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 	t.Run("SuspendedToActive", func(t *testing.T) {
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", time.Time{}, ""); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", time.Time{}, ""); err != nil {
 			t.Fatalf("SetInstallationSuspension (unsuspend): %v", err)
 		}
 
@@ -186,7 +187,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		// that there is none.
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
@@ -201,11 +202,11 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 	t.Run("SuspendedToRemovedRetainsSuspension", func(t *testing.T) {
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
-		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, org, TestGitHubHost, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -235,10 +236,10 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		// revived row reads as suspended.
 		store, seed := mk(t)
 		org := seedActive(t, store, seed)
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
-		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, org, TestGitHubHost, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 
@@ -265,15 +266,15 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		for _, inst := range []domain.OrgGitHubAppInstallation{
-			{InstallationID: "456", OrgID: org, AccountType: "Organization", AccountID: "1234", AccountLogin: "acme"},
-			{InstallationID: "789", OrgID: org, AccountType: "Organization", AccountID: "5678", AccountLogin: "beta"},
+			{InstallationID: "456", OrgID: org, AccountType: "Organization", AccountID: "1234", AccountLogin: "acme", GitHubHost: TestGitHubHost},
+			{InstallationID: "789", OrgID: org, AccountType: "Organization", AccountID: "5678", AccountLogin: "beta", GitHubHost: TestGitHubHost},
 		} {
 			if _, err := store.UpsertInstallation(ctx, inst); err != nil {
 				t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
 			}
 		}
 
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension: %v", err)
 		}
 
@@ -300,7 +301,7 @@ func RunGitHubInstallationSuspensionConformance(t *testing.T, mk GitHubSuspensio
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 
-		if _, err := store.SetInstallationSuspension(ctx, org, "456", suspendedAt, "octocat"); err != nil {
+		if _, err := store.SetInstallationSuspension(ctx, org, TestGitHubHost, "456", suspendedAt, "octocat"); err != nil {
 			t.Fatalf("SetInstallationSuspension on an unmirrored installation: %v", err)
 		}
 		if row := seed.Row(t, org, "456"); row.Exists {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/jiraoauth"
@@ -267,8 +268,8 @@ func seedStockGate(t *testing.T, s *Server) {
 	t.Helper()
 	ctx := t.Context()
 	org := runmode.LocalDefaultOrgID
+	seedSourceHost(t, s, eventsource.KindJira, "https://jira.example.com")
 	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
-		JiraURL: "https://jira.example.com",
 		JiraPAT: "tok",
 	}); err != nil {
 		t.Fatalf("save jira creds: %v", err)
@@ -281,8 +282,8 @@ func seedStockGate(t *testing.T, s *Server) {
 	); err != nil {
 		t.Fatalf("seed jira rule: %v", err)
 	}
-	// Identity is host-scoped — key it on the same Jira host the
-	// org creds (and thus the stock handler's read) use.
+	// Identity is host-scoped — key it on the org's Jira site, the host the
+	// stock handler's read uses.
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
 		t.Fatalf("set jira identity: %v", err)
 	}

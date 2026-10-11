@@ -152,10 +152,14 @@ func appRefusal(err error) domain.GitHubAppUnusableReason {
 // earns a 401 that reads like a bad key. The bind refuses such a workspace, so
 // this is reached only by one whose base URL moved after it bound.
 //
-// bound is the org's own active installation ids. Filtering on the ACTIVE set
-// rather than every row the org has ever held is deliberate: a soft-removed row
-// is an uninstall, and GitHub mints a fresh installation id on re-install, so
-// reviving one would be creating a binding nobody performed.
+// bound is the org's own active installation ids on its own host. Filtering on
+// the ACTIVE set rather than every row the org has ever held is deliberate: a
+// soft-removed row is an uninstall, and GitHub mints a fresh installation id on
+// re-install, so reviving one would be creating a binding nobody performed.
+// Filtering on the HOST is the same rule across deployments: an id bound on
+// another GitHub names a different installation there, and matching it against
+// this listing would claim whichever installation of this GitHub carries the
+// number (InstallationIDsOnHost).
 //
 // A failed or partial listing yields an error and therefore changes nothing —
 // ListInstallations fails the whole call rather than returning the pages it
@@ -164,6 +168,10 @@ func appRefusal(err error) domain.GitHubAppUnusableReason {
 func RefreshBoundInstallations(ctx context.Context, deployment githubapp.DeploymentApp, orgID, baseURL string, bound []string) ([]domain.OrgGitHubAppInstallation, error) {
 	if err := managedHostMismatch(orgID, baseURL); err != nil {
 		return nil, err
+	}
+	// Nothing bound on this GitHub leaves nothing for a listing to refresh.
+	if len(bound) == 0 {
+		return nil, nil
 	}
 	deploymentHost := ghbase.DefaultBaseURL()
 	minter, err := deployment.Minter(ghbase.APIBase(deploymentHost))
@@ -190,14 +198,19 @@ func managedHostMismatch(orgID, baseURL string) error {
 	if host == deploymentHost {
 		return nil
 	}
+	if host == "" {
+		host = "no GitHub URL"
+	}
 	return fmt.Errorf("%w: org=%s workspace on %s, deployment app on %s",
 		ErrManagedWorkspaceOnOtherGitHub, orgID, host, deploymentHost)
 }
 
 // ManagedInstallationSet is one managed workspace's bound installation set: the
-// org, its configured base URL ("" for the deployment default — checked against
-// it, never listed against), and the installation ids the bind ceremony wrote
-// for it.
+// org, its configured base URL ("" for none, which is not the deployment's
+// GitHub), and the ids of the live installations the bind
+// ceremony wrote for it on the host that base URL resolves to. A workspace with
+// live rows only on other hosts still has a set, with an empty Bound, so a base
+// URL that moved off the deployment's GitHub after the bind is still reported.
 type ManagedInstallationSet struct {
 	OrgID   string
 	BaseURL string
@@ -235,14 +248,14 @@ type ManagedInstallationSet struct {
 // until the next cycle.
 //
 // upsert writes one row (its OrgID already stamped); markRemoved soft-removes
-// one of orgID's installations. Both are the store's own pool-bound writers,
-// as with ReconcileInstallations.
+// one of orgID's installations on the host listed. Both are the store's own
+// pool-bound writers, as with ReconcileInstallations.
 func RefreshManagedInstallationSets(
 	ctx context.Context,
 	deployment githubapp.DeploymentApp,
 	sets []ManagedInstallationSet,
 	upsert func(domain.OrgGitHubAppInstallation) error,
-	markRemoved func(orgID, installationID string) error,
+	markRemoved func(orgID, githubHost, installationID string) error,
 ) error {
 	var firstErr error
 	fail := func(err error) {
@@ -254,6 +267,11 @@ func RefreshManagedInstallationSets(
 	for _, set := range sets {
 		if err := managedHostMismatch(set.OrgID, set.BaseURL); err != nil {
 			fail(err)
+			continue
+		}
+		// On the deployment's GitHub with nothing bound there: no row a listing
+		// could refresh.
+		if len(set.Bound) == 0 {
 			continue
 		}
 		listable = append(listable, set)
@@ -283,7 +301,7 @@ func RefreshManagedInstallationSets(
 		orgID := set.OrgID
 		err := ReconcileInstallations(kept, set.Bound,
 			upsert,
-			func(installationID string) error { return markRemoved(orgID, installationID) },
+			func(installationID string) error { return markRemoved(orgID, deploymentHost, installationID) },
 		)
 		if err != nil {
 			fail(fmt.Errorf("reconcile managed installations for org %s: %w", orgID, err))
@@ -292,22 +310,24 @@ func RefreshManagedInstallationSets(
 	return firstErr
 }
 
-// ScanManagedInstallationSets folds rows of (org_id, base_url, installation_id),
-// ordered by org, into one ManagedInstallationSet per org. Both dialects read
-// the same three columns in the same order, so the fold lives here rather than
-// twice.
+// ScanManagedInstallationSets folds rows of (org_id, base_url, installation_id,
+// github_host), ordered by org, into one ManagedInstallationSet per org, keeping
+// in Bound the installations on the host the org's base URL resolves to. Both
+// dialects read the same four columns in the same order, so the fold lives here
+// rather than twice.
 func ScanManagedInstallationSets(rows *sql.Rows) ([]ManagedInstallationSet, error) {
 	var out []ManagedInstallationSet
 	for rows.Next() {
-		var orgID, baseURL, installationID string
-		if err := rows.Scan(&orgID, &baseURL, &installationID); err != nil {
+		var orgID, baseURL, installationID, githubHost string
+		if err := rows.Scan(&orgID, &baseURL, &installationID, &githubHost); err != nil {
 			return nil, fmt.Errorf("scan managed installation set: %w", err)
 		}
-		if n := len(out); n > 0 && out[n-1].OrgID == orgID {
-			out[n-1].Bound = append(out[n-1].Bound, installationID)
-			continue
+		if n := len(out); n == 0 || out[n-1].OrgID != orgID {
+			out = append(out, ManagedInstallationSet{OrgID: orgID, BaseURL: baseURL})
 		}
-		out = append(out, ManagedInstallationSet{OrgID: orgID, BaseURL: baseURL, Bound: []string{installationID}})
+		if set := &out[len(out)-1]; githubHost == EffectiveGitHubHost(set.BaseURL) {
+			set.Bound = append(set.Bound, installationID)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("read managed installation sets: %w", err)

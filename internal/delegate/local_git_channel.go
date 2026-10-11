@@ -178,13 +178,13 @@ func (s *Spawner) startLocalGitChannel(ctx context.Context, orgID string, task d
 	}
 	// The insteadOf upstream the proxy rewrites onto. Resolved here rather than
 	// in the shared gate because only this half needs it: the sandboxed sibling
-	// reads the same host off its sealed bundle. A read failure leaves it empty,
-	// which the proxy fills with the deployment's default GitHub.
-	if base, err := resolver.BaseURLFor(ctx, orgID); err != nil {
-		delegateLog.Warn("resolve git host base for the local git proxy failed; leaving upstream empty (defaults to the deployment's GitHub)", "org", orgID, "error", err)
-	} else {
-		cfg.Upstream = base
+	// reads the same host off its sealed bundle. An org whose GitHub URL cannot
+	// be resolved has no git host to front, so the proxy is not started.
+	base, err := resolver.BaseURLFor(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the org's GitHub URL for the local git proxy: %w", err)
 	}
+	cfg.Upstream = base
 	cfg.ConversationID = info.ConversationID
 	cfg.TokenSource = localGitTokenSource(scoped, orgID)
 	cfg.ProbeCredentials = func(ctx context.Context) error {

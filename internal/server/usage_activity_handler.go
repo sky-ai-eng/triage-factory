@@ -353,6 +353,7 @@ func resolveArtifactTeamNames(ctx context.Context, tx db.TxStores, orgID string,
 type actionJSON struct {
 	ID             string          `json:"id"`
 	Provider       string          `json:"provider"`
+	Scope          string          `json:"scope"`
 	Action         string          `json:"action"`
 	Target         string          `json:"target"`
 	ExternalID     string          `json:"external_id,omitempty"`
@@ -381,6 +382,7 @@ func toActionJSON(a domain.ExternalAction) actionJSON {
 	return actionJSON{
 		ID:             a.ID,
 		Provider:       a.Provider,
+		Scope:          a.Scope,
 		Action:         a.Action,
 		Target:         a.Target,
 		ExternalID:     a.ExternalID,

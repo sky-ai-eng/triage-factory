@@ -101,25 +101,10 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 	sid := r.signIn(userID)
 	tok := r.createToken(sid, map[string]any{"name": "wizard", "org_id": orgID.String()})
 
-	path := "/api/teams/" + teamID.String() + "/github-repos"
-	rec := r.tokensJSON("PUT", path, map[string]any{"repos": []string{"acme/widgets", "acme/gadgets"}}, "", tok.Token)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("PUT tracked set under a token = %d, want 200: %s", rec.Code, rec.Body.String())
-	}
-	var tracked struct {
-		Repos []string `json:"repos"`
-	}
-	rec = r.tokensJSON("GET", path, nil, "", tok.Token)
-	if err := json.Unmarshal(rec.Body.Bytes(), &tracked); err != nil {
-		t.Fatalf("decode tracked set: %v (body=%s)", err, rec.Body.String())
-	}
-	if strings.Join(tracked.Repos, ",") != "acme/gadgets,acme/widgets" {
-		t.Errorf("tracked set after the token's write = %v, want both repos", tracked.Repos)
-	}
-
-	// A GitHub that answers the two calls the bind makes — whoami and the
-	// email list — for exactly one PAT, so the handler's own validation is
-	// exercised without a network and the outcome is a persisted identity.
+	// The org's GitHub, which the tracked set is kept on: a stand-in that
+	// answers the two calls the bind makes — whoami and the email list — for
+	// exactly one PAT, so the handler's own validation is exercised without a
+	// network and the outcome is a persisted identity.
 	const pat = "ghp_wizard_probe"
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Header.Get("Authorization") != "Bearer "+pat {
@@ -143,6 +128,22 @@ func TestBearerAuth_WizardWritesLandUnderToken(t *testing.T) {
 		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = EXCLUDED.base_url
 	`, orgID, github.URL); err != nil {
 		t.Fatalf("point the org at the stub GitHub: %v", err)
+	}
+
+	path := "/api/teams/" + teamID.String() + "/github-repos"
+	rec := r.tokensJSON("PUT", path, map[string]any{"repos": []string{"acme/widgets", "acme/gadgets"}}, "", tok.Token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT tracked set under a token = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var tracked struct {
+		Repos []string `json:"repos"`
+	}
+	rec = r.tokensJSON("GET", path, nil, "", tok.Token)
+	if err := json.Unmarshal(rec.Body.Bytes(), &tracked); err != nil {
+		t.Fatalf("decode tracked set: %v (body=%s)", err, rec.Body.String())
+	}
+	if strings.Join(tracked.Repos, ",") != "acme/gadgets,acme/widgets" {
+		t.Errorf("tracked set after the token's write = %v, want both repos", tracked.Repos)
 	}
 
 	bind := "/api/orgs/" + orgID.String() + "/github/identity/pat"

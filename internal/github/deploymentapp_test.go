@@ -54,13 +54,16 @@ func TestDeploymentAppSource_CachesUntilTTL(t *testing.T) {
 	src.now = func() time.Time { return now }
 	ctx := context.Background()
 
-	// Three orgs on the deployment's GitHub: one with the host spelled out,
-	// one with a trailing slash, one that configured nothing and resolves to
-	// the default. One question, one preflight.
-	for _, base := range []string{deploymentTestHost, deploymentTestHost + "/", ""} {
+	// Two orgs on the deployment's GitHub: one with the host spelled out, one
+	// with a trailing slash. One question, one preflight. An org that
+	// configured nothing is on no GitHub, the deployment's included.
+	for _, base := range []string{deploymentTestHost, deploymentTestHost + "/"} {
 		if _, err := src.resolve(ctx, base); err != nil {
 			t.Fatalf("resolve(%q): %v", base, err)
 		}
+	}
+	if _, err := src.resolve(ctx, ""); !errors.Is(err, ErrDeploymentAppOtherGitHub) {
+		t.Fatalf("resolve(\"\") = %v; want ErrDeploymentAppOtherGitHub", err)
 	}
 	if got := atomic.LoadInt32(preflights); got != 1 {
 		t.Errorf("preflight ran %d times inside one TTL; want 1", got)

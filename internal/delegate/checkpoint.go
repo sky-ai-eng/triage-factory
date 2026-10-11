@@ -543,7 +543,7 @@ func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath
 	field("checkouts", strconv.Itoa(len(captured.checkouts)))
 	for _, co := range captured.checkouts {
 		d := co.state.Delta
-		field("checkout", co.rel, co.repoID, co.slug, d.Branch, d.Head)
+		field("checkout", co.rel, co.repositoryID, co.repoID, co.slug, d.Branch, d.Head)
 		if err := hashBundle(h, d.Bundle, co.state.BundlePath); err != nil {
 			return "", fmt.Errorf("fingerprint %s bundle: %w", co.rel, err)
 		}

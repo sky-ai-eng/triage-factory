@@ -42,12 +42,12 @@ var (
 // importing it here would be a cycle. Keep them in sync with
 // internal/integrations; keys_drift_test pins the agreement.
 //
-// keyJiraURL is shared by both backends. The remaining keys split by scheme:
-// keyJiraPAT is the Data Center PAT (Bearer); keyJiraEmail + keyJiraAPIToken
-// are the Cloud API-token pair (Basic); keyJiraAuthMethod is the AuthMethod
-// marker recording which of the two the org uses.
+// The keys split by scheme: keyJiraPAT is the Data Center PAT (Bearer);
+// keyJiraEmail + keyJiraAPIToken are the Cloud API-token pair (Basic);
+// keyJiraAuthMethod is the AuthMethod marker recording which of the two the
+// org uses. The site the credential talks to is the org's Jira base URL in
+// org_settings, the same value a per-user credential is keyed under.
 const (
-	keyJiraURL        = "jira_url"
 	keyJiraPAT        = "jira_pat"
 	keyJiraEmail      = "jira_email"
 	keyJiraAPIToken   = "jira_api_token"
@@ -56,9 +56,10 @@ const (
 
 // CanonicalHost canonicalizes an org's configured Jira base URL into the value
 // the per-user credential is keyed under ("jira_token/<host>") AND the origin a
-// per-user Client talks to. It trims a trailing slash + surrounding whitespace
-// and requires a real http(s) origin; ok=false on an empty ("Jira not
-// configured") or malformed base URL. This is the single source of truth the
+// per-user Client talks to. It is the ghbase.CanonicalBaseURL form (whitespace
+// and trailing slashes trimmed, scheme and authority lowercased, the context
+// path's case kept) and requires a real http(s) origin; ok=false on an empty
+// ("Jira not configured") or malformed base URL. This is the single source of truth the
 // bind flow (server.resolveJiraHost) and this resolver both compose, so a
 // stored credential always reads back under the key it was written with.
 //
@@ -220,10 +221,9 @@ func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, oauth UserA
 // ForSystem resolves the org's Jira service credential into an authenticated
 // client, routed by the stored auth-method marker: a Cloud org gets a Basic /
 // REST v3 client (CloudAPIToken, email + token), a Data Center org a Bearer /
-// REST v2 one (DataCenterPAT). The base URL is the org's stored jira_url
-// secret, canonicalized through CanonicalHost so the system client talks to
-// the exact same trimmed/validated origin a per-user client does (ForUser) —
-// no drift from a stray trailing slash or whitespace in the stored value.
+// REST v2 one (DataCenterPAT). The base URL is the org's Jira site,
+// org_settings.jira_base_url, canonicalized through CanonicalHost — the same
+// value and the same origin a per-user client resolves (ForUser).
 //
 // An absent marker is an org onboarded before Cloud support landed, so the
 // deployment is inferred from the host shape (DeploymentForMarker →
@@ -231,17 +231,13 @@ func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, oauth UserA
 // Data Center. Every genuine pre-Cloud org is non-*.atlassian.net (Cloud
 // onboarding always writes a marker), so this preserves the historical Data
 // Center behavior for them while still classifying a Cloud host correctly.
-// Returns ErrNoJiraSystemCredential when the URL is absent/unusable or the
+// Returns ErrNoJiraSystemCredential when the site is absent/unusable or the
 // scheme-appropriate credential is absent; a backend read error propagates so
 // a transient vault/keychain outage isn't misreported as "not configured".
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {
-	rawURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
+	host, err := r.systemSite(ctx, orgID)
 	if err != nil {
-		return nil, fmt.Errorf("resolve jira url for org %s: %w", orgID, err)
-	}
-	host, ok := CanonicalHost(rawURL)
-	if !ok {
-		return nil, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+		return nil, err
 	}
 
 	method, err := r.secrets.GetSystem(ctx, orgID, keyJiraAuthMethod)
@@ -304,13 +300,9 @@ type systemCredentialResolver interface {
 // *Client. See SystemCredential's doc for why this exists alongside
 // ForSystem rather than replacing it.
 func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (SystemCredential, error) {
-	rawURL, err := r.secrets.GetSystem(ctx, orgID, keyJiraURL)
+	host, err := r.systemSite(ctx, orgID)
 	if err != nil {
-		return SystemCredential{}, fmt.Errorf("resolve jira url for org %s: %w", orgID, err)
-	}
-	host, ok := CanonicalHost(rawURL)
-	if !ok {
-		return SystemCredential{}, fmt.Errorf("%w: org=%s", ErrNoJiraSystemCredential, orgID)
+		return SystemCredential{}, err
 	}
 
 	method, err := r.secrets.GetSystem(ctx, orgID, keyJiraAuthMethod)
@@ -344,6 +336,21 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 }
 
 var _ systemCredentialResolver = (*resolver)(nil)
+
+// systemSite returns the org's Jira site in canonical form, the origin its
+// service credential talks to. An org with no usable site has no service
+// credential to resolve: ErrNoJiraSystemCredential.
+func (r *resolver) systemSite(ctx context.Context, orgID string) (string, error) {
+	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("resolve jira site for org %s: %w", orgID, err)
+	}
+	host, ok := CanonicalHost(orgSet.JiraBaseURL)
+	if !ok {
+		return "", fmt.Errorf("%w: org=%s (org has no jira site)", ErrNoJiraSystemCredential, orgID)
+	}
+	return host, nil
+}
 
 // ForUser resolves the acting user's own Jira credential into an authenticated
 // client, keyed under and talking to the org's Jira host. The stored secret is

@@ -49,11 +49,26 @@ func (f *fakeApps) GetForOrgSystem(_ context.Context, _ string) (*domain.OrgGitH
 	return f.app, nil
 }
 
-func (f *fakeApps) ListInstallationsForOrgSystem(_ context.Context, _ string) ([]domain.OrgGitHubAppInstallation, error) {
+// ListInstallationsOnHostSystem answers like the store: the live rows on host,
+// and nothing for an empty host. A fixture installation that names no
+// GitHubHost is on the org's current host — the host every production writer
+// stamps — and the resolver asks only about that host, so it answers for any
+// non-empty host asked. One that names a host is on that host alone.
+func (f *fakeApps) ListInstallationsOnHostSystem(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	return f.insts, nil
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range f.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
 type fakeOrgs struct {
@@ -364,6 +379,44 @@ func TestResolver_ClientForRepo_CachesCoverage(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&gh.repoProbes); got != 1 {
 		t.Errorf("coverage probes = %d, want 1 (positive decision should be memoized)", got)
+	}
+}
+
+// A memoized coverage answer is about one host's repository: when the org's
+// host changes, the same slug on the new host is probed there rather than
+// inherited from the old host's positive.
+func TestResolver_ClientForRepo_CoverageIsPerHost(t *testing.T) {
+	ghA := newGHTestServer(t)
+	ghA.installRepos = []string{"acme/widget"}
+	ghB := newGHTestServer(t)
+	ghB.installRepos = []string{"acme/widget"}
+	orgs := &fakeOrgs{base: ghA.srv.URL}
+	r := newTestResolver(
+		&fakeSecrets{vals: map[string]string{"pem": testPEM(t)}},
+		&fakeApps{app: activeApp(), insts: []domain.OrgGitHubAppInstallation{installOn("acme")}},
+		orgs,
+		&fakeAgents{},
+		nil,
+	)
+
+	for i := 0; i < 2; i++ {
+		if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+			t.Fatalf("ClientForRepo on host A #%d: %v", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&ghA.repoProbes); got != 1 {
+		t.Fatalf("host A coverage probes = %d, want 1 (memoized after the first)", got)
+	}
+
+	orgs.base = ghB.srv.URL
+	if _, err := r.ClientForRepo(context.Background(), "org-1", "acme", "widget"); err != nil {
+		t.Fatalf("ClientForRepo on host B: %v", err)
+	}
+	if got := atomic.LoadInt32(&ghB.repoProbes); got != 1 {
+		t.Errorf("host B coverage probes = %d, want 1 (host A's positive must not vouch for host B's repository)", got)
+	}
+	if got := atomic.LoadInt32(&ghB.mintCalls); got != 1 {
+		t.Errorf("host B mints = %d, want 1 (host A's cached installation token must not be sent to host B)", got)
 	}
 }
 
@@ -723,23 +776,24 @@ func TestResolver_PATReadError_Propagates(t *testing.T) {
 	}
 }
 
-// When org_settings has no base and the github_url secret read fails, the
-// resolver must NOT default to the deployment default (which would send a possibly-GHES
-// PAT to the wrong host) — it must propagate the error.
+// A settings row the resolver cannot read is an error, never "no URL": an org
+// whose GitHub URL cannot be read must not be reported as not configured, and
+// nothing may be sent anywhere.
 func TestResolver_BaseReadError_Propagates(t *testing.T) {
+	errSettings := errors.New("settings read failed")
 	r := newTestResolver(
-		&fakeSecrets{err: errVaultDown},
+		&fakeSecrets{vals: map[string]string{integrations.KeyGitHubPAT: "ghp_test"}},
 		&fakeApps{app: nil},
-		&fakeOrgs{base: ""}, // settings empty → resolver reads the github_url secret, which errors
+		&fakeOrgs{settingsErr: errSettings},
 		&fakeAgents{},
 		nil,
 	)
 	_, err := r.ClientFor(context.Background(), "org-1", "acme")
 	if err == nil || errors.Is(err, ErrNoGitHubCredentials) {
-		t.Fatalf("want a propagated base-resolution error, got %v", err)
+		t.Fatalf("want a propagated settings read error, got %v", err)
 	}
-	if !errors.Is(err, errVaultDown) {
-		t.Errorf("error should wrap the secret-store failure, got %v", err)
+	if !errors.Is(err, errSettings) {
+		t.Errorf("error should wrap the settings read failure, got %v", err)
 	}
 }
 
@@ -757,32 +811,35 @@ func TestResolver_NoCredentials(t *testing.T) {
 	}
 }
 
-// When org_settings.github_base_url is empty, the resolver must still honor
-// a GHES host stored only in the github_url secret (the pre-settings-mirror
-// / local-mode case) rather than defaulting to public github.com.
-func TestResolver_BaseURLFallbackToSecret(t *testing.T) {
+// An org's GitHub host is org_settings.github_base_url and nothing else: with
+// the setting empty, a URL stored in the legacy github_url secret is not read,
+// and the org resolves no credential and no base, even with a PAT stored.
+func TestResolver_NoGitHubURLResolvesNoCredential(t *testing.T) {
 	gh := newGHTestServer(t)
 	r := newTestResolver(
 		&fakeSecrets{vals: map[string]string{
-			integrations.KeyGitHubURL: gh.srv.URL, // host lives only in the secret
+			"github_url":              gh.srv.URL,
 			integrations.KeyGitHubPAT: "ghp_test",
 		}},
 		&fakeApps{app: nil},
-		&fakeOrgs{base: ""}, // settings has no base
+		&fakeOrgs{base: ""},
 		&fakeAgents{},
 		nil,
 	)
-	client, err := r.ClientFor(context.Background(), "org-1", "acme")
-	if err != nil {
-		t.Fatalf("ClientFor: %v", err)
+	if _, err := r.ClientFor(context.Background(), "org-1", "acme"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("ClientFor err = %v; want ErrNoGitHubCredentials", err)
 	}
-	// If the base wrongly defaulted to the deployment default, this request would never
-	// reach the test server and lastProbe would stay empty.
-	if _, err := client.Get(context.Background(), "/probe"); err != nil {
-		t.Fatalf("probe: %v", err)
+	if _, err := r.TokenFor(context.Background(), "org-1", "acme"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("TokenFor err = %v; want ErrNoGitHubCredentials", err)
 	}
-	if gh.lastProbe != "Bearer ghp_test" {
-		t.Errorf("base did not fall back to the github_url secret; lastProbe=%q", gh.lastProbe)
+	if base, err := r.BaseURLFor(context.Background(), "org-1"); !errors.Is(err, ErrNoGitHubCredentials) {
+		t.Errorf("BaseURLFor = %q, %v; want ErrNoGitHubCredentials", base, err)
+	}
+	if ok, err := r.(*resolver).HasAnyCredential(context.Background(), "org-1"); err != nil || ok {
+		t.Errorf("HasAnyCredential = %v, %v; want false with no URL", ok, err)
+	}
+	if gh.lastProbe != "" {
+		t.Errorf("a request reached GitHub with no URL configured: %q", gh.lastProbe)
 	}
 }
 
@@ -836,7 +893,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot"}},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{},
 			nil,
 		)
@@ -850,7 +907,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: &domain.OrgGitHubApp{OrgID: "org-1", Active: true, Slug: "acme-bot", BotUserID: 41898282}},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{},
 			nil,
 		)
@@ -862,7 +919,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: true, Slug: "acme-bot", BotUserID: 999}},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "pat-login", GitHubOrgEmail: "pat@example.com"}},
 			nil,
 		)
@@ -874,7 +931,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: &domain.OrgGitHubApp{Active: false, Slug: "acme-bot", BotUserID: 12345}},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
 			nil,
 		)
@@ -887,7 +944,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			withPAT(),
 			&fakeApps{app: nil},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat", GitHubOrgEmail: "octocat@example.com"}},
 			nil,
 		)
@@ -903,7 +960,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			&fakeSecrets{}, // PAT cleared — github_org_login is now stale
 			&fakeApps{app: nil},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{agent: &domain.Agent{GitHubOrgLogin: "octocat"}},
 			nil,
 		)
@@ -917,7 +974,7 @@ func TestResolver_OrgIdentityFor(t *testing.T) {
 		r := newTestResolver(
 			&fakeSecrets{},
 			&fakeApps{app: nil},
-			&fakeOrgs{},
+			&fakeOrgs{base: "https://github.com"},
 			&fakeAgents{agent: &domain.Agent{}}, // no stored login
 			nil,
 		)

@@ -2,6 +2,7 @@ package dbtest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -16,8 +17,9 @@ type PlacementOverrideStoreFactory func(t *testing.T) (store db.PlacementOverrid
 // RunPlacementOverrideStoreConformance covers the contract every backend impl
 // must hold: absence reads as (nil, nil) not an error; upsert then
 // get round-trips a pin and a replica count; upsert is replace-wholesale
-// keyed on (org, kind, value); list is org-scoped and ordered; delete reports
-// matched and is idempotent.
+// keyed on (org, kind, host, value); the same key on two hosts is two
+// overrides; an empty host is refused; list is org-scoped and ordered; delete
+// reports matched and is idempotent.
 func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStoreFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -28,11 +30,11 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		// is stored as NULL — the row and the argument disagree by design.
 		store, orgID := mk(t)
 		read := func() (*domain.PlacementOverride, error) {
-			return store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/ret")
+			return store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, "acme/ret")
 		}
 
 		first, err := store.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/ret", Replicas: 2,
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: "acme/ret", Replicas: 2,
 		})
 		if err != nil {
 			t.Fatalf("Upsert (insert): %v", err)
@@ -43,7 +45,7 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		}
 
 		replaced, err := store.Upsert(ctx, domain.PlacementOverride{
-			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/ret",
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: "acme/ret",
 			PinnedInstanceID: "exec-9", Replicas: 5,
 		})
 		if err != nil {
@@ -57,7 +59,7 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 
 	t.Run("absent_get_is_nil_not_error", func(t *testing.T) {
 		store, orgID := mk(t)
-		ov, err := store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/ghost")
+		ov, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, "acme/ghost")
 		if err != nil {
 			t.Fatalf("get absent: %v", err)
 		}
@@ -68,11 +70,11 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 
 	t.Run("upsert_pin_roundtrips", func(t *testing.T) {
 		store, orgID := mk(t)
-		want := domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/web", PinnedInstanceID: "exec-7"}
+		want := domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: "acme/web", PinnedInstanceID: "exec-7"}
 		if _, err := store.Upsert(ctx, want); err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
-		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, "acme/web")
+		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, "acme/web")
 		if err != nil || got == nil {
 			t.Fatalf("get: %v (got %+v)", err, got)
 		}
@@ -87,15 +89,15 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Run("upsert_replaces_wholesale", func(t *testing.T) {
 		store, orgID := mk(t)
 		key := "acme/mono"
-		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "exec-1"}); err != nil {
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: key, PinnedInstanceID: "exec-1"}); err != nil {
 			t.Fatalf("upsert pin: %v", err)
 		}
 		// Re-upsert the same key with a replica count and no pin — must
 		// replace, not merge (pin cleared, replicas set).
-		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, Replicas: 3}); err != nil {
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: key, Replicas: 3}); err != nil {
 			t.Fatalf("upsert replicas: %v", err)
 		}
-		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, key)
+		got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key)
 		if err != nil || got == nil {
 			t.Fatalf("get: %v (%+v)", err, got)
 		}
@@ -109,12 +111,12 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 
 	t.Run("list_is_org_scoped_and_ordered", func(t *testing.T) {
 		store, orgID := mk(t)
-		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "b/two", Replicas: 2})
-		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "a/one", PinnedInstanceID: "x"})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: "b/two", Replicas: 2})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: "a/one", PinnedInstanceID: "x"})
 		// key_kind is a free-text column (no FK/CHECK) — an arbitrary second
-		// kind here proves the ORDER BY (key_kind, key_value) sorts across
+		// kind here proves the ORDER BY (key_kind, host, key_value) sorts across
 		// kinds, not just within the one the app mints today.
-		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: "hostgroup", KeyValue: "HG", Replicas: 1})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: "hostgroup", Host: TestGitHubHost, KeyValue: "HG", Replicas: 1})
 
 		list, err := store.List(ctx, orgID)
 		if err != nil {
@@ -123,8 +125,8 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 		if len(list) != 3 {
 			t.Fatalf("expected 3 overrides, got %d: %+v", len(list), list)
 		}
-		// Ordered (key_kind, key_value): "hostgroup" sorts before "repo"
-		// alphabetically, then key_value within a kind.
+		// Ordered (key_kind, host, key_value): "hostgroup" sorts before "repo"
+		// alphabetically, then key_value within a kind on one host.
 		if list[0].KeyKind != "hostgroup" || list[0].KeyValue != "HG" {
 			t.Fatalf("first should be hostgroup/HG: %+v", list)
 		}
@@ -136,22 +138,83 @@ func RunPlacementOverrideStoreConformance(t *testing.T, mk PlacementOverrideStor
 	t.Run("delete_reports_matched_and_is_idempotent", func(t *testing.T) {
 		store, orgID := mk(t)
 		key := "acme/del"
-		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: key, PinnedInstanceID: "z"})
+		_, _ = store.Upsert(ctx, domain.PlacementOverride{OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: key, PinnedInstanceID: "z"})
 
-		matched, err := store.Delete(ctx, orgID, domain.PlacementKindRepo, key)
+		matched, err := store.Delete(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key)
 		if err != nil || !matched {
 			t.Fatalf("first delete: matched=%v err=%v", matched, err)
 		}
-		matched, err = store.Delete(ctx, orgID, domain.PlacementKindRepo, key)
+		matched, err = store.Delete(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key)
 		if err != nil {
 			t.Fatalf("second delete err: %v", err)
 		}
 		if matched {
 			t.Fatalf("second delete should report matched=false")
 		}
-		got, _ := store.Get(ctx, orgID, domain.PlacementKindRepo, key)
+		got, _ := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key)
 		if got != nil {
 			t.Fatalf("row should be gone after delete, got %+v", got)
+		}
+	})
+
+	t.Run("the_same_key_on_two_hosts_is_two_overrides", func(t *testing.T) {
+		// An owner/repo names a repository only within one GitHub host, so a
+		// pin on one host must neither answer for nor be replaced or cleared
+		// by a write on the other.
+		store, orgID := mk(t)
+		const key = "acme/api"
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestGitHubHost, KeyValue: key, PinnedInstanceID: "exec-dotcom",
+		}); err != nil {
+			t.Fatalf("upsert on %s: %v", TestGitHubHost, err)
+		}
+		if got, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, key); err != nil || got != nil {
+			t.Fatalf("Get on %s = %+v, %v; want no override — the pin is %s's", TestOtherGitHubHost, got, err, TestGitHubHost)
+		}
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, Host: TestOtherGitHubHost, KeyValue: key, Replicas: 4,
+		}); err != nil {
+			t.Fatalf("upsert on %s: %v", TestOtherGitHubHost, err)
+		}
+
+		dotcom, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key)
+		if err != nil || dotcom == nil || dotcom.PinnedInstanceID != "exec-dotcom" || dotcom.Host != TestGitHubHost {
+			t.Fatalf("Get on %s = %+v, %v; want its own pin, untouched by the other host's write", TestGitHubHost, dotcom, err)
+		}
+		ghe, err := store.Get(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, key)
+		if err != nil || ghe == nil || ghe.Replicas != 4 || ghe.PinnedInstanceID != "" || ghe.Host != TestOtherGitHubHost {
+			t.Fatalf("Get on %s = %+v, %v; want its own replica count", TestOtherGitHubHost, ghe, err)
+		}
+
+		if matched, err := store.Delete(ctx, orgID, domain.PlacementKindRepo, TestOtherGitHubHost, key); err != nil || !matched {
+			t.Fatalf("delete on %s: matched=%v err=%v", TestOtherGitHubHost, matched, err)
+		}
+		if got, _ := store.Get(ctx, orgID, domain.PlacementKindRepo, TestGitHubHost, key); got == nil {
+			t.Errorf("deleting %s's override removed %s's", TestOtherGitHubHost, TestGitHubHost)
+		}
+	})
+
+	t.Run("an_empty_host_is_refused", func(t *testing.T) {
+		store, orgID := mk(t)
+		if _, err := store.Upsert(ctx, domain.PlacementOverride{
+			OrgID: orgID, KeyKind: domain.PlacementKindRepo, KeyValue: "acme/nohost", Replicas: 2,
+		}); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("Upsert with no host: err = %v, want ErrRepoHostRequired", err)
+		}
+		if _, err := store.Get(ctx, orgID, domain.PlacementKindRepo, "", "acme/nohost"); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("Get with no host: err = %v, want ErrRepoHostRequired", err)
+		}
+		if _, err := store.Delete(ctx, orgID, domain.PlacementKindRepo, "", "acme/nohost"); !errors.Is(err, db.ErrRepoHostRequired) {
+			t.Errorf("Delete with no host: err = %v, want ErrRepoHostRequired", err)
+		}
+		list, err := store.List(ctx, orgID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for _, ov := range list {
+			if ov.KeyValue == "acme/nohost" {
+				t.Errorf("a refused write left a row: %+v", ov)
+			}
 		}
 	})
 }

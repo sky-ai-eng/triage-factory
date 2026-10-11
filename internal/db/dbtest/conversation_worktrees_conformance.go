@@ -48,22 +48,24 @@ type ConversationWorktreeSeeder struct {
 	Claim   func(t *testing.T, conversationID string) (claimID string)
 	Release func(t *testing.T, claimID string)
 
-	// Repo ensures a registry row exists for an "owner/repo" slug.
-	// conversation_worktrees references the repository by that row's id, and
-	// the store resolves the slug rather than creating one — on the executor
-	// it holds no INSERT on repositories at all. So a fixture that reserves a
-	// worktree has to bring the repository into existence first, exactly as
-	// tracking does in production. Idempotent.
-	Repo func(t *testing.T, slug string)
+	// Repo ensures a registry row exists for an "owner/repo" slug on a GitHub
+	// host and returns its id. conversation_worktrees references the
+	// repository by that row's id, and the store checks the id rather than
+	// creating a row — on the executor it holds no INSERT on repositories at
+	// all. So a fixture that reserves a worktree has to bring the repository
+	// into existence first, exactly as tracking does in production.
+	// Idempotent: a second call for the same (host, slug) returns the same id.
+	Repo func(t *testing.T, host, slug string) (repositoryID string)
 }
 
-// insertWorktree reserves a worktree through the store, ensuring the
-// repository it names has a registry row first — the production ordering
-// (a repository is tracked, then a conversation checks it out) expressed as a
-// fixture.
+// insertWorktree reserves a worktree through the store for the repository w
+// names by slug on TestGitHubHost, ensuring it has a registry row first — the
+// production ordering (a repository is tracked, then a conversation checks it
+// out) expressed as a fixture. w.RepositoryID is filled from that row.
 func insertWorktree(t *testing.T, store db.ConversationWorktreeStore, seed ConversationWorktreeSeeder, orgID string, w domain.ConversationWorktree) (bool, string, error) {
 	t.Helper()
-	seed.Repo(t, w.RepoID)
+	w.RepositoryID = seed.Repo(t, TestGitHubHost, w.RepoID)
+	w.RepoID = ""
 	return store.Insert(context.Background(), orgID, w)
 }
 
@@ -147,6 +149,85 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 	})
 
+	t.Run("Rows_are_keyed_by_repository_id_not_slug", func(t *testing.T) {
+		// A slug names a repository only on one GitHub host. The same owner/repo
+		// on two hosts is two registry rows, and one conversation holding a
+		// checkout of each holds two ledger rows under the same ref, each
+		// addressed by its own repository id.
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "two-hosts")
+		dotcom := seed.Repo(t, TestGitHubHost, "owner/repo")
+		ghe := seed.Repo(t, TestOtherGitHubHost, "owner/repo")
+		if dotcom == ghe {
+			t.Fatalf("both hosts resolved to repository %s; the fixture needs two rows", dotcom)
+		}
+		for _, w := range []domain.ConversationWorktree{
+			{ConversationID: conversationID, RepositoryID: dotcom, Path: "/p/dotcom", Ref: "default"},
+			{ConversationID: conversationID, RepositoryID: ghe, Path: "/p/ghe", Ref: "default"},
+		} {
+			inserted, _, err := store.Insert(ctx, orgID, w)
+			if err != nil {
+				t.Fatalf("insert %s: %v", w.Path, err)
+			}
+			if !inserted {
+				t.Errorf("%s: inserted=false — a same-slug repository on another host must not conflict", w.Path)
+			}
+		}
+		rows, err := store.List(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		byRepository := map[string]domain.ConversationWorktree{}
+		for _, r := range rows {
+			byRepository[r.RepositoryID] = r
+		}
+		if len(rows) != 2 || byRepository[dotcom].Path != "/p/dotcom" || byRepository[ghe].Path != "/p/ghe" {
+			t.Fatalf("rows = %+v, want one per repository", rows)
+		}
+		for _, r := range rows {
+			if r.RepoID != "owner/repo" {
+				t.Errorf("row %s reads RepoID %q, want owner/repo", r.Path, r.RepoID)
+			}
+		}
+
+		got, err := store.GetByRepoRef(ctx, orgID, conversationID, ghe, "default")
+		if err != nil || got == nil || got.Path != "/p/ghe" {
+			t.Fatalf("GetByRepoRef(ghe) = %+v, %v; want the ghe row", got, err)
+		}
+		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, dotcom, "default"); err != nil {
+			t.Fatalf("DeleteByRepoRef(dotcom): %v", err)
+		}
+		rows, err = store.List(ctx, orgID, conversationID)
+		if err != nil {
+			t.Fatalf("list after delete: %v", err)
+		}
+		if len(rows) != 1 || rows[0].RepositoryID != ghe {
+			t.Errorf("after deleting the github.com row: %+v, want only the ghe row", rows)
+		}
+	})
+
+	t.Run("Insert_refuses_a_repository_id_no_row_answers_to", func(t *testing.T) {
+		// A write checks the id names a repository rather than creating one,
+		// and a slug in RepoID does not stand in for it: reads fill RepoID, and
+		// writes ignore it.
+		store, orgID, seed := mk(t)
+		conversationID := seed.Conversation(t, "unknown-repo")
+		seed.Repo(t, TestGitHubHost, "owner/repo")
+		if _, _, err := store.Insert(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepositoryID: unknownRepoID, Path: "/p", Ref: "default",
+		}); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("Insert with an unknown repository id = %v, want db.ErrNoSuchRepository", err)
+		}
+		if _, _, err := store.Insert(ctx, orgID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepoID: "owner/repo", Path: "/p", Ref: "default",
+		}); err == nil {
+			t.Error("Insert with only a slug succeeded; want it refused — the ledger is keyed on the repository id")
+		}
+		if rows, _ := store.List(ctx, orgID, conversationID); len(rows) != 0 {
+			t.Errorf("a refused insert wrote %+v", rows)
+		}
+	})
+
 	t.Run("GetByRepoRef_returns_row_or_nil", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "getrepo")
@@ -155,7 +236,8 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
-		got, err := store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "pr-1")
+		repositoryID := seed.Repo(t, TestGitHubHost, "owner/repo")
+		got, err := store.GetByRepoRef(ctx, orgID, conversationID, repositoryID, "pr-1")
 		if err != nil {
 			t.Fatalf("get: %v", err)
 		}
@@ -165,15 +247,20 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		if got.Path != "/p1" || got.Ref != "pr-1" {
 			t.Errorf("unexpected row: %+v", got)
 		}
+		// Reads carry both handles: the row id the ledger is keyed on and the
+		// repository's "owner/repo" joined back from the registry.
+		if got.RepositoryID != repositoryID || got.RepoID != "owner/repo" {
+			t.Errorf("row names repository (%q, %q), want (%q, owner/repo)", got.RepositoryID, got.RepoID, repositoryID)
+		}
 		// A different ref on the same repo is a distinct key → nil.
-		missingRef, err := store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "pr-2")
+		missingRef, err := store.GetByRepoRef(ctx, orgID, conversationID, repositoryID, "pr-2")
 		if err != nil {
 			t.Fatalf("get missing ref: %v", err)
 		}
 		if missingRef != nil {
 			t.Errorf("expected nil for missing ref, got %+v", missingRef)
 		}
-		missing, err := store.GetByRepoRef(ctx, orgID, conversationID, "other/repo", "pr-1")
+		missing, err := store.GetByRepoRef(ctx, orgID, conversationID, seed.Repo(t, TestGitHubHost, "other/repo"), "pr-1")
 		if err != nil {
 			t.Fatalf("get missing: %v", err)
 		}
@@ -212,7 +299,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 	t.Run("DeleteByRepoRef_idempotent_on_missing_row", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "del-repo")
-		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, "no/such-repo", "pr-1"); err != nil {
+		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, seed.Repo(t, TestGitHubHost, "no/such-repo"), "pr-1"); err != nil {
 			t.Errorf("DeleteByRepoRef(missing) = %v, want nil", err)
 		}
 	})
@@ -228,7 +315,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 				t.Fatalf("insert ref %s: %v", w.Ref, err)
 			}
 		}
-		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, "owner/repo", "pr-1"); err != nil {
+		if err := store.DeleteByRepoRef(ctx, orgID, conversationID, seed.Repo(t, TestGitHubHost, "owner/repo"), "pr-1"); err != nil {
 			t.Fatalf("DeleteByRepoRef: %v", err)
 		}
 		rows, err := store.List(ctx, orgID, conversationID)
@@ -302,15 +389,18 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 		conversationID := seed.Conversation(t, "record")
 		claimID := seed.Claim(t, conversationID)
-		seed.Repo(t, "owner/repo")
-		row := domain.ConversationWorktree{ConversationID: conversationID, RepoID: "owner/repo", Path: "/old/owner/repo/ref-main", Ref: "ref-main"}
+		repositoryID := seed.Repo(t, TestGitHubHost, "owner/repo")
+		row := domain.ConversationWorktree{ConversationID: conversationID, RepositoryID: repositoryID, Path: "/old/owner/repo/ref-main", Ref: "ref-main"}
 		stored, err := store.RecordForClaimSystem(ctx, orgID, claimID, row)
 		if err != nil {
 			t.Fatalf("RecordForClaimSystem (insert): %v", err)
 		}
 		AssertWriteReturnedStoredRow(t, "RecordForClaimSystem (insert)", stored, func() (*domain.ConversationWorktree, error) {
-			return store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "ref-main")
+			return store.GetByRepoRef(ctx, orgID, conversationID, repositoryID, "ref-main")
 		})
+		if stored.RepoID != "owner/repo" {
+			t.Errorf("recorded RepoID = %q, want owner/repo read back from the registry", stored.RepoID)
+		}
 
 		row.Path = "/new/owner/repo/ref-main"
 		stored, err = store.RecordForClaimSystem(ctx, orgID, claimID, row)
@@ -321,7 +411,7 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 			t.Errorf("recorded path = %q, want %q", stored.Path, row.Path)
 		}
 		AssertWriteReturnedStoredRow(t, "RecordForClaimSystem (move)", stored, func() (*domain.ConversationWorktree, error) {
-			return store.GetByRepoRef(ctx, orgID, conversationID, "owner/repo", "ref-main")
+			return store.GetByRepoRef(ctx, orgID, conversationID, repositoryID, "ref-main")
 		})
 		rows, err := store.List(ctx, orgID, conversationID)
 		if err != nil || len(rows) != 1 {
@@ -337,9 +427,9 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		conversationID := seed.Conversation(t, "record-fenced")
 		claimID := seed.Claim(t, conversationID)
 		seed.Release(t, claimID)
-		seed.Repo(t, "owner/repo")
+		repositoryID := seed.Repo(t, TestGitHubHost, "owner/repo")
 		_, err := store.RecordForClaimSystem(ctx, orgID, claimID, domain.ConversationWorktree{
-			ConversationID: conversationID, RepoID: "owner/repo", Path: "/p", Ref: "default",
+			ConversationID: conversationID, RepositoryID: repositoryID, Path: "/p", Ref: "default",
 		})
 		if !errors.Is(err, db.ErrClaimReleased) {
 			t.Fatalf("RecordForClaimSystem on a released claim = %v, want ErrClaimReleased", err)

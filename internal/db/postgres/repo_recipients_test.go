@@ -53,7 +53,7 @@ func TestRepoRecipients_Postgres(t *testing.T) {
 					`INSERT INTO org_memberships (user_id, org_id, role) VALUES ($1, $2, $3::org_role)`,
 					userID, orgID, role)
 			},
-			TrackRepo: func(t *testing.T, teamID, owner, repo string) {
+			TrackRepo: func(t *testing.T, teamID, host, owner, repo string) {
 				t.Helper()
 				// A tracking row references the registry row, so the registry
 				// row has to exist first. The org is the team's — a tracking
@@ -62,20 +62,20 @@ func TestRepoRecipients_Postgres(t *testing.T) {
 				// ReplaceForTeam's team-in-org check exist to make
 				// unrepresentable.
 				pgtest.MustExec(t, h.AdminDB, `
-					INSERT INTO repositories (org_id, owner, repo, source)
-					SELECT t.org_id, $2, $3, 'github' FROM teams t WHERE t.id = $1
+					INSERT INTO repositories (org_id, host, owner, repo, source)
+					SELECT t.org_id, $2, $3, $4, 'github' FROM teams t WHERE t.id = $1
 					ON CONFLICT DO NOTHING
-				`, teamID, owner, repo)
+				`, teamID, host, owner, repo)
 				pgtest.MustExec(t, h.AdminDB, `
 					INSERT INTO team_github_repos (team_id, repository_id, org_id)
 					SELECT t.id, r.id, t.org_id
 					  FROM teams t
 					  JOIN repositories r
-					    ON r.org_id = t.org_id AND r.source = 'github'
-					   AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
+					    ON r.org_id = t.org_id AND r.source = 'github' AND r.host = $2
+					   AND lower(r.owner) = lower($3) AND lower(r.repo) = lower($4)
 					 WHERE t.id = $1
 					ON CONFLICT DO NOTHING
-				`, teamID, owner, repo)
+				`, teamID, host, owner, repo)
 			},
 			ArchiveTeam: func(t *testing.T, teamID string) {
 				t.Helper()

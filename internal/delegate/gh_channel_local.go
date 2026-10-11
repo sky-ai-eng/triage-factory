@@ -85,13 +85,21 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 		credential = domain.CredentialGitHubPAT
 	}
 
+	// The injector sends the org's credential to the org's GitHub and no
+	// other, so with no GitHub URL to name it there is no channel.
+	upstream := s.githubAPIUpstreamFor(ctx, orgID)
+	if upstream == "" {
+		delegateLog.Warn("no GitHub URL for the local gh channel; the agent continues on the scoped exec verbs", "conversation", conversationID)
+		return nil, noopChannelCloser{}
+	}
+
 	var gitHandler http.Handler
 	if len(gitHandlers) > 0 {
 		gitHandler = gitHandlers[0]
 	}
 	ch, err := ghchannel.Start(ghchannel.Config{
 		ConversationID: conversationID,
-		Upstream:       s.githubAPIUpstreamFor(ctx, orgID),
+		Upstream:       upstream,
 		BinDir:         filepath.Dir(ghPath),
 		// Resolved per request against the live secret store — no caching in
 		// front of it — so a credential rotated mid-run is picked up on the
@@ -166,9 +174,9 @@ func localGHTokenSource(resolver ghclient.Resolver, orgID, owner string) ghinjec
 
 // githubAPIUpstreamFor resolves the REST API base the local gh channel's
 // injector forwards to — api.github.com, a GHES {base}/api/v3, or a .ghe.com
-// api host — derived from the org's non-secret configured GitHub base via the
-// same APIBase mapping the client uses. Empty (resolver unwired / read error)
-// defaults to api.github.com inside ghchannel. Local mode only: a sandboxed
+// api host — derived from the org's configured GitHub URL via the same APIBase
+// mapping the client uses. "" when the resolver is unwired or the URL cannot
+// be resolved; the channel is then not started. Local mode only: a sandboxed
 // run's injector reads the host off its sealed bundle instead.
 func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string {
 	s.mu.Lock()
@@ -179,7 +187,7 @@ func (s *Spawner) githubAPIUpstreamFor(ctx context.Context, orgID string) string
 	}
 	base, err := resolver.BaseURLFor(ctx, orgID)
 	if err != nil {
-		delegateLog.Warn("resolve github base for the local gh channel failed; defaulting to api.github.com", "org", orgID, "error", err)
+		delegateLog.Warn("resolve github base for the local gh channel failed", "org", orgID, "error", err)
 		return ""
 	}
 	return ghbase.APIBase(base)

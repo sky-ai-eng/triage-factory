@@ -165,7 +165,7 @@ func TestReadTouch_JiraGetIssue_TouchesIssue(t *testing.T) {
 		t.Fatalf("JiraGetIssue: issue=%v err=%v", issue, err)
 	}
 
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-123")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, "SKY-123")
 	if err != nil || ent == nil {
 		t.Fatalf("read did not resolve-or-create the issue entity: ent=%v err=%v", ent, err)
 	}
@@ -193,7 +193,7 @@ func TestReadTouch_JiraGetIssue_FailedRead_NoTouch(t *testing.T) {
 	if _, err := client.JiraGetIssue(ctx, "SKY-123"); err == nil {
 		t.Fatal("expected the Jira read to fail against the 404 backend")
 	}
-	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", "https://jira.example.com", "SKY-123")
+	ent, err := stores.Entities.GetBySource(ctx, runmode.LocalDefaultOrgID, "jira", jira.URL, "SKY-123")
 	if err != nil {
 		t.Fatalf("GetBySource: %v", err)
 	}

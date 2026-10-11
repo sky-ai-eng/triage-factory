@@ -2,7 +2,10 @@ package dbtest
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -33,18 +36,22 @@ type GitHubInstallationHostFactory func(t *testing.T) (db.GitHubAppsStore, GitHu
 //   - github_host round-trips through UpsertInstallation →
 //     ListInstallationsForOrgSystem, path component and all;
 //   - it is normalized on write to the same string every other GitHub host key
-//     in the schema uses, so a trailing slash and an unset base URL cannot
-//     produce a second spelling of one host;
+//     in the schema uses, so a trailing slash cannot produce a second
+//     spelling of one host;
 //   - the column never reads back empty — an installation written without a
-//     host is one whose org configured none, which is the deployment default;
-//   - it follows the org when a later write reports a different one, like the
-//     login and unlike the account id;
-//   - the negative space this column exists FOR: two orgs on different GitHub
-//     deployments may hold the same numeric installation_id, because that id is
-//     unique per deployment and not universally;
+//     host names no GitHub and is refused;
+//   - it is part of the row's key: the same installation id on two hosts is two
+//     installations, in one org as across two, so neither write takes over the
+//     other's row, and a removal or a suspension addresses one of them;
 //   - and the mirror of that, which the column is half the key of: on ONE
 //     deployment, an installation belongs to exactly one workspace, refused by a
-//     unique index over live rows rather than by any caller's filter.
+//     unique index over live rows rather than by any caller's filter;
+//   - an account login is held once per org per deployment, not once per org:
+//     the same login on two hosts names two accounts, and one host still
+//     refuses the login twice;
+//   - ListInstallationsOnHost(System) reads one deployment's live rows,
+//     normalizes its host argument as the write does, and answers an empty
+//     host with nothing.
 func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHostFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -102,45 +109,75 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 	})
 
-	t.Run("UnsetHostResolvesToTheDeploymentDefault", func(t *testing.T) {
-		// The NOT NULL column's floor: an org that configured no base URL is on
-		// the deployment's default GitHub, so a struct built without a host is
-		// a row under that host — never a NULL and never the empty string,
-		// which is not a host anything can be compared against. Pinned under a
-		// non-github.com default so the assertion cannot pass on the literal:
-		// the store must read the resolved default, not spell github.com.
+	t.Run("UnsetHostIsRefused", func(t *testing.T) {
+		// An installation lives on one GitHub, and a struct without a host
+		// names none: it is refused and nothing is written, whatever the
+		// deployment's default GitHub is — never a row under "" or under a
+		// host the writer did not name.
 		ghbase.SetDefaultBaseURLForTest(t, "https://ghe.default.test")
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
-		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); err != nil {
-			t.Fatalf("UpsertInstallation: %v", err)
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", "", "acme")); !errors.Is(err, db.ErrInstallationHostRequired) {
+			t.Fatalf("UpsertInstallation with no host = %v; want ErrInstallationHostRequired", err)
 		}
-		if got := only(t, store, org).GitHubHost; got != "https://ghe.default.test" {
-			t.Errorf("GitHubHost = %q for an installation written without one; want the deployment default %q", got, "https://ghe.default.test")
+		if rows, err := store.ListInstallationsForOrgSystem(ctx, org); err != nil || len(rows) != 0 {
+			t.Errorf("installations after a refused write = %+v, %v; want none", rows, err)
 		}
-		// And the lookup normalizes an empty host the same way, so a caller
-		// asking about "the default" finds the row the writer keyed.
-		if got, err := store.InstallationOwnerSystem(ctx, "", "456"); err != nil || got != org {
-			t.Errorf("InstallationOwnerSystem(\"\", 456) = (%q, %v); want (%q, nil)", got, err, org)
+		if got, err := store.InstallationOwnerSystem(ctx, "", "456"); err != nil || got != "" {
+			t.Errorf("InstallationOwnerSystem(\"\", 456) = (%q, %v); want no owner", got, err)
 		}
 	})
 
-	t.Run("HostFollowsALaterWrite", func(t *testing.T) {
-		// Both writers derive the host from the org's current base URL, so an
-		// installation the current host reports is on the current host. It takes
-		// the login's overwrite rule rather than the account id's fill-in-only
-		// one for that reason: there is no such thing as a writer that saw the
-		// installation but not which GitHub it came from.
+	t.Run("SameInstallationIDOnTwoHostsInOneOrg", func(t *testing.T) {
+		// GitHub numbers installations per deployment, so 456 on two hosts is
+		// two installations even in one org. The second write is a row of its
+		// own: it neither takes over the first row's host and account nor
+		// collides with it, and a removal or a suspension names the host and
+		// touches only that host's row.
 		store, seed := mk(t)
 		org := seed.Org(t, seed.User(t))
 		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghbase.DefaultBaseURL(), "acme")); err != nil {
-			t.Fatalf("UpsertInstallation: %v", err)
+			t.Fatalf("UpsertInstallation (default host): %v", err)
 		}
-		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
-			t.Fatalf("UpsertInstallation (moved host): %v", err)
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "globex")); err != nil {
+			t.Fatalf("UpsertInstallation (same id on GHES): %v", err)
 		}
-		if got := only(t, store, org).GitHubHost; got != ghes {
-			t.Errorf("GitHubHost = %q after a write reporting another deployment; want %q", got, ghes)
+		byHost := func(t *testing.T) map[string]domain.OrgGitHubAppInstallation {
+			t.Helper()
+			insts, err := store.ListInstallationsForOrgSystem(ctx, org)
+			if err != nil {
+				t.Fatalf("ListInstallationsForOrgSystem: %v", err)
+			}
+			out := map[string]domain.OrgGitHubAppInstallation{}
+			for _, inst := range insts {
+				out[inst.GitHubHost] = inst
+			}
+			return out
+		}
+		got := byHost(t)
+		if len(got) != 2 || got[ghbase.DefaultBaseURL()].AccountLogin != "acme" || got[ghes].AccountLogin != "globex" {
+			t.Fatalf("live installations = %+v; want 456 for acme on %s and 456 for globex on %s",
+				got, ghbase.DefaultBaseURL(), ghes)
+		}
+
+		if _, err := store.SetInstallationSuspension(ctx, org, ghes, "456", time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), "octocat"); err != nil {
+			t.Fatalf("SetInstallationSuspension: %v", err)
+		}
+		got = byHost(t)
+		if !got[ghes].Suspended() || got[ghbase.DefaultBaseURL()].Suspended() {
+			t.Errorf("suspending 456 on %s: suspended = (default %v, ghes %v); want only the GHES row",
+				ghes, got[ghbase.DefaultBaseURL()].Suspended(), got[ghes].Suspended())
+		}
+
+		removed, err := store.MarkInstallationRemoved(ctx, org, ghes, "456")
+		if err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
+		}
+		if removed == nil || removed.GitHubHost != ghes {
+			t.Errorf("MarkInstallationRemoved returned %+v; want the GHES row", removed)
+		}
+		if got := only(t, store, org); got.GitHubHost != ghbase.DefaultBaseURL() || got.AccountLogin != "acme" {
+			t.Errorf("live installation after removing the GHES one = %+v; want 456 for acme on %s", got, ghbase.DefaultBaseURL())
 		}
 	})
 
@@ -228,7 +265,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation: %v", err)
 		}
-		if _, err := store.MarkInstallationRemoved(ctx, org, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, org, ghes, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		got, err := store.InstallationOwnerSystem(ctx, ghes, "456")
@@ -289,7 +326,7 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		if _, err := store.UpsertInstallation(ctx, install(orgA, "456", ghes, "acme")); err != nil {
 			t.Fatalf("UpsertInstallation (org A): %v", err)
 		}
-		if _, err := store.MarkInstallationRemoved(ctx, orgA, "456"); err != nil {
+		if _, err := store.MarkInstallationRemoved(ctx, orgA, ghes, "456"); err != nil {
 			t.Fatalf("MarkInstallationRemoved: %v", err)
 		}
 		if _, err := store.UpsertInstallation(ctx, install(orgB, "456", ghes, "other")); err != nil {
@@ -297,6 +334,114 @@ func RunGitHubInstallationHostConformance(t *testing.T, mk GitHubInstallationHos
 		}
 		if got := only(t, store, orgB).AccountLogin; got != "other" {
 			t.Errorf("org B AccountLogin = %q; want %q", got, "other")
+		}
+	})
+
+	t.Run("SameLoginOnTwoHostsCoexists", func(t *testing.T) {
+		// A login is unique within one GitHub deployment, so the same login on
+		// two hosts names two accounts, and the second installation lands beside
+		// the first rather than colliding with it.
+		store, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghbase.DefaultBaseURL(), "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (default host): %v", err)
+		}
+		if _, err := store.UpsertInstallation(ctx, install(org, "789", ghes, "acme")); err != nil {
+			t.Fatalf("UpsertInstallation (same login on another host): %v", err)
+		}
+		insts, err := store.ListInstallationsForOrgSystem(ctx, org)
+		if err != nil {
+			t.Fatalf("ListInstallationsForOrgSystem: %v", err)
+		}
+		hosts := map[string]string{}
+		for _, inst := range insts {
+			hosts[inst.InstallationID] = inst.GitHubHost
+		}
+		if len(insts) != 2 || hosts["456"] != ghbase.DefaultBaseURL() || hosts["789"] != ghes {
+			t.Errorf("live installations = %+v; want 456 on %s and 789 on %s, both live", insts, ghbase.DefaultBaseURL(), ghes)
+		}
+	})
+
+	t.Run("SameLoginTwiceOnOneHostIsRefused", func(t *testing.T) {
+		// The host joined the key; it did not loosen it. On one deployment a
+		// login names one account, which holds at most one live installation.
+		store, seed := mk(t)
+		org := seed.Org(t, seed.User(t))
+		if _, err := store.UpsertInstallation(ctx, install(org, "456", ghes, "acme")); err != nil {
+			t.Fatalf("UpsertInstallation: %v", err)
+		}
+		if _, err := store.UpsertInstallation(ctx, install(org, "789", ghes+"/", "acme")); err == nil {
+			t.Fatal("UpsertInstallation (same login, same host) succeeded; want a uniqueness refusal")
+		}
+		if got := only(t, store, org); got.InstallationID != "456" {
+			t.Errorf("live installation = %q after the refused write; want the incumbent 456", got.InstallationID)
+		}
+	})
+
+	t.Run("ListInstallationsOnHostReadsOneHost", func(t *testing.T) {
+		store, seed := mk(t)
+		owner := seed.User(t)
+		org, other := seed.Org(t, owner), seed.Org(t, owner)
+		for _, inst := range []domain.OrgGitHubAppInstallation{
+			install(org, "456", ghbase.DefaultBaseURL(), "acme"),
+			install(org, "789", ghes, "acme"),
+			install(org, "790", ghes, "globex"),
+			install(org, "791", ghes, "initech"), // removed below
+			install(other, "800", ghes, "umbrella"),
+		} {
+			if _, err := store.UpsertInstallation(ctx, inst); err != nil {
+				t.Fatalf("UpsertInstallation(%s): %v", inst.InstallationID, err)
+			}
+		}
+		if _, err := store.MarkInstallationRemoved(ctx, org, ghes, "791"); err != nil {
+			t.Fatalf("MarkInstallationRemoved: %v", err)
+		}
+
+		ids := func(insts []domain.OrgGitHubAppInstallation) []string {
+			out := make([]string, 0, len(insts))
+			for _, inst := range insts {
+				out = append(out, inst.InstallationID)
+			}
+			return out
+		}
+		reads := map[string]func(host string) ([]domain.OrgGitHubAppInstallation, error){
+			"ListInstallationsOnHost": func(host string) ([]domain.OrgGitHubAppInstallation, error) {
+				return store.ListInstallationsOnHost(ctx, org, host)
+			},
+			"ListInstallationsOnHostSystem": func(host string) ([]domain.OrgGitHubAppInstallation, error) {
+				return store.ListInstallationsOnHostSystem(ctx, org, host)
+			},
+		}
+		for name, read := range reads {
+			for _, tc := range []struct {
+				host string
+				want []string
+			}{
+				// The org's live rows on that host, ordered by login; the removed
+				// row and the other org's row on the same host are not among them.
+				{ghes, []string{"789", "790"}},
+				// The argument normalizes as the write does.
+				{ghes + "/", []string{"789", "790"}},
+				{ghbase.DefaultBaseURL(), []string{"456"}},
+				// A host the org holds nothing on.
+				{"https://ghe.elsewhere.test", []string{}},
+				// No host is no match, not the deployment default.
+				{"", []string{}},
+				{"/", []string{}},
+			} {
+				got, err := read(tc.host)
+				if err != nil {
+					t.Fatalf("%s(%q): %v", name, tc.host, err)
+				}
+				if g := ids(got); !reflect.DeepEqual(g, tc.want) {
+					t.Errorf("%s(%q) = %v; want %v", name, tc.host, g, tc.want)
+				}
+				for _, inst := range got {
+					if inst.OrgID != org {
+						t.Errorf("%s(%q) returned org %q's row %s", name, tc.host, inst.OrgID, inst.InstallationID)
+					}
+				}
+			}
 		}
 	})
 }

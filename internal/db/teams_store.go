@@ -336,8 +336,8 @@ type TeamsStore interface {
 	// order drops and repeats rows across pages. githubBaseURL / jiraBaseURL
 	// are the org's configured hosts (raw, read from org_settings by the
 	// caller); the impl resolves them to the host identities are keyed under
-	// (EffectiveGitHubHost: an unset github_base_url resolves to the deployment default;
-	// NormalizeJiraHost: an unset jira_base_url matches nothing). A member's
+	// (EffectiveGitHubHost, NormalizeJiraHost: an unset base URL is no host
+	// and matches nothing). A member's
 	// GitHubUsername / JiraAccountID is nil when they hold no binding on that
 	// host. linearWorkspaceID is the org's Linear workspace
 	// (domain.OrgSettings.LinearWorkspaceID), matched verbatim; "" matches

@@ -6,7 +6,7 @@ import (
 )
 
 // RateLimitState is one org's most recently observed primary GitHub
-// rate-limit budget, as last reported by a response's X-RateLimit-*
+// rate-limit budget on one host, as last reported by a response's X-RateLimit-*
 // headers (see Client.recordRateLimit).
 type RateLimitState struct {
 	Remaining int
@@ -23,8 +23,12 @@ type RateLimitState struct {
 // (TFAC-573) reads through this. A Resolver that doesn't implement it
 // (test fakes) simply has nothing to report — same optional-extension
 // shape as RepoIdentityResolver/ScopedResolver above.
+//
+// host is the GitHubHost the budget was observed on: each GitHub deployment
+// meters its own, so an org that moved hosts has the new host's budget read,
+// never the old one's last answer.
 type RateLimitReader interface {
-	RateLimitFor(orgID string) (RateLimitState, bool)
+	RateLimitFor(orgID, host string) (RateLimitState, bool)
 }
 
 // rateLimitRegistry is a process-wide, in-memory, per-org cache of the
@@ -39,23 +43,26 @@ type RateLimitReader interface {
 // the next observed response repopulates it — acceptable for a soft
 // operational signal that self-heals on the next poll cycle.
 type rateLimitRegistry struct {
-	mu    sync.RWMutex
-	byOrg map[string]RateLimitState
+	mu        sync.RWMutex
+	byOrgHost map[rateLimitKey]RateLimitState
 }
+
+// rateLimitKey is one org's budget on one GitHub host.
+type rateLimitKey struct{ orgID, host string }
 
 func newRateLimitRegistry() *rateLimitRegistry {
-	return &rateLimitRegistry{byOrg: make(map[string]RateLimitState)}
+	return &rateLimitRegistry{byOrgHost: make(map[rateLimitKey]RateLimitState)}
 }
 
-func (r *rateLimitRegistry) record(orgID string, s RateLimitState) {
+func (r *rateLimitRegistry) record(orgID, host string, s RateLimitState) {
 	r.mu.Lock()
-	r.byOrg[orgID] = s
+	r.byOrgHost[rateLimitKey{orgID, host}] = s
 	r.mu.Unlock()
 }
 
-func (r *rateLimitRegistry) get(orgID string) (RateLimitState, bool) {
+func (r *rateLimitRegistry) get(orgID, host string) (RateLimitState, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	s, ok := r.byOrg[orgID]
+	s, ok := r.byOrgHost[rateLimitKey{orgID, host}]
 	return s, ok
 }

@@ -56,10 +56,9 @@ type TeamRosterFactory func(t *testing.T) (TeamRosterStores, TeamRosterSeeder)
 //     repeat rows, and with it the walk is exact.
 //   - paging: (items, total, err), where total is the unpaged count on every
 //     page and an offset past the end is an empty page rather than an error.
-//   - host scoping: an unset github_base_url resolves to the deployment default (that is
-//     where the capture paths bind), an unset jira_base_url matches nothing,
-//     and a binding on another host — or in another Linear workspace — never
-//     leaks into this roster.
+//   - host scoping: an unset github_base_url or jira_base_url matches
+//     nothing, and a binding on another host — or in another Linear
+//     workspace — never leaks into this roster.
 //   - the N=1 shape local mode runs on: one member, role admin, identities
 //     populated — the answer the assignee picker and the predicate editor
 //     read there, from the same query the multi-team roster uses.
@@ -212,10 +211,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertLinearIdentity: %v", err)
 		}
 
-		// githubBaseURL is passed UNSET, as an org on the deployment's default
-		// GitHub has it: the impl must resolve that to the default, which is
-		// where the binding above landed.
-		members, _, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, linearWorkspace, db.Unwindowed)
+		members, _, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)
 		}
@@ -304,7 +300,7 @@ func RunTeamRosterConformance(t *testing.T, mk TeamRosterFactory) {
 			t.Fatalf("UpsertLinearIdentity: %v", err)
 		}
 
-		members, total, err := stores.Teams.ListMembers(ctx, teamID, "", jiraHost, linearWorkspace,
+		members, total, err := stores.Teams.ListMembers(ctx, teamID, ghHost, jiraHost, linearWorkspace,
 			db.ListOpts{Limit: 200, Offset: 0})
 		if err != nil {
 			t.Fatalf("ListMembers: %v", err)

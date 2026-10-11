@@ -217,6 +217,7 @@ func TestGitHubAppsStore_SQLite_DeleteForOrg(t *testing.T) {
 
 	for _, login := range []string{"acme", "globex"} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+			GitHubHost:     dbtest.TestGitHubHost,
 			InstallationID: "inst-" + login, OrgID: orgID, AccountType: "Organization", AccountLogin: login,
 		}); err != nil {
 			t.Fatalf("seed installation %s: %v", login, err)
@@ -249,6 +250,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgID)
 
 	inst := domain.OrgGitHubAppInstallation{
+		GitHubHost:     dbtest.TestGitHubHost,
 		InstallationID: "555",
 		OrgID:          orgID,
 		AccountType:    "Organization",
@@ -269,7 +271,7 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 		t.Error("InstalledAt is zero; want defaulted CURRENT_TIMESTAMP")
 	}
 
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, "555"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgID, dbtest.TestGitHubHost, "555"); err != nil {
 		t.Fatalf("MarkInstallationRemoved: %v", err)
 	}
 	got, _ = stores.GitHubApps.ListInstallationsForOrg(ctx, orgID)
@@ -288,8 +290,8 @@ func TestGitHubAppsStore_SQLite_InstallationLifecycle(t *testing.T) {
 	}
 }
 
-// TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the composite
-// (org_id, installation_id) key: the same numeric installation_id under two
+// TestGitHubAppsStore_SQLite_InstallationCrossOrg pins the (org_id,
+// github_host, installation_id) key: the same numeric installation_id under two
 // orgs on two GitHub deployments — the case that is legal, since GitHub numbers
 // installations per deployment and not universally — stays two independent
 // rows, and a delete for one org never touches the other's same-id row. The
@@ -305,7 +307,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 	seedSQLiteOrgForApps(t, conn, orgB)
 
 	for _, tc := range []struct{ org, login, typ, host string }{
-		{orgA, "only-in-a", "User", ""},
+		{orgA, "only-in-a", "User", dbtest.TestGitHubHost},
 		{orgB, "only-in-b", "Organization", "https://git.example.com"},
 	} {
 		if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
@@ -321,7 +323,7 @@ func TestGitHubAppsStore_SQLite_InstallationCrossOrg(t *testing.T) {
 		t.Errorf("orgA = %+v, want one only-in-a row (orgB's same-id upsert leaked)", gotA)
 	}
 
-	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "900"); err != nil {
+	if _, err := stores.GitHubApps.MarkInstallationRemoved(ctx, orgB, "https://git.example.com", "900"); err != nil {
 		t.Fatalf("MarkInstallationRemoved orgB: %v", err)
 	}
 	if got, _ := stores.GitHubApps.ListInstallationsForOrg(ctx, orgA); len(got) != 1 {
@@ -369,10 +371,10 @@ func TestGitHubAppsStore_SQLite_Backfill(t *testing.T) {
 		t.Fatalf("seed pem secret: %v", err)
 	}
 
-	// Pre-seed a stale active installation (33) that the mock GitHub no
-	// longer reports — the reconcile must soft-remove it.
+	// Pre-seed a stale active installation (33) on the listed host that the
+	// mock GitHub no longer reports — the reconcile must soft-remove it.
 	if _, err := stores.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
-		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed",
+		InstallationID: "33", OrgID: orgID, AccountType: "User", AccountLogin: "departed", GitHubHost: srv.URL,
 	}); err != nil {
 		t.Fatalf("seed stale installation: %v", err)
 	}

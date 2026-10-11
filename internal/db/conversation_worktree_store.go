@@ -17,13 +17,14 @@ import (
 // conversation): "default", "pr-<N>", or "ref-<branch>".
 //
 // The row references the repository by its registry row id, so a rename moves
-// nothing here. Every method still takes and returns repoID as "owner/repo" —
-// the caller is an agent's argv — and the impls resolve it. Resolution is a
-// LOOKUP, never a create: in multi mode this runs on the executor, whose
-// Postgres role holds no INSERT on repositories at all. A worktree is reserved
-// for a repository the conversation was already authorized to clone, so the
-// registry row exists; Insert reports an error rather than minting one if it
-// does not.
+// nothing here, and every method is keyed on that id (ConversationWorktree's
+// RepositoryID, and the repositoryID arguments): a slug names a repository only
+// on one GitHub host, and the caller has already resolved the agent's argv to
+// a row on the org's host by the time it reserves a worktree. Reads also return
+// the repository's "owner/repo" as RepoID. A write checks the id names a row in
+// the org — never a create: in multi mode this runs on the executor, whose
+// Postgres role holds no INSERT on repositories at all — and reports an error
+// rather than recording a reference to nothing.
 //
 // Lifted out of the pre-D2 package-level functions in
 // internal/db/conversation_worktrees.go so multi-mode Postgres callers route
@@ -54,7 +55,7 @@ type ConversationWorktreeStore interface {
 	// create on disk. Used as the cross-process serialization point:
 	// two concurrent `workspace add owner/repo` invocations for the
 	// same (conversation, repo, ref) that both passed the GetByRepoRef "not
-	// found" check race here, and the PK conflict on (conversation_id, repo_id,
+	// found" check race here, and the PK conflict on (conversation_id, repository_id,
 	// ref) deterministically picks one winner.
 	//
 	// On PK conflict the winning row's path is returned with
@@ -63,12 +64,12 @@ type ConversationWorktreeStore interface {
 	// caller supplied.
 	Insert(ctx context.Context, orgID string, w domain.ConversationWorktree) (inserted bool, winningPath string, err error)
 
-	// GetByRepoRef fetches the worktree row for a (conversation_id, repo_id,
+	// GetByRepoRef fetches the worktree row for a (conversation_id, repository_id,
 	// ref) triple, or (nil, nil) if none exists. Used by the workspace
 	// CLI to short-circuit the create+insert path when the agent
 	// re-invokes `workspace add` against an already-materialized
 	// (repo, ref).
-	GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error)
+	GetByRepoRef(ctx context.Context, orgID, conversationID, repositoryID, ref string) (*domain.ConversationWorktree, error)
 
 	// List returns every worktree materialized for a conversation, in
 	// insertion order. The spawner's cleanup defer iterates this
@@ -82,7 +83,7 @@ type ConversationWorktreeStore interface {
 	// — no JWT claims in scope.
 	ListSystem(ctx context.Context, orgID, conversationID string) ([]domain.ConversationWorktree, error)
 
-	// DeleteByRepoRef removes the row for a (conversation_id, repo_id, ref)
+	// DeleteByRepoRef removes the row for a (conversation_id, repository_id, ref)
 	// triple. Used by the workspace CLI to release a reservation after
 	// worktree materialization fails, or to clear a stale row whose on-disk
 	// path was reaped (e.g. startup orphan sweep) so a subsequent
@@ -90,7 +91,7 @@ type ConversationWorktreeStore interface {
 	// that doesn't exist is a no-op (no error).
 	//
 	// Exempt from the returned-row rule: it is a delete.
-	DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error
+	DeleteByRepoRef(ctx context.Context, orgID, conversationID, repositoryID, ref string) error
 
 	// DeleteByPathSystem removes the row for a (conversation_id, path)
 	// pair. Used by the spawner cleanup defer that iterates List
@@ -126,9 +127,9 @@ type ConversationWorktreeStore interface {
 	// here. Manual conversations go through SyntheticClaimsWithTx + the
 	// non-System methods.
 	InsertSystem(ctx context.Context, orgID string, w domain.ConversationWorktree) (inserted bool, winningPath string, err error)
-	GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error)
+	GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repositoryID, ref string) (*domain.ConversationWorktree, error)
 
 	// DeleteByRepoRefSystem is exempt from the returned-row rule: it is a
 	// delete.
-	DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error
+	DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repositoryID, ref string) error
 }

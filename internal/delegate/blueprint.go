@@ -318,9 +318,9 @@ func (s *Spawner) runBlueprintWorktreeCleanup(orgID, blueprintRunID, wsKey strin
 // prConfigReclaim is the per-run PR push config one checkout row may have left
 // in a shared bare, by every namespace it can be under.
 type prConfigReclaim struct {
-	owner, repo string
-	prNumber    int
-	keys        []string
+	repositoryID string
+	prNumber     int
+	keys         []string
 }
 
 // prConfigReclaimFor reads a row's reclaim off its ref and its checkout. A
@@ -333,20 +333,19 @@ func prConfigReclaimFor(w domain.ConversationWorktree) prConfigReclaim {
 	if !ok {
 		return prConfigReclaim{}
 	}
-	owner, repo := parseOwnerRepo(w.RepoID)
-	if owner == "" || repo == "" {
+	if w.RepositoryID == "" {
 		return prConfigReclaim{}
 	}
 	keys := []string{w.ConversationID}
 	if key, ok := worktree.PRBranchKey(worktree.CurrentBranch(w.Path), prNum); ok && key != w.ConversationID {
 		keys = append(keys, key)
 	}
-	return prConfigReclaim{owner: owner, repo: repo, prNumber: prNum, keys: keys}
+	return prConfigReclaim{repositoryID: w.RepositoryID, prNumber: prNum, keys: keys}
 }
 
 func (r prConfigReclaim) run() {
 	for _, key := range r.keys {
-		worktree.CleanupPRConfig(r.owner, r.repo, r.prNumber, key)
+		worktree.CleanupPRConfig(r.repositoryID, r.prNumber, key)
 	}
 }
 

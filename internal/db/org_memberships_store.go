@@ -62,9 +62,9 @@ type OrgMembershipsStore interface {
 	// jiraBaseURL are the org's configured hosts (raw, read from
 	// org_settings by the caller) —
 	// the impl resolves them to the host identities are actually keyed under
-	// (EffectiveGitHubHost: an unset github_base_url resolves to the deployment default,
-	// where most identities live; Jira has no default host, so an unset one
-	// matches nothing, which is correct). A member's GitHubUsername /
+	// (EffectiveGitHubHost and NormalizeJiraHost: an unset base URL is no
+	// host, and matches nothing, which is correct — that org has no GitHub
+	// or Jira to hold an identity on). A member's GitHubUsername /
 	// JiraAccountID is nil when they hold no binding on that host.
 	// linearWorkspaceID is the org's Linear workspace, matched verbatim ("" —
 	// no Linear — matches nothing); a member's LinearUserID is nil when they

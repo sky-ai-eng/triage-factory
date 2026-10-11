@@ -39,6 +39,7 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 		conn.Close()
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordGitHubURLForTest(t, conn)
 	t.Cleanup(func() { conn.Close() })
 	recordJiraSiteForTest(t, conn)
 	return sqlitestore.New(conn), conn
@@ -49,10 +50,30 @@ func newTestDB(t *testing.T) (db.Stores, *sql.DB) {
 // org without one has nowhere to record a Jira issue the exec verbs touch.
 func recordJiraSiteForTest(t *testing.T, conn *sql.DB) {
 	t.Helper()
+	recordJiraSite(t, conn, testScope("jira"))
+}
+
+// recordGitHubURLForTest makes testScope("github") the local org's GitHub URL:
+// every GitHub write is keyed by the org's GitHub, and an org with none
+// records nothing.
+func recordGitHubURLForTest(t *testing.T, conn *sql.DB) {
+	t.Helper()
+	if _, err := conn.Exec(`
+		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
+	`, runmode.LocalDefaultOrgID, testScope("github")); err != nil {
+		t.Fatalf("record github url: %v", err)
+	}
+}
+
+// recordJiraSite makes site the local org's Jira site, the one its service
+// credential talks to.
+func recordJiraSite(t *testing.T, conn *sql.DB, site string) {
+	t.Helper()
 	if _, err := conn.Exec(`
 		INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', ?)
 		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url
-	`, runmode.LocalDefaultOrgID, testScope("jira")); err != nil {
+	`, runmode.LocalDefaultOrgID, site); err != nil {
 		t.Fatalf("record jira site: %v", err)
 	}
 }
@@ -383,6 +404,7 @@ func TestLocalClient_RoutingByTriggerType_Manual(t *testing.T) {
 	// UpsertArtifact routes through the same withWrite branch the retired
 	// pending-PR writer used: a synthetic-claims tx for a manual conversation.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Provider: domain.ArtifactProviderGitHub,
 		Kind:     domain.ArtifactKindPullRequest,
 		Target:   "octocat/hello#1",
 		State:    domain.ArtifactStatePRDraft,
@@ -414,6 +436,7 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 	// through the admin-pool ...System variant (the case Postgres RLS would reject under
 	// tf_app). SQLite collapses both, but the same shape runs against Postgres.
 	if _, err := client.UpsertArtifact(context.Background(), domain.Artifact{
+		Provider: domain.ArtifactProviderGitHub,
 		Kind:     domain.ArtifactKindPullRequest,
 		Target:   "octocat/hello#2",
 		State:    domain.ArtifactStatePRDraft,
@@ -430,7 +453,8 @@ func TestLocalClient_RoutingByTriggerType_Event(t *testing.T) {
 func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T) {
 	stores, conn := newTestDB(t)
 	seedConversation(t, stores, conn, "conv-server", "", "event")
-	if _, err := conn.Exec(`INSERT INTO repositories (id, source, owner, repo) VALUES (?, 'github', 'octocat', 'hello')`, uuid.New().String()); err != nil {
+	repositoryID := uuid.New().String()
+	if _, err := conn.Exec(`INSERT INTO repositories (id, source, host, owner, repo) VALUES (?, 'github', ?, 'octocat', 'hello')`, repositoryID, dbtest.TestGitHubHost); err != nil {
 		t.Fatalf("seed repository: %v", err)
 	}
 
@@ -453,7 +477,7 @@ func TestServer_InsertConversationWorktreeBindsConversationIdentity(t *testing.T
 	client := Dial(sockPath)
 	t.Cleanup(func() { _ = client.Close() })
 	row := domain.ConversationWorktree{
-		ConversationID: "conv-attacker", RepoID: "octocat/hello",
+		ConversationID: "conv-attacker", RepositoryID: repositoryID,
 		Path: "/tmp/conv-server/hello", Ref: "default",
 	}
 	inserted, _, err := client.InsertConversationWorktree(context.Background(), row)

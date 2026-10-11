@@ -46,9 +46,10 @@ func runPlacement(args []string) {
 	}
 }
 
-// openPlacementStores opens the DB and returns the two stores the placement
-// verbs need plus a resolver for the explainer. Callers must close the conn.
-func openPlacementStores() (instances db.InstanceStore, overrides db.PlacementOverrideStore, resolver *placement.Resolver, closeFn func() error) {
+// openPlacementStores opens the DB and returns the stores the placement verbs
+// need — the org store is read for the org's current GitHub host — plus a
+// resolver for the explainer. Callers must close the conn.
+func openPlacementStores() (instances db.InstanceStore, overrides db.PlacementOverrideStore, orgs db.OrgsStore, resolver *placement.Resolver, closeFn func() error) {
 	conn, dialect, err := db.OpenForCLI()
 	if err != nil {
 		fail("%v", err)
@@ -57,9 +58,11 @@ func openPlacementStores() (instances db.InstanceStore, overrides db.PlacementOv
 	case "postgres":
 		instances = pgstore.NewInstanceStore(conn)
 		overrides = pgstore.NewPlacementOverrideStore(conn)
+		orgs = pgstore.NewWithoutSecrets(conn, conn).Orgs
 	default:
 		instances = sqlitestore.NewInstanceStore(conn)
 		overrides = sqlitestore.NewPlacementOverrideStore(conn)
+		orgs = sqlitestore.New(conn).Orgs
 	}
 	// The explainer's Explain() ignores the enabled flag, but reads the
 	// configured aging/liveness windows to report them — resolve them from env
@@ -70,24 +73,30 @@ func openPlacementStores() (instances db.InstanceStore, overrides db.PlacementOv
 		fail("%v", cfgErr)
 	}
 	resolver = placement.NewResolver(instances, overrides, cfg)
-	return instances, overrides, resolver, conn.Close
+	return instances, overrides, orgs, resolver, conn.Close
 }
 
-// placementKeyFlags binds the shared --org / --repo / --kind flags and
-// resolves a (kind, value) key. --repo implies kind=repo; --kind overrides.
+// placementKeyFlags binds the shared --org / --repo / --host / --kind flags
+// and resolves a (kind, host, value) key. --repo implies kind=repo; --kind
+// overrides.
 type placementKeyFlags struct {
 	org  string
 	repo string
+	host string
 	kind string
 }
 
 func (f *placementKeyFlags) bind(fs *flag.FlagSet) {
 	fs.StringVar(&f.org, "org", "", "org id (defaults to the local sentinel org in local mode)")
 	fs.StringVar(&f.repo, "repo", "", "repo key, owner/repo (delegation)")
+	fs.StringVar(&f.host, "host", "", "GitHub host the repo lives on, e.g. https://ghe.example.com (defaults to the org's current GitHub host)")
 	fs.StringVar(&f.kind, "kind", "", "key kind: repo (inferred from --repo)")
 }
 
-func (f *placementKeyFlags) resolve() (orgID, kind, value string) {
+// resolve returns the key the flags name. A repo key's host is --host in its
+// canonical form, or else the org's current GitHub host: an owner/repo names a
+// repository only within one host.
+func (f *placementKeyFlags) resolve(orgs db.OrgsStore) (orgID, kind, host, value string) {
 	orgID = f.org
 	if orgID == "" {
 		orgID = runmode.LocalDefaultOrgID
@@ -104,7 +113,14 @@ func (f *placementKeyFlags) resolve() (orgID, kind, value string) {
 	if kind != domain.PlacementKindRepo {
 		fail("--kind must be 'repo'")
 	}
-	return orgID, kind, value
+	if f.host != "" {
+		return orgID, kind, domain.GitHubHost(f.host), value
+	}
+	host, err := db.OrgGitHubHostSystem(context.Background(), orgs, orgID)
+	if err != nil {
+		fail("resolve the org's GitHub host: %v", err)
+	}
+	return orgID, kind, host, value
 }
 
 func runPlacementExplain(args []string) {
@@ -112,12 +128,12 @@ func runPlacementExplain(args []string) {
 	var kf placementKeyFlags
 	kf.bind(fs)
 	_ = fs.Parse(args)
-	orgID, kind, value := kf.resolve()
 
-	_, _, resolver, closeFn := openPlacementStores()
+	_, _, orgs, resolver, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
+	orgID, kind, host, value := kf.resolve(orgs)
 
-	plan, err := resolver.Explain(context.Background(), orgID, kind, value)
+	plan, err := resolver.Explain(context.Background(), orgID, kind, host, value)
 	if err != nil {
 		fail("explain %s/%s: %v", kind, value, err)
 	}
@@ -126,7 +142,7 @@ func runPlacementExplain(args []string) {
 	if plan.Enabled {
 		state = "enabled"
 	}
-	fmt.Printf("placement for %s key %q (org %s): %s\n", kind, value, orgID, state)
+	fmt.Printf("placement for %s key %q on %s (org %s): %s\n", kind, value, host, orgID, state)
 	fmt.Printf("  aging=%s liveness=%s\n", plan.Aging, plan.Liveness)
 	if plan.Override != nil {
 		if plan.Override.PinnedInstanceID != "" {
@@ -168,17 +184,17 @@ func runPlacementPin(args []string) {
 	if *instanceID == "" {
 		fail("--instance is required")
 	}
-	orgID, kind, value := kf.resolve()
 
-	_, overrides, _, closeFn := openPlacementStores()
+	_, overrides, orgs, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
+	orgID, kind, host, value := kf.resolve(orgs)
 
 	if _, err := overrides.Upsert(context.Background(), domain.PlacementOverride{
-		OrgID: orgID, KeyKind: kind, KeyValue: value, PinnedInstanceID: *instanceID,
+		OrgID: orgID, KeyKind: kind, Host: host, KeyValue: value, PinnedInstanceID: *instanceID,
 	}); err != nil {
 		fail("pin: %v", err)
 	}
-	fmt.Printf("pinned %s key %q (org %s) -> %s\n", kind, value, orgID, *instanceID)
+	fmt.Printf("pinned %s key %q on %s (org %s) -> %s\n", kind, value, host, orgID, *instanceID)
 	fmt.Println("takes effect on the next run enqueued for this key; run `... placement explain` to preview.")
 }
 
@@ -191,17 +207,17 @@ func runPlacementReplicas(args []string) {
 	if *k < 1 {
 		fail("--k must be >= 1")
 	}
-	orgID, kind, value := kf.resolve()
 
-	_, overrides, _, closeFn := openPlacementStores()
+	_, overrides, orgs, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
+	orgID, kind, host, value := kf.resolve(orgs)
 
 	if _, err := overrides.Upsert(context.Background(), domain.PlacementOverride{
-		OrgID: orgID, KeyKind: kind, KeyValue: value, Replicas: *k,
+		OrgID: orgID, KeyKind: kind, Host: host, KeyValue: value, Replicas: *k,
 	}); err != nil {
 		fail("replicas: %v", err)
 	}
-	fmt.Printf("set replicas=%d for %s key %q (org %s)\n", *k, kind, value, orgID)
+	fmt.Printf("set replicas=%d for %s key %q on %s (org %s)\n", *k, kind, value, host, orgID)
 	fmt.Println("the top-K rendezvous candidates now all count as preferred; runs of this key spread across them.")
 }
 
@@ -210,20 +226,20 @@ func runPlacementClear(args []string) {
 	var kf placementKeyFlags
 	kf.bind(fs)
 	_ = fs.Parse(args)
-	orgID, kind, value := kf.resolve()
 
-	_, overrides, _, closeFn := openPlacementStores()
+	_, overrides, orgs, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
+	orgID, kind, host, value := kf.resolve(orgs)
 
-	matched, err := overrides.Delete(context.Background(), orgID, kind, value)
+	matched, err := overrides.Delete(context.Background(), orgID, kind, host, value)
 	if err != nil {
 		fail("clear: %v", err)
 	}
 	if !matched {
-		fmt.Printf("no override on %s key %q (org %s) — nothing to clear\n", kind, value, orgID)
+		fmt.Printf("no override on %s key %q on %s (org %s) — nothing to clear\n", kind, value, host, orgID)
 		return
 	}
-	fmt.Printf("cleared override on %s key %q (org %s); placement reverts to the pure rendezvous hash\n", kind, value, orgID)
+	fmt.Printf("cleared override on %s key %q on %s (org %s); placement reverts to the pure rendezvous hash\n", kind, value, host, orgID)
 }
 
 func runPlacementList(args []string) {
@@ -235,7 +251,7 @@ func runPlacementList(args []string) {
 		orgID = runmode.LocalDefaultOrgID
 	}
 
-	_, overrides, _, closeFn := openPlacementStores()
+	_, overrides, _, _, closeFn := openPlacementStores()
 	defer func() { _ = closeFn() }()
 
 	rows, err := overrides.List(context.Background(), orgID)
@@ -247,13 +263,13 @@ func runPlacementList(args []string) {
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "KIND\tKEY\tPIN\tREPLICAS\tUPDATED")
+	fmt.Fprintln(w, "KIND\tHOST\tKEY\tPIN\tREPLICAS\tUPDATED")
 	for _, ov := range rows {
 		pin := ov.PinnedInstanceID
 		if pin == "" {
 			pin = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", ov.KeyKind, ov.KeyValue, pin, ov.Replicas, ov.UpdatedAt.Format("2006-01-02 15:04"))
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n", ov.KeyKind, ov.Host, ov.KeyValue, pin, ov.Replicas, ov.UpdatedAt.Format("2006-01-02 15:04"))
 	}
 	_ = w.Flush()
 }
@@ -262,10 +278,10 @@ func printPlacementUsage() {
 	fmt.Println(`triagefactory instance placement — inspect and steer run placement.
 
 USAGE
-  triagefactory instance placement explain  --org <id> --repo <owner/repo>
-  triagefactory instance placement pin      --org <id> --repo <owner/repo> --instance <id>
-  triagefactory instance placement replicas --org <id> --repo <owner/repo> --k <N>
-  triagefactory instance placement clear    --org <id> --repo <owner/repo>
+  triagefactory instance placement explain  --org <id> --repo <owner/repo> [--host <url>]
+  triagefactory instance placement pin      --org <id> --repo <owner/repo> [--host <url>] --instance <id>
+  triagefactory instance placement replicas --org <id> --repo <owner/repo> [--host <url>] --k <N>
+  triagefactory instance placement clear    --org <id> --repo <owner/repo> [--host <url>]
   triagefactory instance placement list     --org <id>
 
 NOTES
@@ -281,6 +297,10 @@ NOTES
   owner; replicas=K spreads a hot key's runs across its top-K candidates.
   Overrides take effect on the next enqueue, not retroactively. --kind
   overrides the inferred kind.
+
+  An owner/repo names a repository only on one GitHub host, so every key is
+  for one host: --host, or the org's current GitHub host when it is omitted.
+  A run uses the override on its task's own host.
 
   Local mode: single-process N=1, so placement is a no-op (the hash always
   returns self) — these verbs still work for inspection.`)

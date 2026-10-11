@@ -11,6 +11,10 @@
 // the poller reads it out of an installation's repo grant, the profiler out of
 // the /repos/{owner}/{repo} response GitHub redirects to the new name (the only
 // path a PAT org has). Both hand what they saw to Apply.
+//
+// Both observe the org's current GitHub host, and Apply is told which one: a
+// provider id identifies a repository only on the host that issued it, so the
+// comparison, the rename and the cache eviction all stay on that host.
 package reporename
 
 import (
@@ -21,7 +25,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // Apply reconciles the slugs of the repositories in observed against what the
@@ -33,11 +36,21 @@ import (
 //
 // Best-effort by construction: a rename TF fails to apply is one it re-detects
 // on the next observation, and no caller's real work is worth failing over it.
-func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID string, observed []domain.RepoRef) int {
+//
+// host is the GitHub host observed was read from — the org's current one. It is
+// stamped onto every observation, and only the repositories stored on it are
+// compared against them.
+func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Resolver, log *slog.Logger, orgID, host string, observed []domain.RepoRef) int {
 	if repos == nil || len(observed) == 0 {
 		return 0
 	}
-	stored, err := repos.ListIdentitiesSystem(ctx, orgID)
+	stamped := make([]domain.RepoRef, len(observed))
+	for i, o := range observed {
+		o.Host = host
+		stamped[i] = o
+	}
+	observed = stamped
+	stored, err := repos.ListIdentitiesSystem(ctx, orgID, host)
 	if err != nil {
 		log.WarnContext(ctx, "read repository identities failed", "org", orgID, "error", err)
 		return 0
@@ -76,39 +89,17 @@ func Apply(ctx context.Context, repos db.RepositoryStore, resolver ghclient.Reso
 		}
 		applied++
 		log.InfoContext(ctx, "repository renamed", "org", orgID, "from", out.From, "to", out.To)
-		invalidateCoverage(resolver, orgID, out.From, out.To)
-		disposeOldDirs(ctx, log, orgID, out.From)
+		invalidateCoverage(resolver, orgID, host, out.From, out.To)
 	}
 	return applied
 }
 
-// disposeOldDirs reclaims the directories the old slug named — the bare
-// clone and every cold checkout it still registers — now that nothing
-// derives their paths. After
-// the commit and best-effort on purpose, like the coverage invalidation above:
-// a directory removal cannot join the transaction, and failing to reclaim disk
-// must never fail the rename. Local mode is the mode this exists for (its
-// reaper is deliberately unbounded, so nothing else reclaims the orphan); in
-// multi it reaches at most this pod's own disk and the TTL reaper covers the
-// fleet. A tree a live worktree still holds is skipped, and nothing retries —
-// the rename is the steady state afterwards — which is the accepted cost of
-// never deleting under a running agent.
-func disposeOldDirs(ctx context.Context, log *slog.Logger, orgID, from string) {
-	owner, repo, ok := cutSlug(from)
-	if !ok {
-		return
-	}
-	if worktree.DisposeRenamedRepoDirs(orgID, owner, repo) {
-		log.InfoContext(ctx, "reclaimed renamed repository's old directories", "org", orgID, "slug", from)
-	}
-}
-
 // invalidateCoverage drops the cached App-grant coverage decision for BOTH
-// slugs. The cache keys on the slug and holds positives only, so a rename
-// leaves each entry vouching for the wrong repository: the old slug's for one
-// that no longer answers to that name, the new slug's for whatever repository
-// was called that before. Both are re-probed rather than inherited.
-func invalidateCoverage(resolver ghclient.Resolver, orgID, from, to string) {
+// slugs on host. The cache keys on the slug and holds positives only, so a
+// rename leaves each entry vouching for the wrong repository: the old slug's
+// for one that no longer answers to that name, the new slug's for whatever
+// repository was called that before. Both are re-probed rather than inherited.
+func invalidateCoverage(resolver ghclient.Resolver, orgID, host, from, to string) {
 	inv, ok := resolver.(ghclient.RepoCoverageInvalidator)
 	if !ok {
 		return
@@ -118,7 +109,7 @@ func invalidateCoverage(resolver ghclient.Resolver, orgID, from, to string) {
 		if !found {
 			continue
 		}
-		inv.InvalidateRepoCoverage(orgID, owner, repo)
+		inv.InvalidateRepoCoverage(orgID, host, owner, repo)
 	}
 }
 

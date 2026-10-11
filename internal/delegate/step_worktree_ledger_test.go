@@ -9,6 +9,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/paths"
@@ -24,13 +25,13 @@ func seedTaskRepoRegistry(t *testing.T, f stepFixture) {
 	t.Helper()
 	ctx := context.Background()
 	stores := sqlitestore.New(f.database)
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, []domain.TeamGitHubRepo{
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
 		{Owner: "owner", Repo: "repo"},
 	}); err != nil {
 		t.Fatalf("track the task repo: %v", err)
 	}
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+		Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "repo", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
 	}); err != nil {
 		t.Fatalf("seed the task repository: %v", err)
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -213,14 +214,20 @@ func (c *LocalClient) createWorkspaceCheckoutIn(ctx context.Context, hostRoot, o
 			return "", fmt.Errorf("create workspace checkout: PR #%d not found on %s", prNumber, repoID)
 		}
 		upstream, head := prCloneURLs(profile.CloneURL, pr)
-		return workspaceCreatePR(ctx, profile.Owner, profile.Repo, upstream, head, pr.HeadRef, prNumber, c.info.ConversationID, hostRoot,
+		return workspaceCreatePR(ctx, workspaceRepo(profile), upstream, head, pr.HeadRef, prNumber, c.info.ConversationID, hostRoot,
 			// WithBaseBranch refreshes origin/<base> so the worktree-local `pr diff`
 			// frames against a current base, not a clone-time-frozen ref (TFAC-505).
 			worktree.WithBaseBranch(pr.BaseRef),
 			worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, upstream)))
 	}
-	return workspaceCreateCheckout(ctx, profile.Owner, profile.Repo, profile.CloneURL, ref, c.info.ConversationID, hostRoot,
+	return workspaceCreateCheckout(ctx, workspaceRepo(profile), profile.CloneURL, ref, c.info.ConversationID, hostRoot,
 		worktree.WithCloneAuth(c.workspaceCloneAuth(ctx, profile.Owner, profile.CloneURL)))
+}
+
+// workspaceRepo is the worktree handle for a repository row: the row id keys its
+// bare clone, the slug places its checkout in the run tree.
+func workspaceRepo(profile *domain.Repository) worktree.Repo {
+	return worktree.Repo{ID: profile.ID, Owner: profile.Owner, Name: profile.Repo}
 }
 
 // prCloneURLs derives the (upstream, head) clone URLs to hand CreateForPRInRoot,

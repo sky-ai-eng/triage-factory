@@ -223,6 +223,11 @@ func input(t *testing.T, c fakeLinearCall) map[string]any {
 func linearProxyClient(t *testing.T, linearURL string, eventTriggered bool) (*LocalClient, db.Stores, ConversationInfo) {
 	t.Helper()
 	stores, info := newCaptureStores(t, eventTriggered)
+	// The org's Linear workspace, which connecting Linear always records: it is
+	// the scope every Linear artifact and audit row is written under.
+	if _, err := stores.Orgs.SetLinearWorkspace(context.Background(), info.OrgID, "linear-workspace-uuid", "acme"); err != nil {
+		t.Fatalf("set linear workspace: %v", err)
+	}
 	lc := NewLocal(stores, info)
 	lc.proxyCreds = &ProxyCredentials{LinearAPIURL: linearURL, LinearAPIToken: fakeLinearPlaceholer}
 	return lc, stores, info

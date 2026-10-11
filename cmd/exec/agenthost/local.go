@@ -761,8 +761,8 @@ func (c *LocalClient) AvailableSources(ctx context.Context) ([]string, error) {
 	return c.rt.AvailableSources(ctx)
 }
 
-func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return c.rt.GetConversationWorktreeByRepoRef(ctx, repoID, ref)
+func (c *LocalClient) GetConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return c.rt.GetConversationWorktreeByRepoRef(ctx, repositoryID, ref)
 }
 
 func (c *LocalClient) ListConversationWorktrees(ctx context.Context) ([]domain.ConversationWorktree, error) {
@@ -773,8 +773,8 @@ func (c *LocalClient) InsertConversationWorktree(ctx context.Context, row domain
 	return c.rt.InsertConversationWorktree(ctx, row)
 }
 
-func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repoID, ref string) error {
-	return c.rt.DeleteConversationWorktree(ctx, repoID, ref)
+func (c *LocalClient) DeleteConversationWorktreeByRepoRef(ctx context.Context, repositoryID, ref string) error {
+	return c.rt.DeleteConversationWorktree(ctx, repositoryID, ref)
 }
 
 // --- disclosure footer ---
@@ -816,23 +816,43 @@ func (c *LocalClient) UpsertArtifact(ctx context.Context, a domain.Artifact) (do
 //
 // Branch is the only artifact kind with a synthesized URL: a PR carries GitHub's
 // own html_url and a review's link is resolved server-side, so both already name
-// the right host and pass through untouched. A base-resolve failure keeps the
-// default github.com URL (the link degrades; the record does not), and a
-// non-branch ref leaves the URL as-is rather than clobber it.
+// the right host and pass through untouched. A base-resolve failure drops the
+// synthesized URL (the link goes; the record does not) rather than keep one on
+// a host nobody resolved, and a non-branch ref leaves the URL as-is rather
+// than clobber it.
 func (c *LocalClient) hostAnchorBranchURL(ctx context.Context, a domain.Artifact) domain.Artifact {
 	if a.Kind != domain.ArtifactKindBranch {
 		return a
 	}
 	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 	if err != nil {
-		agenthostLog.Warn("resolve github base for branch URL failed; keeping default host",
+		agenthostLog.Warn("resolve github base for branch URL failed; recording no link",
 			"conversation", c.info.ConversationID, "target", a.Target, "ref", a.ExternalID, "error", err)
+		a.URL = ""
 		return a
 	}
 	if u, ok := domain.BranchArtifactWebURL(base, a.Target, a.ExternalID); ok {
 		a.URL = u
 	}
 	return a
+}
+
+// githubPullAnchorURL is the web link to an anchor on a pull request on the
+// org's GitHub: "{base}/owner/repo/pull/N#anchor". "" when the org's GitHub
+// URL cannot be resolved; the row is recorded without a link rather than with
+// one on a host nobody resolved.
+func (c *LocalClient) githubPullAnchorURL(ctx context.Context, owner, repo string, number int, anchor string) string {
+	base, err := c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
+	if err != nil {
+		agenthostLog.Warn("resolve github base for an action link failed; recording no link",
+			"conversation", c.info.ConversationID, "repo", owner+"/"+repo, "error", err)
+		return ""
+	}
+	pull := domain.GitHubPullURLBase(base, owner+"/"+repo, number)
+	if pull == "" {
+		return ""
+	}
+	return pull + "#" + anchor
 }
 
 // --- jira ---
@@ -1333,9 +1353,8 @@ func (c *LocalClient) githubResolver() ghclient.Resolver {
 // branch-capture gate uses it to decide whether a push's remote belongs to the
 // org's GitHub before recording a branch artifact — local mode's only capture
 // point, where the hook holds this in-process client. Same resolution
-// (org_settings → github_url secret → default) hostAnchorBranchURL uses to
-// anchor the recorded branch link, so the gate and the corrected URL agree on
-// the host.
+// (org_settings.github_base_url) hostAnchorBranchURL uses to anchor the
+// recorded branch link, so the gate and the corrected URL agree on the host.
 func (c *LocalClient) GithubWebHostBase(ctx context.Context) (string, error) {
 	return c.githubResolver().BaseURLFor(ctx, c.info.OrgID)
 }
@@ -1515,9 +1534,20 @@ func (c *LocalClient) authorizeRepo(ctx context.Context, owner, repo string) err
 		c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
 		return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, lerr)
 	}
-	for _, w := range rows {
-		if strings.EqualFold(w.RepoID, repoID) {
-			return nil
+	// A ledger row names its repository by registry id, and the repository a
+	// verb reaches is the row for owner/repo on the org's current GitHub host.
+	// A checkout of the same owner/repo on another host is another repository
+	// and authorizes nothing here.
+	if len(rows) > 0 {
+		profile, perr := c.rt.GetRepo(ctx, repoID)
+		if perr != nil {
+			c.RecordGitDenied(ctx, owner, repo, "", "gh", "authorize-error")
+			return fmt.Errorf("authorize repo %s/%s: %w", owner, repo, perr)
+		}
+		for _, w := range rows {
+			if profile != nil && w.RepositoryID == profile.ID {
+				return nil
+			}
 		}
 	}
 	// No ledger row. The run's OWN task repo is authorized anyway, because a
@@ -1690,7 +1720,7 @@ func (c *LocalClient) GithubDismissReview(ctx context.Context, owner, repo strin
 		Action:     domain.ActionReviewDismissed,
 		Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 		ExternalID: strconv.Itoa(reviewID),
-		URL:        fmt.Sprintf("%s#pullrequestreview-%d", domain.GitHubPullURL(owner+"/"+repo, number), reviewID),
+		URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("pullrequestreview-%d", reviewID)),
 		Credential: c.githubCredential(),
 		DetailJSON: string(detail),
 	})
@@ -2094,7 +2124,7 @@ func (c *LocalClient) GithubReplyToComment(ctx context.Context, owner, repo stri
 			Action:     domain.ActionCommentPosted,
 			Target:     fmt.Sprintf("%s/%s#%d", owner, repo, number),
 			ExternalID: strconv.Itoa(replyID),
-			URL:        fmt.Sprintf("%s#discussion_r%d", domain.GitHubPullURL(owner+"/"+repo, number), replyID),
+			URL:        c.githubPullAnchorURL(ctx, owner, repo, number, fmt.Sprintf("discussion_r%d", replyID)),
 			Credential: c.githubCredential(),
 			DetailJSON: string(detail),
 		})

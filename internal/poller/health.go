@@ -96,22 +96,24 @@ func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 		GitHub:          m.sourceHealth(orgIDs, settings, "github"),
 		Jira:            m.sourceHealth(orgIDs, settings, "jira"),
 		Linear:          m.sourceHealth(orgIDs, settings, "linear"),
-		GitHubRateLimit: m.rateLimitSnapshot(orgIDs),
+		GitHubRateLimit: m.rateLimitSnapshot(orgIDs, settings),
 	}
 }
 
 // rateLimitSnapshot reads the resolver's per-org rate-limit registry for
 // every org in orgIDs, when the resolver implements RateLimitReader (the
 // production resolver always does; test fakes typically don't). An org
-// with no observation yet is simply absent from the returned map.
-func (m *Manager) rateLimitSnapshot(orgIDs []string) map[string]ghclient.RateLimitState {
+// with no observation yet is simply absent from the returned map. Each org's
+// budget is read on its current GitHub host: a budget last observed on a host
+// the org has left says nothing about the one it polls now.
+func (m *Manager) rateLimitSnapshot(orgIDs []string, settings map[string]domain.OrgSettings) map[string]ghclient.RateLimitState {
 	reader, ok := m.resolver.(ghclient.RateLimitReader)
 	if !ok {
 		return nil
 	}
 	out := make(map[string]ghclient.RateLimitState, len(orgIDs))
 	for _, orgID := range orgIDs {
-		if s, ok := reader.RateLimitFor(orgID); ok {
+		if s, ok := reader.RateLimitFor(orgID, domain.GitHubHost(settings[orgID].GitHubBaseURL)); ok {
 			out[orgID] = s
 		}
 	}

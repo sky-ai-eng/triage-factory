@@ -13,6 +13,7 @@ import (
 type readyOrgs struct {
 	db.OrgsStore
 	class domain.GitHubCredentialClass
+	base  string // org_settings.github_base_url
 	err   error
 }
 
@@ -20,7 +21,7 @@ func (o readyOrgs) GetSettings(context.Context, string) (domain.OrgSettings, err
 	if o.err != nil {
 		return domain.OrgSettings{}, o.err
 	}
-	return domain.OrgSettings{GitHubCredentialClass: o.class}, nil
+	return domain.OrgSettings{GitHubCredentialClass: o.class, GitHubBaseURL: o.base}, nil
 }
 
 func (o readyOrgs) GetSettingsSystem(ctx context.Context, orgID string) (domain.OrgSettings, error) {
@@ -41,12 +42,25 @@ func (a readyApps) GetForOrgSystem(ctx context.Context, orgID string) (*domain.O
 	return a.GetForOrg(ctx, orgID)
 }
 
-func (a readyApps) ListInstallationsForOrg(context.Context, string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.insts, nil
+// ListInstallationsOnHost answers like the store: the rows on host, and
+// nothing for an empty host. A fixture installation that names no GitHubHost is
+// on the org's current host, the only host GitHubReady asks about.
+func (a readyApps) ListInstallationsOnHost(_ context.Context, _, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	key := db.InstallationHostKey(host)
+	out := []domain.OrgGitHubAppInstallation{}
+	if key == "" {
+		return out, nil
+	}
+	for _, inst := range a.insts {
+		if inst.GitHubHost == "" || db.InstallationHostKey(inst.GitHubHost) == key {
+			out = append(out, inst)
+		}
+	}
+	return out, nil
 }
 
-func (a readyApps) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	return a.ListInstallationsForOrg(ctx, orgID)
+func (a readyApps) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	return a.ListInstallationsOnHost(ctx, orgID, host)
 }
 
 // TestGitHubReady_EveryCredentialClass walks all three classes through the
@@ -85,7 +99,7 @@ func TestGitHubReady_EveryCredentialClass(t *testing.T) {
 		{"unknown class", domain.GitHubCredentialClass("not-a-credential-class"), live, bound, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orgs := readyOrgs{class: tc.class}
+			orgs := readyOrgs{class: tc.class, base: "https://github.com"}
 			apps := readyApps{app: tc.app, insts: tc.insts}
 
 			got, err := GitHubReady(ctx, orgs, apps, "org-1", auth.Credentials{})
@@ -156,7 +170,7 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 		{"unknown class", domain.GitHubCredentialClass("not-a-credential-class"), live, bound, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			orgs := readyOrgs{class: tc.class}
+			orgs := readyOrgs{class: tc.class, base: "https://github.com"}
 			apps := readyApps{app: tc.app, insts: tc.insts}
 			creds := auth.Credentials{GitHubPAT: "ghp_present"}
 
@@ -178,6 +192,45 @@ func TestGitHubReady_PATAnswersOnlyWhereItWouldBeBorrowed(t *testing.T) {
 	}
 }
 
+// TestGitHubReady_ManagedBindOnAnotherHostIsNotReady: a managed workspace is
+// ready when it has bound an account on its current GitHub host, because those
+// are the installations its resolution mints from. A bind left on a host the
+// org has moved off resolves nothing here, so it reads as connecting nothing.
+func TestGitHubReady_ManagedBindOnAnotherHostIsNotReady(t *testing.T) {
+	ctx := context.Background()
+	const current = "https://ghe.new.example.com"
+	onOld := domain.OrgGitHubAppInstallation{InstallationID: "456", AccountLogin: "acme", GitHubHost: "https://ghe.old.example.com"}
+	onCurrent := domain.OrgGitHubAppInstallation{InstallationID: "789", AccountLogin: "acme", GitHubHost: current}
+
+	for _, tc := range []struct {
+		name  string
+		insts []domain.OrgGitHubAppInstallation
+		want  bool
+	}{
+		{"bound only on the old host", []domain.OrgGitHubAppInstallation{onOld}, false},
+		{"bound on both hosts", []domain.OrgGitHubAppInstallation{onOld, onCurrent}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: domain.GitHubCredentialClassManagedApp, base: current + "/"}
+			apps := readyApps{insts: tc.insts}
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", auth.Credentials{})
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", auth.Credentials{})
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
+	}
+}
+
 // TestGitHubReady_ReadFailureIsAnError pins that a backend fault stays a fault.
 // Reporting one as "not connected" is indistinguishable to the caller from the
 // real answer, and would send a founder back through setup over a store blip.
@@ -185,5 +238,47 @@ func TestGitHubReady_ReadFailureIsAnError(t *testing.T) {
 	boom := errors.New("settings store unavailable")
 	if _, err := GitHubReady(context.Background(), readyOrgs{err: boom}, readyApps{}, "org-1", auth.Credentials{}); !errors.Is(err, boom) {
 		t.Errorf("err = %v; want the settings read error to propagate", err)
+	}
+}
+
+// TestGitHubReady_PATNeedsAGitHubURL pins the gate on the PAT arms: a PAT is
+// sent only to the org's GitHub URL, so an org with none reads as not
+// connected — on the pat class and in the staged window of a PAT-to-App switch
+// alike, through both doors.
+func TestGitHubReady_PATNeedsAGitHubURL(t *testing.T) {
+	ctx := context.Background()
+	staged := &domain.OrgGitHubApp{Active: false, ClientID: "Iv1.byo"}
+	creds := auth.Credentials{GitHubPAT: "ghp_present"}
+
+	for _, tc := range []struct {
+		name  string
+		class domain.GitHubCredentialClass
+		app   *domain.OrgGitHubApp
+		base  string
+		want  bool
+	}{
+		{"pat class, no url", domain.GitHubCredentialClassPAT, nil, "", false},
+		{"pat class, url", domain.GitHubCredentialClassPAT, nil, "https://ghe.example.com", true},
+		{"byo app staged behind the pat, no url", domain.GitHubCredentialClassBYOApp, staged, "", false},
+		{"byo app staged behind the pat, url", domain.GitHubCredentialClassBYOApp, staged, "https://ghe.example.com", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orgs := readyOrgs{class: tc.class, base: tc.base}
+			apps := readyApps{app: tc.app}
+			got, err := GitHubReady(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReady: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("GitHubReady = %v; want %v", got, tc.want)
+			}
+			gotSys, err := GitHubReadySystem(ctx, orgs, apps, "org-1", creds)
+			if err != nil {
+				t.Fatalf("GitHubReadySystem: %v", err)
+			}
+			if gotSys != got {
+				t.Errorf("GitHubReadySystem = %v; GitHubReady = %v; the two doors must answer alike", gotSys, got)
+			}
+		})
 	}
 }

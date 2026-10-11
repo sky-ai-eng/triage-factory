@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -159,15 +160,16 @@ func TestReviewRequested_UserRoutesToRequestedUsersTeams(t *testing.T) {
 	}
 }
 
-// TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom guards the common
-// github.com case where org_settings.github_base_url is unset: the OAuth
-// login-claim binds identities to "https://github.com" literally, so the
-// resolver must default an empty host to the deployment default or the reverse lookup
-// misses and the task is dropped.
-func TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom(t *testing.T) {
+// TestReviewRequested_NoOrgHost_ResolvesNobody: identities are keyed by the
+// org's GitHub URL, and an org with none has no host to look a login up on. A
+// review request then resolves to no TF user, rather than to whoever holds
+// the login on github.com, so no task is made for it.
+func TestReviewRequested_NoOrgHost_ResolvesNobody(t *testing.T) {
 	database := newTestDB(t)
 	seedHandlerFKTargets(t, database)
-	// Deliberately NOT calling setReviewHost — github_base_url stays empty.
+	if _, err := database.Exec(`UPDATE org_event_sources SET base_url = NULL WHERE org_id = ? AND kind = 'github'`, runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("clear github url: %v", err)
+	}
 
 	teamReviewer := seedTeam(t, database, "reviewer-team")
 	seedUserOnTeam(t, database, teamReviewer, "alice") // bound under https://github.com
@@ -180,11 +182,11 @@ func TestReviewRequested_EmptyOrgHost_DefaultsToGitHubCom(t *testing.T) {
 	})
 
 	active, err := testTaskStore(database).FindActiveByEntity(context.Background(), runmode.LocalDefaultOrgID, entityID)
-	if err != nil || len(active) != 1 {
-		t.Fatalf("expected 1 task even with empty org github_base_url, got %d (err=%v)", len(active), err)
+	if err != nil {
+		t.Fatalf("FindActiveByEntity: %v", err)
 	}
-	if vis := visTeamsOf(t, database, active[0].ID); len(vis) != 1 || vis[0] != teamReviewer {
-		t.Errorf("visibility = %v, want [%s] (resolved via github.com default)", vis, teamReviewer)
+	if len(active) != 0 {
+		t.Errorf("got %d tasks with no org GitHub URL, want 0: no identity resolves", len(active))
 	}
 }
 
@@ -231,7 +233,7 @@ func TestReviewRequested_TeamRoutesToMappedTFTeams(t *testing.T) {
 
 	teamA := runmode.LocalDefaultTeamID
 	teamBackend := seedTeam(t, database, "backend-tf")
-	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, []domain.TeamGitHubGroup{
+	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)
@@ -267,7 +269,7 @@ func TestReviewRequested_PerReviewerDistinctTasks(t *testing.T) {
 	teamBackend := seedTeam(t, database, "backend-tf")
 	seedUserOnTeam(t, database, teamAlice, "alice")
 	seedUserOnTeam(t, database, teamBob, "bob")
-	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, []domain.TeamGitHubGroup{
+	if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(context.Background(), teamBackend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "acme", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("map github team: %v", err)

@@ -52,7 +52,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		// worked and nothing would be tracked or polled. Refused instead.
 		s, orgID, _, _ := mk(t)
 		const foreignTeam = "00000000-0000-0000-0000-0000000000ff"
-		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, []domain.TeamGitHubRepo{
+		err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, foreignTeam, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		})
 		if !errors.Is(err, db.ErrTeamNotInOrg) {
@@ -67,7 +67,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Tracking_brings_the_repository_into_the_registry", func(t *testing.T) {
 		s, orgID, teamID, _ := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam: %v", err)
@@ -76,7 +76,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		if err != nil || got == nil {
 			t.Fatalf("Get after tracking = %v, %v; want the row tracking minted", got, err)
 		}
-		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID)
+		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListTrackedNamesSystem: %v", err)
 		}
@@ -87,7 +87,7 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 	t.Run("Untracking_keeps_the_registry_row_and_everything_referencing_it", func(t *testing.T) {
 		s, orgID, teamID, conversation := mk(t)
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 			{Owner: "octo", Repo: "dropped"},
 		}); err != nil {
@@ -95,16 +95,20 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 		}
 		// Give the repository about to be untracked the durable reference a
 		// real one accumulates: a worktree a run checked out.
+		dropped, err := s.Repos.GetByRefSystem(ctx, orgID, repoRef(untrackedSlug))
+		if err != nil || dropped == nil {
+			t.Fatalf("resolve %s: got=%v err=%v", untrackedSlug, dropped, err)
+		}
 		convID := conversation(t, "untrack")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: convID, RepoID: untrackedSlug, Ref: "pr-7",
+			ConversationID: convID, RepositoryID: dropped.ID, Ref: "pr-7",
 			Path: "/tmp/wt/" + convID + "/octo/dropped/pr-7",
 		}); err != nil {
 			t.Fatalf("reserve worktree: %v", err)
 		}
 
 		// The untrack.
-		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, []domain.TeamGitHubRepo{
+		if err := s.TeamGitHubRepos.ReplaceForTeam(ctx, orgID, teamID, TestGitHubHost, []domain.TeamGitHubRepo{
 			{Owner: "octo", Repo: "kept"},
 		}); err != nil {
 			t.Fatalf("ReplaceForTeam (untrack): %v", err)
@@ -112,14 +116,14 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 
 		// It leaves the tracked set — this is the part that must change, and
 		// it is what stops the poller and the profiler working on it.
-		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID)
+		names, err := s.Repos.ListTrackedNamesSystem(ctx, orgID, TestGitHubHost)
 		if err != nil {
 			t.Fatalf("ListTrackedNamesSystem: %v", err)
 		}
 		if len(names) != 1 || names[0] != keptSlug {
 			t.Errorf("tracked names = %v, want [%s] — untracking must remove it from the polled set", names, keptSlug)
 		}
-		if tracked, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, "octo", "dropped"); err != nil || tracked {
+		if tracked, err := s.TeamGitHubRepos.TracksRepoSystem(ctx, teamID, TestGitHubHost, "octo", "dropped"); err != nil || tracked {
 			t.Errorf("TracksRepoSystem(dropped) = %v, %v; want false", tracked, err)
 		}
 
@@ -138,17 +142,17 @@ func RunRepoReferenceConformance(t *testing.T, mk RepoReferenceFactory) {
 	})
 
 	t.Run("A_worktree_cannot_be_reserved_for_a_repository_with_no_row", func(t *testing.T) {
-		// The reference is checked rather than assumed. Before the conversion
-		// this wrote a row naming a repository nothing knew about, and the
-		// ledger rotted quietly; now it fails at the point the caller is
-		// wrong. The store resolves rather than creates on purpose — the
-		// executor's role holds no INSERT on repositories.
+		// The reference is checked rather than assumed: a reservation naming a
+		// repository id no row answers to fails at the point the caller is
+		// wrong instead of recording a reference to nothing. The store checks
+		// rather than creates on purpose — the executor's role holds no INSERT
+		// on repositories.
 		s, orgID, _, conversation := mk(t)
 		convID := conversation(t, "unknown")
 		if _, _, err := s.ConversationWorktrees.InsertSystem(ctx, orgID, domain.ConversationWorktree{
-			ConversationID: convID, RepoID: "ghost/repo", Ref: "default", Path: "/tmp/wt/ghost",
-		}); err == nil {
-			t.Error("reserving a worktree for a repository with no registry row succeeded; want an error")
+			ConversationID: convID, RepositoryID: unknownRepoID, RepoID: "ghost/repo", Ref: "default", Path: "/tmp/wt/ghost",
+		}); !errors.Is(err, db.ErrNoSuchRepository) {
+			t.Errorf("reserving a worktree for a repository with no registry row = %v; want db.ErrNoSuchRepository", err)
 		}
 		if got, _ := s.Repos.GetByRef(ctx, orgID, repoRef("ghost/repo")); got != nil {
 			t.Errorf("the refused reservation minted a repository row: %+v", got)

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workitem"
 	"github.com/sky-ai-eng/triage-factory/internal/db/workkinds"
@@ -54,6 +55,14 @@ func newTestDB(t *testing.T) *sql.DB {
 
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
+	}
+	// The local org is on dbtest.TestGitHubHost: GitHub rows are keyed by the
+	// org's GitHub, and an org with none has none.
+	if _, err := database.Exec(
+		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'github', ?)`,
+		runmode.LocalDefaultOrgID, dbtest.TestGitHubHost,
+	); err != nil {
+		t.Fatalf("seed github url: %v", err)
 	}
 	return database
 }

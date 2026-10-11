@@ -154,12 +154,13 @@ func TestGitHubPATPut_AuditsSet(t *testing.T) {
 	s := newTestServer(t)
 
 	gh := githubUserStub(t, "rotated-bot")
+	commitGitHubHost(t, s, gh.URL)
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{GitHubURL: gh.URL, GitHubPAT: "ghp_old"}); err != nil {
+		auth.Credentials{GitHubPAT: "ghp_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
 
-	rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_new")
+	rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_new"})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -294,11 +295,11 @@ func TestGitHubPATDelete_AuditsRemoval(t *testing.T) {
 	s := newTestServer(t)
 
 	const host = "https://github.example.com"
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_old"}); err != nil {
+		auth.Credentials{GitHubPAT: "ghp_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 
 	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
 	if rec.Code != http.StatusOK {
@@ -333,23 +334,20 @@ func TestGitHubPATDelete_Idempotent(t *testing.T) {
 }
 
 // TestGitHubPATDelete_StagedApp_KeepsHost: a staged App coexists with a live
-// PAT during a PAT→App switch, and it resolves against the SAME host. Clearing
-// the host here would send a GHES org's App to the deployment default without
-// an error — the resolver falls org_settings → github_url secret → the
-// deployment default, and this
-// disconnect clears the first two. So with any App registration present the
-// unbind takes the token only.
+// PAT during a PAT→App switch, and it resolves against the SAME host, which
+// the org's GitHub URL is the only record of. So with any App registration
+// present the unbind takes the token only and leaves the URL.
 func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	const host = "https://github.example.com"
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
+		auth.Credentials{GitHubPAT: "ghp_live"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": host})
 	seedLocalApp(t, s, false) // staged: the PAT is still the live credential
 
 	rec := doJSON(t, s, http.MethodDelete, patRoute(), nil)
@@ -357,8 +355,7 @@ func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
 		t.Fatalf("disconnect = %d, body=%s", rec.Code, rec.Body.String())
 	}
 
-	// Token gone, host intact — in org_settings AND in the secret the resolver
-	// falls back to.
+	// Token gone, host intact in org_settings.
 	if stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT); stored != "" {
 		t.Errorf("PAT still stored after disconnect: %q", stored)
 	}
@@ -370,9 +367,6 @@ func TestGitHubPATDelete_StagedApp_KeepsHost(t *testing.T) {
 	}
 	if settingsHost != host {
 		t.Errorf("github base_url = %q, want %q kept for the staged App", settingsHost, host)
-	}
-	if secretHost, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubURL); secretHost != host {
-		t.Errorf("github_url secret = %q, want %q — it is the resolver's fallback", secretHost, host)
 	}
 	// The removal is still audited, against the host it was bound to.
 	row := findCredAudit(t, credAuditRows(t, s), domain.AccessActionCredentialRemoved, domain.CredentialKindGitHubPAT)
@@ -391,11 +385,11 @@ func TestJiraCredentialDelete_AuditsRemoval(t *testing.T) {
 	s := newTestServer(t)
 
 	const host = "https://jira.example.com"
+	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": host})
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{JiraURL: host, JiraPAT: "jira_old"}); err != nil {
+		auth.Credentials{JiraPAT: "jira_old"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
-	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": host})
 
 	rec := doJSON(t, s, http.MethodDelete, jiraCredentialRoute(), nil)
 	if rec.Code != http.StatusOK {
@@ -430,8 +424,8 @@ func TestDangerZoneClear_AuditsEveryBoundCredential(t *testing.T) {
 	s := newTestServer(t)
 
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: "https://github.com", GitHubPAT: "ghp_x",
-		JiraURL: "https://jira.example.com", JiraPAT: "jira_x",
+		GitHubPAT: "ghp_x",
+		JiraPAT:   "jira_x",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
@@ -450,29 +444,29 @@ func TestDangerZoneClear_AuditsEveryBoundCredential(t *testing.T) {
 
 // TestOrgSettingsPatch_TouchesNoCredential: the config route is inert with
 // respect to credentials in BOTH directions — it can't bind one and it can't
-// revoke one. Clearing a base URL used to destroy the matching token as a side
-// effect; now it clears a column, and disconnecting is an explicit DELETE.
+// revoke one. Disconnecting is an explicit DELETE, and clearing the URL a
+// connected token is bound to is refused rather than taken as a disconnect.
 func TestOrgSettingsPatch_TouchesNoCredential(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
-	const host = "https://github.example.com"
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{GitHubURL: host, GitHubPAT: "ghp_live"}); err != nil {
+		auth.Credentials{GitHubPAT: "ghp_live"}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
 
 	// github_pat / jira_pat aren't fields on this route, and strict decoding
 	// says so rather than accepting them silently — which is itself the
-	// guarantee this test is about. Clear only the URLs.
-	patchOrgSettingsOK(t, s, map[string]any{
-		"github_base_url": nil, "jira_base_url": nil,
-	})
+	// guarantee this test is about. A config save beside the token is fine.
+	patchOrgSettingsOK(t, s, map[string]any{"github_clone_protocol": "https", "jira_base_url": nil})
+	if rec := patchOrgSettings(t, s, map[string]any{"github_base_url": nil}); rec.Code != http.StatusConflict {
+		t.Fatalf("clear github_base_url under a bound token = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
 
 	stored, _ := s.secrets.Get(t.Context(), runmode.LocalDefaultOrgID, integrations.KeyGitHubPAT)
 	if stored != "ghp_live" {
-		t.Errorf("stored PAT = %q, want it untouched — clearing a URL is not a disconnect", stored)
+		t.Errorf("stored PAT = %q, want it untouched — a config save is not a disconnect", stored)
 	}
 	if rows := credAuditRows(t, s); len(rows) != 0 {
 		t.Errorf("credential rows = %+v, want none (a config save is not a credential change)", rows)

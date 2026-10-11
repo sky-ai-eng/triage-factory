@@ -250,7 +250,7 @@ function Band({
     }
   }
 
-  const host = acct.host || (acct.kind === 'github' ? 'github.com' : 'Jira')
+  const host = acct.host || (acct.kind === 'github' ? 'GitHub' : 'Jira')
   const hint = acct.hint
     ? acct.hint
     : acct.kind === 'github'
@@ -393,7 +393,7 @@ function Row({
     const v = verbRef.current
     if (v && v.parentElement?.closest('.ac-band')?.contains(document.activeElement)) v.focus()
   }
-  const host = acct.host || (acct.kind === 'github' ? 'github.com' : '')
+  const host = acct.host || ''
   const value = connected
     ? acct.account + (host ? ' · ' + host : '')
     : host

@@ -30,9 +30,8 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 		h.Reset(t)
 		orgID, _ := seedPgOrgAndUserForDashboard(t, h)
 		teamID := firstTeamForOrg(t, h, orgID)
-		// github_base_url unset, the common case: the store resolves it to
-		// the deployment default — github.com here, which is where a login-claim binding lands.
-		return stores.TeamPRs, orgID, teamID, "", newPgTeamPRSeeder(h, orgID, teamID)
+		// The org is on github.com, where a login-claim binding lands.
+		return stores.TeamPRs, orgID, teamID, dbtest.TestGitHubHost, newPgTeamPRSeeder(h, orgID, teamID)
 	})
 
 	// The tracked set is the outer filter, and local mode has no untracked
@@ -58,7 +57,7 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 			Number: 3, Author: "tf-bot", State: "OPEN", Repo: "tf-test/untracked-owned",
 		}, teamID)
 
-		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, "", db.PRListFilter{}, db.Unwindowed)
+		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("TeamPRs: %v", err)
 		}
@@ -91,7 +90,7 @@ func TestTeamPRStore_Postgres(t *testing.T) {
 			Number: 99, Author: "member-a", State: "OPEN", Repo: "tf-test/theirs",
 		}})
 
-		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, "", db.PRListFilter{}, db.Unwindowed)
+		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(), orgID, teamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("TeamPRs: %v", err)
 		}
@@ -132,7 +131,7 @@ func newPgTeamPRSeeder(h *pgtest.Harness, orgID, teamID string) dbtest.TeamPRSee
 			if _, err := h.AdminDB.Exec(`
 				INSERT INTO user_github_identities (user_id, github_base_url, login, source)
 				VALUES ($1, $2, $3, 'connect_oauth')
-			`, id, db.EffectiveGitHubHost(""), login); err != nil {
+			`, id, dbtest.TestGitHubHost, login); err != nil {
 				t.Fatalf("bind identity for %s: %v", login, err)
 			}
 			return id
@@ -204,22 +203,7 @@ func trackPgTeamRepo(t *testing.T, h *pgtest.Harness, orgID, teamID, ownerRepo s
 	if !ok {
 		t.Fatalf("fixture repo %q is not owner/repo", ownerRepo)
 	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO repositories (org_id, source, owner, repo) VALUES ($1, 'github', $2, $3)
-		ON CONFLICT DO NOTHING
-	`, orgID, owner, repo); err != nil {
-		t.Fatalf("seed repository %s: %v", ownerRepo, err)
-	}
-	if _, err := h.AdminDB.Exec(`
-		INSERT INTO team_github_repos (team_id, repository_id, org_id)
-		VALUES ($1,
-		        (SELECT id FROM repositories
-		          WHERE org_id = $2 AND lower(owner) = lower($3) AND lower(repo) = lower($4)),
-		        $2)
-		ON CONFLICT (team_id, repository_id) DO NOTHING
-	`, teamID, orgID, owner, repo); err != nil {
-		t.Fatalf("track repo %s for team %s: %v", ownerRepo, teamID, err)
-	}
+	pgtest.SeedTrackedRepo(t, h, orgID, teamID, owner, repo)
 }
 
 func repoOf(snap domain.PRSnapshot) string {

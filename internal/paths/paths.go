@@ -147,18 +147,19 @@ func OrgRoot(orgID string) string {
 
 // --- Class 1: org-scoped persistent --------------------------------------
 
-// BareCacheRoot is the parent of every owner/repo bare clone for an
-// org: <OrgRoot>/repos. Worktree's prune / stale-lock cleanup sweeps
-// walk this whole tree.
+// BareCacheRoot is the parent of every bare clone for an org:
+// <OrgRoot>/repos. Worktree's prune / stale-lock cleanup sweeps walk this
+// whole tree.
 func BareCacheRoot(orgID string) string {
 	return filepath.Join(OrgRoot(orgID), "repos")
 }
 
-// BareCacheDir is the bare clone path for one repo:
-// <OrgRoot>/repos/<owner>/<repo>.git. This is consumed while threading
-// a real orgID through the bounded, evictable worktree cache.
-func BareCacheDir(orgID, owner, repo string) string {
-	return filepath.Join(BareCacheRoot(orgID), owner, repo+".git")
+// BareCacheDir is the bare clone path for one repository:
+// <OrgRoot>/repos/<repositoryID>.git, keyed by the repository's registry row
+// id — the one name for it that is unique across orgs and GitHub hosts and
+// that a rename does not move.
+func BareCacheDir(orgID, repositoryID string) string {
+	return filepath.Join(BareCacheRoot(orgID), repositoryID+".git")
 }
 
 // TeamKBDir is one team's knowledge base on disk:

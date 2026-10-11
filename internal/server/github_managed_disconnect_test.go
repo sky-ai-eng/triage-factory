@@ -16,6 +16,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -152,14 +153,16 @@ func (r *bindRig) accessChanges(t *testing.T, action string) []string {
 func (r *bindRig) seedReach(t *testing.T, installationID string) {
 	t.Helper()
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
-		VALUES ($1, 'managed_app', $2, 'acme', 'widgets')
+		INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo)
+		SELECT org_id, 'managed_app', installation_id, github_host, 'acme', 'widgets'
+		  FROM org_github_app_installations WHERE org_id = $1 AND installation_id = $2
 	`, r.orgID.String(), installationID); err != nil {
 		t.Fatalf("seed reachable_repositories: %v", err)
 	}
 	if _, err := r.h.AdminDB.Exec(`
-		INSERT INTO reachable_scopes (org_id, credential_class, scope)
-		VALUES ($1, 'managed_app', $2)
+		INSERT INTO reachable_scopes (org_id, credential_class, host, scope)
+		SELECT org_id, 'managed_app', github_host, installation_id
+		  FROM org_github_app_installations WHERE org_id = $1 AND installation_id = $2
 	`, r.orgID.String(), installationID); err != nil {
 		t.Fatalf("seed reachable_scopes: %v", err)
 	}
@@ -581,7 +584,7 @@ func TestManagedClass_DoorsRefuseAManagedWorkspace(t *testing.T) {
 		// to become the plain PAT workspace it already effectively is.
 		rig := newBindRig(t, newFakeGitHub())
 		rig.bindManaged(t, 4242)
-		if _, err := rig.srv.githubApps.MarkInstallationRemoved(context.Background(), rig.orgID.String(), "4242"); err != nil {
+		if _, err := rig.srv.githubApps.MarkInstallationRemoved(context.Background(), rig.orgID.String(), ghbase.DefaultBaseURL(), "4242"); err != nil {
 			t.Fatalf("remove installation: %v", err)
 		}
 		resp := rig.postJSONWithSid("PUT", "/api/orgs/"+rig.orgID.String()+"/github/pat", rig.sid, map[string]string{"pat": "ghp_new"})

@@ -24,12 +24,12 @@ import (
 // prescribed-feature-branch variant for a future caller that needs a named
 // branch checked out up front rather than a detached checkout the agent
 // branches from itself.
-func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, runRoot string) (string, error) {
+func CreateForBranchInRoot(ctx context.Context, r Repo, cloneURL, baseBranch, featureBranch, runRoot string) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForBranchInRoot: runRoot is required")
 	}
-	wtDir := filepath.Join(runRoot, owner, repo)
-	if err := sandbox.MkdirRunTreeScaffold(runRoot, owner); err != nil {
+	wtDir := filepath.Join(runRoot, r.Owner, r.Name)
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, r.Owner); err != nil {
 		return "", fmt.Errorf("mkdir owner subdir: %w", err)
 	}
 	// No CloneAuth here: this is the in-sandbox Jira `workspace add` path
@@ -37,7 +37,7 @@ func CreateForBranchInRoot(ctx context.Context, owner, repo, cloneURL, baseBranc
 	// concern, not the host-side clone path. The shared body is already
 	// auth-capable, so a credential can be threaded through when it wires
 	// the in-sandbox path.
-	return createBranchWorktreeAt(ctx, owner, repo, cloneURL, baseBranch, featureBranch, wtDir, CloneAuth{})
+	return createBranchWorktreeAt(ctx, r, cloneURL, baseBranch, featureBranch, wtDir, CloneAuth{})
 }
 
 // CheckoutRefSlug is the conversation_worktrees ref (PK discriminator) AND the
@@ -107,7 +107,7 @@ func CheckoutRefSlug(ref string) string {
 // bare would dangle there (mirrors CreateForPR's split). Lazy materialization
 // takes the same branch as the eager one, so a repo added mid-run needs no new
 // mount.
-func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, rootKey, runRoot string, opts ...CloneOption) (string, error) {
+func CreateForCheckoutInRoot(ctx context.Context, r Repo, cloneURL, ref, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForCheckoutInRoot: runRoot is required")
 	}
@@ -119,15 +119,15 @@ func CreateForCheckoutInRoot(ctx context.Context, owner, repo, cloneURL, ref, ro
 			return "", err
 		}
 	}
-	wtDir := filepath.Join(runRoot, owner, repo, CheckoutRefSlug(ref))
-	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(owner, repo)); err != nil {
+	wtDir := filepath.Join(runRoot, r.Owner, r.Name, CheckoutRefSlug(ref))
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(r.Owner, r.Name)); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
 	auth := resolveCloneOptions(opts).auth
 	if selfContainedRunTrees() {
-		return createCheckoutCloneAt(ctx, owner, repo, cloneURL, ref, rootKey, wtDir, auth)
+		return createCheckoutCloneAt(ctx, r, cloneURL, ref, rootKey, wtDir, auth)
 	}
-	return createCheckoutWorktreeAt(ctx, owner, repo, cloneURL, ref, wtDir, auth)
+	return createCheckoutWorktreeAt(ctx, r, cloneURL, ref, wtDir, auth)
 }
 
 // checkoutRefPattern restricts a checkout ref to a conservative refname
@@ -175,12 +175,12 @@ func ValidateCheckoutRef(ref string) error {
 // per-repo lock and bare-clone reuse with the other Create* helpers; differs in
 // that it never creates or reattaches a local branch — the checkout is
 // detached.
-func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, wtDir string, auth CloneAuth) (string, error) {
-	mu := lockRepo(owner, repo)
+func createCheckoutWorktreeAt(ctx context.Context, r Repo, cloneURL, ref, wtDir string, auth CloneAuth) (string, error) {
+	mu := lockRepo(r.ID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
+	bareDir, err := ensureBareCloneLocked(ctx, r, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -230,12 +230,12 @@ func createCheckoutWorktreeAt(ctx context.Context, owner, repo, cloneURL, ref, w
 // creates its own branch. git can only clone a local branch, so a transient
 // run-namespaced branch (triagefactory/<rootKey>/checkout) carries the tip
 // through the clone and is deleted from both the clone and the bare afterwards.
-func createCheckoutCloneAt(ctx context.Context, owner, repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
-	mu := lockRepo(owner, repo)
+func createCheckoutCloneAt(ctx context.Context, r Repo, cloneURL, ref, rootKey, wtDir string, auth CloneAuth) (string, error) {
+	mu := lockRepo(r.ID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
+	bareDir, err := ensureBareCloneLocked(ctx, r, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -521,12 +521,12 @@ func gitConfigReadEnv() []string {
 
 // createBranchWorktreeAt is CreateForBranchInRoot's body — bare-clone setup,
 // base-branch fetch, and `git worktree add` (with branchExists reattach).
-func createBranchWorktreeAt(ctx context.Context, owner, repo, cloneURL, baseBranch, featureBranch, wtDir string, auth CloneAuth) (string, error) {
-	mu := lockRepo(owner, repo)
+func createBranchWorktreeAt(ctx context.Context, r Repo, cloneURL, baseBranch, featureBranch, wtDir string, auth CloneAuth) (string, error) {
+	mu := lockRepo(r.ID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, cloneURL, auth)
+	bareDir, err := ensureBareCloneLocked(ctx, r, cloneURL, auth)
 	if err != nil {
 		return "", err
 	}

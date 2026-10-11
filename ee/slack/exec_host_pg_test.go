@@ -335,6 +335,11 @@ func (r *slackExecRig) artifactsForConversation(orgID, conversationID string) []
 	if err != nil {
 		r.t.Fatalf("list artifacts: %v", err)
 	}
+	for _, a := range arts {
+		if a.Provider == domain.ArtifactProviderSlack && a.Scope != domain.SlackScope {
+			r.t.Errorf("slack artifact %s recorded in scope %q, want %q", a.DedupKey, a.Scope, domain.SlackScope)
+		}
+	}
 	return arts
 }
 
@@ -347,6 +352,9 @@ func (r *slackExecRig) actionsForConversation(orgID, conversationID string) []do
 	var out []domain.ExternalAction
 	for _, a := range all {
 		if a.ConversationID == conversationID {
+			if a.Provider == domain.ArtifactProviderSlack && a.Scope != domain.SlackScope {
+				r.t.Errorf("slack action %s recorded in scope %q, want %q", a.Action, a.Scope, domain.SlackScope)
+			}
 			out = append(out, a)
 		}
 	}

@@ -109,9 +109,8 @@ type OrgGitHubAppInstallation struct {
 	// across two GHES instances can hold the same numeric id twice, meaning two
 	// unrelated installations, and telling them apart through a join to the
 	// owning org's settings is a join too many for any comparison that spans
-	// orgs. "" on a struct handed to a writer means "resolve it" — the store
-	// folds it to the deployment default, which is what an org with no configured base
-	// URL is on — so reads never see one.
+	// orgs. "" on a struct handed to a writer names no GitHub, and the store
+	// refuses it, so reads never see one.
 	GitHubHost  string
 	InstalledAt time.Time
 	// SuspendedAt is when the account owner suspended this installation, zero

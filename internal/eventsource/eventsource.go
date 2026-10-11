@@ -59,6 +59,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -419,6 +420,9 @@ type resolver struct {
 	creds       auth.Credentials
 	credsLoaded bool
 
+	settings       domain.OrgSettings
+	settingsLoaded bool
+
 	paused       map[string]bool
 	pausedLoaded bool
 }
@@ -487,6 +491,20 @@ func (r *resolver) credentials(ctx context.Context) (auth.Credentials, error) {
 	return creds, nil
 }
 
+// orgSettings loads the org's settings row once per pass, for the sites a
+// credential talks to.
+func (r *resolver) orgSettings(ctx context.Context) (domain.OrgSettings, error) {
+	if r.settingsLoaded {
+		return r.settings, nil
+	}
+	set, err := r.tx.Orgs.GetSettings(ctx, r.orgID)
+	if err != nil {
+		return domain.OrgSettings{}, err
+	}
+	r.settings, r.settingsLoaded = set, true
+	return set, nil
+}
+
 // githubState is available exactly when a GitHub credential resolves — a
 // stored PAT or a registered, active App. It is the same derivation the setup gate reads, so the two
 // cannot drift into disagreeing about whether GitHub is connected.
@@ -506,15 +524,19 @@ func githubState(ctx context.Context, r *resolver) (State, error) {
 }
 
 // jiraState is available exactly when the org's stored auth-method marker
-// resolves to a usable service credential. That reads the marker rather than
-// key presence, which is why a Cloud org — which has no PAT at all — correctly
-// reports available.
+// resolves to a usable service credential on the org's Jira site. That reads
+// the marker rather than key presence, which is why a Cloud org — which has no
+// PAT at all — correctly reports available.
 func jiraState(ctx context.Context, r *resolver) (State, error) {
 	creds, err := r.credentials(ctx)
 	if err != nil {
 		return "", err
 	}
-	if _, ok := integrations.JiraSystemConfig(creds); ok {
+	set, err := r.orgSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := integrations.JiraSystemConfig(creds, set.JiraBaseURL); ok {
 		return StateAvailable, nil
 	}
 	return StateUnconfigured, nil
@@ -577,6 +599,9 @@ type systemResolver struct {
 	creds       auth.Credentials
 	credsLoaded bool
 
+	settings       domain.OrgSettings
+	settingsLoaded bool
+
 	paused       map[string]bool
 	pausedLoaded bool
 }
@@ -633,6 +658,19 @@ func (r *systemResolver) credentials(ctx context.Context) (auth.Credentials, err
 	return creds, nil
 }
 
+// orgSettings mirrors resolver.orgSettings through GetSettingsSystem.
+func (r *systemResolver) orgSettings(ctx context.Context) (domain.OrgSettings, error) {
+	if r.settingsLoaded {
+		return r.settings, nil
+	}
+	set, err := r.stores.Orgs.GetSettingsSystem(ctx, r.orgID)
+	if err != nil {
+		return domain.OrgSettings{}, err
+	}
+	r.settings, r.settingsLoaded = set, true
+	return set, nil
+}
+
 // githubStateSystem / jiraStateSystem / linearStateSystem are the core probes'
 // system twins: the same derivations as githubState / jiraState / linearState,
 // cut from the LoadSystem-loaded bundle and the `...System` reads.
@@ -656,7 +694,11 @@ func jiraStateSystem(ctx context.Context, r *systemResolver) (State, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, ok := integrations.JiraSystemConfig(creds); ok {
+	set, err := r.orgSettings(ctx)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := integrations.JiraSystemConfig(creds, set.JiraBaseURL); ok {
 		return StateAvailable, nil
 	}
 	return StateUnconfigured, nil

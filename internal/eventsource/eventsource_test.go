@@ -64,6 +64,25 @@ func (r *rig) saveCreds(t *testing.T, creds auth.Credentials) {
 	}
 }
 
+// saveGitHubPAT makes https://github.com the org's GitHub URL and stores a
+// PAT for it.
+func (r *rig) saveGitHubPAT(t *testing.T) {
+	t.Helper()
+	if _, err := r.stores.Orgs.SetSourceBaseURL(t.Context(), runmode.LocalDefaultOrgID, eventsource.KindGitHub, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
+	r.saveCreds(t, auth.Credentials{GitHubPAT: "ghp-x"})
+}
+
+// saveJira makes site the org's Jira site and stores creds.
+func (r *rig) saveJira(t *testing.T, site string, creds auth.Credentials) {
+	t.Helper()
+	if _, err := r.stores.Orgs.SetSourceBaseURL(t.Context(), runmode.LocalDefaultOrgID, eventsource.KindJira, site); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
+	r.saveCreds(t, creds)
+}
+
 // bindLinear stores a Linear service credential the way its bind route does:
 // the key under the api_key marker. integrations.Save leaves Linear alone, so
 // this writes the keys directly.
@@ -133,7 +152,7 @@ func kinds(a eventsource.Availability) []string {
 // TestResolve_StatePerSource walks the states each built-in source can report
 // and the setup that produces them.
 func TestResolve_StatePerSource(t *testing.T) {
-	dcJira := auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"}
+	dcJira := auth.Credentials{JiraPAT: "jira-pat"}
 
 	cases := map[string]struct {
 		setup func(t *testing.T, r *rig)
@@ -169,13 +188,19 @@ func TestResolve_StatePerSource(t *testing.T) {
 			want:  map[string]eventsource.State{eventsource.KindLinear: eventsource.StateUnconfigured},
 		},
 		"github pat bound": {
-			setup: func(t *testing.T, r *rig) {
-				r.saveCreds(t, auth.Credentials{GitHubURL: "https://github.com", GitHubPAT: "ghp-x"})
-			},
+			setup: func(t *testing.T, r *rig) { r.saveGitHubPAT(t) },
 			want: map[string]eventsource.State{
 				eventsource.KindGitHub: eventsource.StateAvailable,
 				eventsource.KindJira:   eventsource.StateUnconfigured,
 			},
+		},
+		// A PAT is sent only to the org's GitHub URL, so with none it is a
+		// credential nothing can use.
+		"github pat with no url": {
+			setup: func(t *testing.T, r *rig) {
+				r.saveCreds(t, auth.Credentials{GitHubPAT: "ghp-x"})
+			},
+			want: map[string]eventsource.State{eventsource.KindGitHub: eventsource.StateUnconfigured},
 		},
 		"github app active, no pat": {
 			setup: func(t *testing.T, r *rig) { r.registerApp(t, true) },
@@ -186,7 +211,7 @@ func TestResolve_StatePerSource(t *testing.T) {
 			want:  map[string]eventsource.State{eventsource.KindGitHub: eventsource.StateUnconfigured},
 		},
 		"jira data center pat": {
-			setup: func(t *testing.T, r *rig) { r.saveCreds(t, dcJira) },
+			setup: func(t *testing.T, r *rig) { r.saveJira(t, "https://jira.example.com", dcJira) },
 			want: map[string]eventsource.State{
 				eventsource.KindJira:   eventsource.StateAvailable,
 				eventsource.KindGitHub: eventsource.StateUnconfigured,
@@ -197,8 +222,7 @@ func TestResolve_StatePerSource(t *testing.T) {
 		// is what makes this available.
 		"jira cloud api token": {
 			setup: func(t *testing.T, r *rig) {
-				r.saveCreds(t, auth.Credentials{
-					JiraURL:        "https://acme.atlassian.net",
+				r.saveJira(t, "https://acme.atlassian.net", auth.Credentials{
 					JiraEmail:      "bot@acme.example",
 					JiraAPIToken:   "cloud-token",
 					JiraAuthMethod: "cloud_api_token",
@@ -208,9 +232,15 @@ func TestResolve_StatePerSource(t *testing.T) {
 		},
 		"jira host with no credential": {
 			setup: func(t *testing.T, r *rig) {
-				r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com"})
+				r.saveJira(t, "https://jira.example.com", auth.Credentials{})
 			},
 			want: map[string]eventsource.State{eventsource.KindJira: eventsource.StateUnconfigured},
+		},
+		// The site a credential talks to is the org's Jira site, so a
+		// credential with none has nowhere to go.
+		"jira credential with no site": {
+			setup: func(t *testing.T, r *rig) { r.saveCreds(t, dcJira) },
+			want:  map[string]eventsource.State{eventsource.KindJira: eventsource.StateUnconfigured},
 		},
 	}
 
@@ -443,7 +473,7 @@ func TestResolve_DisabledPrecedence(t *testing.T) {
 	}{
 		"disabled beats available": {
 			setup: func(t *testing.T, r *rig) {
-				r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"})
+				r.saveJira(t, "https://jira.example.com", auth.Credentials{JiraPAT: "jira-pat"})
 				r.pause(t, eventsource.KindJira)
 			},
 			kind: eventsource.KindJira,
@@ -455,7 +485,7 @@ func TestResolve_DisabledPrecedence(t *testing.T) {
 		// the whole product as an admin's deliberate choice.
 		"required beats disabled": {
 			setup: func(t *testing.T, r *rig) {
-				r.saveCreds(t, auth.Credentials{GitHubURL: "https://github.com", GitHubPAT: "ghp-x"})
+				r.saveGitHubPAT(t)
 				r.pause(t, eventsource.KindGitHub)
 			},
 			kind: eventsource.KindGitHub,
@@ -514,10 +544,8 @@ func TestResolve_DisabledPrecedence(t *testing.T) {
 // the row is keyed (org, kind) rather than being an org-level switch.
 func TestResolve_DisabledIsPerSource(t *testing.T) {
 	r := newRig(t)
-	r.saveCreds(t, auth.Credentials{
-		GitHubURL: "https://github.com", GitHubPAT: "ghp-x",
-		JiraURL: "https://jira.example.com", JiraPAT: "jira-pat",
-	})
+	r.saveGitHubPAT(t)
+	r.saveJira(t, "https://jira.example.com", auth.Credentials{JiraPAT: "jira-pat"})
 	r.pause(t, eventsource.KindJira)
 
 	got := r.resolve(t)
@@ -540,7 +568,7 @@ func TestResolve_DisabledIsPerSource(t *testing.T) {
 // read does.
 func TestStateFor_ReadsThePause(t *testing.T) {
 	r := newRig(t)
-	r.saveCreds(t, auth.Credentials{JiraURL: "https://jira.example.com", JiraPAT: "jira-pat"})
+	r.saveJira(t, "https://jira.example.com", auth.Credentials{JiraPAT: "jira-pat"})
 	r.pause(t, eventsource.KindJira)
 
 	var (

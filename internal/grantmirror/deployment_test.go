@@ -158,7 +158,7 @@ func TestRunDeployment_ALostUnsuspendUnblocksTheGrantPass(t *testing.T) {
 	app := testDeploymentApp(t)
 	stores, org := newManagedWorkspace(t, gh.srv.URL)
 	bindInstallation(t, stores, org, gh.srv.URL, "456", "1000", "acme")
-	if _, err := stores.GitHubApps.SetInstallationSuspension(ctx, org, "456", time.Now().Add(-time.Hour), "owner"); err != nil {
+	if _, err := stores.GitHubApps.SetInstallationSuspension(ctx, org, gh.srv.URL, "456", time.Now().Add(-time.Hour), "owner"); err != nil {
 		t.Fatalf("suspend the installation: %v", err)
 	}
 	// GitHub, meanwhile, has lifted it — and no delivery said so.
@@ -166,9 +166,12 @@ func TestRunDeployment_ALostUnsuspendUnblocksTheGrantPass(t *testing.T) {
 
 	mirror := newFakeMirror()
 	r := &Reconciler{
-		apps:       stores.GitHubApps,
-		mirror:     mirror,
-		clients:    fakeGrants{byLogin: map[string]grantAnswer{"acme": {repos: []github.UserRepo{repo("acme/api", 1)}, complete: true}}},
+		apps:   stores.GitHubApps,
+		mirror: mirror,
+		clients: fakeGrants{
+			byLogin: map[string]grantAnswer{"acme": {repos: []github.UserRepo{repo("acme/api", 1)}, complete: true}},
+			host:    db.EffectiveGitHubHost(gh.srv.URL),
+		},
 		classes:    fakeClasses{class: domain.GitHubCredentialClassManagedApp},
 		deployment: app,
 	}

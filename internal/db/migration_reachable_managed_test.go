@@ -21,7 +21,9 @@ import (
 //     conflict to detect — GitHub repeating a repository across a paginated walk
 //     would mint a second row and a wrong total_count, quietly.
 func TestMigrate_ReachableRepoManagedClass(t *testing.T) {
-	database := newTenantlessTestDB(t)
+	// At the migration that admitted the class: a later one keys the reach rows
+	// and scope markers by host, and this case pins the shape this one left.
+	database := openMigrationsTestDBAt(t, TestDSNMemory, 202608310001)
 
 	const org = "00000000-0000-0000-0000-000000000001"
 	if _, err := database.Exec(

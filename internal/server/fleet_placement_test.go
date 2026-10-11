@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth/verify"
+	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/placement"
 	"github.com/sky-ai-eng/triage-factory/internal/server/authz"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -16,12 +18,23 @@ import (
 
 type fakeExplainer struct {
 	plan    placement.Plan
-	lastKey [3]string // org, kind, value
+	lastKey [4]string // org, kind, host, value
 }
 
-func (f *fakeExplainer) Explain(_ context.Context, org, kind, val string) (placement.Plan, error) {
-	f.lastKey = [3]string{org, kind, val}
+func (f *fakeExplainer) Explain(_ context.Context, org, kind, host, val string) (placement.Plan, error) {
+	f.lastKey = [4]string{org, kind, host, val}
 	return f.plan, nil
+}
+
+// placementOrgs answers the settings read with a fixed GitHub base URL — the
+// org's current host the explainer keys the override on.
+type placementOrgs struct {
+	db.OrgsStore
+	githubBase string
+}
+
+func (o placementOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{GitHubBaseURL: o.githubBase}, nil
 }
 
 // localModeReq builds a GET request carrying local-mode claims so
@@ -33,7 +46,7 @@ func localModeReq(target string) *http.Request {
 
 func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	fe := &fakeExplainer{plan: placement.Plan{
-		Enabled: true, OrgID: "org1", KeyKind: "repo", KeyValue: "acme/web",
+		Enabled: true, OrgID: "org1", KeyKind: "repo", Host: "https://ghe.example.com", KeyValue: "acme/web",
 		PreferredSet: []string{"exec-a"},
 		Aging:        20 * time.Second, Liveness: 12 * time.Second,
 		Candidates: []placement.Candidate{
@@ -42,7 +55,7 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 			{InstanceID: "exec-dead", Reason: "dead"},
 		},
 	}}
-	s := &Server{az: &authz.Checker{}, placement: fe}
+	s := &Server{az: &authz.Checker{}, placement: fe, orgs: placementOrgs{githubBase: "https://ghe.example.com/"}}
 
 	rec := httptest.NewRecorder()
 	s.handleFleetPlacement(rec, localModeReq("/api/fleet/placement?org=org1&repo=acme/web"))
@@ -54,7 +67,7 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &dto); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if !dto.Enabled || dto.KeyValue != "acme/web" || len(dto.Candidates) != 3 {
+	if !dto.Enabled || dto.KeyValue != "acme/web" || dto.Host != "https://ghe.example.com" || len(dto.Candidates) != 3 {
 		t.Fatalf("unexpected dto: %+v", dto)
 	}
 	if dto.Candidates[0].InstanceID != "exec-a" || !dto.Candidates[0].Preferred {
@@ -63,8 +76,9 @@ func TestHandleFleetPlacement_ReturnsCandidateOrder(t *testing.T) {
 	if dto.PreferredSet[0] != "exec-a" || dto.AgingSeconds != 20 {
 		t.Fatalf("preferred/aging wrong: %+v", dto)
 	}
-	// The handler derived the (org, repo) key it passed to the resolver.
-	if fe.lastKey != [3]string{"org1", "repo", "acme/web"} {
+	// The handler derived the (org, repo) key it passed to the resolver, on
+	// the org's current GitHub host.
+	if fe.lastKey != [4]string{"org1", "repo", "https://ghe.example.com", "acme/web"} {
 		t.Fatalf("resolver keyed on %v", fe.lastKey)
 	}
 }

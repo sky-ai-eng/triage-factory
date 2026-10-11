@@ -238,6 +238,7 @@ func TestEntityTerminatingEvents(t *testing.T) {
 	terminators := []string{
 		domain.EventGitHubPRMerged,
 		domain.EventGitHubPRClosed,
+		domain.EventGitHubPRUnreachable,
 		domain.EventJiraIssueCompleted,
 		domain.EventJiraIssueUnreachable,
 		domain.EventLinearIssueCompleted,

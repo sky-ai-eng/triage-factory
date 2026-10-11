@@ -749,10 +749,10 @@ func (s *teamsStore) ListMembers(ctx context.Context, teamID, githubBaseURL, jir
 	//    admin-pool read scoped to exactly the members the RLS roster already
 	//    returned, and the id list narrows it further to the page in hand so
 	//    the enrichment costs the window rather than the whole roster. Host
-	//    resolution mirrors the org roster: an unset github_base_url resolves
-	//    to the deployment default (EffectiveGitHubHost), an unset jira_base_url
-	//    normalizes to "" and matches nothing, and the Linear workspace is
-	//    matched verbatim, so an org with none matches nothing either.
+	//    resolution mirrors the org roster: an unset github_base_url or
+	//    jira_base_url is no host and matches nothing, and the Linear
+	//    workspace is matched verbatim, so an org with none matches nothing
+	//    either.
 	ghMap, err := queryIdentityMap(ctx, s.admin, `
 		SELECT gh.user_id::text, gh.login
 		FROM user_github_identities gh

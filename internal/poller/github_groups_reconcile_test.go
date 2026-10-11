@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventbus"
@@ -39,11 +40,19 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "octo", TeamSlug: "backend"},
 		{OrgLogin: "octo", TeamSlug: "legacy"},
 	}); err != nil {
 		t.Fatalf("seed mappings: %v", err)
+	}
+	// The same org login on another host is another organization: the teams
+	// listed on this host say nothing about its teams, so its mapping survives.
+	const otherHost = "https://ghe.example.com"
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, otherHost, []domain.TeamGitHubGroup{
+		{OrgLogin: "octo", TeamSlug: "legacy"},
+	}); err != nil {
+		t.Fatalf("seed other host's mapping: %v", err)
 	}
 
 	bus := eventbus.New()
@@ -56,14 +65,21 @@ func TestReconcileGitHubGroups_PrunesDeletedTeams(t *testing.T) {
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
 
-	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
+	m.reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeam: %v", err)
 	}
 	if len(got) != 1 || got[0].TeamSlug != "backend" {
 		t.Errorf("after reconcile, mappings = %+v; want only octo/backend (legacy pruned)", got)
+	}
+	other, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, otherHost)
+	if err != nil {
+		t.Fatalf("ListForTeam on the other host: %v", err)
+	}
+	if len(other) != 1 || other[0].TeamSlug != "legacy" {
+		t.Errorf("after reconcile, the other host's mappings = %+v; want octo/legacy untouched", other)
 	}
 }
 
@@ -85,7 +101,7 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	team := runmode.LocalDefaultTeamID
 
-	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, []domain.TeamGitHubGroup{
+	if err := stores.TeamGitHubGroups.SetForTeam(ctx, team, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 		{OrgLogin: "octo", TeamSlug: "backend"},
 	}); err != nil {
 		t.Fatalf("seed mappings: %v", err)
@@ -101,9 +117,9 @@ func TestReconcileGitHubGroups_EmptyFetchDoesNotPrune(t *testing.T) {
 		resolver:     &fakeResolver{client: ghclient.NewClient(srv.URL, "pat")},
 	}
 
-	m.reconcileGitHubGroups(ctx, org, []string{"octo/repo"})
+	m.reconcileGitHubGroups(ctx, org, dbtest.TestGitHubHost, []string{"octo/repo"})
 
-	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team)
+	got, err := stores.TeamGitHubGroups.ListForTeam(ctx, team, dbtest.TestGitHubHost)
 	if err != nil {
 		t.Fatalf("ListForTeam: %v", err)
 	}

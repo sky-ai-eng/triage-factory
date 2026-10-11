@@ -397,6 +397,9 @@ func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
 	database := newDelegateTestDB(t)
 	stores := testSpawnerStores(database)
 	const site = "https://jira.example.com"
+	if _, err := stores.Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", site); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
 	e, _, err := stores.Entities.FindOrCreateSystem(context.Background(), runmode.LocalDefaultOrgID,
 		"jira", site, "OPS-7", "10007", "issue", "Moved", site+"/browse/OPS-7")
 	if err != nil {
@@ -437,6 +440,40 @@ func TestRunJiraMirror_UsesTheEntitysCurrentKey(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("recorded %d actions, want the assign and the transition", n)
+	}
+}
+
+// An issue tracked on another Jira site is not the issue the org's client
+// would reach under the same key, so the mirror leaves it alone: no client is
+// resolved and nothing is recorded.
+func TestRunJiraMirror_SkipsAnIssueOnAnotherSite(t *testing.T) {
+	database := newDelegateTestDB(t)
+	stores := testSpawnerStores(database)
+	ctx := context.Background()
+	if _, err := stores.Orgs.SetSourceBaseURL(ctx, runmode.LocalDefaultOrgID, "jira", "https://new.example.com"); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
+	e, _, err := stores.Entities.FindOrCreateSystem(ctx, runmode.LocalDefaultOrgID,
+		"jira", "https://old.example.com", "OPS-7", "10007", "issue", "Old", "")
+	if err != nil {
+		t.Fatalf("seed entity: %v", err)
+	}
+	fake := newRecordingJiraServer(t, "To Do", "")
+	resolver := &fakeJiraResolver{client: fake.client()}
+	s := NewSpawner(database, stores, nil, nil, "")
+	s.SetJiraResolver(resolver)
+
+	s.runJiraMirror(runmode.LocalDefaultOrgID, e.ID, "OPS-7", "", mirrorRule(), true)
+
+	if n := resolver.systemCalls(); n != 0 {
+		t.Errorf("resolved the org's Jira client %d times for an issue on another site, want 0", n)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM external_actions WHERE provider = 'jira'`).Scan(&n); err != nil {
+		t.Fatalf("count actions: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("recorded %d actions for an issue on another site, want 0", n)
 	}
 }
 
@@ -520,6 +557,11 @@ func TestRunJiraMirror_InProgress_AssignFails_SkipsTransition(t *testing.T) {
 
 func seedJiraMirrorRule(t *testing.T, database *sql.DB) {
 	t.Helper()
+	// The org's Jira site is the one the fixtures' issues are on
+	// (seedJiraConversation): the mirror acts only on its own site.
+	if _, err := testSpawnerStores(database).Orgs.SetSourceBaseURL(context.Background(), runmode.LocalDefaultOrgID, "jira", "https://jira.example.com"); err != nil {
+		t.Fatalf("set jira site: %v", err)
+	}
 	if _, err := database.Exec(
 		`INSERT INTO jira_project_status_rules
 		   (team_id, project_key, pickup_members, in_progress_members, in_progress_canonical, done_members, done_canonical)

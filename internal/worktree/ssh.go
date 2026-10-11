@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os/exec"
@@ -10,36 +11,30 @@ import (
 	"time"
 )
 
-// SSHHostFromBaseURL turns a GitHub HTTPS base URL (the value stored in
-// auth.Credentials.GitHubURL / OrgSettings.GitHubBaseURL) into the
-// SSH probe target — e.g. "https://github.example.com" → "git@github.example.com".
-//
-// Defaults to "git@github.com" when the input is empty or unparseable
-// rather than refusing to operate: the toggle flow has already gated
-// the user past credential validation by the time we reach a probe,
-// and a conservative default is more useful than a hard failure here.
-// Callers that want to fail loudly on a missing host should check for
-// emptiness themselves before calling.
+// SSHHostFromBaseURL turns a GitHub HTTPS base URL (an org's
+// OrgSettings.GitHubBaseURL) into the SSH probe target — e.g.
+// "https://github.example.com" → "git@github.example.com". "" when the input is
+// empty or has no host: an org with no GitHub URL has no SSH host, and a probe
+// of some other GitHub would answer a question nobody asked.
 //
 // Strips userinfo, port, path, query, and fragment from the URL — only
 // the hostname becomes part of the SSH target. GHE deployments served
 // on non-default ports still use the standard SSH port 22 by default,
 // and SSH config aliases handle anything more exotic.
 func SSHHostFromBaseURL(baseURL string) string {
-	const fallback = "git@github.com"
 	if baseURL == "" {
-		return fallback
+		return ""
 	}
 	u, err := url.Parse(baseURL)
-	if err != nil {
-		return fallback
+	if err != nil || u.Hostname() == "" {
+		return ""
 	}
-	host := u.Hostname()
-	if host == "" {
-		return fallback
-	}
-	return "git@" + host
+	return "git@" + u.Hostname()
 }
+
+// errNoSSHHost refuses a preflight with no host to probe: the caller has no
+// GitHub URL to derive one from (SSHHostFromBaseURL).
+var errNoSSHHost = errors.New("ssh preflight: no host to probe — the workspace has no GitHub URL")
 
 // sshPreflightCache holds a per-host cached result so a burst of simultaneous
 // clone failures (e.g. during bootstrap with many repos) triggers at most one
@@ -118,7 +113,7 @@ func (e sshPreflightEntry) valid() bool {
 // itself is the "SSH side is the cause" signal.
 func PreflightSSH(ctx context.Context, host string) error {
 	if host == "" {
-		host = "git@github.com"
+		return errNoSSHHost
 	}
 	cmd := exec.CommandContext(ctx, "ssh",
 		"-T",
@@ -182,9 +177,6 @@ func PreflightSSH(ctx context.Context, host string) error {
 //	   and BatchMode blocks the unlock prompt.
 //	2: agent socket unreachable (SSH_AUTH_SOCK unset or stale).
 func diagnoseSSHFailure(ctx context.Context, sshOut, host string) string {
-	if host == "" {
-		host = "git@github.com"
-	}
 	hostname := strings.TrimPrefix(host, "git@")
 	const macOSNote = "On macOS, `ssh-add --apple-use-keychain ~/.ssh/id_ed25519` persists the key in the login keychain so you don't have to re-add it after every reboot."
 	// settingsURL is on the user's GitHub host, not always github.com —
@@ -320,7 +312,7 @@ func diagnoseSSHFailure(ctx context.Context, sshOut, host string) string {
 // doesn't exist today.
 func CachedPreflightSSH(ctx context.Context, host string) error {
 	if host == "" {
-		host = "git@github.com"
+		return errNoSSHHost
 	}
 
 	sshPreflightCache.mu.Lock()

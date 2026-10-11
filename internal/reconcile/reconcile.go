@@ -39,9 +39,15 @@ type clientResolver interface {
 // conversation-scoped refresh endpoint): both call Reconcile with a set of
 // non-terminal artifacts. Writes route through the admin pool (UpsertSystem) —
 // the reconciler has no JWT-claims context in either tier.
+//
+// The resolver's clients reach the org's current GitHub host and no other, so
+// only artifacts recorded on that host (their scope) are reconciled. Another
+// host's pull request or branch is not where those clients look, and a branch
+// missing there would read as deleted.
 type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
+	orgs      db.OrgsStore   // read for the org's current GitHub host
 	ws        *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
@@ -57,9 +63,25 @@ type Reconciler struct {
 type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID string)
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
-// no-ops); the store + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, ws: ws}
+// no-ops); the stores + resolver are required.
+func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, artifacts: artifacts, orgs: orgs, ws: ws}
+}
+
+// onCurrentHost returns the org's current GitHub host and the artifacts of
+// arts recorded on it.
+func (rc *Reconciler) onCurrentHost(ctx context.Context, orgID string, arts []domain.Artifact) (string, []domain.Artifact, error) {
+	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
+	if err != nil {
+		return "", nil, err
+	}
+	out := make([]domain.Artifact, 0, len(arts))
+	for _, a := range arts {
+		if a.Scope == host {
+			out = append(out, a)
+		}
+	}
+	return host, out, nil
 }
 
 // SetPullRequestResolvedHook installs the closure a draft → open transition
@@ -107,8 +129,10 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 //
 // arts is the org's already-listed non-terminal set (branch artifacts included),
 // passed in by ReconcileOrg to avoid a second list; a nil arts makes this
-// self-list (the boot pass). Best-effort per repo — a per-owner credential or
-// GitHub failure skips that repo this pass.
+// self-list (the boot pass). Only branches on the org's current GitHub host
+// are matched, and a recorded pull request takes that host as its scope: it
+// was found there, from a branch pushed there. Best-effort per repo — a
+// per-owner credential or GitHub failure skips that repo this pass.
 func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID string, arts []domain.Artifact) error {
 	if arts == nil {
 		var err error
@@ -116,6 +140,10 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 		if err != nil {
 			return fmt.Errorf("list non-terminal artifacts: %w", err)
 		}
+	}
+	host, arts, err := rc.onCurrentHost(ctx, orgID, arts)
+	if err != nil {
+		return fmt.Errorf("resolve github host: %w", err)
 	}
 
 	// (owner/repo) → (branch → the conversation that pushed it). Only pushed
@@ -169,6 +197,7 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 			art.ConversationID = ref.conversationID
 			art.OrgID = orgID
 			art.TeamID = ref.teamID
+			art.Scope = host
 			inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
 			if err != nil {
 				reconcileLog.Warn("backstop: record PR artifact failed",
@@ -184,9 +213,11 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 	return nil
 }
 
-// Reconcile refreshes each artifact in arts against live GitHub and applies any
-// state transition: PR draft/open/merged/closed, review submitted/dismissed,
-// branch deleted. Each transition broadcasts over the WS hub (as
+// Reconcile refreshes each artifact in arts on the org's current GitHub host
+// against live GitHub and applies any state transition: PR
+// draft/open/merged/closed, review submitted/dismissed, branch deleted. An
+// artifact recorded on another host is skipped (see Reconciler). Each
+// transition broadcasts over the WS hub (as
 // artifact_updated on the owning conversation, so the conversation view's
 // artifact-derived surface refreshes), and a draft pull request that stops
 // being unresolved runs the resolved hook. Returns the artifacts that
@@ -199,6 +230,10 @@ func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID 
 func (rc *Reconciler) Reconcile(ctx context.Context, orgID string, arts []domain.Artifact) ([]domain.Artifact, error) {
 	if len(arts) == 0 {
 		return nil, nil
+	}
+	_, arts, err := rc.onCurrentHost(ctx, orgID, arts)
+	if err != nil {
+		return nil, fmt.Errorf("resolve github host: %w", err)
 	}
 
 	// Pass 1 — group the GitHub fetches by owner. PR and review artifacts both

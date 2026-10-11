@@ -191,7 +191,7 @@ func TestWorktreeAdd_BloblessPromisorFetch_AuthAndFastFail(t *testing.T) {
 
 	// Blobless-clone the bare WITH auth so the bare exists but defers the blob.
 	auth := CloneAuthFor(cloneURL, token)
-	bareDir, err := EnsureBareClone(context.Background(), "acme", "repo", cloneURL, WithCloneAuth(auth))
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("acme", "repo"), cloneURL, WithCloneAuth(auth))
 	if err != nil {
 		t.Fatalf("EnsureBareClone (blobless, authed): %v", err)
 	}
@@ -308,7 +308,7 @@ func TestRestoreCheckout_BloblessPrivateRepo(t *testing.T) {
 	root := mustRunRoot(t, "restore-run")
 	t.Cleanup(func() { RemoveRunRoot("restore-run") })
 	got, err := RestoreCheckout(context.Background(), CheckoutRestore{
-		Owner: "acme", Repo: "repo", CloneURL: cloneURL, Auth: CloneAuthFor(cloneURL, token),
+		RepositoryID: testRepo("acme", "repo").ID, Owner: "acme", Repo: "repo", CloneURL: cloneURL, Auth: CloneAuthFor(cloneURL, token),
 		Root: root, Slug: CheckoutRefSlug("main"), RootKey: "restore-run",
 		Head: strings.TrimSpace(string(tipOut)), Branch: "main",
 	})

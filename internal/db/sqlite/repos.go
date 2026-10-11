@@ -19,7 +19,7 @@ import (
 // # Row id vs "owner/repo"
 //
 // The row is keyed on a uuid, with the slug an ordinary column under a folded
-// UNIQUE(org_id, source, owner, repo) — the same shape Postgres has always
+// UNIQUE(org_id, source, host, owner, repo) — the same shape Postgres has always
 // had, so the two dialects hold the same reference in the tables that point
 // here, and surface the same handle. The id-keyed methods query the primary
 // key and refuse a miss with db.ErrNoSuchRepository; the ref-keyed ones query
@@ -43,6 +43,9 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	if err != nil {
 		return domain.Repository{}, err
 	}
+	if err := db.RequireRepoHost(p.Host); err != nil {
+		return domain.Repository{}, err
+	}
 	// source is absent from the conflict list: it is a create-time identity
 	// column, not profiling metadata. external_id refreshes only when the
 	// writer actually has one — COALESCE over the NULLIF keeps an empty
@@ -54,15 +57,26 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 	// create path too; inferring the case-sensitive columns here would leave it
 	// as the one create path that could still duplicate. owner/repo are absent
 	// from the SET list, so the stored casing stays sticky, and the id minted
-	// for a conflicting INSERT is discarded along with the rest of it.
+	// for a conflicting INSERT is discarded along with the rest of it. host is
+	// part of the target, so a same-named repository on another host is another
+	// row.
+	//
+	// The id written is p.ExternalID unless another row on the host already
+	// carries it — a rename not yet applied, or one refused. The scalar
+	// subquery answers NULL then, and COALESCE keeps whatever this row had.
 	//
 	// RETURNING projects the point read's column list, so the row handed back
 	// carries the COALESCEd external_id, the stored casing and the base branch
 	// and clone state this statement left alone — none of which p can describe.
 	row := s.q.QueryRowContext(ctx, `
-		INSERT INTO repositories (id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-		ON CONFLICT(org_id, source, LOWER(owner), LOWER(repo)) DO UPDATE SET
+		INSERT INTO repositories (id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, profiled_at, updated_at)
+		VALUES (?1, ?2, ?3, ?4, ?5,
+		        (SELECT ?6 WHERE NOT EXISTS (
+		            SELECT 1 FROM repositories o
+		             WHERE o.source = ?4 AND o.host = ?5 AND o.external_id = ?6
+		               AND NOT (LOWER(o.owner) = LOWER(?2) AND LOWER(o.repo) = LOWER(?3)))),
+		        ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, datetime('now'))
+		ON CONFLICT(org_id, source, host, LOWER(owner), LOWER(repo)) DO UPDATE SET
 			external_id    = COALESCE(excluded.external_id, repositories.external_id),
 			description    = excluded.description,
 			has_readme     = excluded.has_readme,
@@ -74,7 +88,7 @@ func (s *repoStore) Upsert(ctx context.Context, orgID string, p domain.Repositor
 			profiled_at    = excluded.profiled_at,
 			updated_at     = datetime('now')
 		RETURNING `+repoProfileFullColumns,
-		uuid.New().String(), p.Owner, p.Repo, source,
+		uuid.New().String(), p.Owner, p.Repo, source, p.Host,
 		nullIfEmpty(p.ExternalID),
 		nullIfEmpty(p.Description),
 		p.HasReadme, p.HasClaudeMd, p.HasAgentsMd,
@@ -104,7 +118,10 @@ func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef)
 	if err != nil {
 		return "", err
 	}
-	id, err := findRepositoryID(ctx, q, source, ref.Owner, ref.Repo)
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return "", err
+	}
+	id, err := findRepositoryID(ctx, q, source, ref.Host, ref.Owner, ref.Repo)
 	if err != nil {
 		return "", err
 	}
@@ -114,7 +131,7 @@ func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef)
 	if err := insertRepositoryRow(ctx, q, ref); err != nil {
 		return "", err
 	}
-	id, err = findRepositoryID(ctx, q, source, ref.Owner, ref.Repo)
+	id, err = findRepositoryID(ctx, q, source, ref.Host, ref.Owner, ref.Repo)
 	if err != nil {
 		return "", err
 	}
@@ -126,12 +143,12 @@ func getOrCreateRepositoryID(ctx context.Context, q queryer, ref domain.RepoRef)
 
 // findRepositoryID resolves a slug to the registry row's surrogate id, or "" if
 // no row holds that slug. Case-INSENSITIVE, like every other slug lookup here.
-func findRepositoryID(ctx context.Context, q queryer, source, owner, repo string) (string, error) {
+func findRepositoryID(ctx context.Context, q queryer, source, host, owner, repo string) (string, error) {
 	var id string
 	err := q.QueryRowContext(ctx, `
 		SELECT id FROM repositories
-		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, source, owner, repo).Scan(&id)
+		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, host, owner, repo).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -148,8 +165,8 @@ func findRepositoryByRef(ctx context.Context, q queryer, source string, ref doma
 	row := q.QueryRowContext(ctx, `
 		SELECT `+repoProfileFullColumns+`
 		FROM repositories
-		WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, source, ref.Owner, ref.Repo)
+		WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, ref.Host, ref.Owner, ref.Repo)
 	p, err := scanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -184,22 +201,28 @@ func insertRepositoryRow(ctx context.Context, q queryer, ref domain.RepoRef) err
 	if err != nil {
 		return err
 	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return err
+	}
 	if _, err := q.ExecContext(ctx, `
-		INSERT INTO repositories (id, owner, repo, source, updated_at)
-		VALUES (?, ?, ?, ?, datetime('now'))
+		INSERT INTO repositories (id, owner, repo, source, host, updated_at)
+		VALUES (?, ?, ?, ?, ?, datetime('now'))
 		ON CONFLICT DO NOTHING
-	`, uuid.New().String(), ref.Owner, ref.Repo, source); err != nil {
+	`, uuid.New().String(), ref.Owner, ref.Repo, source, ref.Host); err != nil {
 		return fmt.Errorf("insert repositories[%s]: %w", ref.Slug(), err)
 	}
 	return nil
 }
 
-func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
+func (s *repoStore) List(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, 0, err
 	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, 0, err
+	}
 	var total int
-	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories`).Scan(&total); err != nil {
+	if err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE host = ?`, host).Scan(&total); err != nil {
 		return nil, 0, err
 	}
 	if opts.CountOnly {
@@ -208,8 +231,9 @@ func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([
 	query := `
 		SELECT ` + repoProfileFullColumns + `
 		FROM repositories
+		WHERE host = ?
 		ORDER BY owner, repo, id`
-	args := []any{}
+	args := []any{host}
 	if opts.Limit > 0 {
 		query += `
 		LIMIT ? OFFSET ?`
@@ -235,16 +259,19 @@ func (s *repoStore) List(ctx context.Context, orgID string, opts db.ListOpts) ([
 // ListTeamScoped mirrors List in local mode — N=1, so there is no other
 // team to scope away (matches the ListActiveJiraTeamScoped /
 // FactoryReadStore.Entities local-mode asymmetry, TFAC-559).
-func (s *repoStore) ListTeamScoped(ctx context.Context, orgID string, opts db.ListOpts) ([]domain.Repository, int, error) {
-	return s.List(ctx, orgID, opts)
+func (s *repoStore) ListTeamScoped(ctx context.Context, orgID, host string, opts db.ListOpts) ([]domain.Repository, int, error) {
+	return s.List(ctx, orgID, host, opts)
 }
 
-func (s *repoStore) CountConfigured(ctx context.Context, orgID string) (int, error) {
+func (s *repoStore) CountConfigured(ctx context.Context, orgID, host string) (int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return 0, err
 	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return 0, err
+	}
 	var count int
-	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories`).Scan(&count)
+	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM repositories WHERE host = ?`, host).Scan(&count)
 	return count, err
 }
 
@@ -279,12 +306,19 @@ func (s *repoStore) Get(ctx context.Context, orgID, id string) (*domain.Reposito
 	return &p, nil
 }
 
+func (s *repoStore) GetSystem(ctx context.Context, orgID, id string) (*domain.Repository, error) {
+	return s.Get(ctx, orgID, id)
+}
+
 func (s *repoStore) GetByRef(ctx context.Context, orgID string, ref domain.RepoRef) (*domain.Repository, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
 	source, err := domain.NormalizeRepoSource(ref.Source)
 	if err != nil {
+		return nil, err
+	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
 		return nil, err
 	}
 	// Case-insensitive, like every other ref lookup here. The callers that
@@ -304,12 +338,15 @@ func (s *repoStore) UpdateCloneStatusByRef(ctx context.Context, orgID string, re
 	if err != nil {
 		return nil, err
 	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return nil, err
+	}
 	row := s.q.QueryRowContext(ctx, `
 		UPDATE repositories
 		SET clone_status = ?, clone_error = ?, clone_error_kind = ?, updated_at = datetime('now')
-		WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+		WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
 		RETURNING `+repoProfileFullColumns,
-		status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Owner, ref.Repo)
+		status, nullIfEmpty(errMsg), nullIfEmpty(errKind), source, ref.Host, ref.Owner, ref.Repo)
 	p, err := scanRepositoryFull(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing answers to the name — the documented no-op, not a fault.
@@ -342,22 +379,26 @@ func scanUpdatedRepository(row rowScanner, id string) (domain.Repository, error)
 // SQLite has one connection so each System variant
 // delegates to its non-System counterpart.
 
-func (s *repoStore) ListSystem(ctx context.Context, orgID string) ([]domain.Repository, error) {
+func (s *repoStore) ListSystem(ctx context.Context, orgID, host string) ([]domain.Repository, error) {
 	// Unwindowed: system callers resolve the whole registry.
-	rows, _, err := s.List(ctx, orgID, db.Unwindowed)
+	rows, _, err := s.List(ctx, orgID, host, db.Unwindowed)
 	return rows, err
 }
 
-func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID string) ([]string, error) {
+func (s *repoStore) ListTrackedNamesSystem(ctx context.Context, orgID, host string) ([]string, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT DISTINCT r.owner || '/' || r.repo
 		  FROM repositories r
 		  JOIN team_github_repos g ON g.repository_id = r.id
+		 WHERE r.host = ?
 		 ORDER BY r.owner, r.repo
-	`)
+	`, host)
 	if err != nil {
 		return nil, err
 	}
@@ -407,13 +448,21 @@ func (s *repoStore) FillMissingExternalIDsSystem(ctx context.Context, orgID stri
 			if err != nil {
 				return err
 			}
+			if err := db.RequireRepoHost(ref.Host); err != nil {
+				return err
+			}
+			// An id another row on the host already carries is left where it
+			// is: that row is the repository GitHub calls by it.
 			res, err := tx.ExecContext(ctx, `
 				UPDATE repositories
-				   SET external_id = ?, updated_at = datetime('now')
-				 WHERE source = ?
-				   AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+				   SET external_id = ?1, updated_at = datetime('now')
+				 WHERE source = ?2 AND host = ?3
+				   AND LOWER(owner) = LOWER(?4) AND LOWER(repo) = LOWER(?5)
 				   AND external_id IS NULL
-			`, ref.ExternalID, source, ref.Owner, ref.Repo)
+				   AND NOT EXISTS (
+				       SELECT 1 FROM repositories o
+				        WHERE o.source = ?2 AND o.host = ?3 AND o.external_id = ?1)
+			`, ref.ExternalID, source, ref.Host, ref.Owner, ref.Repo)
 			if err != nil {
 				return fmt.Errorf("fill external id for %s: %w", ref.Slug(), err)
 			}
@@ -437,13 +486,16 @@ func (s *repoStore) GetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 	if err != nil {
 		return "", nil, err
 	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return "", nil, err
+	}
 	var etag sql.NullString
 	var polledAt sql.NullTime
 	err = s.q.QueryRowContext(ctx, `
 		SELECT pulls_etag, pulls_polled_at
 		  FROM repositories
-		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, source, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
+		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, source, ref.Host, ref.Owner, ref.Repo).Scan(&etag, &polledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil
 	}
@@ -465,11 +517,14 @@ func (s *repoStore) SetPullsPollStateByRefSystem(ctx context.Context, orgID stri
 	if err != nil {
 		return err
 	}
+	if err := db.RequireRepoHost(ref.Host); err != nil {
+		return err
+	}
 	_, err = s.q.ExecContext(ctx, `
 		UPDATE repositories
 		   SET pulls_etag = ?, pulls_polled_at = ?
-		 WHERE source = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
-	`, nullIfEmpty(etag), polledAt.UTC(), source, ref.Owner, ref.Repo)
+		 WHERE source = ? AND host = ? AND LOWER(owner) = LOWER(?) AND LOWER(repo) = LOWER(?)
+	`, nullIfEmpty(etag), polledAt.UTC(), source, ref.Host, ref.Owner, ref.Repo)
 	return err
 }
 
@@ -482,7 +537,7 @@ type rowScanner interface {
 
 // repoProfileFullColumns is the projection scanRepositoryFull reads, named
 // once so the three queries that share it cannot drift out of column order.
-const repoProfileFullColumns = `id, owner, repo, source, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
+const repoProfileFullColumns = `id, owner, repo, source, host, external_id, description, has_readme, has_claude_md, has_agents_md, profile_text, clone_url, default_branch, base_branch, profiled_at, clone_status, clone_error, clone_error_kind`
 
 // scanRepositoryFull reads the repositories row shape shared by Get, List,
 // and the ref lookup.
@@ -490,7 +545,7 @@ func scanRepositoryFull(row rowScanner) (domain.Repository, error) {
 	var p domain.Repository
 	var externalID, description, profileText, cloneURL, defaultBranch, baseBranch, cloneError, cloneErrorKind sql.NullString
 	var profiledAt sql.NullTime
-	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
+	if err := row.Scan(&p.ID, &p.Owner, &p.Repo, &p.Source, &p.Host, &externalID, &description, &p.HasReadme, &p.HasClaudeMd, &p.HasAgentsMd, &profileText, &cloneURL, &defaultBranch, &baseBranch, &profiledAt, &p.CloneStatus, &cloneError, &cloneErrorKind); err != nil {
 		return p, err
 	}
 	p.ExternalID = externalID.String

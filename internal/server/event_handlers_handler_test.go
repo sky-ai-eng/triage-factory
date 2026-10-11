@@ -306,6 +306,7 @@ func TestHandleEventHandlerCreate_RejectsInvalidPredicate(t *testing.T) {
 
 func TestHandleEventHandlerUpdate_PatchesRule(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	id := createUserRule(t, s)
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{
@@ -342,6 +343,7 @@ func TestHandleEventHandlerUpdate_NotFound(t *testing.T) {
 // immutable here.
 func TestHandleEventHandlerUpdate_RejectsOtherKindsFields(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-patch-kinds")
 	ruleID := createUserRule(t, s)
 	triggerID := createUserTrigger(t, s, "p-patch-kinds")
@@ -375,6 +377,7 @@ func TestHandleEventHandlerUpdate_RejectsOtherKindsFields(t *testing.T) {
 // one that is left.
 func TestHandleEventHandlerUpdate_FlipsEnabled(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	id := createUserRule(t, s)
 
 	rec := doJSON(t, s, http.MethodPatch, "/api/event-handlers/"+id, map[string]any{"enabled": false})
@@ -403,6 +406,7 @@ func TestHandleEventHandlerUpdate_FlipsEnabled(t *testing.T) {
 // create. A removed route answers 404/405, never the old behaviour.
 func TestHandleEventHandlerRemovedRoutes(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	id := createUserRule(t, s)
 
 	for name, tc := range map[string]struct {
@@ -435,6 +439,7 @@ func TestHandleEventHandlerRemovedRoutes(t *testing.T) {
 
 func TestHandleEventHandlerDelete_UserRowHardDeletes(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	id := createUserRule(t, s)
 
 	rec := doJSON(t, s, http.MethodDelete, "/api/event-handlers/"+id, nil)
@@ -503,6 +508,7 @@ func TestHandleEventHandlerDelete_SystemRowSoftDeletes(t *testing.T) {
 
 func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-promote")
 	id := createUserRule(t, s)
 
@@ -533,6 +539,7 @@ func TestHandleEventHandlerPromote_RuleToTrigger(t *testing.T) {
 
 func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-already-trigger")
 	// Create a trigger then try to promote it.
 	id := createUserTrigger(t, s, "p-already-trigger")
@@ -553,6 +560,7 @@ func TestHandleEventHandlerPromote_RejectsAlreadyTrigger(t *testing.T) {
 // the body is well-formed, the values can't be applied.
 func TestHandleEventHandlerPromote_ValidatesTriggerFields(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	id := createUserRule(t, s)
 
 	for name, body := range map[string]map[string]any{
@@ -625,6 +633,7 @@ func TestEventHandlerTriggerParity_CreateAndPromote(t *testing.T) {
 
 func TestHandleEventHandlerReorder_AppliesOrder(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	idA := createUserRuleWithSort(t, s, "rule-a", 0)
 	idB := createUserRuleWithSort(t, s, "rule-b", 1)
 
@@ -664,6 +673,7 @@ func TestHandleEventHandlerReorder_RejectsEmpty(t *testing.T) {
 // reports all of them.
 func TestHandleEventHandlerReorder_RejectsInexactSet(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	seedBlueprintForTrigger(t, s, "p-reorder")
 	idA := createUserRuleWithSort(t, s, "rule-a", 0)
 	idB := createUserRuleWithSort(t, s, "rule-b", 1)

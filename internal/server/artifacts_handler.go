@@ -164,6 +164,10 @@ func (ah *artifactsHandler) loadArtifact(w http.ResponseWriter, r *http.Request,
 // ghForArtifact parses an artifact's owner/repo/number coordinates (PR and review
 // artifacts both target owner/repo#<number>) and resolves a per-repo GitHub
 // client. Writes the error response and returns ok=false on any failure.
+//
+// The client talks to the org's GitHub host now, where the same owner/repo#N
+// is a different pull request than one recorded on another host, so an
+// artifact from another host is refused with a 409 (artifactOnCurrentHost).
 func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (gh *ghclient.Client, owner, repo string, number int, ok bool) {
 	o, rp, n, parseOK := domain.ParsePRTarget(art.Target)
 	if !parseOK {
@@ -171,6 +175,18 @@ func (ah *artifactsHandler) ghForArtifact(w http.ResponseWriter, r *http.Request
 		// (no PR to address). Treat as a server-side data error rather than
 		// guessing — the create writer always stamps a well-formed target.
 		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
+		return nil, "", "", 0, false
+	}
+	onHost, host, err := ah.artifactOnCurrentHost(r.Context(), orgID, art)
+	if err != nil {
+		internalError(w, "artifacts", err)
+		return nil, "", "", 0, false
+	}
+	if !onHost {
+		httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+			Reason:  httpx.ReasonConflict,
+			Message: fmt.Sprintf("this pull request is on %s, and the workspace's GitHub is %s; it can only be acted on from a workspace on its own GitHub", art.Scope, hostOrNotConfigured(host)),
+		})
 		return nil, "", "", 0, false
 	}
 
@@ -247,9 +263,19 @@ func (ah *artifactsHandler) handleArtifactGet(w http.ResponseWriter, r *http.Req
 // coordinates. On a live-fetch failure it degrades to the proposed/edited
 // snapshot in details_json so the overlay still renders — a closed/merged PR or
 // a transient GitHub blip shouldn't blank the editor.
+//
+// An artifact recorded on another GitHub host serves its snapshot with no live
+// fetch: the org's client would read a different pull request under the same
+// coordinates.
 func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Request, orgID string, art *domain.Artifact) (prArtifactDetailsJSON, bool) {
-	gh, owner, repo, number, ok := ah.ghForArtifact(w, r, orgID, art)
+	owner, repo, number, ok := domain.ParsePRTarget(art.Target)
 	if !ok {
+		internalError(w, "artifacts", fmt.Errorf("malformed artifact target %q (artifact %s)", art.Target, art.ID))
+		return prArtifactDetailsJSON{}, false
+	}
+	onHost, _, err := ah.artifactOnCurrentHost(r.Context(), orgID, art)
+	if err != nil {
+		internalError(w, "artifacts", err)
 		return prArtifactDetailsJSON{}, false
 	}
 
@@ -260,6 +286,17 @@ func (ah *artifactsHandler) prArtifactDetails(w http.ResponseWriter, r *http.Req
 	details, _ := domain.ParsePRArtifactDetails(art.DetailsJSON)
 	title := details.Snapshot.Title
 	body := details.Snapshot.Body
+	if !onHost {
+		return prArtifactDetailsJSON{
+			Owner: owner, Repo: repo, Number: number,
+			HeadBranch: details.HeadBranch, BaseBranch: details.Base,
+			Title: title, Body: body,
+		}, true
+	}
+	gh, _, _, _, ok := ah.ghForArtifact(w, r, orgID, art)
+	if !ok {
+		return prArtifactDetailsJSON{}, false
+	}
 	if pr, err := gh.GetPRBasic(r.Context(), owner, repo, number); err != nil {
 		artifactsLog.Warn("live PR fetch failed; falling back to snapshot",
 			"artifact", art.ID, "owner", owner, "repo", repo, "number", number, "error", err)
@@ -963,7 +1000,7 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 		if _, e := tx.Artifacts.Upsert(cleanupCtx, orgID, closed); e != nil {
 			return e
 		}
-		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, repoPath, headRef)
+		branchURL, e := retireBranchArtifact(cleanupCtx, tx, orgID, art.ConversationID, art.Scope, repoPath, headRef)
 		if e != nil {
 			return e
 		}
@@ -993,13 +1030,13 @@ func (ah *artifactsHandler) handleArtifactReject(w http.ResponseWriter, r *http.
 }
 
 // retireBranchArtifact flips the conversation's `branch` artifact for headRef
-// (on repoPath) to deleted, returning its web URL for the audit row. A
-// conversation with no such artifact — a push the capture writers missed, or
-// no conversation at all — is not an error: the PR artifact carries the
-// rejection on its own, and the returned URL falls back to the public-host
-// branch link so the audit row still links somewhere.
-func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, repoPath, headRef string) (string, error) {
-	fallbackURL, _ := domain.BranchArtifactWebURL("", repoPath, headRef)
+// (on repoPath, on the GitHub host scope) to deleted, returning its web URL
+// for the audit row. A conversation with no such artifact — a push the
+// capture writers missed, or no conversation at all — is not an error: the PR
+// artifact carries the rejection on its own, and the returned URL falls back
+// to the branch link on scope's host so the audit row still links somewhere.
+func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversationID, scope, repoPath, headRef string) (string, error) {
+	fallbackURL, _ := domain.BranchArtifactWebURL(scope, repoPath, headRef)
 	if conversationID == "" {
 		return fallbackURL, nil
 	}
@@ -1009,7 +1046,7 @@ func retireBranchArtifact(ctx context.Context, tx db.TxStores, orgID, conversati
 	}
 	for i := range arts {
 		a := arts[i]
-		if a.Kind != domain.ArtifactKindBranch || a.Target != repoPath || a.ExternalID != headRef {
+		if a.Kind != domain.ArtifactKindBranch || a.Scope != scope || a.Target != repoPath || a.ExternalID != headRef {
 			continue
 		}
 		if a.State != domain.ArtifactStateBranchDeleted {
@@ -1036,6 +1073,7 @@ func branchDeletedAction(art *domain.Artifact, userID, repoPath, headRef, branch
 	return domain.ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       domain.ArtifactProviderGitHub,
+		Scope:          art.Scope,
 		Action:         domain.ActionBranchDeleted,
 		Target:         repoPath,
 		ExternalID:     headRef,
@@ -1242,4 +1280,27 @@ func (ah *artifactsHandler) upsertPRDetails(ctx context.Context, orgID, userID s
 		_, e := tx.Artifacts.Upsert(ctx, orgID, next)
 		return e
 	})
+}
+
+// artifactOnCurrentHost reports whether art was recorded on the org's GitHub
+// host now, the host every client this handler resolves talks to, and returns
+// that host.
+func (ah *artifactsHandler) artifactOnCurrentHost(ctx context.Context, orgID string, art *domain.Artifact) (bool, string, error) {
+	var host string
+	if err := ah.tx.WithReadTx(ctx, orgID, ClaimsFrom(ctx).Subject, func(tx db.TxStores) error {
+		set, err := tx.Orgs.GetSettings(ctx, orgID)
+		host = domain.ExternalObjectScope(domain.ArtifactProviderGitHub, set)
+		return err
+	}); err != nil {
+		return false, "", fmt.Errorf("read the org's github host: %w", err)
+	}
+	return art.Scope == host, host, nil
+}
+
+// hostOrNotConfigured names a GitHub host for a message, or says there is none.
+func hostOrNotConfigured(host string) string {
+	if host == "" {
+		return "not configured"
+	}
+	return host
 }

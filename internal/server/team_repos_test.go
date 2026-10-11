@@ -13,6 +13,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -148,8 +149,8 @@ func TestTeamReposPut_MirrorIsAuthoritative(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(ts.Close)
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -198,8 +199,8 @@ func TestTeamReposPut_ColdPathFailsOpenOn5xx(t *testing.T) {
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(ts.Close)
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -274,8 +275,8 @@ func TestTeamReposPut_RejectsUnreachableRepo(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 	ts := fakeReposServer(t, "owner/tracked")
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -310,13 +311,23 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 	keyring.MockInit()
 	srv := newTestServer(t)
 
-	// Phase 1: creds can reach owner/stale + owner/other → track both.
+	// One GitHub host whose answers change between the phases: the access is
+	// revoked on the same GitHub, not moved to another one.
 	wide := fakeReposServer(t, "owner/stale", "owner/other")
+	narrow := fakeReposServer(t, "owner/other", "owner/fresh")
+	var current atomic.Pointer[httptest.Server]
+	current.Store(wide)
+	host := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		current.Load().Config.Handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(host.Close)
+
+	// Phase 1: creds can reach owner/stale + owner/other → track both.
+	seedSourceHost(t, srv, eventsource.KindGitHub, host.URL)
 	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: wide.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
-		t.Fatalf("seed wide creds: %v", err)
+		t.Fatalf("seed creds: %v", err)
 	}
 	if rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
 		"repos": []string{"owner/stale", "owner/other"},
@@ -326,13 +337,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 
 	// Phase 2: access to owner/stale is revoked — creds now reach only
 	// owner/other (and a new owner/fresh the user wants to add).
-	narrow := fakeReposServer(t, "owner/other", "owner/fresh")
-	if err := integrations.Save(context.Background(), srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: narrow.URL,
-		GitHubPAT: "ghp-test",
-	}); err != nil {
-		t.Fatalf("seed narrow creds: %v", err)
-	}
+	current.Store(narrow)
 
 	// Re-saving the current set (still carrying the now-unreachable
 	// owner/stale) must succeed — it's already tracked, so it's not
@@ -368,6 +373,7 @@ func TestTeamReposPut_StaleTrackedRepoStaysRemovable(t *testing.T) {
 // blocks a write when it can't enumerate the reachable set — no
 // credentials configured means checked=false, so the save proceeds.
 func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
+	keyring.MockInit()
 	srv := newTestServer(t)
 	// No credentials seeded → fanOutUnreachableRepo returns checked=false.
 	rec := doJSON(t, srv, http.MethodPut, "/api/teams/default/github-repos", map[string]any{
@@ -375,5 +381,64 @@ func TestTeamReposPut_FailsOpenWithoutCredentials(t *testing.T) {
 	})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("no-credential PUT = %d, want 200 (fail-open); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestTeamRepos_OperateOnTheCurrentHostOnly pins that a team's tracked set is
+// per GitHub host. Once the org points at another host, the GET lists only that
+// host's tracking (none yet), a PUT records the new host's set without pruning
+// the old host's rows, and pointing the org back shows the old set unchanged.
+// No credentials are bound, so the reachability gate fails open and the test is
+// about the host alone.
+func TestTeamRepos_OperateOnTheCurrentHostOnly(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	srv := newTestServer(t)
+	const route = "/api/teams/default/github-repos"
+	put := func(slugs ...string) {
+		t.Helper()
+		if rec := doJSON(t, srv, http.MethodPut, route, map[string]any{"repos": slugs}); rec.Code != http.StatusOK {
+			t.Fatalf("PUT %v = %d, want 200; body=%s", slugs, rec.Code, rec.Body.String())
+		}
+	}
+	get := func() []string {
+		t.Helper()
+		rec := doJSON(t, srv, http.MethodGet, route, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		}
+		var resp teamReposResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp.Repos
+	}
+
+	put("acme/api", "acme/web")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
+		t.Fatalf("tracked on the default host = %v, want [acme/api acme/web]", got)
+	}
+
+	setOrgGitHubBase(t, srv, "https://ghe.example.com")
+	if got := get(); len(got) != 0 {
+		t.Fatalf("tracked on the new host = %v, want none: the old host's tracking is not this host's", got)
+	}
+	// acme/api again on purpose: the same name on another host is another
+	// repository.
+	put("acme/api", "ghe/tool")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "ghe/tool"}) {
+		t.Errorf("tracked on the new host = %v, want [acme/api ghe/tool]", got)
+	}
+	onNew, err := srv.allStores.TeamGitHubRepos.ListForTeamSystem(t.Context(), runmode.LocalDefaultTeamID, "https://ghe.example.com")
+	if err != nil {
+		t.Fatalf("ListForTeamSystem: %v", err)
+	}
+	if len(onNew) != 2 {
+		t.Errorf("rows stored on the new host = %+v, want 2", onNew)
+	}
+
+	setOrgGitHubBase(t, srv, "https://github.com")
+	if got := get(); !equalSlugs(got, []string{"acme/api", "acme/web"}) {
+		t.Errorf("tracked back on the default host = %v, want the original [acme/api acme/web] unpruned", got)
 	}
 }

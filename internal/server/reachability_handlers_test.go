@@ -123,6 +123,7 @@ func TestNormalizeReachabilityURL(t *testing.T) {
 		{"https://ghes.acme.com:8443", "https://ghes.acme.com:8443"},  // explicit port kept
 		{"https://jira.acme.com/jira", "https://jira.acme.com/jira"},  // Jira context path preserved
 		{"https://jira.acme.com/jira/", "https://jira.acme.com/jira"}, // ...slash still trimmed
+		{"HTTPS://GHES.Acme.com/Ctx", "https://ghes.acme.com/Ctx"},    // scheme and host fold, path keeps its case
 	}
 	for _, tt := range good {
 		if got, ok := ghbase.NormalizeBaseURL(tt.in); !ok || got != tt.want {

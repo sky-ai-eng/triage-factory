@@ -12,7 +12,6 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 )
 
 // runRecordPush upserts a `branch` artifact for one pushed ref. Invoked by
@@ -103,7 +102,7 @@ func orgGitHubHost(ctx context.Context, host agenthost.Client) string {
 	}
 	base, err := whr.GithubWebHostBase(ctx)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "hook record-push: resolve org github host: %v; falling back to the deployment default host gate\n", err)
+		fmt.Fprintf(os.Stderr, "hook record-push: resolve org github host: %v; only a private or loopback remote is trusted\n", err)
 		return ""
 	}
 	u, err := url.Parse(base)
@@ -180,10 +179,9 @@ func stripUserInfo(host string) string {
 //   - a loopback/private IP is trusted as the sandbox git proxy's veth address
 //     (which fronts the org upstream). The sandbox hook stands down in favor of
 //     the proxy's own capture, so this is a belt-and-suspenders accept;
-//   - when baseHost is empty (the org base couldn't be resolved), it falls back
-//     to the deployment's default GitHub — the host an org with no base URL is
-//     on — so a transient resolver miss doesn't silently stop recording pushes
-//     there.
+//   - when baseHost is empty (the org has no GitHub URL, or it couldn't be
+//     read), no public host is trusted: a push can be the org's only if the
+//     org names its GitHub.
 //
 // Anything else (gitlab.com, a github.com push from a GHES org) is rejected so
 // its pushes aren't recorded — and, post-anchoring, mis-linked — under the org's
@@ -191,13 +189,6 @@ func stripUserInfo(host string) string {
 func isTrustedHost(host, baseHost string) bool {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
-	}
-	if baseHost == "" {
-		// No org host resolved: the gate is the deployment's default GitHub,
-		// the host an org with no base URL is on.
-		if u, err := url.Parse(ghbase.DefaultBaseURL()); err == nil {
-			baseHost = u.Hostname()
-		}
 	}
 	if baseHost != "" && strings.EqualFold(host, baseHost) {
 		return true

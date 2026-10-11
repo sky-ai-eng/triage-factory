@@ -20,9 +20,7 @@ const service = "triagefactory"
 // page → POST .../identity/{github,jira}*. It is never derived from these org
 // credentials.
 type Credentials struct {
-	GitHubURL string
 	GitHubPAT string
-	JiraURL   string
 	JiraPAT   string
 
 	// Jira Cloud service credential (Basic auth, REST v3). JiraEmail +

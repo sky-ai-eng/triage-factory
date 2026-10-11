@@ -29,7 +29,12 @@ func SameRepoSlug(a, b string) bool { return strings.EqualFold(a, b) }
 
 // DetectRepoRenames returns the observed identities whose repository TF stores
 // under a different slug — the rename condition, stated in the only terms that
-// can express it: same (source, external id), different (owner, repo).
+// can express it: same (source, host, external id), different (owner, repo).
+//
+// The host is part of the identity because GitHub repository ids are
+// per-deployment sequences: another host's repository can carry the same id,
+// and matching across hosts would rename a repository into a stranger's. A ref
+// with no host matches nothing, on either side.
 //
 // stored is what TF has, observed is what the provider currently reports.
 // Neither side may contribute a match without an external id: a repository
@@ -47,31 +52,31 @@ func DetectRepoRenames(stored, observed []RepoRef) []RepoRef {
 	if len(stored) == 0 || len(observed) == 0 {
 		return nil
 	}
-	// Key on (source, external id): an id is only an identity within the
-	// provider that issued it.
-	type identity struct{ source, externalID string }
+	// Key on (source, host, external id): an id is only an identity within the
+	// deployment of the provider that issued it.
+	type identity struct{ source, host, externalID string }
 	slugs := make(map[identity]string, len(stored))
 	for _, s := range stored {
-		if s.ExternalID == "" {
+		if s.ExternalID == "" || s.Host == "" {
 			continue
 		}
 		source, err := NormalizeRepoSource(s.Source)
 		if err != nil {
 			continue
 		}
-		slugs[identity{source, s.ExternalID}] = s.Slug()
+		slugs[identity{source, s.Host, s.ExternalID}] = s.Slug()
 	}
 
 	var out []RepoRef
 	for _, o := range observed {
-		if o.ExternalID == "" {
+		if o.ExternalID == "" || o.Host == "" {
 			continue
 		}
 		source, err := NormalizeRepoSource(o.Source)
 		if err != nil {
 			continue
 		}
-		was, ok := slugs[identity{source, o.ExternalID}]
+		was, ok := slugs[identity{source, o.Host, o.ExternalID}]
 		if !ok || SameRepoSlug(was, o.Slug()) {
 			continue
 		}
@@ -136,37 +141,66 @@ func RewriteArtifactDedupKey(key, oldSlug, newSlug string) (string, bool) {
 	return provider + ":" + kind + ":" + rewritten, true
 }
 
-// RewriteRepoURL rewrites the repository slug inside a provider web URL —
-// "<scheme>://<host>/<owner>/<repo>[/...]". The slug sits mid-path rather than
-// at the head of the string, so this cannot share RewriteRepoSlugPrefix: the
-// match is positional on the URL's first two path segments and nowhere else,
-// because a host ("octo.api") or a later segment (a branch named after the
+// RewriteRepoURL rewrites the repository slug inside a link on host, a
+// GitHubHost value: "<host>/<owner>/<repo>[/...]", where host carries the
+// scheme, the authority and any context path. The slug is the two path
+// segments right after the host's own path, and only those: a host
+// ("octo.api"), a context path, or a later segment (a branch named after the
 // repository, ".../tree/octo/api") can spell the slug without referring to it.
 //
-// Reports false — with s returned unchanged — for anything that is not an
-// absolute URL whose path leads with the old slug at a segment boundary. A
-// value TF never learned, or one already pointing elsewhere, is left exactly
-// as it stands; nothing is ever synthesized from the slug.
-func RewriteRepoURL(rawURL, oldSlug, newSlug string) (string, bool) {
-	if rawURL == "" || oldSlug == "" {
+// Reports false — with rawURL returned unchanged — for a link that is not on
+// host (GitHubURLOnHost) or whose path does not continue with the old slug at
+// a segment boundary. A value TF never learned, or one already pointing
+// elsewhere, is left exactly as it stands; nothing is ever synthesized from
+// the slug.
+func RewriteRepoURL(rawURL, host, oldSlug, newSlug string) (string, bool) {
+	if oldSlug == "" || !GitHubURLOnHost(rawURL, host) {
+		return rawURL, false
+	}
+	h, err := url.Parse(host)
+	if err != nil {
 		return rawURL, false
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+	if err != nil {
 		return rawURL, false
 	}
-	p := u.Path
-	if len(p) < 1+len(oldSlug) || p[0] != '/' {
+	prefix := strings.TrimRight(h.Path, "/") + "/"
+	if !strings.HasPrefix(u.Path, prefix) {
 		return rawURL, false
 	}
-	if !strings.EqualFold(p[1:1+len(oldSlug)], oldSlug) {
+	p := u.Path[len(prefix):]
+	if len(p) < len(oldSlug) || !strings.EqualFold(p[:len(oldSlug)], oldSlug) {
 		return rawURL, false
 	}
-	rest := p[1+len(oldSlug):]
+	rest := p[len(oldSlug):]
 	if rest != "" && rest[0] != '/' {
 		return rawURL, false
 	}
-	u.Path = "/" + newSlug + rest
+	u.Path = prefix + newSlug + rest
 	u.RawPath = ""
 	return u.String(), true
+}
+
+// GitHubURLOnHost reports whether rawURL is a link on host, a GitHubHost value
+// (scheme, authority and any context path, with no trailing slash). It is how a
+// stored link is placed on a GitHub deployment before anything in it is read
+// as an owner/repo (RewriteRepoURL). The scheme and authority compare
+// case-insensitively, as URLs define them. The context path compares exactly:
+// GitHubHost keeps it as configured, a server may treat paths case-sensitively,
+// and every other host comparison is exact. An empty host or link, or one
+// that does not parse as an absolute URL, is on no host.
+func GitHubURLOnHost(rawURL, host string) bool {
+	if rawURL == "" || host == "" {
+		return false
+	}
+	h, err := url.Parse(host)
+	if err != nil || h.Scheme == "" || h.Host == "" {
+		return false
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || !strings.EqualFold(u.Scheme, h.Scheme) || !strings.EqualFold(u.Host, h.Host) {
+		return false
+	}
+	return strings.HasPrefix(u.EscapedPath(), strings.TrimRight(h.EscapedPath(), "/")+"/")
 }

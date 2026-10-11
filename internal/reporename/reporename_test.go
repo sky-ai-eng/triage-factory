@@ -3,26 +3,30 @@ package reporename
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
-	"github.com/sky-ai-eng/triage-factory/internal/paths"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 var testLog = logging.Component("reporename-test")
 
+// testHost is the org's current GitHub host in these tests, and otherHost a
+// second deployment whose repository ids are a separate sequence.
+const (
+	testHost  = dbtest.TestGitHubHost
+	otherHost = "https://ghe.example.com"
+)
+
 func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
-	paths.SetForTest(t, t.TempDir())
 	store := &renameStore{
 		stored: []domain.RepoRef{
-			{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"},
-			{Source: "github", Owner: "octo", Repo: "web", ExternalID: "2"},
+			{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"},
+			{Source: "github", Host: testHost, Owner: "octo", Repo: "web", ExternalID: "2"},
 		},
 		outcomes: map[string]domain.RepoRenameOutcome{
 			"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"},
@@ -30,7 +34,7 @@ func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
 	}
 	resolver := &coverageResolver{}
 
-	n := Apply(context.Background(), store, resolver, testLog, "org-1", []domain.RepoRef{
+	n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost, []domain.RepoRef{
 		{Owner: "octo", Repo: "platform-api", ExternalID: "1"},
 		{Owner: "octo", Repo: "web", ExternalID: "2"},     // unchanged
 		{Owner: "octo", Repo: "unknown", ExternalID: "9"}, // TF has no row
@@ -48,15 +52,97 @@ func TestApply_RenamesOnlyWhatMoved(t *testing.T) {
 	if len(resolver.forgotten) != 2 || resolver.forgotten[0] != want[0] || resolver.forgotten[1] != want[1] {
 		t.Errorf("evicted %v, want %v", resolver.forgotten, want)
 	}
+	// The observation is stamped with the host it was read from, which is the
+	// host the store renames on and the host whose cache entries are evicted.
+	if store.attempts[0].Host != testHost {
+		t.Errorf("rename attempted on host %q, want %q", store.attempts[0].Host, testHost)
+	}
+	for i, h := range resolver.hosts {
+		if h != testHost {
+			t.Errorf("eviction %d on host %q, want %q", i, h, testHost)
+		}
+	}
+	if len(store.listedHosts) != 1 || store.listedHosts[0] != testHost {
+		t.Errorf("identities read for hosts %v, want [%s]", store.listedHosts, testHost)
+	}
+}
+
+// Repository ids are per-deployment sequences, so the same external id on two
+// hosts names two different repositories. An observation read from one host
+// must never rename the other host's row, even when that row is the only one
+// carrying the id. The fake hands back every stored row whatever host is asked
+// for, so this holds on Apply's own comparison and not only on the store's
+// filter.
+func TestApply_NeverMatchesARepositoryOnAnotherHost(t *testing.T) {
+	t.Run("the id is held only on another host", func(t *testing.T) {
+		store := &renameStore{
+			stored: []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
+			outcomes: map[string]domain.RepoRenameOutcome{
+				"1": {Renamed: true, From: "octo/api", To: "acme/platform"},
+			},
+		}
+		resolver := &coverageResolver{}
+		if n := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
+			[]domain.RepoRef{{Owner: "acme", Repo: "platform", ExternalID: "1"}}); n != 0 {
+			t.Errorf("applied = %d, want 0", n)
+		}
+		if len(store.attempts) != 0 {
+			t.Errorf("attempted %+v; an id observed on %s matched the row on %s", store.attempts, otherHost, testHost)
+		}
+		if len(resolver.forgotten) != 0 {
+			t.Errorf("evicted %v with nothing renamed", resolver.forgotten)
+		}
+		if len(store.listedHosts) != 1 || store.listedHosts[0] != otherHost {
+			t.Errorf("identities read for hosts %v, want [%s]", store.listedHosts, otherHost)
+		}
+	})
+
+	t.Run("both hosts hold the id", func(t *testing.T) {
+		store := &renameStore{
+			stored: []domain.RepoRef{
+				{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"},
+				{Source: "github", Host: otherHost, Owner: "acme", Repo: "api", ExternalID: "1"},
+			},
+			outcomes: map[string]domain.RepoRenameOutcome{
+				"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"},
+			},
+		}
+		resolver := &coverageResolver{}
+
+		// otherHost's repository still answers to the name it is stored under,
+		// so nothing on otherHost moved — even though testHost's row with the
+		// same id is called something else.
+		if n := Apply(context.Background(), store, resolver, testLog, "org-1", otherHost,
+			[]domain.RepoRef{{Owner: "acme", Repo: "api", ExternalID: "1"}}); n != 0 {
+			t.Errorf("applied = %d on %s's steady state, want 0", n, otherHost)
+		}
+		if len(store.attempts) != 0 {
+			t.Fatalf("attempted %+v on %s's steady state", store.attempts, otherHost)
+		}
+
+		// testHost's repository did move, and only its row is renamed.
+		if n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
+			[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
+			t.Fatalf("applied = %d, want 1", n)
+		}
+		if len(store.attempts) != 1 || store.attempts[0].Host != testHost || store.attempts[0].Slug() != "octo/platform-api" {
+			t.Fatalf("attempts = %+v, want one rename to octo/platform-api on %s", store.attempts, testHost)
+		}
+		for i, h := range resolver.hosts {
+			if h != testHost {
+				t.Errorf("eviction %d on host %q, want %q", i, h, testHost)
+			}
+		}
+	})
 }
 
 func TestApply_SteadyStateCostsNoTransaction(t *testing.T) {
 	// Every cycle after the rename observes the same thing the store already
 	// holds. Detection is a map lookup, so the steady state must not open a
 	// transaction per repository per cycle.
-	store := &renameStore{stored: []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}}}
+	store := &renameStore{stored: []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}}}
 
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1",
+	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "Octo", Repo: "API", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -70,12 +156,12 @@ func TestApply_LosingIsNotAnError(t *testing.T) {
 	// other detector got there first — reports Renamed=false. That is the
 	// loser contract, and it must not be counted or retried.
 	store := &renameStore{
-		stored:   []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
+		stored:   []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 		outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: false}},
 	}
 	resolver := &coverageResolver{}
 
-	if n := Apply(context.Background(), store, resolver, testLog, "org-1",
+	if n := Apply(context.Background(), store, resolver, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0 — losing is terminal, not a rename", n)
 	}
@@ -95,10 +181,10 @@ func TestApply_RefusalAndFailureAreSurvivable(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &renameStore{
-				stored:  []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
+				stored:  []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 				failure: tc.err,
 			}
-			if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1",
+			if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 				[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 				t.Errorf("applied = %d, want 0", n)
 			}
@@ -110,7 +196,7 @@ func TestApply_RefusalAndFailureAreSurvivable(t *testing.T) {
 
 func TestApply_ReadFailureIsSurvivable(t *testing.T) {
 	store := &renameStore{listErr: errors.New("db is having a day")}
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1",
+	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
@@ -121,13 +207,13 @@ func TestApply_ReadFailureIsSurvivable(t *testing.T) {
 
 func TestApply_NoObservationsNoRead(t *testing.T) {
 	store := &renameStore{}
-	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", nil); n != 0 {
+	if n := Apply(context.Background(), store, &coverageResolver{}, testLog, "org-1", testHost, nil); n != 0 {
 		t.Errorf("applied = %d, want 0", n)
 	}
 	if store.listCalls != 0 {
 		t.Errorf("read identities %d times with nothing observed, want 0", store.listCalls)
 	}
-	if n := Apply(context.Background(), nil, &coverageResolver{}, testLog, "org-1",
+	if n := Apply(context.Background(), nil, &coverageResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "api", ExternalID: "1"}}); n != 0 {
 		t.Errorf("applied = %d with a nil store, want 0", n)
 	}
@@ -136,53 +222,18 @@ func TestApply_NoObservationsNoRead(t *testing.T) {
 func TestApply_ResolverWithoutTheExtensionIsFine(t *testing.T) {
 	// The invalidator is an optional Resolver extension; a fake that doesn't
 	// implement it (and a nil resolver) must not panic the rename.
-	paths.SetForTest(t, t.TempDir())
 	store := &renameStore{
-		stored:   []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
+		stored:   []domain.RepoRef{{Source: "github", Host: testHost, Owner: "octo", Repo: "api", ExternalID: "1"}},
 		outcomes: map[string]domain.RepoRenameOutcome{"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"}},
 	}
-	if n := Apply(context.Background(), store, plainResolver{}, testLog, "org-1",
+	if n := Apply(context.Background(), store, plainResolver{}, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 		t.Errorf("applied = %d, want 1", n)
 	}
 	store.attempts = nil
-	if n := Apply(context.Background(), store, nil, testLog, "org-1",
+	if n := Apply(context.Background(), store, nil, testLog, "org-1", testHost,
 		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
 		t.Errorf("applied = %d with a nil resolver, want 1", n)
-	}
-}
-
-func TestApply_ReclaimsTheOldSlugsDirectories(t *testing.T) {
-	// The acceptance case for local mode, where nothing else would: a rename
-	// leaves no unreferenced bare clone behind. The fixture is the on-disk
-	// shape the old slug named; Apply's post-commit disposal must remove it
-	// while leaving a sibling repository's clone alone.
-	paths.SetForTest(t, t.TempDir())
-	org := runmode.LocalDefaultOrgID
-	oldBare := paths.BareCacheDir(org, "octo", "api")
-	siblingBare := paths.BareCacheDir(org, "octo", "web")
-	for _, dir := range []string{oldBare, siblingBare} {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatalf("seed %s: %v", dir, err)
-		}
-	}
-
-	store := &renameStore{
-		stored: []domain.RepoRef{{Source: "github", Owner: "octo", Repo: "api", ExternalID: "1"}},
-		outcomes: map[string]domain.RepoRenameOutcome{
-			"1": {Renamed: true, From: "octo/api", To: "octo/platform-api"},
-		},
-	}
-	if n := Apply(context.Background(), store, nil, testLog, org,
-		[]domain.RepoRef{{Owner: "octo", Repo: "platform-api", ExternalID: "1"}}); n != 1 {
-		t.Fatalf("applied = %d, want 1", n)
-	}
-
-	if _, err := os.Stat(oldBare); !os.IsNotExist(err) {
-		t.Errorf("old bare still on disk after the rename: %v", err)
-	}
-	if _, err := os.Stat(siblingBare); err != nil {
-		t.Errorf("sibling repository's bare was touched: %v", err)
 	}
 }
 
@@ -195,11 +246,16 @@ type renameStore struct {
 	failure   error
 	listErr   error
 	listCalls int
-	attempts  []domain.RepoRef
+	// listedHosts is the host each identity read asked for. The read returns
+	// every stored row whatever the host, so a test can tell Apply's own host
+	// comparison from the store's filter.
+	listedHosts []string
+	attempts    []domain.RepoRef
 }
 
-func (s *renameStore) ListIdentitiesSystem(context.Context, string) ([]domain.RepoRef, error) {
+func (s *renameStore) ListIdentitiesSystem(_ context.Context, _, host string) ([]domain.RepoRef, error) {
 	s.listCalls++
+	s.listedHosts = append(s.listedHosts, host)
 	if s.listErr != nil {
 		return nil, s.listErr
 	}
@@ -215,15 +271,20 @@ func (s *renameStore) RenameSystem(_ context.Context, _ string, observed domain.
 }
 
 // coverageResolver is a Resolver fake that also implements the optional
-// coverage-invalidation extension, recording the slugs it was asked to evict.
+// coverage-invalidation extension, recording the slugs it was asked to evict
+// and the host of each.
 type coverageResolver struct {
 	plainResolver
 	forgotten []string
+	hosts     []string
 }
 
-func (r *coverageResolver) InvalidateRepoCoverage(_, owner, repo string) {
+func (r *coverageResolver) InvalidateRepoCoverage(_, host, owner, repo string) {
 	r.forgotten = append(r.forgotten, owner+"/"+repo)
+	r.hosts = append(r.hosts, host)
 }
+
+var _ ghclient.RepoCoverageInvalidator = (*coverageResolver)(nil)
 
 // plainResolver implements ghclient.Resolver and nothing else — the fake shape
 // most of the product's tests use.

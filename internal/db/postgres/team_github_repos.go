@@ -35,22 +35,25 @@ func newTeamGitHubReposStore(app, admin queryer) db.TeamGitHubReposStore {
 
 var _ db.TeamGitHubReposStore = (*teamGitHubReposStore)(nil)
 
-func (s *teamGitHubReposStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
-	return listTeamGitHubRepos(ctx, s.app, teamID)
+func (s *teamGitHubReposStore) ListForTeam(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	return listTeamGitHubRepos(ctx, s.app, teamID, host)
 }
 
-func (s *teamGitHubReposStore) ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error) {
-	return listTeamGitHubRepos(ctx, s.admin, teamID)
+func (s *teamGitHubReposStore) ListForTeamSystem(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	return listTeamGitHubRepos(ctx, s.admin, teamID, host)
 }
 
-func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domain.TeamGitHubRepo, error) {
+func listTeamGitHubRepos(ctx context.Context, q queryer, teamID, host string) ([]domain.TeamGitHubRepo, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	rows, err := q.QueryContext(ctx, `
 		SELECT r.owner, r.repo
 		FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = $1
+		WHERE g.team_id = $1 AND r.host = $2
 		ORDER BY r.owner ASC, r.repo ASC
-	`, teamID)
+	`, teamID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos: %w", err)
 	}
@@ -66,7 +69,10 @@ func listTeamGitHubRepos(ctx context.Context, q queryer, teamID string) ([]domai
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error) {
+func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, orgID, host string) ([]domain.TrackedRepoTeams, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	// Admin pool: the preflight's org admin must see every team's tracking,
 	// including teams they don't belong to (the app-pool SELECT policy is
 	// team-membership-scoped). Org scope rides the teams join + the org_id
@@ -76,9 +82,9 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 		FROM team_github_repos g
 		JOIN teams t ON t.id = g.team_id
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE t.org_id = $1
+		WHERE t.org_id = $1 AND r.host = $2
 		ORDER BY r.owner ASC, r.repo ASC, t.name ASC
-	`, orgID)
+	`, orgID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_repos with teams: %w", err)
 	}
@@ -98,9 +104,12 @@ func (s *teamGitHubReposStore) ListOrgReposWithTeamsSystem(ctx context.Context, 
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error {
+func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repos []domain.TeamGitHubRepo) error {
 	norm, err := domain.NormalizeTeamGitHubRepos(repos)
 	if err != nil {
+		return err
+	}
+	if err := db.RequireRepoHost(host); err != nil {
 		return err
 	}
 
@@ -139,7 +148,7 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		// pool can see for itself.
 		ids := make([]string, 0, len(norm))
 		for _, r := range norm {
-			id, err := getOrCreateRepositoryID(ctx, tx, orgID, domain.RepoRef{Owner: r.Owner, Repo: r.Repo})
+			id, err := getOrCreateRepositoryID(ctx, tx, orgID, domain.RepoRef{Host: host, Owner: r.Owner, Repo: r.Repo})
 			if err != nil {
 				return fmt.Errorf("resolve repository %s/%s: %w", r.Owner, r.Repo, err)
 			}
@@ -157,34 +166,43 @@ func (s *teamGitHubReposStore) ReplaceForTeam(ctx context.Context, orgID, teamID
 		//
 		// Untracking stops here. The registry row survives — a worktree ledger
 		// entry, a pinned project or a task may still name the repository, and
-		// tracking is forward-only in both directions.
+		// tracking is forward-only in both directions. The prune reaches only
+		// repositories on host: the team's tracking on another host is not
+		// this save's to change.
 		if len(ids) == 0 {
-			if _, err := tx.ExecContext(ctx,
-				`DELETE FROM team_github_repos WHERE team_id = $1`, teamID,
-			); err != nil {
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM team_github_repos g
+				 USING repositories r
+				 WHERE g.team_id = $1 AND r.id = g.repository_id AND r.host = $2
+			`, teamID, host); err != nil {
 				return fmt.Errorf("clear team_github_repos: %w", err)
 			}
 			return nil
 		}
 		if _, err := tx.ExecContext(ctx, `
-			DELETE FROM team_github_repos
-			WHERE team_id = $1
-			  AND repository_id <> ALL ($2::uuid[])
-		`, teamID, pgUUIDArray(ids)); err != nil {
+			DELETE FROM team_github_repos g
+			 USING repositories r
+			 WHERE g.team_id = $1 AND r.id = g.repository_id AND r.host = $3
+			   AND g.repository_id <> ALL ($2::uuid[])
+		`, teamID, pgUUIDArray(ids), host); err != nil {
 			return fmt.Errorf("prune team_github_repos: %w", err)
 		}
 		return nil
 	})
 }
 
-func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	var n int
 	err := s.admin.QueryRowContext(ctx, `
 		SELECT 1 FROM team_github_repos g
 		JOIN repositories r ON r.id = g.repository_id
-		WHERE g.team_id = $1 AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
+		WHERE g.team_id = $1 AND r.host = $4
+		  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
 		LIMIT 1
-	`, teamID, owner, repo).Scan(&n)
+	`, teamID, owner, repo, host).Scan(&n)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
@@ -198,7 +216,10 @@ func (s *teamGitHubReposStore) TracksRepoSystem(ctx context.Context, teamID, own
 // backends pin to one result. Admin pool: the emitters (profiler) are
 // claims-free background jobs, and the union deliberately crosses team
 // boundaries the membership RLS policies would hide.
-func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error) {
+func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	// UNION (not UNION ALL) dedups a user who is both an org admin and a
 	// tracking-team member. The tracking arm mirrors
 	// repoProfileTrackedByViewerTeams (the REST read's scoping) join for
@@ -222,10 +243,11 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 			JOIN repositories r ON r.id = g.repository_id
 			JOIN memberships m ON m.team_id = g.team_id
 			WHERE t.org_id = $1
+			  AND r.host = $4
 			  AND lower(r.owner) = lower($2) AND lower(r.repo) = lower($3)
 		) u
 		ORDER BY user_id ASC
-	`, orgID, owner, repo)
+	`, orgID, owner, repo, host)
 	if err != nil {
 		return nil, fmt.Errorf("repo update recipients: %w", err)
 	}
@@ -241,7 +263,10 @@ func (s *teamGitHubReposStore) RepoUpdateRecipientsSystem(ctx context.Context, o
 	return out, rows.Err()
 }
 
-func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	// Runs on the app pool so team_github_repos_select RLS auto-scopes the
 	// EXISTS to the caller's own team memberships — no team_id needed, same
 	// RLS-does-the-scoping trick as factoryGitHubRepoTrackedExists /
@@ -254,17 +279,21 @@ func (s *teamGitHubReposStore) TracksRepoViewerScoped(ctx context.Context, orgID
 			JOIN teams tm ON tm.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			WHERE tm.org_id = $1
+			  AND r.host = $4
 			  AND lower(r.owner) = lower($2)
 			  AND lower(r.repo) = lower($3)
 		)
-	`, orgID, owner, repo).Scan(&ok)
+	`, orgID, owner, repo, host).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("tracks repo viewer scoped: %w", err)
 	}
 	return ok, nil
 }
 
-func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error) {
+func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	// TracksRepoViewerScoped's query plus tf.user_is_team_admin on the
 	// matched row: RLS narrows the EXISTS to the caller's memberships, the
 	// predicate narrows it again to the ones they administer. Both are
@@ -277,11 +306,12 @@ func (s *teamGitHubReposStore) TracksRepoViewerAdminScoped(ctx context.Context, 
 			JOIN teams tm ON tm.id = g.team_id
 			JOIN repositories r ON r.id = g.repository_id
 			WHERE tm.org_id = $1
+			  AND r.host = $4
 			  AND lower(r.owner) = lower($2)
 			  AND lower(r.repo) = lower($3)
 			  AND tf.user_is_team_admin(g.team_id)
 		)
-	`, orgID, owner, repo).Scan(&ok)
+	`, orgID, owner, repo, host).Scan(&ok)
 	if err != nil {
 		return false, fmt.Errorf("tracks repo viewer admin scoped: %w", err)
 	}

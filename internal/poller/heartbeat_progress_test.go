@@ -24,7 +24,7 @@ type hookRepositoryStore struct {
 	visit func(orgID string)
 }
 
-func (r *hookRepositoryStore) ListTrackedNamesSystem(_ context.Context, orgID string) ([]string, error) {
+func (r *hookRepositoryStore) ListTrackedNamesSystem(_ context.Context, orgID, _ string) ([]string, error) {
 	r.visit(orgID)
 	return nil, nil
 }
@@ -48,7 +48,7 @@ func (s *hookSourceStore) ListDisabledSystem(_ context.Context, orgID string) ([
 // so /readyz still reports the poller alive.
 func TestPollCycles_HeartbeatAdvancesAsEachOrgFinishes(t *testing.T) {
 	t.Run("github", func(t *testing.T) {
-		m := &Manager{orgs: &fakeOrgsStore{ids: []string{"org-a", "org-b"}}, users: &emptyUsersStore{}}
+		m := &Manager{orgs: &fakeOrgsStore{ids: []string{"org-a", "org-b"}}, entities: &activeEntityStore{}, users: &emptyUsersStore{}}
 		var alive, sawB bool
 		m.repos = &hookRepositoryStore{visit: func(orgID string) {
 			switch orgID {

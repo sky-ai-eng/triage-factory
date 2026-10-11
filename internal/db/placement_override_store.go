@@ -18,17 +18,23 @@ import (
 // gated orgID), so every method takes an explicit orgID bound by argument
 // rather than an app-pool RLS policy — hence no "...System" suffix. SQLite is
 // N=1 and unscoped; the rows are inert there (the hash always returns self).
+//
+// A key is (org, kind, host, value): a repo key's value is an owner/repo, which
+// names a repository only within one GitHub host, so every method takes the
+// host the repository lives on and an empty one is refused with
+// ErrRepoHostRequired. A pin on one host never answers for, or moves with, a
+// same-named repository on another.
 type PlacementOverrideStore interface {
-	// Get returns the override for (orgID, keyKind, keyValue), or (nil, nil)
-	// when none exists — the common case. Read at enqueue (the placement
+	// Get returns the override for (orgID, keyKind, host, keyValue), or (nil,
+	// nil) when none exists — the common case. Read at enqueue (the placement
 	// stamp) and by the explainer.
-	Get(ctx context.Context, orgID, keyKind, keyValue string) (*domain.PlacementOverride, error)
+	Get(ctx context.Context, orgID, keyKind, host, keyValue string) (*domain.PlacementOverride, error)
 
-	// List returns every override for an org, ordered (key_kind, key_value).
-	// Backs the explainer's "overrides in effect" listing and the CLI verb.
+	// List returns every override for an org on every host, ordered
+	// (key_kind, host, key_value). Backs the CLI's listing verb.
 	List(ctx context.Context, orgID string) ([]domain.PlacementOverride, error)
 
-	// Upsert writes ov wholesale, keyed on (OrgID, KeyKind, KeyValue),
+	// Upsert writes ov wholesale, keyed on (OrgID, KeyKind, Host, KeyValue),
 	// stamping updated_at. The operator write path (CLI); never on the
 	// executor's enqueue path.
 	//
@@ -38,9 +44,9 @@ type PlacementOverrideStore interface {
 	// PinnedInstanceID stores NULL rather than the empty string it was handed.
 	Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error)
 
-	// Delete removes the override for (orgID, keyKind, keyValue). matched is
-	// false when no such row existed.
+	// Delete removes the override for (orgID, keyKind, host, keyValue).
+	// matched is false when no such row existed.
 	//
 	// Exempt from the returned-row rule: it is a delete.
-	Delete(ctx context.Context, orgID, keyKind, keyValue string) (matched bool, err error)
+	Delete(ctx context.Context, orgID, keyKind, host, keyValue string) (matched bool, err error)
 }

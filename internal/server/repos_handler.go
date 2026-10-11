@@ -116,6 +116,12 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The org's current GitHub host: the picker offers what the org can reach
+	// there, never what a host it has left could.
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
+	if !ok {
+		return
+	}
 	// The configuration preflight runs BEFORE the mirror read, and it is what
 	// keeps an unconfigured org out of the readiness state: "we have not looked
 	// yet" is a promise that looking will eventually produce something, and for
@@ -126,8 +132,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	class := pre.class
-
-	state, err := s.reachableRepos.ReachableStateSystem(r.Context(), orgID, class)
+	state, err := s.reachableRepos.ReachableStateSystem(r.Context(), orgID, host, class)
 	if err != nil {
 		reposLog.Error("read reachable repo cache state failed", "org", orgID, "error", err)
 		internalError(w, "repos", err)
@@ -165,7 +170,7 @@ func (s *Server) handleGitHubRepos(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, class, q,
+	rows, total, err := s.reachableRepos.ListReachableSystem(r.Context(), orgID, host, class, q,
 		db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly})
 	if err != nil {
 		reposLog.Error("list reachable repos failed", "org", orgID, "error", err)
@@ -213,6 +218,11 @@ func (s *Server) handleGitHubReposRefresh(w http.ResponseWriter, r *http.Request
 	// sibling verb routes (archive, restore, revoke), so there is no payload
 	// schema for a caller to get wrong.
 	orgID := OrgIDFrom(r.Context())
+	// An org with no GitHub URL has nothing to refresh, so asking for a
+	// refresh is answered as the other writes that need a host answer it.
+	if _, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos"); !ok {
+		return
+	}
 	if s.reachTrigger == nil {
 		// No refresh manager wired: this process cannot ask for one and must not
 		// report that it did. 503 rather than 500 — it is a capability this
@@ -275,12 +285,14 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		return pickerPreflight{}, false
 	}
 	if class.AppTier() {
-		// An App with at least one installation is usable by definition — the
-		// installations ARE the reach, whether the App is the workspace's own or
-		// the deployment's shared one. A read failure here is carried rather than
-		// refused: reporting it would mean claiming "not installed", which only a
-		// successful read of zero installations can support.
-		insts, err := s.githubApps.ListInstallationsForOrgSystem(r.Context(), orgID)
+		// An App with at least one installation on the org's current host is
+		// usable by definition — the installations ARE the reach, whether the App
+		// is the workspace's own or the deployment's shared one. One left on a
+		// host the org has moved off reaches nothing the picker lists. A read
+		// failure here is carried rather than refused: reporting it would mean
+		// claiming "not installed", which only a successful read of zero
+		// installations can support.
+		insts, err := s.installationsOnOrgHost(r.Context(), orgID)
 		if err != nil {
 			reposLog.Warn("list installations failed; serving the mirror if there is one", "org", orgID, "error", err)
 			return pickerPreflight{class: class, err: err}, true
@@ -317,7 +329,7 @@ func (s *Server) pickerCredentialClass(w http.ResponseWriter, r *http.Request, o
 		internalError(w, "repos", err)
 		return pickerPreflight{}, false
 	}
-	if creds.GitHubPAT == "" || (orgSet.GitHubBaseURL == "" && creds.GitHubURL == "") {
+	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		reposLog.Warn("github not configured, no usable app installation and no pat", "org", orgID)
 		writeNotConfigured(w, "GitHub is not connected for this workspace")
 		return pickerPreflight{}, false
@@ -345,22 +357,33 @@ func (s *Server) isOrgAdmin(ctx context.Context, orgID, userID string) (bool, er
 // short-circuits to true.
 //
 // Mutations are a strictly narrower gate — see repoMutationAccess.
-func repoVisible(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (bool, error) {
+//
+// host is the org's current GitHub host. A row on any other host is visible to
+// nobody, admin included: it is a repository of a host the org has left, kept
+// for the records that name it and for the org's return, and the surfaces that
+// read the registry by list read only the current host's rows.
+func repoVisible(ctx context.Context, tx db.TxStores, orgID, host string, isAdmin bool, row domain.Repository) (bool, error) {
+	if row.Host != host {
+		return false, nil
+	}
 	if isAdmin {
 		return true, nil
 	}
-	return tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, row.Owner, row.Repo)
+	return tx.TeamGitHubRepos.TracksRepoViewerScoped(ctx, orgID, row.Host, row.Owner, row.Repo)
 }
 
 // repoCanEdit resolves the per-row can_edit annotation the read routes carry:
 // true for an org admin, otherwise true only when the caller administers a
 // team that tracks the repo. It is the read-shaped half of repoMutationAccess
 // — same predicate, no 404-vs-403 distinction to make.
-func repoCanEdit(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (bool, error) {
+func repoCanEdit(ctx context.Context, tx db.TxStores, orgID, host string, isAdmin bool, row domain.Repository) (bool, error) {
+	if row.Host != host {
+		return false, nil
+	}
 	if isAdmin {
 		return true, nil
 	}
-	return tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, row.Owner, row.Repo)
+	return tx.TeamGitHubRepos.TracksRepoViewerAdminScoped(ctx, orgID, row.Host, row.Owner, row.Repo)
 }
 
 // repoWriteAccess is the outcome of the repo-mutation gate. Three-valued
@@ -397,11 +420,16 @@ const (
 //
 // Local mode (N=1) resolves to repoWriteAllowed via isAdmin, which its
 // isOrgAdmin short-circuits to true before any store call.
-func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID string, isAdmin bool, row domain.Repository) (repoWriteAccess, error) {
+func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID, host string, isAdmin bool, row domain.Repository) (repoWriteAccess, error) {
+	// A row on a host the org has left is in nobody's list (repoVisible), so it
+	// is invisible to a write as well.
+	if row.Host != host {
+		return repoWriteInvisible, nil
+	}
 	if isAdmin {
 		return repoWriteAllowed, nil
 	}
-	teamAdmin, err := repoCanEdit(ctx, tx, orgID, isAdmin, row)
+	teamAdmin, err := repoCanEdit(ctx, tx, orgID, host, isAdmin, row)
 	if err != nil {
 		return repoWriteInvisible, err
 	}
@@ -410,7 +438,7 @@ func repoMutationAccess(ctx context.Context, tx db.TxStores, orgID string, isAdm
 		// the visibility read below would only confirm what we already know.
 		return repoWriteAllowed, nil
 	}
-	tracked, err := repoVisible(ctx, tx, orgID, isAdmin, row)
+	tracked, err := repoVisible(ctx, tx, orgID, host, isAdmin, row)
 	if err != nil {
 		return repoWriteInvisible, err
 	}
@@ -513,6 +541,16 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	if host == "" {
+		// No GitHub URL, no host, and so no repository on it.
+		httpx.WriteList(w, page, []repoJSON{}, 0)
+		return
+	}
 
 	var (
 		repos   []domain.Repository
@@ -523,9 +561,9 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		var e error
 		opts := db.ListOpts{Limit: page.Limit, Offset: page.Offset, CountOnly: page.CountOnly}
 		if isAdmin {
-			repos, total, e = tx.Repos.List(r.Context(), orgID, opts)
+			repos, total, e = tx.Repos.List(r.Context(), orgID, host, opts)
 		} else {
-			repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, opts)
+			repos, total, e = tx.Repos.ListTeamScoped(r.Context(), orgID, host, opts)
 		}
 		if e != nil {
 			return e
@@ -541,7 +579,7 @@ func (s *Server) handleRepositories(w http.ResponseWriter, r *http.Request) {
 		// rather than by the caller's whole tracked set, and still inside the
 		// single transaction the list read used.
 		for i, row := range repos {
-			canEdit[i], e = repoCanEdit(r.Context(), tx, orgID, isAdmin, row)
+			canEdit[i], e = repoCanEdit(r.Context(), tx, orgID, host, isAdmin, row)
 			if e != nil {
 				return e
 			}
@@ -584,8 +622,11 @@ const (
 // A nil row with a nil error is that 404; the caller writes it. canEdit is
 // false whenever annotate is noCanEdit — a caller that did not ask for it must
 // not read it.
+//
+// host is the org's current GitHub host, which lookup resolves a name on and
+// which a row resolved by id must be on to be visible.
 func (s *Server) readRepo(
-	ctx context.Context, orgID, userID string, annotate repoAnnotation,
+	ctx context.Context, orgID, userID, host string, annotate repoAnnotation,
 	lookup func(ctx context.Context, tx db.TxStores) (*domain.Repository, error),
 ) (*domain.Repository, bool, error) {
 	isAdmin, err := s.isOrgAdmin(ctx, orgID, userID)
@@ -601,7 +642,7 @@ func (s *Server) readRepo(
 		if e != nil || found == nil {
 			return e
 		}
-		visible, e := repoVisible(ctx, tx, orgID, isAdmin, *found)
+		visible, e := repoVisible(ctx, tx, orgID, host, isAdmin, *found)
 		if e != nil || !visible {
 			return e
 		}
@@ -609,7 +650,7 @@ func (s *Server) readRepo(
 		if annotate == noCanEdit {
 			return nil
 		}
-		canEdit, e = repoCanEdit(ctx, tx, orgID, isAdmin, *found)
+		canEdit, e = repoCanEdit(ctx, tx, orgID, host, isAdmin, *found)
 		return e
 	})
 	return row, canEdit, err
@@ -630,7 +671,12 @@ func (s *Server) handleRepoGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, withCanEdit,
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, host, withCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
 			return repoByID(ctx, tx.Repos.Get, orgID, id)
 		})
@@ -667,14 +713,22 @@ func (s *Server) handleRepoGetByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, withCanEdit,
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	row, canEdit, err := s.readRepo(r.Context(), orgID, userID, host, withCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
+			if host == "" {
+				return nil, nil // no GitHub URL: no name resolves
+			}
 			// Ref-keyed, not id-keyed: the path segments are the provider's
-			// current NAME for the repository, and the registry id is a
-			// separate handle (TFAC-834). GetByRef's (nil, nil) miss is the
-			// answer this route wants anyway, since a name that resolves to
-			// nothing is a 404 here.
-			return tx.Repos.GetByRef(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo})
+			// current NAME for the repository on the org's GitHub host, and
+			// the registry id is a separate handle. GetByRef's (nil, nil)
+			// miss is the answer this route wants anyway, since a name that
+			// resolves to nothing is a 404 here.
+			return tx.Repos.GetByRef(ctx, orgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
 		})
 	if err != nil {
 		internalError(w, "repos", err)
@@ -760,6 +814,10 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		internalError(w, "repos", err)
 		return
 	}
+	host, ok := s.requireOrgGitHubHost(r.Context(), w, orgID, "repos")
+	if !ok {
+		return
+	}
 	// Resolve the id to a row before the gate, in the same transaction as the
 	// gate, because the gate reads team_github_repos by name and only the row
 	// knows what this repository is currently called. A rename between the
@@ -777,7 +835,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 			return e
 		}
 		row = found
-		access, e = repoMutationAccess(r.Context(), tx, orgID, isAdmin, *found)
+		access, e = repoMutationAccess(r.Context(), tx, orgID, host, isAdmin, *found)
 		return e
 	}); err != nil {
 		internalError(w, "repos", err)
@@ -787,7 +845,7 @@ func (s *Server) handleRepoUpdate(w http.ResponseWriter, r *http.Request) {
 		notFound(w, "repo")
 		return
 	}
-	ref := domain.RepoRef{Owner: row.Owner, Repo: row.Repo}
+	ref := row.Ref()
 	// Every arm is spelled out, including the permitting one, and anything
 	// unrecognized denies. This is the only enforcement point for an
 	// org-wide write (RLS can't back it up), so a future enum member must
@@ -934,7 +992,12 @@ func (s *Server) handleRepoBranches(w http.ResponseWriter, r *http.Request) {
 	// is — so the id resolves to a row here and the row supplies the name. That
 	// is the general shape of this flip: TF ids on the wire, provider
 	// coordinates on the provider hop, resolved once at the boundary between.
-	row, _, err := s.readRepo(r.Context(), orgID, userID, noCanEdit,
+	host, err := s.orgGitHubHost(r.Context(), orgID)
+	if err != nil {
+		internalError(w, "repos", err)
+		return
+	}
+	row, _, err := s.readRepo(r.Context(), orgID, userID, host, noCanEdit,
 		func(ctx context.Context, tx db.TxStores) (*domain.Repository, error) {
 			return repoByID(ctx, tx.Repos.Get, orgID, id)
 		})

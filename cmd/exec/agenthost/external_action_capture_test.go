@@ -53,6 +53,7 @@ func newCaptureStoresConn(t *testing.T, eventTriggered bool) (*sql.DB, db.Stores
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	recordGitHubURLForTest(t, conn)
 	recordJiraSiteForTest(t, conn)
 	const conversationID = "11111111-1111-1111-1111-111111111111"
 	if _, err := conn.Exec(`INSERT INTO conversations (id, origin, status) VALUES (?, 'interactive', 'running')`, conversationID); err != nil {
@@ -202,16 +203,16 @@ func TestCapture_BranchPush_AnchorsURLToOrgHost(t *testing.T) {
 	if !ok {
 		t.Fatal("NewBranchArtifact returned ok=false")
 	}
-	// The constructor can't know the org host, so it defaults to github.com...
-	if branch.URL != "https://github.com/octo/repo/tree/feat/x" {
-		t.Fatalf("precondition: constructor URL = %q, want the github.com default", branch.URL)
+	// The constructor can't know the org host, so it builds no link...
+	if branch.URL != "" {
+		t.Fatalf("precondition: constructor URL = %q, want none", branch.URL)
 	}
 
 	stored, err := client.UpsertArtifact(context.Background(), branch)
 	if err != nil {
 		t.Fatalf("UpsertArtifact: %v", err)
 	}
-	// ...and the sink rewrites it to the org's GHES host, segments preserved.
+	// ...and the sink sets it on the org's GHES host, segments preserved.
 	if stored.URL != "https://ghe.example.com/octo/repo/tree/feat/x" {
 		t.Errorf("stored branch URL = %q, want the org GHES host", stored.URL)
 	}
@@ -262,8 +263,8 @@ func TestCapture_GithubReply_RecordsArtifactlessAction(t *testing.T) {
 				a.ExternalID != "777" || a.ConversationID != info.ConversationID {
 				t.Errorf("reply action mismatch: %+v", a)
 			}
-			// The audit row deep-links to the reply on the PR.
-			if a.URL != "https://github.com/octo/repo/pull/1#discussion_r777" {
+			// The audit row deep-links to the reply on the PR, on the org's GitHub.
+			if a.URL != gh.URL+"/octo/repo/pull/1#discussion_r777" {
 				t.Errorf("reply url = %q, want the PR discussion deep link", a.URL)
 			}
 			if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
@@ -708,7 +709,7 @@ func TestCapture_GHChannelReply_IsIndistinguishableFromTheVerbRow(t *testing.T) 
 		Path:       "/repos/octo/repo/pulls/1/comments/555/replies",
 		Status:     201,
 		ExternalID: "777",
-		URL:        "https://github.com/octo/repo/pull/1#discussion_r777",
+		URL:        gh.URL + "/octo/repo/pull/1#discussion_r777",
 	})
 	rows := listExternalActions(t, stores)
 	if len(rows) != 1 {
@@ -1004,7 +1005,7 @@ func TestCapture_GithubReviewDismiss_RecordsArtifactlessAction(t *testing.T) {
 		a.ExternalID != "99" || a.ConversationID != info.ConversationID {
 		t.Errorf("dismiss action mismatch: %+v", a)
 	}
-	if a.URL != "https://github.com/octo/repo/pull/1#pullrequestreview-99" {
+	if a.URL != gh.URL+"/octo/repo/pull/1#pullrequestreview-99" {
 		t.Errorf("dismiss url = %q, want the review deep link", a.URL)
 	}
 	// The reason is the whole of what makes a dismissal readable later.

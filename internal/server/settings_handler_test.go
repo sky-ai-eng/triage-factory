@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -478,10 +480,10 @@ func patchTeamSettingsOK(t *testing.T, s *Server, teamID string, body any) map[s
 
 // TestOrgSettingsPatch_BlankGitHubURLWithApp_409 closes the settings-route half
 // of the hazard TestGitHubPATDelete_StagedApp_KeepsHost covers for the PAT
-// unbind: githubBaseFor falls org_settings → github_url secret → the deployment
-// default, so blanking the column while an App is registered silently sends a
-// GHES org's App to a host it is not on. The config route refuses instead of skipping, because here
-// the clear is the request itself, not a side effect of one.
+// unbind: the org's GitHub URL is the only record of the host an App was
+// registered on, so blanking it while an App is registered strands the App.
+// The config route refuses instead of skipping, because here the clear is the
+// request itself, not a side effect of one.
 func TestOrgSettingsPatch_BlankGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -532,17 +534,23 @@ func TestOrgSettingsPatch_BlankGitHubURLWithoutApp_OK(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK: moving an App org to a
-// different non-empty host is a legitimate GHES domain change and stays
-// allowed. The guard is aimed at the silent-default case, not at host edits.
-func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
+// TestOrgSettingsPatch_RetargetGitHubURLWithApp_409: an App works only on the
+// GitHub that registered it, so moving an App org to another host is refused
+// like clearing it is. Moving hosts is a disconnect and a fresh connect.
+func TestOrgSettingsPatch_RetargetGitHubURLWithApp_409(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
 	s := newTestServer(t)
 
 	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
 	seedLocalApp(t, s, true)
-	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+	rec := patchOrgSettings(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	if e := firstError(t, rec); e.Field != "github_base_url" {
+		t.Errorf("error = %+v, want it on github_base_url", e)
+	}
 
 	var stored string
 	if err := s.db.QueryRowContext(t.Context(),
@@ -550,8 +558,88 @@ func TestOrgSettingsPatch_RetargetGitHubURLWithApp_OK(t *testing.T) {
 		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
 		t.Fatalf("read github base_url: %v", err)
 	}
-	if stored != "https://new.example.com" {
-		t.Errorf("github base_url = %q, want the retargeted host", stored)
+	if stored != "https://old.example.com" {
+		t.Errorf("github base_url = %q, want the host the App is on", stored)
+	}
+}
+
+// TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409: a token works only on the
+// GitHub that issued it, so the URL does not move while one is bound.
+func TestOrgSettingsPatch_RetargetGitHubURLWithPAT_409(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
+	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_bound"}); err != nil {
+		t.Fatalf("seed creds: %v", err)
+	}
+	for _, target := range []any{"https://new.example.com", nil} {
+		rec := patchOrgSettings(t, s, map[string]any{"github_base_url": target})
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("github_base_url → %v: status = %d, want 409; body=%s", target, rec.Code, rec.Body.String())
+		}
+		if e := firstError(t, rec); e.Field != "github_base_url" {
+			t.Errorf("error = %+v, want it on github_base_url", e)
+		}
+	}
+	var stored string
+	if err := s.db.QueryRowContext(t.Context(),
+		`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
+		runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+		t.Fatalf("read github base_url: %v", err)
+	}
+	if stored != "https://old.example.com" {
+		t.Errorf("github base_url = %q, want the host the token is on", stored)
+	}
+}
+
+// TestOrgSettingsPatch_RetargetGitHubURLWithInstallation: a workspace bound to
+// the deployment's App holds the host its installations are on, like a token or
+// a registration does — moving off it is refused while one is bound there. An
+// installation the workspace left on some other GitHub records its own host and
+// is not stranded by the move, so it holds nothing in place.
+func TestOrgSettingsPatch_RetargetGitHubURLWithInstallation(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		instHost string
+		wantCode int
+		wantBase string
+	}{
+		{"installed on the current host", "https://old.example.com", http.StatusConflict, "https://old.example.com"},
+		{"installed only on another host", "https://elsewhere.example.com", http.StatusOK, "https://new.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runmode.SetForTest(t, runmode.ModeLocal)
+			keyring.MockInit()
+			s := newTestServer(t)
+			ctx := t.Context()
+
+			patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://old.example.com"})
+			if _, err := s.orgs.SetGitHubCredentialClass(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp); err != nil {
+				t.Fatalf("set credential class: %v", err)
+			}
+			if _, err := s.githubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
+				InstallationID: "456", OrgID: runmode.LocalDefaultOrgID, AccountType: "Organization",
+				AccountLogin: "acme", GitHubHost: tc.instHost,
+			}); err != nil {
+				t.Fatalf("seed installation: %v", err)
+			}
+
+			rec := patchOrgSettings(t, s, map[string]any{"github_base_url": "https://new.example.com"})
+			if rec.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.wantCode, rec.Body.String())
+			}
+			var stored string
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT COALESCE(base_url, '') FROM org_event_sources WHERE org_id = ? AND kind = 'github'`,
+				runmode.LocalDefaultOrgID).Scan(&stored); err != nil {
+				t.Fatalf("read github base_url: %v", err)
+			}
+			if stored != tc.wantBase {
+				t.Errorf("github base_url = %q, want %q", stored, tc.wantBase)
+			}
+		})
 	}
 }
 
@@ -569,7 +657,8 @@ func TestOrgSettingsPatch_GitHubURLClear_PreservesUserIdentity(t *testing.T) {
 	ctx := t.Context()
 	const host = "https://github.example.com"
 
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubURL: host}); err != nil {
+	seedSourceHost(t, s, eventsource.KindGitHub, host)
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{}); err != nil {
 		t.Fatalf("seed creds: %v", err)
 	}
 	if err := s.users.UpsertGitHubIdentity(ctx, runmode.LocalDefaultUserID, host, "octocat", "", "", "pat"); err != nil {
@@ -834,10 +923,10 @@ func TestJiraCredentialPut_DoesNotWriteUserIdentity(t *testing.T) {
 	}
 }
 
-// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity is the disconnect
-// mirror of the GitHub URL-clear test: clearing the org's Jira URL is an
-// access change (PAT_1) and must NOT wipe the user's now-independent Jira
-// identity. Per-user Jira access is cleared only by its own surface.
+// TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity: clearing the
+// org's Jira URL on an org with no service credential (its members bind their
+// own) must NOT wipe the user's independent Jira identity. Per-user Jira
+// access is cleared only by its own surface.
 func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	runmode.SetForTest(t, runmode.ModeLocal)
 	keyring.MockInit()
@@ -845,14 +934,11 @@ func TestOrgSettingsPatch_JiraURLClear_PreservesUserIdentity(t *testing.T) {
 	ctx := t.Context()
 	const host = "https://jira.example.com"
 
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
-		t.Fatalf("seed creds: %v", err)
-	}
+	seedSourceHost(t, s, eventsource.KindJira, host)
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, host, "user-acct", "User Name", "pat"); err != nil {
 		t.Fatalf("seed identity: %v", err)
 	}
 
-	// Disconnect the org's Jira access: clear the Jira URL.
 	patchOrgSettingsOK(t, s, map[string]any{"jira_base_url": nil})
 
 	accountID, displayName, err := s.users.GetJiraIdentity(ctx, runmode.LocalDefaultUserID, host)
@@ -877,7 +963,8 @@ func TestJiraCredentialDelete_PreservesUserCredential(t *testing.T) {
 	const host = "https://jira.example.com"
 
 	// The org has a Jira PAT (the thing we'll clear)...
-	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraURL: host, JiraPAT: "org-pat"}); err != nil {
+	seedSourceHost(t, s, eventsource.KindJira, host)
+	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{JiraPAT: "org-pat"}); err != nil {
 		t.Fatalf("seed org creds: %v", err)
 	}
 	// ...and the caller has bound their own per-user credential, as the bind
@@ -1434,5 +1521,88 @@ func TestTeamSettingsPatch_BaseBranchPushPolicy(t *testing.T) {
 	}
 	if got := teamBasePushPolicy(t, s); got != domain.DefaultBaseBranchPushPolicy {
 		t.Errorf("a rejected policy must not be stored: got %q", got)
+	}
+}
+
+// changeKicks records the GitHub and Jira change hooks a write fires. The hooks
+// are set directly rather than through SetOnGitHubChanged, which would also
+// start a reachable-repo refresh this test is not about.
+type changeKicks struct{ github, jira chan string }
+
+func recordChangeKicks(s *Server) changeKicks {
+	k := changeKicks{github: make(chan string, 8), jira: make(chan string, 8)}
+	s.onGitHubChanged = func(orgID string) { k.github <- orgID }
+	s.onJiraChanged = func(orgID string) { k.jira <- orgID }
+	return k
+}
+
+// fired reports whether ch received a kick within a short window.
+func fired(ch chan string) bool {
+	select {
+	case <-ch:
+		return true
+	case <-time.After(300 * time.Millisecond):
+		return false
+	}
+}
+
+// markPollsComplete records a completed poll for every source in sources, so a
+// later write's restart mark is observable as readiness going false.
+func markPollsComplete(t *testing.T, s *Server, sources ...string) {
+	t.Helper()
+	for _, src := range sources {
+		if err := s.allStores.PollReadiness.MarkPollComplete(t.Context(), runmode.LocalDefaultOrgID, src, time.Time{}); err != nil {
+			t.Fatalf("MarkPollComplete(%s): %v", src, err)
+		}
+	}
+}
+
+// pollReady reads source's poll readiness for the local org.
+func pollReady(t *testing.T, s *Server, source string) bool {
+	t.Helper()
+	ok, err := s.allStores.PollReadiness.Ready(t.Context(), runmode.LocalDefaultOrgID, source)
+	if err != nil {
+		t.Fatalf("Ready(%s): %v", source, err)
+	}
+	return ok
+}
+
+// TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly pins which
+// poll readiness a settings save clears. A GitHub change (here the host) kicks
+// the GitHub poller and marks GitHub restarted, so the last-poll time waits for
+// a poll of the new configuration; Jira's poller is not kicked and its
+// readiness stands. A save that changes GitHub and Jira together kicks and
+// marks both.
+func TestOrgSettingsPatch_GitHubChange_RestartsGitHubReadinessOnly(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	keyring.MockInit()
+	s := newTestServer(t)
+	kicks := recordChangeKicks(s)
+
+	markPollsComplete(t, s, "github", "jira")
+	patchOrgSettingsOK(t, s, map[string]any{"github_base_url": "https://ghe.example.com"})
+	if !fired(kicks.github) {
+		t.Error("a GitHub host change did not kick the GitHub poller")
+	}
+	if fired(kicks.jira) {
+		t.Error("a GitHub-only change kicked the Jira poller")
+	}
+	if pollReady(t, s, "github") {
+		t.Error("GitHub readiness survived a GitHub host change")
+	}
+	if !pollReady(t, s, "jira") {
+		t.Error("a GitHub-only change cleared Jira readiness")
+	}
+
+	markPollsComplete(t, s, "github", "jira")
+	patchOrgSettingsOK(t, s, map[string]any{
+		"github_base_url": "https://ghe2.example.com",
+		"jira_base_url":   "https://jira.example.com",
+	})
+	if !fired(kicks.github) || !fired(kicks.jira) {
+		t.Error("a combined GitHub and Jira change must kick both pollers")
+	}
+	if pollReady(t, s, "github") || pollReady(t, s, "jira") {
+		t.Error("a combined GitHub and Jira change must clear both readiness rows")
 	}
 }

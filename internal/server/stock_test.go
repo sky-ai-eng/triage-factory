@@ -18,12 +18,11 @@ import (
 // seedStockConfig installs everything the carry-over routes gate on before
 // they look at a single issue key: org Jira credentials, a team status rule,
 // and the acting user's stored Jira identity (host-scoped, so it keys on the
-// same host the org creds carry).
+// org's Jira site).
 func seedStockConfig(t *testing.T, s *Server) {
 	t.Helper()
 	ctx := t.Context()
 	if err := integrations.Save(ctx, s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		JiraURL: "https://jira.example.com",
 		JiraPAT: "tok",
 	}); err != nil {
 		t.Fatalf("save jira creds: %v", err)
@@ -39,10 +38,9 @@ func seedStockConfig(t *testing.T, s *Server) {
 	if err := s.users.UpsertJiraIdentity(ctx, runmode.LocalDefaultUserID, "https://jira.example.com", "acc-1", "Tester", "pat"); err != nil {
 		t.Fatalf("set jira identity: %v", err)
 	}
-	// The deck read resolves the user's Jira identity against the ORG's
-	// configured host (org_event_sources), where the action routes read it off
-	// the credential; both have to name the same host or the identity lookup
-	// misses and the deck reports Jira unconfigured.
+	// The deck and the action routes resolve the user's Jira identity against
+	// the org's Jira site (org_event_sources); without it the identity lookup
+	// misses and the routes report Jira unconfigured.
 	if _, err := s.db.Exec(
 		`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, 'jira', 'https://jira.example.com')
 		 ON CONFLICT(org_id, kind) DO UPDATE SET base_url = excluded.base_url`,

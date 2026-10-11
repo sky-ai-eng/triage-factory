@@ -36,9 +36,9 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 					t.Fatalf("delete conversation: %v", err)
 				}
 			},
-			Repo: func(t *testing.T, slug string) {
+			Repo: func(t *testing.T, host, slug string) string {
 				t.Helper()
-				trackRepoForTest(t, stores, slug)
+				return trackRepoOnHostForTest(t, stores, host, slug)
 			},
 			SiblingConversation: func(t *testing.T, conversationID string) string {
 				t.Helper()
@@ -85,22 +85,36 @@ func TestConversationWorktreeStore_SQLite(t *testing.T) {
 	})
 }
 
-// trackRepoForTest adds slug to the local default team's tracked set, which is
-// how a repository row comes to exist for a worktree to reference: tracking is
-// the one door into the registry. It appends rather than replaces, so a
-// fixture staging several repositories keeps every one of them tracked.
-func trackRepoForTest(t *testing.T, stores db.Stores, slug string) {
+// trackRepoForTest adds slug to the local default team's tracked set on
+// dbtest.TestGitHubHost, which is how a repository row comes to exist for a
+// worktree to reference: tracking is the one door into the registry. Returns
+// the repository's row id.
+func trackRepoForTest(t *testing.T, stores db.Stores, slug string) string {
+	t.Helper()
+	return trackRepoOnHostForTest(t, stores, dbtest.TestGitHubHost, slug)
+}
+
+// trackRepoOnHostForTest is trackRepoForTest on a named GitHub host. It
+// appends rather than replaces, so a fixture staging several repositories
+// keeps every one of them tracked; tracking on one host leaves the team's
+// tracked set on any other host as it stands.
+func trackRepoOnHostForTest(t *testing.T, stores db.Stores, host, slug string) string {
 	t.Helper()
 	ctx := context.Background()
-	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID)
+	tracked, err := stores.TeamGitHubRepos.ListForTeamSystem(ctx, runmode.LocalDefaultTeamID, host)
 	if err != nil {
 		t.Fatalf("list tracked repos: %v", err)
 	}
-	ref := domain.RepoRefFromSlug(slug)
+	ref := domain.RepoRefFromSlug(host, slug)
 	tracked = append(tracked, domain.TeamGitHubRepo{Owner: ref.Owner, Repo: ref.Repo})
-	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, tracked); err != nil {
-		t.Fatalf("track repository %s: %v", slug, err)
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, host, tracked); err != nil {
+		t.Fatalf("track repository %s on %s: %v", slug, host, err)
 	}
+	row, err := stores.Repos.GetByRefSystem(ctx, runmode.LocalDefaultOrgID, ref)
+	if err != nil || row == nil {
+		t.Fatalf("resolve tracked repository %s on %s: got=%v err=%v", slug, host, row, err)
+	}
+	return row.ID
 }
 
 // TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg pins assertLocalOrg.
@@ -110,10 +124,10 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	ctx := context.Background()
 	const badOrg = "11111111-1111-1111-1111-111111111111"
 
-	if _, _, err := stores.ConversationWorktrees.Insert(ctx, badOrg, domain.ConversationWorktree{ConversationID: "r", RepoID: "owner/repo", Path: "/p", Ref: "default"}); err == nil {
+	if _, _, err := stores.ConversationWorktrees.Insert(ctx, badOrg, domain.ConversationWorktree{ConversationID: "r", RepositoryID: "repository-id", Path: "/p", Ref: "default"}); err == nil {
 		t.Error("Insert(non-local org) should error")
 	}
-	if _, err := stores.ConversationWorktrees.GetByRepoRef(ctx, badOrg, "r", "owner/repo", "default"); err == nil {
+	if _, err := stores.ConversationWorktrees.GetByRepoRef(ctx, badOrg, "r", "repository-id", "default"); err == nil {
 		t.Error("GetByRepoRef(non-local org) should error")
 	}
 	if _, err := stores.ConversationWorktrees.List(ctx, badOrg, "r"); err == nil {
@@ -122,7 +136,7 @@ func TestConversationWorktreeStore_SQLite_RejectsNonLocalOrg(t *testing.T) {
 	if _, err := stores.ConversationWorktrees.ListSystem(ctx, badOrg, "r"); err == nil {
 		t.Error("ListSystem(non-local org) should error")
 	}
-	if err := stores.ConversationWorktrees.DeleteByRepoRef(ctx, badOrg, "r", "owner/repo", "default"); err == nil {
+	if err := stores.ConversationWorktrees.DeleteByRepoRef(ctx, badOrg, "r", "repository-id", "default"); err == nil {
 		t.Error("DeleteByRepoRef(non-local org) should error")
 	}
 	if err := stores.ConversationWorktrees.DeleteByPathSystem(ctx, badOrg, "r", "/p"); err == nil {

@@ -6,14 +6,13 @@ import (
 )
 
 // BootstrapTarget is a single repo for BootstrapBareClones to ensure
-// on disk. Owner and Repo identify the bare's path; CloneURL is the
+// on disk. Repo identifies the bare (its ID keys the path); CloneURL is the
 // upstream URL that origin should point at. Empty CloneURL means
 // profiling hasn't populated the URL yet — those targets are skipped
 // rather than guessed at, and the next delegated run on that repo
 // will lazily clone once profiling has caught up.
 type BootstrapTarget struct {
-	Owner    string
-	Repo     string
+	Repo     Repo
 	CloneURL string
 	// Token is the bearer half of the HTTPS credential for this target's host
 	// (the org bot PAT in local mode). It's wrapped in CloneAuthFor, which
@@ -65,8 +64,8 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 			skipped++
 			continue
 		}
-		if _, err := EnsureBareClone(ctx, t.Owner, t.Repo, t.CloneURL, WithCloneAuth(CloneAuthFor(t.CloneURL, t.Token))); err != nil {
-			worktreeLog.Warn("warm failed", "owner", t.Owner, "repo", t.Repo, "error", err)
+		if _, err := EnsureBareClone(ctx, t.Repo, t.CloneURL, WithCloneAuth(CloneAuthFor(t.CloneURL, t.Token))); err != nil {
+			worktreeLog.Warn("warm failed", "repository_id", t.Repo.ID, "repo", t.Repo.Slug(), "error", err)
 			failed++
 			continue
 		}
@@ -74,7 +73,7 @@ func BootstrapBareClones(ctx context.Context, targets []BootstrapTarget) {
 		// didn't reach inline cleanup — runs cancelled above the
 		// runAgent defer, crashed runs, etc. Safe to call whether or
 		// not anything's there to clean.
-		SweepStaleForkPRConfig(t.Owner, t.Repo)
+		SweepStaleForkPRConfig(t.Repo.ID)
 		ensured++
 	}
 	worktreeLog.Info("warm complete", "duration", time.Since(start).Round(time.Millisecond), "ensured", ensured, "skipped", skipped, "failed", failed)

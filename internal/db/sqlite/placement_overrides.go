@@ -33,24 +33,27 @@ var _ db.PlacementOverrideStore = (*placementOverrideStore)(nil)
 // placement_overrides row, in the order scanPlacementOverride reads them. Both
 // reads SELECT it and Upsert RETURNs it, so the write shape cannot drift from
 // the read shape.
-const placementOverrideColumns = `org_id, key_kind, key_value, pinned_instance_id, replicas, updated_at`
+const placementOverrideColumns = `org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at`
 
 func scanPlacementOverride(scan func(...any) error) (domain.PlacementOverride, error) {
 	var ov domain.PlacementOverride
 	var pinned sql.NullString
-	if err := scan(&ov.OrgID, &ov.KeyKind, &ov.KeyValue, &pinned, &ov.Replicas, &ov.UpdatedAt); err != nil {
+	if err := scan(&ov.OrgID, &ov.KeyKind, &ov.Host, &ov.KeyValue, &pinned, &ov.Replicas, &ov.UpdatedAt); err != nil {
 		return ov, err
 	}
 	ov.PinnedInstanceID = pinned.String
 	return ov, nil
 }
 
-func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, keyValue string) (*domain.PlacementOverride, error) {
+func (s *placementOverrideStore) Get(ctx context.Context, orgID, keyKind, host, keyValue string) (*domain.PlacementOverride, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	ov, err := scanPlacementOverride(s.q.QueryRowContext(ctx, `
 		SELECT `+placementOverrideColumns+`
 		FROM placement_overrides
-		WHERE org_id = ? AND key_kind = ? AND key_value = ?
-	`, orgID, keyKind, keyValue).Scan)
+		WHERE org_id = ? AND key_kind = ? AND host = ? AND key_value = ?
+	`, orgID, keyKind, host, keyValue).Scan)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -65,7 +68,7 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 		SELECT `+placementOverrideColumns+`
 		FROM placement_overrides
 		WHERE org_id = ?
-		ORDER BY key_kind, key_value
+		ORDER BY key_kind, host, key_value
 	`, orgID)
 	if err != nil {
 		return nil, err
@@ -83,21 +86,27 @@ func (s *placementOverrideStore) List(ctx context.Context, orgID string) ([]doma
 }
 
 func (s *placementOverrideStore) Upsert(ctx context.Context, ov domain.PlacementOverride) (domain.PlacementOverride, error) {
+	if err := db.RequireRepoHost(ov.Host); err != nil {
+		return domain.PlacementOverride{}, err
+	}
 	return scanPlacementOverride(s.q.QueryRowContext(ctx, `
-		INSERT INTO placement_overrides (org_id, key_kind, key_value, pinned_instance_id, replicas, updated_at)
-		VALUES (?, ?, ?, NULLIF(?, ''), ?, ?)
-		ON CONFLICT(org_id, key_kind, key_value) DO UPDATE SET
+		INSERT INTO placement_overrides (org_id, key_kind, host, key_value, pinned_instance_id, replicas, updated_at)
+		VALUES (?, ?, ?, ?, NULLIF(?, ''), ?, ?)
+		ON CONFLICT(org_id, key_kind, host, key_value) DO UPDATE SET
 			pinned_instance_id = excluded.pinned_instance_id,
 			replicas           = excluded.replicas,
 			updated_at         = excluded.updated_at
 		RETURNING `+placementOverrideColumns,
-		ov.OrgID, ov.KeyKind, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas, time.Now().UTC()).Scan)
+		ov.OrgID, ov.KeyKind, ov.Host, ov.KeyValue, ov.PinnedInstanceID, ov.Replicas, time.Now().UTC()).Scan)
 }
 
-func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, keyValue string) (bool, error) {
+func (s *placementOverrideStore) Delete(ctx context.Context, orgID, keyKind, host, keyValue string) (bool, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return false, err
+	}
 	res, err := s.q.ExecContext(ctx, `
-		DELETE FROM placement_overrides WHERE org_id = ? AND key_kind = ? AND key_value = ?
-	`, orgID, keyKind, keyValue)
+		DELETE FROM placement_overrides WHERE org_id = ? AND key_kind = ? AND host = ? AND key_value = ?
+	`, orgID, keyKind, host, keyValue)
 	if err != nil {
 		return false, err
 	}

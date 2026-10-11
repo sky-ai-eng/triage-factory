@@ -37,4 +37,15 @@ func TestRelayRuntime_TaskOwnRepo_AnsweredByTheOrchestrator(t *testing.T) {
 	if err != nil || other {
 		t.Fatalf("TaskOwnRepo(another repo) = (%v, %v), want (false, nil)", other, err)
 	}
+
+	// A task polled from a GitHub host other than the org's current one is about
+	// a repository on that host. The same owner/repo on the current host, which
+	// is what the asking gate reaches, is not the task's.
+	if _, err := conn.Exec(`UPDATE entities SET scope = 'https://ghe.example.com' WHERE id = 'ent-1'`); err != nil {
+		t.Fatalf("move entity to another host: %v", err)
+	}
+	elsewhere, err := rt.TaskOwnRepo(ctx, "octo", "repo")
+	if err != nil || elsewhere {
+		t.Fatalf("TaskOwnRepo(task's repo, task polled from another host) = (%v, %v), want (false, nil)", elsewhere, err)
+	}
 }

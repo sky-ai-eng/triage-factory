@@ -31,6 +31,9 @@ func TestIncludeToolsFor_StampsTheAvailabilityAnswer(t *testing.T) {
 	if err := db.BootstrapSchemaForTest(conn); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(conn, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	stores := sqlitestore.New(conn)
 	if err := integrations.Save(t.Context(), stores.Secrets, runmode.LocalDefaultOrgID, auth.Credentials{GitHubPAT: "ghp_test"}); err != nil {
 		t.Fatalf("save credentials: %v", err)

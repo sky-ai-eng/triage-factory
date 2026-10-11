@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -681,12 +682,16 @@ func TestCloseOwed_CloseSetSparesTheTerminatingEvents(t *testing.T) {
 		}
 		set[et] = true
 	}
-	for _, spared := range []string{domain.EventGitHubPRMerged, domain.EventGitHubPRClosed, domain.EventJiraIssueCompleted, domain.EventJiraIssueUnreachable} {
+	for _, spared := range []string{domain.EventGitHubPRMerged, domain.EventGitHubPRClosed, domain.EventGitHubPRUnreachable, domain.EventJiraIssueCompleted, domain.EventJiraIssueUnreachable} {
 		if set[spared] {
 			t.Errorf("%q is in the obligation's close set; a lifecycle task riding its run would be cancelled", spared)
 		}
 	}
-	for _, covered := range append(append(githubPRTerminalCloseTypes(), jiraIssueTerminalCloseTypes()...), jiraIssueUnreachableCloseTypes()...) {
+	transitions := [][]string{
+		githubPRTerminalCloseTypes(), githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable),
+		jiraIssueTerminalCloseTypes(), jiraIssueUnreachableCloseTypes(),
+	}
+	for _, covered := range slices.Concat(transitions...) {
 		if !set[covered] && !domain.TaskMayRideClosedEntity(covered) {
 			t.Errorf("%q is closed by a real transition but not by the obligation", covered)
 		}

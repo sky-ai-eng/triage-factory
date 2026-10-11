@@ -11,6 +11,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -37,9 +38,9 @@ func TestIntegrationsStatus_SetupCompleteGate(t *testing.T) {
 		t.Errorf("setup_step=%v with no GitHub; want org", st["setup_step"])
 	}
 
-	// GitHub configured (PAT) but still no tracked repo → resume at team.
+	// GitHub configured (URL + PAT) but still no tracked repo → resume at team.
+	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
 	if err := integrations.Save(ctx, s.secrets, org, auth.Credentials{
-		GitHubURL: "https://github.com",
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("Save creds: %v", err)
@@ -284,8 +285,8 @@ func TestIntegrationsStatus_SetupCompleteGate_ModelPicksLocal(t *testing.T) {
 	keyring.MockInit()
 	s := newTestServer(t)
 
+	seedSourceHost(t, s, eventsource.KindGitHub, "https://github.com")
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: "https://github.com",
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("Save creds: %v", err)

@@ -11,7 +11,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
-	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 )
 
@@ -93,14 +92,17 @@ func (f *fakeResolver) TokenFor(ctx context.Context, orgID, target string) (gith
 	return f.token, nil
 }
 
+// BaseURLFor answers baseURL whatever err says: the org's GitHub URL is a
+// settings read, and a credential that fails to resolve does not unset it.
+// With none named, the fixture org is on github.com.
 func (f *fakeResolver) BaseURLFor(ctx context.Context, orgID string) (string, error) {
-	if f.err != nil {
-		return "", f.err
-	}
 	if f.baseURL != "" {
 		return f.baseURL, nil
 	}
-	return ghbase.DefaultBaseURL(), nil
+	if f.err != nil {
+		return "", f.err
+	}
+	return "https://github.com", nil
 }
 
 // OrgIdentityFor satisfies the ghclient.Resolver interface. Returns the

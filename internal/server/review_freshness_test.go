@@ -12,6 +12,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
@@ -46,7 +47,7 @@ func seedFinalizedReviewAt(t *testing.T, s *Server, suffix string, number int, f
 		{ID: "c_1", Path: "a.go", Line: &l, Body: domain.SeverityBadgeMarkdown(domain.SeverityMajor) + "nit: rename", CommitSHA: finalizeHead},
 	}
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(s.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(s.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed finalized review: %v", err)
 	}
 	return artID
@@ -210,7 +211,7 @@ func TestReviewRefresh_RemapsAndDrops(t *testing.T) {
 		{ID: "c_b", Path: "b.go", Line: &lb, Body: "outdated", CommitSHA: "finA"},
 	}
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
@@ -283,7 +284,7 @@ func seedOutdatedOnlyReview(t *testing.T, srv *Server, suffix, body string) stri
 		{ID: "c_b", Path: "b.go", Line: &lb, Body: "outdated", CommitSHA: "finA"},
 	}
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	return artID
@@ -480,7 +481,7 @@ func TestReviewRefresh_Guards(t *testing.T) {
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	d.ReviewEvent = ""
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	if rec := doJSON(t, srv, http.MethodPost, "/api/artifacts/"+unfin+"/review/refresh", nil); rec.Code != http.StatusConflict {
@@ -577,7 +578,7 @@ func TestReviewFreshness_NoAnchorComment(t *testing.T) {
 	d, _ := domain.ParseReviewArtifactDetails(art.DetailsJSON)
 	d.StagedComments[0].Line = nil
 	art.DetailsJSON = domain.MarshalReviewArtifactDetails(d)
-	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, *art); err != nil {
+	if _, err := sqlitestore.New(srv.db).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, dbtest.InOrgScope(t, sqlitestore.New(srv.db).Orgs, runmode.LocalDefaultOrgID, *art)); err != nil {
 		t.Fatalf("null line: %v", err)
 	}
 

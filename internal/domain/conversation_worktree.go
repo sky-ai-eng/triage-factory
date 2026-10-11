@@ -24,8 +24,14 @@ import "time"
 // gate reads the worktree's live current branch, never this row, so a
 // stored prescribed branch carried no authority — ref instead records
 // the checkout intent for `workspace list` and the per-conversation worktree path.
+//
+// RepositoryID is the registry row the checkout is of, and what the row is
+// keyed on: a slug names a repository only on one GitHub host, and the row id
+// already is one. RepoID is that repository's "owner/repo", filled on every
+// read for the surfaces that print or path-join it, and ignored on a write.
 type ConversationWorktree struct {
 	ConversationID string
+	RepositoryID   string
 	RepoID         string
 	Path           string
 	Ref            string

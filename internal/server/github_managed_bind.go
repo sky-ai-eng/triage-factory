@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
 	"github.com/sky-ai-eng/triage-factory/internal/githubbind"
@@ -185,6 +186,16 @@ var (
 		status: http.StatusConflict,
 		message: "This workspace is pointed at %s; the deployment's GitHub App is on %s. " +
 			"Bring your own App for this GitHub.",
+	}
+
+	// The workspace has no GitHub URL. The deployment App is on one GitHub,
+	// and a workspace binds it only once it has said that is its GitHub: the
+	// URL is set first, never assumed.
+	refuseNoGitHubURL = bindRefusal{
+		code:   "github_url_not_set",
+		status: http.StatusConflict,
+		message: "This workspace has no GitHub URL yet. Set it to %s, where the deployment's GitHub App is, " +
+			"and connect again.",
 	}
 
 	// The operator's App is missing "Request user authorization (OAuth) during
@@ -382,6 +393,12 @@ func (b bindRefusal) withAccounts(connected, named string) bindRefusal {
 
 // withHosts fills the one refusal whose message names two GitHub hosts: the
 // workspace's and the deployment's.
+// withHost fills a refusal that names one host.
+func (b bindRefusal) withHost(host string) bindRefusal {
+	b.message = fmt.Sprintf(b.message, host)
+	return b
+}
+
 func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal {
 	b.message = fmt.Sprintf(b.message, workspaceHost, deploymentHost)
 	return b
@@ -1208,16 +1225,20 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 		return "", identity, &refuseNoDeploymentApp, nil
 	}
 	ghWeb, err = s.ghResolver.BaseURLFor(ctx, orgID)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		refusal := refuseNoGitHubURL.withHost(ghbase.DefaultBaseURL())
+		return "", identity, &refusal, nil
+	}
 	if err != nil {
 		return "", identity, nil, fmt.Errorf("resolve github base for org %s: %w", orgID, err)
 	}
 	// The deployment App lives on the deployment's default GitHub and nowhere
-	// else, so a workspace whose effective host is another GitHub is refused
-	// here, before anything is asked of GitHub: a preflight against the
-	// workspace's host would be the deployment's key presented to a server
-	// that has never seen it, and the 401 that earns reads like a bad key.
-	if deploymentHost := ghbase.DefaultBaseURL(); ghbase.ResolveBaseURL(ghWeb) != deploymentHost {
-		refusal := refuseWrongGitHub.withHosts(ghbase.ResolveBaseURL(ghWeb), deploymentHost)
+	// else, so a workspace whose host is another GitHub is refused here,
+	// before anything is asked of GitHub: a preflight against the workspace's
+	// host would be the deployment's key presented to a server that has never
+	// seen it, and the 401 that earns reads like a bad key.
+	if deploymentHost := ghbase.DefaultBaseURL(); ghWeb != deploymentHost {
+		refusal := refuseWrongGitHub.withHosts(ghWeb, deploymentHost)
 		return "", identity, &refusal, nil
 	}
 	minter, merr := s.deploymentApp.Minter(ghbase.APIBase(ghWeb))

@@ -36,6 +36,34 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 | **Authored PR** | `github:pr:opened` | First time an authored PR is discovered |
 | **PR Merged** | `github:pr:merged` | The PR's `merged` field changes to `true` |
 | **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it |
+| **PR Unreachable** | `github:pr:unreachable` | TF will no longer follow a tracked PR — see below |
+
+#### PR Unreachable
+
+Like the Jira and Linear events of the same name, this one does not come from
+the snapshot-diff: it reports that TF will no longer follow its own subject, and
+it closes the entity and every task on it the way `github:pr:closed` does. Its
+`reason` says why. There is one today:
+
+- `scope_changed`: the org's GitHub base URL now names another GitHub host.
+  Every active PR from the previous host retires at the start of the next
+  GitHub cycle, before discovery and without GitHub being asked: an
+  `owner/repo#N` on one host says nothing about the same name on another, and a
+  node id from one host means nothing to the other. The rows are not moved or
+  reused. A pull request on the new host that shares an old `owner/repo#N` is a
+  different pull request and gets its own entity, and pointing the org back at
+  the old host finds the retired rows by key and reopens the ones still open,
+  the way a reopened PR is.
+
+Metadata is the entity's last-known state from its stored snapshot (author,
+repo, number, draft flag, head SHA, labels, title), or the repo and number
+parsed from its key when it was never polled, plus the `host` it was polled
+from and the `reason`. There is no `dedup_key` — a PR stops being followed once.
+
+Repositories are scoped the same way. A tracked repository belongs to the host
+it was added on, so after a host change the poller, the profiler and team
+tracking see only the new host's repositories, and the old host's stay on file
+untouched for a switch back.
 
 ## Jira Events
 

@@ -2,9 +2,12 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
 // ErrUnknownGitHubCredentialClass is returned by githubCredentialClass when the
@@ -44,4 +47,43 @@ func (s *Server) githubCredentialClass(ctx context.Context, orgID string) (domai
 		return "", fmt.Errorf("%w: org=%s class=%q", ErrUnknownGitHubCredentialClass, orgID, set.GitHubCredentialClass)
 	}
 	return set.GitHubCredentialClass, nil
+}
+
+// errGitHubHostHasCredential refuses moving an org's GitHub host while a GitHub
+// credential is connected. A token or an App works only on the GitHub that
+// issued it, so the org's host is the only record of which GitHub a credential
+// belongs to, and it cannot change under one.
+var errGitHubHostHasCredential = errors.New("a GitHub credential only works on the GitHub that issued it — disconnect it before changing the GitHub URL")
+
+// githubCredentialConnected names the GitHub credential org has connected on
+// host — its GitHub host before the change being checked — in the words an
+// admin would use to go find it, or "" when it has none: a token, its own App
+// registration (staged or active), or an installation of an App bound to it on
+// that host. An installation on any other host is not held in place: it records
+// its own host, and the org's host moving does not change which GitHub it
+// belongs to. Every read goes through tx, so a caller inside a write sees the
+// rows that write sees and holds no second connection while it does.
+func githubCredentialConnected(ctx context.Context, tx db.TxStores, orgID, host string) (string, error) {
+	creds, err := integrations.Load(ctx, tx.Secrets, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github token: %w", err)
+	}
+	if creds.GitHubPAT != "" {
+		return "this workspace's GitHub token", nil
+	}
+	app, err := tx.GitHubApps.GetForOrg(ctx, orgID)
+	if err != nil {
+		return "", fmt.Errorf("read github app registration: %w", err)
+	}
+	if app != nil {
+		return "this workspace's GitHub App", nil
+	}
+	installs, err := tx.GitHubApps.ListInstallationsOnHost(ctx, orgID, host)
+	if err != nil {
+		return "", fmt.Errorf("read github app installations: %w", err)
+	}
+	if len(installs) > 0 {
+		return "the deployment's GitHub App", nil
+	}
+	return "", nil
 }

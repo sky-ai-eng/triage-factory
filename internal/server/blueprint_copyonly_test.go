@@ -186,6 +186,7 @@ func TestPromptDelete_MultiStepBlueprintConflicts(t *testing.T) {
 
 func TestPromptDelete_TailKeepsTriggerAndId(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "TailChain", 3)
 	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
 
@@ -210,6 +211,7 @@ func TestPromptDelete_TailKeepsTriggerAndId(t *testing.T) {
 
 func TestPromptDelete_HeadDetachesTrigger(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "HeadChain", 3)
 	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
 
@@ -246,6 +248,7 @@ func TestPromptDelete_HeadDetachesTrigger(t *testing.T) {
 
 func TestPromptDelete_MidSplitsDownstreamTriggerless(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "MidChain", 4)
 	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
 

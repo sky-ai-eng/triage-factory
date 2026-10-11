@@ -105,7 +105,7 @@ exec %q "$@"
 func TestGitRunCtxAuth_RetriesAndRecoversFromLockRace(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "acme", "retry-ok", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("acme", "retry-ok"), upstream)
 	if err != nil {
 		t.Fatalf("seed bare: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestGitRunCtxAuth_RetriesAndRecoversFromLockRace(t *testing.T) {
 func TestGitRunCtxAuth_GivesUpAfterMaxAttempts(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "acme", "retry-fail", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("acme", "retry-fail"), upstream)
 	if err != nil {
 		t.Fatalf("seed bare: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestGitRunCtxAuth_GivesUpAfterMaxAttempts(t *testing.T) {
 func TestGitRunCtxAuth_CancelledDuringBackoffReturnsPromptly(t *testing.T) {
 	withTestHome(t)
 	upstream := makeTestUpstream(t)
-	bareDir, err := EnsureBareClone(context.Background(), "acme", "retry-cancel", upstream)
+	bareDir, err := EnsureBareClone(context.Background(), testRepo("acme", "retry-cancel"), upstream)
 	if err != nil {
 		t.Fatalf("seed bare: %v", err)
 	}

@@ -17,9 +17,17 @@ import (
 type fakeRateLimitResolver struct {
 	ghclient.Resolver
 	states map[string]ghclient.RateLimitState
+	mu     sync.Mutex
+	hosts  map[string]string // org id → the host its budget was read on
 }
 
-func (f *fakeRateLimitResolver) RateLimitFor(orgID string) (ghclient.RateLimitState, bool) {
+func (f *fakeRateLimitResolver) RateLimitFor(orgID, host string) (ghclient.RateLimitState, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hosts == nil {
+		f.hosts = map[string]string{}
+	}
+	f.hosts[orgID] = host
 	s, ok := f.states[orgID]
 	return s, ok
 }
@@ -51,6 +59,12 @@ func TestHealth_GitHubRateLimit_ReadsFromResolver(t *testing.T) {
 	}
 	if _, ok := snap.GitHubRateLimit["org-2"]; ok {
 		t.Error("org-2 should be absent (no observation)")
+	}
+	// Each org's budget is read on its current GitHub host.
+	for _, org := range []string{"org-1", "org-2"} {
+		if got := resolver.hosts[org]; got != "https://github.com" {
+			t.Errorf("%s budget read on host %q, want https://github.com", org, got)
+		}
 	}
 }
 

@@ -65,6 +65,12 @@ var errOrgManagedInTheWay = errors.New("org rides the deployment app with a live
 // rows have all been removed (an uninstall reported by webhook, say) is free to
 // bind a PAT and become the plain PAT workspace it already effectively is.
 //
+// Rows on every host count. The class is the org's, not a host's: a live
+// managed row the org left on a GitHub it has moved off is still a row under
+// the managed class, and binding another credential beside it is the
+// disagreement this guard exists to prevent. The disconnect verbs below remove
+// those rows too.
+//
 // An unknown class is refused as an error rather than read as "not managed":
 // the caller cannot know whether rows under a class this build cannot name are
 // in the way, and the doors already treat an unknown class as a reason not to
@@ -201,6 +207,8 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// Every host's rows: leaving the class has to take all of them, and the
+	// narrowed verb may drop a row left on a GitHub the org has moved off.
 	live, err := s.githubApps.ListInstallationsForOrgSystem(ctx, orgID)
 	if err != nil {
 		internalError(w, "github-access", err)
@@ -208,10 +216,12 @@ func (s *Server) serveManagedDisconnect(w http.ResponseWriter, r *http.Request, 
 	}
 	remove := live
 	if only != "" {
+		// An id names an installation only on its own host, and the path names
+		// no host, so every live row carrying the id goes.
 		remove = nil
 		for _, inst := range live {
 			if inst.InstallationID == only {
-				remove = []domain.OrgGitHubAppInstallation{inst}
+				remove = append(remove, inst)
 			}
 		}
 		if len(remove) == 0 {
@@ -274,7 +284,7 @@ func (s *Server) disconnectManagedInstallations(ctx context.Context, orgID, user
 			// cascade included: the reachable-repo rows and the scope marker go
 			// with the row, so nothing keeps vouching for a reach the
 			// workspace no longer has.
-			if _, err := tx.GitHubApps.MarkInstallationRemoved(ctx, orgID, inst.InstallationID); err != nil {
+			if _, err := tx.GitHubApps.MarkInstallationRemoved(ctx, orgID, inst.GitHubHost, inst.InstallationID); err != nil {
 				return fmt.Errorf("remove installation %s: %w", inst.InstallationID, err)
 			}
 		}

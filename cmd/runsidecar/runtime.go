@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -57,6 +58,7 @@ type credRuntime struct {
 
 	mu         sync.Mutex
 	bundle     *credbundle.Bundle // newest unsealed bundle; nil until first seal
+	githubBase string             // web base every GitHub lane forwards to; set at proxy start
 	proxies    *agentproc.RunProxyHandle
 	githubAPI  *apiproxy.Server      // GitHub REST credential proxy; nil unless requested
 	jiraAPI    *apiproxy.Server      // Jira REST credential proxy; nil unless requested
@@ -195,7 +197,13 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 	// tokens for it. The web base and the REST mount are the same fact in two
 	// shapes, so they are derived together, here, from the one value the brain
 	// sealed — nothing about the host travels in the frame.
-	gitUpstream, apiUpstream := githubUpstreams(bundle)
+	gitUpstream, apiUpstream, err := githubUpstreams(bundle)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	r.githubBase = gitUpstream
+	r.mu.Unlock()
 	conversationID := runConversationID(req)
 
 	var git *agentproc.GitProxyConfig
@@ -416,16 +424,43 @@ func runConversationID(req sidecarproto.StartProxiesBody) string {
 
 // githubUpstreams derives this run's two GitHub hosts from the sealed bundle:
 // the web base the git proxy forwards to, and the REST mount the API proxy and
-// the gh injector prepend. A bundle with no GitHub half (a Jira-only org) — or
-// one whose org never configured a base — answers the deployment default's web
-// base and API mount, which is what an org with no base URL resolves to anyway.
-// Neither is ever empty, so no lane below carries a default of its own.
-func githubUpstreams(b *credbundle.Bundle) (git, api string) {
-	base := ""
-	if b.GitHub != nil {
-		base = b.GitHub.BaseURL
+// the gh injector prepend. A bundle with no GitHub half carries no GitHub
+// credential, so its lanes forward unauthenticated to the deployment's GitHub
+// (ghbase.DefaultBaseURL). A GitHub half with no host is refused: its tokens
+// were issued by some GitHub, and the default may not be that one. Neither
+// value is ever empty, so no lane below carries a default of its own.
+func githubUpstreams(b *credbundle.Bundle) (git, api string, err error) {
+	if b.GitHub == nil {
+		base := ghbase.DefaultBaseURL()
+		return base, ghbase.APIBase(base), nil
 	}
-	return ghbase.ResolveBaseURL(base), ghbase.APIBase(base)
+	base := ghbase.CanonicalBaseURL(b.GitHub.BaseURL)
+	if base == "" {
+		return "", "", errors.New("runsidecar: the bundle's GitHub credentials name no GitHub host")
+	}
+	return base, ghbase.APIBase(base), nil
+}
+
+// heldGitHub returns the held bundle's GitHub half when it was resolved for
+// the GitHub this run's lanes forward to, and nil when it was not; ok is false
+// when no bundle has arrived. The lanes are fixed at proxy start, while the
+// bundle is re-sealed through the run and read live: a re-seal resolved after
+// the org reconnected GitHub on another URL carries tokens that host issued,
+// and attaching them here would send them to this one.
+func (r *credRuntime) heldGitHub() (gh *credbundle.GitHubCreds, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.bundle == nil {
+		return nil, false
+	}
+	gh = r.bundle.GitHub
+	if gh == nil {
+		return nil, true
+	}
+	if base := ghbase.CanonicalBaseURL(gh.BaseURL); base == "" || base != r.githubBase {
+		return nil, true
+	}
+	return gh, true
 }
 
 // startGHInjector stands up the real-gh credential-injector proxy: generates the
@@ -503,14 +538,14 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 		// jail holds only the per-run placeholder on both halves.
 		GitHandler: gitHandler,
 		TokenSource: func(context.Context) (string, error) {
-			bundle := r.currentBundle()
-			if bundle == nil {
+			gh, ok := r.heldGitHub()
+			if !ok {
 				return "", fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoBundle)
 			}
-			if bundle.GitHub == nil || bundle.GitHub.CLIToken == nil || bundle.GitHub.CLIToken.Token == "" {
+			if gh == nil || gh.CLIToken == nil || gh.CLIToken.Token == "" {
 				return "", fmt.Errorf("runsidecar: gh channel: %w", credbundle.ErrNoCLIToken)
 			}
-			return bundle.GitHub.CLIToken.Token, nil
+			return gh.CLIToken.Token, nil
 		},
 		ObserveWrite: func(_ context.Context, w ghinjector.ObservedWrite) {
 			// Fire-and-forget: the request already transited, and the
@@ -605,11 +640,11 @@ func (r *credRuntime) startGitHubAPIProxy(hostVethIP, upstream, conversationID s
 // token for the repository the request targets, read live so a mid-run re-seal
 // is picked up.
 func (r *credRuntime) githubAPIToken(_ context.Context, owner, repo string) (string, error) {
-	bundle := r.currentBundle()
-	if bundle == nil {
+	gh, ok := r.heldGitHub()
+	if !ok {
 		return "", fmt.Errorf("runsidecar: github api proxy: %w", credbundle.ErrNoBundle)
 	}
-	tok, _, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
+	tok, _, source := credbundle.ResolveRepoToken(gh, owner, repo)
 	if source == credbundle.RepoTokenNone {
 		return "", fmt.Errorf("runsidecar: github api proxy, %s/%s: %w", owner, repo, credbundle.ErrNoRepoToken)
 	}
@@ -798,19 +833,18 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 	return &agentproc.GitProxyConfig{
 		Upstream: upstream,
 		TokenSource: func(_ context.Context, owner, repo string) (gitproxy.Token, error) {
-			bundle := r.currentBundle()
-			if bundle == nil {
+			gh, ok := r.heldGitHub()
+			if !ok {
 				return gitproxy.Token{}, fmt.Errorf("%w: %w", agentproc.ErrNoGitCredentials, credbundle.ErrNoBundle)
 			}
-			token, expiresAt, source := credbundle.ResolveRepoToken(bundle.GitHub, owner, repo)
+			token, expiresAt, source := credbundle.ResolveRepoToken(gh, owner, repo)
 			if source == credbundle.RepoTokenNone {
 				return gitproxy.Token{}, fmt.Errorf("%w: repo %s/%s: %w", agentproc.ErrNoGitCredentials, owner, repo, credbundle.ErrNoRepoToken)
 			}
 			return gitproxy.Token{Value: token, ExpiresAt: expiresAt}, nil
 		},
 		ProbeCredentials: func(_ context.Context) error {
-			bundle := r.currentBundle()
-			if bundle == nil || bundle.GitHub == nil || len(bundle.GitHub.RepoTokens) == 0 {
+			if gh, _ := r.heldGitHub(); gh == nil || len(gh.RepoTokens) == 0 {
 				return fmt.Errorf("%w: bundle carries no GitHub credential", agentproc.ErrNoGitCredentials)
 			}
 			return nil

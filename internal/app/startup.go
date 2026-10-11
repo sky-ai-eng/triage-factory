@@ -46,6 +46,18 @@ func (a *App) runStartupTasks(ctx context.Context) {
 		if a.spawner != nil {
 			a.spawner.RekeyWorkspaceBlobsToTask(ctx, runmode.LocalDefaultOrgID)
 		}
+		// A local install may hold its Jira site in the keychain beside the
+		// credential, where nothing reads it. It moves into org_settings here,
+		// before the first poll resolves a Jira client. A failure leaves the key
+		// for the next boot and the org on whatever site its settings name.
+		if err := integrations.AdoptSavedJiraSite(ctx, a.stores.Secrets, a.stores.Orgs, runmode.LocalDefaultOrgID, runmode.LocalDefaultUserID); err != nil {
+			serverLog.Warn("could not move the saved Jira site into org settings", "error", err)
+		}
+		// The same for GitHub: an org on GitHub with no GitHub URL set gets
+		// the one it was using, before anything resolves a GitHub client.
+		if err := integrations.AdoptSavedGitHubHost(ctx, a.stores, runmode.LocalDefaultOrgID); err != nil {
+			serverLog.Warn("could not set the GitHub URL the org was using", "error", err)
+		}
 		a.importLocalSkills(ctx)
 	}
 }
@@ -259,12 +271,11 @@ func (a *App) wireCloneStatusCallback() {
 	// Org-scoped notifier (no RecipientsFunc): this hook is local-only,
 	// and at N=1 the org-wide broadcast IS the REST-parity scope.
 	notify := repoevent.NewNotifier(a.wsHub, nil)
-	// The event is keyed on the registry row id, and the clone hook is handed
-	// a name — but the stamp itself resolves the row, so this publishes the row
-	// that write returned rather than looking the same repository up a second
-	// time. A nil row is the write's documented no-op: nothing answers to the
-	// name, so there is nothing to update and nothing for a client to merge
-	// into.
+	// The clone hook is handed the bare's registry row id. The row is read once
+	// to learn its address, and the stamp publishes the row that write returned.
+	// A missing row — or a nil one from the write — is the documented no-op: the
+	// repository was removed while it cloned, so there is nothing to update and
+	// nothing for a client to merge into.
 	//
 	// All three clone columns go on the wire because the write sets all three,
 	// and off the row rather than restated from the arguments — so a success
@@ -276,14 +287,24 @@ func (a *App) wireCloneStatusCallback() {
 		}
 		notify.Publish(context.Background(), runmode.LocalDefaultOrgID, repoevent.Update{
 			ID:             row.ID,
+			Host:           row.Host,
 			Slug:           row.Slug(),
 			CloneStatus:    repoevent.Ptr(row.CloneStatus),
 			CloneError:     repoevent.Ptr(row.CloneError),
 			CloneErrorKind: repoevent.Ptr(row.CloneErrorKind),
 		})
 	}
-	worktree.SetOnCloneResult(func(owner, repo string, cloneErr error) {
-		ref := domain.RepoRef{Owner: owner, Repo: repo}
+	worktree.SetOnCloneResult(func(bare worktree.Repo, cloneErr error) {
+		owner, repo := bare.Owner, bare.Name
+		stored, err := a.stores.Repos.GetSystem(context.Background(), runmode.LocalDefaultOrgID, bare.ID)
+		if err != nil {
+			cloneStatusLog.Error("read repository for clone status failed", "repository_id", bare.ID, "error", err)
+			return
+		}
+		if stored == nil {
+			return
+		}
+		ref := stored.Ref()
 		if cloneErr == nil {
 			row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "ok", "", "")
 			if err != nil {
@@ -305,18 +326,18 @@ func (a *App) wireCloneStatusCallback() {
 			// endpoint to explain a clone that never spoke SSH would name a
 			// cause the operator cannot act on.
 			//
-			// Use the configured GitHub host so GHE installs probe the right
-			// SSH endpoint, not github.com.
-			creds, _ := integrations.Load(context.Background(), a.stores.Secrets, runmode.LocalDefaultOrgID)
-			sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
-			sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
-				kind = "ssh"
-				cloneStatusLog.Warn("ssh preflight also failed; kind=ssh", "owner", owner, "repo", repo, "ssh_host", sshHost, "error", perr)
-			} else {
-				cloneStatusLog.Info("ssh preflight passed; kind=other (clone error is on the git side)", "owner", owner, "repo", repo, "ssh_host", sshHost)
+			// The org's GitHub host, so GHE installs probe the right SSH
+			// endpoint, not github.com.
+			if sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL); sshHost != "" {
+				sshCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				if perr := worktree.CachedPreflightSSH(sshCtx, sshHost); perr != nil {
+					kind = "ssh"
+					cloneStatusLog.Warn("ssh preflight also failed; kind=ssh", "owner", owner, "repo", repo, "ssh_host", sshHost, "error", perr)
+				} else {
+					cloneStatusLog.Info("ssh preflight passed; kind=other (clone error is on the git side)", "owner", owner, "repo", repo, "ssh_host", sshHost)
+				}
+				cancel()
 			}
-			cancel()
 		}
 
 		row, err := a.stores.Repos.UpdateCloneStatusByRefSystem(context.Background(), runmode.LocalDefaultOrgID, ref, "failed", cloneErr.Error(), kind)
@@ -334,8 +355,13 @@ func (a *App) wireCloneStatusCallback() {
 // repositories.clone_url; targets without a CloneURL are skipped). DB read
 // errors are logged and skipped — the lazy clone inside CreateForPR /
 // CreateForBranch recovers affected delegations on the next run.
-func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
-	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID)
+func bootstrapBareClones(repos db.RepositoryStore, orgs db.OrgsStore, secrets db.SecretStore) {
+	orgSet, err := orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
+	if err != nil {
+		worktreeLog.Warn("bootstrap: load org settings failed", "error", err)
+		return
+	}
+	profiles, err := repos.ListSystem(context.Background(), runmode.LocalDefaultOrgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 	if err != nil {
 		worktreeLog.Warn("bootstrap: load repositories failed", "error", err)
 		return
@@ -350,13 +376,13 @@ func bootstrapBareClones(repos db.RepositoryStore, secrets db.SecretStore) {
 	if cerr != nil {
 		worktreeLog.Warn("bootstrap: load credentials failed; HTTPS clones of private repos may fail to warm", "error", cerr)
 	}
+	token := creds.GitHubPAT
 	targets := make([]worktree.BootstrapTarget, 0, len(profiles))
 	for _, p := range profiles {
 		targets = append(targets, worktree.BootstrapTarget{
-			Owner:    p.Owner,
-			Repo:     p.Repo,
+			Repo:     worktree.Repo{ID: p.ID, Owner: p.Owner, Name: p.Repo},
 			CloneURL: p.CloneURL,
-			Token:    creds.GitHubPAT,
+			Token:    token,
 		})
 	}
 	worktree.BootstrapBareClones(context.Background(), targets)

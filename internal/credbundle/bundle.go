@@ -119,7 +119,8 @@ type GitHubCreds struct {
 	// meaningful against the host it was resolved for. Every GitHub lane an
 	// executor binds takes its upstream from here (the git proxy verbatim, the
 	// REST proxy and the gh injector through ghbase.APIBase), so nothing can
-	// point a token at a host it does not belong to. Empty means the deployment default.
+	// point a token at a host it does not belong to. A bundle carries a GitHub
+	// half only for an org with a GitHub URL, so it is never empty there.
 	BaseURL string `json:"base_url,omitempty"`
 
 	RepoTokens map[string]RepoToken `json:"repo_tokens,omitempty"`

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -99,10 +100,10 @@ func TestGate_DisjointRepos_DropsUntrackingTeam(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-b"}}); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 
@@ -151,10 +152,10 @@ func TestGate_SharedRepo_VisibleToBoth(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 	shared := []domain.TeamGitHubRepo{{Owner: "owner", Repo: "shared"}}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, shared); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, shared); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 	seedMatchAllCIRule(t, dbh, teamA)
@@ -368,7 +369,7 @@ func TestGate_MultiTeamAuthor_UntrackedTeamGatedFromOwnerLadder(t *testing.T) {
 	teamB := seedGateTeam(t, dbh, "team-b")
 
 	// A tracks repo-a; B (unconfigured) tracks nothing.
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo-a"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
 
@@ -415,10 +416,10 @@ func TestGate_MultiTeamAuthor_BothTrack_StaysAmbiguous(t *testing.T) {
 	teamA := runmode.LocalDefaultTeamID
 	teamB := seedGateTeam(t, dbh, "team-b")
 	shared := []domain.TeamGitHubRepo{{Owner: "owner", Repo: "shared"}}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, shared); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, shared); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamB, dbtest.TestGitHubHost, shared); err != nil {
 		t.Fatalf("teamB track: %v", err)
 	}
 
@@ -459,7 +460,7 @@ func TestGate_LocalN1_NoOp(t *testing.T) {
 	ctx := context.Background()
 
 	teamA := runmode.LocalDefaultTeamID
-	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
+	if err := st.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, teamA, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{{Owner: "owner", Repo: "repo"}}); err != nil {
 		t.Fatalf("teamA track: %v", err)
 	}
 	// N=1: the local author is on the one team, so the author-centric ladder

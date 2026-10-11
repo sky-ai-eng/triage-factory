@@ -117,6 +117,11 @@ func seedPgOrgAndUserForDashboard(t *testing.T, h *pgtest.Harness) (orgID, userI
 		orgID, userID); err != nil {
 		t.Fatalf("seed org_memberships: %v", err)
 	}
+	// On github.com, as pgtest.SeedOrg's orgs are.
+	if _, err := h.AdminDB.Exec(`INSERT INTO org_event_sources (org_id, kind, base_url) VALUES ($1, 'github', $2)`,
+		orgID, dbtest.TestGitHubHost); err != nil {
+		t.Fatalf("seed github url: %v", err)
+	}
 	seedPgDefaultTeam(t, h, orgID, userID)
 	return orgID, userID
 }

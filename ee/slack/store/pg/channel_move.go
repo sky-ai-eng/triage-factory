@@ -294,11 +294,11 @@ func moveThreadEntities(ctx context.Context, q db.Execer, orgID, oldID, newID st
 func moveArtifacts(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, dedup_key, target, COALESCE(url, '') FROM artifacts
-		WHERE org_id = $1 AND provider = $2
+		WHERE org_id = $1 AND provider = $2 AND scope = $4
 		  AND (starts_with(target, $3) OR strpos(dedup_key, ':' || $3) > 0)
 		ORDER BY id
 		FOR UPDATE
-	`, orgID, domain.ArtifactProviderSlack, oldID+"/")
+	`, orgID, domain.ArtifactProviderSlack, oldID+"/", domain.SlackScope)
 	if err != nil {
 		return 0, fmt.Errorf("list slack artifacts to move: %w", err)
 	}
@@ -327,8 +327,8 @@ func moveArtifacts(ctx context.Context, q db.Execer, orgID, oldID, newID string)
 		if keyMoved {
 			var taken bool
 			if err := q.QueryRowContext(ctx, `
-				SELECT EXISTS (SELECT 1 FROM artifacts WHERE org_id = $1 AND dedup_key = $2)
-			`, orgID, key).Scan(&taken); err != nil {
+				SELECT EXISTS (SELECT 1 FROM artifacts WHERE org_id = $1 AND scope = $3 AND dedup_key = $2)
+			`, orgID, key, domain.SlackScope).Scan(&taken); err != nil {
 				return 0, fmt.Errorf("check moved artifact key %s: %w", key, err)
 			}
 			if taken {
@@ -355,10 +355,10 @@ func moveArtifacts(ctx context.Context, q db.Execer, orgID, oldID, newID string)
 func moveActionPointers(ctx context.Context, q db.Execer, orgID, oldID, newID string) (int, error) {
 	rows, err := q.QueryContext(ctx, `
 		SELECT id, COALESCE(current_url, url) FROM external_actions
-		WHERE org_id = $1 AND provider = $2
+		WHERE org_id = $1 AND provider = $2 AND scope = $4
 		  AND strpos(COALESCE(current_url, url, ''), '/archives/' || $3) > 0
 		ORDER BY id
-	`, orgID, domain.ArtifactProviderSlack, oldID)
+	`, orgID, domain.ArtifactProviderSlack, oldID, domain.SlackScope)
 	if err != nil {
 		return 0, fmt.Errorf("list slack external actions to move: %w", err)
 	}

@@ -175,6 +175,7 @@ func seedInstallation(t *testing.T, s *Server, id int64, login string) {
 		OrgID:          runmode.LocalDefaultOrgID,
 		AccountType:    "Organization",
 		AccountLogin:   login,
+		GitHubHost:     seedRepoHost(t, s),
 	}); err != nil {
 		t.Fatalf("seed installation %s: %v", login, err)
 	}
@@ -200,13 +201,13 @@ func setOrgGitHubBase(t *testing.T, s *Server, base string) {
 // This wraps s.githubApps, which is NOT the store a handler's own
 // tx.GitHubApps calls run against inside s.tx.WithTx — WithTx builds a fresh
 // TxStores straight off the *sql.Tx, so a hook here only reaches the
-// pre-transaction reads (GetForOrgSystem, ListInstallationsForOrgSystem), never
+// pre-transaction reads (GetForOrgSystem, ListInstallationsOnHostSystem), never
 // a write made through tx. See setActiveReturnsNilTx below for the shape that
 // reaches inside the transaction.
 type ghAppsRaceHook struct {
 	db.GitHubAppsStore
 	afterGet  func() // fires once, after the first GetForOrgSystem
-	afterList func() // fires once, after the first ListInstallationsForOrgSystem
+	afterList func() // fires once, after the first ListInstallationsOnHostSystem
 	getOnce   sync.Once
 	listOnce  sync.Once
 }
@@ -219,8 +220,8 @@ func (g *ghAppsRaceHook) GetForOrgSystem(ctx context.Context, orgID string) (*do
 	return app, err
 }
 
-func (g *ghAppsRaceHook) ListInstallationsForOrgSystem(ctx context.Context, orgID string) ([]domain.OrgGitHubAppInstallation, error) {
-	insts, err := g.GitHubAppsStore.ListInstallationsForOrgSystem(ctx, orgID)
+func (g *ghAppsRaceHook) ListInstallationsOnHostSystem(ctx context.Context, orgID, host string) ([]domain.OrgGitHubAppInstallation, error) {
+	insts, err := g.GitHubAppsStore.ListInstallationsOnHostSystem(ctx, orgID, host)
 	if err == nil && g.afterList != nil {
 		g.listOnce.Do(g.afterList)
 	}
@@ -1101,7 +1102,7 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 		t.Errorf("github_pat_login = %q with nothing bound, want empty", got)
 	}
 
-	gh := githubUserStub(t, "acme-bot")
+	gh := githubTokenStub(t, map[string]string{"ghp_first": "acme-bot", "ghp_second": "acme-bot-2"})
 	if rec := bindOrgGitHubPAT(t, s, gh.URL, "ghp_first"); rec.Code != http.StatusOK {
 		t.Fatalf("pat bind = %d, body=%s", rec.Code, rec.Body.String())
 	}
@@ -1109,9 +1110,9 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 		t.Errorf("github_pat_login = %q after bind, want acme-bot", got)
 	}
 
-	// Rotation: same route, a token that authenticates as someone else.
-	rotated := githubUserStub(t, "acme-bot-2")
-	if rec := bindOrgGitHubPAT(t, s, rotated.URL, "ghp_second"); rec.Code != http.StatusOK {
+	// Rotation: same route, same host, a token that authenticates as someone
+	// else.
+	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_second"}); rec.Code != http.StatusOK {
 		t.Fatalf("pat rotate = %d, body=%s", rec.Code, rec.Body.String())
 	}
 	if got := orgPATLogin(t, s); got != "acme-bot-2" {
@@ -1123,6 +1124,45 @@ func TestOrgSettingsGet_ReportsBoundPATLogin(t *testing.T) {
 	}
 	if got := orgPATLogin(t, s); got != "" {
 		t.Errorf("github_pat_login = %q after unbind, want empty", got)
+	}
+}
+
+// TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly pins kickGitHubChanged:
+// a PAT bind and a PAT unbind each kick the GitHub poller and mark GitHub poll
+// readiness restarted, and leave Jira's poller and readiness alone — a GitHub
+// credential change does not touch the Jira poller.
+func TestGitHubPATBindAndUnbind_RestartGitHubReadinessOnly(t *testing.T) {
+	keyring.MockInit()
+	runmode.SetForTest(t, runmode.ModeLocal)
+	s := newTestServer(t)
+	gh := githubUserStub(t, "acme-bot")
+	commitGitHubHost(t, s, gh.URL)
+	kicks := recordChangeKicks(s)
+
+	for _, step := range []struct {
+		name   string
+		method string
+		body   any
+	}{
+		{"bind", http.MethodPut, map[string]any{"pat": "ghp_x"}},
+		{"unbind", http.MethodDelete, nil},
+	} {
+		markPollsComplete(t, s, "github", "jira")
+		if rec := doJSON(t, s, step.method, patRoute(), step.body); rec.Code != http.StatusOK {
+			t.Fatalf("pat %s = %d, body=%s", step.name, rec.Code, rec.Body.String())
+		}
+		if !fired(kicks.github) {
+			t.Errorf("pat %s did not kick the GitHub poller", step.name)
+		}
+		if fired(kicks.jira) {
+			t.Errorf("pat %s kicked the Jira poller", step.name)
+		}
+		if pollReady(t, s, "github") {
+			t.Errorf("GitHub readiness survived a pat %s", step.name)
+		}
+		if !pollReady(t, s, "jira") {
+			t.Errorf("a pat %s cleared Jira readiness", step.name)
+		}
 	}
 }
 
@@ -1212,8 +1252,12 @@ func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 		t.Errorf("settings version moved %d → %d; the bind writes no settings column", versionAfterCommit, got)
 	}
 
-	// Move the workspace to the other deployment and rotate. The bind must
-	// follow the setting, not the host the previous credential was bound to.
+	// Move the workspace to the other deployment: the token comes off first,
+	// since the URL does not move while a credential is connected, and the
+	// next bind follows the new setting.
+	if rec := doJSON(t, s, http.MethodDelete, patRoute(), nil); rec.Code != http.StatusOK {
+		t.Fatalf("pat unbind = %d, body=%s", rec.Code, rec.Body.String())
+	}
 	before := *firstHits
 	commitGitHubHost(t, s, second.URL)
 	if rec := doJSON(t, s, http.MethodPut, patRoute(), map[string]any{"pat": "ghp_two"}); rec.Code != http.StatusOK {
@@ -1228,6 +1272,29 @@ func TestGitHubPATPut_ValidatesAgainstTheCommittedHost(t *testing.T) {
 	if *firstHits != before {
 		t.Errorf("the previous host was probed again (%d → %d) — the bind followed the credential's host, not the org's", before, *firstHits)
 	}
+}
+
+// githubTokenStub is githubUserStub answering with the login each token maps
+// to, so a test can rotate the credential on one host.
+func githubTokenStub(t *testing.T, logins map[string]string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		login, ok := logins[strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")]
+		if !ok {
+			http.Error(w, "bad credentials", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/user":
+			_ = json.NewEncoder(w).Encode(map[string]any{"login": login})
+		case "/api/v3/user/emails":
+			writeGitHubPrimaryEmail(w, login+"@example.com")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // recordingGitHubStub is githubUserStub plus a request counter, so a test can

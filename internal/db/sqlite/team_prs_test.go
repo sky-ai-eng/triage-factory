@@ -26,10 +26,8 @@ func TestTeamPRStore_SQLite(t *testing.T) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		stores := sqlitestore.New(conn)
-		// The org's github_base_url is unset here, the common case: the store
-		// resolves it to the deployment default (github.com here), which is where a login-claim
-		// binding actually lands.
-		return stores.TeamPRs, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "",
+		// The org is on github.com, where a login-claim binding lands.
+		return stores.TeamPRs, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost,
 			newSQLiteTeamPRSeeder(conn, runmode.LocalDefaultTeamID)
 	})
 
@@ -48,7 +46,7 @@ func TestTeamPRStore_SQLite(t *testing.T) {
 		}})
 
 		prs, total, err := stores.TeamPRs.TeamPRs(t.Context(),
-			runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, "", db.PRListFilter{}, db.Unwindowed)
+			runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, db.PRListFilter{}, db.Unwindowed)
 		if err != nil {
 			t.Fatalf("TeamPRs: %v", err)
 		}
@@ -82,7 +80,7 @@ func newSQLiteTeamPRSeeder(conn *sql.DB, teamID string) dbtest.TeamPRSeeder {
 			if _, err := conn.Exec(`
 				INSERT INTO user_github_identities (user_id, github_base_url, login, source)
 				VALUES (?, ?, ?, 'connect_oauth')
-			`, id, db.EffectiveGitHubHost(""), login); err != nil {
+			`, id, dbtest.TestGitHubHost, login); err != nil {
 				t.Fatalf("bind identity for %s: %v", login, err)
 			}
 			return id

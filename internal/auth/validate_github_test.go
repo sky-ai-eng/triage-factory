@@ -128,7 +128,6 @@ func TestCaptureGitHubIdentityAPIMount(t *testing.T) {
 		name, base, wantUser, wantEmails string
 	}{
 		{"public", "https://github.com", "https://api.github.com/user", "https://api.github.com/user/emails"},
-		{"unconfigured", "", "https://api.github.com/user", "https://api.github.com/user/emails"},
 		{"ghes", "https://ghes.acme.com", "https://ghes.acme.com/api/v3/user", "https://ghes.acme.com/api/v3/user/emails"},
 		{"data_residency", "https://octocorp.ghe.com", "https://api.octocorp.ghe.com/user", "https://api.octocorp.ghe.com/user/emails"},
 	} {
@@ -144,5 +143,18 @@ func TestCaptureGitHubIdentityAPIMount(t *testing.T) {
 				t.Errorf("probed %v, want %v", seen, want)
 			}
 		})
+	}
+}
+
+// TestCaptureGitHubIdentity_NoGitHubURLSendsNothing: with no GitHub URL there
+// is no host to send the token to, so the probe is refused before any request.
+func TestCaptureGitHubIdentity_NoGitHubURLSendsNothing(t *testing.T) {
+	var seen []string
+	stubGitHubAPI(t, &seen)
+	if _, err := CaptureGitHubIdentity(context.Background(), "", "secret"); err == nil {
+		t.Fatal("CaptureGitHubIdentity with no GitHub URL succeeded; want a refusal")
+	}
+	if len(seen) != 0 {
+		t.Errorf("probed %v with no GitHub URL; want nothing", seen)
 	}
 }

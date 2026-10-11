@@ -434,11 +434,17 @@ CREATE TABLE public.access_change_log (
 -- hook and git-proxy backstop) and carries a deterministic key so the twin collapses
 -- under ON CONFLICT DO NOTHING. current_url is the only column an UPDATE may touch:
 -- where the object lives now (reads serve COALESCE(current_url, url)).
+-- scope is the provider namespace the acted-on object lives in, the value an
+-- entity of that provider is scoped under (domain.ExternalObjectScope): the
+-- GitHub host, the Jira site, the Linear workspace id. target and dedup_key are
+-- only unique inside it.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     team_id uuid,
     provider text NOT NULL,
+    scope text NOT NULL
+        CONSTRAINT external_actions_scope_check CHECK (scope <> ''),
     action text NOT NULL,
     target text NOT NULL,
     external_id text,
@@ -646,14 +652,19 @@ CREATE TABLE public.linear_team_rules (
 );
 
 
--- One row per (team, github_org_login, github_team_slug): a team routing a
--- GitHub team's review requests to itself. Dumb string labels, no membership
+-- One row per (team, host, github_org_login, github_team_slug): a team routing
+-- a GitHub team's review requests to itself. Dumb string labels, no membership
 -- resolution. Pure key tuples — edits are replace-sets, so no UPDATE policy.
+-- host is the GitHub host (domain.GitHubHost) the GitHub team lives on: an org
+-- login names a different organization on another host, so every read and the
+-- deletion reconcile see only the org's current host's rows.
 CREATE TABLE public.team_github_groups (
     team_id uuid NOT NULL,
+    host text NOT NULL,
     github_org_login text NOT NULL,
     github_team_slug text NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT tgg_host_populated CHECK (host <> ''),
     CONSTRAINT tgg_org_login_populated CHECK (github_org_login <> ''),
     CONSTRAINT tgg_team_slug_populated CHECK (github_team_slug <> '')
 );
@@ -888,15 +899,20 @@ CREATE TABLE public.prompts (
 
 
 -- The registry of the repositories TF works with, and the target every
--- repository reference in this schema points at. (source, external_id) is the
--- half of a repository identity a rename does not move; source is app-validated.
--- Durable: untracking never deletes it, since a worktree or task may name it.
+-- repository reference in this schema points at. (source, host, external_id) is
+-- the half of a repository identity a rename does not move; source is
+-- app-validated. host is the GitHub host (domain.GitHubHost) the repository
+-- lives on: repository ids are per-deployment sequences and names repeat across
+-- deployments, so nothing matches across hosts. Durable: untracking never
+-- deletes it, since a worktree or task may name it.
 CREATE TABLE public.repositories (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
     owner text NOT NULL,
     repo text NOT NULL,
     source text DEFAULT 'github'::text NOT NULL,
+    host text NOT NULL
+        CONSTRAINT repositories_host_check CHECK (host <> ''),
     external_id text,
     description text,
     has_readme boolean DEFAULT false NOT NULL,
@@ -918,8 +934,12 @@ CREATE TABLE public.repositories (
 
 -- One row per external object a conversation produces (branch, PR, review,
 -- issue, comment); provider + kind discriminate, writers UPSERT on
--- (org_id, dedup_key). team_id is denormalized from the conversation so reads
--- scope by team; conversation_id is nullable so the row survives a purge.
+-- (org_id, scope, dedup_key). scope is the provider namespace the object lives
+-- in, the value an entity of that provider is scoped under
+-- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
+-- workspace id; target and dedup_key are only unique inside it. team_id is
+-- denormalized from the conversation so reads scope by team; conversation_id is
+-- nullable so the row survives a purge.
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -927,6 +947,8 @@ CREATE TABLE public.artifacts (
     team_id uuid NOT NULL,
     provider text NOT NULL,
     kind text NOT NULL,
+    scope text NOT NULL
+        CONSTRAINT artifacts_scope_check CHECK (scope <> ''),
     target text NOT NULL,
     external_id text,
     url text,
@@ -1528,7 +1550,7 @@ ALTER TABLE ONLY public.linear_team_rules
 
 
 ALTER TABLE ONLY public.team_github_groups
-    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, github_org_login, github_team_slug);
+    ADD CONSTRAINT team_github_groups_pkey PRIMARY KEY (team_id, host, github_org_login, github_team_slug);
 
 
 ALTER TABLE ONLY public.team_github_repos
@@ -1782,10 +1804,15 @@ CREATE INDEX idx_events_org_type_entity ON public.events USING btree (org_id, ev
 
 
 -- Repository natural key. source distinguishes providers issuing the same
--- owner/repo; lower() folds case, since GitHub identifiers are case-insensitive,
--- so a racing writer conflicts instead of inserting a twin. An expression key
--- must be an index, not a UNIQUE constraint; the store infers it in ON CONFLICT.
-CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, lower(owner), lower(repo));
+-- owner/repo and host the deployments of one provider; lower() folds case, since
+-- GitHub identifiers are case-insensitive, so a racing writer conflicts instead
+-- of inserting a twin. An expression key must be an index, not a UNIQUE
+-- constraint; the store infers it in ON CONFLICT.
+CREATE UNIQUE INDEX repositories_identity ON public.repositories USING btree (org_id, source, host, lower(owner), lower(repo));
+
+
+-- One row per provider id on a host: what a rename keys on.
+CREATE UNIQUE INDEX repositories_external_identity ON public.repositories USING btree (org_id, source, host, external_id) WHERE (external_id IS NOT NULL);
 
 
 -- Serves the ordered org-wide list the folded key cannot: ORDER BY owner, repo.
@@ -1809,7 +1836,7 @@ CREATE INDEX idx_access_change_log_org_created ON public.access_change_log USING
 -- Append-only dedup: the branch hook+proxy twin shares a deterministic key and
 -- collapses via ON CONFLICT DO NOTHING; any other duplicate is rejected.
 
-CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, dedup_key);
+CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING btree (org_id, scope, dedup_key);
 
 
 CREATE INDEX idx_external_actions_org_occurred ON public.external_actions USING btree (org_id, occurred_at DESC);
@@ -1821,7 +1848,7 @@ CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING
 CREATE INDEX idx_external_actions_conversation ON public.external_actions USING btree (conversation_id);
 
 
-CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, dedup_key);
+CREATE UNIQUE INDEX idx_artifacts_dedup ON public.artifacts USING btree (org_id, scope, dedup_key);
 
 
 CREATE INDEX idx_artifacts_team_created ON public.artifacts USING btree (team_id, created_at DESC);
@@ -3634,9 +3661,9 @@ CREATE POLICY org_github_apps_delete ON public.org_github_apps FOR DELETE TO tf_
     USING (((org_id = tf.current_org_id()) AND tf.user_is_org_admin(org_id)));
 
 
--- installation_id is unique only within one GitHub host, and per-org GHES bases
--- mean two orgs' numeric ids can overlap, so the PK is composite and github_host
--- records which GitHub the row came from. account_id is GitHub's numeric id for
+-- GitHub numbers installations per deployment, so an installation id names one
+-- installation only together with the host it lives on, and github_host is part
+-- of the key. account_id is GitHub's numeric id for
 -- the installed-on account, stored as text; it survives a rename, so credential
 -- resolution matches on it while account_login is what the UI renders. Nullable:
 -- an older row resolves by login until a reconcile or webhook fills it in.
@@ -3647,10 +3674,11 @@ CREATE TABLE public.org_github_app_installations (
     account_id text,
     account_login text NOT NULL,
     -- The GitHub deployment this installation lives on, normalized like every
-    -- other host key here (EffectiveGitHubHost): trailing slashes trimmed, an
-    -- unconfigured base URL resolving to https://github.com, and any path
-    -- component KEPT so a GHES mount path keys the same host as its identity rows.
-    github_host text DEFAULT 'https://github.com'::text NOT NULL,
+    -- other host key here (InstallationHostKey): canonical case, trailing
+    -- slashes trimmed, and any path component KEPT so a GHES mount path keys the
+    -- same host as its identity rows. No default: a row names the host it was
+    -- listed on.
+    github_host text NOT NULL,
     installed_at timestamp with time zone DEFAULT now() NOT NULL,
     removed_at timestamp with time zone,
     -- An account owner can suspend an installation without uninstalling it: the
@@ -3674,15 +3702,17 @@ CREATE TABLE public.org_github_app_installations (
 );
 
 ALTER TABLE ONLY public.org_github_app_installations
-    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, installation_id);
+    ADD CONSTRAINT org_github_app_installations_pkey PRIMARY KEY (org_id, github_host, installation_id);
 
 ALTER TABLE ONLY public.org_github_app_installations
     ADD CONSTRAINT org_github_app_installations_org_id_fkey FOREIGN KEY (org_id) REFERENCES public.orgs(id) ON DELETE CASCADE;
 
--- At most one active install per account, without overwriting history: an
--- uninstall stamps removed_at, a reinstall inserts a fresh installation_id.
+-- At most one active install per account on each GitHub deployment, without
+-- overwriting history: an uninstall stamps removed_at, a reinstall inserts a
+-- fresh installation_id. github_host is in the key because a login is unique
+-- only within one deployment: the same login on two GitHubs names two accounts.
 CREATE UNIQUE INDEX org_github_app_installations_active_account_key
-    ON public.org_github_app_installations (org_id, account_login)
+    ON public.org_github_app_installations (org_id, github_host, account_login)
     WHERE (removed_at IS NULL);
 
 -- An installation belongs to exactly one workspace per GitHub deployment. The
@@ -3770,11 +3800,14 @@ CREATE TABLE public.reachable_repositories (
         CONSTRAINT reachable_repositories_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
     -- The credential INSTANCE the reach was observed through — the scope one
-    -- refresh replaces atomically. Both App classes hang off the installation
-    -- row, which records its GitHub deployment and cascades on uninstall; the
-    -- PAT tier has none, so it carries the host directly.
+    -- refresh replaces atomically. Every row carries the GitHub it was observed
+    -- on. An App row also names its installation, and (org_id, host,
+    -- installation_id) is that installation's key, so the row hangs off the
+    -- installation on its own host and cascades with it; the PAT tier has no
+    -- installation, and its host alone is its scope.
     installation_id text,
-    host text,
+    host text NOT NULL
+        CONSTRAINT reachable_repositories_host_check CHECK (host <> ''),
     -- The issuing provider, carried so the registry join is written against the
     -- registry's own key (org_id, source, lower(owner), lower(repo)). Not part of
     -- this table's key: every row here is reached through a GitHub credential.
@@ -3797,31 +3830,32 @@ CREATE TABLE public.reachable_repositories (
     -- When the refresh that wrote this row ran: a staleness gate for the
     -- re-enumeration TTL and the write gate choosing cache over upstream probe.
     observed_at timestamp with time zone DEFAULT now() NOT NULL,
-    -- Exactly one scope column per class: with both, a row has two answers to
-    -- what one refresh replaces; with neither, it can never be replaced.
+    -- An installation exactly when the class has one: an App row without one
+    -- could never be replaced, and a PAT row with one would have two answers to
+    -- what one refresh replaces.
     CONSTRAINT reachable_repositories_scope_check
-        CHECK ((credential_class IN ('byo_app', 'managed_app') AND installation_id IS NOT NULL AND host IS NULL)
-            OR (credential_class = 'pat' AND installation_id IS NULL AND host IS NOT NULL))
+        CHECK ((credential_class IN ('byo_app', 'managed_app') AND installation_id IS NOT NULL)
+            OR (credential_class = 'pat' AND installation_id IS NULL))
 );
 
 ALTER TABLE ONLY public.reachable_repositories
     ADD CONSTRAINT reachable_repositories_installation_fkey
-    FOREIGN KEY (org_id, installation_id)
-    REFERENCES public.org_github_app_installations (org_id, installation_id) ON DELETE CASCADE;
+    FOREIGN KEY (org_id, host, installation_id)
+    REFERENCES public.org_github_app_installations (org_id, github_host, installation_id) ON DELETE CASCADE;
 
 -- The natural key per scope shape, case-folded like repositories_identity:
 -- GitHub identifiers are case-insensitive, so a case-sensitive index behind a
 -- case-insensitive guard admits duplicates when two writers race. Two partial
--- indexes, not one over coalesce(installation_id, host), which would collide.
+-- indexes, one per scope shape.
 --
 -- Both App classes share the App predicate rather than taking an index each:
--- the key already contains installation_id, an installation belongs to exactly
+-- the key already contains the installation, an installation belongs to exactly
 -- one App, and an org holds one class at a time, so a cross-class collision on
--- the same installation id is not constructible. A class outside both
+-- the same installation is not constructible. A class outside both
 -- predicates would carry no uniqueness constraint at all, and the writer's
 -- ON CONFLICT DO NOTHING would have no conflict to detect.
 CREATE UNIQUE INDEX reachable_repositories_app_identity
-    ON public.reachable_repositories USING btree (org_id, installation_id, lower(owner), lower(repo))
+    ON public.reachable_repositories USING btree (org_id, host, installation_id, lower(owner), lower(repo))
     WHERE credential_class IN ('byo_app', 'managed_app');
 
 CREATE UNIQUE INDEX reachable_repositories_pat_identity
@@ -3864,21 +3898,25 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.reachable_repositories TO t
 -- One row per refresh scope, so "we have not looked yet" is representable: a
 -- scope that legitimately reaches nothing writes zero repository rows, which
 -- row count alone cannot distinguish from an un-run refresh. No FK — scope
--- holds an installation id for byo_app and a host for pat, so there is no
--- single parent. App-pool members read; every app-pool write is denied.
+-- holds an installation id for the App classes and a host for pat, so there is
+-- no single parent; removing an installation deletes its markers in the same
+-- transaction. App-pool members read; every app-pool write is denied.
 CREATE TABLE public.reachable_scopes (
     org_id uuid NOT NULL,
     credential_class text NOT NULL
         CONSTRAINT reachable_scopes_class_check
         CHECK (credential_class IN ('pat', 'byo_app', 'managed_app')),
-    -- The credential instance one refresh replaces: the installation id for the
-    -- App classes, the host for pat. Opaque text, never joined on.
+    -- The GitHub the scope is on, and the credential instance one refresh
+    -- replaces there: the installation id for the App classes, the host again
+    -- for pat.
+    host text NOT NULL
+        CONSTRAINT reachable_scopes_host_check CHECK (host <> ''),
     scope text NOT NULL,
     refreshed_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY public.reachable_scopes
-    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, scope);
+    ADD CONSTRAINT reachable_scopes_pkey PRIMARY KEY (org_id, credential_class, host, scope);
 
 ALTER TABLE public.reachable_scopes ENABLE ROW LEVEL SECURITY;
 
@@ -5493,14 +5531,18 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.model_availability TO tf_ap
 -- capacity-weighted rendezvous order for one placement key — a manual pin or a
 -- hot-key replica count, nothing else (drain lives on the instances row).
 -- Checked before the hash and expected to stay nearly empty. key_kind is
--- 'repo', key_value "owner/repo"; org_id is plain text, matching the
--- rendezvous key's own org fold. A pin wins when both intents are set. Neither
--- is FK-validated — a pin to a retired instance self-heals via the claim's
--- aging tier. Admin-pool-only system table, same posture as instances: RLS
--- with NO policy plus REVOKE ALL, org_id bound by argument.
+-- 'repo', key_value "owner/repo", and host the GitHub host (domain.GitHubHost)
+-- that repository lives on: a slug names a repository only within one host,
+-- so a pin is one host's and a rename moves only that host's pins. org_id is
+-- plain text, matching the rendezvous key's own org fold. A pin wins when both
+-- intents are set. Neither is FK-validated — a pin to a retired instance
+-- self-heals via the claim's aging tier. Admin-pool-only system table, same
+-- posture as instances: RLS with NO policy plus REVOKE ALL, org_id bound by
+-- argument.
 CREATE TABLE public.placement_overrides (
     org_id             text NOT NULL,
     key_kind           text NOT NULL,
+    host               text NOT NULL,
     key_value          text NOT NULL,
     pinned_instance_id text,
     replicas           integer NOT NULL DEFAULT 0,
@@ -5508,7 +5550,7 @@ CREATE TABLE public.placement_overrides (
 );
 
 ALTER TABLE ONLY public.placement_overrides
-    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, key_value);
+    ADD CONSTRAINT placement_overrides_pkey PRIMARY KEY (org_id, key_kind, host, key_value);
 
 ALTER TABLE public.placement_overrides ENABLE ROW LEVEL SECURITY;
 

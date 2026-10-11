@@ -29,10 +29,8 @@ func (r *rig) availableKindsSystem(t *testing.T) []string {
 // different pool.
 func TestAvailableKindsSystem_AgreesWithTheClaimsResolve(t *testing.T) {
 	r := newRig(t)
-	r.saveCreds(t, auth.Credentials{
-		GitHubPAT: "ghp_test",
-		JiraURL:   "https://jira.example.com", JiraPAT: "jira-pat",
-	})
+	r.saveGitHubPAT(t)
+	r.saveJira(t, "https://jira.example.com", auth.Credentials{JiraPAT: "jira-pat"})
 	r.bindLinear(t, "api_key", "lin_api_x")
 
 	var claims []string
@@ -76,10 +74,8 @@ func TestAvailableKindsSystem_LinearFollowsItsCredential(t *testing.T) {
 // so it is never stamped into a claim's tools manifest.
 func TestAvailableKindsSystem_PauseExcludes(t *testing.T) {
 	r := newRig(t)
-	r.saveCreds(t, auth.Credentials{
-		GitHubPAT: "ghp_test",
-		JiraURL:   "https://jira.example.com", JiraPAT: "jira-pat",
-	})
+	r.saveGitHubPAT(t)
+	r.saveJira(t, "https://jira.example.com", auth.Credentials{JiraPAT: "jira-pat"})
 	r.pause(t, eventsource.KindJira)
 
 	got := r.availableKindsSystem(t)

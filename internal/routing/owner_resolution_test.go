@@ -9,6 +9,7 @@ import (
 	"time"
 
 	dbpkg "github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -120,11 +121,11 @@ type outageGitHubGroupsStore struct {
 	o *outage
 }
 
-func (s outageGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
+func (s outageGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, host, orgLogin, teamSlug string) ([]string, error) {
 	if s.o.down() {
 		return nil, errOutage
 	}
-	return s.TeamGitHubGroupsStore.TeamsForGroupSystem(ctx, orgID, orgLogin, teamSlug)
+	return s.TeamGitHubGroupsStore.TeamsForGroupSystem(ctx, orgID, host, orgLogin, teamSlug)
 }
 
 // identityQueueRouter wires every store the owning-team ladder reads (Users,
@@ -289,7 +290,7 @@ func TestOwnerResolution_StoreFailure_RequeuesThenRoutesToTheRightTeam(t *testin
 			seed: func(t *testing.T, database *sql.DB, _ *Router) (string, string) {
 				setReviewHost(t, database)
 				backend := seedTeam(t, database, "backend-tf")
-				if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(t.Context(), backend, []domain.TeamGitHubGroup{
+				if err := sqlitestore.New(database).TeamGitHubGroups.SetForTeam(t.Context(), backend, dbtest.TestGitHubHost, []domain.TeamGitHubGroup{
 					{OrgLogin: "acme", TeamSlug: "backend"},
 				}); err != nil {
 					t.Fatalf("map github team: %v", err)

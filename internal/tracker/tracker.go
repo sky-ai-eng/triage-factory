@@ -319,7 +319,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, resumeFrom, discoveryErr := t.discoverGitHub(ctx, client, username, repos)
+	discovered, quietRepos, resumeFrom, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
@@ -487,10 +487,19 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		return 0, "", discoveryErr
 	}
 
-	// Phase 2: Refresh active entities.
-	entities, err := t.entities.ListActiveSystem(context.Background(), orgID, "github")
+	// Phase 2: Refresh active entities on scope. A row polled from another
+	// host is never refreshed here: its node id means nothing to this host, and
+	// a stub's owner/repo#N may name a different pull request on it. The poller
+	// retires those rows before discovery (RetireGitHubOutOfScope).
+	listed, err := t.entities.ListActiveSystem(context.Background(), orgID, "github")
 	if err != nil {
 		return 0, "", fmt.Errorf("list active github entities: %w", err)
+	}
+	entities := make([]domain.Entity, 0, len(listed))
+	for _, e := range listed {
+		if e.Scope == scope {
+			entities = append(entities, e)
+		}
 	}
 
 	// Classify by snapshot state (open vs terminal) for query cost tiering.
@@ -871,7 +880,10 @@ const maxSearchQueryLen = 256
 // is an Auth failure, so a cycle whose every repo was refused that way reports
 // it: the credential reaches none of what the org tracks (an organization's
 // SAML enforcement, say), which is the auth-down state the poller records.
-func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, string, error) {
+//
+// scope is the GitHub host repos are on, which keys each repo's stored
+// conditional-request cursor.
+func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, string, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
@@ -940,7 +952,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 
 			etag := ""
 			if t.repos != nil {
-				if stored, _, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Owner: owner, Repo: name}); err != nil {
+				if stored, _, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Host: scope, Owner: owner, Repo: name}); err != nil {
 					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
 				} else {
 					etag = stored
@@ -990,10 +1002,10 @@ func (t *Tracker) discoverGitHub(ctx context.Context, client *ghclient.Client, u
 
 			if notModified {
 				span.SetAttributes(telemetry.Outcome("not_modified"))
-				t.recordPullsPoll(ctx, repoFull, etag) // advance polled_at, keep etag
+				t.recordPullsPoll(ctx, scope, repoFull, etag) // advance polled_at, keep etag
 			} else {
 				span.SetAttributes(telemetry.Outcome("listed"), telemetry.Count(len(prs)))
-				t.recordPullsPoll(ctx, repoFull, newEtag)
+				t.recordPullsPoll(ctx, scope, repoFull, newEtag)
 			}
 
 			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified}
@@ -1168,13 +1180,13 @@ type repoListResult struct {
 // recordPullsPoll persists the conditional-request state for a repo after a
 // successful list (200 or 304). Best-effort — a write failure just means the
 // next cycle re-lists unconditionally, costing one primary-limit request.
-func (t *Tracker) recordPullsPoll(ctx context.Context, repoFull, etag string) {
+func (t *Tracker) recordPullsPoll(ctx context.Context, scope, repoFull, etag string) {
 	if t.repos == nil {
 		return
 	}
 	// Ref-keyed: repoFull is one of the names ListTrackedNamesSystem handed
-	// this cycle, the same one that just went into the request path.
-	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(repoFull), etag, time.Now().UTC()); err != nil {
+	// this cycle for scope, the same one that just went into the request path.
+	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(scope, repoFull), etag, time.Now().UTC()); err != nil {
 		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
 	}
 }

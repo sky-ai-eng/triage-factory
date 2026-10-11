@@ -62,13 +62,19 @@ func runCheckPush(host agenthost.Client, stores db.Stores, args []string, refsIn
 	if !ok {
 		return 0
 	}
-	repoRef := domain.RepoRef{Owner: owner, Repo: repo}
-
 	info, err := host.LookupConversation(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hook check-push: no conversation context (%v); allowing push\n", err)
 		return 0
 	}
+	// The remote is on the org's GitHub host (the gate above), so the
+	// repository it names is that host's.
+	ghHost, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, info.OrgID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "hook check-push: could not read the org's GitHub host (%v); allowing push\n", err)
+		return 0
+	}
+	repoRef := domain.RepoRef{Host: ghHost, Owner: owner, Repo: repo}
 	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, repoRef, info.IsEventTriggered)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "hook check-push: could not evaluate base-branch push policy (%v); allowing push\n", err)

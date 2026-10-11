@@ -13,6 +13,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -55,8 +56,8 @@ func TestGitHubGroupCandidates_MembershipAndCounts(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -140,8 +141,8 @@ func TestGitHubGroupCandidates_ResolvedButNoTeams(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -226,8 +227,8 @@ func TestUserTeamsMulti_ReconstructsViaGraphQL(t *testing.T) {
 	// Org base URL + PAT both point at the stub so ghResolver.ClientFor
 	// resolves a tier-3 PAT-borrow client aimed at our GraphQL endpoint.
 	dbtest.SeedOrgSettings(t, srv.orgs, runmode.LocalDefaultOrgID, domain.OrgSettings{GitHubBaseURL: ts.URL})
+	seedSourceHost(t, srv, eventsource.KindGitHub, ts.URL)
 	if err := integrations.Save(ctx, srv.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: ts.URL,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)

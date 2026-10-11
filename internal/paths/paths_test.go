@@ -16,6 +16,10 @@ import (
 const (
 	realOrg  = "11111111-1111-1111-1111-111111111111"
 	otherOrg = "22222222-2222-2222-2222-222222222222"
+
+	// testRepositoryID stands in for a repositories row id, which is what a
+	// bare clone is keyed by.
+	testRepositoryID = "33333333-3333-3333-3333-333333333333"
 )
 
 func TestStateRoot_LocalDefault(t *testing.T) {
@@ -178,7 +182,7 @@ func TestResolvers_LocalLayout(t *testing.T) {
 		{"StateRoot", StateRoot(), "/s"},
 		{"OrgRoot", OrgRoot(realOrg), "/s"},
 		{"BareCacheRoot", BareCacheRoot(realOrg), filepath.Join("/s", "repos")},
-		{"BareCacheDir", BareCacheDir(realOrg, "octo", "cat"), filepath.Join("/s", "repos", "octo", "cat.git")},
+		{"BareCacheDir", BareCacheDir(realOrg, testRepositoryID), filepath.Join("/s", "repos", testRepositoryID+".git")},
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
 		{"DBPath", DBPath(), filepath.Join("/s", "triagefactory.db")},
@@ -201,7 +205,7 @@ func TestResolvers_MultiLayout(t *testing.T) {
 		// Class 1 — org-scoped.
 		{"OrgRoot", OrgRoot(realOrg), orgBase},
 		{"BareCacheRoot", BareCacheRoot(realOrg), filepath.Join(orgBase, "repos")},
-		{"BareCacheDir", BareCacheDir(realOrg, "octo", "cat"), filepath.Join(orgBase, "repos", "octo", "cat.git")},
+		{"BareCacheDir", BareCacheDir(realOrg, testRepositoryID), filepath.Join(orgBase, "repos", testRepositoryID+".git")},
 		// Class 2/3 — host-global / local, NO org segment.
 		{"SandboxRootfsDir", SandboxRootfsDir("abc"), filepath.Join("/s", "sandbox", "rootfs-abc")},
 		{"SDKDir", SDKDir(), filepath.Join("/s", "sdk")},
@@ -284,11 +288,11 @@ func TestMultiOrg_Isolation(t *testing.T) {
 	SetForTest(t, "/s")
 	t.Setenv(envToolchainRoot, "") // hermetic: the host-global asserts below go through ToolchainRoot
 
-	if a, b := BareCacheDir(realOrg, "o", "r"), BareCacheDir(otherOrg, "o", "r"); a == b {
+	if a, b := BareCacheDir(realOrg, testRepositoryID), BareCacheDir(otherOrg, testRepositoryID); a == b {
 		t.Errorf("BareCacheDir must differ across orgs, both = %q", a)
 	}
 	// Each org's clone actually lives under its own /orgs/<id>/ subtree.
-	if got := BareCacheDir(realOrg, "o", "r"); !strings.Contains(got, filepath.Join("orgs", realOrg)) {
+	if got := BareCacheDir(realOrg, testRepositoryID); !strings.Contains(got, filepath.Join("orgs", realOrg)) {
 		t.Errorf("BareCacheDir(%q) = %q, want it under the org subtree", realOrg, got)
 	}
 
@@ -299,6 +303,33 @@ func TestMultiOrg_Isolation(t *testing.T) {
 	}
 	if SDKDir() != filepath.Join("/s", "sdk") {
 		t.Errorf("SDKDir leaked an org segment: %q", SDKDir())
+	}
+}
+
+// TestBareCacheDir_KeyedByRepositoryID pins the bare clone's address: one
+// <repository_id>.git directly under the org's repos root, with no owner/repo
+// segments. Two repositories that share an owner/repo name (the same slug on
+// two GitHub hosts) are two rows with two ids, so they get two bares; the
+// name never enters the path.
+func TestBareCacheDir_KeyedByRepositoryID(t *testing.T) {
+	for _, mode := range []runmode.Mode{runmode.ModeLocal, runmode.ModeMulti} {
+		t.Run(string(mode), func(t *testing.T) {
+			runmode.SetForTest(t, mode)
+			SetForTest(t, "/s")
+
+			got := BareCacheDir(realOrg, testRepositoryID)
+			if dir := filepath.Dir(got); dir != BareCacheRoot(realOrg) {
+				t.Errorf("BareCacheDir parent = %q, want BareCacheRoot %q", dir, BareCacheRoot(realOrg))
+			}
+			if base := filepath.Base(got); base != testRepositoryID+".git" {
+				t.Errorf("BareCacheDir base = %q, want %q", base, testRepositoryID+".git")
+			}
+
+			const sameSlugOtherHost = "44444444-4444-4444-4444-444444444444"
+			if other := BareCacheDir(realOrg, sameSlugOtherHost); other == got {
+				t.Errorf("two repository ids resolved to one bare %q", got)
+			}
+		})
 	}
 }
 

@@ -34,14 +34,11 @@ import (
 // can't let these tests silently fall through to "not configured".
 type fakeJiraSecrets struct {
 	db.SecretStore
-	url string
 	pat string
 }
 
 func (f fakeJiraSecrets) GetSystem(_ context.Context, _ string, key string) (string, error) {
 	switch key {
-	case integrations.KeyJiraURL:
-		return f.url, nil
 	case integrations.KeyJiraPAT:
 		return f.pat, nil
 	default:
@@ -50,26 +47,27 @@ func (f fakeJiraSecrets) GetSystem(_ context.Context, _ string, key string) (str
 }
 
 // fakeJiraOrgs satisfies db.OrgsStore for NewResolver. GetSettingsSystem is the
-// one method the recording path reaches (jiraSiteBase, to build a browse URL);
-// it returns empty settings so the artifact URL is "" — the same as a
-// production org with no Jira base configured. The Jira API calls under test
-// touch no other OrgsStore method.
+// one method the Jira path reaches: the resolver reads the org's Jira site
+// from it, and the recording path builds a browse URL from the same value.
+// The Jira API calls under test touch no other OrgsStore method.
 type fakeJiraOrgs struct {
 	db.OrgsStore
+	site string
 }
 
-func (fakeJiraOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
-	return domain.OrgSettings{}, nil
+func (f fakeJiraOrgs) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{JiraBaseURL: f.site}, nil
 }
 
-// jiraStores builds a db.Stores whose Secrets resolve to the given Jira
-// host + token. Only Secrets/Orgs are populated — the host-routed Jira
-// methods touch nothing else on the bundle, so a minimal struct is the
-// honest fixture (and proves the methods don't reach for other stores).
+// jiraStores builds a db.Stores whose org's Jira site is url and whose
+// service credential is pat. Only Secrets/Orgs are populated — the
+// host-routed Jira methods touch nothing else on the bundle, so a minimal
+// struct is the honest fixture (and proves the methods don't reach for other
+// stores).
 func jiraStores(url, pat string) db.Stores {
 	return db.Stores{
-		Secrets: fakeJiraSecrets{url: url, pat: pat},
-		Orgs:    fakeJiraOrgs{},
+		Secrets: fakeJiraSecrets{pat: pat},
+		Orgs:    fakeJiraOrgs{site: url},
 	}
 }
 
@@ -181,7 +179,7 @@ func TestLocalClient_JiraGetIssue_ExecutorBundleFirst(t *testing.T) {
 	}))
 	defer jira.Close()
 
-	stores := db.Stores{Secrets: disabledJiraSecrets{}, Orgs: fakeJiraOrgs{}}
+	stores := db.Stores{Secrets: disabledJiraSecrets{}, Orgs: fakeJiraOrgs{site: jira.URL}}
 	lc := NewLocal(stores, ConversationInfo{OrgID: runmode.LocalDefaultOrgID, ConversationID: "conv-1"})
 
 	t.Run("no proxy creds: hits the disabled secret store (the pre-fix executor failure)", func(t *testing.T) {

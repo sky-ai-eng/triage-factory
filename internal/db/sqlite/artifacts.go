@@ -43,7 +43,7 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // artifactColumns is the SELECT list scanned into a domain.Artifact via
 // scanArtifact. Same order the Postgres impl projects.
 const artifactColumns = `
-	id, conversation_id, org_id, team_id, provider, kind, target,
+	id, conversation_id, org_id, team_id, provider, kind, scope, target,
 	external_id, url, state, dedup_key, details_json, created_at, updated_at
 `
 
@@ -51,18 +51,21 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	if err := assertLocalOrg(orgID); err != nil {
 		return domain.Artifact{}, err
 	}
+	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
+		return domain.Artifact{}, err
+	}
 	id := a.ID
 	if id == "" {
 		id = uuid.New().String()
 	}
-	// ON CONFLICT(org_id, dedup_key) updates the documented mutable fields
+	// ON CONFLICT(org_id, scope, dedup_key) updates the documented mutable fields
 	// from the proposed row (excluded.*) and bumps updated_at. id/created_at
 	// are preserved on the existing row — a conflicting insert keeps the
 	// original identity, the same UPSERT contract the Postgres impl has.
-	// provider/kind are deliberately NOT updated: they are encoded into
-	// dedup_key (the conflict target), so the insert side pins them and the
-	// update side leaves them rather than risk a row whose discriminators
-	// disagree with its key.
+	// provider/kind/scope are deliberately NOT updated: they are encoded into
+	// the conflict target, so the insert side pins them and the update side
+	// leaves them rather than risk a row whose discriminators disagree with
+	// its key.
 	//
 	// target/external_id/url are preserved-on-empty: they are the backing
 	// object's stable coordinates (resource key / PR number / issue key, html
@@ -89,10 +92,10 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// of its owning team's reads.
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
-			(id, conversation_id, org_id, team_id, provider, kind, target,
+			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(org_id, dedup_key) DO UPDATE SET
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(excluded.target, ''), artifacts.target),
@@ -102,7 +105,7 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 			details_json = excluded.details_json,
 			updated_at   = CURRENT_TIMESTAMP
 		RETURNING `+artifactColumns,
-		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
 		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	var out domain.Artifact
@@ -121,13 +124,17 @@ func (s *artifactStore) UpsertSystem(ctx context.Context, orgID string, a domain
 	return s.Upsert(ctx, orgID, a)
 }
 
-// InsertArtifactIfAbsentSystem inserts a only when no (org_id, dedup_key) row
-// exists — ON CONFLICT DO NOTHING — returning whether a row was inserted. See
+// InsertArtifactIfAbsentSystem inserts a only when no (org_id, scope,
+// dedup_key) row exists — ON CONFLICT DO NOTHING — returning whether a row was
+// inserted. See
 // the interface doc: it never overwrites an existing row, so the reconciler
 // backstop can't regress a PR's state. Identical single-connection path in
 // SQLite (no admin/app split).
 func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID string, a domain.Artifact) (bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return false, err
+	}
+	if err := db.RequireExternalObjectScope(a.Scope); err != nil {
 		return false, err
 	}
 	id := a.ID
@@ -136,11 +143,11 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 	}
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO artifacts
-			(id, conversation_id, org_id, team_id, provider, kind, target,
+			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
 			 external_id, url, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(org_id, dedup_key) DO NOTHING`,
-		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Target,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING`,
+		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
 		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	if err != nil {
@@ -263,18 +270,21 @@ func (s *artifactStore) ListByConversationSystem(ctx context.Context, orgID, con
 
 // ListPendingReviewsByTargetSystem is identical to a plain org read in SQLite:
 // local mode is single-tenant (N=1) with no RLS, so there is no admin/app pool
-// split. Filters to pending review drafts anchored to the given PR target. See
-// TFAC-501.
-func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, target string) ([]domain.Artifact, error) {
+// split. Filters to pending review drafts anchored to the given PR target on
+// scope's host.
+func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error) {
 	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
 		return nil, err
 	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT `+artifactColumns+`
 		FROM artifacts
-		WHERE org_id = ? AND kind = ? AND state = ? AND target = ?
+		WHERE org_id = ? AND kind = ? AND state = ? AND scope = ? AND target = ?
 		ORDER BY created_at DESC, id DESC
-	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, target)
+	`, orgID, domain.ArtifactKindReview, domain.ArtifactStateReviewPending, scope, target)
 	if err != nil {
 		return nil, err
 	}
@@ -511,7 +521,7 @@ func scanArtifactRows(rows *sql.Rows) ([]domain.Artifact, error) {
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	var conversationID, externalID, url, detailsJSON sql.NullString
 	if err := sc.Scan(
-		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Target,
+		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
 		&externalID, &url, &a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return err

@@ -18,7 +18,7 @@ import (
 // error text is the whole explanation an operator ever gets, at the far end of
 // a relay hop, in a different process from the store that produced it. A bare
 // driver error ("column X does not exist") says what broke without saying which
-// question was being asked, and these three ask quite different ones.
+// question was being asked, and these reads ask quite different ones.
 func TestGitAuthorizeDecision_ErrorNamesTheFailingRead(t *testing.T) {
 	boom := errors.New("boom")
 	info := agenthost.ConversationInfo{
@@ -33,8 +33,19 @@ func TestGitAuthorizeDecision_ErrorNamesTheFailingRead(t *testing.T) {
 		want   string
 	}{
 		{
+			name: "github host read",
+			stores: db.Stores{
+				Orgs:                  stubOrgsStore{err: boom},
+				TeamGitHubRepos:       failingTracksStore{tracks: true},
+				ConversationWorktrees: stubWorktreesStore{},
+				Repos:                 stubReposStore{},
+			},
+			want: "github host read",
+		},
+		{
 			name: "tracked-set read",
 			stores: db.Stores{
+				Orgs:                  stubOrgsStore{},
 				TeamGitHubRepos:       failingTracksStore{err: boom},
 				ConversationWorktrees: stubWorktreesStore{},
 				Repos:                 stubReposStore{},
@@ -44,11 +55,22 @@ func TestGitAuthorizeDecision_ErrorNamesTheFailingRead(t *testing.T) {
 		{
 			name: "worktree ledger read",
 			stores: db.Stores{
+				Orgs:                  stubOrgsStore{},
 				TeamGitHubRepos:       failingTracksStore{tracks: true},
 				ConversationWorktrees: stubWorktreesStore{err: boom},
 				Repos:                 stubReposStore{},
 			},
 			want: "worktree ledger read",
+		},
+		{
+			name: "repository read",
+			stores: db.Stores{
+				Orgs:                  stubOrgsStore{},
+				TeamGitHubRepos:       failingTracksStore{tracks: true},
+				ConversationWorktrees: stubWorktreesStore{},
+				Repos:                 stubReposStore{err: boom},
+			},
+			want: "repository read",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,8 +97,19 @@ type failingTracksStore struct {
 	err    error
 }
 
-func (s failingTracksStore) TracksRepoSystem(context.Context, string, string, string) (bool, error) {
+func (s failingTracksStore) TracksRepoSystem(context.Context, string, string, string, string) (bool, error) {
 	return s.tracks, s.err
+}
+
+// stubOrgsStore answers the org's settings read the gate makes for its GitHub
+// host: the default host, or err.
+type stubOrgsStore struct {
+	db.OrgsStore
+	err error
+}
+
+func (s stubOrgsStore) GetSettingsSystem(context.Context, string) (domain.OrgSettings, error) {
+	return domain.OrgSettings{}, s.err
 }
 
 type stubWorktreesStore struct {
@@ -88,6 +121,13 @@ func (s stubWorktreesStore) ListSystem(context.Context, string, string) ([]domai
 	return nil, s.err
 }
 
+// stubReposStore answers the gate's read of the repository on the org's host
+// with err; any other read panics on the embedded nil.
 type stubReposStore struct {
 	db.RepositoryStore
+	err error
+}
+
+func (s stubReposStore) GetByRefSystem(context.Context, string, domain.RepoRef) (*domain.Repository, error) {
+	return nil, s.err
 }

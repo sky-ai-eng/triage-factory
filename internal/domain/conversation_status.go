@@ -208,7 +208,9 @@ const (
 	// ParkReasonLaunchFailed — the runtime never started, and the claim's
 	// retry budget for this loss episode is spent. The conversation parks
 	// rather than fails: nothing ran, so there is nothing to have failed, and
-	// a message wakes it to try again.
+	// a message wakes it to try again. A conversation whose pull request is
+	// on a GitHub host the org is no longer on parks with it too, without
+	// the retries; its stop note names both hosts.
 	ParkReasonLaunchFailed ParkReason = "launch_failed"
 	// ParkReasonModelNotEnabled — the model this conversation would run on is
 	// one its team may no longer pick: its default, or the model the step it

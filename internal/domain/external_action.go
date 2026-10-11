@@ -46,6 +46,11 @@ type ExternalAction struct {
 	// consts). A branch push is a github action even though its artifact provider
 	// is "git".
 	Provider string `json:"provider"`
+	// Scope is the provider namespace the acted-on object lives in, as on an
+	// Artifact (ExternalObjectScope): the GitHub host, the Jira site, the
+	// Linear workspace id, SlackScope, NetworkScope. Target and DedupKey are
+	// only unique inside it. Required on every write.
+	Scope string `json:"scope"`
 	// Action is the discriminator — one of the Action* consts below. Free text
 	// (extensible — no CHECK constraint on the column).
 	Action string `json:"action"`
@@ -402,7 +407,7 @@ func ExternalActionTypes() []string {
 // "branch:<conversationID>:<ref>:<sha>". The git pre-push hook and the git-proxy
 // receive-pack backstop both observe the SAME push (same conversation, ref, sha), so they
 // produce an identical key and the twin collapses under ON CONFLICT(org_id,
-// dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
+// scope, dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
 // ref, or new commits) carries a different sha and is recorded as its own row.
 // This is one of the two actions with a deterministic natural key (the other is
 // EgressDenialDedupKey); every other action leaves DedupKey empty (the store
@@ -417,10 +422,10 @@ func BranchPushDedupKey(conversationID, ref, sha string) string {
 // blocked host in a tight loop, and hundreds of identical rows would bury the
 // signal rather than sharpen it — the thing worth recording is that THIS
 // conversation was refused THIS destination, so the repeats collapse under
-// ON CONFLICT(org_id, dedup_key) DO NOTHING.
+// ON CONFLICT(org_id, scope, dedup_key) DO NOTHING.
 //
-// The conversation id is load-bearing, not decoration: the unique index spans
-// (org_id, dedup_key), so a key built from the host alone would let one
+// The conversation id is load-bearing, not decoration: every denial shares one
+// scope (NetworkScope), so a key built from the host alone would let one
 // conversation's probe silently swallow every later conversation's probe of the
 // same host — org-wide, for the lifetime of the table.
 func EgressDenialDedupKey(conversationID, target string) string {
@@ -461,17 +466,19 @@ type ExternalActionListOpts struct {
 // lands in.
 func ArtifactAction(art *Artifact, actorUserID, action, from, to, credential string) ExternalAction {
 	// A PR artifact carries its html_url; a review artifact carries none (its
-	// target is the PR), so fall back to the PR web URL from the target — the
-	// audit row links somewhere rather than render non-clickable.
+	// target is the PR), so fall back to the PR web URL from the target on the
+	// artifact's host — the audit row links somewhere rather than render
+	// non-clickable.
 	url := art.URL
 	if url == "" {
 		if owner, repo, number, ok := ParsePRTarget(art.Target); ok {
-			url = GitHubPullURL(owner+"/"+repo, number)
+			url = GitHubPullURLBase(art.Scope, owner+"/"+repo, number)
 		}
 	}
 	return ExternalAction{
 		TeamID:         art.TeamID,
 		Provider:       ArtifactProviderGitHub,
+		Scope:          art.Scope,
 		Action:         action,
 		Target:         art.Target,
 		ExternalID:     art.ExternalID,

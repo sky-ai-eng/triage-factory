@@ -152,12 +152,16 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		creds, credsErr = integrations.Load(r.Context(), tx.Secrets, orgID)
 		var e error
-		repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID)
-		if e != nil {
-			return e
-		}
 		if orgSet, e = tx.Orgs.GetSettings(r.Context(), orgID); e != nil {
 			return e
+		}
+		// Repositories on the org's current GitHub host: one the org tracked on
+		// a host it has left is not a repository it has configured here, and
+		// an org with no GitHub URL has configured none.
+		if host := db.EffectiveGitHubHost(orgSet.GitHubBaseURL); host != "" {
+			if repoCount, e = tx.Repos.CountConfigured(r.Context(), orgID, host); e != nil {
+				return e
+			}
 		}
 		if orgModel, teamModel, e = setupModelPicks(r.Context(), tx, orgID); e != nil {
 			return e
@@ -215,7 +219,7 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 	// connected. cfg.Deployment is the authoritative Cloud-vs-DC answer (from the
 	// marker), surfaced below so the frontend seeds its deployment picker without
 	// re-guessing from the host shape (which is wrong for Cloud custom domains).
-	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds)
+	jiraCfg, jiraConnected := integrations.JiraSystemConfig(creds, orgSet.JiraBaseURL)
 
 	result := map[string]any{
 		"configured":     tenantExists,
@@ -228,11 +232,11 @@ func (s *Server) handleIntegrationsStatus(w http.ResponseWriter, r *http.Request
 		"setup_step":     setupStep,
 	}
 
-	if creds.GitHubURL != "" {
-		result["github_url"] = creds.GitHubURL
+	if orgSet.GitHubBaseURL != "" {
+		result["github_url"] = orgSet.GitHubBaseURL
 	}
-	if creds.JiraURL != "" {
-		result["jira_url"] = creds.JiraURL
+	if orgSet.JiraBaseURL != "" {
+		result["jira_url"] = orgSet.JiraBaseURL
 	}
 	if jiraConnected {
 		result["jira_deployment"] = string(jiraCfg.Deployment)

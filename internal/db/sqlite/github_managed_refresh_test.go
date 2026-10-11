@@ -104,13 +104,16 @@ func newManagedRefreshFixture(t *testing.T) (db.Stores, dbtest.GitHubManagedRefr
 		Reach: func(t *testing.T, orgID, installationID string) {
 			t.Helper()
 			if _, err := conn.Exec(`
-				INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
-				VALUES (?, 'managed_app', ?, 'reach', 'repo-' || ?)
-			`, orgID, installationID, installationID); err != nil {
+				INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo)
+				SELECT org_id, 'managed_app', installation_id, github_host, 'reach', 'repo-' || installation_id
+				  FROM org_github_app_installations WHERE org_id = ? AND installation_id = ?
+			`, orgID, installationID); err != nil {
 				t.Fatalf("seed reachable entry: %v", err)
 			}
 			if _, err := conn.Exec(`
-				INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'managed_app', ?)
+				INSERT INTO reachable_scopes (org_id, credential_class, host, scope)
+				SELECT org_id, 'managed_app', github_host, installation_id
+				  FROM org_github_app_installations WHERE org_id = ? AND installation_id = ?
 			`, orgID, installationID); err != nil {
 				t.Fatalf("seed reachable scope: %v", err)
 			}

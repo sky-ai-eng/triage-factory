@@ -31,6 +31,9 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err := db.BootstrapSchemaForTest(database); err != nil {
 		t.Fatalf("bootstrap schema: %v", err)
 	}
+	if err := db.SetLocalGitHubURLForTest(database, "https://github.com"); err != nil {
+		t.Fatalf("set github url: %v", err)
+	}
 	return database
 }
 
@@ -162,10 +165,19 @@ func memoryConversationIDs(t *testing.T, database *sql.DB, entityID string) map[
 // pass sees it.
 func seedArtifact(t *testing.T, database *sql.DB, conversationID string, a domain.Artifact) {
 	t.Helper()
+	stores := sqlitestore.New(database)
 	a.ConversationID = conversationID
 	a.OrgID = runmode.LocalDefaultOrgID
 	a.TeamID = runmode.LocalDefaultTeamID
-	if _, err := sqlitestore.New(database).Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
+	if a.Scope == "" {
+		// The org's current scope for the provider, as the exec funnel stamps it.
+		set, err := stores.Orgs.GetSettingsSystem(context.Background(), runmode.LocalDefaultOrgID)
+		if err != nil {
+			t.Fatalf("read org settings: %v", err)
+		}
+		a.Scope = domain.ExternalObjectScope(a.Provider, set)
+	}
+	if _, err := stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, a); err != nil {
 		t.Fatalf("seed artifact %s/%s: %v", a.Kind, a.State, err)
 	}
 }
@@ -259,6 +271,36 @@ func TestAttach_ProducedStubForUnpolledPR(t *testing.T) {
 	}
 	if !memoryConversationIDs(t, database, entB.ID)["r-prod"] {
 		t.Error("produced entity does not reach the conversation's memory through the join")
+	}
+}
+
+// TestAttach_ArtifactFromAnotherScopeAttachesNothing: a PR artifact recorded on
+// a GitHub host the org is no longer on names a pull request there, not the
+// same-numbered one on the current host, so it mints and attaches no entity.
+func TestAttach_ArtifactFromAnotherScopeAttachesNothing(t *testing.T) {
+	database := newTestDB(t)
+	seedConversation(t, database, "r-elsewhere")
+	ctx := context.Background()
+	entA := primaryEntity(t, database, "r-elsewhere")
+
+	if _, err := sqlitestore.New(database).TaskMemory.UpsertAgentMemorySystem(ctx, runmode.LocalDefaultOrgID, "r-elsewhere", "", "narrative", domain.MemorySourceAgent); err != nil {
+		t.Fatalf("upsert memory: %v", err)
+	}
+	pr := domain.NewPullRequestArtifact("o/r", 77, "node", "head", "main", "https://ghe.example.com/o/r/pull/77", "elsewhere", "", false)
+	pr.Scope = "https://ghe.example.com"
+	seedArtifact(t, database, "r-elsewhere", pr)
+
+	attachAll(t, database, runmode.LocalDefaultOrgID, "r-elsewhere", entA.ID)
+
+	if ent := entityBySource(t, database, "github", "o/r#77"); ent != nil {
+		t.Errorf("an artifact from another host minted an entity on the current one: %+v", ent)
+	}
+	var n int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM conversation_memory_entities WHERE conversation_id = ?`, "r-elsewhere").Scan(&n); err != nil {
+		t.Fatalf("count join rows: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("join rows = %d, want only the primary", n)
 	}
 }
 

@@ -26,12 +26,10 @@ import (
 // credential class this build does not understand.
 var credsLog = logging.Component("integrations")
 
-// The four well-known integration secret keys. The local SQLite shim
-// uses these names verbatim as keychain entry keys.
+// The well-known integration secret keys. The local SQLite shim uses these
+// names verbatim as keychain entry keys.
 const (
-	KeyGitHubURL = "github_url"
 	KeyGitHubPAT = "github_pat"
-	KeyJiraURL   = "jira_url"
 	KeyJiraPAT   = "jira_pat"
 )
 
@@ -71,6 +69,20 @@ const (
 // sweep this key so an upgrade from an older install leaves no orphan
 // keychain row.
 const legacyJiraDisplayName = "jira_display_name"
+
+// legacyJiraURL is the key a local install kept its Jira site under, beside
+// the service credential. An org's Jira site is org_settings.jira_base_url
+// alone: boot moves a stored value there (AdoptSavedJiraSite), and ClearJira
+// and the uninstall sweep remove the key so an install that never booted this
+// build leaves no orphan keychain row.
+const legacyJiraURL = "jira_url"
+
+// legacyGitHubURL is the key a local install kept its GitHub host under,
+// beside the PAT. An org's GitHub host is org_settings.github_base_url alone:
+// boot moves a stored value there (AdoptSavedGitHubHost), and ClearGitHub and
+// the uninstall sweep remove the key so an install that never booted this
+// build leaves no orphan keychain row.
+const legacyGitHubURL = "github_url"
 
 // legacyGitHubUsername is the legacy key that held the org bot's GitHub login
 // in the keychain. GitHub identity moved into the users.github_username
@@ -162,10 +174,10 @@ func BedrockKeys() []string {
 // clean-slate uses instead.
 func AllKeys() []string {
 	return []string{
-		KeyGitHubURL, KeyGitHubPAT,
-		KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
+		KeyGitHubPAT,
+		KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod,
 		KeyLinearAPIKey, KeyLinearAuthMethod, KeyLinearAppInstall, KeyLinearBoundAs,
-		legacyJiraDisplayName, legacyGitHubUsername,
+		legacyJiraDisplayName, legacyJiraURL, legacyGitHubURL, legacyGitHubUsername,
 	}
 }
 
@@ -276,9 +288,7 @@ func Load(ctx context.Context, secrets db.SecretStore, orgID string) (auth.Crede
 		}
 		*dst = v
 	}
-	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
-	get(KeyJiraURL, &creds.JiraURL)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
@@ -321,9 +331,7 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 		}
 		*dst = v
 	}
-	get(KeyGitHubURL, &creds.GitHubURL)
 	get(KeyGitHubPAT, &creds.GitHubPAT)
-	get(KeyJiraURL, &creds.JiraURL)
 	get(KeyJiraPAT, &creds.JiraPAT)
 	get(KeyJiraEmail, &creds.JiraEmail)
 	get(KeyJiraAPIToken, &creds.JiraAPIToken)
@@ -348,9 +356,7 @@ func LoadSystem(ctx context.Context, secrets db.SecretStore, orgID string) (auth
 // Linear credential and writes none of them.
 func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Credentials) error {
 	pairs := []struct{ key, value string }{
-		{KeyGitHubURL, c.GitHubURL},
 		{KeyGitHubPAT, c.GitHubPAT},
-		{KeyJiraURL, c.JiraURL},
 		{KeyJiraPAT, c.JiraPAT},
 		{KeyJiraEmail, c.JiraEmail},
 		{KeyJiraAPIToken, c.JiraAPIToken},
@@ -368,16 +374,17 @@ func Save(ctx context.Context, secrets db.SecretStore, orgID string, c auth.Cred
 }
 
 // JiraSystemConfig builds the jira.Config for an org's stored Jira service
-// credential from an already-loaded Credentials bundle, routed by the
-// auth-method marker (Cloud API token vs DC PAT) via jira.DeploymentForMarker.
-// It is the request-path analog of jira.Resolver.ForSystem for handlers that
-// already hold a Credentials bundle (read under the caller's claims), so they
-// don't re-read the secrets through the admin-pool resolver or re-implement the
-// Cloud-vs-DC branch. The base URL is canonicalized so the client talks to the
-// same origin the resolver would. ok=false when no usable credential is present
-// — no URL, or the scheme's credential half is missing.
-func JiraSystemConfig(c auth.Credentials) (jira.Config, bool) {
-	host, ok := jira.CanonicalHost(c.JiraURL)
+// credential from an already-loaded Credentials bundle and the org's Jira site
+// (org_settings.jira_base_url), routed by the auth-method marker (Cloud API
+// token vs DC PAT) via jira.DeploymentForMarker. It is the request-path analog
+// of jira.Resolver.ForSystem for handlers that already hold a Credentials
+// bundle (read under the caller's claims), so they don't re-read the secrets
+// through the admin-pool resolver or re-implement the Cloud-vs-DC branch. The
+// site is canonicalized so the client talks to the same origin the resolver
+// would. ok=false when no usable credential is present — no site, or the
+// scheme's credential half is missing.
+func JiraSystemConfig(c auth.Credentials, site string) (jira.Config, bool) {
+	host, ok := jira.CanonicalHost(site)
 	if !ok {
 		return jira.Config{}, false
 	}
@@ -437,7 +444,8 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // resolution decides: every arm below mirrors github.activeApp, and the PAT
 // signal stands exactly where that would actually borrow a PAT.
 //
-//	pat          the PAT is the credential. It answers.
+//	pat          the PAT is the credential. It answers when the org has a
+//	             GitHub URL to send it to (githubPATReady).
 //	byo_app      a live App answers; a registered-but-staged one is the middle
 //	             of a PAT→App switch, where the PAT is still what resolves, so
 //	             there the PAT answers.
@@ -453,12 +461,13 @@ func LinearSystemConfigured(c auth.Credentials) bool {
 // when the question was "would this workspace's credential system use it".
 //
 // The managed arm asks the one question that has an answer here: has this
-// workspace bound the shared App to any account? The App itself is a deployment
-// fact — configured in the operator's environment, not in anything this
-// function can read — so what makes it READY FOR THIS ORG is the bind, which is
-// also the only thing the org can do about it. Zero installations is a
-// workspace that has connected nothing, which is exactly what the setup step
-// exists to prompt.
+// workspace bound the shared App to any account on its current GitHub host? The
+// App itself is a deployment fact — configured in the operator's environment,
+// not in anything this function can read — so what makes it READY FOR THIS ORG
+// is the bind, which is also the only thing the org can do about it. Zero
+// installations on the host is a workspace that has connected nothing it can
+// use, which is exactly what the setup step exists to prompt; a binding left on
+// a host the org has moved off resolves nothing.
 //
 // A failed read is an ERROR, never a false. Reporting one as "not connected"
 // is indistinguishable to the caller from the real answer, and a caller that
@@ -480,15 +489,15 @@ func GitHubReady(ctx context.Context, orgs db.OrgsStore, apps db.GitHubAppsStore
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return creds.GitHubPAT != "", nil
+		return githubPATReady(creds, orgSet), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrg(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHost(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return creds.GitHubPAT != "", nil
+		return githubPATReady(creds, orgSet), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
@@ -517,15 +526,15 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 		}
 		// No App, or one still staged behind a live PAT: the PAT is what this
 		// org resolves through until the cutover flips it.
-		return creds.GitHubPAT != "", nil
+		return githubPATReady(creds, orgSet), nil
 	case domain.GitHubCredentialClassManagedApp:
-		insts, err := apps.ListInstallationsForOrgSystem(ctx, orgID)
+		insts, err := apps.ListInstallationsOnHostSystem(ctx, orgID, db.EffectiveGitHubHost(orgSet.GitHubBaseURL))
 		if err != nil {
 			return false, fmt.Errorf("read org github app installations: %w", err)
 		}
 		return len(insts) > 0, nil
 	case domain.GitHubCredentialClassPAT:
-		return creds.GitHubPAT != "", nil
+		return githubPATReady(creds, orgSet), nil
 	default:
 		credsLog.WarnContext(ctx, "unknown github credential class; reporting github unconfigured",
 			"org", orgID, "class", orgSet.GitHubCredentialClass)
@@ -533,19 +542,28 @@ func GitHubReadySystem(ctx context.Context, orgs db.OrgsStore, apps db.GitHubApp
 	}
 }
 
+// githubPATReady reports whether creds hold an org PAT and the org has a
+// GitHub URL to send it to. The URL cannot move while the PAT is bound, so a
+// PAT is always on the org's current host.
+func githubPATReady(creds auth.Credentials, orgSet domain.OrgSettings) bool {
+	return creds.GitHubPAT != "" && orgSet.GitHubBaseURL != ""
+}
+
 // GitHubKeys returns the org GitHub credential's keys in the order ClearGitHub
-// deletes them. A writer of these keys takes them in this order too: Postgres
+// deletes them, the legacy github_url included (see legacyGitHubURL above). A
+// writer of these keys takes them in this order too: Postgres
 // holds each row's lock until commit, so two writers taking the same rows in
 // different orders can deadlock.
 func GitHubKeys() []string {
-	return []string{KeyGitHubURL, KeyGitHubPAT}
+	return []string{legacyGitHubURL, KeyGitHubPAT}
 }
 
 // JiraKeys returns the org Jira credential's keys in the order ClearJira
-// deletes them, legacy jira_display_name included (see legacyJiraDisplayName
-// above). Writers take them in this order, for the reason GitHubKeys gives.
+// deletes them, the legacy jira_url and jira_display_name included (see
+// legacyJiraURL and legacyJiraDisplayName above). Writers take them in this
+// order, for the reason GitHubKeys gives.
 func JiraKeys() []string {
-	return []string{KeyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName}
+	return []string{legacyJiraURL, KeyJiraPAT, KeyJiraEmail, KeyJiraAPIToken, KeyJiraAuthMethod, legacyJiraDisplayName}
 }
 
 // LinearKeys returns the org Linear credential's keys in the order ClearLinear

@@ -50,16 +50,16 @@ import (
 //
 // Runs HOST-SIDE in both modes (the agenthost daemon calls it on the sandbox's
 // behalf in multi), so WithCloneAuth is honored for the clone and fetch.
-func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey, runRoot string, opts ...CloneOption) (string, error) {
+func CreateForPRInRoot(ctx context.Context, r Repo, upstreamCloneURL, headCloneURL, headBranch string, prNumber int, rootKey, runRoot string, opts ...CloneOption) (string, error) {
 	if runRoot == "" {
 		return "", fmt.Errorf("CreateForPRInRoot: runRoot is required")
 	}
 	cfg := resolveCloneOptions(opts)
-	wtDir := filepath.Join(runRoot, owner, repo, PRRefSlug(prNumber))
-	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(owner, repo)); err != nil {
+	wtDir := filepath.Join(runRoot, r.Owner, r.Name, PRRefSlug(prNumber))
+	if err := sandbox.MkdirRunTreeScaffold(runRoot, filepath.Join(r.Owner, r.Name)); err != nil {
 		return "", fmt.Errorf("mkdir repo subdir: %w", err)
 	}
-	return createPRWorktreeAt(ctx, owner, repo, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
+	return createPRWorktreeAt(ctx, r, upstreamCloneURL, headCloneURL, headBranch, cfg.baseBranch, prNumber, rootKey, wtDir, cfg.auth, selfContainedRunTrees())
 }
 
 // createPRWorktreeAt is CreateForPRInRoot's body — bare-clone setup,
@@ -68,12 +68,12 @@ func CreateForPRInRoot(ctx context.Context, owner, repo, upstreamCloneURL, headC
 // linked `git worktree` (selfContained=false) or, for a sandboxed run in either
 // mode, as a self-contained clone (selfContained=true — see
 // finishSelfContainedPRClone). wtDir's parent is created by the caller.
-func createPRWorktreeAt(ctx context.Context, owner, repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, rootKey, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
-	mu := lockRepo(owner, repo)
+func createPRWorktreeAt(ctx context.Context, r Repo, upstreamCloneURL, headCloneURL, headBranch, baseBranch string, prNumber int, rootKey, wtDir string, auth CloneAuth, selfContained bool) (string, error) {
+	mu := lockRepo(r.ID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := ensureBareCloneLocked(ctx, owner, repo, upstreamCloneURL, auth)
+	bareDir, err := ensureBareCloneLocked(ctx, r, upstreamCloneURL, auth)
 	if err != nil {
 		return "", err
 	}
@@ -446,12 +446,12 @@ const cleanupTimeout = 30 * time.Second
 // individual git invocations are swallowed — cleanup is best-effort
 // and a partial failure shouldn't propagate up the run-finalization
 // path.
-func CleanupPRConfig(owner, repo string, prNumber int, rootKey string) {
-	mu := lockRepo(owner, repo)
+func CleanupPRConfig(repositoryID string, prNumber int, rootKey string) {
+	mu := lockRepo(repositoryID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := repoDir(owner, repo)
+	bareDir, err := repoDir(repositoryID)
 	if err != nil {
 		return
 	}
@@ -517,12 +517,12 @@ func removePRConfigLocked(ctx context.Context, bareDir, localBranch string, prNu
 // reclaim of one orphan can never touch a concurrent run's config.
 // Best-effort: orphan-detection failures or partial removes correct
 // themselves on the next bootstrap.
-func SweepStaleForkPRConfig(owner, repo string) {
-	mu := lockRepo(owner, repo)
+func SweepStaleForkPRConfig(repositoryID string) {
+	mu := lockRepo(repositoryID)
 	mu.Lock()
 	defer mu.Unlock()
 
-	bareDir, err := repoDir(owner, repo)
+	bareDir, err := repoDir(repositoryID)
 	if err != nil {
 		return
 	}

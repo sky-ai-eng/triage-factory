@@ -20,13 +20,16 @@ func newTeamGitHubGroupsStore(q, _ queryer) db.TeamGitHubGroupsStore {
 
 var _ db.TeamGitHubGroupsStore = (*teamGitHubGroupsStore)(nil)
 
-func (s *teamGitHubGroupsStore) ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubGroup, error) {
+func (s *teamGitHubGroupsStore) ListForTeam(ctx context.Context, teamID, host string) ([]domain.TeamGitHubGroup, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT github_org_login, github_team_slug
 		FROM team_github_groups
-		WHERE team_id = ?
+		WHERE team_id = ? AND host = ?
 		ORDER BY github_org_login ASC, github_team_slug ASC
-	`, teamID)
+	`, teamID, host)
 	if err != nil {
 		return nil, fmt.Errorf("read team_github_groups: %w", err)
 	}
@@ -42,26 +45,29 @@ func (s *teamGitHubGroupsStore) ListForTeam(ctx context.Context, teamID string) 
 	return out, rows.Err()
 }
 
-func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID string, groups []domain.TeamGitHubGroup) error {
+func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID, host string, groups []domain.TeamGitHubGroup) error {
 	norm, err := domain.NormalizeTeamGitHubGroups(groups)
 	if err != nil {
 		return err
 	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return err
+	}
 	// Replace-set: every column is part of the primary key, so delete
-	// the whole set and re-insert the survivors inside one tx — there is
+	// the host's set and re-insert the survivors inside one tx — there is
 	// nothing to update in place.
 	return inTx(ctx, s.q, func(tx queryer) error {
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM team_github_groups WHERE team_id = ?`, teamID,
+			`DELETE FROM team_github_groups WHERE team_id = ? AND host = ?`, teamID, host,
 		); err != nil {
 			return fmt.Errorf("clear team_github_groups: %w", err)
 		}
 		for _, g := range norm {
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO team_github_groups (team_id, github_org_login, github_team_slug)
-				VALUES (?, ?, ?)
-				ON CONFLICT(team_id, github_org_login, github_team_slug) DO NOTHING
-			`, teamID, g.OrgLogin, g.TeamSlug); err != nil {
+				INSERT INTO team_github_groups (team_id, host, github_org_login, github_team_slug)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(team_id, host, github_org_login, github_team_slug) DO NOTHING
+			`, teamID, host, g.OrgLogin, g.TeamSlug); err != nil {
 				return fmt.Errorf("insert team_github_groups[%s/%s]: %w", g.OrgLogin, g.TeamSlug, err)
 			}
 		}
@@ -69,16 +75,20 @@ func (s *teamGitHubGroupsStore) SetForTeam(ctx context.Context, teamID string, g
 	})
 }
 
-func (s *teamGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, orgLogin, teamSlug string) ([]string, error) {
+func (s *teamGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, host, orgLogin, teamSlug string) ([]string, error) {
+	if err := db.RequireRepoHost(host); err != nil {
+		return nil, err
+	}
 	rows, err := s.q.QueryContext(ctx, `
 		SELECT g.team_id
 		FROM team_github_groups g
 		JOIN teams t ON t.id = g.team_id
 		WHERE t.org_id = ?
+		  AND g.host = ?
 		  AND g.github_org_login = ?
 		  AND g.github_team_slug = ?
 		ORDER BY g.team_id ASC
-	`, orgID, strings.ToLower(strings.TrimSpace(orgLogin)), strings.ToLower(strings.TrimSpace(teamSlug)))
+	`, orgID, host, strings.ToLower(strings.TrimSpace(orgLogin)), strings.ToLower(strings.TrimSpace(teamSlug)))
 	if err != nil {
 		return nil, fmt.Errorf("teams for github group: %w", err)
 	}
@@ -94,10 +104,13 @@ func (s *teamGitHubGroupsStore) TeamsForGroupSystem(ctx context.Context, orgID, 
 	return out, rows.Err()
 }
 
-func (s *teamGitHubGroupsStore) PruneMissingSystem(ctx context.Context, orgID, orgLogin string, presentSlugs []string) (int, error) {
+func (s *teamGitHubGroupsStore) PruneMissingSystem(ctx context.Context, orgID, host, orgLogin string, presentSlugs []string) (int, error) {
 	login := strings.ToLower(strings.TrimSpace(orgLogin))
 	if login == "" {
 		return 0, fmt.Errorf("PruneMissingSystem: empty orgLogin")
+	}
+	if err := db.RequireRepoHost(host); err != nil {
+		return 0, err
 	}
 	keep := domain.NormalizeGitHubTeamSlugs(presentSlugs)
 	// Empty present-set → every mapping for this org login is stale.
@@ -106,9 +119,9 @@ func (s *teamGitHubGroupsStore) PruneMissingSystem(ctx context.Context, orgID, o
 	if len(keep) == 0 {
 		res, err := s.q.ExecContext(ctx, `
 			DELETE FROM team_github_groups
-			WHERE github_org_login = ?
+			WHERE github_org_login = ? AND host = ?
 			  AND team_id IN (SELECT id FROM teams WHERE org_id = ?)
-		`, login, orgID)
+		`, login, host, orgID)
 		if err != nil {
 			return 0, fmt.Errorf("prune team_github_groups (clear %s): %w", login, err)
 		}
@@ -116,15 +129,15 @@ func (s *teamGitHubGroupsStore) PruneMissingSystem(ctx context.Context, orgID, o
 		return int(n), nil
 	}
 	placeholders := make([]string, len(keep))
-	args := make([]any, 0, len(keep)+2)
-	args = append(args, login, orgID)
+	args := make([]any, 0, len(keep)+3)
+	args = append(args, login, host, orgID)
 	for i, slug := range keep {
 		placeholders[i] = "?"
 		args = append(args, slug)
 	}
 	query := fmt.Sprintf(`
 		DELETE FROM team_github_groups
-		WHERE github_org_login = ?
+		WHERE github_org_login = ? AND host = ?
 		  AND team_id IN (SELECT id FROM teams WHERE org_id = ?)
 		  AND github_team_slug NOT IN (%s)
 	`, strings.Join(placeholders, ", "))

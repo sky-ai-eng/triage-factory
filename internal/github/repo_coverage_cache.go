@@ -16,12 +16,16 @@ import (
 const repoCoverageTTL = 5 * time.Minute
 
 // repoCoverageCache memoizes ClientForRepo's installation-grant probe, keyed by
-// (orgID, owner/repo). Within one org an account login maps to at most one
-// active installation — the mirror's partial unique on (org_id, account_login)
-// WHERE removed_at IS NULL makes it so — which is what lets the owner/repo pair
-// serve as a key without the installation id. Note what that rests on: a login
-// is a renameable handle, so the key is stable only for as long as the handle
-// keeps pointing at the same account (see below).
+// (orgID, host, owner/repo). The host is the GitHubHost the probe ran against:
+// a slug names a different repository on another deployment, so an answer
+// about one host's repository never vouches for another's. Within one org and
+// one host an account login maps to at most one active installation — the
+// mirror's partial unique on (org_id, github_host, account_login) WHERE
+// removed_at IS NULL makes it so, and installationFor chooses only among the
+// installations on the host it resolves for — which is what lets the
+// (host, owner/repo) key serve without the installation id. Note what that
+// rests on: a login is a renameable handle, so the key is stable only for as
+// long as the handle keeps pointing at the same account (see below).
 //
 // It caches the POSITIVE answer only — "this repo is in the grant." That choice
 // is deliberate:
@@ -76,8 +80,8 @@ func (c *repoCoverageCache) timeNow() time.Time {
 
 // covered reports whether owner/repo is known-covered and still within its TTL.
 // A false return (miss or expired) means "unknown — probe GitHub."
-func (c *repoCoverageCache) covered(orgID, owner, repo string) bool {
-	key := coverageKey(orgID, owner, repo)
+func (c *repoCoverageCache) covered(orgID, host, owner, repo string) bool {
+	key := coverageKey(orgID, host, owner, repo)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	exp, ok := c.expires[key]
@@ -92,26 +96,26 @@ func (c *repoCoverageCache) covered(orgID, owner, repo string) bool {
 }
 
 // markCovered records owner/repo as covered until now+repoCoverageTTL.
-func (c *repoCoverageCache) markCovered(orgID, owner, repo string) {
+func (c *repoCoverageCache) markCovered(orgID, host, owner, repo string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.expires[coverageKey(orgID, owner, repo)] = c.timeNow().Add(repoCoverageTTL)
+	c.expires[coverageKey(orgID, host, owner, repo)] = c.timeNow().Add(repoCoverageTTL)
 }
 
 // forget drops owner/repo's entry so the next call re-probes. A miss is a
 // no-op — the cache holds positives only, so "not there" is already the
 // answer forget produces.
-func (c *repoCoverageCache) forget(orgID, owner, repo string) {
+func (c *repoCoverageCache) forget(orgID, host, owner, repo string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.expires, coverageKey(orgID, owner, repo))
+	delete(c.expires, coverageKey(orgID, host, owner, repo))
 }
 
-// coverageKey joins org + slug with a NUL so no pair can alias another by
-// concatenation; the slug is lowercased to match GitHub's case-insensitive
+// coverageKey joins org, host and slug with NULs so no triple can alias another
+// by concatenation; the slug is lowercased to match GitHub's case-insensitive
 // owner/repo handling.
-func coverageKey(orgID, owner, repo string) string {
-	return orgID + "\x00" + strings.ToLower(owner+"/"+repo)
+func coverageKey(orgID, host, owner, repo string) string {
+	return orgID + "\x00" + host + "\x00" + strings.ToLower(owner+"/"+repo)
 }
 
 // RepoCoverageInvalidator is the optional Resolver extension that drops a
@@ -125,10 +129,12 @@ func coverageKey(orgID, owner, repo string) string {
 // repository: the old slug's for one that no longer answers to that name, the
 // new slug's for whatever repository was called that before. Both have to be
 // re-probed rather than inherited.
+//
+// host is the GitHubHost the renamed repository lives on.
 type RepoCoverageInvalidator interface {
-	InvalidateRepoCoverage(orgID, owner, repo string)
+	InvalidateRepoCoverage(orgID, host, owner, repo string)
 }
 
-func (r *resolver) InvalidateRepoCoverage(orgID, owner, repo string) {
-	r.coverage.forget(orgID, owner, repo)
+func (r *resolver) InvalidateRepoCoverage(orgID, host, owner, repo string) {
+	r.coverage.forget(orgID, host, owner, repo)
 }

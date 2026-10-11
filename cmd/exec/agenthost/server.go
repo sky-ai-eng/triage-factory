@@ -535,7 +535,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		w, err := client.GetConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		w, err := client.GetConversationWorktreeByRepoRef(ctx, a.RepositoryID, a.Ref)
 		if err != nil {
 			return nil, err
 		}
@@ -564,7 +564,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, client.DeleteConversationWorktreeByRepoRef(ctx, a.RepoID, a.Ref)
+		return emptyResult{}, client.DeleteConversationWorktreeByRepoRef(ctx, a.RepositoryID, a.Ref)
 
 	case methodWorkspaceRoots:
 		// A jailed caller sees the host run root only through the /work bind

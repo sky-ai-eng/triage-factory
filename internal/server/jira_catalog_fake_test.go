@@ -12,6 +12,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/zalando/go-keyring"
@@ -200,8 +201,9 @@ func newServerWithJiraCatalog(t *testing.T, keys ...string) (*Server, *jiraCatal
 	keyring.MockInit()
 	fake := newJiraCatalogFake(t, keys...)
 	s := newTestServer(t)
+	seedSourceHost(t, s, eventsource.KindJira, fake.URL)
 	if err := integrations.Save(t.Context(), s.secrets, runmode.LocalDefaultOrgID,
-		auth.Credentials{JiraURL: fake.URL, JiraPAT: "org-pat"}); err != nil {
+		auth.Credentials{JiraPAT: "org-pat"}); err != nil {
 		t.Fatalf("seed jira creds: %v", err)
 	}
 	return s, fake

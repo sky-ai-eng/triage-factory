@@ -12,17 +12,22 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/pgtest"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 )
 
-// seedJiraCredential stores a Data Center Jira service credential for the org,
-// pointed at baseURL, written as userID the way the credential route writes it.
+// seedJiraCredential makes baseURL the org's Jira site and stores a Data
+// Center Jira service credential for it, written as userID the way the
+// credential route writes them.
 func (r *authRig) seedJiraCredential(orgID, userID uuid.UUID, baseURL string) {
 	r.t.Helper()
 	ctx := context.Background()
 	if err := r.srv.tx.WithTx(ctx, orgID.String(), userID.String(), func(tx db.TxStores) error {
+		if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID.String(), eventsource.KindJira, baseURL); err != nil {
+			return err
+		}
 		return integrations.Save(ctx, tx.Secrets, orgID.String(),
-			auth.Credentials{JiraURL: baseURL, JiraPAT: "org-pat"})
+			auth.Credentials{JiraPAT: "org-pat"})
 	}); err != nil {
 		r.t.Fatalf("seed jira credential: %v", err)
 	}

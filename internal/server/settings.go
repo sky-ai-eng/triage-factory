@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -43,9 +44,10 @@ type settingsHandler struct {
 	// construction site in routes() hands this handler the one method rather
 	// than a back-reference to the whole server.
 	kickJira func(r *http.Request, orgID string)
-	// guardJiraWrite prepares the Jira bind's keychain writes in local mode,
-	// taking the lock the unbind takes too: the Server's guardLocalJiraWrite,
-	// wired from routes() like kickJira.
+	// guardJiraWrite takes the org's Jira credential lock, which the unbind
+	// and a settings save moving the Jira site take too, and prepares the
+	// bind's keychain writes in local mode: the Server's guardJiraWrite, wired
+	// from routes() like kickJira.
 	guardJiraWrite func(ctx context.Context, orgID string) (restore, unlock func(), err error)
 	// guardAnthropicWrite and guardBedrockWrite do the same for the LLM
 	// credential binds and unbinds: the Server's guardLocalAnthropicWrite and
@@ -407,9 +409,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		}
 		url, email, token = req.URL, req.Email, req.Token
 		var v httpx.Validation
-		if url == "" {
-			v.Missing("url")
-		}
+		url = validateJiraSite(&v, url)
 		if email == "" {
 			v.Missing("email")
 		}
@@ -427,9 +427,7 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		}
 		url, pat = req.URL, req.PAT
 		var v httpx.Validation
-		if url == "" {
-			v.Missing("url")
-		}
+		url = validateJiraSite(&v, url)
 		if pat == "" {
 			v.Invalid("pat", "a personal access token is required for Jira Data Center")
 		}
@@ -488,13 +486,29 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 	// and user identity stay independent even when the same token connects
 	// the org.
 	if err := se.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		// A rotation stays on the site its credential was issued for: a Jira
+		// credential works only on its own site, and the org's site is the one
+		// record of which site that is. Moving to another site is a disconnect
+		// and a fresh connect.
+		cur, err := tx.Orgs.GetSettings(r.Context(), orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		if cur.JiraBaseURL != url {
+			prior, err := integrations.Load(r.Context(), tx.Secrets, orgID)
+			if err != nil {
+				return fmt.Errorf("load jira credential: %w", err)
+			}
+			if _, connected := integrations.JiraSystemConfig(prior, cur.JiraBaseURL); connected {
+				return fmt.Errorf("the org's Jira credential is connected to %s: %w", cur.JiraBaseURL, errJiraSiteHasCredential)
+			}
+		}
 		// The keys are written in the order ClearJira deletes them, the
 		// unbind's order (integrations.JiraKeys). A key the chosen deployment
 		// does not use is deleted, so switching between Cloud and Data Center
 		// leaves no stale secret for a later read to mistake for the org's
 		// auth.
 		for _, kv := range [][2]string{
-			{integrations.KeyJiraURL, url},
 			{integrations.KeyJiraPAT, pat},
 			{integrations.KeyJiraEmail, email},
 			{integrations.KeyJiraAPIToken, token},
@@ -527,6 +541,12 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		if restore != nil {
 			restore()
 		}
+		if errors.Is(err, errJiraSiteHasCredential) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason: httpx.ReasonConflict, Message: err.Error(), Field: "url",
+			})
+			return
+		}
 		// Log the underlying wrap-chain (SQL / vault / FK errors) for
 		// operator debugging, but return a stable user-facing message
 		// so we don't leak Postgres internals to API clients.
@@ -544,6 +564,27 @@ func (se *settingsHandler) handleJiraConnect(w http.ResponseWriter, r *http.Requ
 		"status":       "connected",
 		"display_name": jiraUser.DisplayName,
 	})
+}
+
+// errJiraSiteHasCredential refuses moving an org's Jira site while its Jira
+// service credential is stored: the credential works only on the site that
+// issued it, and the org's site is the one record of which site that is.
+var errJiraSiteHasCredential = errors.New("a Jira credential only works on the Jira site that issued it — disconnect it before changing the Jira URL")
+
+// validateJiraSite checks a Jira credential body's url and returns it in the
+// canonical form the org's site is stored and compared in, recording a fault
+// on v when it is missing or is not an http(s) URL.
+func validateJiraSite(v *httpx.Validation, raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		v.Missing("url")
+		return ""
+	}
+	site, ok := jira.CanonicalHost(raw)
+	if !ok {
+		v.Invalid("url", "must be an http or https URL")
+		return ""
+	}
+	return site
 }
 
 // decodeJiraDeployment takes the lenient first look at a Jira credential body:
@@ -605,25 +646,25 @@ func (se *settingsHandler) handleGitHubPreflightSSH(w http.ResponseWriter, r *ht
 		notFound(w, "route")
 		return
 	}
-	// Probe target tracks the configured GitHub base URL so the Test
-	// SSH button on the Settings page works for GHE deployments. We
-	// load creds (not settings) because creds.GitHubURL is the URL the
-	// user actually authenticates against; org_settings.github_base_url
-	// mirrors it but the SecretStore copy is the source of truth.
-	// Wrapped in WithTx so the org_secrets read sees claims and matches
-	// the rest of the settings surface.
+	// Probe target tracks the org's GitHub base URL so the Test SSH button on
+	// the Settings page works for GHE deployments. Read under the request's
+	// claims, like the rest of the settings surface.
 	orgID := OrgIDFrom(r.Context())
 	userID := ClaimsFrom(r.Context()).Subject
-	var creds auth.Credentials
+	var orgSet domain.OrgSettings
 	if err := se.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var lerr error
-		creds, lerr = integrations.Load(r.Context(), tx.Secrets, orgID)
+		orgSet, lerr = tx.Orgs.GetSettings(r.Context(), orgID)
 		return lerr
 	}); err != nil {
-		internalError(w, "settings", fmt.Errorf("load integration credentials: %w", err))
+		internalError(w, "settings", fmt.Errorf("load org settings: %w", err))
 		return
 	}
-	sshHost := worktree.SSHHostFromBaseURL(creds.GitHubURL)
+	if orgSet.GitHubBaseURL == "" {
+		writeNotConfigured(w, "set this workspace's GitHub URL before testing SSH")
+		return
+	}
+	sshHost := worktree.SSHHostFromBaseURL(orgSet.GitHubBaseURL)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()

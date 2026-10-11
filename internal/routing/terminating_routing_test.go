@@ -218,6 +218,8 @@ func TestTerminalCloseSet_CoversTaskTypes(t *testing.T) {
 		}
 	}
 	covers("github:pr:", githubPRTerminalCloseTypes(), domain.EventGitHubPRMerged, domain.EventGitHubPRClosed)
+	// Like Jira's, GitHub's unreachable set spares only its own type.
+	covers("github:pr:", githubPRCloseTypesExcept(domain.EventGitHubPRUnreachable), domain.EventGitHubPRUnreachable)
 	covers("jira:issue:", jiraIssueTerminalCloseTypes(), domain.EventJiraIssueCompleted)
 	// The unreachable set is checked separately because it spares a different
 	// type: a completion can leave a jira:issue:completed task standing, an

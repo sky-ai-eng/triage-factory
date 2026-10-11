@@ -181,17 +181,25 @@ type snapshotManifest struct {
 	WriterClaimID string `json:"writer_claim_id,omitempty"`
 }
 
-// manifestCheckout is one checkout in a snapshot: which repo and slug it is,
-// where under the root it sits, the HEAD and branch it was on, and the names of
-// its delta's members ("" when the capture carried none).
+// manifestCheckout is one checkout in a snapshot: which repository and slug it
+// is, where under the root it sits, the HEAD and branch it was on, and the
+// names of its delta's members ("" when the capture carried none).
+//
+// RepositoryID is the repository's registry row id, which is what a restore
+// rebuilds against: the bare cache is keyed by it, and an owner/repo name can
+// belong to a different repository once the org's GitHub host changes. RepoID
+// is the owner/repo name the checkout sits under. Blobs written before the row
+// id was recorded carry RepoID alone; a restore resolves that name on the GitHub
+// host of the task's own entity.
 type manifestCheckout struct {
-	RepoID string `json:"repo_id"`
-	Slug   string `json:"slug"`
-	Path   string `json:"path"`
-	Head   string `json:"head"`
-	Branch string `json:"branch,omitempty"`
-	Bundle string `json:"bundle,omitempty"`
-	Patch  string `json:"patch,omitempty"`
+	RepositoryID string `json:"repository_id,omitempty"`
+	RepoID       string `json:"repo_id"`
+	Slug         string `json:"slug"`
+	Path         string `json:"path"`
+	Head         string `json:"head"`
+	Branch       string `json:"branch,omitempty"`
+	Bundle       string `json:"bundle,omitempty"`
+	Patch        string `json:"patch,omitempty"`
 }
 
 // positionFor is the transcript position this manifest's tree reflects for
@@ -275,7 +283,7 @@ type snapshotWrite struct {
 
 // snapshotCheckout is one checkout a snapshot captures.
 type snapshotCheckout struct {
-	repoID, slug string
+	repositoryID, repoID, slug string
 	// rel is the checkout's path relative to the run root, slash-separated:
 	// <owner>/<repo>/<slug>.
 	rel string
@@ -323,7 +331,7 @@ func (s *Spawner) snapshotCheckouts(ctx context.Context, orgID, taskID, root str
 			continue
 		}
 		seen[rel] = true
-		out = append(out, snapshotCheckout{repoID: w.RepoID, slug: w.Ref, rel: rel, path: at})
+		out = append(out, snapshotCheckout{repositoryID: w.RepositoryID, repoID: w.RepoID, slug: w.Ref, rel: rel, path: at})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].rel < out[j].rel })
 	return out, nil
@@ -943,7 +951,7 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapsh
 	var members []member
 	for _, co := range captured.checkouts {
 		d := co.state.Delta
-		mc := manifestCheckout{RepoID: co.repoID, Slug: co.slug, Path: co.rel, Head: d.Head, Branch: d.Branch}
+		mc := manifestCheckout{RepositoryID: co.repositoryID, RepoID: co.repoID, Slug: co.slug, Path: co.rel, Head: d.Head, Branch: d.Branch}
 		if len(d.Bundle) > 0 || co.state.BundlePath != "" {
 			mc.Bundle = snapCheckoutsPrefix + co.rel + "/bundle"
 			members = append(members, member{mc.Bundle, co.state.BundlePath, d.Bundle})
@@ -1044,9 +1052,9 @@ type gitSeed struct {
 	auth     worktree.CloneAuth
 }
 
-// gitSeedFor resolves the seed for one repo a rehydrate rebuilds a checkout
-// of. The clone URL comes from the repository row (written in the org's
-// configured protocol).
+// gitSeedFor resolves the seed for one repository a rehydrate rebuilds a
+// checkout of, addressed by its registry row id. The clone URL comes from that
+// row (written in the org's configured protocol).
 //
 // The auth is the engagement's own git-proxy routing, matching setupGitHub's
 // first clone. Multi resolves it from the credential sidecar; local resolves it
@@ -1057,14 +1065,14 @@ type gitSeed struct {
 // same upstream the sidecar's proxy relays to) but cannot seed a missing bare;
 // with no engagement proxy (an unwired fixture) it seeds and fetches without
 // injected auth.
-func (s *Spawner) gitSeedFor(ctx context.Context, orgID, owner, repo string, sidecar *runSidecar, localChannels ...*localGitChannel) gitSeed {
+func (s *Spawner) gitSeedFor(ctx context.Context, orgID, repositoryID, owner, repo string, sidecar *runSidecar, localChannels ...*localGitChannel) gitSeed {
 	seed := gitSeed{owner: owner, repo: repo}
 	if owner == "" || repo == "" {
 		return seed
 	}
-	if s.repos != nil {
-		if profile, err := s.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Owner: owner, Repo: repo}); err != nil {
-			delegateLog.Warn("load repository for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repo", owner+"/"+repo, "error", err)
+	if s.repos != nil && repositoryID != "" {
+		if profile, err := s.repos.GetSystem(ctx, orgID, repositoryID); err != nil {
+			delegateLog.Warn("load repository for workspace rehydrate failed; a missing bare cannot be seeded", "org", orgID, "repository_id", repositoryID, "repo", owner+"/"+repo, "error", err)
 		} else if profile != nil {
 			seed.cloneURL = profile.CloneURL
 		}
@@ -1109,23 +1117,32 @@ func (s *Spawner) gitHostBaseFor(ctx context.Context, orgID string) string {
 }
 
 // checkoutRestorer is what a cold rehydrate needs to rebuild the checkouts a
-// snapshot carries, resolved per repo: the bare seed, and for a pr-<N>
+// snapshot carries, resolved per repo: the registry row id of a checkout an
+// older manifest names only by owner/repo, the bare seed, and for a pr-<N>
 // checkout the pull request, read fresh through this engagement's GitHub
 // client so its push settings are re-derived the way a fresh --pr checkout
 // derives them. The zero value rebuilds no checkout at all.
 type checkoutRestorer struct {
-	seed func(ctx context.Context, owner, repo string) gitSeed
-	pr   func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error)
+	repository func(ctx context.Context, owner, repo string) (string, error)
+	seed       func(ctx context.Context, repositoryID, owner, repo string) gitSeed
+	pr         func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error)
 }
 
-// checkoutRestorerFor builds this engagement's restorer. Every network hop
-// rides the engagement's own credential path: the sidecar's git and REST
-// proxies on an executor, the loopback git channel and the resolver-built
-// client locally.
-func (s *Spawner) checkoutRestorerFor(orgID string, sidecar *runSidecar, localGit *localGitChannel) checkoutRestorer {
+// checkoutRestorerFor builds this engagement's restorer for a task whose entity
+// is entityID. Every network hop rides the engagement's own credential path:
+// the sidecar's git and REST proxies on an executor, the loopback git channel
+// and the resolver-built client locally.
+func (s *Spawner) checkoutRestorerFor(orgID, entityID string, sidecar *runSidecar, localGit *localGitChannel) checkoutRestorer {
 	return checkoutRestorer{
-		seed: func(ctx context.Context, owner, repo string) gitSeed {
-			return s.gitSeedFor(ctx, orgID, owner, repo, sidecar, localGit)
+		repository: func(ctx context.Context, owner, repo string) (string, error) {
+			row, err := s.entityRepository(ctx, orgID, entityID, owner, repo)
+			if err != nil {
+				return "", err
+			}
+			return row.ID, nil
+		},
+		seed: func(ctx context.Context, repositoryID, owner, repo string) gitSeed {
+			return s.gitSeedFor(ctx, orgID, repositoryID, owner, repo, sidecar, localGit)
 		},
 		pr: func(ctx context.Context, owner, repo string, number int) (*ghclient.PRView, error) {
 			client := prReadClient(orgID, nil, sidecar)
@@ -1382,7 +1399,7 @@ var errSnapshotLayout = errors.New("rehydrate: snapshot is of an older run-tree 
 // restoring conversation records for it.
 type restoredCheckout struct {
 	worktree.RestoredCheckout
-	repoID, slug string
+	repositoryID, repoID, slug string
 }
 
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the run tree
@@ -1625,15 +1642,27 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 }
 
 // restoreOneCheckout rebuilds one manifest checkout through restoreCheckout,
-// resolving its repo's seed and, for a pr-<N> checkout, its pull request.
+// resolving its repository's row id when the manifest predates recording it,
+// its seed and, for a pr-<N> checkout, its pull request.
 func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, mc manifestCheckout, staged map[string]string) (restoredCheckout, error) {
 	owner, repo := parseOwnerRepo(mc.RepoID)
+	repositoryID := mc.RepositoryID
+	if repositoryID == "" {
+		if restorer.repository == nil {
+			return restoredCheckout{}, fmt.Errorf("restore %s: the manifest names no repository row and nothing resolves one", mc.Path)
+		}
+		id, err := restorer.repository(ctx, owner, repo)
+		if err != nil {
+			return restoredCheckout{}, fmt.Errorf("restore %s: %w", mc.Path, err)
+		}
+		repositoryID = id
+	}
 	var seed gitSeed
 	if restorer.seed != nil {
-		seed = restorer.seed(ctx, owner, repo)
+		seed = restorer.seed(ctx, repositoryID, owner, repo)
 	}
 	r := worktree.CheckoutRestore{
-		Owner: owner, Repo: repo, CloneURL: seed.cloneURL, Auth: seed.auth,
+		RepositoryID: repositoryID, Owner: owner, Repo: repo, CloneURL: seed.cloneURL, Auth: seed.auth,
 		Root: root, Slug: mc.Slug, RootKey: keyID,
 		Head: mc.Head, Branch: mc.Branch,
 		BundlePath: staged[mc.Bundle], PatchPath: staged[mc.Patch],
@@ -1663,7 +1692,7 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 	if err != nil {
 		return restoredCheckout{}, err
 	}
-	return restoredCheckout{RestoredCheckout: c, repoID: mc.RepoID, slug: mc.Slug}, nil
+	return restoredCheckout{RestoredCheckout: c, repositoryID: repositoryID, repoID: mc.RepoID, slug: mc.Slug}, nil
 }
 
 // prReadRefused reports whether err is GitHub answering a PR read with a 403
@@ -1694,7 +1723,7 @@ func (s *Spawner) recordRestoredCheckouts(ctx context.Context, orgID string, con
 	for _, c := range restored {
 		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
 		_, err := s.conversationWorktrees.RecordForClaimSystem(recordCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
-			ConversationID: conv.ID, RepoID: c.repoID, Path: c.Path, Ref: c.slug,
+			ConversationID: conv.ID, RepositoryID: c.repositoryID, Path: c.Path, Ref: c.slug,
 		})
 		cancel()
 		if errors.Is(err, db.ErrClaimReleased) {

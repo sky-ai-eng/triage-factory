@@ -39,11 +39,12 @@ func seedGrantFixture(t *testing.T, s *Server, selection string) {
 		OrgID:               runmode.LocalDefaultOrgID,
 		AccountType:         "Organization",
 		AccountLogin:        "acme",
+		GitHubHost:          seedRepoHost(t, s),
 		RepositorySelection: selection,
 	}); err != nil {
 		t.Fatalf("upsert installation: %v", err)
 	}
-	if err := stores.ReachableRepos.ReplaceForInstallationSystem(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp, "1", []domain.ReachableRepository{
+	if err := stores.ReachableRepos.ReplaceForInstallationSystem(ctx, runmode.LocalDefaultOrgID, domain.GitHubCredentialClassBYOApp, seedRepoHost(t, s), "1", []domain.ReachableRepository{
 		{OrgID: runmode.LocalDefaultOrgID, InstallationID: "1", Owner: "acme", Repo: "api", ExternalID: "10", HTMLURL: "https://github.com/acme/api"},
 		{OrgID: runmode.LocalDefaultOrgID, InstallationID: "1", Owner: "acme", Repo: "secrets", ExternalID: "11", Private: true, HTMLURL: "https://github.com/acme/secrets"},
 	}); err != nil {

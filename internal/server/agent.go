@@ -238,6 +238,7 @@ type artifactJSON struct {
 	ID         string          `json:"id"`
 	Kind       string          `json:"kind"`
 	Provider   string          `json:"provider"`
+	Scope      string          `json:"scope"`
 	State      string          `json:"state"`
 	Target     string          `json:"target"`
 	ExternalID string          `json:"external_id"`
@@ -263,6 +264,7 @@ func artifactEnvelope(a domain.Artifact) artifactJSON {
 		ID:         a.ID,
 		Kind:       a.Kind,
 		Provider:   a.Provider,
+		Scope:      a.Scope,
 		State:      a.State,
 		Target:     a.Target,
 		ExternalID: a.ExternalID,

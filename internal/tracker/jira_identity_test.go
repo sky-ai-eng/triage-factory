@@ -262,7 +262,7 @@ func TestRefreshJira_MoveBetweenConfiguredProjects(t *testing.T) {
 	taskID := fx.seedTask(t, before.ID)
 	art, err := fx.stores.Artifacts.UpsertSystem(context.Background(), runmode.LocalDefaultOrgID, domain.Artifact{
 		TeamID: runmode.LocalDefaultTeamID, Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
-		Target: "ENG-1", ExternalID: "10001", State: domain.ArtifactStateIssueUpdated,
+		Scope: before.Scope, Target: "ENG-1", ExternalID: "10001", State: domain.ArtifactStateIssueUpdated,
 		DedupKey: domain.ArtifactDedupKey(domain.ArtifactProviderJira, domain.ArtifactKindIssue, domain.JiraIssueResource(jiraSite, "10001"), ""),
 	})
 	if err != nil {

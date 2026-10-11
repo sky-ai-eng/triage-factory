@@ -29,6 +29,15 @@ func (ah *artifactsHandler) annotateReviewFreshness(ctx context.Context, orgID s
 	if !ok {
 		return // malformed target — leave everything "unknown" (reviewArtifactDetails 500s a bad target before us)
 	}
+	// The org's client reads its current GitHub host; a review recorded on
+	// another host has no live head there to compare against.
+	if onHost, _, err := ah.artifactOnCurrentHost(ctx, orgID, art); err != nil || !onHost {
+		if err != nil {
+			artifactsLog.Warn("review freshness: could not read the org's GitHub host; serving unknown freshness",
+				"artifact", art.ID, "error", err)
+		}
+		return
+	}
 	// Resolve the per-repo client directly (not ghForArtifact, which writes an
 	// error response): a missing credential must degrade to "unknown", not 503 the
 	// overlay.

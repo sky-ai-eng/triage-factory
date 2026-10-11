@@ -27,12 +27,13 @@ import (
 //     bot conversations and the Jira board mirror, neither of which has a
 //     user to bind claims for. Mirrors the `...System` admin halves on Artifacts / Reviews.
 //
-// Both Record paths use ON CONFLICT(org_id, dedup_key) DO NOTHING — append-only,
-// never a mutation. An empty entry.DedupKey is filled with a uuid (a unique,
-// non-colliding key) so the row is an unconditional append; only the branch push
-// passes a deterministic key (domain.BranchPushDedupKey) so the git hook+proxy
-// twin collapses. SQLite is N=1 and unscoped; both pools collapse to the one
-// connection.
+// Both Record paths use ON CONFLICT(org_id, scope, dedup_key) DO NOTHING —
+// append-only, never a mutation. An empty entry.DedupKey is filled with a uuid
+// (a unique, non-colliding key) so the row is an unconditional append; only the
+// branch push passes a deterministic key (domain.BranchPushDedupKey) so the git
+// hook+proxy twin collapses. An empty entry.Scope is refused with
+// ErrExternalObjectScopeRequired. SQLite is N=1 and unscoped; both pools
+// collapse to the one connection.
 //
 // Append-only carries one amendment: the record of the act is immutable, and
 // the POINTER to where the object now lives (current_url) is maintained — a

@@ -116,7 +116,7 @@ func TestCreateForPR_SelfContainedClone_MultiMode(t *testing.T) {
 
 	// The shared bare is left with no per-run ref (dropBareRunRefs ran after the
 	// clone copied its objects).
-	bareDir, err := repoDir("acme", "repo")
+	bareDir, err := repoDir(testRepo("acme", "repo").ID)
 	if err != nil {
 		t.Fatalf("repoDir: %v", err)
 	}

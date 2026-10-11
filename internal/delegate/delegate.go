@@ -690,6 +690,11 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	if prNumber == 0 {
 		return runConfig{}, fmt.Errorf("invalid PR number from task.EntitySourceID: %q", task.EntitySourceID)
 	}
+	// The registry row keys the ledger entry and the bare clone below.
+	repoRow, err := s.taskRepository(ctx, orgID, task, owner, repo)
+	if err != nil {
+		return runConfig{}, err
+	}
 
 	s.updatePhase(ctx, orgID, conversationID, claimID, domain.ClaimPhaseFetching)
 	// Named for the phase it reports, so the trace and the run station agree
@@ -804,7 +809,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 		recordCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
 		err := s.recordCheckout(recordCtx, orgID, claimID, domain.ConversationWorktree{
 			ConversationID: conversationID,
-			RepoID:         owner + "/" + repo,
+			RepositoryID:   repoRow.ID,
 			Path:           checkoutPath,
 			Ref:            worktree.PRRefSlug(prNumber),
 		})
@@ -818,7 +823,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	// A clone that cannot finish in its bound is a setup failure, and the
 	// timeout surfaces as the error it is for the bring-up ladder to requeue.
 	cloneCtx, endClone := s.beginWorkspaceOp(cloneCtx, conversationID, "clone")
-	prCheckout, err := worktree.CreateForPRInRoot(cloneCtx, owner, repo, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, conversationID, runRoot,
+	prCheckout, err := worktree.CreateForPRInRoot(cloneCtx, worktree.Repo{ID: repoRow.ID, Owner: owner, Name: repo}, upstreamCloneURL, headCloneURL, pr.HeadRef, prNumber, conversationID, runRoot,
 		worktree.WithCloneAuth(cloneAuth),
 		// Refresh origin/<base> at materialization so `pr diff` frames against a
 		// current base instead of a clone-time-frozen ref (TFAC-505).

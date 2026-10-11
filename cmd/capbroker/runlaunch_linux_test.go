@@ -5,7 +5,10 @@ package capbroker
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -386,17 +389,20 @@ func TestBrokerRun_ConcurrentRunsAreIndependent(t *testing.T) {
 // the one-shot Run path, which calls Wait while the runsc child is still
 // exiting after emitting its terminal result. With a per-call cap on WaitRun
 // this would return an i/o timeout and drop the exit's OOM attribution.
+//
+// The test decides when the run exits (cat ends on stdin EOF) and learns when
+// the WaitRun request has reached the broker, so nothing races a timer: the
+// launch runs on the full budget, the budget shrinks only for the wait, and
+// the run is held alive for twice the shrunk budget past the request's
+// arrival, which a cap on either side would not survive.
 func TestBrokerRun_WaitOutlastsCallTimeout(t *testing.T) {
-	// A run that ignores its stdio and stays alive well past the shrunk call
-	// budget before exiting on its own.
-	withStubRuntime(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "sleep", "0.5") })
+	withStubRuntime(t, func(ctx context.Context) *exec.Cmd { return exec.CommandContext(ctx, "cat") })
 	withTempStdioSocketDir(t)
 
 	origTimeout := callTimeout
-	callTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { callTimeout = origTimeout })
 
-	client := serveTestBroker(t, &fakeOps{})
+	client, waitRunArrived := serveTestBrokerReportingWaitRun(t, &fakeOps{})
 	run, err := client.LaunchRun(context.Background(), validLaunchParams("cSlow"))
 	if err != nil {
 		t.Fatalf("LaunchRun: %v", err)
@@ -406,13 +412,100 @@ func TestBrokerRun_WaitOutlastsCallTimeout(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	start := time.Now()
-	if err := run.Wait(); err != nil {
-		t.Fatalf("Wait errored (spurious timeout past the %s call budget?): %v", callTimeout, err)
+	// Both sides read callTimeout for the launch before its reply reached
+	// this goroutine, and nothing reads it again until the next call, so the
+	// WaitRun below is the one call made under the shrunk budget.
+	callTimeout = 150 * time.Millisecond
+
+	waited := make(chan error, 1)
+	go func() { waited <- run.Wait() }()
+
+	select {
+	case <-waitRunArrived:
+	case err := <-waited:
+		t.Fatalf("Wait returned (%v) before its request reached the broker", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("the WaitRun request never reached the broker")
 	}
-	if elapsed := time.Since(start); elapsed < callTimeout {
-		t.Errorf("Wait returned in %s, under the call budget — it did not actually wait for the run", elapsed)
+	held := 2 * callTimeout
+	select {
+	case err := <-waited:
+		t.Fatalf("Wait returned (%v) within %s of reaching the broker while the run was alive; WaitRun is held to the %s call budget", err, held, callTimeout)
+	case <-time.After(held):
 	}
+
+	if err := run.Stdin().Close(); err != nil {
+		t.Fatalf("close the run's stdin: %v", err)
+	}
+	select {
+	case err := <-waited:
+		if err != nil {
+			t.Fatalf("Wait errored once the run exited: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Wait never returned after the run exited")
+	}
+}
+
+// serveTestBrokerReportingWaitRun is serveTestBroker that also reports each
+// WaitRun request on the returned channel once the broker has read it in full,
+// which is when its dispatch starts blocking on the run.
+func serveTestBrokerReportingWaitRun(t *testing.T, ops sandbox.PrivilegedOps) (*IPCClient, <-chan struct{}) {
+	t.Helper()
+	sockPath := filepath.Join(t.TempDir(), "test.sock")
+	l, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	arrived := make(chan struct{}, 8)
+	srv := NewServer(ops)
+	go func() { _ = srv.Serve(waitRunListener{Listener: l, arrived: arrived}) }()
+	t.Cleanup(func() { _ = l.Close() })
+	return Dial(sockPath), arrived
+}
+
+type waitRunListener struct {
+	net.Listener
+	arrived chan<- struct{}
+}
+
+func (l waitRunListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return &waitRunConn{Conn: c, arrived: l.arrived}, nil
+}
+
+// waitRunConn collects the one request frame a broker connection carries as
+// the broker reads it, and reports it when it names WaitRun. Only the broker's
+// handler goroutine reads the connection, so the fields need no lock.
+type waitRunConn struct {
+	net.Conn
+	arrived chan<- struct{}
+	seen    []byte
+	decided bool
+}
+
+func (c *waitRunConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if c.decided || n == 0 {
+		return n, err
+	}
+	c.seen = append(c.seen, p[:n]...)
+	if len(c.seen) < 4 {
+		return n, err
+	}
+	length := int(binary.BigEndian.Uint32(c.seen[:4]))
+	if len(c.seen) < 4+length {
+		return n, err
+	}
+	c.decided = true
+	var req request
+	if json.Unmarshal(c.seen[4:4+length], &req) == nil && req.Method == methodWaitRun {
+		c.arrived <- struct{}{}
+	}
+	return n, err
 }
 
 // TestBrokerRun_InFlightCapQueues pins the abuse-resistance cap: with the

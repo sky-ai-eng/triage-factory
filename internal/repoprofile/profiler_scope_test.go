@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/repoevent"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -55,9 +56,9 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 
 	repos := &batchRepositoryStore{names: []string{"own/withdocs"}}
 	p := NewProfiler(fixedResolver{client: github.NewClient(srv.URL, "tok")}, nil, nil, repos, oneOrgStore{}, nil, nil, hub)
-	var gotOwner, gotRepo string
-	p.SetRecipients(func(_ context.Context, orgID, owner, repo string) ([]string, error) {
-		gotOwner, gotRepo = owner, repo
+	var gotHost, gotOwner, gotRepo string
+	p.SetRecipients(func(_ context.Context, orgID, host, owner, repo string) ([]string, error) {
+		gotHost, gotOwner, gotRepo = host, owner, repo
 		return []string{"user-tracking"}, nil
 	})
 	p.batchFn = func(context.Context, string, string, []repoWithDocs, agentproc.SecretsReader) ([]repoProfileResult, error) {
@@ -82,8 +83,8 @@ func TestRunOrg_RecipientScopedFanOut(t *testing.T) {
 	if second.Type != repoevent.EventType || second.Data.ProfileText == nil || *second.Data.ProfileText != "a profile" {
 		t.Errorf("second event = %+v; want profile_text diff", second)
 	}
-	if gotOwner != "own" || gotRepo != "withdocs" {
-		t.Errorf("recipients resolved for (%q, %q); want (own, withdocs)", gotOwner, gotRepo)
+	if gotHost != dbtest.TestGitHubHost || gotOwner != "own" || gotRepo != "withdocs" {
+		t.Errorf("recipients resolved for (%q, %q, %q); want (%s, own, withdocs)", gotHost, gotOwner, gotRepo, dbtest.TestGitHubHost)
 	}
 
 	// The same-org client outside the recipient set gets nothing at all.

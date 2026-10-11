@@ -9,6 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/pushpolicy"
@@ -49,7 +50,7 @@ func setPolicy(t *testing.T, stores db.Stores, policy string) {
 // exactly when a base-branch push must not slip through.
 func TestProtectedBranches_UnprofiledRepoStillRefusesMainAndMaster(t *testing.T) {
 	stores := newStores(t)
-	got, err := pushpolicy.ProtectedBranches(context.Background(), stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/never-profiled"))
+	got, err := pushpolicy.ProtectedBranches(context.Background(), stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/never-profiled"))
 	if err != nil {
 		t.Fatalf("ProtectedBranches: %v", err)
 	}
@@ -64,7 +65,7 @@ func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	stores := newStores(t)
 	ctx := context.Background()
 	if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
-		Owner: "acme", Repo: "api",
+		Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api",
 		DefaultBranch: "trunk",
 		CloneURL:      "https://x", ProfileText: "t",
 	}); err != nil {
@@ -72,20 +73,56 @@ func TestProtectedBranches_ProfileAddsDefaultAndBase(t *testing.T) {
 	}
 	// The configured base branch has its own write path (it's a user choice, not
 	// a profiling output), so set it the way the settings surface does.
-	row, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
+	row, err := stores.Repos.GetByRef(ctx, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
 	if err != nil || row == nil {
 		t.Fatalf("GetByRef: got=%v err=%v", row, err)
 	}
 	if _, err := stores.Repos.UpdateBaseBranch(ctx, runmode.LocalDefaultOrgID, row.ID, "develop"); err != nil {
 		t.Fatalf("set base branch: %v", err)
 	}
-	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug("acme/api"))
+	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
 	if err != nil {
 		t.Fatalf("ProtectedBranches: %v", err)
 	}
 	want := map[string]bool{"main": true, "master": true, "trunk": true, "develop": true}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("protected set = %v; want %v", got, want)
+	}
+}
+
+// TestProtectedBranches_ProfileOnTheRefsHostOnly: the profile that widens the
+// protected set is the repository on the ref's own GitHub host. A row with the
+// same owner/repo on another host is another repository, and its default
+// branch protects nothing here.
+func TestProtectedBranches_ProfileOnTheRefsHostOnly(t *testing.T) {
+	stores := newStores(t)
+	ctx := context.Background()
+	const otherHost = "https://ghe.example.com"
+	for _, r := range []domain.Repository{
+		{Host: dbtest.TestGitHubHost, Owner: "acme", Repo: "api", DefaultBranch: "trunk", CloneURL: "https://x", ProfileText: "t"},
+		{Host: otherHost, Owner: "acme", Repo: "api", DefaultBranch: "release", CloneURL: "https://y", ProfileText: "t"},
+	} {
+		if _, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, r); err != nil {
+			t.Fatalf("seed repository on %s: %v", r.Host, err)
+		}
+	}
+
+	got, err := pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"))
+	if err != nil {
+		t.Fatalf("ProtectedBranches: %v", err)
+	}
+	want := map[string]bool{"main": true, "master": true, "trunk": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("protected set on %s = %v; want %v (the %s row's default branch must not leak in)", dbtest.TestGitHubHost, got, want, otherHost)
+	}
+
+	got, err = pushpolicy.ProtectedBranches(ctx, stores, runmode.LocalDefaultOrgID, domain.RepoRefFromSlug(otherHost, "acme/api"))
+	if err != nil {
+		t.Fatalf("ProtectedBranches on %s: %v", otherHost, err)
+	}
+	want = map[string]bool{"main": true, "master": true, "release": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("protected set on %s = %v; want %v", otherHost, got, want)
 	}
 }
 
@@ -155,7 +192,7 @@ func TestProtectedFor_PolicyEmptiesTheSet(t *testing.T) {
 	ctx := context.Background()
 
 	stores := newStores(t)
-	strict, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug("acme/api"), false)
+	strict, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"), false)
 	if err != nil {
 		t.Fatalf("ProtectedFor (default policy): %v", err)
 	}
@@ -164,7 +201,7 @@ func TestProtectedFor_PolicyEmptiesTheSet(t *testing.T) {
 	}
 
 	setPolicy(t, stores, domain.BaseBranchPushAlways)
-	open, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug("acme/api"), true)
+	open, err := pushpolicy.ProtectedFor(ctx, stores, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, domain.RepoRefFromSlug(dbtest.TestGitHubHost, "acme/api"), true)
 	if err != nil {
 		t.Fatalf("ProtectedFor (always): %v", err)
 	}

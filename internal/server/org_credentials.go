@@ -10,6 +10,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 )
@@ -131,13 +132,14 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The org's own GitHub host, resolved the same way the switch flow beside
-	// this one resolves it. It fails closed rather than guessing: a settings or
-	// secret read it cannot complete is an error here, never a silent
-	// fall-through to the deployment default, because pairing a GHES token
-	// with a host it is not on would send a tenant credential to the wrong
-	// server.
+	// The org's own GitHub URL, the only host a token is checked against or
+	// sent to. A workspace with none sets it first: a token is a credential
+	// for one GitHub, and nothing here guesses which.
 	baseURL, err := s.ghResolver.BaseURLFor(ctx, orgID)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		writeNotConfigured(w, "set this workspace's GitHub URL before connecting a token: a token works only on the GitHub that issued it")
+		return
+	}
 	if err != nil {
 		internalError(w, "github-access", err)
 		return
@@ -188,9 +190,17 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
-		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{
-			GitHubURL: baseURL, GitHubPAT: pat,
-		}); err != nil {
+		// The token was checked against baseURL before the lock was taken, and
+		// a settings save could move the URL in that window. Under the lock it
+		// cannot move again, so this read is the one that holds.
+		set, err := tx.Orgs.GetSettings(ctx, orgID)
+		if err != nil {
+			return fmt.Errorf("load org settings: %w", err)
+		}
+		if domain.GitHubHost(set.GitHubBaseURL) != baseURL {
+			return errGitHubHostMovedDuringBind
+		}
+		if err := integrations.Save(ctx, tx.Secrets, orgID, auth.Credentials{GitHubPAT: pat}); err != nil {
 			return fmt.Errorf("store credential: %w", err)
 		}
 		// The org credential's OWN login, so the resolver can stamp the org
@@ -213,6 +223,10 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 				domain.CredentialKindGitHubPAT, baseURL, ghUser.Login),
 		})
 	}); err != nil {
+		if errors.Is(err, errGitHubHostMovedDuringBind) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{Reason: httpx.ReasonConflict, Message: err.Error()})
+			return
+		}
 		settingsOrgLog.Error("github pat bind failed", "org", orgID, "error", err)
 		internalError(w, "github-access", err)
 		return
@@ -223,6 +237,10 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "connected", "login": ghUser.Login})
 }
 
+// errGitHubHostMovedDuringBind refuses a PAT bind whose token was checked
+// against a GitHub URL the workspace no longer has.
+var errGitHubHostMovedDuringBind = errors.New("this workspace's GitHub URL changed while the token was being checked — connect it again")
+
 // handleGitHubPATDelete unbinds the org's GitHub bot PAT — the disconnect.
 // Idempotent: disconnecting an org that has nothing bound is a 200 with no
 // audit row (a removal that removed nothing isn't an access change).
@@ -232,12 +250,10 @@ func (s *Server) handleGitHubPATPut(w http.ResponseWriter, r *http.Request) {
 // a plain disconnect clears both — leaving a host behind would render a
 // connected-looking, credential-less GitHub card. But an App registration keeps
 // using that host: a staged App coexists with a live PAT during a PAT→App
-// switch, and the resolver's base lookup falls through org_settings → the
-// github_url secret → the deployment default, so clearing both while an App row
-// survives would silently re-point a GHES org's App at the deployment default —
-// a GitHub it is not on. Wrong host, no error.
-// With an App present the disconnect touches the credential only, and the App's
-// own teardown (discard / switch-to-pat) owns the host from there.
+// switch, and an App works only on the GitHub it was registered on, so the
+// host stays while a registration does. With an App present the disconnect
+// touches the credential only, and the App's own teardown (discard /
+// switch-to-pat) owns the host from there.
 //
 // Per-user GitHub identity (PAT_2) is deliberately untouched: it's owned by its
 // own surface, and disconnecting the org's access doesn't unmake the fact that
@@ -279,11 +295,7 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 	// disconnect failed, so the org must still be connected. The guard takes
 	// no lock of its own: githubAppRegMu, held from above until after any
 	// restore, is the lock every GitHub credential write takes.
-	keys := integrations.GitHubKeys()
-	if keepHost {
-		keys = []string{integrations.KeyGitHubPAT}
-	}
-	restore, unlock, err := s.guardLocalSecretWrite(ctx, nil, orgID, keys...)
+	restore, unlock, err := s.guardLocalSecretWrite(ctx, nil, orgID, integrations.GitHubKeys()...)
 	if err != nil {
 		internalError(w, "github-access", err)
 		return
@@ -303,16 +315,10 @@ func (s *Server) handleGitHubPATDelete(w http.ResponseWriter, r *http.Request) {
 			return fmt.Errorf("load org settings: %w", err)
 		}
 		prevHost := orgSet.GitHubBaseURL
-		if keepHost {
-			// Drop the token alone. ClearGitHub would take the github_url
-			// secret too, which is the resolver's second fallback.
-			if _, err := tx.Secrets.Delete(ctx, orgID, integrations.KeyGitHubPAT); err != nil {
-				return fmt.Errorf("clear credential: %w", err)
-			}
-		} else {
-			if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
-				return fmt.Errorf("clear credential: %w", err)
-			}
+		if err := integrations.ClearGitHub(ctx, tx.Secrets, orgID); err != nil {
+			return fmt.Errorf("clear credential: %w", err)
+		}
+		if !keepHost {
 			if _, err := tx.Orgs.SetSourceBaseURL(ctx, orgID, eventsource.KindGitHub, ""); err != nil {
 				return fmt.Errorf("clear github base url: %w", err)
 			}
@@ -361,7 +367,7 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	// In local mode the keychain sits outside the transaction, so a failure
 	// after the clear puts the credential back: the request reports the
 	// disconnect failed, so the org must still be connected.
-	restore, unlock, err := s.guardLocalJiraWrite(ctx, orgID)
+	restore, unlock, err := s.guardJiraWrite(ctx, orgID)
 	if err != nil {
 		internalError(w, "jira-access", err)
 		return
@@ -408,23 +414,20 @@ func (s *Server) handleJiraCredentialDelete(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
-// kickGitHubChanged re-dues polling under a changed GitHub credential. Jira is
-// marked restarted alongside it because the GitHub restart path rebuilds both
-// pollers; skipping the mark would let Jira carry over a stale snapshot.
+// kickGitHubChanged re-dues GitHub polling under a changed GitHub credential
+// and clears GitHub's readiness until that poll completes. Jira's poller is
+// not touched by it, so its readiness is left alone.
 func (s *Server) kickGitHubChanged(r *http.Request, orgID string) {
 	if s.onGitHubChanged == nil {
 		return
 	}
-	s.MarkJiraRestarted(r.Context(), orgID)
+	s.MarkGitHubRestarted(r.Context(), orgID)
 	go s.onGitHubChanged(orgID)
 }
 
-// kickJiraChanged re-dues Jira polling under a changed Jira credential — the
-// Jira half of the pair above, and the half a credential BIND owed and did not
-// pay. The unbind has always kicked; the bind used to get its restart
-// second-hand, from the fused setup route that carried the Jira credential
-// alongside the GitHub one and kicked the GitHub path (which rebuilds both
-// pollers). With that route gone, an org connecting Jira has to kick here or it
+// kickJiraChanged re-dues Jira polling under a changed Jira credential and
+// clears Jira's readiness until that poll completes — the Jira half of the pair
+// above. A bind kicks as well as an unbind: an org connecting Jira otherwise
 // polls nothing until the next scheduled cycle.
 func (s *Server) kickJiraChanged(r *http.Request, orgID string) {
 	if s.onJiraChanged == nil {

@@ -3172,3 +3172,53 @@ func TestTeamGitHubRepos_CrossTenantRowIsUnrepresentable(t *testing.T) {
 		`INSERT INTO team_github_repos (team_id, repository_id, org_id) VALUES ($1, $2, $3)`,
 		teamB, repoB, orgB)
 }
+
+// TestBaseline_HostAndScopeRefuseEmpty pins the CHECKs that keep a repository's
+// host and an artifact's or audit row's scope from being the empty string. Every
+// read addresses these rows by a host or scope, and none asks for "", so an
+// empty one is a row nothing can find. The stores refuse it before writing;
+// these hold for a write that goes around them.
+func TestBaseline_HostAndScopeRefuseEmpty(t *testing.T) {
+	h := Shared(t)
+	h.Reset(t)
+	owner := SeedUser(t, h, "host-check-owner")
+	orgID := SeedOrg(t, h, "host-check-org", owner)
+	teamID := SeedTeam(t, h, orgID, "host-check-team")
+
+	for _, tc := range []struct {
+		name, constraint, insert string
+		args                     func(value string) []any
+	}{
+		{
+			name:       "repositories.host",
+			constraint: "repositories_host_check",
+			insert:     `INSERT INTO repositories (org_id, owner, repo, host) VALUES ($1, 'acme', $2, $3)`,
+			args:       func(v string) []any { return []any{orgID, "api-" + v, v} },
+		},
+		{
+			name:       "artifacts.scope",
+			constraint: "artifacts_scope_check",
+			insert: `INSERT INTO artifacts (org_id, team_id, provider, kind, scope, target, state, dedup_key)
+			         VALUES ($1, $2, 'github', 'pr', $3, 'acme/api#1', 'open', $4)`,
+			args: func(v string) []any { return []any{orgID, teamID, v, "pr:" + v} },
+		},
+		{
+			name:       "external_actions.scope",
+			constraint: "external_actions_scope_check",
+			insert: `INSERT INTO external_actions (org_id, provider, scope, action, target, credential, dedup_key)
+			         VALUES ($1, 'github', $2, 'comment', 'acme/api#1', 'github_app', $3)`,
+			args: func(v string) []any { return []any{orgID, v, "comment:" + v} },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := h.AdminDB.Exec(tc.insert, tc.args("")...)
+			var pgErr *pgconn.PgError
+			if !errors.As(err, &pgErr) || pgErr.Code != "23514" || pgErr.ConstraintName != tc.constraint {
+				t.Fatalf("insert with an empty value = %v; want a 23514 violation of %s", err, tc.constraint)
+			}
+			if _, err := h.AdminDB.Exec(tc.insert, tc.args("https://github.com")...); err != nil {
+				t.Errorf("the same insert with a value = %v; want it stored", err)
+			}
+		})
+	}
+}

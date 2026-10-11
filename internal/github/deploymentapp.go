@@ -184,7 +184,10 @@ func (s *deploymentAppSource) resolve(ctx context.Context, base string) (*deploy
 		return nil, fmt.Errorf("%w: %w", ErrDeploymentAppUnavailable, githubapp.ErrNoDeploymentApp)
 	}
 	deploymentHost := ghbase.DefaultBaseURL()
-	if host := ghbase.ResolveBaseURL(base); host != deploymentHost {
+	if host := ghbase.CanonicalBaseURL(base); host != deploymentHost {
+		if host == "" {
+			host = "no GitHub URL"
+		}
 		return nil, fmt.Errorf("%w: %w: workspace on %s, deployment app on %s",
 			ErrDeploymentAppUnavailable, ErrDeploymentAppOtherGitHub, host, deploymentHost)
 	}

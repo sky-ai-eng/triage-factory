@@ -9,14 +9,21 @@ import (
 )
 
 // gateRuntime is a minimal Runtime for exercising authorizeRepo in isolation:
-// it answers the team-tracks + conversation_worktrees reads the gate makes and records
-// git-denied audit rows, panicking on any other method (none is reached).
+// it answers the team-tracks, conversation_worktrees and repository reads the
+// gate makes and records git-denied audit rows, panicking on any other method
+// (none is reached). repository is the row the asked-for name resolves to on
+// the org's current GitHub host; nil is a name with no row there.
 type gateRuntime struct {
 	Runtime
-	tracks    bool
-	taskRepo  bool
-	worktrees []domain.ConversationWorktree
-	denied    []string // audit targets recorded via Record
+	tracks     bool
+	taskRepo   bool
+	worktrees  []domain.ConversationWorktree
+	repository *domain.Repository
+	denied     []string // audit targets recorded via Record
+}
+
+func (r *gateRuntime) GetRepo(context.Context, string) (*domain.Repository, error) {
+	return r.repository, nil
 }
 
 func (r *gateRuntime) TeamTracksRepo(context.Context, string, string) (bool, error) {
@@ -77,13 +84,37 @@ func TestAuthorizeRepo(t *testing.T) {
 	})
 
 	t.Run("tracked_and_materialized_is_authorized", func(t *testing.T) {
-		rt := &gateRuntime{tracks: true, worktrees: []domain.ConversationWorktree{{RepoID: "acme/widgets"}}}
+		rt := &gateRuntime{
+			tracks:     true,
+			worktrees:  []domain.ConversationWorktree{{RepositoryID: "repo-widgets", RepoID: "acme/widgets"}},
+			repository: &domain.Repository{ID: "repo-widgets", Owner: "acme", Repo: "widgets"},
+		}
 		c := newGateClient(rt)
 		if err := c.authorizeRepo(ctx, "acme", "widgets"); err != nil {
 			t.Fatalf("authorizeRepo = %v, want nil (tracked + materialized)", err)
 		}
 		if len(rt.denied) != 0 {
 			t.Errorf("recorded denials %v, want none for an authorized repo", rt.denied)
+		}
+	})
+
+	// A ledger row names its repository by row id. A checkout of acme/widgets
+	// materialized while the org was on another GitHub host is that host's
+	// repository; the name now resolves to a different row, so the checkout
+	// authorizes nothing and the refusal is the one an unmaterialized repo gets.
+	t.Run("materialized_on_another_host_is_not_this_repository", func(t *testing.T) {
+		rt := &gateRuntime{
+			tracks:     true,
+			worktrees:  []domain.ConversationWorktree{{RepositoryID: "repo-widgets-old-host", RepoID: "acme/widgets"}},
+			repository: &domain.Repository{ID: "repo-widgets-current-host", Owner: "acme", Repo: "widgets"},
+		}
+		c := newGateClient(rt)
+		err := c.authorizeRepo(ctx, "acme", "widgets")
+		if err == nil || !strings.Contains(err.Error(), "workspace add acme/widgets") {
+			t.Fatalf("authorizeRepo = %v, want the not-materialized refusal", err)
+		}
+		if len(rt.denied) != 1 || rt.denied[0] != "acme/widgets" {
+			t.Errorf("recorded denials %v, want [acme/widgets]", rt.denied)
 		}
 	})
 

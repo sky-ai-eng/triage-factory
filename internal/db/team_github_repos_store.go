@@ -36,6 +36,16 @@ var ErrTeamNotInOrg = errors.New("db: team does not belong to that org")
 // about tracking, and RepositoryStore.ListTrackedNamesSystem — which reads
 // through this table — is what answers it.
 //
+// # Scoped by GitHub host
+//
+// A tracking row references a repository row, and a repository row lives on
+// one GitHub host (RepositoryStore's host scope), so every method here takes
+// the host it asks about — the org's current one — and sees only tracking rows
+// whose repository is on it. After the org moves to another host its tracked
+// set reads empty there, because a same-named repository on the new host is a
+// different repository; the old host's rows stay stored and apply again if the
+// org moves back. Like untracking, nothing about a move prunes or deletes.
+//
 // # Pool split (Postgres)
 //
 //   - ListForTeam, ReplaceForTeam run on the app pool. The
@@ -64,11 +74,11 @@ type TeamGitHubReposStore interface {
 	// (owner, repo). Empty slice with nil error when the team tracks
 	// nothing. Postgres routes through the app pool
 	// (team_github_repos_select gates by team membership).
-	ListForTeam(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error)
+	ListForTeam(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error)
 
 	// ListForTeamSystem mirrors ListForTeam but routes through the admin
 	// pool in Postgres for callers without a JWT-claims context.
-	ListForTeamSystem(ctx context.Context, teamID string) ([]domain.TeamGitHubRepo, error)
+	ListForTeamSystem(ctx context.Context, teamID, host string) ([]domain.TeamGitHubRepo, error)
 
 	// ListOrgReposWithTeamsSystem returns each tracked (owner, repo) in the
 	// org together with the display names of the teams tracking it, ordered by
@@ -78,12 +88,14 @@ type TeamGitHubReposStore interface {
 	// Admin pool in Postgres — the org admin running a preflight must see every
 	// team's tracking, including teams they don't belong to, so this is a
 	// claims-free system read scoped by org_id in the query.
-	ListOrgReposWithTeamsSystem(ctx context.Context, orgID string) ([]domain.TrackedRepoTeams, error)
+	ListOrgReposWithTeamsSystem(ctx context.Context, orgID, host string) ([]domain.TrackedRepoTeams, error)
 
 	// ReplaceForTeam upserts one row per entry in repos and deletes rows
 	// whose repository is no longer in the input — bulk-replace semantics
 	// mirroring JiraStatusRulesStore.ReplaceForTeam. Passing an empty slice
-	// clears every row for the team.
+	// clears every row for the team on host. Every entry is a repository on
+	// host, and the prune reaches only rows whose repository is on host: the
+	// team's tracking on another host is left exactly as it stands.
 	//
 	// This is the single door that brings a repository into the repositories
 	// table: in the same transaction it get-or-creates the registry row each
@@ -117,13 +129,13 @@ type TeamGitHubReposStore interface {
 	// Exempt from the returned-row rule: it reconciles a team's whole tracked
 	// set in one transaction, so there is no single row a return value could
 	// name.
-	ReplaceForTeam(ctx context.Context, orgID, teamID string, repos []domain.TeamGitHubRepo) error
+	ReplaceForTeam(ctx context.Context, orgID, teamID, host string, repos []domain.TeamGitHubRepo) error
 
-	// TracksRepoSystem reports whether the team tracks (owner, repo),
+	// TracksRepoSystem reports whether the team tracks (owner, repo) on host,
 	// matched case-insensitively on both fields (GitHub identifiers are
 	// case-insensitive). This is the router gate lookup. Admin pool in
 	// Postgres: the router goroutine has no JWT claims.
-	TracksRepoSystem(ctx context.Context, teamID, owner, repo string) (bool, error)
+	TracksRepoSystem(ctx context.Context, teamID, host, owner, repo string) (bool, error)
 
 	// RepoUpdateRecipientsSystem returns the distinct, sorted ids of every
 	// user who may receive a repository_updated websocket event for
@@ -143,7 +155,7 @@ type TeamGitHubReposStore interface {
 	// emitters are claims-free background jobs. Called fresh per emission
 	// so membership changes take effect immediately; local mode never
 	// calls it (N=1 broadcasts org-wide).
-	RepoUpdateRecipientsSystem(ctx context.Context, orgID, owner, repo string) ([]string, error)
+	RepoUpdateRecipientsSystem(ctx context.Context, orgID, host, owner, repo string) ([]string, error)
 
 	// TracksRepoViewerScoped reports whether ANY team the calling user
 	// belongs to tracks (owner, repo), matched case-insensitively
@@ -156,7 +168,7 @@ type TeamGitHubReposStore interface {
 	// team's tracked set. Org admins bypass this check entirely at the
 	// handler layer instead of calling it. Local mode (N=1) always
 	// reports true — no team boundary to enforce.
-	TracksRepoViewerScoped(ctx context.Context, orgID, owner, repo string) (bool, error)
+	TracksRepoViewerScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error)
 
 	// TracksRepoViewerAdminScoped narrows TracksRepoViewerScoped to teams
 	// the calling user *administers*: it reports whether ANY team the
@@ -172,5 +184,5 @@ type TeamGitHubReposStore interface {
 	// administers none of the teams tracking it gets 403, not 404. Org
 	// admins bypass this at the handler layer instead of calling it. Local
 	// mode (N=1) always reports true — no team boundary to enforce.
-	TracksRepoViewerAdminScoped(ctx context.Context, orgID, owner, repo string) (bool, error)
+	TracksRepoViewerAdminScoped(ctx context.Context, orgID, host, owner, repo string) (bool, error)
 }

@@ -13,6 +13,7 @@ import (
 // trigger is hard-deleted (detached).
 func TestBlueprintDelete_CascadesPromptsAndTrigger(t *testing.T) {
 	s := newTestServer(t)
+	configureEventSources(t, s)
 	bp, ps := createChainBlueprint(t, s, "DeleteMe", 3)
 	attachTrigger(t, s, bp, "github:pr:ci_check_failed")
 

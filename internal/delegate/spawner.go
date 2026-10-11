@@ -1017,12 +1017,20 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		return gitproxy.Decision{Allowed: false}, nil
 	}
 	repoID := owner + "/" + repo
-	// The three reads below each fail the decision closed, and the only thing
-	// that reaches an operator is the proxy's one log line at the far end of a
+	// The reads below each fail the decision closed, and the only thing that
+	// reaches an operator is the proxy's one log line at the far end of a
 	// relay. Name which read broke: the bare driver error they used to return
 	// ("column X does not exist") says what went wrong without saying where,
-	// and these three are answering quite different questions.
-	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, owner, repo)
+	// and these reads are answering quite different questions.
+	//
+	// owner/repo is a repository on the org's current GitHub host — the host
+	// the proxy forwards the push to — so tracking and push policy are read
+	// there too.
+	host, err := db.OrgGitHubHostSystem(ctx, stores.Orgs, info.OrgID)
+	if err != nil {
+		return gitproxy.Decision{}, fmt.Errorf("github host read: %w", err)
+	}
+	tracks, err := stores.TeamGitHubRepos.TracksRepoSystem(ctx, info.TeamID, host, owner, repo)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("tracked-set read: %w", err)
 	}
@@ -1033,6 +1041,14 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("worktree ledger read: %w", err)
 	}
+	// A ledger row names its repository by registry id, and the repository a
+	// push here reaches is the row for owner/repo on host. A checkout of the
+	// same owner/repo on another host is another repository, so it earns
+	// nothing on this one. No row on host means no ledger row can name it.
+	repoRow, err := stores.Repos.GetByRefSystem(ctx, info.OrgID, domain.RepoRef{Host: host, Owner: owner, Repo: repo})
+	if err != nil {
+		return gitproxy.Decision{}, fmt.Errorf("repository read: %w", err)
+	}
 
 	// Base / protected refs are not pushable regardless of what the worktree is
 	// checked out on, unless the team's base-branch push policy says otherwise
@@ -1041,7 +1057,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	// denies) rather than silently authorizing — being unable to tell whether
 	// the live branch IS the base branch, or whether the team lifted the guard,
 	// is exactly when we must not allow the push.
-	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, domain.RepoRef{Owner: owner, Repo: repo}, info.IsEventTriggered)
+	protected, err := pushpolicy.ProtectedFor(ctx, stores, info.OrgID, info.TeamID, domain.RepoRef{Host: host, Owner: owner, Repo: repo}, info.IsEventTriggered)
 	if err != nil {
 		return gitproxy.Decision{}, fmt.Errorf("push policy read: %w", err)
 	}
@@ -1049,15 +1065,15 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 	var allowedRefs []string
 	found := false
 	for _, w := range rows {
-		if !strings.EqualFold(w.RepoID, repoID) {
+		if repoRow == nil || w.RepositoryID != repoRow.ID {
 			continue
 		}
 		found = true
 		// A HEAD file read plus a few `git config --file` subprocesses per
 		// matching row (the current branch comes from a plain .git/HEAD read,
-		// no subprocess). conversation_worktrees is keyed (conversation_id, repo_id, ref), so
-		// several rows can match; git ops per run are few enough that per-row
-		// spawning stays fine.
+		// no subprocess). conversation_worktrees is keyed (conversation_id,
+		// repository_id, ref), so several rows can match; git ops per run are
+		// few enough that per-row spawning stays fine.
 		branch := worktreePushTargetBranch(w.Path)
 		if branch == "" || protected[branch] {
 			continue
@@ -1075,7 +1091,7 @@ func gitAuthorizeDecision(ctx context.Context, stores db.Stores, info agenthost.
 		// still rejected by the receive-pack gate: read-only bootstrap, push
 		// authority is earned once the checkout's branch resolves through a real
 		// ledger row.
-		if agenthost.IsTaskOwnRepo(ctx, stores, info, owner, repo) {
+		if agenthost.IsTaskOwnRepo(ctx, stores, info, host, owner, repo) {
 			return gitproxy.Decision{Allowed: true, ProtectedRefs: pushpolicy.Refs(protected)}, nil
 		}
 		return gitDenyNotMaterialized(repoID), nil
@@ -1283,6 +1299,40 @@ func (s *Spawner) setWorktreePath(ctx context.Context, orgID, conversationID, cl
 			"conversation", conversationID, "claim_id", claimID, "org_id", orgID, "worktree_path", path, "error", err)
 	}
 	return err
+}
+
+// taskRepository is the registry row of a GitHub task's own repository: owner/
+// repo on the GitHub host the task's pull request was polled from — its
+// entity's scope — not on whatever host the org names now. A task polled from a
+// host the org has since left keeps resolving to that host's repository, never
+// to a same-named one on the new host. A repository with no row is an error: a
+// PR is polled only from a tracked repository, and tracking is what mints the
+// row.
+func (s *Spawner) taskRepository(ctx context.Context, orgID string, task domain.Task, owner, repo string) (*domain.Repository, error) {
+	return s.entityRepository(ctx, orgID, task.EntityID, owner, repo)
+}
+
+// entityRepository resolves owner/repo on the GitHub host of entityID's scope.
+// See taskRepository.
+func (s *Spawner) entityRepository(ctx context.Context, orgID, entityID, owner, repo string) (*domain.Repository, error) {
+	if s.repos == nil || s.entities == nil {
+		return nil, errors.New("resolve the task's repository: no repository or entity store")
+	}
+	entity, err := s.entities.GetSystem(ctx, orgID, entityID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve the task's repository: read entity: %w", err)
+	}
+	if entity == nil || entity.Scope == "" {
+		return nil, fmt.Errorf("resolve the task's repository: entity %s names no GitHub host", entityID)
+	}
+	row, err := s.repos.GetByRefSystem(ctx, orgID, domain.RepoRef{Host: entity.Scope, Owner: owner, Repo: repo})
+	if err != nil {
+		return nil, fmt.Errorf("resolve the task's repository: %w", err)
+	}
+	if row == nil {
+		return nil, fmt.Errorf("resolve the task's repository: no repository row for %s/%s on %s", owner, repo, entity.Scope)
+	}
+	return row, nil
 }
 
 // recordCheckout writes a checkout's conversation_worktrees row for an

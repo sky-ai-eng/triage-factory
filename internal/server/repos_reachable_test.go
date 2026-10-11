@@ -18,6 +18,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	"github.com/sky-ai-eng/triage-factory/internal/grantmirror"
 	"github.com/sky-ai-eng/triage-factory/internal/integrations"
 	"github.com/sky-ai-eng/triage-factory/internal/reachcache"
@@ -167,8 +168,8 @@ func newCountingAppGitHub(t *testing.T, reposByInstall map[string][]string) *cou
 // what a PAT-class org is.
 func seedPATOrg(t *testing.T, s *Server, url string) {
 	t.Helper()
+	seedSourceHost(t, s, eventsource.KindGitHub, url)
 	if err := integrations.Save(context.Background(), s.secrets, runmode.LocalDefaultOrgID, auth.Credentials{
-		GitHubURL: url,
 		GitHubPAT: "ghp-test",
 	}); err != nil {
 		t.Fatalf("seed creds: %v", err)
@@ -610,6 +611,7 @@ func seedManagedWorkspace(t *testing.T, s *Server, installationIDs ...string) {
 			OrgID:          org,
 			AccountType:    "Organization",
 			AccountLogin:   fmt.Sprintf("acct-%d", i),
+			GitHubHost:     seedRepoHost(t, s),
 		}); err != nil {
 			t.Fatalf("upsert installation %s: %v", id, err)
 		}
@@ -627,7 +629,7 @@ func TestPickerServesAManagedWorkspaceFromTheMirror(t *testing.T) {
 	srv := newTestServer(t)
 	seedManagedWorkspace(t, srv, "111")
 	if err := srv.reachableRepos.ReplaceForInstallationSystem(context.Background(),
-		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, "111",
+		runmode.LocalDefaultOrgID, domain.GitHubCredentialClassManagedApp, seedRepoHost(t, srv), "111",
 		[]domain.ReachableRepository{
 			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "api"},
 			{OrgID: runmode.LocalDefaultOrgID, Owner: "acme", Repo: "web"},

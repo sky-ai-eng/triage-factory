@@ -32,6 +32,7 @@ func TestArtifactStore_Postgres_RoundTrip(t *testing.T) {
 		OrgID:          orgID,
 		TeamID:         teamID,
 		Provider:       domain.ArtifactProviderGitHub,
+		Scope:          "https://github.com",
 		Kind:           domain.ArtifactKindPullRequest,
 		Target:         "octo/repo#123",
 		ExternalID:     "123",
@@ -79,7 +80,7 @@ func TestArtifactStore_Postgres_UpsertDedup(t *testing.T) {
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	first, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "pull_request", Target: "octo/repo",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRDraft, DedupKey: key,
 	})
 	if err != nil {
@@ -87,7 +88,7 @@ func TestArtifactStore_Postgres_UpsertDedup(t *testing.T) {
 	}
 	second, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "pull_request", Target: "octo/repo#7",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#7",
 		ExternalID: "7", URL: "https://github.com/octo/repo/pull/7",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
 	})
@@ -126,7 +127,7 @@ func TestArtifactStore_Postgres_InsertIfAbsent(t *testing.T) {
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo#7", "")
 	base := domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#7", ExternalID: "7",
 		DedupKey: key,
 	}
 
@@ -181,7 +182,7 @@ func TestArtifactStore_Postgres_PendingToReal(t *testing.T) {
 	key := domain.ArtifactDedupKey("github", "pull_request", "octo/repo", "refs/heads/feat")
 	pending, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "pull_request", Target: "octo/repo",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
 		State: domain.ArtifactStatePRPending, DedupKey: key,
 	})
 	if err != nil {
@@ -192,7 +193,7 @@ func TestArtifactStore_Postgres_PendingToReal(t *testing.T) {
 	}
 	real, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "pull_request", Target: "octo/repo#42",
+		Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo#42",
 		ExternalID: "42", URL: "https://github.com/octo/repo/pull/42",
 		State: domain.ArtifactStatePROpen, DedupKey: key,
 	})
@@ -232,8 +233,8 @@ func TestArtifactStore_Postgres_RLS_TeamScoped(t *testing.T) {
 	conversationID := seedPgArtifactConversation(t, h, orgA, teamA, alice)
 	// Seed a teamA-scoped artifact via admin (bypass RLS for setup).
 	if _, err := h.AdminDB.Exec(`
-		INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
-		VALUES ($1, $2, $3, 'github', 'pull_request', 'octo/repo', 'open', 'github:pull_request:octo/repo#1')
+		INSERT INTO artifacts (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
+		VALUES ($1, $2, $3, 'github', 'https://github.com', 'pull_request', 'octo/repo', 'open', 'github:pull_request:octo/repo#1')
 	`, orgA, conversationID, teamA); err != nil {
 		t.Fatalf("seed artifact: %v", err)
 	}
@@ -296,7 +297,7 @@ func TestArtifactStore_Postgres_RLS_WritePath(t *testing.T) {
 	mkArtifact := func(key string) domain.Artifact {
 		return domain.Artifact{
 			OrgID: orgA, TeamID: teamA,
-			Provider: "github", Kind: "pull_request", Target: "octo/repo",
+			Provider: "github", Scope: "https://github.com", Kind: "pull_request", Target: "octo/repo",
 			State: domain.ArtifactStatePROpen, DedupKey: key,
 		}
 	}
@@ -340,7 +341,7 @@ func TestArtifactStore_Postgres_ListByTeam_IncludesDetached(t *testing.T) {
 
 	art, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "git", Kind: "branch", Target: "octo/repo",
+		Provider: "git", Scope: "https://github.com", Kind: "branch", Target: "octo/repo",
 		State: domain.ArtifactStateBranchPushed, DedupKey: "git:branch:octo/repo:refs/heads/x",
 	})
 	if err != nil {
@@ -388,7 +389,7 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	key := domain.ArtifactDedupKey("jira", "issue", "SKY-1", "")
 	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1",
 		State: domain.ArtifactStateIssueCreated, DedupKey: key,
 	}); err != nil {
@@ -397,7 +398,7 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 
 	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
 	})
 	if err != nil {
@@ -413,7 +414,7 @@ func TestArtifactStore_Postgres_UpsertPreservesExternalIDAndURL(t *testing.T) {
 	// A non-empty value still overwrites.
 	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "jira", Kind: "issue", Target: "SKY-1",
+		Provider: "jira", Scope: "https://acme.atlassian.net", Kind: "issue", Target: "SKY-1",
 		ExternalID: "SKY-1", URL: "https://jira.example.com/browse/SKY-1?focusedId=9",
 		State: domain.ArtifactStateIssueUpdated, DedupKey: key,
 	})
@@ -441,7 +442,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	key := domain.ArtifactDedupKey("github", "comment", "555", "")
 	if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "comment", Target: "octo/repo#7",
+		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#7",
 		ExternalID: "555", URL: "https://github.com/octo/repo/pull/7#issuecomment-555",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
 	}); err != nil {
@@ -451,7 +452,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	// A comment-delete that only carries the id (empty target/url).
 	out, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "comment", ExternalID: "555",
+		Provider: "github", Scope: "https://github.com", Kind: "comment", ExternalID: "555",
 		State: domain.ArtifactStateCommentDeleted, DedupKey: key,
 	})
 	if err != nil {
@@ -467,7 +468,7 @@ func TestArtifactStore_Postgres_UpsertPreservesTargetOnEmpty(t *testing.T) {
 	// A non-empty target still overwrites (migration path).
 	out, err = stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: "github", Kind: "comment", Target: "octo/repo#8",
+		Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo#8",
 		State: domain.ArtifactStateCommentPosted, DedupKey: key,
 	})
 	if err != nil {
@@ -499,7 +500,7 @@ func TestArtifactStore_Postgres_UpsertSystem_BypassesRLS(t *testing.T) {
 	// from the conversations FK.
 	art := domain.Artifact{
 		OrgID: orgID, TeamID: teamID,
-		Provider: domain.ArtifactProviderJira, Kind: domain.ArtifactKindIssue,
+		Provider: domain.ArtifactProviderJira, Scope: "https://acme.atlassian.net", Kind: domain.ArtifactKindIssue,
 		Target: "SKY-1", ExternalID: "SKY-1", State: domain.ArtifactStateIssueCreated,
 		DedupKey: domain.ArtifactDedupKey("jira", "issue", "SKY-1", ""),
 	}
@@ -562,7 +563,7 @@ func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 	for i, s := range seeds {
 		key := fmt.Sprintf("a%d", i)
 		if _, err := stores.Artifacts.UpsertSystem(ctx, orgA, domain.Artifact{
-			OrgID: orgA, TeamID: teamA, Provider: "github", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
+			OrgID: orgA, TeamID: teamA, Provider: "github", Scope: "https://github.com", Kind: s.kind, Target: "octo/repo", State: s.state, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s/%s: %v", s.kind, s.state, err)
 		}
@@ -572,7 +573,7 @@ func TestArtifactStore_Postgres_ListNonTerminalBySystem(t *testing.T) {
 	}
 	// Org B owns a non-terminal artifact that must never surface in org A's list.
 	if _, err := stores.Artifacts.UpsertSystem(ctx, orgB, domain.Artifact{
-		OrgID: orgB, TeamID: teamB, Provider: "github", Kind: domain.ArtifactKindPullRequest,
+		OrgID: orgB, TeamID: teamB, Provider: "github", Scope: "https://github.com", Kind: domain.ArtifactKindPullRequest,
 		Target: "octo/repo", State: domain.ArtifactStatePROpen, DedupKey: "b0",
 	}); err != nil {
 		t.Fatalf("seed org B: %v", err)
@@ -623,7 +624,7 @@ func TestArtifactStore_Postgres_CountByConversation(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-			Provider: "github", Kind: "comment", Target: "octo/repo",
+			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
@@ -673,8 +674,8 @@ func TestArtifactStore_Postgres_CountByConversation_TeamScoped(t *testing.T) {
 	// Two teamA-scoped artifacts on the conversation (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
-			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
+			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
+			VALUES ($1, $2, $3, 'github', 'https://github.com', 'comment', 'octo/repo', 'posted', $4)
 		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
 		}
@@ -730,7 +731,7 @@ func TestArtifactStore_Postgres_ListByConversations(t *testing.T) {
 	seed := func(conversationID, key string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-			Provider: "github", Kind: "comment", Target: "octo/repo",
+			Provider: "github", Scope: "https://github.com", Kind: "comment", Target: "octo/repo",
 			State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		}); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
@@ -787,8 +788,8 @@ func TestArtifactStore_Postgres_ListByConversations_TeamScoped(t *testing.T) {
 	// Two teamA-scoped artifacts on the conversation (admin insert bypasses RLS for setup).
 	for _, key := range []string{"github:comment:octo/repo:1", "github:comment:octo/repo:2"} {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, kind, target, state, dedup_key)
-			VALUES ($1, $2, $3, 'github', 'comment', 'octo/repo', 'posted', $4)
+			INSERT INTO artifacts (org_id, conversation_id, team_id, provider, scope, kind, target, state, dedup_key)
+			VALUES ($1, $2, $3, 'github', 'https://github.com', 'comment', 'octo/repo', 'posted', $4)
 		`, orgA, conversationID, teamA, key); err != nil {
 			t.Fatalf("seed artifact: %v", err)
 		}
@@ -842,8 +843,8 @@ func TestArtifactStore_Postgres_ListByOrgSystem(t *testing.T) {
 
 	seedArt := func(orgID, teamID, provider, kind, state, key, createdAt string) {
 		if _, err := h.AdminDB.Exec(`
-			INSERT INTO artifacts (org_id, team_id, provider, kind, target, state, dedup_key, created_at)
-			VALUES ($1, $2, $3, $4, 'octo/repo', $5, $6, $7)
+			INSERT INTO artifacts (org_id, team_id, provider, scope, kind, target, state, dedup_key, created_at)
+			VALUES ($1, $2, $3, 'https://github.com', $4, 'octo/repo', $5, $6, $7)
 		`, orgID, teamID, provider, kind, state, key, createdAt); err != nil {
 			t.Fatalf("seed %s: %v", key, err)
 		}
@@ -960,7 +961,7 @@ func TestArtifactStore_Postgres_ListPendingReviewsByTarget(t *testing.T) {
 	mk := func(kind, state, target, dedup string) {
 		if _, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 			ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-			Provider: domain.ArtifactProviderGitHub, Kind: kind, State: state,
+			Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Kind: kind, State: state,
 			Target: target, DedupKey: dedup,
 		}); err != nil {
 			t.Fatalf("seed artifact %s/%s: %v", kind, state, err)
@@ -972,7 +973,7 @@ func TestArtifactStore_Postgres_ListPendingReviewsByTarget(t *testing.T) {
 	mk(domain.ArtifactKindReview, domain.ArtifactStateReviewPending, "octo/repo#8", "rev-8")
 	mk(domain.ArtifactKindPullRequest, domain.ArtifactStatePROpen, "octo/repo#7", "pr-7")
 
-	got, err := stores.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, "octo/repo#7")
+	got, err := stores.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, "https://github.com", "octo/repo#7")
 	if err != nil {
 		t.Fatalf("ListPendingReviewsByTargetSystem: %v", err)
 	}
@@ -1000,7 +1001,7 @@ func TestArtifactStore_Postgres_TransitionReviewState(t *testing.T) {
 
 	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-cas", DetailsJSON: `{"number":7}`,
 	})
@@ -1009,7 +1010,7 @@ func TestArtifactStore_Postgres_TransitionReviewState(t *testing.T) {
 	}
 	pr, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+		Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Kind: domain.ArtifactKindPullRequest,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7", DedupKey: "pr-cas",
 	})
 	if err != nil {
@@ -1063,7 +1064,7 @@ func TestArtifactStore_Postgres_UpdateReviewDetailsIfPending(t *testing.T) {
 
 	rev, err := stores.Artifacts.Upsert(ctx, orgID, domain.Artifact{
 		ConversationID: conversationID, OrgID: orgID, TeamID: teamID,
-		Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindReview,
+		Provider: domain.ArtifactProviderGitHub, Scope: "https://github.com", Kind: domain.ArtifactKindReview,
 		State: domain.ArtifactStateReviewPending, Target: "octo/repo#7",
 		DedupKey: "rev-details", DetailsJSON: `{"v":1}`,
 	})

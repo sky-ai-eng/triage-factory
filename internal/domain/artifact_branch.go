@@ -27,7 +27,9 @@ type branchDetails struct {
 //
 // It returns ok=false — the caller skips, no artifact — when ref is not a
 // branch (a tag or other namespace) or repoPath is not exactly owner/repo (a
-// malformed or multi-segment path we won't anchor a github.com link to).
+// malformed or multi-segment path we won't anchor a link to). The artifact
+// carries no URL: the constructor has no org context to know the host, and
+// the host-side sink that writes it sets the link (BranchArtifactWebURL).
 //
 // This is the single source of truth for the branch-artifact shape. Both
 // capture writers build through it: the pre-push hook (TFAC-460) and the
@@ -37,11 +39,7 @@ type branchDetails struct {
 // hook+push is never double-recorded and the proxy only adds rows the hook
 // missed (a `git push --no-verify`).
 func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool) {
-	branch, ok := strings.CutPrefix(ref, branchRefPrefix)
-	if !ok {
-		return Artifact{}, false
-	}
-	if !validOwnerRepo(repoPath) {
+	if !strings.HasPrefix(ref, branchRefPrefix) || !validOwnerRepo(repoPath) {
 		return Artifact{}, false
 	}
 
@@ -57,7 +55,6 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 		Kind:        ArtifactKindBranch,
 		Target:      repoPath,
 		ExternalID:  ref,
-		URL:         branchWebURL("", repoPath, branch),
 		State:       ArtifactStateBranchPushed,
 		DedupKey:    ArtifactDedupKey(ArtifactProviderGit, ArtifactKindBranch, repoPath, ref),
 		DetailsJSON: string(details),
@@ -67,16 +64,15 @@ func NewBranchArtifact(repoPath, ref, sha string, created bool) (Artifact, bool)
 // BranchArtifactWebURL builds the web link for a pushed branch ref on a specific
 // GitHub host base — github.com, a GHES host, or a GHEC data-residency host.
 // base is the org's user-facing web base (as reported by the credential
-// resolver's BaseURLFor); an empty base falls back to the public github.com
-// host.
+// resolver's BaseURLFor); an empty base names no GitHub and builds no link.
 //
-// It exists because a branch artifact's URL is synthesized where the org's host
-// isn't knowable — the sandbox pre-push hook has no credentials, and this
-// domain constructor has no org context — so NewBranchArtifact composes it
-// against github.com and the host-side artifact sink re-anchors it here once the
-// base resolves. ok=false when ref is not a branch (a tag or other namespace) or
-// repoPath is not exactly owner/repo, so the sink leaves the existing URL
-// untouched rather than clobber it with a malformed link.
+// It exists because a branch artifact is built where the org's host isn't
+// knowable — the sandbox pre-push hook has no credentials, and
+// NewBranchArtifact has no org context — so the host-side artifact sink sets
+// the link here once the base resolves. ok=false when ref is not a branch (a
+// tag or other namespace) or repoPath is not exactly owner/repo, so the sink
+// leaves the existing URL untouched rather than clobber it with a malformed
+// link.
 func BranchArtifactWebURL(base, repoPath, ref string) (string, bool) {
 	branch, ok := strings.CutPrefix(ref, branchRefPrefix)
 	if !ok || !validOwnerRepo(repoPath) {
@@ -112,11 +108,10 @@ func validOwnerRepo(repoPath string) bool {
 }
 
 // branchWebURL builds the web link for a branch on the given GitHub host base
-// (github.com or a GHES/GHEC host); an empty base falls back to the public
-// github.com host. The base can't be derived from the artifact's source — a
-// sandbox git remote rewritten to the per-run proxy address is not a usable web
-// host — so it is passed in by the host-side caller that resolved it, and
-// defaulted to github.com where it isn't known yet (the constructor).
+// (github.com or a GHES/GHEC host), or "" for an empty base. The base can't be
+// derived from the artifact's source — a sandbox git remote rewritten to the
+// per-run proxy address is not a usable web host — so it is passed in by the
+// host-side caller that resolved it.
 //
 // Each branch path segment is URL-escaped: a branch name can legally contain
 // '#', '%', '?', space, etc., which would otherwise break the link (a '#' would
@@ -126,7 +121,7 @@ func validOwnerRepo(repoPath string) bool {
 func branchWebURL(base, repoPath, branch string) string {
 	base = strings.TrimRight(base, "/")
 	if base == "" {
-		base = "https://github.com"
+		return ""
 	}
 	segs := strings.Split(branch, "/")
 	for i, s := range segs {

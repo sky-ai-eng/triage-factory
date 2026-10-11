@@ -145,8 +145,62 @@ func CleanupWithOptions(opts CleanupOptions) {
 		return
 	}
 	reposRoot := paths.BareCacheRoot(runmode.LocalDefaultOrgID)
+	removeLegacyBareLayout(reposRoot)
 	clearStaleLockedWorktreesAll(reposRoot)
 	pruneAll(reposRoot)
+}
+
+// removeLegacyBareLayout deletes the bare clones of the slug-keyed layout,
+// <reposRoot>/<owner>/<repo>.git. A bare is keyed by its repository's row id
+// now (repoDir), so nothing resolves to one of these again: a slug names a
+// repository only on one GitHub host, and the old layout shared one directory
+// between every host's and every org's same-named repository. Each one is
+// reclaimed whole, the way an eviction reclaims a bare, unless a checkout on
+// disk still links into it — a warm worktree kept across the restart — which
+// keeps it until a later startup finds it unused. An owner directory left with
+// nothing in it goes too.
+//
+// Anything directly under reposRoot that is not a directory, or is itself a
+// .git directory, is the current layout or not ours, and is left alone.
+func removeLegacyBareLayout(reposRoot string) {
+	owners, err := os.ReadDir(reposRoot)
+	if err != nil {
+		return
+	}
+	removed := 0
+	for _, o := range owners {
+		if !o.IsDir() || strings.HasSuffix(o.Name(), ".git") {
+			continue
+		}
+		ownerDir := filepath.Join(reposRoot, o.Name())
+		bares, err := os.ReadDir(ownerDir)
+		if err != nil {
+			worktreeLog.Warn("legacy bare layout: read owner dir failed", "path", ownerDir, "error", err)
+			continue
+		}
+		for _, b := range bares {
+			if !b.IsDir() || !strings.HasSuffix(b.Name(), ".git") {
+				continue
+			}
+			bare := filepath.Join(ownerDir, b.Name())
+			if bareHasLiveWorktrees(bare) {
+				continue
+			}
+			removeRegisteredWorktrees(bare)
+			if err := os.RemoveAll(bare); err != nil {
+				worktreeLog.Warn("legacy bare layout: remove bare failed", "path", bare, "error", err)
+				continue
+			}
+			forgetBare(bare)
+			removed++
+		}
+		// Only an empty directory goes: Remove (not RemoveAll) refuses one
+		// that still holds a bare kept above.
+		_ = os.Remove(ownerDir)
+	}
+	if removed > 0 {
+		worktreeLog.Info("removed bare clones of the slug-keyed layout", "count", removed)
+	}
 }
 
 // sweepOrphanedStagingDirs reclaims the per-run staging dirs left behind by runs

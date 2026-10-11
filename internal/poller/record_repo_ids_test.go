@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
@@ -31,7 +32,7 @@ func TestRecordRepoIDs_WritesTheIntersectionFromTheGrant(t *testing.T) {
 	}
 	scoped := []string{"octo/engineering", "octo/marketing", "octo/idless"}
 
-	m.recordRepoIDs(context.Background(), "org-1", scoped, grant)
+	m.recordRepoIDs(context.Background(), "org-1", dbtest.TestGitHubHost, scoped, grant)
 
 	if len(repos.calls) != 1 {
 		t.Fatalf("FillMissingExternalIDsSystem called %d times, want 1", len(repos.calls))
@@ -61,6 +62,9 @@ func TestRecordRepoIDs_WritesTheIntersectionFromTheGrant(t *testing.T) {
 	if eng.Source != domain.RepoSourceGitHub {
 		t.Errorf("source = %q, want %q", eng.Source, domain.RepoSourceGitHub)
 	}
+	if eng.Host != dbtest.TestGitHubHost {
+		t.Errorf("host = %q, want %q — ids are stamped only on the host the grant was read from", eng.Host, dbtest.TestGitHubHost)
+	}
 	if _, ok := bySlug["octo/unconfigured"]; ok {
 		t.Error("a granted-but-untracked repo was written; it has no row, and the poller must not create one")
 	}
@@ -76,7 +80,7 @@ func TestRecordRepoIDs_StoreFailureIsNotFatal(t *testing.T) {
 	repos := &repoIDFillStore{err: errors.New("db is having a day")}
 	m := &Manager{repos: repos}
 
-	m.recordRepoIDs(context.Background(), "org-1",
+	m.recordRepoIDs(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]string{"octo/engineering"},
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/engineering"}})
 
@@ -93,7 +97,7 @@ func TestRecordRepoIDs_NoIDsMeansNoCall(t *testing.T) {
 	repos := &repoIDFillStore{}
 	m := &Manager{repos: repos}
 
-	m.recordRepoIDs(context.Background(), "org-1",
+	m.recordRepoIDs(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]string{"octo/engineering"},
 		[]ghclient.UserRepo{{FullName: "octo/engineering"}}) // no id
 
@@ -106,7 +110,7 @@ func TestRecordRepoIDs_NoIDsMeansNoCall(t *testing.T) {
 // panic on the way through.
 func TestRecordRepoIDs_NilStore(t *testing.T) {
 	m := &Manager{}
-	m.recordRepoIDs(context.Background(), "org-1",
+	m.recordRepoIDs(context.Background(), "org-1", dbtest.TestGitHubHost,
 		[]string{"octo/engineering"},
 		[]ghclient.UserRepo{{ID: 1, FullName: "octo/engineering"}})
 }

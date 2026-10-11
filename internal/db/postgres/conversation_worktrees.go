@@ -30,11 +30,11 @@ import (
 //     spawner's runAgent + chain orchestrator cleanup defers route
 //     here. org_id stays bound as defense in depth.
 //
-// A ledger row points at a repository by the registry row's id. The store's
-// surface stays the slug, because the caller is an agent's argv
-// (`tfac exec workspace add owner/repo`), so every method resolves the slug
-// here: a write get-or-creates the registry row, a read or a delete resolves it
-// and matches nothing when there is none.
+// A ledger row points at a repository by the registry row's id, and so does
+// every method here: the agent's argv (`tfac exec workspace add owner/repo`)
+// is resolved to a row on the org's GitHub host before a reservation is made,
+// and a slug alone would name a repository on whichever host answered first.
+// Reads join the row back for its "owner/repo".
 type conversationWorktreeStore struct {
 	q     queryer
 	admin queryer
@@ -54,27 +54,26 @@ func (s *conversationWorktreeStore) InsertSystem(ctx context.Context, orgID stri
 	return insertConversationWorktree(ctx, s.admin, orgID, w, s.GetByRepoRefSystem)
 }
 
-// resolveWorktreeRepositoryID maps the slug a caller passes to the registry
-// row's id. A lookup, never a create: this runs on the executor, whose Postgres
-// role holds SELECT and UPDATE on repositories and deliberately not INSERT — a
-// repository is brought into the registry by the side that polls and tracks,
-// never by a running agent's pod. A worktree is reserved for a repository the
-// conversation was already authorized to clone, so the row exists; an absent
-// one is a broken caller and says so rather than minting a repository nobody
-// tracks.
-func resolveWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repoID string) (string, error) {
-	owner, repo := splitRepoSlug(repoID)
-	if owner == "" || repo == "" {
-		return "", fmt.Errorf("conversation_worktree repo id %q is not an owner/repo slug", repoID)
+// checkWorktreeRepositoryID confirms the registry id a caller passes names a
+// repository in the org. A lookup, never a create: this runs on the executor,
+// whose Postgres role holds SELECT and UPDATE on repositories and deliberately
+// not INSERT — a repository is brought into the registry by the side that polls
+// and tracks, never by a running agent's pod. A worktree is reserved for a
+// repository the conversation was already authorized to clone, so the row
+// exists; an absent one is a broken caller and says so rather than recording a
+// reference to nothing.
+func checkWorktreeRepositoryID(ctx context.Context, q queryer, orgID, repositoryID string) error {
+	if err := validRepoID(repositoryID); err != nil {
+		return err
 	}
-	id, err := findRepositoryID(ctx, q, orgID, domain.RepoSourceGitHub, owner, repo)
-	if err != nil {
-		return "", err
+	var found int
+	err := q.QueryRowContext(ctx, `
+		SELECT 1 FROM repositories WHERE org_id = $1 AND id = $2
+	`, orgID, repositoryID).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", db.ErrNoSuchRepository, repositoryID)
 	}
-	if id == "" {
-		return "", fmt.Errorf("no repository row for %s", repoID)
-	}
-	return id, nil
+	return err
 }
 
 func insertConversationWorktree(
@@ -101,12 +100,12 @@ func insertConversationWorktree(
 	// below: credentials are minted per repo, not per (repo, ref), so a
 	// second checkout in a repo the conversation already holds widens
 	// nothing.
-	repositoryID, err := resolveWorktreeRepositoryID(ctx, q, orgID, w.RepoID)
-	if err != nil {
-		return false, "", fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
+	repositoryID := w.RepositoryID
+	if err := checkWorktreeRepositoryID(ctx, q, orgID, repositoryID); err != nil {
+		return false, "", fmt.Errorf("resolve repository %s: %w", repositoryID, err)
 	}
 	var inserted, priorRows int
-	err = q.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 		WITH prior AS (
 			SELECT 1 FROM conversation_worktrees
 			WHERE org_id = $2 AND conversation_id = $1 AND repository_id = $3
@@ -156,38 +155,47 @@ func insertConversationWorktree(
 		}
 		return true, w.Path, nil
 	}
-	existing, err := lookup(ctx, orgID, w.ConversationID, w.RepoID, w.Ref)
+	existing, err := lookup(ctx, orgID, w.ConversationID, repositoryID, w.Ref)
 	if err != nil {
 		return false, "", fmt.Errorf("read existing conversation_worktree after conflict: %w", err)
 	}
 	if existing == nil {
-		return false, "", fmt.Errorf("conversation_worktree row vanished after ON CONFLICT DO NOTHING (conversation_id=%s, repo_id=%s, ref=%s)", w.ConversationID, w.RepoID, w.Ref)
+		return false, "", fmt.Errorf("conversation_worktree row vanished after ON CONFLICT DO NOTHING (conversation_id=%s, repository_id=%s, ref=%s)", w.ConversationID, repositoryID, w.Ref)
 	}
 	return false, existing.Path, nil
 }
 
-func (s *conversationWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return getConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
+func (s *conversationWorktreeStore) GetByRepoRef(ctx context.Context, orgID, conversationID, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return getConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repositoryID, ref)
 }
 
-func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
-	return getConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
+func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgID, conversationID, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	return getConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repositoryID, ref)
 }
 
-func getConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) (*domain.ConversationWorktree, error) {
-	owner, repo := splitRepoSlug(repoID)
-	if owner == "" || repo == "" {
+// worktreeColumns is the projection scanWorktree reads: the ledger row plus the
+// repository's slug, joined as r.
+const worktreeColumns = `w.conversation_id, w.repository_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at`
+
+func scanWorktree(row pgRowScanner) (domain.ConversationWorktree, error) {
+	var w domain.ConversationWorktree
+	err := row.Scan(&w.ConversationID, &w.RepositoryID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt)
+	return w, err
+}
+
+func getConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repositoryID, ref string) (*domain.ConversationWorktree, error) {
+	if validRepoID(repositoryID) != nil {
 		return nil, nil
 	}
 	row := q.QueryRowContext(ctx, `
-		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		SELECT `+worktreeColumns+`
 		FROM conversation_worktrees w
 		JOIN repositories r ON r.id = w.repository_id
 		WHERE w.org_id = $1 AND w.conversation_id = $2
-		  AND lower(r.owner) = lower($3) AND lower(r.repo) = lower($4) AND w.ref = $5
-	`, orgID, conversationID, owner, repo, ref)
-	var w domain.ConversationWorktree
-	if err := row.Scan(&w.ConversationID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
+		  AND w.repository_id = $3 AND w.ref = $4
+	`, orgID, conversationID, repositoryID, ref)
+	w, err := scanWorktree(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -206,7 +214,7 @@ func (s *conversationWorktreeStore) ListSystem(ctx context.Context, orgID, conve
 
 func listConversationWorktrees(ctx context.Context, q queryer, orgID, conversationID string) ([]domain.ConversationWorktree, error) {
 	rows, err := q.QueryContext(ctx, `
-		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		SELECT `+worktreeColumns+`
 		FROM conversation_worktrees w
 		JOIN repositories r ON r.id = w.repository_id
 		WHERE w.org_id = $1 AND w.conversation_id = $2
@@ -218,8 +226,8 @@ func listConversationWorktrees(ctx context.Context, q queryer, orgID, conversati
 	defer rows.Close()
 	out := []domain.ConversationWorktree{}
 	for rows.Next() {
-		var w domain.ConversationWorktree
-		if err := rows.Scan(&w.ConversationID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
+		w, err := scanWorktree(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -227,27 +235,22 @@ func listConversationWorktrees(ctx context.Context, q queryer, orgID, conversati
 	return out, rows.Err()
 }
 
-func (s *conversationWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repoID, ref string) error {
-	return deleteConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repoID, ref)
+func (s *conversationWorktreeStore) DeleteByRepoRef(ctx context.Context, orgID, conversationID, repositoryID, ref string) error {
+	return deleteConversationWorktreeByRepoRef(ctx, s.q, orgID, conversationID, repositoryID, ref)
 }
 
-func (s *conversationWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repoID, ref string) error {
-	return deleteConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repoID, ref)
+func (s *conversationWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repositoryID, ref string) error {
+	return deleteConversationWorktreeByRepoRef(ctx, s.admin, orgID, conversationID, repositoryID, ref)
 }
 
-func deleteConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repoID, ref string) error {
-	owner, repo := splitRepoSlug(repoID)
-	if owner == "" || repo == "" {
+func deleteConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, conversationID, repositoryID, ref string) error {
+	if validRepoID(repositoryID) != nil {
 		return nil
 	}
 	_, err := q.ExecContext(ctx, `
-		DELETE FROM conversation_worktrees w
-		WHERE w.org_id = $1 AND w.conversation_id = $2 AND w.ref = $3
-		  AND EXISTS (
-		      SELECT 1 FROM repositories r
-		       WHERE r.id = w.repository_id
-		         AND lower(r.owner) = lower($4) AND lower(r.repo) = lower($5))
-	`, orgID, conversationID, ref, owner, repo)
+		DELETE FROM conversation_worktrees
+		WHERE org_id = $1 AND conversation_id = $2 AND ref = $3 AND repository_id = $4
+	`, orgID, conversationID, ref, repositoryID)
 	return err
 }
 
@@ -261,7 +264,7 @@ func (s *conversationWorktreeStore) DeleteByPathSystem(ctx context.Context, orgI
 
 func (s *conversationWorktreeStore) ListForTaskSystem(ctx context.Context, orgID, taskID string) ([]domain.ConversationWorktree, error) {
 	rows, err := s.admin.QueryContext(ctx, `
-		SELECT w.conversation_id, r.owner || '/' || r.repo, w.path, w.ref, w.created_at
+		SELECT `+worktreeColumns+`
 		FROM conversation_worktrees w
 		JOIN repositories r ON r.id = w.repository_id
 		JOIN conversations c ON c.org_id = w.org_id AND c.id = w.conversation_id
@@ -274,8 +277,8 @@ func (s *conversationWorktreeStore) ListForTaskSystem(ctx context.Context, orgID
 	defer rows.Close()
 	out := []domain.ConversationWorktree{}
 	for rows.Next() {
-		var w domain.ConversationWorktree
-		if err := rows.Scan(&w.ConversationID, &w.RepoID, &w.Path, &w.Ref, &w.CreatedAt); err != nil {
+		w, err := scanWorktree(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, w)
@@ -292,9 +295,9 @@ func (s *conversationWorktreeStore) RecordForClaimSystem(ctx context.Context, or
 		if err := assertClaimActive(ctx, q, orgID, w.ConversationID, claimID); err != nil {
 			return err
 		}
-		repositoryID, err := resolveWorktreeRepositoryID(ctx, q, orgID, w.RepoID)
-		if err != nil {
-			return fmt.Errorf("resolve repository %s: %w", w.RepoID, err)
+		repositoryID := w.RepositoryID
+		if err := checkWorktreeRepositoryID(ctx, q, orgID, repositoryID); err != nil {
+			return fmt.Errorf("resolve repository %s: %w", repositoryID, err)
 		}
 		var priorRows int
 		if err := q.QueryRowContext(ctx, `
@@ -308,10 +311,10 @@ func (s *conversationWorktreeStore) RecordForClaimSystem(ctx context.Context, or
 				ON CONFLICT (conversation_id, repository_id, ref) DO UPDATE SET path = EXCLUDED.path
 				RETURNING conversation_id, repository_id, path, ref, created_at
 			)
-			SELECT up.conversation_id, r.owner || '/' || r.repo, up.path, up.ref, up.created_at,
+			SELECT up.conversation_id, up.repository_id, r.owner || '/' || r.repo, up.path, up.ref, up.created_at,
 			       (SELECT count(*) FROM prior)
 			FROM up JOIN repositories r ON r.id = up.repository_id
-		`, w.ConversationID, orgID, repositoryID, w.Path, w.Ref).Scan(&stored.ConversationID, &stored.RepoID, &stored.Path, &stored.Ref, &stored.CreatedAt, &priorRows); err != nil {
+		`, w.ConversationID, orgID, repositoryID, w.Path, w.Ref).Scan(&stored.ConversationID, &stored.RepositoryID, &stored.RepoID, &stored.Path, &stored.Ref, &stored.CreatedAt, &priorRows); err != nil {
 			return fmt.Errorf("record conversation_worktree: %w", err)
 		}
 		if priorRows == 0 {
