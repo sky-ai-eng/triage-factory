@@ -2,6 +2,7 @@ package worktree
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -386,7 +387,8 @@ func TestRestoreCheckout_FailureDropsBareRunRefs(t *testing.T) {
 			root = mustRunRoot(t, key)
 
 			r := CheckoutRestore{
-				Owner: "acme", Repo: "repo", CloneURL: upstream, Root: root, Slug: PRRefSlug(7), RootKey: key,
+				RepositoryID: testRepo("acme", "repo").ID,
+				Owner:        "acme", Repo: "repo", CloneURL: upstream, Root: root, Slug: PRRefSlug(7), RootKey: key,
 				PR:   &PRCheckout{HeadRef: "feature", HeadCloneURL: upstream, BaseRef: "main"},
 				Head: delta.Head, Branch: delta.Branch,
 			}
@@ -408,8 +410,12 @@ func TestRestoreCheckout_FailureDropsBareRunRefs(t *testing.T) {
 				ctx, cancel = context.WithTimeout(ctx, 1500*time.Millisecond)
 				defer cancel()
 			}
-			if _, err := RestoreCheckout(ctx, r); err == nil {
+			_, err = RestoreCheckout(ctx, r)
+			if err == nil {
 				t.Fatal("restore succeeded")
+			}
+			if errors.Is(err, errRestoreInput) {
+				t.Fatalf("restore refused its own input rather than failing partway: %v", err)
 			}
 			bare, _ := repoDir(testRepo("acme", "repo").ID)
 			if out := gitAt(t, bare, "for-each-ref", "refs/heads/triagefactory/", "refs/remotes/origin/triagefactory/"); strings.TrimSpace(out) != "" {

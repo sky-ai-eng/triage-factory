@@ -3,6 +3,7 @@ package credprovision
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -43,6 +44,7 @@ type reposScopedCall struct {
 type fakeScopedResolver struct {
 	ghclient.Resolver
 	base       string
+	baseErr    error
 	name       string
 	email      string
 	hasCred    bool
@@ -53,7 +55,7 @@ type fakeScopedResolver struct {
 }
 
 func (f *fakeScopedResolver) BaseURLFor(context.Context, string) (string, error) {
-	return f.base, nil
+	return f.base, f.baseErr
 }
 
 func (f *fakeScopedResolver) OrgIdentityFor(context.Context, string) (string, string, bool) {
@@ -480,6 +482,57 @@ func TestManager_resolveGitHub_UnreadableHostFailsTheBundle(t *testing.T) {
 	}
 	if len(res.calls) != 0 {
 		t.Errorf("TokenForRepoScoped called %d times, want 0 when the host is unreadable", len(res.calls))
+	}
+}
+
+// TestManager_resolveGitHub_TokensWaitForTheirHost: the sidecar sends a
+// bundle's GitHub tokens to the host sealed beside them, so nothing is minted
+// until that host is known. A read that fails, or answers with no host, fails
+// the seal; an org whose URL was cleared after the credential probe has no
+// credential left, and gets no GitHub half.
+func TestManager_resolveGitHub_TokensWaitForTheirHost(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		base    string
+		baseErr error
+		wantErr bool
+	}{
+		{name: "host read fails", baseErr: errors.New("settings read: connection reset"), wantErr: true},
+		{name: "host read answers empty", base: "", wantErr: true},
+		{name: "URL cleared since the probe", baseErr: fmt.Errorf("%w: org=org-1 has no GitHub URL configured", ghclient.ErrNoGitHubCredentials)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := &fakeScopedResolver{
+				base:    tc.base,
+				baseErr: tc.baseErr,
+				hasCred: true,
+				token:   githubapp.Token{Value: "ghp_pat"},
+			}
+			m := &Manager{
+				stores: db.Stores{
+					Orgs:                  &fakeOrgs{githubBaseURL: dbtest.TestGitHubHost},
+					TeamGitHubRepos:       &fakeTeamRepos{tracked: map[string]bool{"acme/widgets": true}},
+					Tasks:                 &fakeTasks{task: &domain.Task{EntitySource: "jira", EntitySourceID: "SKY-1"}},
+					Entities:              &fakeEntities{scope: dbtest.TestGitHubHost},
+					Repos:                 fakeRepos{},
+					ConversationWorktrees: &fakeConversationWorktrees{},
+				},
+				ghResolver: res,
+			}
+			gh, err := m.resolveGitHub(context.Background(), "org-1", "team-1", "task-1", "conv-1")
+			if tc.wantErr && err == nil {
+				t.Fatalf("resolveGitHub = %+v, want an error", gh)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("resolveGitHub: %v", err)
+			}
+			if gh != nil {
+				t.Errorf("resolveGitHub = %+v, want no GitHub half", gh)
+			}
+			if len(res.calls) != 0 || len(res.reposCalls) != 0 {
+				t.Errorf("minted %d repo and %d gh-channel tokens, want none before the host is known", len(res.calls), len(res.reposCalls))
+			}
+		})
 	}
 }
 

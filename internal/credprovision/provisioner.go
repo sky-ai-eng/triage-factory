@@ -368,16 +368,26 @@ func (m *Manager) resolveGitHub(ctx context.Context, orgID, teamID, taskID, conv
 	if !has {
 		return nil, nil
 	}
+	// The sidecar sends the tokens below to this host and no other, so nothing
+	// is minted until it is known. An org whose URL was cleared since the probe
+	// has no credential left to resolve; any other failure fails the seal.
+	base, err := m.ghResolver.BaseURLFor(ctx, orgID)
+	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve github host: %w", err)
+	}
+	if base == "" {
+		return nil, fmt.Errorf("resolve github host: org %s resolved an empty GitHub URL", orgID)
+	}
 
 	repoIDs, err := m.authorizedRepos(ctx, orgID, teamID, taskID, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve authorized repo set: %w", err)
 	}
 
-	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, RepoTokens: map[string]credbundle.RepoToken{}}
-	if base, err := m.ghResolver.BaseURLFor(ctx, orgID); err == nil {
-		gh.BaseURL = base
-	}
+	gh := &credbundle.GitHubCreds{Mode: credbundle.GitHubModeApp, BaseURL: base, RepoTokens: map[string]credbundle.RepoToken{}}
 	if name, email, ok := m.ghResolver.OrgIdentityFor(ctx, orgID); ok {
 		gh.IdentityName = name
 		gh.IdentityEmail = email

@@ -448,6 +448,7 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
 				GitHub: &credbundle.GitHubCreds{
 					Mode:     "app",
+					BaseURL:  "https://github.com",
 					CLIToken: &credbundle.RepoToken{Token: "ghs_REALCLITOKEN"},
 				},
 			}
@@ -455,6 +456,11 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, bundle)}, nil); err != nil {
 				t.Fatalf("relay bundle: %v", err)
 			}
+			// The injector is built here rather than by a proxy start, so the
+			// host its lanes forward to is set the way that start sets it.
+			rt.mu.Lock()
+			rt.githubBase = "https://github.com"
+			rt.mu.Unlock()
 
 			cert, certPEM, err := ghinjector.GenerateCert("127.0.0.1")
 			if err != nil {
@@ -660,25 +666,35 @@ func TestRuntime_SandboxNeverGetsLLMChannel(t *testing.T) {
 // TestGitHubUpstreamsFromBundle pins the one derivation every GitHub lane in
 // this process reads. The host arrives sealed beside the token it belongs to,
 // so nothing here can be pointed at a host the credential was not resolved
-// for — and a bundle with no GitHub half still answers, because the lanes it
-// would feed are simply never started.
+// for. A bundle with no GitHub half carries no credential and forwards to the
+// deployment's GitHub; a GitHub half with no host is refused rather than sent
+// there.
 func TestGitHubUpstreamsFromBundle(t *testing.T) {
 	for _, tt := range []struct {
 		name, base, wantGit, wantAPI string
-		noGitHub                     bool
+		noGitHub, wantErr            bool
 	}{
 		{name: "public", base: "https://github.com", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
-		{name: "unconfigured", base: "", wantGit: "https://github.com", wantAPI: "https://api.github.com"},
 		{name: "no_github_half", noGitHub: true, wantGit: "https://github.com", wantAPI: "https://api.github.com"},
 		{name: "ghes", base: "https://ghes.acme.com", wantGit: "https://ghes.acme.com", wantAPI: "https://ghes.acme.com/api/v3"},
 		{name: "data_residency", base: "https://octocorp.ghe.com", wantGit: "https://octocorp.ghe.com", wantAPI: "https://api.octocorp.ghe.com"},
+		{name: "github_half_with_no_host", base: "", wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &credbundle.Bundle{}
 			if !tt.noGitHub {
-				b.GitHub = &credbundle.GitHubCreds{Mode: "app", BaseURL: tt.base}
+				b.GitHub = &credbundle.GitHubCreds{Mode: "app", BaseURL: tt.base, PAT: "ghp_x"}
 			}
-			git, api := githubUpstreams(b)
+			git, api, err := githubUpstreams(b)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("githubUpstreams = (%q, %q), want a refusal", git, api)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("githubUpstreams: %v", err)
+			}
 			if git != tt.wantGit || api != tt.wantAPI {
 				t.Errorf("githubUpstreams = (%q, %q), want (%q, %q)", git, api, tt.wantGit, tt.wantAPI)
 			}
