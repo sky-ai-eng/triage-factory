@@ -368,6 +368,62 @@ func TestUserTokenCache_RefusalOfARotatedTokenRetriesTheStoredOne(t *testing.T) 
 	}
 }
 
+// A refresh that loses to another writer on its retry too has nothing more to
+// try; the caller gets the answer connecting again fixes, and the credential
+// the other writer stored is left alone.
+func TestUserTokenCache_LosingTheRetryIsNoCredential(t *testing.T) {
+	cases := []struct {
+		name   string
+		refuse map[string]bool
+		// next is the envelope another writer stores during each refresh,
+		// keyed by the refresh token it is presented.
+		next map[string]string
+		want string
+	}{
+		{
+			name:   "rotated by another process twice",
+			refuse: map[string]bool{"ref-0": true, "ref-9": true},
+			next: map[string]string{
+				"ref-0": connectEnvelope(t, "ref-9", uGrant, "client-1"),
+				"ref-9": connectEnvelope(t, "ref-19", uGrant, "client-1"),
+			},
+			want: "ref-19",
+		},
+		{
+			name: "connected again during both refreshes",
+			next: map[string]string{
+				"ref-0": connectEnvelope(t, "ref-5", "grant-2", "client-1"),
+				"ref-5": connectEnvelope(t, "ref-7", "grant-3", "client-1"),
+			},
+			want: "ref-7",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newUserRig(t)
+			r.ref.refuse = tc.refuse
+			r.ref.onRefresh = func(tok string) {
+				if env, ok := tc.next[tok]; ok {
+					r.secrets.set(env)
+				}
+			}
+
+			if _, err := r.token(t, r.cache()); !errors.Is(err, linear.ErrNoLinearUserCredential) {
+				t.Fatalf("err = %v, want ErrNoLinearUserCredential", err)
+			}
+			if n := r.ref.calls.Load(); n != 2 {
+				t.Errorf("refreshes = %d, want 2", n)
+			}
+			if cred, ok := r.secrets.stored(t); !ok || cred.RefreshToken != tc.want {
+				t.Errorf("stored = %+v (%v), want the other writer's %s", cred, ok, tc.want)
+			}
+			if len(r.ids.cleared) != 0 {
+				t.Errorf("identity cleared %v for a credential another writer holds", r.ids.cleared)
+			}
+		})
+	}
+}
+
 func TestUserTokenCache_DisconnectDuringRefreshIsNotResurrected(t *testing.T) {
 	r := newUserRig(t)
 	r.ref.onRefresh = func(string) { r.secrets.set("") }

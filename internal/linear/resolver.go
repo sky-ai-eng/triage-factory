@@ -155,7 +155,8 @@ type InstallTokenSource interface {
 // UserTokenSource mints the access token of a user's Connect credential for a
 // workspace. internal/linearoauth's UserTokenCache implements it. A user with
 // no usable Connect credential, including one Linear has refused, is
-// ErrNoLinearUserCredential.
+// ErrNoLinearUserCredential, and so is one the source cannot mint a token for
+// because it kept changing during the refresh: connecting again fixes both.
 type UserTokenSource interface {
 	AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error)
 }
@@ -274,10 +275,10 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 
 // ForUser builds a client from the acting user's own credential for the org's
 // Linear workspace, counted under orgID. With no workspace bound, no stored
-// credential, or a Connect credential Linear has refused it is
-// ErrNoLinearUserCredential, never a client built from the org's credential
-// instead. A failed read, a corrupt envelope or a method this build does not
-// know is returned as an error of its own.
+// credential, or a Connect credential its UserTokenSource reports as unusable
+// (Linear refused it, say) it is ErrNoLinearUserCredential, never a client
+// built from the org's credential instead. A failed read, a corrupt envelope
+// or a method this build does not know is returned as an error of its own.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {

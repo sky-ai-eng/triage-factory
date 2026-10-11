@@ -95,8 +95,8 @@ func userCacheKey(orgID, userID, workspaceID string) string {
 // credential in workspaceID, refreshing when the cache holds none for the
 // stored grant or the one it holds has less than a minute left. A user with
 // no Connect credential, one minted by an app the org can no longer
-// authenticate as, or one Linear has refused is
-// linear.ErrNoLinearUserCredential.
+// authenticate as, one Linear has refused, or one that changed during two
+// refreshes in a row is linear.ErrNoLinearUserCredential.
 func (c *UserTokenCache) AccessTokenForUser(ctx context.Context, orgID, userID, workspaceID string) (string, error) {
 	key := userCacheKey(orgID, userID, workspaceID)
 	cred, _, err := c.readEnvelope(ctx, orgID, userID, workspaceID)
@@ -166,6 +166,11 @@ func (c *UserTokenCache) readEnvelope(ctx context.Context, orgID, userID, worksp
 // retried once against what is stored now. A refresh token Linear refuses is
 // removed (dropRefused), unless it is no longer the stored one: another
 // process rotated it, so the stored token is tried once instead.
+//
+// A retry that loses to another writer again is one this refresh cannot
+// settle. The credential is still the user's own, so it gets the answer of
+// one with none, ErrNoLinearUserCredential: connecting again replaces
+// whatever is stored by then.
 func (c *UserTokenCache) refresh(ctx context.Context, orgID, userID, workspaceID string) (cachedUserToken, error) {
 	key := userCacheKey(orgID, userID, workspaceID)
 	// Re-checked under the flight: a sibling caller may have just refreshed.
@@ -179,11 +184,15 @@ func (c *UserTokenCache) refresh(ctx context.Context, orgID, userID, workspaceID
 		if RefusedGrant(err) {
 			err = c.dropRefused(ctx, orgID, userID, workspaceID, raw, err)
 		}
+		lost := errors.Is(err, errGrantReplaced) || errors.Is(err, errEnvelopeMoved)
 		switch {
 		case err == nil:
 			return ct, nil
-		case (errors.Is(err, errGrantReplaced) || errors.Is(err, errEnvelopeMoved)) && attempt == 0:
+		case lost && attempt == 0:
 			continue
+		case lost:
+			return cachedUserToken{}, fmt.Errorf("%w: org=%s user=%s (the stored credential changed during two refreshes in a row): %w",
+				linear.ErrNoLinearUserCredential, orgID, userID, err)
 		default:
 			return cachedUserToken{}, err
 		}
