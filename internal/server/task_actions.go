@@ -11,6 +11,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/delegate"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/modelaccess"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
@@ -18,9 +19,9 @@ import (
 )
 
 // The task verb routes: claim, delegate, requeue and undo. Each earns its
-// verb by carrying an effect a field write can't express — an external Jira
-// write, a spawned run, artifact teardown, an audit reversal. The lifecycle
-// axis (dismissed / done / snoozed) is a field write and lives on
+// verb by carrying an effect a field write can't express — an external Jira or
+// Linear write, a spawned run, artifact teardown, an audit reversal. The
+// lifecycle axis (dismissed / done / snoozed) is a field write and lives on
 // PATCH /api/tasks/{id} in tasks.go; requeue and undo live there too, next to
 // the finalizer they share.
 //
@@ -54,8 +55,8 @@ type taskClaimRequest struct {
 
 // handleTaskClaim moves a task's user claim. Self-claim (no target) takes
 // ownership for the caller, lands the task in progress, tears down whatever
-// the agent had in flight, and syncs a Jira-backed ticket to the caller.
-// Handoff (a target) moves an existing user claim to someone else and
+// the agent had in flight, and syncs a Jira ticket or Linear issue to the
+// caller. Handoff (a target) moves an existing user claim to someone else and
 // deliberately touches neither — nor the stage, since the row the handoff
 // starts from is already in progress.
 //
@@ -104,7 +105,7 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jiraUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
+	jiraUserClient, linearUserClient, landing, ok := s.selfClaim(w, r, orgID, userID, id, req.HesitationMs)
 	if !ok {
 		return
 	}
@@ -131,6 +132,9 @@ func (s *Server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	if jiraUserClient != nil {
 		s.syncJiraClaim(r, orgID, userID, id, jiraUserClient)
 	}
+	if linearUserClient != nil {
+		s.syncLinearClaim(r, orgID, userID, id, linearUserClient)
+	}
 	s.writeTaskResource(w, r, orgID, userID, id)
 }
 
@@ -156,12 +160,14 @@ const (
 // from bot, claim from unclaimed) and one refuse path (different user owns it
 // → 409). Both landing paths put the task in progress in the same UPDATE that
 // writes the claim — the claim IS the stage marker, so the queue holds nobody's
-// work. For a Jira-backed task it resolves the acting user's Jira client up
-// front so a user with no connected Jira is refused BEFORE the claim lands
-// (acting as the bot here would mis-assign the ticket to the service account).
-// Returns the resolved Jira client (nil for GitHub tasks), which accept path
-// landed, and ok=false when it already wrote an error response.
-func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, claimLanding, bool) {
+// work. For a Jira- or Linear-backed task it resolves the acting user's own
+// client up front so a user with no connected Jira or Linear is refused BEFORE
+// the claim lands (acting as the bot here would mis-assign the issue to the
+// service account). Returns the resolved Jira client (nil unless the task is
+// Jira-backed), the resolved Linear client (nil unless it is Linear-backed),
+// which accept path landed, and ok=false when it already wrote an error
+// response.
+func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID, id string, hesitationMs int) (*jira.Client, *linear.Client, claimLanding, bool) {
 	var task *domain.Task
 	if err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -169,11 +175,11 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		return e
 	}); err != nil {
 		internalError(w, "tasks", err)
-		return nil, claimLandingIdempotent, false
+		return nil, nil, claimLandingIdempotent, false
 	}
 	if task == nil {
 		notFound(w, "task")
-		return nil, claimLandingIdempotent, false
+		return nil, nil, claimLandingIdempotent, false
 	}
 	// Terminal-status refusal: claim transitions on done/dismissed rows are
 	// meaningless. RecordSwipe refuses them too, so this is the answer the
@@ -181,7 +187,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 	// about the task rather than a silently unaudited claim.
 	if isTerminalTaskStatus(task.Status) {
 		writeTaskTerminal(w, "claim")
-		return nil, claimLandingIdempotent, false
+		return nil, nil, claimLandingIdempotent, false
 	}
 
 	// A Jira-backed claim assigns the ticket to the claiming user and
@@ -194,9 +200,29 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 		c, jerr := s.jiraResolver.ForUser(r.Context(), orgID, userID)
 		if jerr != nil {
 			writeJiraUserClientError(w, "tasks", jerr)
-			return nil, claimLandingIdempotent, false
+			return nil, nil, claimLandingIdempotent, false
 		}
 		jiraUserClient = c
+	}
+	// The Linear sibling, under the same rule: the issue is assigned to the
+	// claiming user as themselves, never as the org's app or API-key identity.
+	// This refusal is what enforces that, for every caller: the SPA's Linear
+	// gate is onboarding, and a headless caller never passes through it.
+	var linearUserClient *linear.Client
+	if task.EntitySource == "linear" {
+		c, lerr := s.linearResolver.ForUser(r.Context(), orgID, userID)
+		if errors.Is(lerr, linear.ErrNoLinearUserCredential) {
+			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
+				Reason:  httpx.ReasonNotConfigured,
+				Message: "connect your Linear to act on issues",
+			})
+			return nil, nil, claimLandingIdempotent, false
+		}
+		if lerr != nil {
+			internalError(w, "tasks", lerr)
+			return nil, nil, claimLandingIdempotent, false
+		}
+		linearUserClient = c
 	}
 
 	landing := claimLandingIdempotent
@@ -208,7 +234,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			Reason:  httpx.ReasonConflict,
 			Message: "task is already claimed by another user",
 		})
-		return nil, claimLandingIdempotent, false
+		return nil, nil, claimLandingIdempotent, false
 	case task.ClaimedByAgentID != "":
 		var claimOK bool
 		if err := s.tx.WithTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
@@ -220,13 +246,13 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return nil, claimLandingIdempotent, false
+			return nil, nil, claimLandingIdempotent, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return nil, claimLandingIdempotent, false
+			return nil, nil, claimLandingIdempotent, false
 		}
 		landing = claimLandingFromAgent
 	default:
@@ -240,13 +266,13 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			httpx.WriteErrors(w, http.StatusInternalServerError, httpx.ErrorItem{
 				Reason: httpx.ReasonInternal, Message: "claim stamp failed" + localDetail(err),
 			})
-			return nil, claimLandingIdempotent, false
+			return nil, nil, claimLandingIdempotent, false
 		}
 		if !claimOK {
 			httpx.WriteErrors(w, http.StatusConflict, httpx.ErrorItem{
 				Reason: httpx.ReasonConflict, Message: "claim race lost; refetch task and retry",
 			})
-			return nil, claimLandingIdempotent, false
+			return nil, nil, claimLandingIdempotent, false
 		}
 		landing = claimLandingFromUnclaimed
 	}
@@ -279,7 +305,7 @@ func (s *Server) selfClaim(w http.ResponseWriter, r *http.Request, orgID, userID
 			},
 		})
 	}
-	return jiraUserClient, landing, true
+	return jiraUserClient, linearUserClient, landing, true
 }
 
 // reassignClaim is the claim route's target_user_id arm: the user↔user
@@ -793,6 +819,49 @@ func (s *Server) syncJiraClaim(r *http.Request, orgID, userID, id string, jiraUs
 		}
 	}(task.EntitySourceID, rule.InProgressMembers,
 		jira.Status{ID: rule.InProgressCanonical.ID, Name: rule.InProgressCanonical.Name})
+}
+
+// syncLinearClaim assigns a claimed Linear issue to the acting user and moves
+// it to the Linear team's in-progress state, in a detached goroutine. The
+// Linear sibling of syncJiraClaim, best-effort for the same reason: the claim
+// has already landed in TF. linearUserClient is the acting user's own client,
+// so Linear records the person who claimed the task as the one who assigned
+// and moved the issue.
+func (s *Server) syncLinearClaim(r *http.Request, orgID, userID, id string, linearUserClient *linear.Client) {
+	// The task, its rule and the acting user's Linear identity in one read, so
+	// the rule read goes through the app-pool ListForTeam under RLS.
+	var task *domain.Task
+	var target linearSyncTarget
+	err := s.tx.WithReadTx(r.Context(), orgID, userID, func(tx db.TxStores) error {
+		var e error
+		task, e = tx.Tasks.Get(r.Context(), orgID, id)
+		if e != nil || task == nil || task.EntitySource != "linear" {
+			return e
+		}
+		target, e = readLinearSyncTarget(r.Context(), tx, orgID, userID, task)
+		return e
+	})
+	if err != nil {
+		linearLog.Warn("claim guard: read task for sync failed, skipping", "task", id, "error", err)
+		return
+	}
+	if task == nil || task.EntitySource != "linear" {
+		return
+	}
+	if target.rule == nil || target.rule.InProgressCanonical.IsZero() {
+		linearLog.Warn("claim guard: no in_progress rule for Linear team, skipping transition", "issue", target.identifier)
+		return
+	}
+	// The connect flow writes the credential and the identity in one
+	// transaction, so a user with a credential and no identity is not a state
+	// the product produces. Without the id there is nobody to assign.
+	if target.linearUserID == "" {
+		linearLog.Warn("claim guard: no Linear identity stored for the acting user, skipping", "issue", target.identifier, "user", userID)
+		return
+	}
+	// Detached from the request: the sync outlives the response, so it uses a
+	// background context.
+	go applyLinearClaim(context.Background(), linearUserClient, target.identifier, target.linearUserID, *target.rule)
 }
 
 // triggerDelegation fires the delegation run and records the conversation_id on
