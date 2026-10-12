@@ -23,7 +23,8 @@ const linearNoParent = "none"
 // State comparisons go through LinearStateRef.SameState, so a state renamed in
 // Linear is not a transition: the id is unchanged and the snapshot just stores
 // the new name. The assignee is compared on the Linear user id, so a person
-// renaming themselves is not a reassignment either.
+// renaming themselves is not a reassignment either. The creator is carried on
+// every event and never diffed: Linear does not let it change.
 //
 // Every event's source time is the issue's updatedAt: Linear bumps it for each
 // change diffed here, and a snapshot carries no per-field timestamps.
@@ -161,6 +162,8 @@ func linearIdentity(snap domain.LinearSnapshot) events.LinearIssueIdentity {
 		LinearTeamKey:   snap.TeamKey,
 		Assignee:        snap.Assignee,
 		AssigneeUserID:  snap.AssigneeUserID,
+		Creator:         snap.Creator,
+		CreatorUserID:   snap.CreatorUserID,
 		Title:           snap.Title,
 	}
 }

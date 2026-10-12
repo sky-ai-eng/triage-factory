@@ -362,15 +362,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // and the name is what a reader of the event sees.
 //
 // The actor-identity fields on emitted metadata
-// (Assignee/AssigneeAccountID, Reporter/ReporterAccountID,
-// Commenter/CommenterAccountID) are copied verbatim from the snapshot.
-// Predicate matching against assignee_in / reporter_in / commenter_in
-// allowlists runs downstream — there is no per-user derivation here.
-// Reporter and commenter account IDs are not yet captured by the
-// snapshot (the Jira API client doesn't expose them on the issue or
-// comment list), so those fields land empty in metadata; rules that
-// scope on reporter_in / commenter_in degrade to "no match" naturally
-// until that plumbing arrives.
+// (Assignee/AssigneeAccountID, Reporter/ReporterAccountID) are copied
+// verbatim from the snapshot. Predicate matching against assignee_in /
+// reporter_in allowlists runs downstream — there is no per-user derivation
+// here. The reporter is not diffed: a reporter change does not change
+// whether the issue needs attention, so it emits nothing.
 func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []domain.JiraStatusRef) []domain.Event {
 	terminal := func(snap domain.JiraSnapshot) bool {
 		return domain.ContainsStatus(doneStatuses, snap.StatusRef())
@@ -407,12 +403,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		} else if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
+				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
@@ -460,12 +458,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		if curr.Assignee != "" {
 			emit(domain.EventJiraIssueAssigned, "", events.JiraIssueAssignedMetadata{
 				Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
+				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
 				Status: curr.Status, Summary: curr.Summary,
@@ -483,6 +483,9 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	}
 
 	// New comments.
+	//
+	// TODO(TFAC-1069): the snapshot holds no commenter, so this event's
+	// commenter fields land empty and a commenter_in rule never matches.
 	if curr.CommentCount > prev.CommentCount {
 		emit(domain.EventJiraIssueCommented, "", events.JiraIssueCommentedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
@@ -499,6 +502,7 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 	if prev.OpenSubtaskCount > 0 && curr.OpenSubtaskCount == 0 && !terminal(curr) {
 		emit(domain.EventJiraIssueBecameAtomic, "", events.JiraIssueBecameAtomicMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+			Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 			IssueType: curr.IssueType, Priority: curr.Priority,
 			Status: curr.Status, Summary: curr.Summary,

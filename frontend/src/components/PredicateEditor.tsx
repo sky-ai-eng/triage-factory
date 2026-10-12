@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Tooltip } from '../ui/tooltip/Tooltip'
 import { Info } from 'lucide-react'
 import type { FieldSchema } from '../types'
-import IdentityListField from './IdentityListField'
+import IdentityListField, { type IdentityKind } from './IdentityListField'
 import { apiJSON, httpErrorMessage } from '../lib/apiClient'
 
 interface PredicateEditorProps {
@@ -134,21 +134,31 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
       {field.type === 'int' && <IntField value={value as number | undefined} onChange={onChange} />}
       {/* Every string_list field today is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
-          Jira → assignee_in / reporter_in / commenter_in.
+          Jira → assignee_in / reporter_in / commenter_in;
+          Linear → assignee_in / creator_in.
           IdentityListField branches on identityKind to read the right
-          column (github_username vs jira_account_id) from /api/config.
-          If a non-identity string_list lands later (e.g. labels_any_of),
-          branch on field.name. */}
+          column (github_username, jira_account_id or linear_user_id)
+          from /api/me and the team roster. If a non-identity string_list
+          lands later (e.g. labels_any_of), branch on field.name. */}
       {field.type === 'string_list' && (
         <IdentityListField
           fieldName={field.name}
-          identityKind={eventType.startsWith('jira:') ? 'jira' : 'github'}
+          identityKind={identityKindFor(eventType)}
           value={Array.isArray(value) ? (value as string[]) : undefined}
           onChange={(v) => onChange(v)}
         />
       )}
     </div>
   )
+}
+
+// identityKindFor picks the identity an allowlist holds from the event's
+// source prefix: a Linear assignee is a Linear user id, never a GitHub
+// login.
+function identityKindFor(eventType: string): IdentityKind {
+  if (eventType.startsWith('jira:')) return 'jira'
+  if (eventType.startsWith('linear:')) return 'linear'
+  return 'github'
 }
 
 // --- Bool: tri-state pills [Any] [Yes] [No] --------------------------------

@@ -278,14 +278,17 @@ sub-issue in a team nobody tracks therefore counts as open.
 
 Every Linear event's metadata carries the issue's identity block —
 `issue_identifier`, `issue_id`, `linear_team_id`, `linear_team_key`,
-`assignee`, `assignee_user_id`, `title` — plus the fields its event adds
+`assignee`, `assignee_user_id`, `creator`, `creator_user_id`, `title` — plus
+the fields its event adds
 (`old_status`/`new_status`, `old_priority`/`new_priority`,
 `previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
 `last_status`, `reason`, `comment_id`, `old_identifier`/`old_linear_team_id`/
 `old_linear_team_key`). `linear_team_id` is what the router's team gate reads
 (with `old_linear_team_id` on `identifier_changed`, see below), and
 `assignee_user_id` is what assignee-centric routing joins against a
-member's bound Linear identity.
+member's bound Linear identity. `creator_user_id` is what `creator_in` matches
+on `assigned`, `available` and `became_atomic`; both creator fields are empty
+for an issue an integration created.
 
 #### Identity
 
@@ -457,6 +460,7 @@ which it is matched on once known) and `scope` (the org's Jira site).
 - `body_hash` — fingerprint of the complete description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `status`, `status_id` — compared by id
 - `assignee` (display name), `assignee_account_id`, `priority`
+- `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]`, `issue_type`, `parent_key`
 - `comment_count`, `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`
@@ -473,6 +477,7 @@ UUID, which it is matched on) and `scope` (the org's Linear workspace id).
 - `body_hash` — fingerprint of the raw markdown description; the description itself is mirrored onto the entity, capped at 2,000 codepoints
 - `state` — `{id, name, type}`; compared by id
 - `assignee` (display name), `assignee_user_id`
+- `creator` (display name), `creator_user_id` — empty for an issue an integration created. Linear does not let the creator change, so it is never diffed
 - `priority` (0 = none, 1 = urgent … 4 = low), `priority_label`
 - `labels[]`
 - `team_id`, `team_key`

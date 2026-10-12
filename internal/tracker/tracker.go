@@ -1368,8 +1368,8 @@ func (c *jiraCycle) terminal(snap domain.JiraSnapshot) bool {
 // project_key. Tickets whose project_key has no row degrade silently — no
 // terminal check, no pickup discovery.
 //
-// Actor identity flows through the snapshot (assignee_account_id) and
-// predicate matching happens downstream against the assignee_in /
+// Actor identity flows through the snapshot (assignee_account_id,
+// reporter_account_id) and predicate matching happens downstream against the assignee_in /
 // reporter_in / commenter_in allowlists.
 //
 // scope is the org's Jira site, domain.EntityScope("jira", settings). An
@@ -2510,7 +2510,7 @@ func (t *Tracker) salvageJiraQuery(
 // detection time — and "project" for telling a move from a project key
 // rename. Spelled out because these reads pass their own list rather than
 // relying on DefaultSearchFields.
-var jiraIssueFields = []string{"summary", "description", "status", "assignee", "priority", "labels", "issuetype", "project", "parent", "comment", "subtasks", "created", "updated"}
+var jiraIssueFields = []string{"summary", "description", "status", "assignee", "reporter", "priority", "labels", "issuetype", "project", "parent", "comment", "subtasks", "created", "updated"}
 
 // batchFetchJira reads every entity's issue and returns the answers keyed by
 // entity id. An entity with an issue id is read by id (`id IN (...)`) and
@@ -2657,6 +2657,12 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.
 			issue.Fields.Assignee.Key,
 			issue.Fields.Assignee.Name,
 		)
+	}
+	if r := issue.Fields.Reporter; r != nil {
+		// The same precedence as the assignee's, so a reporter_in allowlist
+		// built from user_jira_identities compares like with like.
+		snap.Reporter = r.DisplayName
+		snap.ReporterAccountID = jiraclient.StableUserID(r.AccountID, r.Key, r.Name)
 	}
 	if issue.Fields.Priority != nil {
 		snap.Priority = issue.Fields.Priority.Name

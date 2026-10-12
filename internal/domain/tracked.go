@@ -255,10 +255,16 @@ type JiraSnapshot struct {
 	Assignee string `json:"assignee"` // display name (UI surfaces)
 	// AssigneeAccountID is the Atlassian stable identifier — accountId
 	// on Cloud, legacy key on Server / DC. Captured alongside the
-	// display name in issueToState so the predicate matcher
-	// (assignee_in / commenter_in / reporter_in) has a stable
-	// comparison target. Empty on snapshots that predate the field.
-	AssigneeAccountID string   `json:"assignee_account_id,omitempty"`
+	// display name in issueToState so the assignee_in matcher has a
+	// stable comparison target. Empty on snapshots that predate the field.
+	AssigneeAccountID string `json:"assignee_account_id,omitempty"`
+	// Reporter and ReporterAccountID are the reporter's display name and
+	// stable identifier, derived the way the assignee's are. Empty when the
+	// issue has no reporter, and on snapshots that predate the field. A
+	// reporter change emits nothing: it does not change whether the issue
+	// needs attention.
+	Reporter          string   `json:"reporter,omitempty"`
+	ReporterAccountID string   `json:"reporter_account_id,omitempty"`
 	Priority          string   `json:"priority"`
 	Labels            []string `json:"labels"`
 	IssueType         string   `json:"issue_type"`
@@ -309,10 +315,16 @@ type LinearSnapshot struct {
 	Assignee string         `json:"assignee"` // display name
 	// AssigneeUserID is the assignee's Linear user id, the same shape a
 	// credential's viewer.id has, so it is what identity matching keys on.
-	AssigneeUserID string   `json:"assignee_user_id,omitempty"`
-	Priority       int      `json:"priority"` // 0 = no priority, 1 = urgent … 4 = low
-	PriorityLabel  string   `json:"priority_label"`
-	Labels         []string `json:"labels"`
+	AssigneeUserID string `json:"assignee_user_id,omitempty"`
+	// Creator and CreatorUserID are the display name and Linear user id of
+	// whoever created the issue. Both are empty for an issue an integration
+	// created, and on snapshots that predate the fields. Linear does not let
+	// the creator change.
+	Creator       string   `json:"creator,omitempty"`
+	CreatorUserID string   `json:"creator_user_id,omitempty"`
+	Priority      int      `json:"priority"` // 0 = no priority, 1 = urgent … 4 = low
+	PriorityLabel string   `json:"priority_label"`
+	Labels        []string `json:"labels"`
 	// TeamID is the Linear team's UUID, the unit a TF team tracks.
 	TeamID           string `json:"team_id"`
 	TeamKey          string `json:"team_key"`

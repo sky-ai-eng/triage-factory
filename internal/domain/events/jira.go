@@ -222,6 +222,8 @@ func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool 
 type JiraIssueBecameAtomicMetadata struct {
 	Assignee          string `json:"assignee"`
 	AssigneeAccountID string `json:"assignee_account_id"`
+	Reporter          string `json:"reporter"`
+	ReporterAccountID string `json:"reporter_account_id"`
 	IssueKey          string `json:"issue_key"`
 	IssueID           string `json:"issue_id"`
 	Project           string `json:"project"`
@@ -233,6 +235,7 @@ type JiraIssueBecameAtomicMetadata struct {
 
 type JiraIssueBecameAtomicPredicate struct {
 	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	ReporterIn []string `json:"reporter_in,omitempty" doc:"Match issues whose reporter is in this list (Atlassian account IDs)."`
 	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
 	IssueType  *string  `json:"issue_type,omitempty"`
 	Priority   *string  `json:"priority,omitempty"`
@@ -241,6 +244,7 @@ type JiraIssueBecameAtomicPredicate struct {
 
 func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		stringInSliceFold(p.ReporterIn, m.ReporterAccountID) &&
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&

@@ -564,12 +564,8 @@ type Issue struct {
 		Priority *struct {
 			Name string `json:"name"`
 		} `json:"priority,omitempty"`
-		Assignee *struct {
-			DisplayName string `json:"displayName"`
-			AccountID   string `json:"accountId"`
-			Key         string `json:"key"`
-			Name        string `json:"name"`
-		} `json:"assignee,omitempty"`
+		Assignee *IssueUser `json:"assignee,omitempty"`
+		Reporter *IssueUser `json:"reporter,omitempty"`
 		// Project is the project the issue is in now. Its ID survives a
 		// project key rename, which is what tells a rename from a move.
 		Project *struct {
@@ -605,6 +601,15 @@ type Issue struct {
 			} `json:"fields"`
 		} `json:"subtasks,omitempty"`
 	} `json:"fields"`
+}
+
+// IssueUser is a user field on an issue (assignee, reporter). AccountID is
+// set on Cloud, Key and Name on Data Center; StableUserID picks between them.
+type IssueUser struct {
+	DisplayName string `json:"displayName"`
+	AccountID   string `json:"accountId"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
 }
 
 // IssueType represents a Jira issue type for a project.
