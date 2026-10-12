@@ -59,6 +59,7 @@ export default function TeamMembersPanel({ orgId, teamId, canManage }: TeamMembe
           displayName: m.display_name,
           githubUsername: m.github_username,
           jiraAccountId: m.jira_account_id,
+          linearUserId: m.linear_user_id,
           role: m.role,
           isCurrentUser: m.is_current_user,
         }))

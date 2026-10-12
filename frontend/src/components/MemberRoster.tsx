@@ -215,6 +215,7 @@ function MemberRow({
             connectedText={member.githubUsername ? `@${member.githubUsername}` : ''}
           />
           <ReadinessBadge label="Jira" value={member.jiraAccountId} connectedText="Connected" />
+          <ReadinessBadge label="Linear" value={member.linearUserId} connectedText="Connected" />
         </div>
       </div>
 

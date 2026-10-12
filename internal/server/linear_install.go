@@ -38,7 +38,7 @@ import (
 // redirects back with linear_error set to one of:
 //
 //	state           the cookie is missing, expired, forged, or not this caller's
-//	denied          the admin declined consent in Linear
+//	denied          Linear answered access_denied: the admin declined consent
 //	no_app          no Linear OAuth app resolves for the org
 //	install_failed  the code exchange or the identity check failed
 //	workspace_taken the workspace is installed in another org
@@ -202,7 +202,13 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 
 	if oErr := r.URL.Query().Get("error"); oErr != "" {
 		linearInstallLog.Warn("linear oauth error", "linear_error", oErr, "org", orgID)
-		redirectLinearInstallError(w, r, orgID, returnTo, "denied")
+		// Only access_denied is the admin declining; server_error,
+		// temporarily_unavailable and the rest are a failed install.
+		code := "install_failed"
+		if oErr == "access_denied" {
+			code = "denied"
+		}
+		redirectLinearInstallError(w, r, orgID, returnTo, code)
 		return
 	}
 	code := r.URL.Query().Get("code")
@@ -277,11 +283,11 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, linearInstallReturn(orgID, returnTo, "linear", "installed"), http.StatusFound)
 }
 
-// errLinearAppChanged is an install whose OAuth app was replaced or removed
-// between the code exchange and the store. Its refresh token needs the secret
-// of the app that minted it, which is no longer the org's, so it is refused
-// rather than stored unable to refresh.
-var errLinearAppChanged = errors.New("linear: the oauth app changed during the install")
+// errLinearAppChanged is an install or a Connect grant whose OAuth app was
+// replaced or removed between the code exchange and the store. Its refresh
+// token needs the secret of the app that minted it, which TF no longer holds,
+// so it is refused rather than stored unable to refresh.
+var errLinearAppChanged = errors.New("linear: the oauth app changed during the code exchange")
 
 // newLinearInstallID mints an install's id: random, so two installs of one
 // org can never share one.

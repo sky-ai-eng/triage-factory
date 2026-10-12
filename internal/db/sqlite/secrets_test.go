@@ -384,6 +384,44 @@ func TestSecretStore_SQLite_DeleteUserSystemIfValue(t *testing.T) {
 	}
 }
 
+// TestSecretStore_SQLite_PutUserSystemIfValue is the Postgres twin's per-user
+// compare-and-swap against the keychain: the entry is written only while it
+// holds the value the caller read, and an absent entry is never written.
+func TestSecretStore_SQLite_PutUserSystemIfValue(t *testing.T) {
+	keyring.MockInit()
+	conn := openSQLiteForTest(t)
+	stores := sqlitestore.New(conn)
+	ctx := context.Background()
+	org := runmode.LocalDefaultOrgID
+	const userID = "11111111-1111-1111-1111-111111111111"
+	const key = "linear_token/ws-1"
+
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, org, userID, key, "", "envelope_v1", ""); err != nil || swapped {
+		t.Fatalf("swap of an absent entry = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, org, userID, key); err != nil || got != "" {
+		t.Fatalf("absent entry after the refused swap = (%q, %v), want none", got, err)
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, org, userID, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, org, userID, key, "envelope_v0", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap naming a value the entry no longer holds = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, org, userID, key, "envelope_v1", "envelope_v2", ""); err != nil || !swapped {
+		t.Fatalf("swap naming the held value = (%v, %v), want (true, nil)", swapped, err)
+	}
+	if got, err := stores.Secrets.GetUser(ctx, org, userID, key); err != nil || got != "envelope_v2" {
+		t.Fatalf("value after the swap = (%q, %v), want envelope_v2", got, err)
+	}
+	if got, err := stores.Secrets.GetSystem(ctx, org, key); err != nil || got != "" {
+		t.Fatalf("org entry under the same key = (%q, %v), want none", got, err)
+	}
+	if _, err := stores.Secrets.PutUserSystemIfValue(ctx, "22222222-2222-2222-2222-222222222222", userID, key, "envelope_v2", "x", ""); err == nil {
+		t.Fatal("a non-local org was accepted")
+	}
+}
+
 // TestSecretStore_SQLite_OrgCompareAndSwap pins the two org-scope system
 // doors: each writes only while the entry still holds the value the caller
 // read, and neither writes an absent entry.

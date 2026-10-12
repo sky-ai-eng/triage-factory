@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Navigate, useLocation, useParams } from 'react-router'
 import { useJiraIdentity } from '../hooks/useJiraIdentity'
 import { captureJiraIdentityPat, captureJiraIdentityApiToken } from '../lib/jiraIdentity'
+import { safeReturnTo } from '../lib/returnTo'
 
 /**
  * ConnectJira is the blocking onboarding gate for per-user Jira access — the
@@ -90,11 +91,14 @@ export default function ConnectJira() {
   const [patError, setPatError] = useState<string | null>(null)
 
   const errorCode = new URLSearchParams(location.search).get('error')
-  const returnTo = useMemo(() => {
-    const rt = new URLSearchParams(location.search).get('return_to')
-    if (rt && rt.startsWith('/') && !rt.startsWith('//')) return rt
-    return orgId ? '/orgs/' + orgId : '/'
-  }, [location.search, orgId])
+  const returnTo = useMemo(
+    () =>
+      safeReturnTo(
+        new URLSearchParams(location.search).get('return_to'),
+        orgId ? '/orgs/' + orgId : '/',
+      ),
+    [location.search, orgId],
+  )
 
   // Active org hasn't resolved yet (rare flash) — hold.
   if (!orgId || state.status === 'loading') {

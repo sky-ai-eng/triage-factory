@@ -110,6 +110,15 @@ func (f fakeAppResolver) Resolve(context.Context, string) (linear.OAuthApp, line
 	return linear.OAuthApp{ClientID: id, ClientSecret: "secret"}, linear.SourceOrgOverride, nil
 }
 
+// ResolveClient knows only the one app Resolve answers with.
+func (f fakeAppResolver) ResolveClient(ctx context.Context, orgID, clientID string) (linear.OAuthApp, error) {
+	app, _, _ := f.Resolve(ctx, orgID)
+	if app.ClientID != clientID {
+		return linear.OAuthApp{}, linear.ErrNoLinearOAuthApp
+	}
+	return app, nil
+}
+
 // graceRefresher behaves the way Linear does inside its grace window: a given
 // refresh token always rotates to the same pair, ref-N → (acc-N+1, ref-N+1),
 // whoever presents it. onRefresh, when set, runs before the answer.

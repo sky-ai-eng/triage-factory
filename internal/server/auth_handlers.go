@@ -1769,6 +1769,11 @@ func parseStateCookie(raw string, key [32]byte) (*stateClaims, error) {
 // `/\evil.com` resolves to `//evil.com` in modern browsers — the same
 // open-redirect class the `//` guard already blocks. Closing the
 // parallel gap.
+//
+// A value url.Parse refuses is rewritten too. Its refusals include ASCII
+// control characters, and a browser strips tabs and newlines from a URL
+// before resolving it, so `/<tab>/evil.com` is `//evil.com` by the time it
+// is followed.
 func normalizeReturnTo(raw string) string {
 	if raw == "" || raw == "/" {
 		return "/"
@@ -1785,10 +1790,9 @@ func normalizeReturnTo(raw string) string {
 	if strings.HasPrefix(raw, "//") {
 		return "/"
 	}
-	if u, err := url.Parse(raw); err == nil {
-		if u.Scheme != "" || u.Host != "" {
-			return "/"
-		}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "" || u.Host != "" {
+		return "/"
 	}
 	return raw
 }

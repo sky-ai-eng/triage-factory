@@ -37,6 +37,9 @@ type linearWhoamiFake struct {
 	workspace linear.Organization
 	viewerID  string
 	calls     int
+	// onCall runs before a call is answered, outside the fake's lock: a
+	// test's way to act while a handler is mid-validation.
+	onCall func()
 }
 
 func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
@@ -44,6 +47,12 @@ func newLinearWhoamiFake(t *testing.T) *linearWhoamiFake {
 	f := &linearWhoamiFake{mode: "person", workspace: linear.Organization{ID: "org-acme", Name: "Acme", URLKey: "acme"}, viewerID: "lu-ada"}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
+		f.mu.Lock()
+		hook := f.onCall
+		f.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
 		f.mu.Lock()
 		f.calls++
 		mode, ws, viewerID := f.mode, f.workspace, f.viewerID

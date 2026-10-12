@@ -26,6 +26,7 @@ describe('MemberRoster — display name fallback', () => {
             displayName: '',
             githubUsername: 'octocat',
             jiraAccountId: null,
+            linearUserId: null,
             role: 'member',
             isCurrentUser: false,
           },
@@ -49,6 +50,7 @@ describe('MemberRoster — display name fallback', () => {
             displayName: '',
             githubUsername: null,
             jiraAccountId: null,
+            linearUserId: null,
             role: 'member',
             isCurrentUser: false,
           },
@@ -59,5 +61,30 @@ describe('MemberRoster — display name fallback', () => {
 
     expect(await screen.findByText('Unnamed user')).toBeInTheDocument()
     expect(screen.getByText('U')).toBeInTheDocument()
+  })
+})
+
+describe('MemberRoster — Linear readiness', () => {
+  it('shows each member’s Linear binding beside their Jira one', async () => {
+    const member = (userId: string, displayName: string, linearUserId: string | null) => ({
+      userId,
+      displayName,
+      githubUsername: null,
+      jiraAccountId: null,
+      linearUserId,
+      role: 'member',
+      isCurrentUser: false,
+    })
+    render(
+      <MemberRoster
+        adapter={adapterFor([member('u-1', 'Ada', 'lu-ada'), member('u-2', 'Bo', null)])}
+        canManage={false}
+      />,
+    )
+
+    await screen.findByText('Ada')
+    const rows = screen.getAllByRole('listitem')
+    expect(rows[0]).toHaveTextContent('Linear: Connected')
+    expect(rows[1]).toHaveTextContent('Linear: Not connected')
   })
 })

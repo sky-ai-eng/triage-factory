@@ -955,6 +955,62 @@ func TestSecretStore_Postgres_DeleteUserSystemIfValue(t *testing.T) {
 	}
 }
 
+// TestSecretStore_Postgres_PutUserSystemIfValue pins the per-user
+// compare-and-swap: it writes only while the row holds the value the caller
+// read, never an absent row, and touches neither another user's row nor the
+// org row under the same key.
+func TestSecretStore_Postgres_PutUserSystemIfValue(t *testing.T) {
+	h := pgtest.Shared(t)
+	h.Reset(t)
+	orgID, userID := seedPgOrgAndUserForSecrets(t, h)
+	otherUser := seedPgSecondUserInOrg(t, h, orgID)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stores := pgstore.New(h.AdminDB, h.AppDB, pgtest.SecretKey)
+
+	const key = "linear_token/ws-1"
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, orgID, userID, key, "", "envelope_v1", ""); err != nil || swapped {
+		t.Fatalf("swap of an absent row = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, userID, key); err != nil || got != "" {
+		t.Fatalf("absent row after the refused swap = (%q, %v), want none", got, err)
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, orgID, otherUser, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("PutUserSystem(other user): %v", err)
+	}
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, orgID, userID, key, "envelope_v1", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap matched another user's row = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if err := stores.Secrets.PutUserSystem(ctx, orgID, userID, key, "envelope_v1", ""); err != nil {
+		t.Fatalf("PutUserSystem: %v", err)
+	}
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, orgID, userID, key, "envelope_v0", "envelope_x", ""); err != nil || swapped {
+		t.Fatalf("swap naming a value the row no longer holds = (%v, %v), want (false, nil)", swapped, err)
+	}
+	if swapped, err := stores.Secrets.PutUserSystemIfValue(ctx, orgID, userID, key, "envelope_v1", "envelope_v2", ""); err != nil || !swapped {
+		t.Fatalf("swap naming the held value = (%v, %v), want (true, nil)", swapped, err)
+	}
+	// The swapped value reads back through the claims-checked door.
+	if err := h.WithUser(t, userID, orgID, func(tx *sql.Tx) error {
+		got, err := pgstore.NewForTx(tx, pgtest.SecretKey).Secrets.GetUser(ctx, orgID, userID, key)
+		if err != nil {
+			return err
+		}
+		if got != "envelope_v2" {
+			t.Errorf("claims-checked GetUser after the swap = %q, want envelope_v2", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if got, err := stores.Secrets.GetUserSystem(ctx, orgID, otherUser, key); err != nil || got != "envelope_v1" {
+		t.Fatalf("other user's row after the swap = (%q, %v), want it untouched", got, err)
+	}
+	if got, err := stores.Secrets.GetSystem(ctx, orgID, key); err != nil || got != "" {
+		t.Fatalf("org row under the same key = (%q, %v), want none", got, err)
+	}
+}
+
 // TestSecretStore_Postgres_OrgCompareAndSwap pins the org-scope system doors:
 // each writes the org row only while it holds the value the caller read, never
 // an absent one, and a per-user row under the same key is left alone. The

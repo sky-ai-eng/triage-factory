@@ -303,6 +303,13 @@ func (s *secretStore) PutUserSystem(ctx context.Context, orgID, userID, key, val
 	return s.upsert(ctx, s.admin, orgID, userID, key, value, description)
 }
 
+// PutUserSystemIfValue is PutSystemIfValue for a per-user secret.
+func (s *secretStore) PutUserSystemIfValue(ctx context.Context, orgID, userID, key, old, value, description string) (bool, error) {
+	return s.applyIfValue(ctx, orgID, userID, key, old, func(q queryer) error {
+		return s.upsert(ctx, q, orgID, userID, key, value, description)
+	})
+}
+
 func (s *secretStore) GetUser(ctx context.Context, orgID, userID, key string) (string, error) {
 	return s.getUser(ctx, s.app, true, "secrets.GetUser", orgID, userID, key)
 }

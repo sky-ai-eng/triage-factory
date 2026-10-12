@@ -50,6 +50,10 @@ const (
 // scopes belong to Linear's agent sessions, which TF does not use.
 const InstallScopes = "read,write,issues:create,comments:create"
 
+// ConnectScopes is the comma-separated scope set a user's Connect requests:
+// what assigning, transitioning and commenting as that user need.
+const ConnectScopes = "read,write"
+
 // ErrTokenEndpoint wraps a refusal from Linear's token endpoint, such as
 // invalid_grant on a refresh token the workspace has revoked, as distinct from
 // an endpoint that was unavailable or could not be reached.
@@ -200,6 +204,20 @@ func InstallAuthorizeURL(app linear.OAuthApp, redirectURI, state string) string 
 	q.Set("response_type", "code")
 	q.Set("scope", InstallScopes)
 	q.Set("actor", "app")
+	q.Set("state", state)
+	q.Set("prompt", "consent")
+	return authorizeEndpoint + "?" + q.Encode()
+}
+
+// ConnectAuthorizeURL is the consent page a user's Connect sends them to. It
+// names no actor, so the grant is to the user themselves, Linear's default.
+// prompt=consent shows the scopes every time; state carries the CSRF nonce.
+func ConnectAuthorizeURL(app linear.OAuthApp, redirectURI, state string) string {
+	q := url.Values{}
+	q.Set("client_id", app.ClientID)
+	q.Set("redirect_uri", redirectURI)
+	q.Set("response_type", "code")
+	q.Set("scope", ConnectScopes)
 	q.Set("state", state)
 	q.Set("prompt", "consent")
 	return authorizeEndpoint + "?" + q.Encode()
