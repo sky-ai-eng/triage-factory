@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"strings"
+	"time"
+)
 
 // Task is an actionable situation — spawned by a task_rule or prompt_trigger
 // match on an event, lives in the user's queue/board. Mirrors the `tasks`
@@ -43,7 +47,10 @@ type Task struct {
 	// Display context (stored on row but derived from event/entity).
 	Severity        string `json:"severity"`
 	RelevanceReason string `json:"relevance_reason"` // "review_requested" | "authored" | "mentioned" | "assigned"
-	SourceStatus    string `json:"source_status"`    // captured for undo (e.g., Jira ticket's prior status)
+	// SourceStatus is the tracker issue's state when a person claimed the task.
+	// nil until a person claims a Jira- or Linear-backed task, again once the
+	// task is back in the queue, and when the snapshot named no status.
+	SourceStatus *SourceStatus `json:"source_status,omitempty"`
 
 	// Claim columns. XOR via tasks_claim_xor CHECK:
 	// at most one is set at a time. Both NULL = unclaimed (in the
@@ -113,6 +120,41 @@ type Task struct {
 	ListSortOrder     int    `json:"-"`
 	ListClaimeeName   string `json:"-"`
 	ListAttentionTier int    `json:"-"`
+}
+
+// SourceStatus is the state a tracker issue was in when a person claimed its
+// task: its Jira status or Linear workflow state, and its assignee. The claim
+// UPDATE reads it from the entity's snapshot into tasks.source_status, and
+// returning the task to the queue clears it. A requeue or undo reads it to
+// reverse only what the claim changed: the issue goes back to this status
+// unless the claim found it already in progress, and it is unassigned unless
+// it was already the claimer's.
+//
+// It is the snapshot's view, so it is as old as the last poll.
+type SourceStatus struct {
+	// StatusID is the status or state id. Empty for a Jira snapshot taken
+	// before status ids were recorded, where StatusName is the only key.
+	StatusID   string `json:"status_id,omitempty"`
+	StatusName string `json:"status_name,omitempty"`
+	// AssigneeID is the Jira accountId or Linear user id of the issue's
+	// assignee, empty when it had none.
+	AssigneeID string `json:"assignee_id,omitempty"`
+}
+
+// ParseSourceStatus decodes a tasks.source_status value. An empty value, one
+// that does not decode, and one naming no status are all nil: the column is
+// written only by the claim UPDATE, and a value the revert cannot act on is
+// the same as no record.
+func ParseSourceStatus(raw string) *SourceStatus {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var s SourceStatus
+	if err := json.Unmarshal([]byte(raw), &s); err != nil || (s.StatusID == "" && s.StatusName == "") {
+		return nil
+	}
+	return &s
 }
 
 // TaskScoreUpdate holds the fields to update on a task after AI scoring.
