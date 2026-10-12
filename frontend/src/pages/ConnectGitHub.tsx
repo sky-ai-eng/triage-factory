@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Navigate, useLocation, useParams } from 'react-router'
 import { useGitHubIdentity } from '../hooks/useGitHubIdentity'
 import { captureGitHubIdentityPat } from '../lib/githubIdentity'
+import { safeReturnTo } from '../lib/returnTo'
 
 /**
  * ConnectGitHub is the blocking onboarding gate: "Connect your GitHub to
@@ -97,13 +98,12 @@ export default function ConnectGitHub() {
 
   const params = new URLSearchParams(location.search)
   const errorCode = params.get('error')
-  const returnTo = useMemo(() => {
-    const rt = params.get('return_to')
-    if (rt && rt.startsWith('/') && !rt.startsWith('//')) return rt
-    return orgId ? '/orgs/' + orgId : '/'
+  const returnTo = useMemo(
+    () => safeReturnTo(params.get('return_to'), orgId ? '/orgs/' + orgId : '/'),
     // location.search is the only input; params is derived from it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.search, orgId])
+    [location.search, orgId],
+  )
 
   // Active org hasn't resolved yet (rare flash) — hold.
   if (!orgId || state.status === 'loading') {

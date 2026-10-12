@@ -1,7 +1,8 @@
 // The Linear gate page. Pinned: Connect is offered only when an app resolves,
 // the key paste always is, a refused Connect explains itself (including the
 // admin-approval caveat on `denied`), a pasted key binds through the user's
-// own route, and a connected user is sent on to where they were headed.
+// own route, and a connected user is sent on to where they were headed, but
+// never off this origin.
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -139,6 +140,19 @@ describe('ConnectLinear', () => {
     }
     stubBackend()
     renderPage()
+    expect(await screen.findByText('the org home')).toBeInTheDocument()
+  })
+
+  it('never sends a connected user off this origin', async () => {
+    identity = {
+      connected: true,
+      account: 'Ada',
+      workspace_url_key: 'acme',
+      connect_available: true,
+    }
+    stubBackend()
+    // Decodes to /\evil.example, which a browser resolves to evil.example.
+    renderPage('?return_to=/%5Cevil.example')
     expect(await screen.findByText('the org home')).toBeInTheDocument()
   })
 })

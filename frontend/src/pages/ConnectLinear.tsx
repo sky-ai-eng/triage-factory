@@ -6,6 +6,7 @@ import {
   linearConnectErrorText,
   linearConnectStartURL,
 } from '../lib/linearIdentity'
+import { safeReturnTo } from '../lib/returnTo'
 
 /**
  * ConnectLinear is the blocking onboarding gate for per-user Linear access —
@@ -43,11 +44,14 @@ export default function ConnectLinear() {
   const [keyError, setKeyError] = useState<string | null>(null)
 
   const errorCode = new URLSearchParams(location.search).get('error')
-  const returnTo = useMemo(() => {
-    const rt = new URLSearchParams(location.search).get('return_to')
-    if (rt && rt.startsWith('/') && !rt.startsWith('//')) return rt
-    return orgId ? '/orgs/' + orgId : '/'
-  }, [location.search, orgId])
+  const returnTo = useMemo(
+    () =>
+      safeReturnTo(
+        new URLSearchParams(location.search).get('return_to'),
+        orgId ? '/orgs/' + orgId : '/',
+      ),
+    [location.search, orgId],
+  )
 
   if (!orgId || state.status === 'loading') {
     return (

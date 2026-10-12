@@ -1351,6 +1351,11 @@ func TestNormalizeReturnTo(t *testing.T) {
 		{`/foo\bar`, "/"},
 		{`/%5Cevil.com`, "/"},
 		{`/%5c%5cevil.com`, "/"}, // lowercase hex
+		// Browsers strip tabs and newlines before resolving, which turns
+		// each of these into `//evil.com`.
+		{"/\t/evil.com", "/"},
+		{"/\n/evil.com", "/"},
+		{"/\r/evil.com", "/"},
 	}
 	for _, tc := range cases {
 		if got := normalizeReturnTo(tc.in); got != tc.want {
