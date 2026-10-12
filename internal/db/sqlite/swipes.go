@@ -243,6 +243,7 @@ func (s *swipeStore) RequeueTask(ctx context.Context, orgID string, taskID strin
 			        snooze_until = NULL,
 			        claimed_by_agent_id = NULL,
 			        claimed_by_user_id  = NULL,
+			        source_status = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
 			  WHERE id = ?`,
@@ -320,6 +321,7 @@ func (s *swipeStore) UndoLastSwipe(ctx context.Context, orgID string, taskID, us
 			        snooze_until = NULL,
 			        claimed_by_agent_id = NULL,
 			        claimed_by_user_id  = NULL,
+			        source_status = NULL,
 			        closed_at = NULL,
 			        close_reason = NULL
 			  WHERE id = ?
