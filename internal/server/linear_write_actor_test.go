@@ -610,6 +610,17 @@ func TestApplyLinearUnclaim(t *testing.T) {
 			}
 		})
 	}
+
+	// A record with no state id could unassign the issue but never move it
+	// back, so it asks Linear nothing at all, not even for the issue.
+	t.Run("recorded state has no id", func(t *testing.T) {
+		fake := newLinearIssueFake(t, &linear.User{ID: linearMe}, linearFixtureState(t, linearStateDoing))
+		applyLinearUnclaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe,
+			domain.SourceStatus{StatusName: "Todo"}, linearClaimRule.InProgressMembers)
+		if n := fake.Requests(); n != 0 {
+			t.Errorf("Linear received %d requests, want none", n)
+		}
+	})
 }
 
 // TestTaskRequeue_LinearTask_UndoesTheClaim: claiming a Linear task records

@@ -139,7 +139,16 @@ func applyLinearClaim(ctx context.Context, c *linear.Client, identifier, linearU
 // is someone else's work, and one that has left in progress was moved on by a
 // person, which a requeue does not reach back and undo. A failed unassign
 // stops before the transition, the same ordering as the claim.
+//
+// A record with no state id is skipped before anything is read or written:
+// Linear transitions only by id, so the issue could be unassigned but never
+// moved back. The claim always records the snapshot's state id, so only a
+// malformed row reaches this.
 func applyLinearUnclaim(ctx context.Context, c *linear.Client, identifier, linearUserID string, prior domain.SourceStatus, inProgress []domain.LinearStateRef) {
+	if prior.StatusID == "" {
+		linearLog.Warn("requeue guard: recorded state has no id, skipping", "issue", identifier, "state", prior.StatusName)
+		return
+	}
 	issue, err := c.GetIssue(ctx, identifier)
 	if err != nil {
 		linearLog.Error("requeue guard: read issue failed", "issue", identifier, "error", err)
