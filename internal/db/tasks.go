@@ -580,7 +580,8 @@ type TaskStore interface {
 	// ok=true on success; false means the race was lost (caller surfaces
 	// 409).
 	// On success the owning team_id consolidates to the acting team
-	// derived from userID (see ClaimQueuedForUser).
+	// derived from userID (see ClaimQueuedForUser), and source_status
+	// records the entity snapshot's state the same way.
 	TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// ClaimQueuedForUser is the user-claim handler's atomic "take
@@ -595,6 +596,11 @@ type TaskStore interface {
 	// and otherwise the lowest-id such team. The existing owner is kept
 	// only when the intersection is empty. The result is always a team
 	// the claimer is a member of, which the RLS update check requires.
+	//
+	// The same UPDATE records source_status (domain.SourceStatus): the
+	// status and assignee the task's Jira or Linear entity snapshot holds,
+	// which a requeue or undo reads to put the issue back. NULL for any
+	// other source.
 	ClaimQueuedForUser(ctx context.Context, orgID, taskID, userID string) (bool, error)
 
 	// ReassignClaimToUser (TFAC-561) is the user↔user handoff arm the

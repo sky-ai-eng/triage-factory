@@ -1254,6 +1254,26 @@ const sqliteActingTeamExpr = `COALESCE(
 // `tasks_queue_unclaimed` CHECK is the backstop underneath.
 const sqliteClaimStageExpr = `CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END`
 
+// sqliteSourceStatusExpr is the tracker state a user claim records
+// (domain.SourceStatus): the status and assignee the task's entity snapshot
+// holds as the claim lands, as a JSON object. Only the user-claim doors write
+// it; returning the task to the queue clears it. Jira and Linear are the
+// sources a claim syncs to, so every other source records NULL, and so does a
+// snapshot that is not valid JSON. Binds nothing.
+const sqliteSourceStatusExpr = `(SELECT CASE e.source
+		  WHEN 'jira' THEN json_object(
+		    'status_id', json_extract(e.snapshot_json, '$.status_id'),
+		    'status_name', json_extract(e.snapshot_json, '$.status'),
+		    'assignee_id', json_extract(e.snapshot_json, '$.assignee_account_id'))
+		  WHEN 'linear' THEN json_object(
+		    'status_id', json_extract(e.snapshot_json, '$.state.id'),
+		    'status_name', json_extract(e.snapshot_json, '$.state.name'),
+		    'assignee_id', json_extract(e.snapshot_json, '$.assignee_user_id'))
+		END
+		  FROM entities e
+		 WHERE e.id = tasks.entity_id
+		   AND json_valid(NULLIF(e.snapshot_json, '')))`
+
 // setOwnerTeam is the owner-only update itself, taking the queryer so the
 // firing path can run it on the transaction that also commits the run whose
 // conversation derives its team from this write. Mirrors the Postgres helper
@@ -1412,7 +1432,8 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		       claimed_by_agent_id = NULL,
 		       team_id = `+sqliteActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = `+sqliteClaimStageExpr+`
+		       status = `+sqliteClaimStageExpr+`,
+		       source_status = `+sqliteSourceStatusExpr+`
 		 WHERE id = ?
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
@@ -1440,7 +1461,8 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   SET claimed_by_user_id = ?,
 		       team_id = `+sqliteActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = `+sqliteClaimStageExpr+`
+		       status = `+sqliteClaimStageExpr+`,
+		       source_status = `+sqliteSourceStatusExpr+`
 		 WHERE id = ?
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
@@ -1755,7 +1777,7 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	t.PriorityReasoning = s.priorityReasoning.String
 	t.Severity = s.severity.String
 	t.RelevanceReason = s.relevanceReason.String
-	t.SourceStatus = s.sourceStatus.String
+	t.SourceStatus = domain.ParseSourceStatus(s.sourceStatus.String)
 	t.ScoringStatus = s.scoringStatus.String
 	t.CloseReason = s.closeReason.String
 	t.CloseEventType = s.closeEventType.String

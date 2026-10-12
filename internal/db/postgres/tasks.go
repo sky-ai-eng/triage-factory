@@ -1117,6 +1117,24 @@ func (s *taskStore) MarkEventInjectedSystem(ctx context.Context, orgID, taskID, 
 // `tasks_queue_unclaimed` CHECK is the backstop underneath.
 const pgClaimStageExpr = `CASE WHEN status IN ('queued', 'snoozed') THEN 'in_progress' ELSE status END`
 
+// pgSourceStatusExpr is the tracker state a user claim records
+// (domain.SourceStatus): the status and assignee the task's entity snapshot
+// holds as the claim lands, as a JSON object. Only the user-claim doors write
+// it; returning the task to the queue clears it. Jira and Linear are the
+// sources a claim syncs to, so every other source records NULL.
+const pgSourceStatusExpr = `(SELECT CASE e.source
+		  WHEN 'jira' THEN jsonb_build_object(
+		    'status_id', e.snapshot_json->>'status_id',
+		    'status_name', e.snapshot_json->>'status',
+		    'assignee_id', e.snapshot_json->>'assignee_account_id')::text
+		  WHEN 'linear' THEN jsonb_build_object(
+		    'status_id', e.snapshot_json->'state'->>'id',
+		    'status_name', e.snapshot_json->'state'->>'name',
+		    'assignee_id', e.snapshot_json->>'assignee_user_id')::text
+		END
+		  FROM entities e
+		 WHERE e.id = tasks.entity_id)`
+
 func (s *taskStore) StampAgentClaimIfUnclaimed(ctx context.Context, orgID, taskID, agentID, actingTeamID string) (bool, error) {
 	return stampAgentClaimIfUnclaimed(ctx, s.q, orgID, taskID, agentID, actingTeamID)
 }
@@ -1299,7 +1317,8 @@ func (s *taskStore) TakeoverClaimFromAgent(ctx context.Context, orgID, taskID, u
 		       claimed_by_agent_id = NULL,
 		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`
+		       status = `+pgClaimStageExpr+`,
+		       source_status = `+pgSourceStatusExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND claimed_by_agent_id IS NOT NULL
 		   AND claimed_by_user_id  IS NULL
@@ -1324,7 +1343,8 @@ func (s *taskStore) ClaimQueuedForUser(ctx context.Context, orgID, taskID, userI
 		   SET claimed_by_user_id = $1,
 		       team_id = `+pgActingTeamExpr+`,
 		       snooze_until = NULL,
-		       status = `+pgClaimStageExpr+`
+		       status = `+pgClaimStageExpr+`,
+		       source_status = `+pgSourceStatusExpr+`
 		 WHERE org_id = $2 AND id = $3
 		   AND status IN ('queued', 'snoozed')
 		   AND claimed_by_user_id  IS NULL
@@ -1664,7 +1684,7 @@ func (s *taskScanState) finalize(t *domain.Task) {
 	t.PriorityReasoning = s.priorityReasoning.String
 	t.Severity = s.severity.String
 	t.RelevanceReason = s.relevanceReason.String
-	t.SourceStatus = s.sourceStatus.String
+	t.SourceStatus = domain.ParseSourceStatus(s.sourceStatus.String)
 	t.ScoringStatus = s.scoringStatus.String
 	t.CloseReason = s.closeReason.String
 	t.CloseEventType = s.closeEventType.String
