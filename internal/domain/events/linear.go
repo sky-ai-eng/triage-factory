@@ -15,7 +15,8 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // that can lack it is unreachable for an entity that has neither a snapshot
 // nor an answer from Linear, and the gate refuses that event for every team.
 // The assignee's user id is what assignee-centric routing joins against
-// user_linear_identities.
+// user_linear_identities. The creator's is what creator_in matches; both
+// creator fields are empty for an issue an integration created.
 //
 // Status and priority are open-set discriminators, as on Jira: a transition
 // carries the new state name or priority label in both metadata and the
@@ -32,6 +33,8 @@ type LinearIssueIdentity struct {
 	LinearTeamKey   string `json:"linear_team_key"` // "ENG"
 	Assignee        string `json:"assignee"`        // display name
 	AssigneeUserID  string `json:"assignee_user_id"`
+	Creator         string `json:"creator"` // display name
+	CreatorUserID   string `json:"creator_user_id"`
 	Title           string `json:"title"`
 }
 
@@ -47,6 +50,7 @@ type LinearIssueAssignedMetadata struct {
 
 type LinearIssueAssignedPredicate struct {
 	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
 	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
 	Priority      *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
 	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Todo')."`
@@ -54,6 +58,7 @@ type LinearIssueAssignedPredicate struct {
 
 func (p LinearIssueAssignedPredicate) Matches(m LinearIssueAssignedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
+		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status)
@@ -70,13 +75,15 @@ type LinearIssueAvailableMetadata struct {
 }
 
 type LinearIssueAvailablePredicate struct {
-	LinearTeamKey *string `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
-	Priority      *string `json:"priority,omitempty"`
-	Status        *string `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Backlog')."`
+	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
+	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
+	Priority      *string  `json:"priority,omitempty"`
+	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Backlog')."`
 }
 
 func (p LinearIssueAvailablePredicate) Matches(m LinearIssueAvailableMetadata) bool {
-	return strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+	return stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
+		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status)
 }
@@ -236,6 +243,7 @@ type LinearIssueBecameAtomicMetadata struct {
 
 type LinearIssueBecameAtomicPredicate struct {
 	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CreatorIn     []string `json:"creator_in,omitempty" doc:"Match issues created by anyone in this list (Linear user IDs)."`
 	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
 	Priority      *string  `json:"priority,omitempty"`
 	Status        *string  `json:"status,omitempty"`
@@ -243,6 +251,7 @@ type LinearIssueBecameAtomicPredicate struct {
 
 func (p LinearIssueBecameAtomicPredicate) Matches(m LinearIssueBecameAtomicMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
+		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
 		strEq(p.Status, m.Status)

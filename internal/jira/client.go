@@ -564,12 +564,8 @@ type Issue struct {
 		Priority *struct {
 			Name string `json:"name"`
 		} `json:"priority,omitempty"`
-		Assignee *struct {
-			DisplayName string `json:"displayName"`
-			AccountID   string `json:"accountId"`
-			Key         string `json:"key"`
-			Name        string `json:"name"`
-		} `json:"assignee,omitempty"`
+		Assignee *IssueUser `json:"assignee,omitempty"`
+		Reporter *IssueUser `json:"reporter,omitempty"`
 		// Project is the project the issue is in now. Its ID survives a
 		// project key rename, which is what tells a rename from a move.
 		Project *struct {
@@ -605,6 +601,15 @@ type Issue struct {
 			} `json:"fields"`
 		} `json:"subtasks,omitempty"`
 	} `json:"fields"`
+}
+
+// IssueUser is a user field on an issue (assignee, reporter). AccountID is
+// set on Cloud, Key and Name on Data Center; StableUserID picks between them.
+type IssueUser struct {
+	DisplayName string `json:"displayName"`
+	AccountID   string `json:"accountId"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
 }
 
 // IssueType represents a Jira issue type for a project.
@@ -858,8 +863,12 @@ func (c *Client) GetChildIssues(ctx context.Context, parentKey string) ([]Issue,
 	return result, nil
 }
 
-// DefaultSearchFields is the default set of fields returned by SearchIssues.
-var DefaultSearchFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "parent", "labels", "created", "updated"}
+// IssueFields is every field Issue decodes, by its Jira name. SearchIssues
+// asks for it when the caller names no fields, so a search without a field
+// list fills the same Issue the tracker reads. "comment" brings the issue's
+// comments along with their count, the one field here whose size grows with
+// the issue's history.
+var IssueFields = []string{"summary", "description", "status", "issuetype", "priority", "assignee", "reporter", "project", "parent", "labels", "comment", "subtasks", "created", "updated"}
 
 // ExtractDescriptionText flattens a Jira issue description to plain text.
 // Server/DC returns description as a JSON string; Cloud returns an ADF
@@ -923,7 +932,7 @@ const cloudSearchMaxPageSize = 5000
 
 // SearchIssues runs a JQL query and returns matching issues, following the
 // backend's pagination until maxResults is satisfied or the results run out.
-// If fields is nil, DefaultSearchFields is used. Pass []string{"*all"} for everything.
+// If fields is nil, IssueFields is used. Pass []string{"*all"} for everything.
 //
 // The two deployments answer JQL at different endpoints. Atlassian removed
 // /rest/api/{2,3}/search from Cloud — it answers 410 Gone — in favour of the
@@ -936,7 +945,7 @@ func (c *Client) SearchIssues(ctx context.Context, jql string, fields []string, 
 		// More than a convenience on Cloud: the enhanced endpoint returns the
 		// issue id alone when fields is absent, rather than a full issue, so
 		// the default has to be filled in here and not left to the server.
-		fields = DefaultSearchFields
+		fields = IssueFields
 	}
 	if maxResults <= 0 {
 		maxResults = 100

@@ -664,6 +664,9 @@ func (t *Tracker) emitLinearUnreachable(ctx context.Context, orgID string, e dom
 		if snap.State.IsZero() {
 			snap.State = fresh.State
 		}
+		if snap.CreatorUserID == "" {
+			snap.Creator, snap.CreatorUserID = fresh.Creator, fresh.CreatorUserID
+		}
 	}
 	if snap.ID == "" {
 		snap.ID = e.ExternalID
@@ -844,6 +847,13 @@ func linearIssueToState(issue linear.Issue, allDone []domain.LinearStateRef) lin
 			snap.Assignee = a.DisplayName
 		}
 		snap.AssigneeUserID = a.ID
+	}
+	if c := issue.Creator; c != nil {
+		snap.Creator = c.Name
+		if snap.Creator == "" {
+			snap.Creator = c.DisplayName
+		}
+		snap.CreatorUserID = c.ID
 	}
 	if p := issue.Parent; p != nil {
 		snap.ParentID, snap.ParentIdentifier = p.ID, p.Identifier

@@ -951,6 +951,8 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 	meta := jiraevents.JiraIssueAssignedMetadata{
 		Assignee:          snap.Assignee,
 		AssigneeAccountID: snap.AssigneeAccountID,
+		Reporter:          snap.Reporter,
+		ReporterAccountID: snap.ReporterAccountID,
 		IssueKey:          snap.Key,
 		IssueID:           snap.ID,
 		Project:           projectFromKey(snap.Key),
@@ -975,17 +977,19 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 // recordCarryOverAssignedEvent: synthesizes a jira:issue:available event so
 // the carry-over "queue" action on an unassigned ticket has a real event
 // row to hang the task off. Mirrors the tracker's own emission path for
-// first-discovered available tickets (diff.go). No actor identity carried
-// on this event — the ticket is unassigned by definition.
+// first-discovered available tickets (diff.go). No assignee is carried on
+// this event — the ticket is unassigned by definition.
 func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, orgID, entityID string, snap domain.JiraSnapshot) (string, error) {
 	meta := jiraevents.JiraIssueAvailableMetadata{
-		IssueKey:  snap.Key,
-		IssueID:   snap.ID,
-		Project:   projectFromKey(snap.Key),
-		IssueType: snap.IssueType,
-		Priority:  snap.Priority,
-		Status:    snap.Status,
-		Summary:   snap.Summary,
+		Reporter:          snap.Reporter,
+		ReporterAccountID: snap.ReporterAccountID,
+		IssueKey:          snap.Key,
+		IssueID:           snap.ID,
+		Project:           projectFromKey(snap.Key),
+		IssueType:         snap.IssueType,
+		Priority:          snap.Priority,
+		Status:            snap.Status,
+		Summary:           snap.Summary,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {

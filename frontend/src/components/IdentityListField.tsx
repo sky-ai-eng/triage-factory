@@ -4,8 +4,9 @@ import { useMe, useTeamMembers } from '../hooks/useDeploymentConfig'
 import type { MeResponse, TeamMember } from '../types'
 
 /** IdentityListField is the editor for `author_in` / `reviewer_in` /
- *  `commenter_in` (GitHub) and `assignee_in` / `reporter_in` /
- *  `commenter_in` (Jira) predicate fields. Two variants based
+ *  `commenter_in` (GitHub), `assignee_in` / `reporter_in` /
+ *  `commenter_in` (Jira) and `assignee_in` / `creator_in` (Linear)
+ *  predicate fields. Two variants based
  *  on the acting team's size, derived from the team roster
  *  (POST /api/teams/{team_id}/members/list):
  *
@@ -22,12 +23,12 @@ import type { MeResponse, TeamMember } from '../types'
  *
  *  identityKind selects which user-row column drives Variant A's
  *  toggle and Variant B's roster lookups: 'github' for GitHub logins,
- *  'jira' for Atlassian account IDs.
+ *  'jira' for Atlassian account IDs, 'linear' for Linear user IDs.
  *
  *  Both serialize to the same wire shape: `string[] | undefined`. The
  *  matcher does case-insensitive compare server-side, so client casing
  *  is preserved verbatim for round-trip rendering. */
-export type IdentityKind = 'github' | 'jira'
+export type IdentityKind = 'github' | 'jira' | 'linear'
 
 export default function IdentityListField({
   fieldName,
@@ -90,20 +91,52 @@ export default function IdentityListField({
   )
 }
 
-// identityFromMe returns the canonical identifier on the current-user
-// payload for the given identity source. Centralizes the
-// github_username vs jira_account_id branch so call sites don't have
-// to know.
-function identityFromMe(me: MeResponse, kind: IdentityKind): string | null {
-  const v = kind === 'jira' ? me.jira_account_id : me.github_username
-  return v || null
+// SourceIdentity is where each identity kind lives on the current-user
+// payload and the team roster, and what the copy calls it. One table so
+// call sites never branch on the kind themselves.
+interface SourceIdentity {
+  /** The source's name in copy: "GitHub", "Jira", "Linear". */
+  label: string
+  /** What one identifier is called in copy. */
+  idNoun: string
+  /** The viewer's identifier on /api/me. */
+  fromMe: (me: MeResponse) => string | undefined
+  /** The friendlier name for the viewer's identifier, for hints. */
+  displayFromMe: (me: MeResponse) => string | undefined
+  /** A roster row's identifier; null when the member hasn't connected. */
+  fromMember: (m: TeamMember) => string | null
 }
 
-// identityFromMember returns the canonical identifier for a team-roster
-// row. Same shape choice as identityFromMe but the roster type carries
-// explicit `null`s (the server distinguishes "not yet captured").
+const SOURCES: Record<IdentityKind, SourceIdentity> = {
+  github: {
+    label: 'GitHub',
+    idNoun: 'handle',
+    fromMe: (me) => me.github_username,
+    displayFromMe: (me) => me.github_username,
+    fromMember: (m) => m.github_username,
+  },
+  jira: {
+    label: 'Jira',
+    idNoun: 'account ID',
+    fromMe: (me) => me.jira_account_id,
+    displayFromMe: (me) => me.jira_display_name,
+    fromMember: (m) => m.jira_account_id,
+  },
+  linear: {
+    label: 'Linear',
+    idNoun: 'user ID',
+    fromMe: (me) => me.linear_user_id,
+    displayFromMe: (me) => me.linear_display_name,
+    fromMember: (m) => m.linear_user_id,
+  },
+}
+
+function identityFromMe(me: MeResponse, kind: IdentityKind): string | null {
+  return SOURCES[kind].fromMe(me) || null
+}
+
 function identityFromMember(m: TeamMember, kind: IdentityKind): string | null {
-  return kind === 'jira' ? m.jira_account_id : m.github_username
+  return SOURCES[kind].fromMember(m) || null
 }
 
 // --- Actor-specific copy ----------------------------------------------------
@@ -132,11 +165,17 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
   // generic copy, which is still less wrong than mislabeling everything
   // as "author."
   const actor = fieldName.endsWith('_in') ? fieldName.slice(0, -3) : fieldName
-  const idLabel = kind === 'jira' ? 'account ID' : 'handle'
-  const teamOrManualHint =
-    kind === 'jira'
-      ? `Empty = match any ${actor}. Atlassian account IDs are opaque — paste from Jira's user profile URL.`
-      : `Empty = match any ${actor}. Case-insensitive.`
+  const idLabel = SOURCES[kind].idNoun
+  const teamOrManualHint = {
+    github: `Empty = match any ${actor}. Case-insensitive.`,
+    jira: `Empty = match any ${actor}. Atlassian account IDs are opaque — paste from Jira's user profile URL.`,
+    linear: `Empty = match any ${actor}. Linear user IDs are opaque UUIDs, not names.`,
+  }[kind]
+  // The account and ID wording for assignee_in, which both Jira and
+  // Linear offer.
+  const account = kind === 'linear' ? 'Linear account' : 'Atlassian account'
+  const pastePlaceholder =
+    kind === 'linear' ? 'search team or paste a Linear user ID…' : 'paste an Atlassian account ID…'
 
   switch (actor) {
     case 'author':
@@ -174,9 +213,9 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
         actor,
         toggleOnLabel: 'Match issues assigned to me',
         toggleOffLabel: 'Match any assignee',
-        scopedHint: (id) => `Scoped to issues assigned to your Atlassian account (${id}).`,
+        scopedHint: (id) => `Scoped to issues assigned to your ${account} (${id}).`,
         unscopedHint: 'Fires on every assignee.',
-        searchPlaceholder: 'paste an Atlassian account ID…',
+        searchPlaceholder: pastePlaceholder,
         emptyHint: teamOrManualHint,
       }
     case 'reporter':
@@ -187,6 +226,16 @@ function labelsForField(fieldName: string, kind: IdentityKind): ActorLabels {
         scopedHint: (id) => `Scoped to issues reported by ${id}.`,
         unscopedHint: 'Fires on every reporter.',
         searchPlaceholder: 'paste an Atlassian account ID…',
+        emptyHint: teamOrManualHint,
+      }
+    case 'creator':
+      return {
+        actor,
+        toggleOnLabel: 'Match issues I created',
+        toggleOffLabel: 'Match any creator',
+        scopedHint: (id) => `Scoped to issues created by ${id}.`,
+        unscopedHint: 'Fires on every creator.',
+        searchPlaceholder: pastePlaceholder,
         emptyHint: teamOrManualHint,
       }
     default:
@@ -238,11 +287,11 @@ function VariantA({
   }
 
   // For the Variant A scoped hint, prefer the friendly display name
-  // when available (Jira gives us both account ID and display name;
-  // GitHub's login doubles as the display string).
-  const displayForHint = identityKind === 'jira' ? me.jira_display_name || myID || '' : myID || ''
+  // when available (Jira and Linear give us both an ID and a display
+  // name; GitHub's login doubles as the display string).
+  const displayForHint = SOURCES[identityKind].displayFromMe(me) || myID || ''
 
-  const sourceLabel = identityKind === 'jira' ? 'Jira' : 'GitHub'
+  const sourceLabel = SOURCES[identityKind].label
 
   return (
     <div>
@@ -325,10 +374,11 @@ function VariantB({
 
   // memberIdentity reads the canonical ID for a team member under the
   // active identity kind: github_username for GitHub predicates,
-  // jira_account_id for Jira predicates. Members without that field
-  // captured show up as "no identity" rows below the option list.
+  // jira_account_id for Jira, linear_user_id for Linear. Members without
+  // that field captured show up as "no identity" rows below the option
+  // list.
   const memberIdentity = (m: TeamMember): string | null => identityFromMember(m, identityKind)
-  const sourceLabel = identityKind === 'jira' ? 'Jira' : 'GitHub'
+  const sourceLabel = SOURCES[identityKind].label
 
   // Close the dropdown when clicking outside the container.
   useEffect(() => {

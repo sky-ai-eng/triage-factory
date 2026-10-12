@@ -175,10 +175,10 @@ func TestSearchIssues_CloudFillsDefaultFields(t *testing.T) {
 	if !ok {
 		t.Fatalf("fields = %v, want a list", requests()[0].body["fields"])
 	}
-	if len(sent) != len(DefaultSearchFields) {
-		t.Fatalf("fields = %v, want DefaultSearchFields %v", sent, DefaultSearchFields)
+	if len(sent) != len(IssueFields) {
+		t.Fatalf("fields = %v, want IssueFields %v", sent, IssueFields)
 	}
-	for i, f := range DefaultSearchFields {
+	for i, f := range IssueFields {
 		if sent[i] != f {
 			t.Errorf("fields[%d] = %v, want %q", i, sent[i], f)
 		}
