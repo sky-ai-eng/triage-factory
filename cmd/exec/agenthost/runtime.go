@@ -911,11 +911,10 @@ func (r *relayRuntime) RelayNotify(_ context.Context, namespace, op string, args
 
 // ProviderCredential returns the provider's sealed keyed set from the held
 // bundle — the sidecar selects a member locally, never asking the orchestrator
-// for a secret.
-// ProviderCredential reads the provider's sealed set from the held bundle. A
-// set the bundle does not carry is refused from the bundle's manifest, which
-// says why the brain sealed none — the same table every Jira and Linear refusal
-// reads, so a provider's verbs explain a missing credential the same way.
+// for a secret. A set the bundle does not carry is refused from the bundle's
+// manifest, which says why the brain sealed none — the same table every Jira
+// and Linear refusal reads, so a provider's verbs explain a missing credential
+// the same way.
 func (r *relayRuntime) ProviderCredential(_ context.Context, namespace string) (json.RawMessage, error) {
 	if r.held == nil {
 		return nil, refusalFor(namespace, domain.SourceManifest(nil).EntryFor(namespace))
