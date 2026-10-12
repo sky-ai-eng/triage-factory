@@ -2367,7 +2367,7 @@ func (t *Tracker) discoverJira(ctx context.Context, client *jiraclient.Client, b
 
 	seen := map[string]bool{}
 	var all []jiraIssueState
-	fields := jiraIssueFields
+	fields := jiraclient.IssueFields
 
 	// Live workflows, fetched only when a query has already failed and cached
 	// for the rest of the cycle so two failed queries on one project cost one
@@ -2504,14 +2504,6 @@ func (t *Tracker) salvageJiraQuery(
 	return build(surviving), dropped
 }
 
-// jiraIssueFields is the field list every tracking read of an issue asks for.
-// "updated" is required for the diff layer's source-time fallback — without
-// it, JiraSnapshot.UpdatedAt is empty and emit() degrades all the way to
-// detection time — and "project" for telling a move from a project key
-// rename. Spelled out because these reads pass their own list rather than
-// relying on DefaultSearchFields.
-var jiraIssueFields = []string{"summary", "description", "status", "assignee", "reporter", "priority", "labels", "issuetype", "project", "parent", "comment", "subtasks", "created", "updated"}
-
 // batchFetchJira reads every entity's issue and returns the answers keyed by
 // entity id. An entity with an issue id is read by id (`id IN (...)`) and
 // matched back by id, so an issue that moved or whose project's key was renamed
@@ -2551,7 +2543,7 @@ func (t *Tracker) batchFetchJira(ctx context.Context, client *jiraclient.Client,
 		for i := 0; i < len(values); i += jiraBatchSize {
 			end := min(i+jiraBatchSize, len(values))
 			jql := fmt.Sprintf("%s IN (%s)", field, strings.Join(values[i:end], ", "))
-			issues, err := client.SearchIssues(ctx, jql, jiraIssueFields, jiraBatchSize)
+			issues, err := client.SearchIssues(ctx, jql, jiraclient.IssueFields, jiraBatchSize)
 			if err != nil {
 				span.SetStatus(codes.Error, "batch fetch")
 				return fmt.Errorf("batch fetch %s %d-%d: %w", field, i, end, err)
@@ -2629,10 +2621,9 @@ type jiraIssueState struct {
 // compares. doneStatuses is the user's configured Done.Members set, used
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
 //
-// issue must come from a read that requested jiraIssueFields, or every
-// field. A field the read left out lands empty in the snapshot rather than
-// failing, and DefaultSearchFields leaves out several: a search with nil
-// fields loses the reporter, the comment count and the subtasks.
+// A field the read did not request lands empty in the snapshot rather than
+// failing, so issue must come from a read of jiraclient.IssueFields (a
+// search's default) or of every field.
 func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		ID:       issue.ID,
