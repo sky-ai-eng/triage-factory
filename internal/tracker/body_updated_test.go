@@ -37,7 +37,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 			jiraCurr := domain.JiraSnapshot{Key: "PROJ-1", BodyHash: tc.curr, UpdatedAt: updated}
 			for _, evt := range []*domain.Event{
 				findEvent(DiffPRSnapshots(ghPrev, ghCurr, testEntityID, testUser, nil), domain.EventGitHubPRBodyUpdated),
-				findEvent(DiffJiraSnapshots(jiraPrev, jiraCurr, testEntityID, nil), domain.EventJiraIssueBodyUpdated),
+				findEvent(DiffJiraSnapshots(jiraPrev, jiraCurr, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated),
 			} {
 				if (evt != nil) != tc.want {
 					t.Fatalf("body update = %v, want present=%v", evt, tc.want)
@@ -58,7 +58,7 @@ func TestBodyUpdatedDiff(t *testing.T) {
 	if evt := findEvent(DiffPRSnapshots(domain.PRSnapshot{}, domain.PRSnapshot{Number: 1, BodyHash: "first"}, testEntityID, testUser, nil), domain.EventGitHubPRBodyUpdated); evt != nil {
 		t.Fatal("first discovery emitted a body update")
 	}
-	if evt := findEvent(DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{Key: "PROJ-1", BodyHash: "first"}, testEntityID, nil), domain.EventJiraIssueBodyUpdated); evt != nil {
+	if evt := findEvent(DiffJiraSnapshots(domain.JiraSnapshot{}, domain.JiraSnapshot{Key: "PROJ-1", BodyHash: "first"}, testEntityID, nil, nil), domain.EventJiraIssueBodyUpdated); evt != nil {
 		t.Fatal("first discovery emitted a body update")
 	}
 }
@@ -107,7 +107,7 @@ func TestRefreshJira_BatchDescriptionLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	long := strings.Repeat("é", 2100)
 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }

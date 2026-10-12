@@ -149,7 +149,7 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   },
   'jira:issue:commented': {
     label: 'New Comment',
-    description: 'A new comment was added to an issue',
+    description: 'Someone other than Triage Factory commented on an issue',
     color: 'bg-blue-500/10 text-blue-600',
   },
   'jira:issue:completed': {
@@ -191,7 +191,7 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   },
   'linear:issue:commented': {
     label: 'New Comment',
-    description: 'A new comment was added to an issue',
+    description: 'Someone other than Triage Factory commented on an issue',
     color: 'bg-blue-500/10 text-blue-600',
   },
   'linear:issue:completed': {

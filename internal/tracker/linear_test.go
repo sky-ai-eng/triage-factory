@@ -22,14 +22,16 @@ import (
 
 // fakeLinear is an in-memory LinearClient. Issues live in byID; a search
 // returns whatever the test put under the query's kind and team; GetIssues
-// and GetIssue answer from byID, by UUID. fail lets a test make a call return an
-// error; notFound makes both reads answer not-found for an id, and batchOmits
-// makes only the batch read leave it out.
+// and GetIssue answer from byID, by UUID. comments holds each issue's comments
+// for ListCommentsSince. fail lets a test make a call return an error;
+// notFound makes both reads answer not-found for an id, and batchOmits makes
+// only the batch read leave it out.
 type fakeLinear struct {
 	mu         sync.Mutex
 	viewer     linear.User
 	search     map[string][]linear.Issue // "pickup:<team>" / "assigned:<team>"
 	byID       map[string]linear.Issue
+	comments   map[string][]linear.Comment
 	calls      []string
 	filters    []linear.IssueFilter
 	batches    [][]string
@@ -40,9 +42,10 @@ type fakeLinear struct {
 
 func newFakeLinear() *fakeLinear {
 	return &fakeLinear{
-		viewer: linear.User{ID: "u-viewer", Name: "Viewer"},
-		search: map[string][]linear.Issue{},
-		byID:   map[string]linear.Issue{},
+		viewer:   linear.User{ID: "u-viewer", Name: "Viewer"},
+		search:   map[string][]linear.Issue{},
+		byID:     map[string]linear.Issue{},
+		comments: map[string][]linear.Comment{},
 	}
 }
 
@@ -112,6 +115,21 @@ func (f *fakeLinear) GetIssue(_ context.Context, ref string) (*linear.Issue, err
 	return nil, fmt.Errorf("%w: issue %s", linear.ErrNotFound, ref)
 }
 
+func (f *fakeLinear) ListCommentsSince(_ context.Context, issueID, since string) ([]linear.Comment, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("comments:" + issueID); err != nil {
+		return nil, err
+	}
+	var out []linear.Comment
+	for _, c := range f.comments[issueID] {
+		if since == "" || c.CreatedAt > since {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeLinear) callLog() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -178,7 +196,7 @@ func newLinearFixture(t *testing.T) *linearFixture {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
 	return &linearFixture{tr: tr, pub: pub, stores: stores, client: newFakeLinear(), workspace: linWorkspace}
 }
 

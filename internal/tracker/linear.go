@@ -91,6 +91,7 @@ type LinearClient interface {
 	SearchIssues(ctx context.Context, f linear.IssueFilter, after string) (linear.IssuePage, error)
 	GetIssues(ctx context.Context, ids []string) ([]linear.Issue, error)
 	GetIssue(ctx context.Context, idOrIdentifier string) (*linear.Issue, error)
+	ListCommentsSince(ctx context.Context, issueID, since string) ([]linear.Comment, error)
 }
 
 // linearIssueState is an issue's diff-scope snapshot plus its description,
@@ -296,7 +297,7 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 			// arriving through the assigned-to-viewer query is itself the
 			// assignment. The event commits with the first snapshot; seeding
 			// first would retire it unseen.
-			evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID))
+			evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID), nil)
 			if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
 				trackerLog.Error("seed assigned linear snapshot+event failed", "source_id", snap.Identifier, "error", err)
 			} else if !ok {
@@ -441,7 +442,12 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 				missing = append(missing, e)
 				continue
 			}
-			emitted += t.applyLinearIssue(ctx, orgID, scope, e, prevs[e.ID], issue, teams, allDone)
+			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], issue, teams, allDone)
+			emitted += n
+			if err != nil {
+				span.SetAttributes(telemetry.Outcome("rate_limited"))
+				return emitted, nil, err
+			}
 		}
 	}
 	if len(missing) > 0 {
@@ -488,7 +494,12 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 		}
 		switch {
 		case err == nil:
-			emitted += t.applyLinearIssue(ctx, orgID, scope, e, prevs[e.ID], *issue, teams, allDone)
+			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], *issue, teams, allDone)
+			emitted += n
+			if err != nil {
+				span.SetAttributes(telemetry.Outcome("rate_limited"))
+				return emitted, err
+			}
 		case errors.Is(err, linear.ErrNotFound):
 			t.emitLinearUnreachable(ctx, orgID, e, nil, events.LinearUnreachableNotFound)
 			emitted++
@@ -520,14 +531,17 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 // identifier_changed is always the difference from the stored snapshot, so an
 // entity with no snapshot (one a source pause cleared) is renamed without one,
 // as it is seeded without every other event.
-func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) int {
+//
+// The only error is a rate limit on the read of the issue's new comments,
+// which ends the cycle; the entity is then left as it was.
+func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
 	state := linearIssueToState(issue, allDone)
 	snap := state.Snap
 	renamed := false
 	if linearRenamed(scope, e, snap) {
 		next, ok := t.renameLinearEntity(ctx, scope, e, snap.Identifier, snap.URL)
 		if !ok {
-			return 0
+			return 0, nil
 		}
 		e, renamed = next, true
 	}
@@ -553,16 +567,16 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e d
 			}
 		}
 		t.emitLinearUnreachable(ctx, orgID, e, answer, reason)
-		return emitted
+		return emitted, nil
 	}
 	done := teams.doneForTeam(snap.TeamID)
 	terminal := func(s domain.LinearSnapshot) bool { return domain.ContainsState(done, s.StateRef()) }
-	snapJSON, _ := json.Marshal(snap)
 
 	if prev == nil {
 		// Quiet seed. A diff from nothing would emit a first-discovery event
 		// for state that predates tracking, and after a source pause one per
 		// known issue at once.
+		snapJSON, _ := json.Marshal(snap)
 		var ok bool
 		var err error
 		if terminal(snap) {
@@ -576,25 +590,30 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, orgID, scope string, e d
 			trackerLog.Warn("seed linear stub snapshot CAS lost race, skipping", "source_id", e.SourceID)
 		}
 		t.mirrorLinearText(orgID, e, state)
-		return 0
+		return 0, nil
 	}
 
-	evts := DiffLinearSnapshots(*prev, snap, e.ID, done)
+	comments, err := t.linearNewComments(ctx, client, scope, *prev, &snap, issue.LastComment)
+	if err != nil {
+		return 0, err
+	}
+	evts := DiffLinearSnapshots(*prev, snap, e.ID, done, comments)
 	if owed, ok := t.closeOwed(ctx, orgID, e.ID, terminal(*prev), terminal(snap)); ok {
 		evts = append(evts, owed)
 	}
 	prevJSON, _ := json.Marshal(*prev)
+	snapJSON, _ := json.Marshal(snap)
 	ok, enqueued, err := t.commitRefresh(ctx, orgID, e.ID, string(prevJSON), string(snapJSON), e.PollSeq, evts)
 	if err != nil {
 		trackerLog.Error("linear snapshot+events commit failed; suppressing this cycle's transitions (re-diffed next cycle)", "source_id", e.SourceID, "error", err)
-		return 0
+		return 0, nil
 	}
 	if !ok {
 		trackerLog.Warn("linear snapshot CAS lost race (stale poll_seq); suppressing this cycle's transitions", "source_id", e.SourceID)
-		return 0
+		return 0, nil
 	}
 	t.mirrorLinearText(orgID, e, state)
-	return enqueued
+	return enqueued, nil
 }
 
 // mirrorLinearText brings the entity's title and description up to the

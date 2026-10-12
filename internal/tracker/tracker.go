@@ -69,6 +69,9 @@ type Tracker struct {
 	tasks    db.TaskStore       // tracker creates review_requested tasks during discovery + reconciles stale ones
 	entities db.EntityStore     // entity lifecycle (find/create, snapshot, title/description, close/reactivate)
 	repos    db.RepositoryStore // per-repo conditional-request (ETag) state for GitHub open-PR discovery
+	// artifacts is read to tell the comments TF posted, each recorded as a
+	// `comment` artifact keyed on its id, from the ones people wrote.
+	artifacts db.ArtifactStore
 	// queue is the durable outbox, held directly rather than reached
 	// through pub because the snapshot-paired arms need the ONE write that
 	// carries both halves: the snapshot advance and the events that belong
@@ -94,8 +97,8 @@ type Tracker struct {
 // loop calls this once per active org per cycle; the resulting
 // Tracker handles all event-emission for that org and stamps every
 // published event with the tenant via publish() below.
-func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, queue db.EventQueueStore, orgID string) *Tracker {
-	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, queue: queue, orgID: orgID}
+func New(database *sql.DB, pub Publisher, tasks db.TaskStore, entities db.EntityStore, repos db.RepositoryStore, artifacts db.ArtifactStore, queue db.EventQueueStore, orgID string) *Tracker {
+	return &Tracker{database: database, pub: pub, tasks: tasks, entities: entities, repos: repos, artifacts: artifacts, queue: queue, orgID: orgID}
 }
 
 // publish stamps evt.OrgID with the tracker's configured tenant before
@@ -1342,7 +1345,10 @@ type jiraCycle struct {
 	// namespace every issue this cycle reads is keyed under.
 	scope string
 	// baseURL is what the issues' links are built from.
-	baseURL  string
+	baseURL string
+	// client reads the comments of an issue that has more than Jira returns
+	// with it.
+	client   *jiraclient.Client
 	projects JiraRules
 	// merged holds rows a merge folded into another row this cycle. They no
 	// longer exist, so the rest of the cycle skips them.
@@ -1390,7 +1396,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 	if scope == "" {
 		return 0, errors.New("jira refresh: no site to key issues under")
 	}
-	c := &jiraCycle{scope: scope, baseURL: baseURL, projects: projects, merged: map[string]bool{}}
+	c := &jiraCycle{scope: scope, baseURL: baseURL, client: client, projects: projects, merged: map[string]bool{}}
 
 	// Phase 0: rows a previous site left active. Retired first, without asking
 	// Jira, so nothing below can mistake one for this site's.
@@ -1438,7 +1444,9 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 		return 0, fmt.Errorf("batch fetch jira: %w", err)
 	}
 
-	// Phase 3: Diff + emit events. Network-free, like the GitHub twin.
+	// Phase 3: Diff + emit events. Network-free like the GitHub twin, but for
+	// the comments of an issue with more than its search page held, which are
+	// read only when its comment count moved.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
 	diffEventsEmitted := 0
@@ -1621,7 +1629,7 @@ func (t *Tracker) seedCreatedJira(ctx context.Context, c *jiraCycle, entity doma
 		// result can itself be the assignment transition. Commit that initial
 		// event with the first snapshot; seeding first would make Phase 3
 		// diff current-against-current and retire the transition unseen.
-		evts := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, c.projects.doneMembersForKey(snap.Key))
+		evts := DiffJiraSnapshots(domain.JiraSnapshot{}, snap, entity.ID, c.projects.doneMembersForKey(snap.Key), nil)
 		if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
 			trackerLog.Error("seed assigned jira snapshot+event failed", "source_id", snap.Key, "error", err)
 		} else if !ok {
@@ -1910,7 +1918,8 @@ func (t *Tracker) applyJiraIssue(ctx context.Context, c *jiraCycle, e domain.Ent
 	// Per-project Done.Members for this entity's project_key. Nil when the
 	// entity is in a project that's no longer configured: nothing reads as
 	// terminal there.
-	evts := DiffJiraSnapshots(*prev, newSnap, e.ID, c.projects.doneMembersForKey(newSnap.Key))
+	comments := t.jiraNewComments(ctx, c, *prev, &newSnap, state.Comments)
+	evts := DiffJiraSnapshots(*prev, newSnap, e.ID, c.projects.doneMembersForKey(newSnap.Key), comments)
 
 	// The close obligation — the GitHub arm's rule, read against this
 	// cycle's per-project done set: the entity is active (Phase 2 lists
@@ -2610,8 +2619,12 @@ func missingJiraIssues(entities []domain.Entity, results map[string]jiraIssueSta
 // the persisted snapshot_json stays small — diff reads don't drag multi-KB
 // issue bodies through every poll.
 type jiraIssueState struct {
-	Snap                            domain.JiraSnapshot
-	Description                     string
+	Snap        domain.JiraSnapshot
+	Description string
+	// Comments is the page of comments the read returned with the issue,
+	// oldest first: every comment, unless the issue has more than Jira
+	// returns in one.
+	Comments                        []NewComment
 	DiscoveredAssignedToCurrentUser bool
 }
 
@@ -2669,8 +2682,15 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.
 	if issue.Fields.Parent != nil {
 		snap.ParentKey = issue.Fields.Parent.Key
 	}
-	if issue.Fields.Comment != nil {
-		snap.CommentCount = issue.Fields.Comment.Total
+	var comments []NewComment
+	if cm := issue.Fields.Comment; cm != nil {
+		snap.CommentCount = cm.Total
+		comments = jiraComments(cm.Comments)
+		// The newest comment is the marker only when the page holds them
+		// all; otherwise it is past the page, and jiraNewComments reads it.
+		if n := len(comments); n > 0 && n >= cm.Total {
+			snap.LastCommentID, snap.LastCommentAt = comments[n-1].ID, comments[n-1].CreatedAt
+		}
 	}
 	snap.Labels = issue.Fields.Labels
 	if issue.Fields.Created != "" {
@@ -2683,6 +2703,7 @@ func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.
 	return jiraIssueState{
 		Snap:        snap,
 		Description: truncateDescription(jiraclient.ExtractDescriptionText(issue.Fields.Description), descriptionStoreMaxRunes),
+		Comments:    comments,
 	}
 }
 

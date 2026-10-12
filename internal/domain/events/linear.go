@@ -138,22 +138,31 @@ func (p LinearIssuePriorityChangedPredicate) Matches(m LinearIssuePriorityChange
 }
 
 // -----------------------------------------------------------------------------
-// issue:commented — the newest comment changed. Linear has no comment count,
-// so the signal is the newest comment's id; CommentID is that comment.
+// issue:commented — someone other than TF commented, the Jira event's sibling.
+// CommentID, Commenter and CommenterUserID are the newest of the comments a
+// poll found, and CommenterUserIDs holds the author of each. A comment an
+// integration posted has the integration's name as its commenter and no user
+// id. A comment TF posted is not one of them, and a poll that found only TF's
+// comments emits nothing.
 // -----------------------------------------------------------------------------
 
 type LinearIssueCommentedMetadata struct {
 	LinearIssueIdentity
-	CommentID string `json:"comment_id"`
+	CommentID        string   `json:"comment_id"`
+	Commenter        string   `json:"commenter"` // display name
+	CommenterUserID  string   `json:"commenter_user_id"`
+	CommenterUserIDs []string `json:"commenter_user_ids"`
 }
 
 type LinearIssueCommentedPredicate struct {
 	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	CommenterIn   []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (Linear user IDs)."`
 	LinearTeamKey *string  `json:"linear_team_key,omitempty"`
 }
 
 func (p LinearIssueCommentedPredicate) Matches(m LinearIssueCommentedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
+		anyInSliceFold(p.CommenterIn, m.CommenterUserIDs) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey)
 }
 

@@ -367,7 +367,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // reporter_in allowlists runs downstream — there is no per-user derivation
 // here. The reporter is not diffed: a reporter change does not change
 // whether the issue needs attention, so it emits nothing.
-func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []domain.JiraStatusRef) []domain.Event {
+//
+// comments is every comment made since prev, oldest first, with TF's marked
+// (jiraNewComments). The snapshot holds only a count and the newest comment,
+// so the caller reads them.
+func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStatuses []domain.JiraStatusRef, comments []NewComment) []domain.Event {
 	terminal := func(snap domain.JiraSnapshot) bool {
 		return domain.ContainsStatus(doneStatuses, snap.StatusRef())
 	}
@@ -482,15 +486,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 		})
 	}
 
-	// New comments.
-	//
-	// TODO(TFAC-1069): the snapshot holds no commenter, so this event's
-	// commenter fields land empty and a commenter_in rule never matches.
-	if curr.CommentCount > prev.CommentCount {
-		emit(domain.EventJiraIssueCommented, "", events.JiraIssueCommentedMetadata{
+	// New comments: one event for the ones TF did not post, however many,
+	// attributed to the newest of them and timed at its creation.
+	if newest, authors, ok := commentedBy(comments); ok {
+		emitWithFallback(domain.EventJiraIssueCommented, "", commentedAt(newest, curr.UpdatedAt), events.JiraIssueCommentedMetadata{
 			Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
-			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
-		})
+			Commenter: newest.Author, CommenterAccountID: newest.AuthorID, CommenterAccountIDs: authors,
+			CommentID: newest.ID, IssueKey: curr.Key, IssueID: curr.ID, Project: project,
+		}, eid, now, &evts)
 	}
 
 	// Became atomic — the last open subtask closed. Belated discovery

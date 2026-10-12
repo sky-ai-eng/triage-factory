@@ -57,7 +57,9 @@ describe('PredicateEditor identity allowlists', () => {
   it.each([
     ['linear:issue:assigned', 'assignee_in', 'lin-me'],
     ['linear:issue:available', 'creator_in', 'lin-me'],
+    ['linear:issue:commented', 'commenter_in', 'lin-me'],
     ['jira:issue:assigned', 'reporter_in', '557058:abc-me'],
+    ['jira:issue:commented', 'commenter_in', '557058:abc-me'],
     ['github:pr:opened', 'author_in', 'octocat'],
   ])(
     'the solo toggle on %s %s writes the viewer’s identity for that source',

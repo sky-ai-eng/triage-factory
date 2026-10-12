@@ -5,8 +5,8 @@ import type { MeResponse, TeamMember } from '../types'
 
 /** IdentityListField is the editor for `author_in` / `reviewer_in` /
  *  `commenter_in` (GitHub), `assignee_in` / `reporter_in` /
- *  `commenter_in` (Jira) and `assignee_in` / `creator_in` (Linear)
- *  predicate fields. Two variants based
+ *  `commenter_in` (Jira) and `assignee_in` / `creator_in` /
+ *  `commenter_in` (Linear) predicate fields. Two variants based
  *  on the acting team's size, derived from the team roster
  *  (POST /api/teams/{team_id}/members/list):
  *

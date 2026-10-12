@@ -94,7 +94,7 @@ func TestRefreshGitHub_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestRefreshGitHub_PauseWithoutClearWouldEmit(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestRefreshJira_ReEnableAfterPauseEmitsNothing(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	rules := JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, rules); err != nil {
@@ -310,7 +310,7 @@ func TestRefreshGitHub_ReEnable_KnownEntitySilentNewEntityDiscovered(t *testing.
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	resolver := fakeReviewerResolver{users: map[string]bool{"carol": true}}
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", []string{"octo/repo"}, resolver); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)

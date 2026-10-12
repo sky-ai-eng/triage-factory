@@ -58,7 +58,7 @@ func TestRefreshGitHub_MirrorsPRBodyIntoDescription(t *testing.T) {
 	trackRepos(t, stores, org, []string{"octo/repo"})
 	bus := eventbus.New()
 	t.Cleanup(bus.Close)
-	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, busPublisher{bus: bus}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	if _, _, err := tr.RefreshGitHub(ctx, "https://github.com", client, "", []string{"octo/repo"}, nil); err != nil {
@@ -138,7 +138,7 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 		t.Fatalf("seed stub: %v", err)
 	}
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	// repos=nil → no discovery; the stub is reached only via Phase-2.
@@ -180,7 +180,7 @@ func TestRefreshGitHub_PhaseTwoMirrorsPRBodyIntoDescription(t *testing.T) {
 	mu.Lock()
 	body = ""
 	mu.Unlock()
-	failed := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, &failingBatchQueue{EventQueueStore: stores.EventQueue}, org)
+	failed := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, &failingBatchQueue{EventQueueStore: stores.EventQueue}, org)
 	if _, _, err := failed.RefreshGitHub(ctx, "https://github.com", client, "", nil, nil); err != nil {
 		t.Fatal(err)
 	}

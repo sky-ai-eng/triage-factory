@@ -185,7 +185,7 @@ func newJiraIdentityFixture(t *testing.T, issues ...*fakeJiraIssue) *jiraIdentit
 func (fx *jiraIdentityFixture) cycle(t *testing.T, site string, rules JiraRules) []domain.Event {
 	t.Helper()
 	pub := &recordingPublisher{}
-	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(fx.db, pub, fx.stores.Tasks, fx.stores.Entities, fx.stores.Repos, fx.stores.Artifacts, fx.stores.EventQueue, runmode.LocalDefaultOrgID)
 	if _, err := tr.RefreshJira(context.Background(), site, fx.client, site, rules); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestRefreshJira_DiscoveryLearnsAClosedRowsID(t *testing.T) {
 func TestDiffJiraSnapshots_KeyChangedFirst(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "ENG-1", Status: "To Do", StatusID: "1"}
 	curr := domain.JiraSnapshot{ID: "10001", Key: "OPS-1", Status: "Done", StatusID: "3", Assignee: "Alice"}
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, jiraRefs("Done"))
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, jiraRefs("Done"), nil)
 	got := eventTypes(evts)
 	if len(got) == 0 || got[0] != domain.EventJiraIssueKeyChanged {
 		t.Fatalf("events = %v, want key_changed first", got)
@@ -623,10 +623,10 @@ func TestDiffJiraSnapshots_KeyChangedFirst(t *testing.T) {
 			t.Errorf("%s metadata = %+v, want the current key and the issue id", evt.EventType, m)
 		}
 	}
-	if evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, nil); len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
+	if evts := DiffJiraSnapshots(domain.JiraSnapshot{}, curr, testEntityID, nil, nil); len(evts) != 1 || evts[0].EventType != domain.EventJiraIssueAssigned {
 		t.Errorf("zero prev = %v, want first discovery", eventTypes(evts))
 	}
-	if evts := DiffJiraSnapshots(domain.JiraSnapshot{Key: "OPS-1", Assignee: "Alice"}, curr, testEntityID, nil); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
+	if evts := DiffJiraSnapshots(domain.JiraSnapshot{Key: "OPS-1", Assignee: "Alice"}, curr, testEntityID, nil, nil); slices.Contains(eventTypes(evts), domain.EventJiraIssueAssigned) {
 		t.Errorf("legacy prev = %v, want it diffed rather than treated as first discovery", eventTypes(evts))
 	}
 }

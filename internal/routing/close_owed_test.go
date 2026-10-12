@@ -89,7 +89,7 @@ func (noopPublisher) PublishPreEnqueued(context.Context, domain.Event) {}
 func pollGitHub(t *testing.T, database *sql.DB, gh *fakeGitHub) {
 	t.Helper()
 	st := sqlitestore.New(database)
-	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
+	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.Artifacts, st.EventQueue, runmode.LocalDefaultOrgID)
 	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(gh.srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestCloseOwed_SourcePause_ClearedSnapshotIsNotTerminal(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	st := sqlitestore.New(database)
-	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
+	tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.Artifacts, st.EventQueue, runmode.LocalDefaultOrgID)
 	if _, _, err := tr.RefreshGitHub(context.Background(), "https://github.com", ghclient.NewClient(srv.URL, "tok"), "", nil, nil); err != nil {
 		t.Fatalf("RefreshGitHub: %v", err)
 	}
@@ -606,7 +606,7 @@ func TestCloseOwed_Jira(t *testing.T) {
 
 	poll := func() {
 		t.Helper()
-		tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.EventQueue, runmode.LocalDefaultOrgID)
+		tr := tracker.New(database, noopPublisher{}, st.Tasks, st.Entities, st.Repos, st.Artifacts, st.EventQueue, runmode.LocalDefaultOrgID)
 		rules := tracker.JiraRules{{Key: "SKY", DoneMembers: jiraRefs("Done")}}
 		if _, err := tr.RefreshJira(ctx, "https://jira.example.com", jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat")), srv.URL, rules); err != nil {
 			t.Fatalf("RefreshJira: %v", err)

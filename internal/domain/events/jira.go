@@ -156,29 +156,34 @@ func (p JiraIssuePriorityChangedPredicate) Matches(m JiraIssuePriorityChangedMet
 }
 
 // -----------------------------------------------------------------------------
-// issue:commented — new comment added.
+// issue:commented — someone other than TF commented. One event per poll however
+// many comments landed: CommentID, Commenter and CommenterAccountID are the
+// newest of them, and CommenterAccountIDs holds the author of each, so
+// commenter_in matches when any of them wrote one. A comment TF posted is not
+// one of them, and a poll that found only TF's comments emits nothing.
 // -----------------------------------------------------------------------------
 
 type JiraIssueCommentedMetadata struct {
-	Assignee           string `json:"assignee"`
-	AssigneeAccountID  string `json:"assignee_account_id"`
-	Commenter          string `json:"commenter"`
-	CommenterAccountID string `json:"commenter_account_id"`
-	CommentID          string `json:"comment_id"`
-	IssueKey           string `json:"issue_key"`
-	IssueID            string `json:"issue_id"`
-	Project            string `json:"project"`
+	Assignee            string   `json:"assignee"`
+	AssigneeAccountID   string   `json:"assignee_account_id"`
+	Commenter           string   `json:"commenter"`
+	CommenterAccountID  string   `json:"commenter_account_id"`
+	CommenterAccountIDs []string `json:"commenter_account_ids"`
+	CommentID           string   `json:"comment_id"`
+	IssueKey            string   `json:"issue_key"`
+	IssueID             string   `json:"issue_id"`
+	Project             string   `json:"project"`
 }
 
 type JiraIssueCommentedPredicate struct {
 	AssigneeIn  []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
-	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match comments authored by anyone in this list (Atlassian account IDs)."`
+	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (Atlassian account IDs)."`
 	Project     *string  `json:"project,omitempty"`
 }
 
 func (p JiraIssueCommentedPredicate) Matches(m JiraIssueCommentedMetadata) bool {
 	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
-		stringInSliceFold(p.CommenterIn, m.CommenterAccountID) &&
+		anyInSliceFold(p.CommenterIn, m.CommenterAccountIDs) &&
 		strEq(p.Project, m.Project)
 }
 

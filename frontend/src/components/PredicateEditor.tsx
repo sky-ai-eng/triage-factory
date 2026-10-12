@@ -135,7 +135,7 @@ function FieldRow({ field, eventType, value, onChange }: FieldRowProps) {
       {/* Every string_list field today is an identity allowlist:
           GitHub → author_in / reviewer_in / commenter_in;
           Jira → assignee_in / reporter_in / commenter_in;
-          Linear → assignee_in / creator_in.
+          Linear → assignee_in / creator_in / commenter_in.
           IdentityListField branches on identityKind to read the right
           column (github_username, jira_account_id or linear_user_id)
           from /api/me and the team roster. If a non-identity string_list

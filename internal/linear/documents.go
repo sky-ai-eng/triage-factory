@@ -4,7 +4,8 @@ package linear
 // returns an issue spreads it, so a field added here reaches every caller.
 //
 // Linear has no comment count on an issue; the newest comment
-// (comments(last: 1)) is the comment signal.
+// (comments(last: 1)) is the comment signal, and issueCommentsQuery reads the
+// comments before it when more than one is new.
 //
 // The labels and sub-issues come as a first page of 25 with hasNextPage. Linear
 // prices a query by its connections' page sizes and refuses one over its
@@ -22,12 +23,16 @@ fragment IssueFields on Issue {
   parent { id identifier }
   team { id key name private }
   labels(first: 25) { nodes { name } pageInfo { hasNextPage } }
-  comments(last: 1) { nodes { id createdAt } }
+  comments(last: 1) { nodes { ` + commentFields + ` } }
   children(first: 25) {
     nodes { id identifier state { id name type position } }
     pageInfo { hasNextPage }
   }
 }`
+
+// commentFields is the one selection of a comment, shared by
+// issueFieldsFragment and issueCommentsQuery so both decode into Comment.
+const commentFields = `id createdAt user { id name displayName } botActor { name }`
 
 const pageInfoFields = `pageInfo { hasNextPage endCursor }`
 
@@ -98,6 +103,18 @@ query IssueChildren($id: String!, $first: Int!, $after: String) {
   issue(id: $id) {
     children(first: $first, after: $after) {
       nodes { id identifier state { id name type position } }
+      ` + pageInfoFields + `
+    }
+  }
+}`
+
+// issueCommentsQuery pages through an issue's comments, narrowed by filter
+// (a CommentFilter, or null for every comment).
+const issueCommentsQuery = `
+query IssueComments($id: String!, $filter: CommentFilter, $first: Int!, $after: String) {
+  issue(id: $id) {
+    comments(filter: $filter, first: $first, after: $after) {
+      nodes { ` + commentFields + ` }
       ` + pageInfoFields + `
     }
   }

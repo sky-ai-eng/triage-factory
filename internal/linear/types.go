@@ -65,10 +65,19 @@ type IssueRef struct {
 	Identifier string `json:"identifier"`
 }
 
-// CommentRef identifies a comment and when it was made.
-type CommentRef struct {
-	ID        string `json:"id"`
-	CreatedAt string `json:"createdAt"`
+// Comment is a comment on an issue: its id, when it was made and who wrote it.
+// User is nil for a comment an integration posted, which BotActor names
+// instead.
+type Comment struct {
+	ID        string    `json:"id"`
+	CreatedAt string    `json:"createdAt"`
+	User      *User     `json:"user"`
+	BotActor  *BotActor `json:"botActor"`
+}
+
+// BotActor is the integration that posted a comment no user wrote.
+type BotActor struct {
+	Name string `json:"name"`
 }
 
 // ChildIssue is a sub-issue and its current state.
@@ -117,7 +126,7 @@ type Issue struct {
 	Trashed     bool   `json:"trashed"`
 
 	// LastComment is the newest comment, nil when there is none.
-	LastComment *CommentRef  `json:"lastComment"`
+	LastComment *Comment     `json:"lastComment"`
 	Children    []ChildIssue `json:"children"`
 }
 
@@ -161,7 +170,7 @@ type issueNode struct {
 		PageInfo pageInfo    `json:"pageInfo"`
 	} `json:"labels"`
 	Comments struct {
-		Nodes []CommentRef `json:"nodes"`
+		Nodes []Comment `json:"nodes"`
 	} `json:"comments"`
 	Children struct {
 		Nodes    []ChildIssue `json:"nodes"`
@@ -179,7 +188,7 @@ func (n issueNode) toIssue() Issue {
 		labels = append(labels, l.Name)
 	}
 	sort.Strings(labels)
-	var last *CommentRef
+	var last *Comment
 	if len(n.Comments.Nodes) > 0 {
 		c := n.Comments.Nodes[len(n.Comments.Nodes)-1]
 		last = &c
