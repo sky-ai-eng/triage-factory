@@ -552,6 +552,15 @@ services:
       TF_ATLASSIAN_CLIENT_ID: ${TF_ATLASSIAN_CLIENT_ID:-}
       TF_ATLASSIAN_CLIENT_SECRET: ${TF_ATLASSIAN_CLIENT_SECRET:-}
       TF_ATLASSIAN_CLIENT_SECRET_FILE: ${TF_ATLASSIAN_CLIENT_SECRET_FILE:-}
+      # First-party Linear OAuth app for one-click "Install Triage Factory"
+      # (optional; set both or neither). Control-only, like the Atlassian
+      # pair: control serves the install and connect ceremonies, and the brain
+      # on control refreshes the tokens they mint and seals them into the
+      # per-claim bundle an executor receives. The secret can also be a
+      # mounted file via TF_LINEAR_CLIENT_SECRET_FILE.
+      TF_LINEAR_CLIENT_ID: ${TF_LINEAR_CLIENT_ID:-}
+      TF_LINEAR_CLIENT_SECRET: ${TF_LINEAR_CLIENT_SECRET:-}
+      TF_LINEAR_CLIENT_SECRET_FILE: ${TF_LINEAR_CLIENT_SECRET_FILE:-}
       # Deployment GitHub App — one App key serving every workspace that has
       # no credential of its own (optional; set all four or none). Control-
       # only, like the Atlassian pair: control serves the bind ceremony and the

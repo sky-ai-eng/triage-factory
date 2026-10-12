@@ -120,18 +120,30 @@ type linearInstallRig struct {
 	*linearAccessRig
 	oauth *linearOAuthFake
 	key   [32]byte
+	// appClientID is the app the start leg is expected to authorize against.
+	appClientID string
 }
 
 func newLinearInstallRig(t *testing.T) *linearInstallRig {
 	t.Helper()
+	r := newLinearInstallRigWith(t, linear.OAuthApp{})
+	r.registerApp(t, "lin-client-1")
+	r.appClientID = "lin-client-1"
+	return r
+}
+
+// newLinearInstallRigWith is the install rig with no app of the org's own and
+// deployment as the deployment app, the zero app for none.
+func newLinearInstallRigWith(t *testing.T, deployment linear.OAuthApp) *linearInstallRig {
+	t.Helper()
 	base := newLinearAccessRig(t)
 	base.fake.set("app")
-	r := &linearInstallRig{linearAccessRig: base, oauth: newLinearOAuthFake(t), key: [32]byte{7}}
+	r := &linearInstallRig{linearAccessRig: base, oauth: newLinearOAuthFake(t), key: [32]byte{7}, appClientID: deployment.ClientID}
 	r.s.SetDeployConfig("http://localhost:3000", r.key)
 	r.s.linearOAuthMinter = linearoauth.NewMinterWithEndpoints(r.oauth.URL+"/token", r.oauth.URL+"/revoke")
+	r.s.linearOAuthApps = linear.NewOAuthAppResolver(r.stores.LinearApps, r.stores.Secrets, deployment)
 	r.s.linearResolver = linear.NewResolverWithInstall(r.stores.Secrets, r.stores.Orgs,
 		linearoauth.NewTokenCache(r.s.linearOAuthMinter, r.s.linearOAuthApps, r.stores.Secrets, r.stores.LinearInstalls, r.s.linearCredentialLock))
-	r.registerApp(t, "lin-client-1")
 	return r
 }
 
@@ -182,7 +194,7 @@ func (r *linearInstallRig) start(t *testing.T) (*http.Cookie, string) {
 		t.Fatalf("start redirected to %s, want Linear's authorize page", loc)
 	}
 	q := loc.Query()
-	if q.Get("actor") != "app" || q.Get("client_id") != "lin-client-1" ||
+	if q.Get("actor") != "app" || q.Get("client_id") != r.appClientID ||
 		q.Get("redirect_uri") != "http://localhost:3000/api/linear/install/callback" {
 		t.Errorf("authorize query = %v, want actor=app for the org's app and the static callback", q)
 	}

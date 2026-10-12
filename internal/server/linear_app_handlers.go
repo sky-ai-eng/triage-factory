@@ -64,11 +64,15 @@ type linearAppInfo struct {
 // DELETE answers with. Like jiraAppStatusResponse it is driven by the
 // resolved source rather than the raw row: a row whose secret is gone is not
 // reported as the org's app.
+//
+// create_url is omitted while the deployment app resolves for the org: the
+// admin has nothing to create, and an app of the org's own is an override
+// registered by hand from the redirect URIs.
 type linearAppStatusResponse struct {
 	App                    *linearAppInfo `json:"app"`
 	InstallAvailable       bool           `json:"install_available"`
 	UsingDeploymentDefault bool           `json:"using_deployment_default"`
-	CreateURL              string         `json:"create_url"`
+	CreateURL              string         `json:"create_url,omitempty"`
 	RedirectURIs           []string       `json:"redirect_uris"`
 }
 
@@ -184,8 +188,10 @@ func (s *Server) linearAppStatus(ctx context.Context, orgID, userID string) (lin
 	resp := linearAppStatusResponse{
 		InstallAvailable:       source != linear.SourceNone,
 		UsingDeploymentDefault: source == linear.SourceDeployment,
-		CreateURL:              s.linearAppCreateLink(orgName),
 		RedirectURIs:           s.linearRedirectURIs(),
+	}
+	if source != linear.SourceDeployment {
+		resp.CreateURL = s.linearAppCreateLink(orgName)
 	}
 	if source == linear.SourceOrgOverride && app != nil {
 		resp.App = &linearAppInfo{

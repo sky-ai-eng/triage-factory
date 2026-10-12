@@ -57,6 +57,7 @@ var Secrets = []string{
 	"TF_LICENSE",                   // signed Enterprise license token
 	"TF_GOTRUE_SERVICE_ROLE_TOKEN", // RS256 admin bearer for GoTrue's SSO admin API
 	"TF_ATLASSIAN_CLIENT_SECRET",   // deployment Atlassian OAuth (3LO) app secret
+	"TF_LINEAR_CLIENT_SECRET",      // deployment Linear OAuth app secret
 	// The deployment GitHub App's three undisclosable halves. Its numeric App
 	// ID is deliberately absent: it is not a secret, and GET /app returns the
 	// rest of the App's identity anyway. The private key most wants the _FILE

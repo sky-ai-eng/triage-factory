@@ -41,6 +41,12 @@
 # the App's settings page; the App ID is not itself secret, but it is
 # per-deployment and so is set the same way rather than committed to [env].
 #
+# The deployment Linear app — one public OAuth app every workspace on this
+# deployment installs through. Set both or neither; one without the other is
+# logged at boot and treated as neither.
+#   fly secrets set TF_LINEAR_CLIENT_ID='...'
+#   fly secrets set TF_LINEAR_CLIENT_SECRET='...'
+#
 # NOT here: the GoTrue RS256 keypair (GOTRUE_JWT_KEYS /
 # GOTRUE_JWT_SECRET). Those live on the GoTrue deployment's secrets,
 # not TF's — TF only verifies tokens against the public JWKS URL,
