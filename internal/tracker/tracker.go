@@ -1446,7 +1446,7 @@ func (t *Tracker) RefreshJira(ctx context.Context, scope string, client *jiracli
 
 	// Phase 3: Diff + emit events. Network-free like the GitHub twin, but for
 	// the comments of an issue with more than its search page held, which are
-	// read only when its comment count moved.
+	// read only when the issue changed.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.jira.diff_emit")
 
 	diffEventsEmitted := 0

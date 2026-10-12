@@ -144,10 +144,11 @@ How the new comments are found:
   (`last_comment_id`, `last_comment_at`), and the new comments are the ones
   after it. The batch read returns a capped page of comments with each issue.
   When an issue has more, the rest are read from `GET issue/{id}/comment`, from
-  the end of the list back to the stored newest comment, and only when the
-  count changed. On such an issue, a comment added and another deleted between
-  two cycles are not seen. A snapshot stored without the newest comment counts
-  the last N comments as new, N being the rise in the count.
+  the end of the list back to the stored newest comment. That read happens only
+  when the issue changed since the last cycle: its comment count moved, or its
+  `updated` time advanced, which Jira does when a comment is added. A snapshot
+  stored without the newest comment counts the last N comments as new, N being
+  the rise in the count.
 - **Linear.** The batch read returns each issue's newest comment. When it
   changes, a follow-up query reads the comments created after the previous
   newest. A newest comment older than the previous one means the newest was

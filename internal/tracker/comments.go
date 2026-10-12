@@ -95,11 +95,11 @@ func (t *Tracker) markTFComments(ctx context.Context, provider, scope, resource 
 //
 // inline is the page of comments Jira returned with the issue. When it holds
 // every comment, issueToState has already set curr's marker from it. When the
-// issue has more comments than the page, the comment count is the only signal
-// past it: unchanged, nothing is new and prev's marker carries over; changed,
-// the comments past the page are read from the end of the list back to prev's
-// marker. A comment added and another deleted between two polls therefore go
-// unseen on such an issue.
+// issue has more comments than the page, the comments past it are read from the
+// end of the list back to prev's marker, but only when the issue changed since
+// prev: its comment count moved, or its updated time advanced, which Jira does
+// when a comment is added. An issue that did neither has no new comment, and
+// prev's marker carries over.
 //
 // A failed read, of the comments or of which are TF's, leaves curr's comment
 // count and marker at prev's and returns none, so the next poll finds the same
@@ -107,7 +107,7 @@ func (t *Tracker) markTFComments(ctx context.Context, provider, scope, resource 
 func (t *Tracker) jiraNewComments(ctx context.Context, c *jiraCycle, prev domain.JiraSnapshot, curr *domain.JiraSnapshot, inline []NewComment) []NewComment {
 	known := inline
 	if len(inline) < curr.CommentCount {
-		if curr.CommentCount == prev.CommentCount {
+		if curr.CommentCount == prev.CommentCount && !jiraUpdatedSince(prev, *curr) {
 			curr.LastCommentID, curr.LastCommentAt = prev.LastCommentID, prev.LastCommentAt
 			return nil
 		}
@@ -133,6 +133,15 @@ func (t *Tracker) jiraNewComments(ctx context.Context, c *jiraCycle, prev domain
 		return nil
 	}
 	return fresh
+}
+
+// jiraUpdatedSince reports whether curr's updated time is after prev's. A time
+// that does not parse, or is absent, counts as a change: the cost of a wrong
+// yes is one read of the comment list, and of a wrong no a missed comment.
+func jiraUpdatedSince(prev, curr domain.JiraSnapshot) bool {
+	tp, okP := domain.ParseExternalTime(prev.UpdatedAt)
+	tc, okC := domain.ParseExternalTime(curr.UpdatedAt)
+	return !okP || !okC || tc.After(tp)
 }
 
 // keepJiraComments puts prev's comment count and marker back on curr.

@@ -1,6 +1,7 @@
 package tracker
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -233,21 +234,37 @@ const jiraCommentSite = "https://jira.example.com"
 
 // jiraCommentIssue is one Jira issue as a test server serves it: its
 // comments, oldest first, and how many of them the search returns with the
-// issue (0 for all). failComments makes the comment-list endpoint answer 403.
+// issue (0 for all). Adding or removing a comment advances the issue's updated
+// time, as Jira does. failComments makes the comment-list endpoint answer 403.
 type jiraCommentIssue struct {
 	mu           sync.Mutex
 	comments     []string // rendered comment objects
+	changes      int      // how many times a comment was added or removed
+	updated      string
 	inline       int
 	failComments bool
 	listReads    []string // "startAt/maxResults" of each comment-list read
 }
 
+// change advances the issue's clock by a minute and returns the new time.
+func (j *jiraCommentIssue) change() string {
+	j.updated = time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC).Add(time.Duration(j.changes) * time.Minute).Format("2006-01-02T15:04:05.000-0700")
+	j.changes++
+	return j.updated
+}
+
 func (j *jiraCommentIssue) add(id, accountID, name string) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	n := len(j.comments)
-	at := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC).Add(time.Duration(n) * time.Minute).Format("2006-01-02T15:04:05.000-0700")
+	at := j.change()
 	j.comments = append(j.comments, fmt.Sprintf(`{"id":%q,"author":{"displayName":%q,"accountId":%q},"created":%q}`, id, name, accountID, at))
+}
+
+func (j *jiraCommentIssue) remove(id string) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.comments = slices.DeleteFunc(j.comments, func(c string) bool { return strings.HasPrefix(c, fmt.Sprintf(`{"id":%q,`, id)) })
+	j.change()
 }
 
 func (j *jiraCommentIssue) reads() []string {
@@ -272,7 +289,7 @@ func (j *jiraCommentIssue) serve(t *testing.T) *httptest.Server {
 				"summary":"Commented subject","status":{"id":"1","name":"To Do"},
 				"assignee":{"displayName":"Alice","accountId":"acc-alice"},
 				"comment":{"total":%d,"comments":[%s]},
-				"updated":"2026-10-01T08:00:00.000+0000"}}]}`, len(j.comments), strings.Join(page, ","))
+				"updated":%q}}]}`, len(j.comments), strings.Join(page, ","), cmp.Or(j.updated, "2026-10-01T08:00:00.000+0000"))
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/issue/10001/comment"):
 			start, _ := strconv.Atoi(r.URL.Query().Get("startAt"))
 			limit, _ := strconv.Atoi(r.URL.Query().Get("maxResults"))
@@ -480,6 +497,34 @@ func TestRefreshJira_ReadsCommentsPastTheInlinePage(t *testing.T) {
 	}
 	if snap := fx.snapshot(t); snap.LastCommentID != "20005" {
 		t.Errorf("snapshot marker after an unchanged poll = %q, want 20005 carried over", snap.LastCommentID)
+	}
+}
+
+// TestRefreshJira_CommentAddedAndAnotherDeletedPastThePage: on an issue with
+// more comments than the search page holds, a comment added and another
+// deleted between two polls leave the count where it was. The issue's updated
+// time still moves, so the comments past the page are read and the new one is
+// reported.
+func TestRefreshJira_CommentAddedAndAnotherDeletedPastThePage(t *testing.T) {
+	issue := &jiraCommentIssue{inline: 1}
+	issue.add("20001", "557058:carol", "Carol")
+	issue.add("20002", "557058:carol", "Carol")
+	fx := newJiraCommentFixture(t, issue)
+	fx.issue.add("20003", "557058:carol", "Carol")
+	onlyCommented(t, fx.cycle(t), domain.EventJiraIssueCommented)
+	if snap := fx.snapshot(t); snap.LastCommentID != "20003" || snap.CommentCount != 3 {
+		t.Fatalf("snapshot marker = (%q, %d), want (20003, 3)", snap.LastCommentID, snap.CommentCount)
+	}
+
+	fx.issue.add("20004", "557058:ada", "Ada Lovelace")
+	fx.issue.remove("20002")
+	evt := onlyCommented(t, fx.cycle(t), domain.EventJiraIssueCommented)
+	got := commentedSources()[0].meta(t, evt)
+	if want := (commentedMeta{CommentID: "20004", Commenter: "Ada Lovelace", AuthorID: "557058:ada", AuthorIDs: []string{"557058:ada"}}); !commentedMetaEqual(got, want) {
+		t.Errorf("metadata = %+v, want %+v", got, want)
+	}
+	if snap := fx.snapshot(t); snap.LastCommentID != "20004" || snap.CommentCount != 3 {
+		t.Errorf("snapshot marker = (%q, %d), want (20004, 3)", snap.LastCommentID, snap.CommentCount)
 	}
 }
 
