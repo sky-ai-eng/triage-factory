@@ -202,16 +202,15 @@ type Client interface {
 	// returns its cached value, the IPCClient does one round-trip.
 	LookupConversation(ctx context.Context) (ConversationInfo, error)
 
-	// AvailableSources answers which event-source kinds the run's org can
-	// currently reach ("github", "jira", registered kinds like "slack") — the
-	// availability set the top-level exec help filters its command index on,
-	// resolved host-side from the same answer the run's <tools> prompt section
-	// was composed from (the claim's stamped tools manifest where one exists,
-	// a live resolve otherwise). Documentation only: the gate that actually
-	// stops a verb is the credential funnel / extension dispatch it resolves
-	// through. Callers treat any error as "unknown" and fall back to the
-	// unfiltered surface — over-inclusion is the safe direction.
-	AvailableSources(ctx context.Context) ([]string, error)
+	// SourceManifest answers which sources the run can reach and, for each
+	// it cannot, why not — the manifest the top-level exec help writes its
+	// per-source notes from, resolved host-side from the same answer the
+	// run's <tools> section was composed from (the sealed bundle's copy in
+	// multi mode, a live resolve in local). Documentation only: the gate that
+	// actually stops a verb is the credential funnel / extension dispatch it
+	// resolves through. Callers treat any error as "unknown" and fall back to
+	// the unfiltered surface — over-inclusion is the safe direction.
+	SourceManifest(ctx context.Context) (domain.SourceManifest, error)
 
 	// --- review draft finalization (gh pr finalize-review) ---
 	//

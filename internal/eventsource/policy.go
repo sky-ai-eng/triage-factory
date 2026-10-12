@@ -11,22 +11,11 @@ import (
 )
 
 // ErrDisabled marks every refusal that traces back to an org admin having
-// turned a source off. Gates wrap it with DisabledError so a caller can tell
-// this apart from an unbound credential without matching on prose: the two
-// need opposite responses — bind a credential, versus ask an admin to lift a
+// turned a source off. A gate's refusal wraps it so a caller can tell this
+// apart from an unbound credential without matching on prose: the two need
+// opposite responses — bind a credential, versus ask an admin to lift a
 // pause — and only one of them is the reader's own to fix.
 var ErrDisabled = errors.New("event source turned off by an org admin")
-
-// DisabledError is the refusal a paused source produces at every gate: the
-// poller's skip, an agent's exec verb, the credential provisioner. One
-// constructor because an agent that reads this text in a tool result and a
-// developer who reads it in a log are owed the same explanation, and because
-// the useful half is the part naming what a pause covers — a reader who only
-// learns "Jira is off" reasonably concludes the credential broke and goes
-// looking for it.
-func DisabledError(kind string) error {
-	return fmt.Errorf("%s is turned off for this organization: an org admin paused it, which stops polling, new tasks and agent access alike until it is turned back on in Settings → Event sources: %w", Label(kind), ErrDisabled)
-}
 
 // Disabled reports whether an org admin has turned kind off for orgID. A source
 // the product is built on has no off switch and always answers false — see

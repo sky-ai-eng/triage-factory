@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -319,6 +320,86 @@ func TestInstanceSandboxesEndpoint_Integration(t *testing.T) {
 	}
 }
 
+// TestSourceManifest_OnSandboxRowsAndClaimDetail pins the read surface for an
+// engagement's source manifest: it rides each sandbox row and the claim
+// detail route, for a finished engagement as much as a live one, and a claim
+// never sealed carries none. The manifest is seeded straight onto the claims
+// row, which is where the brain's seal writes it.
+func TestSourceManifest_OnSandboxRowsAndClaimDetail(t *testing.T) {
+	entitlements.Reset()
+	t.Cleanup(entitlements.Reset)
+	entitlements.RegisterDeploymentProvider(fleetLicensed{})
+
+	stores, conn := openMigratedStoresWithConn(t)
+	ctx := withLocalClaims(t)
+	if _, err := stores.Instances.Register(ctx, "exec-1", domain.InstanceRoleExecutor, "v9", ""); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	released := base.Add(2 * time.Minute)
+	sealedID, neverSealedID := uuid.New().String(), uuid.New().String()
+	seedSandboxClaim(t, conn, sealedID, "exec-1", "completed", "", base, &released, nil, nil)
+	seedSandboxClaim(t, conn, neverSealedID, "exec-1", "running", "", base.Add(time.Minute), nil, nil, nil)
+	if _, err := conn.Exec(`UPDATE claims SET source_manifest = ? WHERE id = ?`,
+		`{"github":{"state":"sealed"},"jira":{"state":"disabled"},"linear":{"state":"unresolved","reason":"token_endpoint_unavailable"}}`, sealedID); err != nil {
+		t.Fatalf("seed manifest: %v", err)
+	}
+	want := domain.SourceManifest{
+		"github": {State: domain.SourceSealed},
+		"jira":   {State: domain.SourceDisabled},
+		"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
+	}
+
+	h := &handler{stores: stores}
+	rec, got := getSandboxes(t, h, ctx, "exec-1", "")
+	if rec.Code != 200 || len(got.Sandboxes) != 2 {
+		t.Fatalf("sandboxes = %d %+v", rec.Code, got.Sandboxes)
+	}
+	for _, sb := range got.Sandboxes {
+		switch sb.ID {
+		case sealedID:
+			if !reflect.DeepEqual(sb.Sources, want) {
+				t.Errorf("finished engagement's sources = %+v, want %+v", sb.Sources, want)
+			}
+		case neverSealedID:
+			if sb.Sources != nil {
+				t.Errorf("never-sealed engagement carries sources %+v", sb.Sources)
+			}
+		}
+		if sb.ExecutorID != "exec-1" {
+			t.Errorf("row %s executor = %q, want exec-1", sb.ID, sb.ExecutorID)
+		}
+	}
+
+	detail := func(id string) (*httptest.ResponseRecorder, claimDetailDTO) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/fleet/claims/"+id, nil).WithContext(ctx)
+		req.SetPathValue("id", id)
+		h.handleClaim(rec, req)
+		var got claimDetailDTO
+		if rec.Code == 200 {
+			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+		}
+		return rec, got
+	}
+	rec, d := detail(sealedID)
+	if rec.Code != 200 {
+		t.Fatalf("claim detail => %d: %s", rec.Code, rec.Body.String())
+	}
+	if d.ID != sealedID || d.ExecutorID != "exec-1" || d.Live || !reflect.DeepEqual(d.Sources, want) {
+		t.Errorf("claim detail = %+v, want the finished engagement with its manifest", d)
+	}
+	if !strings.Contains(rec.Body.String(), `"sources":{"github":{"state":"sealed"}`) {
+		t.Errorf("claim detail body does not carry the manifest's wire shape: %s", rec.Body.String())
+	}
+	if rec, _ := detail(uuid.New().String()); rec.Code != 404 {
+		t.Errorf("unknown claim => %d, want 404", rec.Code)
+	}
+}
+
 // TestInstanceSandboxesEndpoint_LimitAndNotFound pins the two input contracts:
 // limit is validated and capped, and an unknown instance 404s in handleDrain's
 // shape rather than reading as an idle executor.
@@ -479,6 +560,8 @@ func TestSandboxRoutesDenialParity(t *testing.T) {
 			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleDrain(w, r) }},
 		{name: "sandboxes", method: "GET", path: "/api/fleet/instances/exec-1/sandboxes", id: "exec-1",
 			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleInstanceSandboxes(w, r) }},
+		{name: "claim", method: "GET", path: "/api/fleet/claims/c1", id: "c1",
+			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleClaim(w, r) }},
 		{name: "series", method: "GET", path: "/api/fleet/claims/c1/series", id: "c1",
 			serve: func(h *handler, w *httptest.ResponseRecorder, r *http.Request) { h.handleClaimSeries(w, r) }},
 	}

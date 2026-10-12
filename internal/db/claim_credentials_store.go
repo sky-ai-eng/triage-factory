@@ -2,7 +2,12 @@ package db
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // SealedBundle is one row of the sealed per-claim credential channel: the
@@ -32,30 +37,27 @@ type SealedBundle struct {
 	// no sealed bundles at all.
 	SealedAt time.Time
 
-	// IncludeTools is claim_credentials.include_tools — the cleartext tools
-	// manifest the brain stamps beside the ciphertext at seal time: the
-	// event-source kinds available to the claim's org
-	// (eventsource.AvailableKindsSystem), which the executor composes the
-	// run's <tools> section from. It rides this row because the executor
-	// cannot answer the question itself — its secret store is disabled and an
-	// event-triggered conversation has no user identity to claim as — while
-	// the brain answers it with full knowledge on the very pass that seals
-	// the bundle. Names only, never secret material, so it travels in
-	// cleartext like ExecutorID/BootEpoch/SealedAt above.
-	//
-	// nil means the writer stamped no answer (a resolve failure, degraded
-	// deliberately) — the reader falls back to its own floor; an empty
-	// non-nil slice is a real answer of "nothing available". The column is
-	// nullable to keep the two distinguishable.
-	IncludeTools []string
+	// Sources is the engagement's source manifest, read off its claims row
+	// (claims.source_manifest), which Put writes in the same statement as the
+	// ciphertext: which source credentials the bundle carries and why each
+	// other one is absent. It rides this row's read because the executor reads
+	// it beside the bundle and cannot answer the question itself — its secret
+	// store is disabled and an event-triggered conversation has no user
+	// identity to claim as — while the brain answers it with full knowledge on
+	// the very pass that seals the bundle. Names, states and reasons only,
+	// never secret material, so it travels in cleartext like
+	// ExecutorID/BootEpoch/SealedAt above. Nil only when the claim carries no
+	// manifest.
+	Sources domain.SourceManifest
 }
 
 // ClaimCredentialsStore owns the claim_credentials table — the sealed
-// per-claim credential bundle channel. An executor parks a claimed
-// conversation's active claim in phase='awaiting_credentials'; the brain
-// resolves that conversation's LLM/GitHub/Jira credentials, seals them to the
-// claimant's published instances pubkey, and writes exactly one row keyed by
-// the conversation's ACTIVE claim id. Method signatures still take
+// per-claim credential bundle channel — and the source manifest on the claims
+// row beside it. An executor parks a claimed conversation's active claim in
+// phase='awaiting_credentials'; the brain resolves that conversation's
+// LLM/GitHub/Jira/Linear credentials, seals them to the claimant's published
+// pubkey, and writes exactly one row keyed by the conversation's ACTIVE claim
+// id, recording the source manifest on that claim in the same statement. Method signatures still take
 // conversationID (the conversation id) — the impl resolves the active claim
 // internally, so callers never handle claim ids. Admin-pool-only in Postgres,
 // same posture as InstanceStore/ConversationSignalStore: this table never
@@ -113,10 +115,13 @@ type ClaimCredentialsStore interface {
 	// answer as SecretStore's analogous write methods, for the same reason
 	// — a credential surface with nothing non-secret worth echoing back.
 	//
-	// includeTools is the cleartext tools manifest stamped beside the
-	// ciphertext (see SealedBundle.IncludeTools); nil stamps SQL NULL, an
-	// empty slice stamps an empty list — the two are different answers.
-	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, includeTools []string) error
+	// sources is the engagement's source manifest, written onto the active
+	// claim's row (claims.source_manifest) in the same statement, and only
+	// when the ciphertext write itself applies: an epoch-guarded no-op leaves
+	// the claim's manifest describing the bundle the row still holds. The
+	// claims row outlives claim_credentials, which teardown deletes, so the
+	// manifest keeps describing the engagement after it ends.
+	Put(ctx context.Context, orgID, conversationID, executorID string, bootEpoch int64, sealed []byte, sources domain.SourceManifest) error
 
 	// Get returns the sealed bundle for conversationID's active claim, or ok=false
 	// when none has been provisioned yet (or the conversation has no active claim).
@@ -127,4 +132,31 @@ type ClaimCredentialsStore interface {
 	// stronger than "fails safe" (never attempt it at all), so a resume
 	// path after a restart always re-requests provisioning instead.
 	Get(ctx context.Context, orgID, conversationID string) (SealedBundle, bool, error)
+}
+
+// EncodeSourceManifest renders a source manifest for the claims.source_manifest
+// column: nil → SQL NULL (no manifest), anything else → its JSON object. Both
+// dialects write through it so the column holds one shape.
+func EncodeSourceManifest(m domain.SourceManifest) (any, error) {
+	if m == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("encode source manifest: %w", err)
+	}
+	return string(data), nil
+}
+
+// DecodeSourceManifest parses the claims.source_manifest column as both
+// dialects read it back: NULL → nil, anything else → the manifest it holds.
+func DecodeSourceManifest(raw sql.NullString) (domain.SourceManifest, error) {
+	if !raw.Valid || raw.String == "" {
+		return nil, nil
+	}
+	var m domain.SourceManifest
+	if err := json.Unmarshal([]byte(raw.String), &m); err != nil {
+		return nil, fmt.Errorf("parse claims.source_manifest: %w", err)
+	}
+	return m, nil
 }

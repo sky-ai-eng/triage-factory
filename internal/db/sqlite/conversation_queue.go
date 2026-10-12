@@ -536,7 +536,7 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	return scanAwaitingCredentialsConversations(rows)
 }
 
-func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsConversation, error) {
+func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan, expiringBefore time.Time) ([]db.AwaitingCredentialsConversation, error) {
 	// Local mode has no claim_credentials table (the bundle channel is
 	// Postgres-only; local reads the live secret store), so there is never
 	// a sealed bundle to refresh.
@@ -934,7 +934,8 @@ var executorClaimCols = `
 	       c.peak_mem_mb, c.cpu_usec,
 	       COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	       COALESCE(v.failure_kind, ''),
-	       c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at
+	       c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at,
+	       c.source_manifest, c.executor_id
 	FROM claims c
 	LEFT JOIN conversations v ON v.id = c.conversation_id`
 
@@ -1550,14 +1551,21 @@ func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error
 	var c domain.ExecutorClaim
 	var releasedAt, leaseExpiresAt, lastActivityAt, lastCheckpointAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
+	var sources sql.NullString
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
 		&lastActivityAt, &c.CurrentOp, &lastCheckpointAt,
+		&sources, &c.ExecutorID,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
 	}
+	m, err := db.DecodeSourceManifest(sources)
+	if err != nil {
+		return domain.ExecutorClaim{}, err
+	}
+	c.Sources = m
 	if lastActivityAt.Valid {
 		v := lastActivityAt.Time
 		c.LastActivityAt = &v

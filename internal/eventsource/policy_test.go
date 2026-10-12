@@ -64,23 +64,6 @@ func TestDisabled_PropagatesTheReadFailure(t *testing.T) {
 	}
 }
 
-// TestDisabledError_NamesTheSourceAndWhatIsCovered. The wrapped sentinel is
-// what lets a caller tell an admin's switch from an unbound credential without
-// matching prose; the prose is what tells a reader — an agent, or a person in a
-// log — that this covers more than the surface they hit.
-func TestDisabledError_NamesTheSourceAndWhatIsCovered(t *testing.T) {
-	err := DisabledError(KindJira)
-
-	if !errors.Is(err, ErrDisabled) {
-		t.Errorf("DisabledError does not wrap ErrDisabled: %v", err)
-	}
-	for _, want := range []string{"Jira", "polling", "agent access"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %q", err, want)
-		}
-	}
-}
-
 // TestDisableable_GitHubIsRequired is the rule itself: the vocabulary an org
 // can turn off is a strict subset of the one it can read a state for.
 func TestDisableable_GitHubIsRequired(t *testing.T) {

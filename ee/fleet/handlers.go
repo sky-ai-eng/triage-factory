@@ -390,6 +390,7 @@ type sandboxClaimDTO struct {
 	ID             string     `json:"id"`
 	ConversationID string     `json:"conversation_id"`
 	OrgID          string     `json:"org_id"`
+	ExecutorID     string     `json:"executor_id"`
 	ClaimedAt      time.Time  `json:"claimed_at"`
 	ReleasedAt     *time.Time `json:"released_at,omitempty"`
 	// Live marks an unreleased claim — still holding a slot, and whatever
@@ -422,6 +423,13 @@ type sandboxClaimDTO struct {
 	// a stored checkpoint, as the holder's last renewal stamped it. Absent for
 	// an engagement that does not checkpoint, and before the first renewal.
 	LastCheckpointAt *time.Time `json:"last_checkpoint_at,omitempty"`
+	// Sources is the engagement's source manifest as of its latest seal: for
+	// each event source, whether its credential was in the sandbox's sealed
+	// bundle and, when not, why not (state, a closed-vocabulary reason, and a
+	// sealed credential's expiry). It outlives the engagement, so a finished
+	// run still shows what it held. Absent for an engagement that was never
+	// sealed.
+	Sources domain.SourceManifest `json:"sources,omitempty"`
 }
 
 type sandboxesDTO struct {
@@ -497,12 +505,13 @@ func (h *handler) handleInstanceSandboxes(w http.ResponseWriter, r *http.Request
 
 func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
 	d := sandboxClaimDTO{
-		ID: c.ID, ConversationID: c.ConversationID, OrgID: c.OrgID,
+		ID: c.ID, ConversationID: c.ConversationID, OrgID: c.OrgID, ExecutorID: c.ExecutorID,
 		ClaimedAt: c.ClaimedAt, ReleasedAt: c.ReleasedAt, Live: c.ReleasedAt == nil,
 		PeakMemMB: c.PeakMemMB, CPUUsec: c.CPUUsec,
 		Status: c.Status, FailureKind: c.FailureKind, Outcome: c.Outcome,
 		LastActivityAt: c.LastActivityAt, CurrentOp: c.CurrentOp,
 		LastCheckpointAt: c.LastCheckpointAt,
+		Sources:          c.Sources,
 	}
 	end := now
 	if c.ReleasedAt != nil {
@@ -515,6 +524,42 @@ func sandboxClaim(c domain.ExecutorClaim, now time.Time) sandboxClaimDTO {
 		d.DurationS = s
 	}
 	return d
+}
+
+// --- GET /api/fleet/claims/{id} ---
+//
+// One engagement, by claim id: the same row the sandbox breakdown lists, for an
+// operator who holds a claim id and not the executor it ran on. Its source
+// manifest is the reason to ask — which credentials that sandbox held, and why
+// each other one was absent. Cross-org and operator-gated like its siblings;
+// capabilities belong to an engagement, not a conversation, which can have
+// several, so this is addressed by the claim.
+
+type claimDetailDTO struct {
+	GeneratedAt time.Time `json:"generated_at"`
+	sandboxClaimDTO
+}
+
+func (h *handler) handleClaim(w http.ResponseWriter, r *http.Request) {
+	if h.gate(w, r) == nil {
+		return
+	}
+	id := r.PathValue("id")
+	if id == "" {
+		httpx.BadRequest(w, "claim id is required")
+		return
+	}
+	now := time.Now().UTC()
+	claim, err := h.stores.ConversationQueue.ClaimByIDSystem(r.Context(), id)
+	if err != nil {
+		httpx.InternalError(w, "fleet-claim", err)
+		return
+	}
+	if claim == nil {
+		httpx.NotFound(w, "claim")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, claimDetailDTO{GeneratedAt: now, sandboxClaimDTO: sandboxClaim(*claim, now)})
 }
 
 // --- GET /api/fleet/claims/{id}/series ---

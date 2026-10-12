@@ -2005,20 +2005,20 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		owner, repo, prNumber := parseGitHubTask(task)
 		cfg.owner, cfg.repo, cfg.prNumber = owner, repo, prNumber
 		cfg.scope = fmt.Sprintf("Repository: %s/%s\nPR: #%d", owner, repo, prNumber)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
+		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindGitHub)
 		// Re-fetched rather than inherited from the first step: by now the
 		// PR's history includes whatever the earlier steps pushed, which is
 		// exactly what this step needs to see.
 		cfg.prSkeleton = renderPRSkeleton(ctx, prReadClient(orgID, gh, sidecar), owner, repo, prNumber)
 	case "jira":
 		cfg.scope = fmt.Sprintf("Jira issue: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
+		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindJira)
 	case "linear":
 		cfg.scope = fmt.Sprintf("Linear issue: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindLinear)
+		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, eventsource.KindLinear)
 	case "slack":
 		cfg.scope = fmt.Sprintf("Slack thread: %s", task.EntitySourceID)
-		cfg.toolsRef = s.toolsReferenceFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
+		cfg.sources = s.sourceDocsFor(ctx, orgID, conv.CreatorUserID, conv.ID, "slack")
 	default:
 		return runConfig{}, fmt.Errorf("unsupported task source: %s", task.EntitySource)
 	}

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/entitlements"
-	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 )
 
 // ExtensionHandler executes one extension method. rt is the provider runtime
@@ -113,7 +113,7 @@ func callExtension(ctx context.Context, rt Runtime, namespace, method string, ar
 		return nil, fmt.Errorf("%s: check entitlement: %w", namespace, err)
 	}
 	if !allowed {
-		return nil, fmt.Errorf("%s: not enabled for this organization", namespace)
+		return nil, &SourceRefusal{Kind: namespace, State: domain.SourceUnlicensed}
 	}
 	// Gate on the org's source pause the same way, and here rather than in any
 	// one provider's handler: an extension namespace IS its event-source kind
@@ -129,7 +129,7 @@ func callExtension(ctx context.Context, rt Runtime, namespace, method string, ar
 		return nil, fmt.Errorf("%s: check whether the source is turned off for this organization: %w", namespace, err)
 	}
 	if off {
-		return nil, eventsource.DisabledError(namespace)
+		return nil, &SourceRefusal{Kind: namespace, State: domain.SourceDisabled}
 	}
 	return reg.handler(ctx, rt, method, args)
 }

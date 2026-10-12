@@ -125,11 +125,11 @@ func TestSetupSlack_ToolsRef_NoRegisteredReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("setupSlack: %v", err)
 	}
-	if !strings.Contains(cfg.toolsRef, "exec gh") {
-		t.Errorf("toolsRef documents no github verbs: %q", cfg.toolsRef)
+	if !strings.Contains(cfg.sources.tools, "exec gh") {
+		t.Errorf("toolsRef documents no github verbs: %q", cfg.sources.tools)
 	}
-	if strings.Contains(cfg.toolsRef, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef documents slack with nothing registered for it: %q", cfg.toolsRef)
+	if strings.Contains(cfg.sources.tools, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef documents slack with nothing registered for it: %q", cfg.sources.tools)
 	}
 }
 
@@ -154,11 +154,11 @@ func TestSetupSlack_ToolsRef_ComposesRegisteredReference(t *testing.T) {
 	// Composed by source rather than by exact bytes: both families present,
 	// core first. The assembly is canonical, so a caller's order and repeats
 	// cannot change what the agent reads.
-	if !strings.Contains(cfg.toolsRef, "exec gh") || !strings.Contains(cfg.toolsRef, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want both the github and the registered slack verbs", cfg.toolsRef)
+	if !strings.Contains(cfg.sources.tools, "exec gh") || !strings.Contains(cfg.sources.tools, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef = %q, want both the github and the registered slack verbs", cfg.sources.tools)
 	}
-	if strings.Index(cfg.toolsRef, "exec gh") > strings.Index(cfg.toolsRef, "SLACK VERB DOCS") {
-		t.Errorf("toolsRef = %q, want github before the registered source", cfg.toolsRef)
+	if strings.Index(cfg.sources.tools, "exec gh") > strings.Index(cfg.sources.tools, "SLACK VERB DOCS") {
+		t.Errorf("toolsRef = %q, want github before the registered source", cfg.sources.tools)
 	}
 }
 
@@ -260,7 +260,7 @@ func TestBuildStepConfig_Slack_LaterStep(t *testing.T) {
 	if cfg.scope != wantScope {
 		t.Errorf("scope = %q, want %q", cfg.scope, wantScope)
 	}
-	if !strings.Contains(cfg.toolsRef, "exec gh") {
-		t.Errorf("toolsRef documents no github verbs: %q", cfg.toolsRef)
+	if !strings.Contains(cfg.sources.tools, "exec gh") {
+		t.Errorf("toolsRef documents no github verbs: %q", cfg.sources.tools)
 	}
 }

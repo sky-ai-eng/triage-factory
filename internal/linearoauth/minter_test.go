@@ -165,6 +165,35 @@ func TestRefresh_UnavailableIsNotARefusal(t *testing.T) {
 	}
 }
 
+// TestTokenEndpointUnavailable pins the classification an engagement's source
+// manifest records: an error status or an unanswered request is the endpoint
+// being unavailable, a refused grant is not, and neither is an error from
+// anywhere else on the resolve path.
+func TestTokenEndpointUnavailable(t *testing.T) {
+	down, _ := formServer(t, http.StatusBadGateway, `upstream down`)
+	_, err := (&Minter{httpClient: down.Client(), tokenURL: down.URL}).Refresh(context.Background(), testApp(), "ref1")
+	if !TokenEndpointUnavailable(err) {
+		t.Errorf("TokenEndpointUnavailable(5xx) = false, want true: %v", err)
+	}
+
+	unreachable := httptest.NewServer(http.NotFoundHandler())
+	unreachable.Close()
+	_, err = (&Minter{httpClient: http.DefaultClient, tokenURL: unreachable.URL}).Refresh(context.Background(), testApp(), "ref1")
+	if !TokenEndpointUnavailable(err) {
+		t.Errorf("TokenEndpointUnavailable(unreachable) = false, want true: %v", err)
+	}
+
+	refused, _ := formServer(t, http.StatusBadRequest, `{"error":"invalid_grant"}`)
+	_, err = (&Minter{httpClient: refused.Client(), tokenURL: refused.URL}).Refresh(context.Background(), testApp(), "ref1")
+	if TokenEndpointUnavailable(err) {
+		t.Errorf("TokenEndpointUnavailable(invalid_grant) = true, want false: %v", err)
+	}
+
+	if TokenEndpointUnavailable(errors.New("read secret: connection refused")) {
+		t.Error("TokenEndpointUnavailable(secret store error) = true, want false")
+	}
+}
+
 func TestExchangeCode_MissingRefreshTokenFails(t *testing.T) {
 	srv, _ := formServer(t, http.StatusOK, `{"access_token":"acc1","expires_in":86399}`)
 	m := &Minter{httpClient: srv.Client(), tokenURL: srv.URL}

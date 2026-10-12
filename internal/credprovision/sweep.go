@@ -75,11 +75,13 @@ func sweepAwaiting(ctx context.Context, mgr *Manager) {
 	}
 }
 
-// RunRefreshSweep re-mints and re-seals the GitHub tokens of every active
-// (claimed, non-terminal) conversation whose sealed bundle is older than
-// refreshAfter (TFAC-614) — GitHub installation tokens are hour-lived,
-// engagements aren't. Piggybacks no new scheduler cadence beyond its own
-// ticker, per the same brain-unit shape as RunAwaitingSweep.
+// RunRefreshSweep re-provisions every active (claimed, non-terminal)
+// conversation whose sealed bundle the brain should replace now (TFAC-614): one
+// older than refreshAfter — GitHub installation tokens are hour-lived,
+// engagements aren't — and, between those ordinary re-seals, one whose source
+// manifest names an unresolved source or a sealed credential that expires
+// before the next tick could reach it. Piggybacks no new scheduler cadence
+// beyond its own ticker, per the same brain-unit shape as RunAwaitingSweep.
 func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter time.Duration) {
 	if mgr == nil {
 		return
@@ -91,13 +93,22 @@ func RunRefreshSweep(ctx context.Context, mgr *Manager, interval, refreshAfter t
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			sweepRefresh(ctx, mgr, refreshAfter)
+			sweepRefresh(ctx, mgr, interval, refreshAfter)
 		}
 	}
 }
 
-func sweepRefresh(ctx context.Context, mgr *Manager, refreshAfter time.Duration) {
-	convs, err := mgr.stores.ConversationQueue.ListActiveNeedingCredentialRefresh(ctx, time.Now().Add(-refreshAfter))
+// expiryMargin is how far ahead of the next tick a sealed credential's expiry
+// counts as close: the re-seal has to reach the sidecar, which the executor
+// relays on its own cadence, before the credential lapses.
+const expiryMargin = 2 * time.Minute
+
+// sweepRefresh runs one pass. An engagement with an unresolved source is
+// re-sealed on every pass until it resolves, so a run recovers within one
+// interval of its source recovering rather than at its next ordinary re-seal.
+func sweepRefresh(ctx context.Context, mgr *Manager, interval, refreshAfter time.Duration) {
+	now := time.Now()
+	convs, err := mgr.stores.ConversationQueue.ListActiveNeedingCredentialRefresh(ctx, now.Add(-refreshAfter), now.Add(interval+expiryMargin))
 	if err != nil {
 		log.Warn("list conversations needing credential refresh failed; retrying next tick", "error", err)
 		return

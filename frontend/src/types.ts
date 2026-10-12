@@ -1596,6 +1596,8 @@ export interface FleetSandboxClaim {
   id: string
   conversation_id: string
   org_id: string
+  /** The instance that holds (or held) the engagement. */
+  executor_id: string
   claimed_at: string
   released_at?: string
   /** Unreleased — still holding a slot, and its series is still growing. */
@@ -1627,6 +1629,32 @@ export interface FleetSandboxClaim {
    *  engagement that does not checkpoint; like last_activity_at, only a live
    *  claim's stamp describes now. */
   last_checkpoint_at?: string
+  /** The engagement's source manifest as of its latest seal, keyed by event
+   *  source kind. It outlives the engagement, so a finished one still shows
+   *  what its sandbox held. Absent for an engagement that was never sealed —
+   *  every local-mode claim. */
+  sources?: Record<string, FleetSourceEntry>
+}
+
+// FleetSourceState mirrors internal/domain/source_manifest.go's SourceState:
+// whether a source's credential was in the engagement's sealed bundle and,
+// when it was not, why. 'withheld' is reserved — nothing writes it yet.
+export type FleetSourceState =
+  | 'sealed'
+  | 'unresolved'
+  | 'unconfigured'
+  | 'disabled'
+  | 'unlicensed'
+  | 'withheld'
+
+// FleetSourceEntry is one source's line in an engagement's source manifest.
+export interface FleetSourceEntry {
+  state: FleetSourceState
+  /** A closed-vocabulary refinement of the state
+   *  ('token_endpoint_unavailable', 'resolve_failed', …). */
+  reason?: string
+  /** When a sealed credential that expires stops working. */
+  expires_at?: string
 }
 
 export interface FleetSandboxes {

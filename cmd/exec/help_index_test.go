@@ -5,8 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/cmd/exec/convident"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // registerHelpIndexFakes seeds the registry with the two shapes the index
@@ -26,12 +28,12 @@ func registerHelpIndexFakes(t *testing.T) {
 	})
 }
 
-// TestHelpText_UnresolvedKindsListEverything pins the fallback direction: a
-// nil kind set (no availability answer in scope) renders the full surface —
-// registered families included, no availability notes. Over-inclusion is the
-// safe degrade; under-advertising to an entitled run is the trial-and-error
-// failure this help exists to prevent.
-func TestHelpText_UnresolvedKindsListEverything(t *testing.T) {
+// TestHelpText_UnresolvedSourcesListEverything pins the fallback direction: a
+// nil manifest (no answer in scope) renders the full surface — registered
+// families included, no notes. Over-inclusion is the safe degrade;
+// under-advertising to an entitled run is the trial-and-error failure this
+// help exists to prevent.
+func TestHelpText_UnresolvedSourcesListEverything(t *testing.T) {
 	registerHelpIndexFakes(t)
 	out := helpText("tfac", nil)
 
@@ -40,60 +42,69 @@ func TestHelpText_UnresolvedKindsListEverything(t *testing.T) {
 			t.Errorf("full listing is missing %q", want)
 		}
 	}
-	if strings.Contains(out, "not currently available") {
-		t.Error("full listing carries an availability note; unresolved must render unannotated")
+	if strings.Contains(out, "NOTE:") {
+		t.Error("full listing carries a note; unresolved must render unannotated")
 	}
 }
 
-// TestHelpText_FilteredIndex pins the per-state policy: a registered family
-// whose source is absent from the resolved set is omitted (it may be
-// unlicensed — absence is the rule for unlicensed surfaces everywhere else),
-// a sourceless registered family is always listed, and Jira and Linear — core,
-// never unlicensed — stay listed with the not-currently-available note.
-func TestHelpText_FilteredIndex(t *testing.T) {
+// TestHelpText_NotesFollowTheManifest pins the per-state policy: Jira and
+// Linear — core, never unlicensed — stay listed with the refusal table's note
+// for their state, a registered family whose source is unlicensed or absent
+// is omitted, one in any other state is listed with its note, and a
+// sourceless family is always listed.
+func TestHelpText_NotesFollowTheManifest(t *testing.T) {
 	registerHelpIndexFakes(t)
-	out := helpText("tfac", []string{"github"})
+	sources := domain.SourceManifest{
+		"github": {State: domain.SourceSealed},
+		"jira":   {State: domain.SourceDisabled},
+		"linear": {State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable},
+	}
+	out := helpText("tfac", sources)
 
 	if strings.Contains(out, "Fake Source Commands:") {
-		t.Error("a registered family whose source is unavailable must be omitted from the index")
+		t.Error("a registered family absent from the manifest must be omitted from the index")
 	}
 	if !strings.Contains(out, "Fake Plain Commands:") {
 		t.Error("a sourceless registered family must always be listed")
 	}
-	if !strings.Contains(out, "Jira Ticket Commands:") {
-		t.Error("the Jira section must stay listed when jira is unavailable — explained, not hidden")
+	for kind, section := range map[string]string{"jira": "Jira Ticket Commands:", "linear": "Linear Issue Commands:"} {
+		if !strings.Contains(out, section) {
+			t.Errorf("the %s section must stay listed — explained, not hidden", kind)
+		}
+		if note := agenthost.SourceNote(kind, sources[kind]); !strings.Contains(out, "NOTE: "+note) {
+			t.Errorf("the %s section is missing its note %q", kind, note)
+		}
 	}
-	if !strings.Contains(out, unavailableNote("jira")) {
-		t.Error("the Jira section is missing its not-currently-available note")
+	if strings.Contains(out, "NOTE: GitHub") {
+		t.Error("a sealed GitHub carries a note")
 	}
-	if !strings.Contains(out, "Linear Issue Commands:") {
-		t.Error("the Linear section must stay listed when linear is unavailable — explained, not hidden")
+
+	sources["fakesrc"] = domain.SourceEntry{State: domain.SourceUnlicensed}
+	if strings.Contains(helpText("tfac", sources), "Fake Source Commands:") {
+		t.Error("a registered family whose source is unlicensed must be omitted")
 	}
-	if !strings.Contains(out, unavailableNote("linear")) {
-		t.Error("the Linear section is missing its not-currently-available note")
-	}
-	if !strings.Contains(unavailableNote("linear"), "Linear is not currently available") {
-		t.Errorf("the Linear note does not name Linear: %q", unavailableNote("linear"))
+	sources["fakesrc"] = domain.SourceEntry{State: domain.SourceUnconfigured}
+	out = helpText("tfac", sources)
+	if !strings.Contains(out, "Fake Source Commands:") || !strings.Contains(out, "NOTE: Fakesrc: not set up") {
+		t.Error("a registered family whose source is unconfigured must be listed with its note")
 	}
 }
 
-// TestHelpText_ResolvedKindsListTheirFamilies is the positive arm: a resolved
-// set naming the sources renders their sections with no notes, byte-identical
-// in the sections it shares with the unresolved listing.
-func TestHelpText_ResolvedKindsListTheirFamilies(t *testing.T) {
+// TestHelpText_SealedSourcesListTheirFamilies is the positive arm: a manifest
+// sealing every source renders their sections with no notes, byte-identical to
+// the unresolved listing.
+func TestHelpText_SealedSourcesListTheirFamilies(t *testing.T) {
 	registerHelpIndexFakes(t)
-	out := helpText("tfac", []string{"github", "jira", "linear", "fakesrc"})
+	sealed := domain.SourceEntry{State: domain.SourceSealed}
+	out := helpText("tfac", domain.SourceManifest{"github": sealed, "jira": sealed, "linear": sealed, "fakesrc": sealed})
 
 	for _, want := range []string{"Fake Source Commands:", "Fake Plain Commands:", "Jira Ticket Commands:", "Linear Issue Commands:"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("resolved listing is missing %q", want)
 		}
 	}
-	if strings.Contains(out, "not currently available") {
-		t.Error("resolved listing carries an availability note for an available source")
-	}
 	if out != helpText("tfac", nil) {
-		t.Error("an all-available resolve must render the same bytes as the unresolved full listing")
+		t.Error("an all-sealed manifest must render the same bytes as the unresolved full listing")
 	}
 }
 
@@ -107,19 +118,19 @@ func TestHelpText_RegisteredSectionsAreNameOrdered(t *testing.T) {
 	}
 }
 
-// TestHostHelpKinds_NoRunIdentityMeansNoStateOpen pins help's no-state
+// TestHostHelpSources_NoRunIdentityMeansNoStateOpen pins help's no-state
 // property on the host CLI: an operator's bare terminal (no conversation env)
 // gets the full listing without the DB ever being opened, and a failing open
 // under run identity degrades to the full listing rather than an error.
-func TestHostHelpKinds_NoRunIdentityMeansNoStateOpen(t *testing.T) {
+func TestHostHelpSources_NoRunIdentityMeansNoStateOpen(t *testing.T) {
 	t.Run("no identity", func(t *testing.T) {
 		t.Setenv(convident.ConversationIDEnvVar, "")
 		opened := stubLocalStores(t)
-		if kinds := hostHelpKinds(); kinds != nil {
-			t.Errorf("kinds = %v, want nil (full listing) with no run identity", kinds)
+		if sources := hostHelpSources(); sources != nil {
+			t.Errorf("sources = %v, want nil (full listing) with no run identity", sources)
 		}
 		if *opened {
-			t.Error("hostHelpKinds opened local state with no run identity in scope")
+			t.Error("hostHelpSources opened local state with no run identity in scope")
 		}
 	})
 
@@ -130,8 +141,8 @@ func TestHostHelpKinds_NoRunIdentityMeansNoStateOpen(t *testing.T) {
 			return db.Stores{}, nil, errors.New("fake open failure")
 		}
 		t.Cleanup(func() { openLocalStores = saved })
-		if kinds := hostHelpKinds(); kinds != nil {
-			t.Errorf("kinds = %v, want nil (full listing) when the open fails", kinds)
+		if sources := hostHelpSources(); sources != nil {
+			t.Errorf("sources = %v, want nil (full listing) when the open fails", sources)
 		}
 	})
 }

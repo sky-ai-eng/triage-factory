@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/sky-ai-eng/triage-factory/cmd/exec/agenthost"
 	"github.com/sky-ai-eng/triage-factory/internal/agentprompt"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -48,13 +49,13 @@ type runConfig struct {
 	// resumes an SDK session picks its continuation note by it.
 	lastHandBackOutcome string
 
-	teamID   string // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
-	scope    string // what the agent is scoped to (repo, PR, issue)
-	toolsRef string // tool documentation to inject
-	runRoot  string // the run root: the agent's starting directory and conversations.worktree_path, for every source
-	owner    string // resolved GitHub owner (empty for runs with no PR)
-	repo     string // resolved GitHub repo (empty for runs with no PR)
-	prNumber int    // PR number (0 for non-PR runs)
+	teamID   string     // the conversation's owning team (conversations.team_id, NOT NULL), stamped alongside orgID from the claimed conversation row; read at construction to populate agenthost.ConversationInfo.TeamID so the capture writers can stamp artifacts.team_id (TFAC-458). Also stamped on the conversation-bearing terminal paths (dispatchClaimedConversation / handlePreAgentFailure); empty only on the CancelBlueprintRun / paused-cleanup paths that have a task but no claimed conversation in scope.
+	scope    string     // what the agent is scoped to (repo, PR, issue)
+	sources  sourceDocs // the run's <tools> section and its <run_context> source notes
+	runRoot  string     // the run root: the agent's starting directory and conversations.worktree_path, for every source
+	owner    string     // resolved GitHub owner (empty for runs with no PR)
+	repo     string     // resolved GitHub repo (empty for runs with no PR)
+	prNumber int        // PR number (0 for non-PR runs)
 
 	// prCheckout is the host path of a GitHub PR run's checkout of its pull
 	// request, <root>/<owner>/<repo>/pr-<N>; empty for every other run.
@@ -580,37 +581,42 @@ func cloneHostBase(cloneURL string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// toolsReferenceFor composes a run's <tools> section from what the ORG can
-// reach, unioned with the source the run is about (plus GitHub, which every
-// run keeps — repos are acquired on demand).
+// sourceDocs is what a run is told about the sources it can and cannot reach:
+// the <tools> section documenting the verbs of every source it can use, and
+// one <run_context> line per source it cannot, saying why. Both are composed
+// from one source manifest, so a run is never documented a source its notes
+// call unavailable.
+type sourceDocs struct {
+	tools string
+	notes string
+}
+
+// sourceDocsFor composes a run's sourceDocs from its source manifest: the
+// <tools> section from the sources the manifest names usable — sealed, or
+// unresolved and awaiting the re-seal that brings the credential — plus GitHub,
+// which every run keeps (repos are acquired on demand); and a note for every
+// source the manifest names in any other state, or unresolved. A source an
+// admin turned off is therefore left out of <tools> and named in a note.
 //
-// The union is what makes this safe to change: a run never loses the verbs for
-// its own entity source, so nothing regresses, and it gains the verbs for every
-// other source the org actually has. That is the fix for a real hole — a run
-// triggered by a GitHub event was handed the gh verbs alone, so an agent
-// working a pull request that referenced a ticket had no way to read, comment
-// on, or transition it.
+// The manifest is the one the run's verbs explain their refusals from, read
+// through two doors by where it can be had:
 //
-// Two resolve paths, by where the answer can actually be computed:
-//
-//   - The claim's stamped tools manifest (claim_credentials.include_tools) —
-//     the brain's own availability answer, written beside the sealed bundle on
-//     the same pass that provisioned this claim. This is the ONLY complete
+//   - The engagement's sealed manifest (claims.source_manifest, read beside
+//     the bundle) — the brain's own answer, written on the pass that sealed
+//     the credentials this run's sidecar holds. This is the ONLY complete
 //     answer an executor can get: its secret store is disabled, so it cannot
-//     probe GitHub/Jira availability, and an event-triggered conversation has
-//     no user identity to open a claims transaction as. The row is guaranteed
-//     present here on the executor path — the sidecar bring-up that precedes
+//     probe availability, and an event-triggered conversation has no user
+//     identity to open a claims transaction as. The row is guaranteed present
+//     here on the executor path — the sidecar bring-up that precedes
 //     workspace setup blocks until the bundle lands.
-//   - The claims-bound live resolve, for the single-process local mode where
-//     no bundles exist (the manifest read answers ErrNotApplicableInLocal)
-//     and the live secret store makes the probes answerable in-process.
+//   - A live availability resolve, for local mode where no bundles exist (the
+//     read answers ErrNotApplicableInLocal) and every verb resolves its
+//     credential live (agenthost.LiveSourceManifest).
 //
-// A failed resolve on both paths degrades to the superset every run used to
-// get (its own source plus GitHub), never to nothing. The tools block is
+// When neither answers, the run gets the superset every run used to: its own
+// source plus GitHub in <tools>, and no notes. The tools block is
 // documentation; the gate that actually stops a verb is the credential funnel
-// it resolves through, which refuses with an error naming the reason. An agent
-// told about a verb that then refuses knows what happened; an agent told about
-// no verb improvises.
+// it resolves through, which refuses with the refusal table's explanation.
 //
 // creatorUserID/conversationID are the caller's already-loaded
 // conv.CreatorUserID / conv.ID, not ids to look up: every caller sits inside
@@ -618,39 +624,46 @@ func cloneHostBase(cloneURL string) string {
 // reasons, so a fetch here to recover fields off the same row would be a
 // synchronous round trip added to the serial run-setup path for nothing it
 // doesn't already have.
-func (s *Spawner) toolsReferenceFor(ctx context.Context, orgID, creatorUserID, conversationID, ownSource string) string {
-	base := []string{eventsource.KindGitHub, ownSource}
+func (s *Spawner) sourceDocsFor(ctx context.Context, orgID, creatorUserID, conversationID, ownSource string) sourceDocs {
+	manifest := s.runSourceManifest(ctx, orgID, creatorUserID, conversationID)
+	if manifest == nil {
+		return sourceDocs{tools: agentprompt.ToolsReferenceForSources([]string{eventsource.KindGitHub, ownSource})}
+	}
+	return sourceDocs{
+		tools: agentprompt.ToolsReferenceForSources(append(manifest.UsableKinds(), eventsource.KindGitHub)),
+		notes: strings.Join(agenthost.SourceNotes(manifest), "\n"),
+	}
+}
 
+// runSourceManifest reads the run's source manifest through the doors
+// sourceDocsFor describes, nil when neither answers.
+func (s *Spawner) runSourceManifest(ctx context.Context, orgID, creatorUserID, conversationID string) domain.SourceManifest {
 	if s.claimCredentials != nil {
 		b, found, err := s.claimCredentials.Get(ctx, orgID, conversationID)
 		switch {
 		case err != nil && !errors.Is(err, db.ErrNotApplicableInLocal):
-			delegateLog.Warn("read the claim's stamped tools manifest failed; falling back to the live availability resolve",
+			delegateLog.Warn("read the engagement's source manifest failed; falling back to the live availability resolve",
 				"org", orgID, "conversation", conversationID, "error", err)
-		case err == nil && found && b.IncludeTools != nil:
-			// nil means the brain stamped no answer (its resolve failed, or an
-			// older brain wrote the row) — fall through to the live resolve.
-			// An empty non-nil manifest is a real answer and stops here: the
-			// base union still documents the run's own sources.
-			return agentprompt.ToolsReferenceForSources(append(b.IncludeTools, base...))
+		case err == nil && found && b.Sources != nil:
+			return b.Sources
 		}
 	}
 
 	stores, ok := s.getStores()
 	if !ok || stores.Tx == nil {
-		return agentprompt.ToolsReferenceForSources(base)
+		return nil
 	}
-	var kinds []string
+	var avail eventsource.Availability
 	if err := stores.Tx.SyntheticClaimsWithReadTx(ctx, orgID, creatorUserID, func(tx db.TxStores) error {
 		var e error
-		kinds, e = eventsource.AvailableKinds(ctx, tx, orgID)
+		avail, e = eventsource.Resolve(ctx, tx, orgID)
 		return e
 	}); err != nil {
-		delegateLog.Warn("resolve event-source availability for tools reference failed; using the run's own sources",
+		delegateLog.Warn("resolve event-source availability for the run's source manifest failed; documenting the run's own sources",
 			"org", orgID, "error", err)
-		return agentprompt.ToolsReferenceForSources(base)
+		return nil
 	}
-	return agentprompt.ToolsReferenceForSources(append(kinds, base...))
+	return agenthost.LiveSourceManifest(avail)
 }
 
 // errNoGitHubClient is setupGitHub's refusal when it was handed no client to
@@ -845,7 +858,7 @@ func (s *Spawner) setupGitHub(ctx context.Context, orgID, conversationID, claimI
 	return runConfig{
 		orgID:      orgID,
 		scope:      fmt.Sprintf("Repository: %s/%s\nPR: #%d\nBranch: %s", owner, repo, prNumber, pr.HeadRef),
-		toolsRef:   s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindGitHub),
+		sources:    s.sourceDocsFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindGitHub),
 		runRoot:    runRoot,
 		owner:      owner,
 		repo:       repo,
@@ -943,10 +956,10 @@ func (s *Spawner) setupJira(ctx context.Context, orgID, conversationID, claimID,
 	}
 
 	return runConfig{
-		orgID:    orgID,
-		scope:    fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
-		toolsRef: s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
-		runRoot:  runRoot,
+		orgID:   orgID,
+		scope:   fmt.Sprintf("Jira issue: %s", task.EntitySourceID),
+		sources: s.sourceDocsFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindJira),
+		runRoot: runRoot,
 		// owner/repo intentionally empty: the agent picks per-ticket via `workspace add`
 	}, nil
 }
@@ -966,10 +979,10 @@ func (s *Spawner) setupLinear(ctx context.Context, orgID, conversationID, claimI
 	}
 
 	return runConfig{
-		orgID:    orgID,
-		scope:    fmt.Sprintf("Linear issue: %s", task.EntitySourceID),
-		toolsRef: s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindLinear),
-		runRoot:  runRoot,
+		orgID:   orgID,
+		scope:   fmt.Sprintf("Linear issue: %s", task.EntitySourceID),
+		sources: s.sourceDocsFor(ctx, orgID, creatorUserID, conversationID, eventsource.KindLinear),
+		runRoot: runRoot,
 	}, nil
 }
 
@@ -998,13 +1011,11 @@ func (s *Spawner) setupSlack(ctx context.Context, orgID, conversationID, claimID
 		delegateLog.Warn("set worktree_path for Slack conversation failed; resume will reject this conversation", "conversation", conversationID, "error", err)
 	}
 
-	toolsRef := s.toolsReferenceFor(ctx, orgID, creatorUserID, conversationID, "slack")
-
 	return runConfig{
-		orgID:    orgID,
-		scope:    fmt.Sprintf("Slack thread: %s", task.EntitySourceID),
-		toolsRef: toolsRef,
-		runRoot:  runRoot,
+		orgID:   orgID,
+		scope:   fmt.Sprintf("Slack thread: %s", task.EntitySourceID),
+		sources: s.sourceDocsFor(ctx, orgID, creatorUserID, conversationID, "slack"),
+		runRoot: runRoot,
 		// owner/repo intentionally empty: the agent picks repos per-thread
 		// via `workspace add`.
 	}, nil

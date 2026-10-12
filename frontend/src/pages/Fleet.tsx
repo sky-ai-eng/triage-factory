@@ -15,6 +15,7 @@ import type {
   FleetSandboxClaim,
   FleetSandboxes,
   FleetSandboxSeries,
+  FleetSourceState,
   FleetTimeseries,
   ConversationStatusValue,
 } from '../types'
@@ -706,6 +707,53 @@ function SandboxState({ claim }: { claim: FleetSandboxClaim }) {
   )
 }
 
+// The chip tone for one source in an engagement's manifest: a sealed
+// credential is the healthy case, an unresolved one is the brain still
+// retrying, and every other state is a standing fact about the org.
+function sourceTone(state: FleetSourceState): ChipTone {
+  switch (state) {
+    case 'sealed':
+      return 'good'
+    case 'unresolved':
+      return 'attention'
+    default:
+      return 'neutral'
+  }
+}
+
+// SandboxSources is what the engagement's sandbox held: one chip per event
+// source from its source manifest, as of the engagement's latest seal. It rides
+// the sandbox row already fetched, so opening a row costs no request for it.
+function SandboxSources({ claim }: { claim: FleetSandboxClaim }) {
+  const sources = claim.sources
+  const kinds = sources ? Object.keys(sources).sort() : []
+  if (!sources || kinds.length === 0) {
+    return (
+      <p className="pt-2 font-mono text-label-sm uppercase tracking-wider text-ink-3/50">
+        no source manifest — this engagement was never sealed
+      </p>
+    )
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 pt-2" aria-label="sources">
+      <span className="mr-1 font-mono text-label-sm uppercase tracking-wider text-ink-3/60">
+        sources
+      </span>
+      {kinds.map((kind) => {
+        const entry = sources[kind]
+        const label = entry.reason
+          ? `${kind} · ${entry.state} · ${entry.reason.replace(/_/g, ' ')}`
+          : `${kind} · ${entry.state}`
+        return (
+          <span key={kind} title={entry.expires_at ? `expires ${entry.expires_at}` : undefined}>
+            <Chip tone={sourceTone(entry.state)}>{label}</Chip>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
 // SandboxSeries is the second expand level: one sandbox's sampled shape. It is
 // fetched only when this component mounts, i.e. only when its row is open.
 function SandboxSeries({ claim }: { claim: FleetSandboxClaim }) {
@@ -806,6 +854,7 @@ function SandboxRow({ claim, now }: { claim: FleetSandboxClaim; now: number }) {
       {open && (
         <tr>
           <td colSpan={10} className="pb-3 pl-6 pr-2">
+            <SandboxSources claim={claim} />
             <SandboxSeries claim={claim} />
           </td>
         </tr>

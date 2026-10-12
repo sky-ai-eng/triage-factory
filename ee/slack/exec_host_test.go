@@ -30,6 +30,7 @@ func withFastThreadRootRetries(t *testing.T) {
 type fakeRelayRuntime struct {
 	relayErrs  []error
 	relayCalls int
+	credErr    error
 }
 
 func (f *fakeRelayRuntime) Info() agenthost.ConversationInfo { return agenthost.ConversationInfo{} }
@@ -46,7 +47,7 @@ func (f *fakeRelayRuntime) Relay(_ context.Context, _, _ string, _, _ any) error
 func (f *fakeRelayRuntime) RelayNotify(context.Context, string, string, any) {}
 
 func (f *fakeRelayRuntime) ProviderCredential(context.Context, string) (json.RawMessage, error) {
-	return nil, nil
+	return nil, f.credErr
 }
 
 func (f *fakeRelayRuntime) Record(context.Context, *domain.Artifact, *domain.ExternalAction) {}
@@ -54,6 +55,23 @@ func (f *fakeRelayRuntime) Record(context.Context, *domain.Artifact, *domain.Ext
 func (f *fakeRelayRuntime) RecordReadTouch(context.Context, string, string, string, string) {}
 
 var _ agenthost.ExtensionRuntime = (*fakeRelayRuntime)(nil)
+
+// TestSelectBotToken_PassesARefusalThrough pins what a Slack verb with no
+// sealed credential tells the agent: the refusal table's explanation of the
+// source's state, unprefixed because it already names Slack, while any other
+// failure keeps the "slack:" prefix that says which verb family failed.
+func TestSelectBotToken_PassesARefusalThrough(t *testing.T) {
+	refusal := &agenthost.SourceRefusal{Kind: "slack", State: domain.SourceUnconfigured}
+	_, err := selectBotToken(context.Background(), &fakeRelayRuntime{credErr: refusal}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
+	if err == nil || err.Error() != refusal.Error() {
+		t.Errorf("refusal crossed as %v, want the table's %q", err, refusal.Error())
+	}
+
+	_, err = selectBotToken(context.Background(), &fakeRelayRuntime{credErr: errors.New("boom")}, slackWorkspaceIdentity{WorkspaceID: "T1", APIAppID: "A1"})
+	if err == nil || err.Error() != "slack: boom" {
+		t.Errorf("other failure = %v, want it prefixed", err)
+	}
+}
 
 // TestRecordThreadRoot_RetriesTransientFailures pins that recordThreadRoot
 // retries a failed relay call rather than giving up on the first error —

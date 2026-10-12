@@ -1415,20 +1415,30 @@ func (s *conversationQueueStore) ListAwaitingCredentials(ctx context.Context) ([
 	return scanAwaitingCredentialsConversations(rows)
 }
 
-func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan time.Time) ([]db.AwaitingCredentialsConversation, error) {
+func (s *conversationQueueStore) ListActiveNeedingCredentialRefresh(ctx context.Context, olderThan, expiringBefore time.Time) ([]db.AwaitingCredentialsConversation, error) {
 	// The active-claim join IS the "actively running" filter (a claim is the
 	// engagement; there is no stored status to check); the bundle age check
 	// joins claim_credentials on the claim id. A claim parked awaiting
 	// credentials is excluded — its bundle is being minted fresh, not
-	// refreshed.
+	// refreshed. The two manifest arms read the claim's own
+	// source_manifest, which the same statement that wrote the bundle wrote.
 	rows, err := s.conn.QueryContext(ctx, `
 		SELECT `+awaitingCredentialsCols+`
 		FROM conversations r
 		JOIN claims cl ON cl.conversation_id = r.id AND cl.released_at IS NULL
 		JOIN claim_credentials cc ON cc.claim_id = cl.id
 		WHERE cl.phase IS DISTINCT FROM 'awaiting_credentials'
-		  AND cc.created_at < $1
-	`, olderThan)
+		  AND (
+			cc.created_at < $1
+			OR EXISTS (
+				SELECT 1 FROM jsonb_each(COALESCE(cl.source_manifest, '{}'::jsonb)) AS src(kind, entry)
+				WHERE src.entry->>'state' = 'unresolved'
+				   OR (src.entry->>'state' = 'sealed'
+				       AND src.entry ? 'expires_at'
+				       AND (src.entry->>'expires_at')::timestamptz < $2)
+			)
+		  )
+	`, olderThan, expiringBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -1803,7 +1813,8 @@ var executorClaimSelectCols = `
 	c.peak_mem_mb, c.cpu_usec,
 	COALESCE(v.status, CASE WHEN ` + claimLeaseLiveSQL("c") + ` THEN 'running' ELSE 'queued' END, ''),
 	COALESCE(v.failure_kind, ''),
-	c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at`
+	c.last_activity_at, COALESCE(c.current_op, ''), c.last_checkpoint_at,
+	c.source_manifest::text, c.executor_id`
 
 // claimLeaseLiveSQL is one claims row's own liveness, for the alias the
 // caller gave it: unreleased AND its lease still in the future. An expired
@@ -1886,14 +1897,21 @@ func scanOneExecutorClaim(row executorClaimScanner) (domain.ExecutorClaim, error
 	var c domain.ExecutorClaim
 	var releasedAt, leaseExpiresAt, lastActivityAt, lastCheckpointAt sql.NullTime
 	var peakMem, cpuUsec sql.NullInt64
+	var sources sql.NullString
 	if err := row.Scan(
 		&c.ID, &c.OrgID, &c.ConversationID,
 		&c.ClaimedAt, &releasedAt, &leaseExpiresAt, &c.Outcome,
 		&peakMem, &cpuUsec, &c.Status, &c.FailureKind,
 		&lastActivityAt, &c.CurrentOp, &lastCheckpointAt,
+		&sources, &c.ExecutorID,
 	); err != nil {
 		return domain.ExecutorClaim{}, err
 	}
+	m, err := db.DecodeSourceManifest(sources)
+	if err != nil {
+		return domain.ExecutorClaim{}, err
+	}
+	c.Sources = m
 	if lastActivityAt.Valid {
 		v := lastActivityAt.Time
 		c.LastActivityAt = &v

@@ -14,6 +14,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/apiproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
 )
 
@@ -95,8 +96,8 @@ func TestCredentialMiss(t *testing.T) {
 		{credbundle.ErrNoBundle, "no_bundle", http.StatusBadGateway},
 		{credbundle.ErrNoRepoToken, "no_repo_token", http.StatusForbidden},
 		{credbundle.ErrNoCLIToken, "no_cli_token", http.StatusForbidden},
-		{credbundle.ErrNoJiraCredential, "no_jira_credential", http.StatusForbidden},
-		{credbundle.ErrNoLinearCredential, "no_linear_credential", http.StatusForbidden},
+		{&credbundle.SourceMissError{Kind: "jira", State: domain.SourceUnconfigured}, "source_unconfigured", http.StatusForbidden},
+		{&credbundle.SourceMissError{Kind: "linear", State: domain.SourceUnresolved}, "source_unresolved", http.StatusBadGateway},
 		{credbundle.ErrTokenExpiring, "token_expiring", http.StatusBadGateway},
 		{errors.New("resolver outage"), "other", http.StatusBadGateway},
 	}

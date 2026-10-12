@@ -114,7 +114,7 @@ func TestAvailability_KeysOnTheRowNotLiveSocketHealth(t *testing.T) {
 }
 
 // TestAvailabilitySystem_ThreeWaySplit walks the SAME three-way split through
-// the claims-free system door — the one the brain's include_tools stamp
+// the claims-free system door — the one the brain's source manifest
 // resolves through. No WithTx anywhere: a JWT-less caller with only db.Stores
 // must get the identical answers, or the manifest an agent's <tools> section
 // is composed from would disagree with what the org availability read shows a

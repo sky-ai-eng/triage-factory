@@ -10,6 +10,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 // TestRuntime_TokenSourcesNameTheMiss pins the sentinel each sidecar token
@@ -100,7 +101,10 @@ func TestRuntime_TokenSourcesNameTheMiss(t *testing.T) {
 		expect(t, "gh", ghErr(), credbundle.ErrNoCLIToken)
 		expect(t, "api", apiErr(), credbundle.ErrNoRepoToken)
 
-		_, _, _, _, jerr := rt.startJiraAPIProxy("127.0.0.1", "", "conv")
-		expect(t, "jira", jerr, credbundle.ErrNoJiraCredential)
+		_, _, _, _, jerr := rt.startJiraAPIProxy("127.0.0.1", "conv")
+		var miss *credbundle.SourceMissError
+		if !errors.As(jerr, &miss) || miss.Kind != "jira" || miss.State != domain.SourceUnconfigured {
+			t.Errorf("jira: error %v, want an unconfigured Jira miss", jerr)
+		}
 	})
 }

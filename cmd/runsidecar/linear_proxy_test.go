@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -55,7 +56,11 @@ func TestRuntime_LinearAPIProxyInjectsBundleAuth(t *testing.T) {
 
 	relay := func(lc *credbundle.LinearCreds) {
 		t.Helper()
-		b := &credbundle.Bundle{LLM: map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"}, Linear: lc}
+		b := &credbundle.Bundle{
+			LLM:     map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"},
+			Linear:  lc,
+			Sources: domain.SourceManifest{"linear": {State: domain.SourceSealed}},
+		}
 		if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, b)}, nil); err != nil {
 			t.Fatalf("relay bundle: %v", err)
 		}
@@ -64,8 +69,7 @@ func TestRuntime_LinearAPIProxyInjectsBundleAuth(t *testing.T) {
 
 	var res sidecarproto.StartProxiesResult
 	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:       "127.0.0.1",
-		LinearAPIEnabled: true,
+		HostVethIP: "127.0.0.1",
 	}, &res); err != nil {
 		t.Fatalf("start proxies: %v", err)
 	}
@@ -133,13 +137,14 @@ func TestRuntime_LinearAPIProxyInjectsBundleAuth(t *testing.T) {
 	}
 }
 
-// TestRuntime_LinearAPIProxyStartsWithoutCredential pins the degraded run: a
-// Linear run whose bundle carries no Linear credential still comes up, its
-// proxy answers each request with which miss it is — none configured (403) or
-// not resolved for this seal (502, which a re-seal can change) — in the
-// reason field the agenthost turns into guidance, and the first re-seal that
-// carries the credential is used from the next request on.
-func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
+// TestRuntime_LinearAPIProxyStartsWhileUnresolved pins the degraded run: a
+// run whose manifest names Linear unresolved still gets its proxy, which
+// answers each request with the manifest's state and the source — unresolved
+// (502, which a re-seal can change), and unconfigured (403) once a re-seal
+// says the org no longer has a credential — in the members the agenthost turns
+// into guidance; and the first re-seal that carries the credential is used
+// from the next request on, with no restart.
+func TestRuntime_LinearAPIProxyStartsWhileUnresolved(t *testing.T) {
 	gotAuth := make(chan string, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth <- r.Header.Get("Authorization")
@@ -161,13 +166,11 @@ func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
 			t.Fatalf("relay bundle: %v", err)
 		}
 	}
+	manifest := func(e domain.SourceEntry) domain.SourceManifest { return domain.SourceManifest{"linear": e} }
 
-	relay(&credbundle.Bundle{})
+	relay(&credbundle.Bundle{Sources: manifest(domain.SourceEntry{State: domain.SourceUnresolved, Reason: domain.SourceReasonTokenEndpointUnavailable})})
 	var res sidecarproto.StartProxiesResult
-	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{
-		HostVethIP:       "127.0.0.1",
-		LinearAPIEnabled: true,
-	}, &res); err != nil {
+	if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1"}, &res); err != nil {
 		t.Fatalf("start proxies without a Linear credential: %v", err)
 	}
 	if res.LinearAPIURL == "" {
@@ -185,10 +188,11 @@ func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
 		defer func() { _ = resp.Body.Close() }()
 		var body struct {
 			Reason string `json:"reason"`
+			Source string `json:"source"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
-		if resp.StatusCode != wantStatus || body.Reason != wantReason {
-			t.Errorf("miss = (%d, %q), want (%d, %q)", resp.StatusCode, body.Reason, wantStatus, wantReason)
+		if resp.StatusCode != wantStatus || body.Reason != wantReason || body.Source != "linear" {
+			t.Errorf("miss = (%d, %q, %q), want (%d, %q, linear)", resp.StatusCode, body.Reason, body.Source, wantStatus, wantReason)
 		}
 		select {
 		case got := <-gotAuth:
@@ -197,12 +201,15 @@ func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
 		}
 	}
 
-	expectMiss(http.StatusForbidden, credbundle.MissNoLinearCredential)
+	expectMiss(http.StatusBadGateway, credbundle.MissSourceUnresolved)
 
-	relay(&credbundle.Bundle{Unresolved: []string{"linear"}})
-	expectMiss(http.StatusBadGateway, credbundle.MissLinearCredentialUnresolved)
+	relay(&credbundle.Bundle{Sources: manifest(domain.SourceEntry{State: domain.SourceUnconfigured})})
+	expectMiss(http.StatusForbidden, credbundle.MissSourceUnconfigured)
 
-	relay(&credbundle.Bundle{Linear: &credbundle.LinearCreds{AuthMethod: string(linear.AuthMethodAPIKey), APIKey: "lin_api_REALKEY"}})
+	relay(&credbundle.Bundle{
+		Linear:  &credbundle.LinearCreds{AuthMethod: string(linear.AuthMethodAPIKey), APIKey: "lin_api_REALKEY"},
+		Sources: manifest(domain.SourceEntry{State: domain.SourceSealed}),
+	})
 	client := linear.NewClient(linear.ProxyPlaceholder(res.LinearAPIURL, res.LinearAPIToken))
 	if _, err := client.Viewer(ctx); err != nil {
 		t.Fatalf("Viewer after the re-seal: %v", err)
@@ -212,10 +219,11 @@ func TestRuntime_LinearAPIProxyStartsWithoutCredential(t *testing.T) {
 	}
 }
 
-// TestRuntime_LinearAuthHeaderNamesTheMiss pins the sentinel the Linear auth
-// source wraps for each bundle it cannot answer from. An expired app token is
-// unresolved, the retry-later answer, rather than forwarded for Linear to
-// refuse as if the install were gone.
+// TestRuntime_LinearAuthHeaderNamesTheMiss pins what the Linear auth source
+// answers for each bundle it cannot use: the manifest's state for Linear, an
+// expired app token as unresolved — the retry-later answer, rather than
+// forwarded for Linear to refuse as if the install were gone — and an
+// unnamed miss for a bundle whose credential disagrees with its manifest.
 func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 	rt, err := newCredRuntime()
 	if err != nil {
@@ -227,14 +235,29 @@ func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 		rt.bundle = b
 		rt.mu.Unlock()
 	}
+	sealed := domain.SourceManifest{"linear": {State: domain.SourceSealed}}
+	missState := func(err error) domain.SourceState {
+		var miss *credbundle.SourceMissError
+		if !errors.As(err, &miss) || miss.Kind != "linear" {
+			return ""
+		}
+		return miss.State
+	}
 
 	if _, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrNoBundle) {
 		t.Errorf("no bundle: error %v, want ErrNoBundle", err)
 	}
-	hold(&credbundle.Bundle{Unresolved: []string{"linear"}})
-	if _, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrLinearCredentialUnresolved) {
-		t.Errorf("unresolved for this seal: error %v, want ErrLinearCredentialUnresolved", err)
+	for _, state := range []domain.SourceState{domain.SourceUnresolved, domain.SourceUnconfigured, domain.SourceDisabled} {
+		hold(&credbundle.Bundle{Sources: domain.SourceManifest{"linear": {State: state}}})
+		if _, err := rt.linearAuthHeader(ctx); missState(err) != state {
+			t.Errorf("%s: error %v, want a %s Linear miss", state, err, state)
+		}
 	}
+	hold(&credbundle.Bundle{})
+	if _, err := rt.linearAuthHeader(ctx); missState(err) != domain.SourceUnconfigured {
+		t.Errorf("no manifest entry: error %v, want an unconfigured Linear miss", err)
+	}
+
 	for _, tc := range []struct {
 		name string
 		lc   *credbundle.LinearCreds
@@ -242,24 +265,89 @@ func TestRuntime_LinearAuthHeaderNamesTheMiss(t *testing.T) {
 		{"no linear half", nil},
 		{"empty api key", &credbundle.LinearCreds{AuthMethod: string(linear.AuthMethodAPIKey)}},
 		{"empty access token", &credbundle.LinearCreds{AuthMethod: string(linear.AuthMethodAppInstall)}},
+		{"unknown auth method", &credbundle.LinearCreds{AuthMethod: "connect_oauth", AccessToken: "x"}},
 	} {
-		hold(&credbundle.Bundle{Linear: tc.lc})
-		if _, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrNoLinearCredential) {
-			t.Errorf("%s: error %v, want ErrNoLinearCredential", tc.name, err)
+		hold(&credbundle.Bundle{Linear: tc.lc, Sources: sealed})
+		if v, err := rt.linearAuthHeader(ctx); err == nil || credbundle.MissReason(err) != credbundle.MissOther {
+			t.Errorf("%s: (%q, %v), want an unnamed miss", tc.name, v, err)
 		}
 	}
 
-	hold(&credbundle.Bundle{Linear: &credbundle.LinearCreds{AuthMethod: "connect_oauth", AccessToken: "x"}})
-	if v, err := rt.linearAuthHeader(ctx); err == nil {
-		t.Errorf("unknown auth method answered %q, want an error", v)
+	past := time.Now().Add(-time.Hour)
+	hold(&credbundle.Bundle{
+		Linear: &credbundle.LinearCreds{
+			AuthMethod:  string(linear.AuthMethodAppInstall),
+			AccessToken: "lin_oauth_STALE",
+			ExpiresUnix: past.Unix(),
+		},
+		Sources: domain.SourceManifest{"linear": {State: domain.SourceSealed, ExpiresAt: &past}},
+	})
+	if v, err := rt.linearAuthHeader(ctx); missState(err) != domain.SourceUnresolved {
+		t.Errorf("expired app token = (%q, %v), want an unresolved Linear miss", v, err)
 	}
+	if e := rt.Sources()["linear"]; e.State != domain.SourceUnresolved || e.Reason != domain.SourceReasonTokenExpired {
+		t.Errorf("held manifest for an expired token = %+v, want unresolved/token_expired", e)
+	}
+}
 
-	hold(&credbundle.Bundle{Linear: &credbundle.LinearCreds{
-		AuthMethod:  string(linear.AuthMethodAppInstall),
-		AccessToken: "lin_oauth_STALE",
-		ExpiresUnix: time.Now().Add(-time.Hour).Unix(),
-	}})
-	if v, err := rt.linearAuthHeader(ctx); !errors.Is(err, credbundle.ErrLinearCredentialUnresolved) {
-		t.Errorf("expired app token = (%q, %v), want ErrLinearCredentialUnresolved", v, err)
+// TestRuntime_ProxiesFollowTheManifest pins decision 6: the sidecar starts a
+// Jira and a Linear proxy for exactly the sources the bundle's manifest names
+// sealed or unresolved, with nothing in the request saying which source
+// triggered the run — so a GitHub-triggered run in an org with Jira and
+// Linear reaches both.
+func TestRuntime_ProxiesFollowTheManifest(t *testing.T) {
+	jiraSite := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer jiraSite.Close()
+	jiraCreds := &credbundle.JiraCreds{URL: jiraSite.URL, AuthMethod: "datacenter", PAT: "dc-pat"}
+
+	for _, tc := range []struct {
+		name              string
+		bundle            *credbundle.Bundle
+		wantJira, wantLin bool
+	}{
+		{
+			name: "both sealed",
+			bundle: &credbundle.Bundle{Jira: jiraCreds, Linear: &credbundle.LinearCreds{AuthMethod: "api_key", APIKey: "k"}, Sources: domain.SourceManifest{
+				"github": {State: domain.SourceSealed}, "jira": {State: domain.SourceSealed}, "linear": {State: domain.SourceSealed},
+			}},
+			wantJira: true, wantLin: true,
+		},
+		{
+			name: "linear unresolved",
+			bundle: &credbundle.Bundle{Sources: domain.SourceManifest{
+				"jira": {State: domain.SourceUnconfigured}, "linear": {State: domain.SourceUnresolved},
+			}},
+			wantLin: true,
+		},
+		{
+			name: "turned off and unconfigured",
+			bundle: &credbundle.Bundle{Sources: domain.SourceManifest{
+				"jira": {State: domain.SourceDisabled}, "linear": {State: domain.SourceUnconfigured},
+			}},
+		},
+		{
+			name:   "no manifest",
+			bundle: &credbundle.Bundle{Jira: jiraCreds},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orch, rt := dialRuntime(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			tc.bundle.LLM = map[string]string{"ANTHROPIC_API_KEY": "sk-ant-real"}
+			if err := orch.Call(ctx, sidecarproto.KindSealedBundle, sidecarproto.SealedBundleBody{Sealed: sealBundleTo(t, rt.keypair.Public, tc.bundle)}, nil); err != nil {
+				t.Fatalf("relay bundle: %v", err)
+			}
+			var res sidecarproto.StartProxiesResult
+			if err := orch.Call(ctx, sidecarproto.KindStartProxies, sidecarproto.StartProxiesBody{HostVethIP: "127.0.0.1"}, &res); err != nil {
+				t.Fatalf("start proxies: %v", err)
+			}
+			if got := res.JiraAPIURL != ""; got != tc.wantJira {
+				t.Errorf("jira proxy started = %v, want %v", got, tc.wantJira)
+			}
+			if got := res.LinearAPIURL != ""; got != tc.wantLin {
+				t.Errorf("linear proxy started = %v, want %v", got, tc.wantLin)
+			}
+		})
 	}
 }

@@ -2,12 +2,10 @@ package agenthost
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 
-	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
@@ -102,34 +100,40 @@ func (c *LocalClient) SetLinearResolver(r linearclient.Resolver) {
 // org admin turned off is refused (requireSourceEnabled). In multi mode the
 // daemon lives in the run's credential sidecar and proxyCreds is always set, so
 // the client talks to the sidecar's GraphQL proxy holding only the per-run
-// placeholder. Local mode resolves the org credential through the secret store
-// on the user's own machine. Either way the agent process never holds it.
+// placeholder, and a run with no Linear proxy is refused from its manifest
+// (refuseWithoutProxy). Local mode resolves the org credential through the
+// secret store on the user's own machine. Either way the agent process never
+// holds it.
 //
-// A missing credential maps to the "not configured" guidance; every other
-// resolver error (a keychain outage, a revoked install) propagates as itself so
+// A missing credential is the unconfigured refusal; every other resolver error
+// (a keychain outage, a token endpoint that is down) is the unresolved one, so
 // it isn't misreported as absent.
 func (c *LocalClient) linearSystemClient(ctx context.Context) (*linearclient.Client, error) {
 	if err := c.requireSourceEnabled(ctx, eventsource.KindLinear); err != nil {
 		return nil, err
 	}
 	if c.proxyCreds != nil {
-		return proxyLinearClient(c.proxyCreds)
+		client, ok := proxyLinearClient(c.proxyCreds)
+		if !ok {
+			return nil, c.refuseWithoutProxy(ctx, eventsource.KindLinear)
+		}
+		return client, nil
 	}
 	if c.linearResolver == nil {
 		c.linearResolver = newLinearResolver(c.stores)
 	}
 	client, err := c.linearResolver.ForSystem(ctx, c.info.OrgID)
 	if errors.Is(err, linearclient.ErrNoLinearSystemCredential) {
-		return nil, errLinearNotConfigured
+		return nil, &SourceRefusal{Kind: eventsource.KindLinear, State: domain.SourceUnconfigured}
 	}
 	if err != nil {
-		return nil, err
+		return nil, c.refuseResolveFailure(eventsource.KindLinear, err)
 	}
 	return client, nil
 }
 
 func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *linearclient.Issue, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -145,7 +149,7 @@ func (c *LocalClient) LinearGetIssue(ctx context.Context, issue string) (_ *line
 }
 
 func (c *LocalClient) LinearListStates(ctx context.Context, issue string) (_ []linearclient.WorkflowState, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -158,7 +162,7 @@ func (c *LocalClient) LinearListStates(ctx context.Context, issue string) (_ []l
 }
 
 func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string) (_ linearclient.WorkflowState, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return linearclient.WorkflowState{}, err
@@ -184,7 +188,7 @@ func (c *LocalClient) LinearTransition(ctx context.Context, issue, state string)
 }
 
 func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) (_ string, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return "", err
@@ -202,7 +206,7 @@ func (c *LocalClient) LinearAddComment(ctx context.Context, issue, body string) 
 }
 
 func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) (err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return err
@@ -224,7 +228,7 @@ func (c *LocalClient) LinearAssignSelf(ctx context.Context, issue string) (err e
 }
 
 func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return err
@@ -242,7 +246,7 @@ func (c *LocalClient) LinearUnassign(ctx context.Context, issue string) (err err
 }
 
 func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIssueRequest) (_ *linearclient.Issue, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if err := validateLinearTitle(req.Title); err != nil {
 		return nil, err
 	}
@@ -285,7 +289,7 @@ func (c *LocalClient) LinearCreateIssue(ctx context.Context, req LinearCreateIss
 }
 
 func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit LinearIssueEdit) (err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if edit.IsEmpty() {
 		return errors.New("no fields to update")
 	}
@@ -331,7 +335,7 @@ func (c *LocalClient) LinearUpdateIssue(ctx context.Context, issue string, edit 
 }
 
 func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string) (err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if strings.TrimSpace(parent) == "" {
 		return errors.New("parent is required")
 	}
@@ -356,7 +360,7 @@ func (c *LocalClient) LinearSetParent(ctx context.Context, issue, parent string)
 }
 
 func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, priority int) (err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if err := validateLinearPriority(priority); err != nil {
 		return err
 	}
@@ -377,7 +381,7 @@ func (c *LocalClient) LinearSetPriority(ctx context.Context, issue string, prior
 }
 
 func (c *LocalClient) LinearListChildren(ctx context.Context, issue string) (_ []linearclient.ChildIssue, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	client, err := c.linearSystemClient(ctx)
 	if err != nil {
 		return nil, err
@@ -386,7 +390,7 @@ func (c *LocalClient) LinearListChildren(ctx context.Context, issue string) (_ [
 }
 
 func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest) (_ []linearclient.Issue, err error) {
-	defer explainLinearError(&err)
+	defer c.explainSourceMiss(ctx, eventsource.KindLinear, &err)
 	if req.Max < 1 || req.Max > LinearSearchMaxResults {
 		return nil, fmt.Errorf("max %d out of range 1-%d", req.Max, LinearSearchMaxResults)
 	}
@@ -446,57 +450,6 @@ func (c *LocalClient) LinearSearch(ctx context.Context, req LinearSearchRequest)
 		out = out[:req.Max]
 	}
 	return out, nil
-}
-
-// errLinearUnresolved is the answer to a Linear verb on a run whose bundle the
-// brain sealed without the org's Linear credential because it could not
-// resolve one (an outage at Linear's token endpoint). The brain retries on
-// each re-seal while the run continues, so it says when to try again and what
-// to do if Linear stays unavailable.
-var errLinearUnresolved = errors.New("no Linear credential is available to this run for now: Triage Factory could not obtain the organization's Linear credential when it prepared this run, and keeps trying while the run continues. " +
-	"Retry this command in a few minutes. If it still fails, carry on without Linear and say in your summary which Linear actions you could not take")
-
-// linearRefusedGuidance prefixes Linear refusing the org's credential.
-const linearRefusedGuidance = "Linear refused the organization's credential. If the organization connected Linear as an app, its access token may have just expired and is renewed automatically, so retry this command in a few minutes. " +
-	"If it keeps failing, the credential was revoked and an org admin has to reconnect Linear in Settings; carry on without Linear and say in your summary which Linear actions you could not take"
-
-// explainLinearError turns the ways a Linear verb fails for want of a usable
-// credential into guidance the agent can act on, in place of an HTTP status
-// and a proxy's error body. The run's sidecar proxy names a missing credential
-// by reason (credmiss), and those are matched first: the proxy answers "none
-// configured" with a JSON 403, which the client would otherwise read as Linear
-// refusing the credential. Every other error is left as it is.
-func explainLinearError(errp *error) {
-	err := *errp
-	if err == nil {
-		return
-	}
-	var se *linearclient.StatusError
-	if errors.As(err, &se) {
-		switch credentialMissReason(se.Body) {
-		case credbundle.MissNoLinearCredential:
-			*errp = errLinearNotConfigured
-			return
-		case credbundle.MissLinearCredentialUnresolved:
-			*errp = errLinearUnresolved
-			return
-		}
-	}
-	if errors.Is(err, linearclient.ErrUnauthorized) {
-		*errp = fmt.Errorf("%s (%w)", linearRefusedGuidance, err)
-	}
-}
-
-// credentialMissReason reads the reason a credential proxy's miss answer
-// carries (credmiss), or "" for any other body.
-func credentialMissReason(body string) string {
-	var miss struct {
-		Reason string `json:"reason"`
-	}
-	if json.Unmarshal([]byte(body), &miss) != nil {
-		return ""
-	}
-	return miss.Reason
 }
 
 // findLinearTeam resolves a team key to the team. ListTeams narrows by a

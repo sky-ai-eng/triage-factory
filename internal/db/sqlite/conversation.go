@@ -434,7 +434,8 @@ var sqliteClaimReturningColumns = `
 		CASE WHEN ` + claimLeaseLiveSQL("claims") + ` THEN 'running' ELSE 'queued' END,
 		''),
 	COALESCE((SELECT v.failure_kind FROM conversations v WHERE v.id = claims.conversation_id), ''),
-	last_activity_at, COALESCE(current_op, ''), last_checkpoint_at
+	last_activity_at, COALESCE(current_op, ''), last_checkpoint_at,
+	source_manifest, executor_id
 `
 
 // SetActiveClaimPhaseSystem scopes the write to the ACTIVE claim only: a

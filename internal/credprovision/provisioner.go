@@ -3,7 +3,8 @@
 // LLM/GitHub/Jira/Linear credentials (using the real, key-bearing secret store only the brain
 // holds), seals them to the claiming executor's published X25519 public
 // key (credseal), and writes the result to claim_credentials for that
-// executor to unseal.
+// executor to unseal, with the engagement's source manifest recorded on its
+// claim in the same write.
 //
 // Manager is a brain-unit member the same way the registry GC and the drain
 // worker are (internal/app's startBrain/stopBrain): constructed only for
@@ -84,6 +85,10 @@ type Manager struct {
 	jiraResolver   jira.Resolver
 	linearResolver linear.Resolver
 	llm            llmResolver
+
+	// sources overrides the availability resolve (availability) for a test
+	// that drives a whole provision over fake stores. nil in production.
+	sources func(ctx context.Context, orgID string) (eventsource.Availability, error)
 }
 
 // NewManager builds a Manager against stores — a brain-capable role's
@@ -235,49 +240,11 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 		bundle.LLM = llm
 	}
 
-	if gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, conversationID); err != nil {
-		return fmt.Errorf("credprovision: resolve github credentials for conversation %s: %w", conversationID, err)
-	} else {
-		bundle.GitHub = gh
+	sources, err := m.sealSources(ctx, orgID, claim, bundle)
+	if err != nil {
+		return err
 	}
-
-	if jc, err := m.resolveJira(ctx, orgID); err != nil {
-		return fmt.Errorf("credprovision: resolve jira credentials for org %s: %w", orgID, err)
-	} else {
-		bundle.Jira = jc
-	}
-
-	// Unlike the halves above, a failure here degrades rather than failing the
-	// seal. An app install's credential can need a refresh from Linear's token
-	// endpoint, and an outage there would otherwise stop this org's claims from
-	// starting and its in-flight runs' GitHub tokens from being re-minted. The
-	// bundle records the gap instead, so the run's Linear verbs answer that
-	// Linear is unavailable for now, and the next re-seal tries again.
-	//
-	// TODO(TFAC-1066): that next re-seal is the sweep's ordinary one, up to
-	// DefaultRefreshAfter plus a sweep interval away, however soon Linear
-	// recovers; a sealed token that expires during a longer outage waits the
-	// same way.
-	if lc, err := m.resolveLinear(ctx, orgID); err != nil {
-		log.Warn("resolve the org's Linear credential failed; sealing the bundle without it, and the run's Linear verbs will report Linear unavailable until a re-seal resolves it",
-			"org", orgID, "conversation", conversationID, "error", err)
-		bundle.Unresolved = append(bundle.Unresolved, eventsource.KindLinear)
-	} else {
-		bundle.Linear = lc
-	}
-
-	// Every first-class provider beyond the built-in GitHub/Jira/Linear (Slack, and
-	// any future one) resolves its own sealed keyed set through its registered
-	// resolver — the brain never imports the provider package, so core stays
-	// free of provider-specific credential symbols. A provider with nothing
-	// configured for this org/team is simply absent from the map.
-	if providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
-		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, ConversationID: conversationID,
-	}); err != nil {
-		return fmt.Errorf("credprovision: resolve provider credentials for conversation %s: %w", conversationID, err)
-	} else {
-		bundle.Providers = providers
-	}
+	bundle.Sources = sources
 
 	plaintext, err := bundle.Marshal()
 	if err != nil {
@@ -287,7 +254,7 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	if err != nil {
 		return fmt.Errorf("credprovision: seal bundle for conversation %s: %w", conversationID, err)
 	}
-	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed, m.includeToolsFor(ctx, orgID, conversationID)); err != nil {
+	if err := m.stores.ClaimCredentials.Put(ctx, orgID, conversationID, claim.ExecutorID, inst.BootEpoch, sealed, sources); err != nil {
 		return fmt.Errorf("credprovision: write bundle for conversation %s: %w", conversationID, err)
 	}
 	log.Debug("provisioned claim credential bundle", "conversation", conversationID, "org", orgID, "executor", claim.ExecutorID, "boot_epoch", inst.BootEpoch)
@@ -295,38 +262,158 @@ func (m *Manager) ProvisionForConversation(ctx context.Context, orgID, conversat
 	return nil
 }
 
-// includeToolsFor resolves the claim's cleartext tools manifest — the
-// event-source kinds available to the org right now — for the brain to stamp
-// beside the sealed bundle (claim_credentials.include_tools). The executor
-// composes the run's <tools> prompt section from it; it cannot resolve
-// availability itself (disabled secret store, and no user identity on an
-// event-triggered conversation), which is the whole reason the answer ships
-// with the bundle.
+// sealSources resolves every event source's credential into bundle and returns
+// the engagement's source manifest: one entry per source the org's
+// availability answer names, recording whether its credential is now in the
+// bundle and, when it is not, why not. One pass writes both, so the manifest
+// can never describe a bundle other than the one sealed beside it.
 //
-// nil on a failed resolve, never a partial or empty answer standing in for
-// one: the stamp is documentation, not a gate, and the executor reads an
-// absent manifest as "fall back to the run's own sources" — the same
-// degradation a failed resolve has always produced — while an empty one would
-// read as "nothing is available". A failure therefore costs nothing that
-// wasn't already the status quo, so it is logged and never fails the
-// provision.
-func (m *Manager) includeToolsFor(ctx context.Context, orgID, conversationID string) []string {
-	// Nil-safe: a partially-wired Stores bundle cannot run the availability
-	// probes, so it stamps no answer — the same degradation as a failed
-	// resolve, without reaching a nil store.
-	if m.stores.Secrets == nil || m.stores.OrgEventSources == nil {
-		return nil
-	}
-	kinds, err := eventsource.AvailableKindsSystem(ctx, m.stores, orgID)
+// A source an org admin turned off, or one the org is not licensed for, is
+// not resolved at all: off means no credential is resolved for an agent. Every
+// other source is resolved whatever its availability probe said, and its entry
+// follows what the resolve produced — sealed when a credential came back,
+// unconfigured when none did — so the entry is true of the bundle even where
+// the probe and the resolver disagree.
+//
+// GitHub and Jira failures fail the seal, as they always have. A Linear failure
+// degrades instead: an app install's credential can need a refresh from
+// Linear's token endpoint, and an outage there would otherwise stop this org's
+// claims from starting and its in-flight runs' GitHub tokens from being
+// re-minted. Its entry records the source as unresolved, the sidecar still
+// starts its proxy, and the refresh sweep re-seals the engagement until the
+// credential resolves.
+func (m *Manager) sealSources(ctx context.Context, orgID string, claim db.AwaitingCredentialsConversation, bundle *credbundle.Bundle) (domain.SourceManifest, error) {
+	conversationID := claim.ConversationID
+	avail, err := m.availability(ctx, orgID)
 	if err != nil {
-		log.Warn("resolve event-source availability for the claim's tools manifest failed; the executor will fall back to the run's own sources",
-			"org", orgID, "conversation", conversationID, "error", err)
-		return nil
+		return nil, fmt.Errorf("credprovision: resolve event-source availability for org %s: %w", orgID, err)
 	}
-	if kinds == nil {
-		kinds = []string{}
+
+	manifest := domain.SourceManifest{}
+	resolvable := map[string]bool{}
+	for _, src := range avail {
+		switch src.State {
+		case eventsource.StateWIP:
+			continue
+		case eventsource.StateDisabled:
+			manifest[src.Kind] = domain.SourceEntry{State: domain.SourceDisabled}
+			continue
+		case eventsource.StateUnlicensed:
+			manifest[src.Kind] = domain.SourceEntry{State: domain.SourceUnlicensed}
+			continue
+		}
+		resolvable[src.Kind] = true
 	}
-	return kinds
+	// GitHub is required: it has no off switch and no licence, and every run
+	// may clone, push and read a pull request, so it is resolved whatever the
+	// availability answer says about it.
+	resolvable[eventsource.KindGitHub] = true
+	gh, err := m.resolveGitHub(ctx, orgID, claim.TeamID, claim.TaskID, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("credprovision: resolve github credentials for conversation %s: %w", conversationID, err)
+	}
+	bundle.GitHub = gh
+	manifest[eventsource.KindGitHub] = githubEntry(gh)
+
+	if resolvable[eventsource.KindJira] {
+		jc, err := m.resolveJira(ctx, orgID)
+		if err != nil {
+			return nil, fmt.Errorf("credprovision: resolve jira credentials for org %s: %w", orgID, err)
+		}
+		bundle.Jira = jc
+		manifest[eventsource.KindJira] = presentEntry(jc != nil, nil)
+	}
+
+	if resolvable[eventsource.KindLinear] {
+		lc, err := m.resolveLinear(ctx, orgID)
+		switch {
+		case err != nil:
+			reason := agenthost.UnresolvedReason(err)
+			log.Warn("resolve the org's Linear credential failed; sealing the bundle without it, and the run's Linear verbs report Linear unavailable until a re-seal resolves it",
+				"org", orgID, "conversation", conversationID, "reason", reason, "error", err)
+			manifest[eventsource.KindLinear] = domain.SourceEntry{State: domain.SourceUnresolved, Reason: reason}
+		default:
+			bundle.Linear = lc
+			var expires *time.Time
+			if lc != nil && lc.ExpiresUnix != 0 {
+				t := time.Unix(lc.ExpiresUnix, 0).UTC()
+				expires = &t
+			}
+			manifest[eventsource.KindLinear] = presentEntry(lc != nil, expires)
+		}
+	}
+
+	// Every first-class provider beyond the built-in GitHub/Jira/Linear (Slack, and
+	// any future one) resolves its own sealed keyed set through its registered
+	// resolver — the brain never imports the provider package, so core stays
+	// free of provider-specific credential symbols. A provider with nothing
+	// configured for this org/team is simply absent from the map.
+	providers, err := agenthost.ResolveProviderCredentials(ctx, m.stores, agenthost.ProvisionScope{
+		OrgID: orgID, TeamID: claim.TeamID, TaskID: claim.TaskID, ConversationID: conversationID,
+	}, func(namespace string) bool {
+		// Skipped exactly when its source was recorded and not resolvable:
+		// turned off or unlicensed. A provider whose source the availability
+		// answer does not name at all (one with no system probe) has no entry
+		// to record a state in, and resolves as it always has.
+		_, recorded := manifest[namespace]
+		return recorded && !resolvable[namespace]
+	})
+	if err != nil {
+		return nil, fmt.Errorf("credprovision: resolve provider credentials for conversation %s: %w", conversationID, err)
+	}
+	bundle.Providers = providers
+	for kind := range resolvable {
+		if _, done := manifest[kind]; done || !agenthost.ProviderRegistered(kind) {
+			continue
+		}
+		_, sealed := providers[kind]
+		manifest[kind] = presentEntry(sealed, nil)
+	}
+	return manifest, nil
+}
+
+// availability is the org's per-source state, through the claims-free system
+// door.
+func (m *Manager) availability(ctx context.Context, orgID string) (eventsource.Availability, error) {
+	if m.sources != nil {
+		return m.sources(ctx, orgID)
+	}
+	return eventsource.ResolveSystem(ctx, m.stores, orgID)
+}
+
+// presentEntry is a resolved source's entry: sealed when the resolve produced
+// a credential, with expires when that credential expires, and unconfigured
+// when it produced none.
+func presentEntry(present bool, expires *time.Time) domain.SourceEntry {
+	if !present {
+		return domain.SourceEntry{State: domain.SourceUnconfigured}
+	}
+	return domain.SourceEntry{State: domain.SourceSealed, ExpiresAt: expires}
+}
+
+// githubEntry is the GitHub half's entry. Its expiry is the earliest among the
+// tokens sealed for it, the one the run loses first; a PAT carries none.
+func githubEntry(gh *credbundle.GitHubCreds) domain.SourceEntry {
+	if gh == nil {
+		return presentEntry(false, nil)
+	}
+	var earliest time.Time
+	note := func(t time.Time) {
+		if !t.IsZero() && (earliest.IsZero() || t.Before(earliest)) {
+			earliest = t
+		}
+	}
+	for _, tok := range gh.RepoTokens {
+		note(tok.ExpiresAt)
+	}
+	if gh.CLIToken != nil {
+		note(gh.CLIToken.ExpiresAt)
+	}
+	if earliest.IsZero() {
+		return presentEntry(true, nil)
+	}
+	earliest = earliest.UTC()
+	return presentEntry(true, &earliest)
 }
 
 // conversationModel reads the model the conversation runs on. It is the

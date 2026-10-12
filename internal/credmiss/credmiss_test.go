@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/credbundle"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
 func TestStatus(t *testing.T) {
@@ -20,15 +21,50 @@ func TestStatus(t *testing.T) {
 		credbundle.MissOther:              http.StatusBadGateway,
 		credbundle.MissNoRepoToken:        http.StatusForbidden,
 		credbundle.MissNoCLIToken:         http.StatusForbidden,
-		credbundle.MissNoJiraCredential:   http.StatusForbidden,
-		credbundle.MissNoLinearCredential: http.StatusForbidden,
-
-		credbundle.MissLinearCredentialUnresolved: http.StatusBadGateway,
+		credbundle.MissSourceUnresolved:   http.StatusBadGateway,
+		credbundle.MissSourceUnconfigured: http.StatusForbidden,
+		credbundle.MissSourceDisabled:     http.StatusForbidden,
+		credbundle.MissSourceUnlicensed:   http.StatusForbidden,
+		credbundle.MissSourceWithheld:     http.StatusForbidden,
 	}
 	for reason, status := range want {
 		if got := Status(reason); got != status {
 			t.Errorf("Status(%q) = %d, want %d", reason, got, status)
 		}
+	}
+}
+
+// TestRespond_SourceMiss pins a source miss's answer: the per-state reason and
+// the source beside it, and the status a retry decides.
+func TestRespond_SourceMiss(t *testing.T) {
+	r := NewResponder("testproxy", "conv-1", slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	for _, tc := range []struct {
+		state      domain.SourceState
+		wantReason string
+		wantStatus int
+	}{
+		{domain.SourceUnresolved, credbundle.MissSourceUnresolved, http.StatusBadGateway},
+		{domain.SourceUnconfigured, credbundle.MissSourceUnconfigured, http.StatusForbidden},
+		{domain.SourceDisabled, credbundle.MissSourceDisabled, http.StatusForbidden},
+	} {
+		rec := httptest.NewRecorder()
+		r.Respond(rec, fmt.Errorf("linear proxy: %w", &credbundle.SourceMissError{Kind: "linear", State: tc.state}))
+		if rec.Code != tc.wantStatus {
+			t.Errorf("%s: status = %d, want %d", tc.state, rec.Code, tc.wantStatus)
+		}
+		var body struct{ Reason, Source string }
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: body is not JSON: %v", tc.state, err)
+		}
+		if body.Reason != tc.wantReason || body.Source != "linear" {
+			t.Errorf("%s: body = %+v, want reason %q and source linear", tc.state, body, tc.wantReason)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	r.Respond(rec, credbundle.ErrNoRepoToken)
+	if strings.Contains(rec.Body.String(), `"source"`) {
+		t.Errorf("a miss that names no source carries a source member: %s", rec.Body.String())
 	}
 }
 

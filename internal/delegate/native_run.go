@@ -393,11 +393,12 @@ func (s *Spawner) buildNativeLaunchText(ctx context.Context, task domain.Task, m
 		// The native blocks name the in-jail paths and the `tfac` applet
 		// outright, so the run context carries only what differs per run and
 		// those blocks cannot state for themselves: the PR checkout's path, the
-		// branch convention, and this run's staged knowledge.
+		// branch convention, the sources this run cannot reach, and this run's
+		// staged knowledge.
 		systemBlock = composeConversationSystemBlock(
 			mission,
-			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", knowledge),
-			cfg.toolsRef,
+			runContext("", "", agentVisibleCheckout(cfg.runRoot, cfg.prCheckout), s.resolveBranchTemplate(ctx, task), "", cfg.sources.notes, knowledge),
+			cfg.sources.tools,
 			nonTerminal,
 		)
 	}

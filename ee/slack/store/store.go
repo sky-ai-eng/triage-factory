@@ -123,7 +123,7 @@ type WorkspaceStore interface {
 
 	// ListForOrgSystem mirrors ListForOrg on the admin pool (bypasses RLS),
 	// for claims-free system callers — the availability SystemProbe the
-	// brain's include_tools stamp resolves through. System-code-only, same
+	// brain's source manifest resolves through. System-code-only, same
 	// discipline as ListAllSystem.
 	ListForOrgSystem(ctx context.Context, orgID string) ([]Workspace, error)
 

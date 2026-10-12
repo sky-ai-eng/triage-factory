@@ -161,8 +161,10 @@ func (a *App) startBrain(term int64) {
 	// job: every dispatcher takes over expired claims on its own pass.
 	go instance.RunRegistryGC(brainCtx, a.stores.Instances, instance.RegistryGCStaleAfter, instance.RegistryGCInterval)
 	// Sealed-credential-bundle provisioner sweeps (TFAC-614): the backstop
-	// for a dropped cred_request notification, and the periodic refresh of
-	// hour-lived GitHub tokens on long-running runs. nil in local mode and
+	// for a dropped cred_request notification, and the re-seal of a running
+	// engagement's bundle — periodically for its hour-lived GitHub tokens, and
+	// sooner when its source manifest names an unresolved source or a
+	// credential about to expire. nil in local mode and
 	// at TF_ROLE=executor (buildCredProvisioner never constructs
 	// a.credProvisioner there) — RunAwaitingSweep/RunRefreshSweep are
 	// themselves nil-safe no-ops too, matching every other brain-unit

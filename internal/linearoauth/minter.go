@@ -104,6 +104,21 @@ func RefusedGrant(err error) bool {
 	return errors.As(err, &se) && se.Op == opToken && se.Code == "invalid_grant"
 }
 
+// TokenEndpointUnavailable reports whether err is the token endpoint failing
+// a refresh other than by refusing the grant: an error status, or a request
+// that never got an answer. A refused grant is not this — the install was
+// revoked, and the cache reports it as no credential at all.
+func TokenEndpointUnavailable(err error) bool {
+	var (
+		se *StatusError
+		te *upstream.TransportError
+	)
+	if errors.As(err, &se) {
+		return se.Op == opToken && !RefusedGrant(err)
+	}
+	return errors.As(err, &te)
+}
+
 func newStatusError(op string, resp *http.Response, body []byte) *StatusError {
 	var oauth struct {
 		Error string `json:"error"`

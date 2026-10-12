@@ -324,24 +324,16 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		// one sealed into this run's bundle beside the token, so a base-URL
 		// change between provisioning and bring-up cannot point a token
 		// resolved for one host at another.
+		//
+		// The Jira and Linear proxies are not requested at all: the sidecar
+		// starts one for every source the sealed bundle's source manifest names
+		// usable, so a run reaches every source its org has, whatever source
+		// triggered it.
 		GitHubAPIEnabled: true,
 		// The real-gh channel's injector: the sandboxed gh binary reaches it via
 		// GH_HOST. On for every delegated run (same rationale as the REST proxy);
 		// the injector needs GitHub creds, which resolveGitHub already provisions.
 		GHChannelEnabled: true,
-		// Jira REST only for Jira runs, Linear GraphQL only for Linear runs:
-		// such a run's org has that credential, so its bundle carries it, while
-		// an org without one seals none and the proxy would fail to bind. The
-		// Jira upstream is left empty: the sidecar derives it from the bundle's
-		// Jira URL. Linear has one upstream for every workspace.
-		//
-		// TODO(TFAC-1066): both proxies are gated on the trigger source, not on
-		// the org's available sources, so a run about another source's entity,
-		// in an org with Jira or Linear configured, is told about those verbs
-		// (its <tools> section is composed from the available sources) but has
-		// no proxy for them to reach.
-		JiraAPIEnabled:   task.EntitySource == "jira",
-		LinearAPIEnabled: task.EntitySource == "linear",
 		// Relocate the exec-verb socket server into the sidecar: it hosts the
 		// hostile-input parser in this capless jail, relaying every DB effect
 		// back to the orchestrator. Carries the run's non-secret identity only.

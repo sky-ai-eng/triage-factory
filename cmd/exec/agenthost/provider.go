@@ -148,9 +148,12 @@ func dispatchProviderOpLocal(ctx context.Context, stores db.Stores, info Convers
 // keyed by namespace — what the brain places in the bundle's Providers map. A
 // provider that resolves to nil (nothing configured for this org/team) is
 // omitted, so a GitHub-only org's bundle carries no provider sections. A
-// resolver error fails the whole provision (a provider that is configured but
-// unresolvable must not silently ship a run without its credential).
-func ResolveProviderCredentials(ctx context.Context, stores db.Stores, scope ProvisionScope) (map[string]json.RawMessage, error) {
+// provider skip names is not resolved at all: the brain skips the one whose
+// source an org admin turned off or the org is not licensed for, since off
+// means no credential is resolved for an agent. A resolver error fails the
+// whole provision (a provider that is configured but unresolvable must not
+// silently ship a run without its credential).
+func ResolveProviderCredentials(ctx context.Context, stores db.Stores, scope ProvisionScope, skip func(namespace string) bool) (map[string]json.RawMessage, error) {
 	if len(providerCredentialResolvers) == 0 {
 		return nil, nil
 	}
@@ -158,6 +161,9 @@ func ResolveProviderCredentials(ctx context.Context, stores db.Stores, scope Pro
 	// across runs, and the sealed bundle is byte-stable for a given input.
 	names := make([]string, 0, len(providerCredentialResolvers))
 	for name := range providerCredentialResolvers {
+		if skip != nil && skip(name) {
+			continue
+		}
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -177,4 +183,11 @@ func ResolveProviderCredentials(ctx context.Context, stores db.Stores, scope Pro
 		out[name] = raw
 	}
 	return out, nil
+}
+
+// ProviderRegistered reports whether namespace has a registered credential
+// resolver — whether a bundle can carry a credential for it at all.
+func ProviderRegistered(namespace string) bool {
+	_, ok := providerCredentialResolvers[namespace]
+	return ok
 }
