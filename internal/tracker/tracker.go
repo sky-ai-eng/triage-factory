@@ -1369,8 +1369,8 @@ func (c *jiraCycle) terminal(snap domain.JiraSnapshot) bool {
 // terminal check, no pickup discovery.
 //
 // Actor identity flows through the snapshot (assignee_account_id,
-// reporter_account_id) and predicate matching happens downstream against the assignee_in /
-// reporter_in / commenter_in allowlists.
+// reporter_account_id) and predicate matching happens downstream against
+// the assignee_in / reporter_in / commenter_in allowlists.
 //
 // scope is the org's Jira site, domain.EntityScope("jira", settings). An
 // issue's entity is matched on its numeric id (external_id) on that site,
@@ -2628,6 +2628,11 @@ type jiraIssueState struct {
 // separately; the snapshot itself only carries fields that DiffJiraSnapshots
 // compares. doneStatuses is the user's configured Done.Members set, used
 // to decide which subtasks count as "open" when populating OpenSubtaskCount.
+//
+// issue must come from a read that requested jiraIssueFields, or every
+// field. A field the read left out lands empty in the snapshot rather than
+// failing, and DefaultSearchFields leaves out several: a search with nil
+// fields loses the reporter, the comment count and the subtasks.
 func issueToState(issue jiraclient.Issue, baseURL string, doneStatuses []domain.JiraStatusRef) jiraIssueState {
 	snap := domain.JiraSnapshot{
 		ID:       issue.ID,
