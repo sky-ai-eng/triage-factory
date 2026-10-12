@@ -20,6 +20,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
+	"github.com/sky-ai-eng/triage-factory/internal/linear"
 	"github.com/sky-ai-eng/triage-factory/internal/server/httpx"
 	"github.com/sky-ai-eng/triage-factory/internal/server/teamscope"
 	"github.com/sky-ai-eng/triage-factory/pkg/websocket"
@@ -1445,6 +1446,11 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //     progressed out of the in-progress rule entirely (done, back to
 //     pickup, etc.).
 //
+//   - Linear reversal: if the task is Linear-backed and the requester holds
+//     its claim, unassign the issue and move it to the team's first pickup
+//     state. Skipped when the issue is no longer assigned to the requester
+//     or has left the in-progress rule.
+//
 // Every step is best-effort and logged-not-failed: the task is
 // already queued by the time we get here; failing the response would
 // confuse callers about what actually changed.
@@ -1468,6 +1474,7 @@ func (s *Server) finalizeRequeue(r *http.Request, orgID, userID, taskID string, 
 	s.stopTaskConversations(cleanupCtx, orgID, userID, taskID, delegate.StopCauseTaskRequeued)
 	s.endTaskConversations(cleanupCtx, orgID, userID, taskID, domain.EndedRequeued)
 	s.revertJiraStateIfApplicable(cleanupCtx, orgID, userID, task)
+	s.revertLinearStateIfApplicable(cleanupCtx, orgID, userID, task)
 	// Requeue clears both claim cols and flips status to
 	// 'queued'. Peer Board sessions need a task_updated event to
 	// pull the card back into the Queued column; without this they
@@ -1628,6 +1635,55 @@ func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID 
 			jiraLog.Error("failed to transition back on requeue", "issue", issueKey, "status", originalStatus, "error", err)
 		}
 	}(task.EntitySourceID, task.SourceStatus, inProgressMembers)
+}
+
+// revertLinearStateIfApplicable is revertJiraStateIfApplicable's Linear
+// sibling: a requeue or undo of a Linear-backed task unassigns the issue and
+// moves it back to the team's first pickup state, acting as the requesting
+// user. It applies only to the requester's own claim — task is the row as it
+// stood before the requeue — because the reversal is of a claim this user
+// made; an issue they assigned to themselves in Linear by hand is not TF's to
+// unassign. applyLinearUnclaim repeats the check on Linear's side, so an issue
+// someone has since reassigned or moved on is left alone.
+//
+// Best-effort, like the Jira reversal: the task is already queued, so a
+// missing credential, rule or identity is logged and skipped rather than
+// failing the response or acting as the org's identity instead.
+func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userID string, task *domain.Task) {
+	if task == nil || task.EntitySource != "linear" || task.ClaimedByUserID != userID {
+		return
+	}
+	// The rule and identity first: a team with nothing armed has no state to
+	// move the issue back to, and resolving the user's client can mean an
+	// OAuth refresh.
+	var target linearSyncTarget
+	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		var e error
+		target, e = readLinearSyncTarget(ctx, tx, orgID, userID, task)
+		return e
+	}); err != nil {
+		linearLog.Warn("requeue revert: read rule failed, skipping", "issue", task.EntitySourceID, "error", err)
+		return
+	}
+	if target.rule == nil || !target.rule.Armed() {
+		linearLog.Warn("requeue revert: no armed rule for Linear team, skipping", "issue", target.identifier)
+		return
+	}
+	if target.linearUserID == "" {
+		linearLog.Warn("requeue revert: no Linear identity stored for user, skipping", "issue", target.identifier, "user", userID)
+		return
+	}
+	linearUserClient, err := s.linearResolver.ForUser(ctx, orgID, userID)
+	if err != nil {
+		if errors.Is(err, linear.ErrNoLinearUserCredential) {
+			linearLog.Warn("requeue revert: no linear credential for user, skipping", "user", userID, "issue", target.identifier)
+		} else {
+			linearLog.Warn("requeue revert: resolve user client failed, skipping", "issue", target.identifier, "error", err)
+		}
+		return
+	}
+	// Detached from the request, like the Jira reversal.
+	go applyLinearUnclaim(context.Background(), linearUserClient, target.identifier, target.linearUserID, *target.rule)
 }
 
 // parseSnoozeUntilPatch reads the `snooze_until` PATCH field: an RFC3339
