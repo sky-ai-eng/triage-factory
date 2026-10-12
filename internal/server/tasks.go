@@ -1446,10 +1446,9 @@ func (s *Server) handleRequeue(w http.ResponseWriter, r *http.Request) {
 //     has progressed out of the in-progress rule entirely (done, back to
 //     pickup, etc.).
 //
-//   - Linear reversal: if the task is Linear-backed and the requester holds
-//     its claim, unassign the issue and move it to the team's first pickup
-//     state. Skipped when the issue is no longer assigned to the requester
-//     or has left the in-progress rule.
+//   - Linear reversal: the same for a Linear-backed task, with a stricter
+//     guard: it skips unless the issue is still assigned to the requester
+//     and still in the in-progress rule.
 //
 // Every step is best-effort and logged-not-failed: the task is
 // already queued by the time we get here; failing the response would
@@ -1660,24 +1659,31 @@ func applyJiraUnclaim(ctx context.Context, c *jira.Client, issueKey string, prio
 }
 
 // revertLinearStateIfApplicable is revertJiraStateIfApplicable's Linear
-// sibling: a requeue or undo of a Linear-backed task unassigns the issue and
-// moves it back to the team's first pickup state, acting as the requesting
-// user. It applies only to the requester's own claim — task is the row as it
-// stood before the requeue — because the reversal is of a claim this user
-// made; an issue they assigned to themselves in Linear by hand is not TF's to
-// unassign. applyLinearUnclaim repeats the check on Linear's side, so an issue
-// someone has since reassigned or moved on is left alone.
+// sibling: a requeue or undo of a Linear-backed task reverses what the claim
+// changed in Linear, acting as the requesting user. task is the row as it
+// stood before the requeue, so its SourceStatus is the state the claim
+// recorded; a task with none recorded has nothing to put back.
+// applyLinearUnclaim decides what to write.
 //
 // Best-effort, like the Jira reversal: the task is already queued, so a
 // missing credential, rule or identity is logged and skipped rather than
 // failing the response or acting as the org's identity instead.
 func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userID string, task *domain.Task) {
-	if task == nil || task.EntitySource != "linear" || task.ClaimedByUserID != userID {
+	if task == nil || task.EntitySource != "linear" {
 		return
 	}
-	// The rule and identity first: a team with nothing armed has no state to
-	// move the issue back to, and resolving the user's client can mean an
-	// OAuth refresh.
+	if task.SourceStatus == nil {
+		// See revertJiraStateIfApplicable: only a person's claim is worth a
+		// line, since a task nobody claimed was never going to move.
+		if task.ClaimedByUserID != "" {
+			linearLog.Info("requeue revert: no pre-claim state recorded, leaving the issue",
+				"issue", task.EntitySourceID, "claimed_by", task.ClaimedByUserID)
+		}
+		return
+	}
+	// The rule and identity first: with no in-progress rule the claim moved
+	// nothing to undo, and resolving the user's client can mean an OAuth
+	// refresh.
 	var target linearSyncTarget
 	if err := s.tx.WithReadTx(ctx, orgID, userID, func(tx db.TxStores) error {
 		var e error
@@ -1687,8 +1693,8 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		linearLog.Warn("requeue revert: read rule failed, skipping", "issue", task.EntitySourceID, "error", err)
 		return
 	}
-	if target.rule == nil || !target.rule.Armed() {
-		linearLog.Warn("requeue revert: no armed rule for Linear team, skipping", "issue", target.identifier)
+	if target.rule == nil || len(target.rule.InProgressMembers) == 0 {
+		linearLog.Warn("requeue revert: no in_progress rule for Linear team, skipping", "issue", target.identifier)
 		return
 	}
 	if target.linearUserID == "" {
@@ -1705,7 +1711,8 @@ func (s *Server) revertLinearStateIfApplicable(ctx context.Context, orgID, userI
 		return
 	}
 	// Detached from the request, like the Jira reversal.
-	go applyLinearUnclaim(context.Background(), linearUserClient, target.identifier, target.linearUserID, *target.rule)
+	go applyLinearUnclaim(context.Background(), linearUserClient, target.identifier, target.linearUserID,
+		*task.SourceStatus, target.rule.InProgressMembers)
 }
 
 // parseSnoozeUntilPatch reads the `snooze_until` PATCH field: an RFC3339

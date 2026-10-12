@@ -123,18 +123,23 @@ func applyLinearClaim(ctx context.Context, c *linear.Client, identifier, linearU
 	}
 }
 
-// applyLinearUnclaim reverses applyLinearClaim, as the client's user: unassign
-// the issue and move it to the rule's first pickup state. It acts only while
-// the issue still shows the claim — assigned to linearUserID and in an
-// in-progress state. "First" is the rule's stored order. An issue assigned to anyone else is someone else's work,
-// and one that has left in progress was moved on by a person, which a requeue
-// does not reach back and undo. A failed unassign stops before the
-// transition, the same ordering as the claim.
-func applyLinearUnclaim(ctx context.Context, c *linear.Client, identifier, linearUserID string, rule domain.LinearTeamRules) {
-	if len(rule.PickupMembers) == 0 {
-		linearLog.Warn("requeue guard: no pickup state to move the issue back to, skipping", "issue", identifier)
-		return
-	}
+// applyLinearUnclaim is the write a requeue makes in Linear, as the client's
+// user. It reverses only what the claim changed, read against prior, the
+// state the claim recorded, by the rules applyJiraUnclaim follows:
+//
+//   - the issue is unassigned unless prior shows it was already the user's
+//     (linearUserID) — a claim of an issue they already held assigned
+//     nothing;
+//   - it moves back to prior's state unless that state is itself an
+//     in-progress member — a claim of an issue already in progress moved
+//     nothing.
+//
+// It acts only while the issue still shows the claim: assigned to
+// linearUserID and in an in-progress state. An issue assigned to anyone else
+// is someone else's work, and one that has left in progress was moved on by a
+// person, which a requeue does not reach back and undo. A failed unassign
+// stops before the transition, the same ordering as the claim.
+func applyLinearUnclaim(ctx context.Context, c *linear.Client, identifier, linearUserID string, prior domain.SourceStatus, inProgress []domain.LinearStateRef) {
 	issue, err := c.GetIssue(ctx, identifier)
 	if err != nil {
 		linearLog.Error("requeue guard: read issue failed", "issue", identifier, "error", err)
@@ -144,18 +149,24 @@ func applyLinearUnclaim(ctx context.Context, c *linear.Client, identifier, linea
 		linearLog.Info("requeue guard: issue is not assigned to the acting user, skipping", "issue", identifier)
 		return
 	}
-	if !domain.ContainsState(rule.InProgressMembers, linearState(issue.State)) {
+	if !domain.ContainsState(inProgress, linearState(issue.State)) {
 		linearLog.Info("requeue guard: state not in in-progress members, skipping",
 			"issue", identifier, "state", issue.State.Name,
-			"in_progress_members", domain.LinearStateNames(rule.InProgressMembers))
+			"in_progress_members", domain.LinearStateNames(inProgress))
 		return
 	}
-	if err := c.UnassignIssue(ctx, issue.ID); err != nil {
-		linearLog.Error("failed to unassign on requeue", "issue", identifier, "error", err)
+	alreadyMine := prior.AssigneeID != "" && prior.AssigneeID == linearUserID
+	if !alreadyMine {
+		if err := c.UnassignIssue(ctx, issue.ID); err != nil {
+			linearLog.Error("failed to unassign on requeue", "issue", identifier, "error", err)
+			return
+		}
+	}
+	if domain.ContainsState(inProgress, domain.LinearStateRef{ID: prior.StatusID, Name: prior.StatusName}) {
+		linearLog.Info("requeue guard: the claim found the issue already in progress, leaving its state", "issue", identifier, "state", prior.StatusName)
 		return
 	}
-	pickup := rule.PickupMembers[0]
-	if err := c.TransitionIssue(ctx, issue.ID, pickup.ID); err != nil {
-		linearLog.Error("failed to transition back on requeue", "issue", identifier, "state", pickup.Name, "error", err)
+	if err := c.TransitionIssue(ctx, issue.ID, prior.StatusID); err != nil {
+		linearLog.Error("failed to transition back on requeue", "issue", identifier, "state", prior.StatusName, "error", err)
 	}
 }

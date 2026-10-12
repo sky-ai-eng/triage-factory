@@ -224,18 +224,17 @@ const (
 var (
 	linearIssueUUID = fixtureUUID("linear-issue-eng-7")
 
-	linearStateTodoRef   = domain.LinearStateRef{ID: linearStateTodo, Name: "Todo", Type: "unstarted"}
-	linearStateDoingRef  = domain.LinearStateRef{ID: linearStateDoing, Name: "In Progress", Type: "started"}
-	linearStateReviewRef = domain.LinearStateRef{ID: linearStateReview, Name: "In Review", Type: "started"}
+	linearStateBacklogRef = domain.LinearStateRef{ID: linearStateBacklog, Name: "Backlog", Type: "backlog"}
+	linearStateTodoRef    = domain.LinearStateRef{ID: linearStateTodo, Name: "Todo", Type: "unstarted"}
+	linearStateDoingRef   = domain.LinearStateRef{ID: linearStateDoing, Name: "In Progress", Type: "started"}
+	linearStateReviewRef  = domain.LinearStateRef{ID: linearStateReview, Name: "In Review", Type: "started"}
 
-	// linearClaimRule is ENG's armed rule. Pickup is stored Todo first and
-	// Backlog second, against Linear's position order, so an unclaim that
-	// moves the issue to Todo read the stored order.
+	// linearClaimRule is ENG's armed rule.
 	linearClaimRule = domain.LinearTeamRules{
 		LinearTeamID:        linearTeamEng,
 		LinearTeamKey:       "ENG",
 		LinearTeamName:      "Engineering",
-		PickupMembers:       []domain.LinearStateRef{linearStateTodoRef, {ID: linearStateBacklog, Name: "Backlog", Type: "backlog"}},
+		PickupMembers:       []domain.LinearStateRef{linearStateTodoRef, linearStateBacklogRef},
 		InProgressMembers:   []domain.LinearStateRef{linearStateDoingRef, linearStateReviewRef},
 		InProgressCanonical: linearStateDoingRef,
 		DoneMembers:         []domain.LinearStateRef{{ID: linearStateDone, Name: "Done", Type: "completed"}},
@@ -277,12 +276,12 @@ func newLinearClaimServer(t *testing.T, res *recordingLinearResolver, withRule b
 }
 
 // seedQueuedLinearTask installs the FK chain for an unclaimed, queued task on
-// ENG-7, whose snapshot puts it in ENG.
-func seedQueuedLinearTask(t *testing.T, db *sql.DB, taskID string) {
+// ENG-7, whose snapshot puts it in ENG, unassigned, in state.
+func seedQueuedLinearTask(t *testing.T, db *sql.DB, taskID string, state domain.LinearStateRef) {
 	t.Helper()
 	snap, err := json.Marshal(domain.LinearSnapshot{
 		ID: linearIssueUUID, Identifier: linearIssueIdentifier, TeamID: linearTeamEng, TeamKey: "ENG",
-		State: linearStateTodoRef,
+		State: state,
 	})
 	if err != nil {
 		t.Fatalf("marshal snapshot: %v", err)
@@ -344,7 +343,7 @@ func TestTaskClaim_LinearTask_NoUserCredential_Returns409(t *testing.T) {
 	res := &recordingLinearResolver{userErr: linear.ErrNoLinearUserCredential}
 	s := newLinearClaimServer(t, res, true)
 	const taskID = "00000000-0000-4000-8000-000000000300"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusConflict {
@@ -378,7 +377,7 @@ func TestTaskClaim_LinearTask_ResolverBackendError_Returns500(t *testing.T) {
 	res := &recordingLinearResolver{userErr: errors.New("vault unreachable")}
 	s := newLinearClaimServer(t, res, true)
 	const taskID = "00000000-0000-4000-8000-000000000301"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusInternalServerError {
@@ -398,7 +397,7 @@ func TestTaskClaim_LinearTask_AssignsAsTheActingUser(t *testing.T) {
 	res := &recordingLinearResolver{userClient: fake.client()}
 	s := newLinearClaimServer(t, res, true)
 	const taskID = "00000000-0000-4000-8000-000000000302"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
@@ -438,7 +437,7 @@ func TestTaskClaim_LinearTask_NoRule_NoLinearWrites(t *testing.T) {
 	res := &recordingLinearResolver{userClient: fake.client()}
 	s := newLinearClaimServer(t, res, false)
 	const taskID = "00000000-0000-4000-8000-000000000303"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
 	rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0})
 	if rec.Code != http.StatusOK {
@@ -542,35 +541,61 @@ func TestApplyLinearClaim(t *testing.T) {
 	}
 }
 
-// TestApplyLinearUnclaim: the unclaim acts only on an issue still assigned to
-// the acting user and still in progress, and moves it to the first pickup
-// state in the rule's stored order.
+// TestApplyLinearUnclaim: a requeue reverses only what the claim changed,
+// judged against the state the claim recorded, and only while the issue
+// still shows the claim.
 func TestApplyLinearUnclaim(t *testing.T) {
 	cases := []struct {
 		name     string
-		assignee *linear.User
-		state    string
+		prior    domain.SourceStatus
+		assignee *linear.User // the issue's assignee now
+		state    string       // its state now
 		want     []linearWrite
 	}{
 		{
-			name:     "still the acting user's claim",
+			name:     "claimed unassigned from Backlog",
+			prior:    domain.SourceStatus{StatusID: linearStateBacklog, StatusName: "Backlog"},
 			assignee: &linear.User{ID: linearMe},
-			state:    linearStateReview,
-			want:     []linearWrite{{kind: "unassign"}, {kind: "transition", value: linearStateTodo}},
+			state:    linearStateDoing,
+			want:     []linearWrite{{kind: "unassign"}, {kind: "transition", value: linearStateBacklog}},
 		},
 		{
-			name:     "reassigned to someone else",
+			name:     "already mine and in progress",
+			prior:    domain.SourceStatus{StatusID: linearStateReview, StatusName: "In Review", AssigneeID: linearMe},
+			assignee: &linear.User{ID: linearMe},
+			state:    linearStateReview,
+			want:     nil,
+		},
+		{
+			name:     "already mine in Todo",
+			prior:    domain.SourceStatus{StatusID: linearStateTodo, StatusName: "Todo", AssigneeID: linearMe},
+			assignee: &linear.User{ID: linearMe},
+			state:    linearStateDoing,
+			want:     []linearWrite{{kind: "transition", value: linearStateTodo}},
+		},
+		{
+			name:     "unassigned but already in progress",
+			prior:    domain.SourceStatus{StatusID: linearStateDoing, StatusName: "In Progress"},
+			assignee: &linear.User{ID: linearMe},
+			state:    linearStateDoing,
+			want:     []linearWrite{{kind: "unassign"}},
+		},
+		{
+			name:     "reassigned to someone else since",
+			prior:    domain.SourceStatus{StatusID: linearStateTodo, StatusName: "Todo"},
 			assignee: &linear.User{ID: "lin-someone-else"},
 			state:    linearStateDoing,
 			want:     nil,
 		},
 		{
-			name:  "unassigned",
+			name:  "unassigned since",
+			prior: domain.SourceStatus{StatusID: linearStateTodo, StatusName: "Todo"},
 			state: linearStateDoing,
 			want:  nil,
 		},
 		{
-			name:     "moved on out of in progress",
+			name:     "moved on out of in progress since",
+			prior:    domain.SourceStatus{StatusID: linearStateTodo, StatusName: "Todo"},
 			assignee: &linear.User{ID: linearMe},
 			state:    linearStateDone,
 			want:     nil,
@@ -579,7 +604,7 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newLinearIssueFake(t, tc.assignee, linearFixtureState(t, tc.state))
-			applyLinearUnclaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe, linearClaimRule)
+			applyLinearUnclaim(t.Context(), fake.client(), linearIssueIdentifier, linearMe, tc.prior, linearClaimRule.InProgressMembers)
 			if got := fake.Writes(); !slices.Equal(got, tc.want) {
 				t.Errorf("writes = %v, want %v", got, tc.want)
 			}
@@ -587,15 +612,17 @@ func TestApplyLinearUnclaim(t *testing.T) {
 	}
 }
 
-// TestTaskRequeue_LinearTask_UndoesTheClaim: returning a claimed Linear task
-// to the queue unassigns the issue and moves it back to the team's first
-// pickup state, as the user who claimed it.
+// TestTaskRequeue_LinearTask_UndoesTheClaim: claiming a Linear task records
+// the issue's state, and returning the task to the queue puts the issue back
+// in that state, unassigned, as the user who claimed it. Backlog is not the
+// rule's first pickup state, so the issue landing there shows the recorded
+// state was read.
 func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
-	fake := newLinearIssueFake(t, nil, linearFixtureState(t, linearStateTodo))
+	fake := newLinearIssueFake(t, nil, linearFixtureState(t, linearStateBacklog))
 	res := &recordingLinearResolver{userClient: fake.client()}
 	s := newLinearClaimServer(t, res, true)
 	const taskID = "00000000-0000-4000-8000-000000000305"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateBacklogRef)
 
 	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/claim", map[string]any{"hesitation_ms": 0}); rec.Code != http.StatusOK {
 		t.Fatalf("claim status = %d, want 200; body=%s", rec.Code, rec.Body.String())
@@ -607,7 +634,7 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	}
 	want := []linearWrite{
 		{kind: "assign", value: linearMe}, {kind: "transition", value: linearStateDoing},
-		{kind: "unassign"}, {kind: "transition", value: linearStateTodo},
+		{kind: "unassign"}, {kind: "transition", value: linearStateBacklog},
 	}
 	if got := fake.waitForWrites(t, len(want)); !slices.Equal(got, want) {
 		t.Errorf("Linear writes = %v, want %v", got, want)
@@ -618,15 +645,15 @@ func TestTaskRequeue_LinearTask_UndoesTheClaim(t *testing.T) {
 	}
 }
 
-// TestTaskRequeue_LinearTask_NotTheRequestersClaim: a requeue undoes only the
-// requester's own claim, so a task they did not claim asks Linear nothing —
-// not even for their client.
-func TestTaskRequeue_LinearTask_NotTheRequestersClaim(t *testing.T) {
+// TestTaskRequeue_LinearTask_NothingRecorded: a task no person claimed has no
+// recorded state to put back, so its requeue asks Linear nothing, not even
+// for the user's client.
+func TestTaskRequeue_LinearTask_NothingRecorded(t *testing.T) {
 	fake := newLinearIssueFake(t, &linear.User{ID: linearMe}, linearFixtureState(t, linearStateDoing))
 	res := &recordingLinearResolver{userClient: fake.client()}
 	s := newLinearClaimServer(t, res, true)
 	const taskID = "00000000-0000-4000-8000-000000000306"
-	seedQueuedLinearTask(t, s.db, taskID)
+	seedQueuedLinearTask(t, s.db, taskID, linearStateTodoRef)
 
 	if rec := doJSON(t, s, http.MethodPost, "/api/tasks/"+taskID+"/requeue", map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("requeue status = %d, want 200; body=%s", rec.Code, rec.Body.String())
