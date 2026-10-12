@@ -1,6 +1,7 @@
 // The Linear OAuth app card: it links to Linear's pre-filled creation page,
-// lists the redirect URIs to register, and reports the server's refusal to
-// remove an app a live install depends on.
+// lists the redirect URIs to register, says when the deployment's app already
+// serves the workspace, and reports the server's refusal to remove an app a
+// live install depends on.
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
@@ -39,6 +40,22 @@ describe('LinearOAuthAppCard', () => {
     expect(screen.getByLabelText('redirect URI 1')).toHaveValue(uris[0])
     expect(screen.getByLabelText('redirect URI 2')).toHaveValue(uris[1])
     expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ install_available: false }))
+  })
+
+  it("on the deployment app, says so and still offers an app of the workspace's own", async () => {
+    const onStatus = vi.fn()
+    const onDeployment = status({ install_available: true, using_deployment_default: true })
+    delete (onDeployment as Record<string, unknown>).create_url
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, ...jsonBody(onDeployment) }))
+    render(<LinearOAuthAppCard orgId="org-1" onStatus={onStatus} />)
+
+    expect(
+      await screen.findByText(/Using this deployment.s Triage Factory app/),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Create the app in Linear/ })).toBeNull()
+    expect(screen.getByPlaceholderText("Your Linear OAuth app's client ID")).toBeInTheDocument()
+    expect(screen.getByLabelText('redirect URI 1')).toHaveValue(uris[0])
+    expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ install_available: true }))
   })
 
   it('saves the pasted credentials and reports the install as available', async () => {

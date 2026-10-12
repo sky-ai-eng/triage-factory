@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+	"github.com/sky-ai-eng/triage-factory/internal/secretenv"
 )
 
 // ErrNoLinearOAuthApp is OAuthAppResolver.Resolve finding no Linear OAuth app
@@ -26,13 +30,43 @@ func (a OAuthApp) Configured() bool {
 	return a.ClientID != "" && a.ClientSecret != ""
 }
 
+// The deployment app's env vars. They are operator config in the same class as
+// the Atlassian pair: one Linear app is registered for the whole deployment,
+// so it lives in the operator's .env rather than the secret store, which is
+// keyed by org. A distributed local binary can ship no shared client secret,
+// so local mode never reads them.
+const (
+	envDeploymentClientID     = "TF_LINEAR_CLIENT_ID"
+	envDeploymentClientSecret = "TF_LINEAR_CLIENT_SECRET"
+)
+
 // DeploymentOAuthAppFromEnv is the deployment's own Linear OAuth app, the
-// second tier of the precedence.
+// second tier of the precedence, read from the environment in multi mode and
+// the zero app in local mode. Whitespace is trimmed so a stray newline in .env
+// cannot poison the credential.
 //
-// TODO(TFAC-1024): read TF_LINEAR_CLIENT_ID / TF_LINEAR_CLIENT_SECRET in multi
-// mode. Until then there is no deployment app, and an org installs only
-// through an app of its own.
+// The pair is all-or-none. One set without the other is logged and read as no
+// deployment app rather than failing the boot: a deployment whose orgs bring
+// their own apps must still start, and with no deployment app an org that has
+// none of its own is offered no install, which fails closed.
 func DeploymentOAuthAppFromEnv() OAuthApp {
+	if runmode.Current() != runmode.ModeMulti {
+		return OAuthApp{}
+	}
+	app := OAuthApp{
+		ClientID:     strings.TrimSpace(os.Getenv(envDeploymentClientID)),
+		ClientSecret: strings.TrimSpace(secretenv.Get(envDeploymentClientSecret)),
+	}
+	if app.Configured() || app == (OAuthApp{}) {
+		return app
+	}
+	missing := envDeploymentClientSecret
+	if app.ClientID == "" {
+		missing = envDeploymentClientID
+	}
+	linearLog.Error("the deployment Linear app is partially configured, so the deployment runs without one; set both "+
+		envDeploymentClientID+" and "+envDeploymentClientSecret+", or neither",
+		"not_set", missing)
 	return OAuthApp{}
 }
 

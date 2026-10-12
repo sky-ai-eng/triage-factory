@@ -1,12 +1,16 @@
 package linear
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/logging"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // fakeLinearApps is a minimal db.LinearAppsStore for the OAuth-app resolver tests.
@@ -93,6 +97,21 @@ func TestResolveOAuthApp_OverrideMissingSecretFallsThrough(t *testing.T) {
 	}
 }
 
+// TestResolveOAuthApp_OverrideMissingSecretNoDeployment: a dead override with
+// no deployment app to fall through to resolves nothing.
+func TestResolveOAuthApp_OverrideMissingSecretNoDeployment(t *testing.T) {
+	apps := &fakeLinearApps{app: &domain.OrgLinearApp{ClientID: "org-client", ClientSecretRef: linearSecretRef}}
+	r := NewOAuthAppResolver(apps, &fakeSecrets{}, OAuthApp{})
+
+	_, source, err := r.Resolve(context.Background(), testOrgID)
+	if !errors.Is(err, ErrNoLinearOAuthApp) {
+		t.Fatalf("Resolve err = %v, want ErrNoLinearOAuthApp", err)
+	}
+	if source != SourceNone {
+		t.Fatalf("source = %v, want SourceNone", source)
+	}
+}
+
 // TestResolveOAuthApp_StoreErrorPropagates: a backend read error on the
 // per-org lookup propagates rather than being misreported as not-configured —
 // a transient outage must not silently fall through to the deployment app.
@@ -124,14 +143,83 @@ func TestResolveOAuthApp_SecretErrorPropagates(t *testing.T) {
 
 const linearSecretRef = "linear_oauth_client_secret"
 
-// TestDeploymentOAuthAppFromEnv_NoneYet pins that no deployment app resolves
-// in this build, whatever the environment says: an org installs only through
-// an app of its own.
-func TestDeploymentOAuthAppFromEnv_NoneYet(t *testing.T) {
-	t.Setenv("TF_LINEAR_CLIENT_ID", "dep-client")
-	t.Setenv("TF_LINEAR_CLIENT_SECRET", "dep-secret")
-	if app := DeploymentOAuthAppFromEnv(); app.Configured() {
+// setDeploymentEnv sets the deployment app's pair through t.Setenv, so the
+// environment is restored when the test ends. An empty value leaves that var
+// unset in effect, which is how the half-configured cases are expressed.
+func setDeploymentEnv(t *testing.T, clientID, clientSecret string) {
+	t.Helper()
+	t.Setenv("TF_LINEAR_CLIENT_ID", clientID)
+	t.Setenv("TF_LINEAR_CLIENT_SECRET", clientSecret)
+}
+
+// TestDeploymentOAuthAppFromEnv_LocalModeReadsNothing: a distributed local
+// binary can ship no shared client secret, so local mode returns the zero app
+// with both vars set.
+func TestDeploymentOAuthAppFromEnv_LocalModeReadsNothing(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeLocal)
+	setDeploymentEnv(t, "dep-client", "dep-secret")
+	if app := DeploymentOAuthAppFromEnv(); app != (OAuthApp{}) {
 		t.Errorf("DeploymentOAuthAppFromEnv = %+v, want the zero app", app)
+	}
+}
+
+// TestDeploymentOAuthAppFromEnv_MultiReadsAndTrims: multi mode reads the pair,
+// and a stray newline or indent in .env does not reach the credential.
+func TestDeploymentOAuthAppFromEnv_MultiReadsAndTrims(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	setDeploymentEnv(t, "  dep-client\n", "\tdep-secret\n")
+	want := OAuthApp{ClientID: "dep-client", ClientSecret: "dep-secret"}
+	if app := DeploymentOAuthAppFromEnv(); app != want {
+		t.Errorf("DeploymentOAuthAppFromEnv = %+v, want %+v", app, want)
+	}
+}
+
+// TestDeploymentOAuthAppFromEnv_MultiUnconfigured: neither var set is a
+// deployment whose orgs bring their own apps, and nothing is logged.
+func TestDeploymentOAuthAppFromEnv_MultiUnconfigured(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	setDeploymentEnv(t, "", " ")
+	var logs bytes.Buffer
+	t.Cleanup(logging.SetOutput(&logs))
+
+	if app := DeploymentOAuthAppFromEnv(); app != (OAuthApp{}) {
+		t.Errorf("DeploymentOAuthAppFromEnv = %+v, want the zero app", app)
+	}
+	if logs.Len() != 0 {
+		t.Errorf("logged %q, want nothing", logs.String())
+	}
+}
+
+// TestDeploymentOAuthAppFromEnv_HalfConfiguredIsLoggedAndNone: one var without
+// the other is the state in which an operator believes the deployment app is
+// set up and it is not. The boot log says which var is missing, never the
+// value of the one that is set, and the deployment runs with no deployment app.
+func TestDeploymentOAuthAppFromEnv_HalfConfiguredIsLoggedAndNone(t *testing.T) {
+	runmode.SetForTest(t, runmode.ModeMulti)
+	for _, tc := range []struct {
+		clientID, clientSecret, missing, present string
+	}{
+		{clientID: "dep-client", missing: "TF_LINEAR_CLIENT_SECRET", present: "dep-client"},
+		{clientSecret: "dep-secret", missing: "TF_LINEAR_CLIENT_ID", present: "dep-secret"},
+	} {
+		t.Run(tc.missing, func(t *testing.T) {
+			setDeploymentEnv(t, tc.clientID, tc.clientSecret)
+			var logs bytes.Buffer
+			t.Cleanup(logging.SetOutput(&logs))
+
+			if app := DeploymentOAuthAppFromEnv(); app != (OAuthApp{}) {
+				t.Errorf("DeploymentOAuthAppFromEnv = %+v, want the zero app", app)
+			}
+			// The text and JSON handlers spell the attribute differently.
+			line := logs.String()
+			named := strings.Contains(line, "not_set="+tc.missing) || strings.Contains(line, `"not_set":"`+tc.missing+`"`)
+			if !strings.Contains(line, "ERROR") || !named {
+				t.Errorf("logged %q, want an error naming %s", line, tc.missing)
+			}
+			if strings.Contains(line, tc.present) {
+				t.Errorf("logged %q, which carries the value that is set", line)
+			}
+		})
 	}
 }
 

@@ -31,8 +31,10 @@ export interface LinearAppStatus {
   using_deployment_default: boolean
   // Linear's app-creation page, pre-filled for this deployment. Linear does
   // not hand the credentials back, so the admin copies them from the app's
-  // page afterwards. Empty when no deployment identity is configured.
-  create_url: string
+  // page afterwards. Absent while the deployment's app resolves for the org,
+  // since there is nothing for the admin to create, and when no deployment
+  // identity is configured.
+  create_url?: string
   // The two redirect URIs the app registers: the install callback and the
   // per-user Connect callback.
   redirect_uris: string[]

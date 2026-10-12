@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -189,4 +190,33 @@ func secretFileValue(i int) string {
 		return "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\nAAAA\n-----END RSA PRIVATE KEY-----"
 	}
 	return "value-" + strings.Repeat("x", i)
+}
+
+// TestResolve_DeploymentLinearAppSecret: the deployment Linear app's client
+// secret is registered here and resolves through the NAME_FILE convention. Its
+// client id is public config and is not captured.
+func TestResolve_DeploymentLinearAppSecret(t *testing.T) {
+	if !slices.Contains(Secrets, "TF_LINEAR_CLIENT_SECRET") {
+		t.Error("Secrets does not contain TF_LINEAR_CLIENT_SECRET")
+	}
+	if slices.Contains(Secrets, "TF_LINEAR_CLIENT_ID") {
+		t.Error("Secrets contains TF_LINEAR_CLIENT_ID, which is not a secret")
+	}
+
+	path := filepath.Join(t.TempDir(), "linear-client-secret")
+	if err := os.WriteFile(path, []byte("lin-secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TF_LINEAR_CLIENT_SECRET_FILE", path)
+
+	dst := map[string]string{}
+	if err := resolveInto(dst, Secrets); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if got := dst["TF_LINEAR_CLIENT_SECRET"]; got != "lin-secret" {
+		t.Errorf("TF_LINEAR_CLIENT_SECRET = %q, want the file's value", got)
+	}
+	if v := os.Getenv("TF_LINEAR_CLIENT_SECRET_FILE"); v != "" {
+		t.Errorf("TF_LINEAR_CLIENT_SECRET_FILE still in env = %q; resolve must unset it", v)
+	}
 }

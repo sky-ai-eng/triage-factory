@@ -4,7 +4,9 @@
 // already filled in; Linear does not hand the credentials back, so the admin
 // pastes the client ID and secret from the created app's page. With the app
 // saved, a Linear workspace admin can install Triage Factory from the Linear
-// connection section.
+// connection section. When the deployment has a Linear app of its own, Install
+// already works and an app of the org's own is an optional override, so the
+// card says so and offers no creation link.
 //
 // Self-contained (an action section, no Save footer): it owns its status fetch,
 // the draft fields, the summary and the remove. `onStatus` tells the parent
@@ -156,14 +158,18 @@ export default function LinearOAuthAppCard({
   const showForm = !hasOverride || replacing
   const redirectURIs = status?.redirect_uris ?? []
 
+  const onDeploymentApp = !hasOverride && !!status?.using_deployment_default
+
   return (
     <div className="space-y-5">
-      <p className="text-body leading-relaxed text-ink-3">
-        Register a Linear OAuth app so a Linear workspace admin can install Triage Factory as an
-        app. Triage Factory then works in Linear as its own app user instead of through
-        someone&rsquo;s personal API key, and the app user takes no seat. The secret is stored
-        encrypted and never leaves your deployment.
-      </p>
+      {!onDeploymentApp && (
+        <p className="text-body leading-relaxed text-ink-3">
+          Register a Linear OAuth app so a Linear workspace admin can install Triage Factory as an
+          app. Triage Factory then works in Linear as its own app user instead of through
+          someone&rsquo;s personal API key, and the app user takes no seat. The secret is stored
+          encrypted and never leaves your deployment.
+        </p>
+      )}
 
       {loadFailed && (
         <p role="alert" className="text-ui leading-relaxed text-[var(--color-alarm)]">
@@ -188,10 +194,11 @@ export default function LinearOAuthAppCard({
           )}
         </div>
       )}
-      {!hasOverride && status?.using_deployment_default && (
+      {onDeploymentApp && (
         <div className="rounded-2xl border border-[var(--color-line-1)] bg-[var(--color-raised)]/40 px-4 py-3 text-ui text-ink-2">
-          Using this deployment&rsquo;s Linear app. Add your own below to use it for this workspace
-          instead.
+          Using this deployment&rsquo;s Triage Factory app, so a Linear workspace admin can install
+          Triage Factory without registering one. Register your own below only if you need to; it
+          then replaces the deployment&rsquo;s app for this workspace.
         </div>
       )}
 
@@ -254,10 +261,10 @@ export default function LinearOAuthAppCard({
                 <CopyField key={uri} label={`redirect URI ${i + 1}`} value={uri} />
               ))}
               <p className="text-reported leading-relaxed text-ink-3">
-                The link above registers both. If you create the app by hand, add each one under its
-                Callback URLs — Linear matches them exactly. The second is for members connecting
-                their own Linear accounts, which Triage Factory does not offer yet; registering it
-                now saves editing the app later.
+                {status?.create_url
+                  ? 'The link above registers both. If you create the app by hand, add each one under its Callback URLs — Linear matches them exactly.'
+                  : 'Add each one under the app’s Callback URLs — Linear matches them exactly.'}{' '}
+                The second is for members connecting their own Linear accounts.
               </p>
             </div>
           )}
