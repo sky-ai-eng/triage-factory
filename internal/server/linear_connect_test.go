@@ -1212,6 +1212,40 @@ func TestLinearConnect_WorkspaceMovesDuringTheExchange(t *testing.T) {
 	}
 }
 
+// TestLinearConnect_AppChangesDuringTheExchange: the code is exchanged
+// against the app that resolved when the callback started. An app replaced or
+// removed before the grant is stored would leave it unable to refresh, so the
+// store refuses, the minted pair is revoked with the app that minted it, and
+// nothing is written.
+func TestLinearConnect_AppChangesDuringTheExchange(t *testing.T) {
+	for name, change := range map[string]func(t *testing.T, r *linearConnectRig){
+		"replaced": func(t *testing.T, r *linearConnectRig) { r.registerApp(t, "lin-client-2") },
+		"removed": func(t *testing.T, r *linearConnectRig) {
+			if rec := doJSON(t, r.s, http.MethodDelete, linearAppPath(), nil); rec.Code != http.StatusOK {
+				t.Errorf("DELETE app mid-exchange: %d: %s", rec.Code, rec.Body.String())
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newLinearConnectRig(t)
+			cookie, state := r.startConnect(t, "")
+			r.oauth.mu.Lock()
+			r.oauth.onExchange = func() { change(t, r) }
+			r.oauth.mu.Unlock()
+
+			rec := r.get(t, linearConnectCallback(url.Values{"code": {"good-code"}, "state": {state}}), cookie)
+			expectConnectError(t, rec, "connect_failed", "")
+			r.assertNoUserCredential(t)
+			if got := r.oauth.Revoked(); len(got) != 2 {
+				t.Errorf("revoked %v, want the minted pair", got)
+			}
+			if got := r.oauth.RevokedBy(); !slices.Equal(got, []string{"lin-client-1", "lin-client-1"}) {
+				t.Errorf("revoked with %v, want the app that minted the pair", got)
+			}
+		})
+	}
+}
+
 // TestLinearIdentity_DisconnectActsOnTheWorkspaceItRunsIn: a disconnect that
 // waits on the user's lock while the org moves withdraws the credential for
 // the workspace the org is on when it runs, not the one it was on when the

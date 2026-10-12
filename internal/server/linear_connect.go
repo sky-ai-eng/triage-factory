@@ -69,8 +69,9 @@ import (
 //	state              the cookie is missing, expired, forged, or not this caller's
 //	denied             Linear answered access_denied: the user declined consent,
 //	                   or their workspace refused the app
-//	connect_failed     any other OAuth error, or the code exchange or the
-//	                   identity check failed
+//	connect_failed     any other OAuth error, the code exchange or the
+//	                   identity check failed, or the org's OAuth app was
+//	                   replaced or removed during the exchange
 //	no_app             no Linear OAuth app resolves for the org
 //	not_configured     the org has no Linear workspace
 //	workspace_mismatch the Linear account authorized is in a different workspace
@@ -521,6 +522,10 @@ func (s *Server) handleLinearConnectCallback(w http.ResponseWriter, r *http.Requ
 	case errors.Is(err, errLinearWorkspaceChanged):
 		redirectLinearConnect(w, r, orgID, returnTo, "workspace_mismatch")
 		return
+	case errors.Is(err, errLinearAppChanged):
+		linearConnectLog.Warn("the org's linear app changed during the exchange; refusing", "org", orgID, "client_id", app.ClientID)
+		redirectLinearConnect(w, r, orgID, returnTo, "connect_failed")
+		return
 	case err != nil:
 		internalError(w, "linear-connect", err)
 		return
@@ -571,10 +576,13 @@ func (s *Server) holdLinearWorkspace(ctx context.Context, orgID string, read fun
 // org's workspace read under holdLinearWorkspace. It refuses when that is no
 // longer workspaceID (errLinearWorkspaceChanged, or errLinearNotConfigured
 // when the org has none), so a credential is never stored under a workspace
-// it was not checked against. A Connect grant the new credential replaces is
-// then revoked in Linear, unless the new one may be that same grant (see
-// supersededLinearGrant), after both locks are released. It returns the
-// workspace's URL key.
+// it was not checked against. A Connect grant is refused the same way when
+// the app that minted it no longer resolves (errLinearAppChanged): the org's
+// app import and delete hold that lock too, so one that landed during the
+// code exchange is seen here, and a grant TF cannot refresh is never stored.
+// A Connect grant the new credential replaces is then revoked in Linear,
+// unless the new one may be that same grant (see supersededLinearGrant),
+// after both locks are released. It returns the workspace's URL key.
 //
 // Membership is read again here, under the user's credential lock, and a
 // user no longer in the org is errLinearNotOrgMember. The route's own check ran before the
@@ -623,6 +631,15 @@ func (s *Server) storeLinearUserCredential(ctx context.Context, orgID, userID, w
 		return "", errLinearWorkspaceChanged
 	}
 	urlKey := orgSet.LinearWorkspaceURLKey
+	if cred.Method == linear.AuthMethodConnectOAuth {
+		_, err := s.linearOAuthApps.ResolveClient(ctx, orgID, cred.ClientID)
+		if errors.Is(err, linear.ErrNoLinearOAuthApp) {
+			return "", errLinearAppChanged
+		}
+		if err != nil {
+			return "", fmt.Errorf("resolve linear oauth app %s: %w", cred.ClientID, err)
+		}
+	}
 
 	restore, err := s.guardLocalUserSecretWrite(ctx, orgID, userID, key)
 	if err != nil {

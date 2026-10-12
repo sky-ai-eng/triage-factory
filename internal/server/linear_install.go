@@ -283,11 +283,11 @@ func (s *Server) handleLinearInstallCallback(w http.ResponseWriter, r *http.Requ
 	http.Redirect(w, r, linearInstallReturn(orgID, returnTo, "linear", "installed"), http.StatusFound)
 }
 
-// errLinearAppChanged is an install whose OAuth app was replaced or removed
-// between the code exchange and the store. Its refresh token needs the secret
-// of the app that minted it, which is no longer the org's, so it is refused
-// rather than stored unable to refresh.
-var errLinearAppChanged = errors.New("linear: the oauth app changed during the install")
+// errLinearAppChanged is an install or a Connect grant whose OAuth app was
+// replaced or removed between the code exchange and the store. Its refresh
+// token needs the secret of the app that minted it, which TF no longer holds,
+// so it is refused rather than stored unable to refresh.
+var errLinearAppChanged = errors.New("linear: the oauth app changed during the code exchange")
 
 // newLinearInstallID mints an install's id: random, so two installs of one
 // org can never share one.
