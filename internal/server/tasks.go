@@ -1553,7 +1553,19 @@ func (t txTeardownStores) RecordExternalAction(ctx context.Context, orgID string
 // with none recorded has nothing to put back. applyJiraUnclaim decides what
 // to write.
 func (s *Server) revertJiraStateIfApplicable(ctx context.Context, orgID, userID string, task *domain.Task) {
-	if task == nil || task.EntitySource != "jira" || task.SourceStatus == nil {
+	if task == nil || task.EntitySource != "jira" {
+		return
+	}
+	if task.SourceStatus == nil {
+		// A person's claim with nothing recorded: the snapshot named no
+		// status at claim time, the stored value does not decode, or the
+		// row was claimed by a build that did not record one. Without this
+		// line the skip leaves no trace for someone asking why the ticket
+		// did not move. A task nobody claimed was never going to move.
+		if task.ClaimedByUserID != "" {
+			jiraLog.Info("requeue revert: no pre-claim state recorded, leaving the ticket",
+				"ticket", task.EntitySourceID, "claimed_by", task.ClaimedByUserID)
+		}
 		return
 	}
 	// The reversal undoes the user's own claim, so it acts as that user, not
