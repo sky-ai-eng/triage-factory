@@ -668,13 +668,14 @@ func (s *Server) foreignOrigin(r *http.Request) bool {
 
 // originNamesLocalHost reports whether origin is the same host and port as
 // host, and host is one withForeignHostCheck accepts. It applies only when
-// rejectForeignHosts is set, which is local mode. A local instance answers on
-// every address it is bound to: a --host 0.0.0.0 server is reached by its LAN
-// IP, and a loopback one by 127.0.0.1 as well as localhost, while publicURL
-// names only one of them. A page whose origin is the address the request was sent to was
-// served by whatever answers at that address, which is this server; a foreign
-// page has its own origin, and a DNS-rebinding page, whose origin does match
-// the Host it sends, carries a name the Host check refuses.
+// rejectForeignHosts is set, which is local mode. A local instance answers
+// on every address it is bound to: a --host 0.0.0.0 server is reached by its
+// LAN IP, and a loopback one by 127.0.0.1 as well as localhost, while
+// publicURL names only one of them. A page whose origin is the address the
+// request was sent to was served by whatever answers at that address, which
+// is this server; a foreign page has its own origin, and a DNS-rebinding
+// page, whose origin does match the Host it sends, carries a name the Host
+// check refuses.
 func (s *Server) originNamesLocalHost(origin, host string) bool {
 	if !s.deployCfg.rejectForeignHosts || !s.localHost(host) {
 		return false
