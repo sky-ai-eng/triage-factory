@@ -609,8 +609,7 @@ func (s *Server) refreshSessionInline(ctx context.Context, sess *sessions.Sessio
 const devFrontendOrigin = "http://localhost:5173"
 
 // withCSRFOriginCheck rejects mutating requests (POST/PUT/PATCH/DELETE)
-// whose Origin header doesn't match the configured publicURL (or, in local
-// mode with the dev frontend running, devFrontendOrigin — see above).
+// from an Origin this deployment does not serve (foreignOrigin).
 // Browsers always send Origin on cross-origin requests, so this catches the
 // gap that SameSite=Lax leaves (which permits top-level cross-site
 // POSTs to the request URL).
@@ -636,8 +635,9 @@ func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 }
 
 // foreignOrigin reports whether r is a browser request sent from a page this
-// deployment does not serve: its Origin is neither publicURL nor (local dev
-// only) devFrontendOrigin. withCSRFOriginCheck applies it to mutating routes
+// deployment does not serve: its Origin is not publicURL, not (local mode
+// only) the local address the request was sent to, and not (local dev only)
+// devFrontendOrigin. withCSRFOriginCheck applies it to mutating routes
 // and handleWS to the websocket handshake, which browsers send cross-origin
 // without any CORS gate.
 //
@@ -660,10 +660,30 @@ func (s *Server) foreignOrigin(r *http.Request) bool {
 		return false
 	}
 	origin := r.Header.Get("Origin")
-	if origin == "" || origin == s.deployCfg.publicURL {
+	if origin == "" || origin == s.deployCfg.publicURL || s.originNamesLocalHost(origin, r.Host) {
 		return false
 	}
 	return !s.deployCfg.trustDevFrontendOrigin || origin != devFrontendOrigin
+}
+
+// originNamesLocalHost reports whether origin is the same host and port as
+// host, and host is one withForeignHostCheck accepts. It applies only when
+// rejectForeignHosts is set, which is local mode. A local instance answers on
+// every address it is bound to: a --host 0.0.0.0 server is reached by its LAN
+// IP, and a loopback one by 127.0.0.1 as well as localhost, while publicURL
+// names only one of them. A page whose origin is the address the request was sent to was
+// served by whatever answers at that address, which is this server; a foreign
+// page has its own origin, and a DNS-rebinding page, whose origin does match
+// the Host it sends, carries a name the Host check refuses.
+func (s *Server) originNamesLocalHost(origin, host string) bool {
+	if !s.deployCfg.rejectForeignHosts || !s.localHost(host) {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	return strings.EqualFold(u.Host, host)
 }
 
 func writeCrossOriginRejected(w http.ResponseWriter) {

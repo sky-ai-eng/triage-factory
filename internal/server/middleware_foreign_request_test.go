@@ -50,6 +50,9 @@ func TestHandleWS_OriginGate(t *testing.T) {
 		{"dev frontend", http.Header{"Origin": {devFrontendOrigin}}, 0},
 		{"foreign site", http.Header{"Origin": {"https://evil.example"}}, http.StatusForbidden},
 		{"publicURL host on another port", http.Header{"Origin": {"http://localhost:4000"}}, http.StatusForbidden},
+		// httptest listens on 127.0.0.1:<port>, so this is the address the
+		// handshake is sent to, which publicURL does not name.
+		{"the address dialed", http.Header{"Origin": {ts.URL}}, 0},
 		{"Bearer credential skips the origin gate", http.Header{
 			"Origin":        {"https://evil.example"},
 			"Authorization": {"Bearer tf_anything"},
@@ -71,6 +74,54 @@ func TestHandleWS_OriginGate(t *testing.T) {
 			}
 			if resp == nil || resp.StatusCode != tt.want {
 				t.Fatalf("handshake response = %v, want status %d", resp, tt.want)
+			}
+		})
+	}
+}
+
+// TestForeignOrigin_LocalAddress pins the local-mode rule that a page served
+// from the address a request was sent to is not foreign, though publicURL
+// names a different one. That is what lets a --host 0.0.0.0 instance browsed
+// by its LAN address, or a loopback one browsed by 127.0.0.1, make writes. A
+// DNS-rebinding page also sends an Origin matching its Host, so the rule must
+// hold only for a Host the foreign-host check accepts.
+func TestForeignOrigin_LocalAddress(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	newServer := func(publicURL string, local bool) *Server {
+		s := &Server{}
+		s.SetDeployConfig(publicURL, [32]byte{})
+		if local {
+			s.RejectForeignHosts()
+		}
+		return s
+	}
+
+	tests := []struct {
+		name      string
+		publicURL string
+		local     bool
+		host      string
+		origin    string
+		want      int
+	}{
+		{"LAN IP of a 0.0.0.0 bind", "http://0.0.0.0:3000", true, "192.168.1.20:3000", "http://192.168.1.20:3000", http.StatusOK},
+		{"127.0.0.1 beside a localhost publicURL", "http://localhost:3000", true, "127.0.0.1:3000", "http://127.0.0.1:3000", http.StatusOK},
+		{"IPv6 loopback", "http://localhost:3000", true, "[::1]:3000", "http://[::1]:3000", http.StatusOK},
+		{"the --host name", "http://devbox.lan:3000", true, "devbox.lan:3000", "http://devbox.lan:3000", http.StatusOK},
+		{"another local port", "http://localhost:3000", true, "127.0.0.1:3000", "http://127.0.0.1:8080", http.StatusForbidden},
+		{"rebinding page", "http://localhost:3000", true, "attacker.example:3000", "http://attacker.example:3000", http.StatusForbidden},
+		{"opaque origin", "http://localhost:3000", true, "localhost:3000", "null", http.StatusForbidden},
+		{"multi mode trusts publicURL alone", "https://tf.example.com", false, "10.0.0.5:3000", "http://10.0.0.5:3000", http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/anything", nil)
+			req.Host = tt.host
+			req.Header.Set("Origin", tt.origin)
+			rec := httptest.NewRecorder()
+			newServer(tt.publicURL, tt.local).withCSRFOriginCheck(next).ServeHTTP(rec, req)
+			if rec.Code != tt.want {
+				t.Fatalf("status = %d, want %d", rec.Code, tt.want)
 			}
 		})
 	}

@@ -85,8 +85,10 @@ type deployConfig struct {
 	// wired into multi-mode's deploy config.
 	trustDevFrontendOrigin bool
 
-	// rejectForeignHosts turns on withForeignHostCheck (see middleware.go).
-	// Set only via RejectForeignHosts, which only local-mode boot calls.
+	// rejectForeignHosts turns on withForeignHostCheck, and with it
+	// foreignOrigin's trust in an Origin naming the vetted Host (see
+	// middleware.go). Set only via RejectForeignHosts, which only local-mode
+	// boot calls.
 	rejectForeignHosts bool
 }
 
@@ -126,8 +128,9 @@ func (s *Server) AllowDevFrontendOrigin() {
 
 // RejectForeignHosts turns on withForeignHostCheck, which refuses any request
 // whose Host is not this machine's (the DNS-rebinding defense local mode needs
-// because it has no authentication). Local-mode boot only. Call only after
-// SetDeployConfig; a no-op if deployCfg isn't set yet.
+// because it has no authentication), and lets the origin checks trust a page
+// served from the address a request was sent to. Local-mode boot only. Call
+// only after SetDeployConfig; a no-op if deployCfg isn't set yet.
 func (s *Server) RejectForeignHosts() {
 	if s.deployCfg == nil {
 		return
