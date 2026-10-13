@@ -482,6 +482,33 @@ func TestGHWire_ThreadReplyIsKeyedOnTheReply(t *testing.T) {
 	}
 }
 
+// TestGHWire_AliasedReplyKeepsItsActAndLosesItsIDs: a selection that aliases a
+// field onto a name the response read relies on gets back that field's value
+// under that name — here, as GitHub would answer `databaseId: body` — so the row
+// takes nothing from the response. The act is still named and still located by
+// the thread its request named.
+func TestGHWire_AliasedReplyKeepsItsActAndLosesItsIDs(t *testing.T) {
+	upstream, _ := fakeGHE(t, "")
+	var writes writeObservations
+	env := ghEnvWithWrites(t, upstream.URL, writes.record)
+
+	runGH(t, env, "api", "graphql",
+		"-f", `query=mutation($input:AddPullRequestReviewThreadReplyInput!){addPullRequestReviewThreadReply(input:$input){comment{id databaseId: body url}}}`,
+		"-f", "input[pullRequestReviewThreadId]=PRRT_kwThread", "-f", "input[body]=8")
+
+	w := writes.only(t, "gh api graphql")
+	if w.ExternalID != "" || w.NodeID != "" || w.URL != "" {
+		t.Errorf("record = %+v, want no id, node id, or url from an aliased response", w)
+	}
+	shape, ok := ghwrite.Resolve(w)
+	if !ok || !w.Succeeded() || shape.Action != domain.ActionCommentPosted {
+		t.Fatalf("record = %+v resolved to %+v (ok=%v), want comment_posted", w, shape, ok)
+	}
+	if shape.ExternalID != "" || shape.Target() != "PRRT_kwThread" {
+		t.Errorf("shape = %+v, want no id and the thread's node id as the target", shape)
+	}
+}
+
 // TestGHWire_ReadsAreNotAudited is the acceptance's other half and the reason
 // the prescreen exists. gh issues several requests per command — repo lookups,
 // finder queries, schema introspection — and none of them may leave a row.

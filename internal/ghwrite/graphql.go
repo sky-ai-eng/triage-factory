@@ -110,6 +110,15 @@ type GraphQLFacts struct {
 	// read it: for them the review input is optional, and supplying one stages
 	// the act on that pending review instead of performing it.
 	NamesReview bool
+
+	// ResponseAliased reports that the document aliases some field to a name
+	// the response read takes values from (responseReadNames). A response
+	// member is keyed by its alias, so under that name the response holds
+	// whatever field the alias pointed at — a comment's body under databaseId
+	// — and ReadGraphQLResponse reads no url or id from it. Only that read uses
+	// it, and it runs in the process that read the request, so the fact does not
+	// cross the relay.
+	ResponseAliased bool
 }
 
 // Mutation returns the single top-level field this request invoked, or empty
@@ -328,10 +337,11 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 
 	fields, unreadable := resolveTopLevelFields(op.sel, document.fragments)
 	facts := GraphQLFacts{
-		Operation:   op.name,
-		Fields:      fields,
-		Subject:     subject,
-		NamesReview: documentNames(envelope.Query, reviewInput) || variablesName(envelope.Variables, reviewInput),
+		Operation:       op.name,
+		Fields:          fields,
+		Subject:         subject,
+		NamesReview:     documentNames(envelope.Query, reviewInput) || variablesName(envelope.Variables, reviewInput),
+		ResponseAliased: documentAliasesOnto(envelope.Query, responseReadNames),
 	}
 	switch {
 	case unreadable != "":
@@ -494,6 +504,21 @@ func pickSubject(vars map[string]json.RawMessage) string {
 // drive an unbounded descent.
 const maxResponseDepth = 6
 
+// responseReadNames are the response members ReadGraphQLResponse takes values
+// from — the url and ids it reads, and every member on the path to a created
+// comment. Aliasing a field to any of them puts that field's value where the
+// read expects a GitHub-assigned one: a parent alias swaps in another object
+// whole, a leaf alias swaps in text.
+var responseReadNames = func() map[string]bool {
+	names := map[string]bool{"url": true, "id": true, "databaseId": true, "fullDatabaseId": true}
+	for _, entry := range graphQLMutations {
+		for _, member := range entry.comment {
+			names[member] = true
+		}
+	}
+	return names
+}()
+
 // GraphQLResponse is what one GraphQL response adds to an audit row.
 type GraphQLResponse struct {
 	// Errored reports an errors array. GraphQL answers a refused mutation with
@@ -516,9 +541,13 @@ type GraphQLResponse struct {
 // whether the write actually failed, where the object it made now lives, and —
 // for a comment create — that comment's ids.
 //
-// field names the mutation whose payload to search, so the scan starts inside
-// the act's own result and cannot wander into some other part of the response.
-func ReadGraphQLResponse(body []byte, field string) GraphQLResponse {
+// It is read against the facts of the request that produced it. The mutation
+// they name is the payload to search, so the scan starts inside the act's own
+// result and cannot wander into some other part of the response. And a request
+// that aliased a field onto a name this read relies on gets the errors check
+// and nothing else: the row is better without a url or an id than with one the
+// request's author chose.
+func ReadGraphQLResponse(body []byte, facts GraphQLFacts) GraphQLResponse {
 	var payload struct {
 		Data   map[string]json.RawMessage `json:"data"`
 		Errors []json.RawMessage          `json:"errors"`
@@ -527,7 +556,8 @@ func ReadGraphQLResponse(body []byte, field string) GraphQLResponse {
 		return GraphQLResponse{}
 	}
 	read := GraphQLResponse{Errored: len(payload.Errors) > 0}
-	if field == "" {
+	field := facts.Mutation()
+	if field == "" || facts.ResponseAliased {
 		return read
 	}
 	result := payload.Data[field]
@@ -548,9 +578,9 @@ func ReadGraphQLResponse(body []byte, field string) GraphQLResponse {
 // The numeric id comes from databaseId where the selection returned it, from
 // fullDatabaseId (GitHub's replacement for it on review comments) next, and
 // otherwise from the comment url's own anchor, which is all gh's porcelain
-// selects. GitHub assigns every one of these values, but a hand-written
-// selection can alias another field under any of their names, so each is read
-// only in the shape GitHub gives it and is otherwise left empty.
+// selects. GitHub assigns every one of these values; a request that aliased
+// another field to one of their names never reaches this read, and each value
+// is still read only in the shape GitHub gives it and otherwise left empty.
 func createdComment(result json.RawMessage, path []string) (objectURL, externalID, nodeID string) {
 	object := jsonObject(result)
 	for _, key := range path {

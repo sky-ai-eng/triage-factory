@@ -1310,6 +1310,13 @@ func assertDocumentsStayReadable(t *testing.T, records *wireRecords) {
 			t.Errorf("operation %q selected %d top-level fields %v, want exactly one — a document performing "+
 				"several acts cannot be described by one audit row", facts.Operation, len(facts.Fields), facts.Fields)
 		}
+		// The response read skips a request that aliases onto a name it relies
+		// on. A porcelain document that did would lose its row's url and ids with
+		// nothing failing, so the battery is where it has to show.
+		if facts.ResponseAliased {
+			t.Errorf("operation %q aliases a field onto a name the response read relies on — its rows would "+
+				"carry no url or id", facts.Operation)
+		}
 	}
 
 	// The size and spread measurements are taken over the bodies that were

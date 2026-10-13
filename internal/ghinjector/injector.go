@@ -684,7 +684,7 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 		GraphQL: facts,
 	}
 	if len(body) > 0 {
-		read := ghwrite.ReadGraphQLResponse(body, facts.Mutation())
+		read := ghwrite.ReadGraphQLResponse(body, *facts)
 		w.Errored, w.URL, w.ExternalID, w.NodeID = read.Errored, read.URL, read.ExternalID, read.NodeID
 	} else {
 		w.ResponseUnread = true

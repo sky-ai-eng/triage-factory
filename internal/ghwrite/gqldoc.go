@@ -32,9 +32,11 @@ import "strings"
 // — and resolution touches each definition at most once, so a document cannot
 // spend this process's time by nesting or by pointing fragments at each other.
 //
-// One other question is answered, by documentNames: does a given name appear
-// anywhere in the document? That is a pass over the same tokens which compares
-// names and reads nothing else — no value, no string, no position in the grammar.
+// Two other questions are answered, each by one pass over the same tokens that
+// compares names and reads nothing else — no value, no string, no position in
+// the grammar: does a given name appear anywhere in the document
+// (documentNames), and does the document alias some field to one of a set of
+// names (documentAliasesOnto)?
 
 // gqlOperation names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
@@ -194,6 +196,34 @@ func documentNames(doc, name string) bool {
 			return sc.bad
 		}
 		if tok.name(name) {
+			return true
+		}
+	}
+}
+
+// documentAliasesOnto reports whether the document aliases any field to one of
+// names, at any depth and in any fragment. An alias has one token shape: a name,
+// a colon, and the name of the field it stands for. Nothing else in a document
+// has it except a variable definition, which a `$` precedes, and an argument or
+// input field given an enum, a boolean, or a null — which counts as an alias
+// here, costing that request the values the caller would have read.
+//
+// A document the scanner cannot tokenize answers true, for the same reason
+// documentNames does.
+func documentAliasesOnto(doc string, names map[string]bool) bool {
+	sc := &gqlScanner{src: doc}
+	// The last four tokens, oldest first: the alias candidate is the second,
+	// so the one before it can rule out a variable definition.
+	var window [4]gqlToken
+	for {
+		tok, more := sc.next()
+		if !more {
+			return sc.bad
+		}
+		window = [4]gqlToken{window[1], window[2], window[3], tok}
+		alias, colon, field := window[1], window[2], window[3]
+		if alias.kind == gqlKindName && names[alias.text] && colon.punct(":") &&
+			field.kind == gqlKindName && !window[0].punct("$") {
 			return true
 		}
 	}

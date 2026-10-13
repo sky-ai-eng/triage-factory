@@ -31,6 +31,10 @@ func envelope(t *testing.T, query, operationName string, variables any) []byte {
 // input wraps variables the way every mutation gh sends does.
 func input(fields map[string]any) map[string]any { return map[string]any{"input": fields} }
 
+// mutation is the facts of a request that selected one field and aliased
+// nothing the response read relies on.
+func mutation(field string) GraphQLFacts { return GraphQLFacts{Fields: []string{field}} }
+
 // TestParseGraphQLRequest_ReadsRecordNothing is the acceptance floor and the
 // performance one at once: the endpoint's traffic is overwhelmingly reads, and
 // every one of them must resolve to "no write happened" — not to an unnamed row
@@ -685,6 +689,70 @@ func TestParseGraphQLRequest_NamesReview(t *testing.T) {
 	}
 }
 
+// TestParseGraphQLRequest_ResponseAliased: an alias onto a name the response
+// read relies on is found wherever it sits, and nothing else that shares its
+// colon is mistaken for one — except an argument given an enum or a null, which
+// costs that request its url and ids and nothing more.
+func TestParseGraphQLRequest_ResponseAliased(t *testing.T) {
+	const reply = `addPullRequestReviewThreadReply(input:$input)`
+	const head = `mutation($input:AddPullRequestReviewThreadReplyInput!){`
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{name: "the selection gh would send", query: head + reply + `{comment{id databaseId url}}}`},
+		{name: "an alias onto an id", query: head + reply + `{comment{databaseId: body}}}`, want: true},
+		{name: "an alias onto the url", query: head + reply + `{comment{url:bodyText}}}`, want: true},
+		{
+			// Every value under the parent would be GitHub's, of another object.
+			name:  "an alias onto a parent",
+			query: head + reply + `{comment: clientMutationId}}`,
+			want:  true,
+		},
+		{
+			name:  "an alias across a comment and commas",
+			query: head + reply + "{comment{databaseId # x\n , : body}}}",
+			want:  true,
+		},
+		{
+			name:  "an alias inside a fragment",
+			query: head + reply + `{comment{...F}}} fragment F on PullRequestReviewComment{id:body}`,
+			want:  true,
+		},
+		{name: "an alias onto some other name", query: head + reply + `{comment{text: body url}}}`},
+		{
+			name:  "a variable definition",
+			query: `mutation($id:ID!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:"b"}){pullRequestReviewComment{url}}}`,
+		},
+		{
+			name:  "an argument given a variable",
+			query: `mutation($id:ID!){deletePullRequestReviewComment(input:{id:$id}){pullRequestReviewComment{id url}}}`,
+		},
+		{
+			name:  "an argument given a string",
+			query: `mutation{deletePullRequestReviewComment(input:{id:"PRRC_x"}){pullRequestReviewComment{id url}}}`,
+		},
+		{name: "the shape inside a string", query: head + `addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"x",body:"databaseId: body"}){comment{url}}}`},
+		{
+			name:  "an argument given a null",
+			query: `mutation{deletePullRequestReviewComment(input:{id:null}){clientMutationId}}`,
+			want:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, "", nil))
+			if !ok || facts.Mutation() == "" {
+				t.Fatalf("facts = %+v (ok=%v), want one mutation named", facts, ok)
+			}
+			if facts.ResponseAliased != tc.want {
+				t.Errorf("response aliased = %v, want %v", facts.ResponseAliased, tc.want)
+			}
+		})
+	}
+}
+
 // TestGraphQLReviewCommentFamily: the review-comment mutations no porcelain
 // command sends. A reply is keyed on what it created, so its row's id comes from
 // the response; an edit and a delete are keyed on the comment they named, by
@@ -873,7 +941,7 @@ func TestObservation_GraphQLErrorsAreNotSuccesses(t *testing.T) {
 func TestReadGraphQLResponse(t *testing.T) {
 	t.Run("errors", func(t *testing.T) {
 		body := []byte(`{"data":{"mergePullRequest":null},"errors":[{"message":"Pull request is not mergeable"}]}`)
-		read := ReadGraphQLResponse(body, "mergePullRequest")
+		read := ReadGraphQLResponse(body, mutation("mergePullRequest"))
 		if !read.Errored {
 			t.Error("an errors array did not register as a failure")
 		}
@@ -884,7 +952,7 @@ func TestReadGraphQLResponse(t *testing.T) {
 
 	t.Run("created object url", func(t *testing.T) {
 		body := []byte(`{"data":{"addComment":{"commentEdge":{"node":{"url":"https://github.com/acme/widgets/pull/841#issuecomment-7"}}}}}`)
-		read := ReadGraphQLResponse(body, "addComment")
+		read := ReadGraphQLResponse(body, mutation("addComment"))
 		if read.Errored {
 			t.Error("a clean response registered as a failure")
 		}
@@ -896,16 +964,32 @@ func TestReadGraphQLResponse(t *testing.T) {
 	t.Run("scans only the named mutation's payload", func(t *testing.T) {
 		// A url sitting under some other member is not this act's object.
 		body := []byte(`{"data":{"closePullRequest":{"pullRequest":{"id":"PR_x"}},"other":{"url":"https://github.com/a/b/pull/1"}}}`)
-		if read := ReadGraphQLResponse(body, "closePullRequest"); read.URL != "" {
+		if read := ReadGraphQLResponse(body, mutation("closePullRequest")); read.URL != "" {
 			t.Errorf("url = %q, want none — the scan must not wander outside the act's payload", read.URL)
 		}
 	})
 
 	t.Run("unparseable body", func(t *testing.T) {
-		if read := ReadGraphQLResponse([]byte("not json"), "addComment"); read != (GraphQLResponse{}) {
+		if read := ReadGraphQLResponse([]byte("not json"), mutation("addComment")); read != (GraphQLResponse{}) {
 			t.Errorf("read = %+v, want the zero reading for a body that did not parse", read)
 		}
 	})
+}
+
+// TestReadGraphQLResponse_AliasedRequestReadsOnlyErrors: under an aliased name
+// the response holds whatever the alias pointed at, which nothing can tell from
+// a GitHub-assigned value of the right shape. The read keeps the one member no
+// alias can reach — the errors array — and nothing else.
+func TestReadGraphQLResponse_AliasedRequestReadsOnlyErrors(t *testing.T) {
+	// What GitHub returns for `comment{databaseId: body url}` when the reply's
+	// body is a number someone chose.
+	body := []byte(`{"data":{"addPullRequestReviewThreadReply":{"comment":{"databaseId":"123",` +
+		`"url":"https://github.com/acme/widgets/pull/841#discussion_r123"}}},"errors":[{"message":"partial"}]}`)
+	facts := GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}, ResponseAliased: true}
+	read := ReadGraphQLResponse(body, facts)
+	if want := (GraphQLResponse{Errored: true}); read != want {
+		t.Errorf("read = %+v, want %+v — an aliased request's members are not GitHub's", read, want)
+	}
 }
 
 // TestReadGraphQLResponse_CreatedCommentIDs: a comment create's row is keyed on
@@ -997,7 +1081,7 @@ func TestReadGraphQLResponse_CreatedCommentIDs(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			read := ReadGraphQLResponse([]byte(tc.body), tc.field)
+			read := ReadGraphQLResponse([]byte(tc.body), mutation(tc.field))
 			if read.ExternalID != tc.wantID {
 				t.Errorf("external id = %q, want %q", read.ExternalID, tc.wantID)
 			}
@@ -1086,7 +1170,8 @@ func FuzzParseGraphQLRequest(f *testing.F) {
 		facts, ok := ParseGraphQLRequest(body)
 		if !ok {
 			// "No write here" must be unambiguous: nothing may ride along with it.
-			if facts.Mutation() != "" || facts.Unreadable != "" || facts.Subject != "" || facts.NamesReview {
+			if facts.Mutation() != "" || facts.Unreadable != "" || facts.Subject != "" || facts.NamesReview ||
+				facts.ResponseAliased {
 				t.Fatalf("ok=false carried facts %+v; a read must resolve to nothing at all", facts)
 			}
 			return
