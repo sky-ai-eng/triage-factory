@@ -154,18 +154,21 @@ anything an agent leaves there is discarded.
 ## Agent sandbox (Linux)
 
 On Linux, delegated agent runs execute inside a
-[bubblewrap](https://github.com/containers/bubblewrap) mount namespace by
-default. Inside it a run sees its own worktree, its own gh config, TF's git
+[bubblewrap](https://github.com/containers/bubblewrap) mount and pid namespace
+by default. Inside it a run sees its own worktree, its own gh config, TF's git
 hooks and toolchain, and any directory you explicitly granted the run — and
 nothing else. Your home directory, the TF database and clone cache, every
-concurrent run's worktree, and the OS keychain's session sockets are all
-replaced by empty directories.
+concurrent run's worktree, and `/run` (where the OS keychain's session sockets
+live) are all replaced by empty directories. The run also sees only its own
+processes, not TF or anything else running as you.
 
 This is **courtesy isolation, not a security boundary**. The agent runs as you,
 shares your network, and could break out on purpose the way any process running
 as you could. What it prevents is the accident: a wandering or prompt-injected
 agent reading another run's work, your dotfiles, or the database, all of which
-were one `cat` away before.
+were one `cat` away before. It hides the keychain's socket paths and does
+nothing more for the keychain: the network namespace is shared, so services on
+loopback or on an abstract unix socket stay reachable.
 
 Two consequences worth knowing:
 

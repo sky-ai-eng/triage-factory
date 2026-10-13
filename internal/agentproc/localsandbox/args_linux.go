@@ -44,17 +44,27 @@ func Args(spec Spec, host Host) ([]string, error) {
 
 	// The whole host, read-only, plus the two pseudo-filesystems that cannot
 	// simply be carried over: a minimal /dev (no host disks, no /dev/kmsg)
-	// and a fresh /proc. No --unshare-net (the run's git proxy, gh injector
-	// and LLM endpoint are loopback) and no --unshare-pid (the caller's
-	// Setpgid + kill-process-group teardown reaches the agent's children
-	// only while they share this pid namespace; --die-with-parent below is
-	// what covers the case --unshare-pid would have).
+	// and a /proc that belongs to the new pid namespace.
+	//
+	// --unshare-pid is what keeps the masks below meaningful. They hide paths
+	// in THIS mount namespace, but /proc/<pid>/root of a same-uid host process
+	// resolves in that process's own mount namespace, where nothing is masked;
+	// in the host's pid namespace every such process is addressable by number.
+	// In a private one the agent sees only its own processes. It also makes
+	// teardown total: the caller's Setpgid + kill-process-group ends bwrap and
+	// the namespace's init with it, and the kernel then kills whatever is left
+	// in the namespace, including a descendant that left the group with
+	// setsid. --die-with-parent covers the caller itself dying.
+	//
+	// No --unshare-net: the run's git proxy, gh injector and LLM endpoint are
+	// loopback, so the network stays the host's.
 	bwrap := host.Bwrap
 	if bwrap == "" {
 		bwrap = Binary
 	}
 	args := []string{
 		bwrap,
+		"--unshare-pid",
 		"--ro-bind", "/", "/",
 		"--dev", "/dev",
 		"--proc", "/proc",
@@ -78,8 +88,8 @@ func Args(spec Spec, host Host) ([]string, error) {
 	//                          alongside it whenever TMPDIR points elsewhere,
 	//                          so the machine's shared temp goes too
 	//   /run                   which takes /run/user/<uid> with it — the
-	//                          session D-Bus and Secret Service sockets — so
-	//                          the OS keychain is simply unreachable
+	//                          session D-Bus and Secret Service socket paths —
+	//                          out of the run's filesystem view
 	//
 	// Sorted, which puts a parent ahead of any child of it (a prefix sorts
 	// first), and emitted as a group so no later mask can shadow an earlier
@@ -360,7 +370,7 @@ func smokeTest(bin string) error {
 	// fixes passed such a probe and killed every run at its first completion,
 	// so the probe now builds the part of the plan that broke and, where the
 	// host has a resolv.conf to check, asserts it is readable from inside.
-	smoke := []string{"--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run"}
+	smoke := []string{"--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp", "--tmpfs", "/run"}
 	for _, p := range DNSPaths() {
 		smoke = append(smoke, "--ro-bind-try", p, p)
 	}
