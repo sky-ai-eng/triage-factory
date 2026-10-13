@@ -47,6 +47,9 @@ Claude is the one credential that can come from the environment, covered
    authentication — every request is treated as the owner — so the server
    refuses a non-loopback bind unless you also set `TF_ALLOW_PUBLIC_LOCAL=true`.
    Only do that on a network where everyone who can reach the port is you.
+   Open the UI by IP address: local mode answers only requests addressed to
+   `localhost`, an IP address, or the `--host` value, so that a web page whose
+   DNS name rebinds to your machine cannot read the API.
 
 5. **Configure in the browser.** Start your factory, then connect GitHub (host
    and token), pick your repos, connect Jira if you use it, choose how Claude

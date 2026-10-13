@@ -58,6 +58,9 @@ func (a *App) buildServer(ctx context.Context, static fs.FS) error {
 		// run dev` (port 5173, proxying /api to this backend) can make
 		// mutating requests — see AllowDevFrontendOrigin's doc comment.
 		a.srv.AllowDevFrontendOrigin()
+		// Local mode authenticates nothing, so a DNS-rebinding page would
+		// otherwise read every GET route — see RejectForeignHosts.
+		a.srv.RejectForeignHosts()
 	} else {
 		if err := a.wireAuth(ctx); err != nil {
 			return err
