@@ -26,9 +26,12 @@ const linearNoParent = "none"
 // renaming themselves is not a reassignment either. The creator is carried on
 // every event and never diffed: Linear does not let it change.
 //
-// Every event's source time is the issue's updatedAt: Linear bumps it for each
-// change diffed here, and a snapshot carries no per-field timestamps.
-func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef) []domain.Event {
+// comments is every comment made since prev, oldest first, with TF's marked
+// (linearNewComments): the snapshot holds only the newest.
+//
+// Every event's source time is the issue's updatedAt, which Linear bumps for
+// each change diffed here, except commented's, which is its comment's.
+func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef, comments []NewComment) []domain.Event {
 	terminal := func(snap domain.LinearSnapshot) bool {
 		return domain.ContainsState(done, snap.StateRef())
 	}
@@ -103,13 +106,13 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		})
 	}
 
-	// One event per cycle however many comments landed: the snapshot only
-	// knows the newest. A newest comment older than the last one seen is the
-	// last one deleted, which is not a comment.
-	if curr.LastCommentID != "" && curr.LastCommentID != prev.LastCommentID && !linearCommentOlder(curr.LastCommentAt, prev.LastCommentAt) {
-		emit(domain.EventLinearIssueCommented, "", events.LinearIssueCommentedMetadata{
-			LinearIssueIdentity: id, CommentID: curr.LastCommentID,
-		})
+	// One event for the comments TF did not post, however many, attributed to
+	// the newest of them and timed at its creation.
+	if newest, authors, ok := commentedBy(comments); ok {
+		emitWithFallback(domain.EventLinearIssueCommented, "", commentedAt(newest, curr.UpdatedAt), events.LinearIssueCommentedMetadata{
+			LinearIssueIdentity: id, CommentID: newest.ID,
+			Commenter: newest.Author, CommenterUserID: newest.AuthorID, CommenterUserIDs: authors,
+		}, eid, now, &evts)
 	}
 
 	// Compared, and keyed, on the parent's UUID: its identifier changes when

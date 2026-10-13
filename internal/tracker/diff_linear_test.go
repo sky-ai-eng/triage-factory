@@ -87,22 +87,9 @@ func TestDiffLinearSnapshots(t *testing.T) {
 		{name: "priority changed",
 			curr: func(s *domain.LinearSnapshot) { s.Priority, s.PriorityLabel = 1, "Urgent" },
 			want: []want{{domain.EventLinearIssuePriorityChanged, "Urgent"}}},
-		{name: "first comment",
-			curr: func(s *domain.LinearSnapshot) { s.LastCommentID = "c-1" },
-			want: []want{{domain.EventLinearIssueCommented, ""}}},
-		{name: "another comment",
+		{name: "newest comment changed, with no new comments handed in",
 			prev: func(s *domain.LinearSnapshot) { s.LastCommentID = "c-1" },
-			curr: func(s *domain.LinearSnapshot) { s.LastCommentID = "c-2" },
-			want: []want{{domain.EventLinearIssueCommented, ""}}},
-		{name: "only comment deleted",
-			prev: func(s *domain.LinearSnapshot) { s.LastCommentID = "c-1" }},
-		{name: "newest comment deleted",
-			prev: func(s *domain.LinearSnapshot) { s.LastCommentID, s.LastCommentAt = "c-2", "2026-10-01T09:00:00.000Z" },
-			curr: func(s *domain.LinearSnapshot) { s.LastCommentID, s.LastCommentAt = "c-1", "2026-10-01T08:00:00.000Z" }},
-		{name: "comment after the newest was deleted",
-			prev: func(s *domain.LinearSnapshot) { s.LastCommentID, s.LastCommentAt = "c-1", "2026-10-01T08:00:00.000Z" },
-			curr: func(s *domain.LinearSnapshot) { s.LastCommentID, s.LastCommentAt = "c-3", "2026-10-01T09:30:00.000Z" },
-			want: []want{{domain.EventLinearIssueCommented, ""}}},
+			curr: func(s *domain.LinearSnapshot) { s.LastCommentID = "c-2" }},
 		{name: "body edited",
 			curr: func(s *domain.LinearSnapshot) { s.BodyHash = "hash-2" },
 			want: []want{{domain.EventLinearIssueBodyUpdated, ""}}},
@@ -152,7 +139,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 			if tc.curr != nil {
 				tc.curr(&curr)
 			}
-			evts := DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet)
+			evts := DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, nil)
 			var got []want
 			for _, e := range evts {
 				got = append(got, want{e.EventType, e.DedupKey})
@@ -178,7 +165,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 func TestDiffLinearSnapshots_DoneIsTheTeams(t *testing.T) {
 	prev, curr := linSnap(), linSnap()
 	curr.State = linDone
-	evts := DiffLinearSnapshots(prev, curr, "ent-1", nil)
+	evts := DiffLinearSnapshots(prev, curr, "ent-1", nil, nil)
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueStatusChanged}) {
 		t.Errorf("events with no done set = %v, want status_changed alone", got)
 	}
@@ -193,8 +180,9 @@ func TestDiffLinearSnapshots_DoneIsTheTeams(t *testing.T) {
 // type added without passing through here fails rather than going unchecked.
 func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	var all []domain.Event
+	var comments []NewComment
 	diff := func(prev, curr domain.LinearSnapshot) {
-		all = append(all, DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet)...)
+		all = append(all, DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, comments)...)
 	}
 	base := linSnap()
 	unassigned := base
@@ -212,9 +200,11 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 
 	diff(domain.LinearSnapshot{}, unassigned) // available
 	diff(unassigned, base)                    // assigned
-	diff(base, changed)                       // status, priority, commented, body, parent
-	diff(base, done)                          // completed
-	diff(withChildren, base)                  // became_atomic
+	comments = []NewComment{{ID: "c-1", Author: "Bob", AuthorID: "u-bob"}}
+	diff(base, changed) // status, priority, commented, body, parent
+	comments = nil
+	diff(base, done)         // completed
+	diff(withChildren, base) // became_atomic
 	moved := base
 	moved.Identifier, moved.TeamID, moved.TeamKey = "OPS-77", "team-ops", "OPS"
 	diff(base, moved) // identifier_changed
@@ -225,7 +215,7 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	database := newMigratedSQLite(t)
 	stores := sqlitestore.New(database)
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, runmode.LocalDefaultOrgID)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, runmode.LocalDefaultOrgID)
 	snapJSON, _ := json.Marshal(base)
 	tr.emitLinearUnreachable(context.Background(), runmode.LocalDefaultOrgID,
 		domain.Entity{ID: "ent-1", SourceID: base.Identifier, SnapshotJSON: string(snapJSON)}, nil, events.LinearUnreachableNotFound)

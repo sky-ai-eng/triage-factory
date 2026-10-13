@@ -291,6 +291,48 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 	return scanArtifactRows(rows)
 }
 
+func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	// ?-placeholder IN list, chunked to stay inside SQLite's variable limit.
+	for _, chunk := range chunkIDs(dedupKeys) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+2)
+		args = append(args, orgID, scope)
+		for i, key := range chunk {
+			placeholders[i] = "?"
+			args = append(args, key)
+		}
+		rows, err := s.q.QueryContext(ctx, `
+			SELECT dedup_key
+			FROM artifacts
+			WHERE org_id = ? AND scope = ? AND dedup_key IN (`+strings.Join(placeholders, ", ")+`)
+		`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			present[key] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return present, nil
+}
+
 func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

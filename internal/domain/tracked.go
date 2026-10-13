@@ -270,7 +270,14 @@ type JiraSnapshot struct {
 	IssueType         string   `json:"issue_type"`
 	ParentKey         string   `json:"parent_key"`
 	CommentCount      int      `json:"comment_count"`
-	URL               string   `json:"url"`
+	// LastCommentID and LastCommentAt are the newest comment's, the marker
+	// the next poll reads new comments from. Empty when the issue has no
+	// comments, on snapshots that predate the fields, and while the newest
+	// comment is past the page Jira returns with the issue and has not been
+	// read: the next poll then counts its new comments off CommentCount.
+	LastCommentID string `json:"last_comment_id,omitempty"`
+	LastCommentAt string `json:"last_comment_at,omitempty"`
+	URL           string `json:"url"`
 	// CreatedAt is Jira's ISO-8601 timestamp for when the ticket was created
 	// (fields.created). Used for newest-first ordering in carry-over. Empty
 	// on snapshots that predate this field — callers should fall back to the

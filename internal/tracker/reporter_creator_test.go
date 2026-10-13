@@ -85,7 +85,7 @@ func TestJiraReporter_ReachesReporterIn(t *testing.T) {
 				if tc.curr != nil {
 					tc.curr(&curr)
 				}
-				evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses), tc.eventType)
+				evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil), tc.eventType)
 				if evt == nil {
 					t.Fatalf("no %s event", tc.eventType)
 				}
@@ -116,7 +116,7 @@ func TestJiraReporter_ChangeEmitsNothing(t *testing.T) {
 	prev := domain.JiraSnapshot{ID: "10001", Key: "SKY-1", Status: "To Do", Reporter: "Ada", ReporterAccountID: "ada-id"}
 	curr := prev
 	curr.Reporter, curr.ReporterAccountID = "Bob", "bob-id"
-	if evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses); len(evts) != 0 {
+	if evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil); len(evts) != 0 {
 		t.Errorf("reporter change emitted %v, want nothing", eventTypes(evts))
 	}
 }
@@ -173,7 +173,7 @@ func TestLinearCreator_OnEveryEvent(t *testing.T) {
 			if tc.curr != nil {
 				tc.curr(&curr)
 			}
-			evt := findEvent(DiffLinearSnapshots(prev, curr, testEntityID, linDoneSet), tc.eventType)
+			evt := findEvent(DiffLinearSnapshots(prev, curr, testEntityID, linDoneSet, nil), tc.eventType)
 			if evt == nil {
 				t.Fatalf("no %s event", tc.eventType)
 			}
@@ -209,7 +209,7 @@ func TestLinearCreator_IntegrationCreated(t *testing.T) {
 	if snap.Creator != "" || snap.CreatorUserID != "" {
 		t.Fatalf("snapshot creator = (%q, %q), want empty", snap.Creator, snap.CreatorUserID)
 	}
-	evt := findEvent(DiffLinearSnapshots(domain.LinearSnapshot{}, snap, testEntityID, linDoneSet), domain.EventLinearIssueAvailable)
+	evt := findEvent(DiffLinearSnapshots(domain.LinearSnapshot{}, snap, testEntityID, linDoneSet, nil), domain.EventLinearIssueAvailable)
 	if evt == nil {
 		t.Fatal("no available event")
 	}

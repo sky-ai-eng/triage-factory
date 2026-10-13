@@ -62,7 +62,7 @@ func TestRefreshJira_ConfirmedUnreachableRetiresEntity(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRefreshJira_MissingButResolvableIssueIsNotRetired(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestRefreshJira_IdlessMovedIssueLearnsItsIDAndIsRenamed(t *testing.T) {
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, site, client, site, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -211,7 +211,7 @@ func TestRefreshJira_LegacyDuplicatePairMergesIntoTheOlderRow(t *testing.T) {
 		t.Fatalf("seed current: %v", err)
 	}
 	client := jiraclient.NewClient(jiraclient.DataCenterPAT(srv.URL, "pat"))
-	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, &recordingPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, site, client, site, JiraRules{{Key: "OLD"}, {Key: "NEW"}}); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestRefreshJira_RecentlyAnsweredKeyIsNotConfirmed(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestRefreshJira_FailedConfirmationLeavesEntityTracked(t *testing.T) {
 	}
 
 	pub := &recordingPublisher{}
-	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.EventQueue, org)
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	if _, err := tr.RefreshJira(ctx, "https://jira.example.com", client, srv.URL, projects); err != nil {
 		t.Fatalf("RefreshJira: %v", err)
 	}

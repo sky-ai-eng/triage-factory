@@ -74,7 +74,7 @@ untouched for a switch back.
 | **Issue Assigned** | `jira:issue:assigned` | The `assignee` field changes to a non-empty value |
 | **Issue Available** | `jira:issue:available` | An unassigned issue appears in the pickup queue, or an assigned issue becomes unassigned |
 | **Priority Changed** | `jira:issue:priority_changed` | The `priority` field changes |
-| **New Comment** | `jira:issue:commented` | The `comment.total` count increases (fires once per cycle regardless of how many comments were added) |
+| **New Comment** | `jira:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) |
 
 ### Informational
 
@@ -113,6 +113,50 @@ delegation trigger is added; handlers can opt in through the event catalog.
 The preview remains a best-effort display/scoring mirror and can lag the event.
 A consumer needing full, revision-consistent content must obtain that body and
 check its fingerprint rather than treat the preview as a complete document.
+
+#### Comments
+
+`jira:issue:commented` and `linear:issue:commented` report the comments made
+since the previous cycle that TF did not post, in one event however many there
+are. The metadata names the newest of them (`comment_id`, `commenter`, and
+`commenter_account_id` on Jira or `commenter_user_id` on Linear) and the author
+of each (`commenter_account_ids` / `commenter_user_ids`). `commenter_in` matches
+when anyone it lists wrote one of them. A Jira author's id follows the
+assignee's rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
+`commenter_in` list holds the same values as an `assignee_in` list. A Linear
+comment an integration posted names the integration as `commenter` and has no
+user id, so no `commenter_in` list matches it. The event's time is the newest
+comment's.
+
+A comment an agent posts with `jira ticket comment` or `linear issue comment`
+is recorded as a `comment` artifact keyed on the comment's id, and a comment
+with that artifact is TF's. A cycle that finds only TF's comments emits
+nothing, so a trigger whose agent replies to comments does not fire again on
+its own reply. The match is on the comment's id, not its author: under a
+personal credential the agent comments as the person who owns it, and
+excluding that author would drop the person's own comments. A comment whose
+artifact was not written (the write is best-effort), or that a cycle reads in
+the moment between the post and the write, counts as a person's.
+
+How the new comments are found:
+
+- **Jira.** The snapshot keeps the comment count and the newest comment
+  (`last_comment_id`, `last_comment_at`), and the new comments are the ones
+  after it. The batch read returns a capped page of comments with each issue.
+  When an issue has more, the rest are read from `GET issue/{id}/comment`, from
+  the end of the list back to the stored newest comment. That read happens only
+  when the issue changed since the last cycle: its comment count moved, or its
+  `updated` time advanced, which Jira does when a comment is added. A snapshot
+  stored without the newest comment counts the last N comments as new, N being
+  the rise in the count.
+- **Linear.** The batch read returns each issue's newest comment. When it
+  changes, a follow-up query reads the comments created after the previous
+  newest. A newest comment older than the previous one means the newest was
+  deleted, and emits nothing.
+
+When a comment read fails, or reading which comments are TF's does, the
+snapshot keeps its previous comment fields and the next cycle reports the same
+comments.
 
 #### Identity
 
@@ -249,7 +293,7 @@ nothing is assigned to, so the second query returns nothing.
 | **Issue Assigned** | `linear:issue:assigned` | The assignee changes to someone, or an issue is first seen through the assigned-to-credential query | — |
 | **Issue Available** | `linear:issue:available` | The assignee is cleared | — |
 | **Priority Changed** | `linear:issue:priority_changed` | `priority` changes | new priority label |
-| **New Comment** | `linear:issue:commented` | The newest comment's id changes to a different comment (fires once per cycle regardless of how many comments were added; Linear exposes no comment count) | — |
+| **New Comment** | `linear:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) | — |
 | **Issue Became Atomic** | `linear:issue:became_atomic` | The last open sub-issue closes, on an issue not itself done | — |
 
 ### Informational
@@ -282,13 +326,15 @@ Every Linear event's metadata carries the issue's identity block —
 the fields its event adds
 (`old_status`/`new_status`, `old_priority`/`new_priority`,
 `previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
-`last_status`, `reason`, `comment_id`, `old_identifier`/`old_linear_team_id`/
+`last_status`, `reason`, `comment_id`/`commenter`/`commenter_user_id`/
+`commenter_user_ids`, `old_identifier`/`old_linear_team_id`/
 `old_linear_team_key`). `linear_team_id` is what the router's team gate reads
 (with `old_linear_team_id` on `identifier_changed`, see below), and
 `assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity. `creator_user_id` is what `creator_in` matches
 on `assigned`, `available` and `became_atomic`; both creator fields are empty
-for an issue an integration created.
+for an issue an integration created. `commenter_user_ids` is what
+`commenter_in` matches on `commented` (see [Comments](#comments)).
 
 #### Identity
 
@@ -462,7 +508,8 @@ which it is matched on once known) and `scope` (the org's Jira site).
 - `assignee` (display name), `assignee_account_id`, `priority`
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
 - `labels[]`, `issue_type`, `parent_key`
-- `comment_count`, `open_subtask_count` — subtasks not in a configured done status
+- `comment_count`, `last_comment_id`, `last_comment_at` — the newest comment; empty while it is past the page the batch read returns and has not been read
+- `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`
 
 `id` and `project_id` are empty on a snapshot stored before they were recorded,

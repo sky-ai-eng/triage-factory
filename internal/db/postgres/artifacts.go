@@ -309,6 +309,36 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 	return scanArtifactRows(rows)
 }
 
+// PresentDedupKeysSystem runs on the admin pool (BYPASSRLS): the tracker
+// reads it with no claims, and a comment's artifact belongs to whichever team's
+// run posted it. org_id stays in the WHERE clause as defense in depth.
+func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	if len(dedupKeys) == 0 {
+		return present, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT dedup_key
+		FROM artifacts
+		WHERE org_id = $1 AND scope = $2 AND dedup_key = ANY($3)
+	`, orgID, scope, dedupKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		present[key] = true
+	}
+	return present, rows.Err()
+}
+
 func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	counts := make(map[string]int, len(conversationIDs))
 	if len(conversationIDs) == 0 {

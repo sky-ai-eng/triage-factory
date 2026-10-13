@@ -3,6 +3,7 @@ package dbtest
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -146,6 +147,41 @@ func RunExternalObjectScopeConformance(t *testing.T, mk ExternalObjectScopeFacto
 		}
 		if _, err := s.Artifacts.ListPendingReviewsByTargetSystem(ctx, orgID, "", domain.ReviewTarget("octo/api", 7)); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("ListPendingReviewsByTargetSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
+		}
+	})
+
+	t.Run("Present_dedup_keys_are_read_on_one_scope", func(t *testing.T) {
+		s, orgID, teamID := mk(t)
+		comment := func(scope, commentID string) string {
+			key := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, "uuid-1", commentID)
+			if _, err := s.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
+				TeamID: teamID, Provider: domain.ArtifactProviderLinear, Kind: domain.ArtifactKindComment,
+				Scope: scope, Target: "ENG-1", ExternalID: commentID,
+				State: domain.ArtifactStateCommentPosted, DedupKey: key,
+			}); err != nil {
+				t.Fatalf("seed comment %s on %s: %v", commentID, scope, err)
+			}
+			return key
+		}
+		both := comment(hostA, "c-1")
+		comment(hostB, "c-1")
+		onlyA := comment(hostA, "c-2")
+		onlyB := comment(hostB, "c-3")
+		absent := domain.ArtifactDedupKey(domain.ArtifactProviderLinear, domain.ArtifactKindComment, "uuid-1", "c-4")
+
+		got, err := s.Artifacts.PresentDedupKeysSystem(ctx, orgID, hostA, []string{both, onlyA, onlyB, absent})
+		if err != nil {
+			t.Fatalf("PresentDedupKeysSystem: %v", err)
+		}
+		if want := map[string]bool{both: true, onlyA: true}; !maps.Equal(got, want) {
+			t.Errorf("present on %s = %v, want %v", hostA, got, want)
+		}
+		got, err = s.Artifacts.PresentDedupKeysSystem(ctx, orgID, hostA, nil)
+		if err != nil || len(got) != 0 {
+			t.Errorf("PresentDedupKeysSystem with no keys = %v, %v; want an empty set", got, err)
+		}
+		if _, err := s.Artifacts.PresentDedupKeysSystem(ctx, orgID, "", []string{both}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+			t.Errorf("PresentDedupKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
 	})
 

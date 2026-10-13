@@ -63,3 +63,18 @@ func stringInSliceFold(pred []string, meta string) bool {
 	}
 	return false
 }
+
+// anyInSliceFold is stringInSliceFold for metadata that names several
+// identities, such as everyone who wrote one of a poll's new comments: an empty
+// predicate matches, and a non-empty one matches when any of metas is in it.
+func anyInSliceFold(pred, metas []string) bool {
+	if len(pred) == 0 {
+		return true
+	}
+	for _, m := range metas {
+		if stringInSliceFold(pred, m) {
+			return true
+		}
+	}
+	return false
+}

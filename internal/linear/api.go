@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -354,6 +355,54 @@ func (c *Client) ListChildren(ctx context.Context, idOrIdentifier string) ([]Chi
 		return nil, fmt.Errorf("linear: sub-issues of issue %s: %w", idOrIdentifier, err)
 	}
 	return children, nil
+}
+
+// ListCommentsSince returns the comments on an issue created after since (an
+// RFC 3339 time), oldest first, or every comment when since is empty. An
+// issue Linear resolves to nothing is an error matching ErrNotFound.
+func (c *Client) ListCommentsSince(ctx context.Context, issueID, since string) ([]Comment, error) {
+	if err := requireID("issue id", issueID); err != nil {
+		return nil, err
+	}
+	var filter any
+	if since != "" {
+		filter = map[string]any{"createdAt": map[string]any{"gt": since}}
+	}
+	comments, err := collect(func(after string) ([]Comment, pageInfo, error) {
+		var data struct {
+			Issue *struct {
+				Comments struct {
+					Nodes    []Comment `json:"nodes"`
+					PageInfo pageInfo  `json:"pageInfo"`
+				} `json:"comments"`
+			} `json:"issue"`
+		}
+		vars := map[string]any{"id": issueID, "filter": filter, "first": listPageSize, "after": nullable(after)}
+		if err := c.query(ctx, issueCommentsQuery, vars, &data); err != nil {
+			return nil, pageInfo{}, err
+		}
+		if data.Issue == nil {
+			return nil, pageInfo{}, ErrNotFound
+		}
+		return data.Issue.Comments.Nodes, data.Issue.Comments.PageInfo, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("linear: comments of issue %s: %w", issueID, err)
+	}
+	sort.SliceStable(comments, func(i, j int) bool { return createdBefore(comments[i].CreatedAt, comments[j].CreatedAt) })
+	return comments, nil
+}
+
+// createdBefore reports whether creation time a is before b, comparing the
+// moments they name rather than their text. A time that does not parse is
+// compared as text.
+func createdBefore(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339Nano, a)
+	tb, errB := time.Parse(time.RFC3339Nano, b)
+	if errA == nil && errB == nil {
+		return ta.Before(tb)
+	}
+	return a < b
 }
 
 // AssignIssue assigns an issue to a user. UnassignIssue clears it.

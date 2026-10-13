@@ -165,6 +165,18 @@ type ArtifactStore interface {
 	// (single-tenant, no RLS).
 	ListPendingReviewsByTargetSystem(ctx context.Context, orgID, scope, target string) ([]domain.Artifact, error)
 
+	// PresentDedupKeysSystem returns the subset of dedupKeys under which an
+	// artifact exists in scope, as a set. The tracker reads it to tell a
+	// comment TF posted, which is recorded as a `comment` artifact keyed on
+	// the comment's id, from one a person wrote. An empty scope is refused
+	// with ErrExternalObjectScopeRequired.
+	//
+	// Admin pool (BYPASSRLS) in Postgres: the tracker is a background job
+	// with no claims, and the artifact belongs to whichever team's run posted
+	// the comment. org_id stays bound as defense in depth. Identical to a
+	// plain org read in SQLite.
+	PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
+
 	// ListByConversationSystem is the admin-pool (BYPASSRLS) variant of ListByConversation for
 	// system-service readers that hold a real (org_id) identity but no
 	// JWT-claims context — chiefly the delegate spawner's post-completion

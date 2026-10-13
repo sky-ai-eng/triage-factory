@@ -416,7 +416,7 @@ const issueJSON = `{
   "parent": {"id": "uuid-0", "identifier": "TFAC-1"},
   "team": {"id": "team-1", "key": "TFAC", "name": "Triage Factory", "private": false},
   "labels": {"nodes": [{"name": "zeta"}, {"name": "alpha"}]},
-  "comments": {"nodes": [{"id": "c9", "createdAt": "2026-09-19T14:00:00.000Z"}]},
+  "comments": {"nodes": [{"id": "c9", "createdAt": "2026-09-19T14:00:00.000Z", "user": {"id": "u2", "name": "Grace", "displayName": "grace"}, "botActor": null}]},
   "children": {"nodes": [{"id": "uuid-2", "identifier": "TFAC-87", "state": {"id": "s3", "name": "Done", "type": "completed", "position": 3}}]}
 }`
 
@@ -436,7 +436,7 @@ func TestGetIssue_DecodesTheFragment(t *testing.T) {
 		Team:      Team{ID: "team-1", Key: "TFAC", Name: "Triage Factory"},
 		Labels:    []string{"alpha", "zeta"},
 		CreatedAt: "2026-09-18T15:00:00.000Z", UpdatedAt: "2026-09-19T15:00:00.000Z",
-		LastComment: &CommentRef{ID: "c9", CreatedAt: "2026-09-19T14:00:00.000Z"},
+		LastComment: &Comment{ID: "c9", CreatedAt: "2026-09-19T14:00:00.000Z", User: &User{ID: "u2", Name: "Grace", DisplayName: "grace"}},
 		Children: []ChildIssue{{ID: "uuid-2", Identifier: "TFAC-87",
 			State: WorkflowState{ID: "s3", Name: "Done", Type: "completed", Position: 3}}},
 	}
@@ -481,6 +481,74 @@ func TestListWorkflowStates_FollowsCursorToTheEnd(t *testing.T) {
 	}
 	if string(reqs[0].Variables["id"]) != `"team-1"` || string(reqs[0].Variables["first"]) != "100" {
 		t.Errorf("variables = %v", reqs[0].Variables)
+	}
+}
+
+func TestListCommentsSince_FiltersOnCreatedAndWalksEveryPage(t *testing.T) {
+	s := newStub(t, func(n int, req recordedRequest) reply {
+		switch string(req.Variables["after"]) {
+		case "null":
+			return reply{body: `{"data":{"issue":{"comments":{"nodes":[
+				{"id":"c3","createdAt":"2026-09-19T16:00:00.000Z","user":null,"botActor":{"name":"GitHub"}}
+			],"pageInfo":{"hasNextPage":true,"endCursor":"p1"}}}}}`}
+		case `"p1"`:
+			return reply{body: `{"data":{"issue":{"comments":{"nodes":[
+				{"id":"c2","createdAt":"2026-09-19T15:00:00.000Z","user":{"id":"u1","name":"Ada","displayName":"ada"},"botActor":null}
+			],"pageInfo":{"hasNextPage":false,"endCursor":"p2"}}}}}`}
+		}
+		t.Errorf("request %d with unexpected cursor %s", n, req.Variables["after"])
+		return reply{status: http.StatusBadRequest, body: `{}`}
+	})
+
+	got, err := s.client().ListCommentsSince(context.Background(), "uuid-1", "2026-09-19T14:00:00.000Z")
+	if err != nil {
+		t.Fatalf("ListCommentsSince: %v", err)
+	}
+	want := []Comment{
+		{ID: "c2", CreatedAt: "2026-09-19T15:00:00.000Z", User: &User{ID: "u1", Name: "Ada", DisplayName: "ada"}},
+		{ID: "c3", CreatedAt: "2026-09-19T16:00:00.000Z", BotActor: &BotActor{Name: "GitHub"}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("comments =\n%+v\nwant both pages oldest first\n%+v", got, want)
+	}
+	req := s.requests()[0]
+	if string(req.Variables["id"]) != `"uuid-1"` {
+		t.Errorf("id variable = %s", req.Variables["id"])
+	}
+	if f := string(req.Variables["filter"]); f != `{"createdAt":{"gt":"2026-09-19T14:00:00.000Z"}}` {
+		t.Errorf("filter variable = %s, want createdAt after the marker", f)
+	}
+}
+
+func TestListCommentsSince_OrdersByTheMomentNotTheText(t *testing.T) {
+	// 10:00+01:00 is 09:00Z, before c2, though its text sorts after.
+	s := newStub(t, scripted(reply{body: `{"data":{"issue":{"comments":{"nodes":[
+		{"id":"c2","createdAt":"2026-09-19T09:30:00.000Z"},
+		{"id":"c1","createdAt":"2026-09-19T10:00:00.000+01:00"}
+	],"pageInfo":{"hasNextPage":false}}}}}`}))
+	got, err := s.client().ListCommentsSince(context.Background(), "uuid-1", "")
+	if err != nil {
+		t.Fatalf("ListCommentsSince: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "c1" || got[1].ID != "c2" {
+		t.Errorf("comments = %+v, want c1 then c2", got)
+	}
+}
+
+func TestListCommentsSince_NoMarkerReadsEveryComment(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}`}))
+	if _, err := s.client().ListCommentsSince(context.Background(), "uuid-1", ""); err != nil {
+		t.Fatalf("ListCommentsSince: %v", err)
+	}
+	if f := string(s.requests()[0].Variables["filter"]); f != "null" {
+		t.Errorf("filter variable = %s, want null", f)
+	}
+}
+
+func TestListCommentsSince_MissingIssueIsNotFound(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"issue":null}}`}))
+	if _, err := s.client().ListCommentsSince(context.Background(), "uuid-1", ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
 	}
 }
 

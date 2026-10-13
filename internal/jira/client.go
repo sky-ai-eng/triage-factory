@@ -576,9 +576,13 @@ type Issue struct {
 			ID  string `json:"id"`
 			Key string `json:"key"`
 		} `json:"parent,omitempty"`
-		Labels  []string `json:"labels,omitempty"`
+		Labels []string `json:"labels,omitempty"`
+		// Comment is the issue's comment count and the first page of its
+		// comments, oldest first. Jira caps that page, so an issue with more
+		// comments than Comments holds has the rest read by ListComments.
 		Comment *struct {
-			Total int `json:"total"`
+			Total    int       `json:"total"`
+			Comments []Comment `json:"comments,omitempty"`
 		} `json:"comment,omitempty"`
 		Created string `json:"created,omitempty"`
 		// Updated is Jira's last-modified timestamp on the issue. Bumped
@@ -610,6 +614,14 @@ type IssueUser struct {
 	AccountID   string `json:"accountId"`
 	Key         string `json:"key"`
 	Name        string `json:"name"`
+}
+
+// Comment is one comment on an issue: its id, who wrote it and when. The body
+// is not decoded.
+type Comment struct {
+	ID      string     `json:"id"`
+	Author  *IssueUser `json:"author,omitempty"`
+	Created string     `json:"created"`
 }
 
 // IssueType represents a Jira issue type for a project.
@@ -1083,6 +1095,31 @@ func (c *Client) AddComment(ctx context.Context, idOrKey, body string) (string, 
 		return "", nil
 	}
 	return result.ID, nil
+}
+
+// ListComments returns up to limit of an issue's comments, oldest first,
+// starting at index startAt of the list. Jira caps each page it returns, so a
+// short page is followed from where it ended until limit comments are read or
+// the list runs out.
+func (c *Client) ListComments(ctx context.Context, idOrKey string, startAt, limit int) ([]Comment, error) {
+	var out []Comment
+	for len(out) < limit {
+		body, err := c.get(ctx, c.apiURL("issue/%s/comment?startAt=%d&maxResults=%d", idOrKey, startAt+len(out), limit-len(out)))
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Comments []Comment `json:"comments"`
+		}
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("parse comments: %w", err)
+		}
+		if len(page.Comments) == 0 {
+			break
+		}
+		out = append(out, page.Comments...)
+	}
+	return out[:min(len(out), limit)], nil
 }
 
 // GetTransitions returns the available workflow transitions for an issue.

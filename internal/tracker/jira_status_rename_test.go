@@ -15,7 +15,7 @@ func TestDiffJira_RenamedStatusIsNotATransition(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review", StatusID: "10005"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review (QA)", StatusID: "10005"}
 
-	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses)
+	evts := DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil)
 	if evt := findEvent(evts, domain.EventJiraIssueStatusChanged); evt != nil {
 		t.Errorf("a rename emitted %s (%q → %q); the issue never moved",
 			evt.EventType, prev.Status, curr.Status)
@@ -29,7 +29,7 @@ func TestDiffJira_StatusChangeSeenWithoutIDs(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "To Do"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review"}
 
-	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses),
+	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil),
 		domain.EventJiraIssueStatusChanged) == nil {
 		t.Error("no status_changed event for a real move between id-less snapshots")
 	}
@@ -42,7 +42,7 @@ func TestDiffJira_IDArrivingIsNotATransition(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "In Review", StatusID: "10005"}
 
-	if evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses),
+	if evt := findEvent(DiffJiraSnapshots(prev, curr, testEntityID, testDoneStatuses, nil),
 		domain.EventJiraIssueStatusChanged); evt != nil {
 		t.Error("the first poll after the status id landed emitted a status change")
 	}
@@ -56,7 +56,7 @@ func TestDiffJira_TerminalMatchesRenamedDoneStatus(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress", StatusID: "10005"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "Shipped", StatusID: "10100"}
 
-	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, done),
+	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, done, nil),
 		domain.EventJiraIssueCompleted) == nil {
 		t.Error("no completed event: the Done status was renamed, and the id match should have caught it")
 	}
@@ -69,7 +69,7 @@ func TestDiffJira_TerminalMatchesNameOnlyRule(t *testing.T) {
 	prev := domain.JiraSnapshot{Key: "SKY-1", Status: "In Progress", StatusID: "10005"}
 	curr := domain.JiraSnapshot{Key: "SKY-1", Status: "Done", StatusID: "10100"}
 
-	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, done),
+	if findEvent(DiffJiraSnapshots(prev, curr, testEntityID, done, nil),
 		domain.EventJiraIssueCompleted) == nil {
 		t.Error("no completed event for a name-only rule")
 	}
