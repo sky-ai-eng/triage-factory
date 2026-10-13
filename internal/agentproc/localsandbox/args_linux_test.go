@@ -49,6 +49,7 @@ func TestArgs_MountPlan(t *testing.T) {
 	}
 	want := []string{
 		"bwrap",
+		"--unshare-pid",
 		"--ro-bind", "/", "/",
 		"--dev", "/dev",
 		"--proc", "/proc",
@@ -687,6 +688,9 @@ func TestSmokeTest_ValidatesThePlanNotJustTheNamespace(t *testing.T) {
 	}
 	argv := strings.Split(strings.TrimSpace(string(b)), "\n")
 
+	if !slices.Contains(argv, "--unshare-pid") {
+		t.Errorf("smoke argv never unshares the pid namespace, so a host that refuses it would boot green and fail the first run:\n%v", argv)
+	}
 	if indexOfOp(argv, "--tmpfs", "/run") < 0 {
 		t.Errorf("smoke argv never masks /run, so it cannot catch a plan that breaks under that mask:\n%v", argv)
 	}

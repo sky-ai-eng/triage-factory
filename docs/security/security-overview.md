@@ -63,14 +63,16 @@ entirely** (`shouldSandbox()` = `runmode.Current() == runmode.ModeMulti && runti
 the host privileges below. Everything in this document about capabilities and
 privilege separation concerns the multi-mode (self-host and SaaS) deployments.
 
-On Linux, local runs do get a **mount namespace** by default (bubblewrap;
-`TF_LOCAL_SANDBOX`, see [Configuration](../local-mode/configuration.md)). It is
-courtesy isolation and deliberately not a boundary — same uid, shared network,
-shared `/proc` — so nothing in this document rests on it. What it buys is that a
-confused or prompt-injected agent cannot read a sibling run's worktree, the TF
-database, or the operator's home directory without deliberately breaking out,
-and that the OS keychain is out of reach from inside. Everything a compromised
-local agent could do to the machine before, it can still do if it tries.
+On Linux, local runs do get a **mount and pid namespace** by default
+(bubblewrap; `TF_LOCAL_SANDBOX`, see
+[Configuration](../local-mode/configuration.md)). It is courtesy isolation and
+deliberately not a boundary — same uid, shared network — so nothing in this
+document rests on it. What it buys is that a confused or prompt-injected agent
+cannot read a sibling run's worktree, the TF database, or the operator's home
+directory by path without deliberately breaking out, and that it does not see
+the OS keychain's session socket paths. It makes no claim that the keychain is
+unreachable. Everything a compromised local agent could do to the machine
+before, it can still do if it tries.
 
 ---
 
