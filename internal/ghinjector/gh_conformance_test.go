@@ -282,6 +282,9 @@ func graphQLFixture(query string, body []byte) (int, string) {
 			`"revertPullRequest":{"id":"PR_revert","number":97,"url":"https://ghe.test/octo/repo/pull/97"}}}}`
 	case strings.Contains(query, "addComment"):
 		return 200, `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + confCommentURL + `"}}}}}`
+	case strings.Contains(query, "addPullRequestReviewThreadReply"):
+		return 200, `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_reply","databaseId":8,` +
+			`"url":"https://ghe.test/octo/repo/pull/42#discussion_r8"}}}}`
 	case strings.Contains(query, "createLinkedBranch"):
 		return 200, `{"data":{"createLinkedBranch":{"linkedBranch":{"id":"LB_1","ref":{"name":"7-i"}}}}}`
 	case strings.Contains(query, "transferIssue"):
@@ -1131,6 +1134,40 @@ func handWrittenWriteCases() []wireCase {
 			args: graphql(`mutation{addPullRequestReviewThread(input:{pullRequestId:"` + prNode +
 				`",path:"a.go",body:"x"}){clientMutationId}}`),
 			want: []wireExpect{{mutation: "addPullRequestReviewThread", refusal: ghwrite.GateReasonReview}},
+		},
+
+		// The review-comment mutations. gh has no command that sends them, so a
+		// hand-written call is the only way any of them arrives.
+		{
+			name: "api graphql reply to a review thread",
+			args: graphql(`mutation{addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"PRRT_thread",` +
+				`body:"ack"}){comment{id databaseId url}}}`),
+			want: []wireExpect{{mutation: "addPullRequestReviewThreadReply", action: domain.ActionCommentPosted}},
+		},
+		{
+			// Naming a pending review stages the reply on it instead of posting
+			// it, so it meets the refusal the staged thread above does. Spelled
+			// with variables, the way `gh api` passes them, because that is the
+			// form whose input the document never names.
+			name: "api graphql stage a thread reply on a pending review",
+			args: []string{"api", "graphql",
+				"-f", `query=mutation($input:AddPullRequestReviewThreadReplyInput!){` +
+					`addPullRequestReviewThreadReply(input:$input){comment{url}}}`,
+				"-f", "input[pullRequestReviewThreadId]=PRRT_thread",
+				"-f", "input[pullRequestReviewId]=PRR_pending",
+				"-f", "input[body]=ack"},
+			want: []wireExpect{{mutation: "addPullRequestReviewThreadReply", refusal: ghwrite.GateReasonReview}},
+		},
+		{
+			name: "api graphql edit a review comment",
+			args: graphql(`mutation{updatePullRequestReviewComment(input:{pullRequestReviewCommentId:"PRRC_x",` +
+				`body:"revised"}){pullRequestReviewComment{id}}}`),
+			want: []wireExpect{{mutation: "updatePullRequestReviewComment", action: domain.ActionReviewCommentEdited}},
+		},
+		{
+			name: "api graphql delete a review comment",
+			args: graphql(`mutation{deletePullRequestReviewComment(input:{id:"PRRC_x"}){clientMutationId}}`),
+			want: []wireExpect{{mutation: "deletePullRequestReviewComment", action: domain.ActionReviewCommentDeleted}},
 		},
 	}
 }

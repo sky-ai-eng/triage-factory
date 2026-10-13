@@ -149,8 +149,19 @@ type Observation struct {
 	// response body of a CreatesObject shape. Empty when the shape creates
 	// nothing, when the body was past the injector's buffering cap, or when it
 	// didn't parse — the act is still recorded, only its deep link degrades.
+	//
+	// A GraphQL write fills URL from its payload whatever the act, and
+	// ExternalID only for a comment create, from the comment's own object (see
+	// ReadGraphQLResponse).
 	ExternalID string
 	URL        string
+
+	// NodeID is the created object's GraphQL node id, read from the same
+	// response as ExternalID. It is kept apart from ExternalID because the two
+	// name one object in two id spaces: a REST path addresses a comment by its
+	// number, while a GraphQL edit or delete addresses it by node id, and a later
+	// write is matched against whichever its own transport uses.
+	NodeID string
 
 	// GraphQL, when set, marks this as a write performed through the GraphQL
 	// endpoint and carries what the request envelope disclosed. Method and Path

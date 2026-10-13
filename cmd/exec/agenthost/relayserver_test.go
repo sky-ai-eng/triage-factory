@@ -199,6 +199,7 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 		Path:       "/repos/acme/widgets/pulls/841/comments/555/replies",
 		Status:     201,
 		ExternalID: "777",
+		NodeID:     "PRRC_kwRelay",
 		URL:        "https://github.com/acme/widgets/pull/841#discussion_r777",
 	})
 	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
@@ -213,8 +214,8 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 		a.ConversationID != info.ConversationID {
 		t.Errorf("relayed reply row mismatch: %+v", a)
 	}
-	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) {
-		t.Errorf("detail_json = %q, want the thread the reply landed on", a.DetailJSON)
+	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) || !strings.Contains(a.DetailJSON, `"node_id":"PRRC_kwRelay"`) {
+		t.Errorf("detail_json = %q, want the thread the reply landed on and the reply's node id", a.DetailJSON)
 	}
 }
 
@@ -227,10 +228,12 @@ func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
 	s := NewRelayServer(stores, info, nil)
 
 	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
-		Method: "POST",
-		Path:   "/graphql",
-		Status: 200,
-		URL:    "https://github.com/octo/repo/pull/7#issuecomment-9",
+		Method:     "POST",
+		Path:       "/graphql",
+		Status:     200,
+		URL:        "https://github.com/octo/repo/pull/7#issuecomment-9",
+		ExternalID: "9",
+		NodeID:     "IC_kwRelay",
 		GraphQL: &agentproc.GraphQLWriteFacts{
 			Operation: "CommentCreate",
 			Mutations: []string{"addComment"},
@@ -244,8 +247,12 @@ func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
 		t.Fatalf("want 1 graphql write row, got %d: %+v", len(acts), acts)
 	}
 	a := acts[0]
-	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ConversationID != info.ConversationID {
+	if a.Action != domain.ActionCommentPosted || a.Target != "octo/repo#7" || a.ExternalID != "9" ||
+		a.ConversationID != info.ConversationID {
 		t.Errorf("relayed graphql write row mismatch: %+v", a)
+	}
+	if !strings.Contains(a.DetailJSON, `"node_id":"IC_kwRelay"`) {
+		t.Errorf("detail_json = %q, want the comment's node id", a.DetailJSON)
 	}
 }
 

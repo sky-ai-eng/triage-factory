@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/egressproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/ghinjector"
+	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -373,13 +375,14 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 	const replyURL = "https://github.com/acme/widgets/pull/841#discussion_r777"
 	cases := []struct {
-		name    string
-		method  string
-		path    string
-		status  int
-		body    string
-		wantID  string
-		wantURL string
+		name       string
+		method     string
+		path       string
+		status     int
+		body       string
+		wantID     string
+		wantNodeID string
+		wantURL    string
 
 		// reqBody is sent when non-empty; the GraphQL arm is the only one whose
 		// act is named in the request rather than the path.
@@ -396,13 +399,14 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			status: http.StatusNotFound,
 		},
 		{
-			name:    "posted review-thread reply",
-			method:  http.MethodPost,
-			path:    "/api/v3/repos/acme/widgets/pulls/841/comments/555/replies",
-			status:  http.StatusCreated,
-			body:    `{"id":777,"html_url":"` + replyURL + `"}`,
-			wantID:  "777",
-			wantURL: replyURL,
+			name:       "posted review-thread reply",
+			method:     http.MethodPost,
+			path:       "/api/v3/repos/acme/widgets/pulls/841/comments/555/replies",
+			status:     http.StatusCreated,
+			body:       `{"id":777,"node_id":"PRRC_kwSidecar","html_url":"` + replyURL + `"}`,
+			wantID:     "777",
+			wantNodeID: "PRRC_kwSidecar",
+			wantURL:    replyURL,
 		},
 		{
 			// The GraphQL half of the same wiring. Its facts exist only in this
@@ -414,7 +418,9 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			status: http.StatusOK,
 			reqBody: `{"query":"mutation CommentCreate($input:AddCommentInput!){addComment(input: $input){commentEdge{node{url}}}}",` +
 				`"variables":{"input":{"subjectId":"PR_kwSidecar","body":"a reply"}}}`,
-			body:         `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + replyURL + `"}}}}}`,
+			body:         `{"data":{"addComment":{"commentEdge":{"node":{"id":"IC_kwSidecar","url":"` + replyURL + `"}}}}}`,
+			wantID:       "777",
+			wantNodeID:   "IC_kwSidecar",
 			wantURL:      replyURL,
 			wantMutation: "addComment",
 			wantSubject:  "PR_kwSidecar",
@@ -517,8 +523,9 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 						!strings.HasSuffix(tc.path, a.Path) {
 						t.Fatalf("relayed write = %+v, want the %s, its path, and the %d", a, tc.method, tc.status)
 					}
-					if a.ExternalID != tc.wantID || a.URL != tc.wantURL {
-						t.Fatalf("relayed write = %+v, want created object (%q, %q)", a, tc.wantID, tc.wantURL)
+					if a.ExternalID != tc.wantID || a.NodeID != tc.wantNodeID || a.URL != tc.wantURL {
+						t.Fatalf("relayed write = %+v, want created object (%q, %q, %q)",
+							a, tc.wantID, tc.wantNodeID, tc.wantURL)
 					}
 					if tc.wantMutation != "" {
 						if a.GraphQL == nil {
@@ -538,6 +545,30 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestGHWriteFactsToWire_CarriesTheGateInputs: the orchestrator re-derives the
+// refusal from these facts rather than trusting this process's reading, so a
+// fact the gate reads and the projection drops would let the staged form of a
+// request through as its ungated twin.
+func TestGHWriteFactsToWire_CarriesTheGateInputs(t *testing.T) {
+	got := ghWriteFactsToWire(&ghwrite.GraphQLFacts{
+		Operation:   "Reply",
+		Fields:      []string{"addPullRequestReviewThreadReply"},
+		Subject:     "PRRT_kwThread",
+		Unreadable:  ghwrite.GraphQLMalformed,
+		NamesReview: true,
+	})
+	want := &agentproc.GraphQLWriteFacts{
+		Operation:   "Reply",
+		Mutations:   []string{"addPullRequestReviewThreadReply"},
+		Subject:     "PRRT_kwThread",
+		Unreadable:  ghwrite.GraphQLMalformed,
+		NamesReview: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("wire facts = %+v, want %+v", got, want)
 	}
 }
 

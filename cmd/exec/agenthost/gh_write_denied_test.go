@@ -179,6 +179,28 @@ func TestRelay_AuthorizeGHWrite(t *testing.T) {
 			wantAllowed: true,
 		},
 		{
+			// The fact that stages a thread reply has to survive the hop, or
+			// this side would re-derive the reply as the comment it otherwise is.
+			name: "a thread reply staged on a pending review",
+			args: agentproc.AuthorizeGHWriteArgs{
+				Method: "POST",
+				Path:   "/api/graphql",
+				GraphQL: &agentproc.GraphQLWriteFacts{
+					Mutations:   []string{"addPullRequestReviewThreadReply"},
+					NamesReview: true,
+				},
+			},
+		},
+		{
+			name: "a thread reply posted in public",
+			args: agentproc.AuthorizeGHWriteArgs{
+				Method:  "POST",
+				Path:    "/api/graphql",
+				GraphQL: &agentproc.GraphQLWriteFacts{Mutations: []string{"addPullRequestReviewThreadReply"}},
+			},
+			wantAllowed: true,
+		},
+		{
 			// Merging is ungated by decision, not by omission, and this side is
 			// where a change to that would first show up.
 			name:        "a merge",

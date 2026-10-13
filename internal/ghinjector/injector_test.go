@@ -518,7 +518,7 @@ func TestInjector_ObservesRESTWrites(t *testing.T) {
 // reaches the upstream untouched.
 func TestInjector_WriteAuditReadsCreatedObject(t *testing.T) {
 	const replyURL = "https://github.com/acme/widgets/pull/841#discussion_r777"
-	const respBody = `{"id":777,"in_reply_to_id":555,"html_url":"` + replyURL + `"}`
+	const respBody = `{"id":777,"node_id":"PRRC_kwReply","in_reply_to_id":555,"html_url":"` + replyURL + `"}`
 	const reqBody = `{"body":"good catch"}`
 	gotReq := make(chan string, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -556,8 +556,8 @@ func TestInjector_WriteAuditReadsCreatedObject(t *testing.T) {
 
 	select {
 	case w := <-writes:
-		if w.ExternalID != "777" || w.URL != replyURL {
-			t.Errorf("write audit = %+v, want the created reply's id and discussion link", w)
+		if w.ExternalID != "777" || w.NodeID != "PRRC_kwReply" || w.URL != replyURL {
+			t.Errorf("write audit = %+v, want the created reply's id, node id, and discussion link", w)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("no write audit for a posted review-thread reply")

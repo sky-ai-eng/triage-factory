@@ -105,6 +105,17 @@ func TestGate_GraphQL(t *testing.T) {
 			wantReason: GateReasonReview,
 		},
 		{
+			// A thread reply that names a pending review is staged on it, the
+			// position the mutation above is always in.
+			name:       "staging a thread reply on a pending review",
+			facts:      GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}, NamesReview: true},
+			wantReason: GateReasonReview,
+		},
+		// Without one it answers the thread in public, which is a comment.
+		{name: "replying to a thread", facts: GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}}},
+		// The review input means nothing to a mutation that is not staged by it.
+		{name: "a comment beside a review id", facts: GraphQLFacts{Fields: []string{"addComment"}, NamesReview: true}},
+		{
 			name: "creating a repository", facts: GraphQLFacts{Fields: []string{"createRepository"}},
 			wantReason: GateReasonRepoCreate, wantAction: domain.ActionRepoCreated,
 		},
@@ -235,6 +246,13 @@ func TestExplain_SaysWhatToDoInstead(t *testing.T) {
 		t.Errorf("refused = %q, want the mutation name to stand in for the missing verb", got)
 	}
 
+	// A staged reply is one input away from a reply the gate lets through, and
+	// the next step says which input.
+	reply := Refusal{Reason: GateReasonReview, Mutation: "addPullRequestReviewThreadReply"}.Explain()
+	if !strings.Contains(reply.NextStep, "pullRequestReviewId") {
+		t.Errorf("next step = %q, want it to name the input that staged the reply", reply.NextStep)
+	}
+
 	// The one case where nothing can be named — which is the whole reason it
 	// is refused, and the explanation says so rather than leaving the model to
 	// guess which of its calls was the problem.
@@ -271,6 +289,19 @@ func TestGate_EveryGatedActionIsInTheClassifier(t *testing.T) {
 	for name := range gatedMutations {
 		if _, known := graphQLMutations[name]; known {
 			t.Errorf("mutation %q is gated by name but the classifier resolves it; gate the act instead", name)
+		}
+	}
+	// A mutation gated in one form only is classified in the other, so it must
+	// be in the classifier — and must not resolve there to a gated act, which
+	// would refuse the form this arm exists to let through.
+	for name := range stagedMutations {
+		entry, known := graphQLMutations[name]
+		if !known {
+			t.Errorf("mutation %q is gated in its staged form, but its other form is unclassified", name)
+			continue
+		}
+		if _, gated := gatedActions[entry.action]; gated {
+			t.Errorf("mutation %q resolves to the gated act %q, so its unstaged form is refused too", name, entry.action)
 		}
 	}
 }

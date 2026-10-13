@@ -31,6 +31,10 @@ import "strings"
 // is read exactly like an operation's — names only, everything under it skipped
 // — and resolution touches each definition at most once, so a document cannot
 // spend this process's time by nesting or by pointing fragments at each other.
+//
+// One other question is answered, by documentNames: does a given name appear
+// anywhere in the document? That is a pass over the same tokens which compares
+// names and reads nothing else — no value, no string, no position in the grammar.
 
 // gqlOperation names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
@@ -171,6 +175,28 @@ func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (
 		unreadable = GraphQLTooManyFields
 	}
 	return fields, unreadable
+}
+
+// documentNames reports whether name appears anywhere in the document as a name
+// token — an argument or input field, a variable, an alias. It does not ask where,
+// which is what lets it see an input spelled inline, in a variable's default, or
+// inside a fragment, without this reader learning to walk any of them.
+//
+// A string is one token and never a name, so the same word inside a comment
+// body cannot match. A document the scanner cannot tokenize answers true: the
+// caller asks this to decide a refusal, and a scan that stopped short cannot show
+// the name is absent.
+func documentNames(doc, name string) bool {
+	sc := &gqlScanner{src: doc}
+	for {
+		tok, more := sc.next()
+		if !more {
+			return sc.bad
+		}
+		if tok.name(name) {
+			return true
+		}
+	}
 }
 
 // parseDocument reads a document's top level: its operations, and the fragments

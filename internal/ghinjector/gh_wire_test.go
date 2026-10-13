@@ -56,6 +56,9 @@ const (
 	// PR's own page, which is what lets the audit row locate an object the
 	// request named only by node id.
 	gheCommentURL = "https://ghe.test/octo/repo/pull/42#issuecomment-7"
+	// The review comment a thread reply creates, as GitHub links it.
+	gheReplyNodeID = "PRRC_kwWireReply"
+	gheReplyURL    = "https://ghe.test/octo/repo/pull/42#discussion_r8"
 )
 
 // fakeGHE answers the handful of operations the porcelain commands driven here
@@ -116,6 +119,10 @@ func fakeGHE(t *testing.T, commentExtra string) (*httptest.Server, func() string
 
 		case strings.Contains(query, "mergePullRequest"):
 			_, _ = w.Write([]byte(`{"data":{"mergePullRequest":{"clientMutationId":null}}}`))
+
+		case strings.Contains(query, "addPullRequestReviewThreadReply"):
+			_, _ = w.Write([]byte(`{"data":{"addPullRequestReviewThreadReply":{"comment":{` +
+				`"id":"` + gheReplyNodeID + `","databaseId":8,"url":"` + gheReplyURL + `"}}}}`))
 
 		case strings.Contains(query, "addReaction"):
 			_, _ = w.Write([]byte(`{"data":{"addReaction":{"clientMutationId":null}}}`))
@@ -347,21 +354,24 @@ func (o *writeObservations) only(t *testing.T, command string) ObservedWrite {
 // — so before this every one of them completed leaving no trace at all.
 func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 	cases := []struct {
-		name     string
-		args     []string
-		mutation string
-		action   string
-		target   string
-		url      string
+		name       string
+		args       []string
+		mutation   string
+		action     string
+		target     string
+		externalID string
+		url        string
 	}{
 		{
 			name:     "pr comment",
 			args:     []string{"pr", "comment", "42", "-R", ghePROwner + "/" + ghePRRepo, "--body", "a reply"},
 			mutation: "addComment",
 			action:   domain.ActionCommentPosted,
-			// The request named only a node id; the response located it.
-			target: ghePROwner + "/" + ghePRRepo + "#" + strconv.Itoa(ghePRNumber),
-			url:    gheCommentURL,
+			// The request named only a node id; the response located it, and
+			// the anchor on that url is the comment's own number.
+			target:     ghePROwner + "/" + ghePRRepo + "#" + strconv.Itoa(ghePRNumber),
+			externalID: "7",
+			url:        gheCommentURL,
 		},
 		{
 			name:     "pr close",
@@ -370,14 +380,16 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 			action:   domain.ActionPRClosed,
 			// gh selects only the id back, so the node id is all this row can
 			// honestly carry.
-			target: ghePRNodeID,
+			target:     ghePRNodeID,
+			externalID: ghePRNodeID,
 		},
 		{
-			name:     "pr merge",
-			args:     []string{"pr", "merge", "42", "-R", ghePROwner + "/" + ghePRRepo, "--merge"},
-			mutation: "mergePullRequest",
-			action:   domain.ActionPRMerged,
-			target:   ghePRNodeID,
+			name:       "pr merge",
+			args:       []string{"pr", "merge", "42", "-R", ghePROwner + "/" + ghePRRepo, "--merge"},
+			mutation:   "mergePullRequest",
+			action:     domain.ActionPRMerged,
+			target:     ghePRNodeID,
+			externalID: ghePRNodeID,
 		},
 	}
 
@@ -405,6 +417,9 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 			}
 			if shape.Target() != tc.target {
 				t.Errorf("target = %q, want %q", shape.Target(), tc.target)
+			}
+			if shape.ExternalID != tc.externalID {
+				t.Errorf("external id = %q, want %q", shape.ExternalID, tc.externalID)
 			}
 			if w.URL != tc.url {
 				t.Errorf("url = %q, want %q", w.URL, tc.url)
@@ -434,6 +449,36 @@ func TestGHWire_HandWrittenMutationIsAudited(t *testing.T) {
 	// target resolution never gates the record.
 	if shape.Target() != "" {
 		t.Errorf("target = %q, want empty — this request disclosed no variables to read", shape.Target())
+	}
+}
+
+// TestGHWire_ThreadReplyIsKeyedOnTheReply: no porcelain command replies to a
+// review thread through GraphQL, so this is the hand-written spelling, with the
+// input passed as variables the way `gh api` builds them. Its row is keyed on
+// the reply it created — the number from the response and the node id a later
+// GraphQL edit or delete would name it by.
+func TestGHWire_ThreadReplyIsKeyedOnTheReply(t *testing.T) {
+	upstream, _ := fakeGHE(t, "")
+	var writes writeObservations
+	env := ghEnvWithWrites(t, upstream.URL, writes.record)
+
+	runGH(t, env, "api", "graphql",
+		"-f", `query=mutation($input:AddPullRequestReviewThreadReplyInput!){addPullRequestReviewThreadReply(input:$input){comment{id databaseId url}}}`,
+		"-f", "input[pullRequestReviewThreadId]=PRRT_kwThread", "-f", "input[body]=ack")
+
+	w := writes.only(t, "gh api graphql")
+	if w.NodeID != gheReplyNodeID {
+		t.Errorf("node id = %q, want the reply's own %q", w.NodeID, gheReplyNodeID)
+	}
+	shape, ok := ghwrite.Resolve(w)
+	if !ok || !w.Succeeded() || shape.Action != domain.ActionCommentPosted {
+		t.Fatalf("record = %+v resolved to %+v (ok=%v), want comment_posted", w, shape, ok)
+	}
+	if shape.ExternalID != "8" {
+		t.Errorf("external id = %q, want the reply's number 8", shape.ExternalID)
+	}
+	if want := ghePROwner + "/" + ghePRRepo + "#" + strconv.Itoa(ghePRNumber); shape.Target() != want {
+		t.Errorf("target = %q, want %q from the reply's url", shape.Target(), want)
 	}
 }
 
