@@ -781,7 +781,6 @@ func TestGraphQLReviewCommentFamily(t *testing.T) {
 			variables: input(map[string]any{"pullRequestReviewCommentId": "PRRC_kwEdit", "body": "revised"}),
 			action:    domain.ActionReviewCommentEdited,
 			subject:   "PRRC_kwEdit",
-			wantID:    "PRRC_kwEdit",
 		},
 		{
 			name:      "delete",
@@ -789,7 +788,6 @@ func TestGraphQLReviewCommentFamily(t *testing.T) {
 			variables: input(map[string]any{"id": "PRRC_kwDelete"}),
 			action:    domain.ActionReviewCommentDeleted,
 			subject:   "PRRC_kwDelete",
-			wantID:    "PRRC_kwDelete",
 		},
 	}
 	for _, tc := range tests {
@@ -819,8 +817,42 @@ func TestGraphQLReviewCommentFamily(t *testing.T) {
 		NodeID:     "PRRC_kwReply",
 		GraphQL:    &GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}, Subject: "PRRT_kwThread"},
 	})
-	if !ok || shape.ExternalID != "456" || shape.Target() != "acme/widgets#841" {
-		t.Errorf("reply = %+v (ok=%v), want comment 456 on acme/widgets#841", shape, ok)
+	if !ok || shape.ExternalID != "456" || shape.NodeID != "PRRC_kwReply" || shape.Target() != "acme/widgets#841" {
+		t.Errorf("reply = %+v (ok=%v), want comment 456 (PRRC_kwReply) on acme/widgets#841", shape, ok)
+	}
+
+	// An edit's row carries the same number when its response returned one,
+	// and its node id from the request that named it.
+	edit, ok := Resolve(Observation{
+		Status:     200,
+		URL:        "https://github.com/acme/widgets/pull/841#discussion_r456",
+		ExternalID: "456",
+		NodeID:     "PRRC_kwReply",
+		GraphQL:    &GraphQLFacts{Fields: []string{"updatePullRequestReviewComment"}, Subject: "PRRC_kwReply"},
+	})
+	if !ok || edit.ExternalID != "456" || edit.NodeID != "PRRC_kwReply" {
+		t.Errorf("edit = %+v (ok=%v), want the reply's number and node id", edit, ok)
+	}
+
+	// A delete whose response named nothing has no number to record. Its node
+	// id is never filed as one: external_id holds one kind of id per object.
+	deleted, ok := Resolve(Observation{
+		Status:  200,
+		GraphQL: &GraphQLFacts{Fields: []string{"deletePullRequestReviewComment"}, Subject: "PRRC_kwReply"},
+	})
+	if !ok || deleted.ExternalID != "" || deleted.NodeID != "PRRC_kwReply" {
+		t.Errorf("delete = %+v (ok=%v), want no number and the node id the request named", deleted, ok)
+	}
+
+	// A request that spelled its arguments inline names no subject; the
+	// response's id stands in.
+	inline, ok := Resolve(Observation{
+		Status:  200,
+		NodeID:  "PRRC_kwReply",
+		GraphQL: &GraphQLFacts{Fields: []string{"updatePullRequestReviewComment"}},
+	})
+	if !ok || inline.NodeID != "PRRC_kwReply" {
+		t.Errorf("inline edit = %+v (ok=%v), want the response's node id", inline, ok)
 	}
 }
 
@@ -892,6 +924,30 @@ func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 	shape, ok = Resolve(obs)
 	if !ok || shape.Target() != "PR_kwLocate" {
 		t.Errorf("shape = %+v (ok=%v), want the node id as the target", shape, ok)
+	}
+}
+
+// TestResolveGraphQL_NodeIDIsNeverTheExternalID holds the rule across the whole
+// table: external_id carries one kind of id per object whichever transport the
+// act came through, so a node id the request named lands in NodeID and never
+// there.
+func TestResolveGraphQL_NodeIDIsNeverTheExternalID(t *testing.T) {
+	const subject = "N_kwSubject"
+	for name := range graphQLMutations {
+		shape, ok := Resolve(Observation{
+			Status:  200,
+			GraphQL: &GraphQLFacts{Fields: []string{name}, Subject: subject},
+		})
+		if !ok {
+			t.Errorf("%s did not resolve", name)
+			continue
+		}
+		if shape.ExternalID == subject {
+			t.Errorf("%s filed the request's node id as its external id", name)
+		}
+		if !shape.CreatesObject && shape.NodeID != subject {
+			t.Errorf("%s node id = %q, want the %q its request named", name, shape.NodeID, subject)
+		}
 	}
 }
 
@@ -1071,12 +1127,27 @@ func TestReadGraphQLResponse_CreatedCommentIDs(t *testing.T) {
 			body:  `{"data":{"addPullRequestReviewThreadReply":{"clientMutationId":null}}}`,
 		},
 		{
-			// The ids are read for a comment create only: an edit's comment was
-			// named by the request, and the row already carries it.
-			name:    "an edit",
-			field:   "updatePullRequestReviewComment",
-			body:    `{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_kwEdited","databaseId":5,"url":"https://github.com/acme/widgets/pull/841#discussion_r5"}}}}`,
-			wantURL: "https://github.com/acme/widgets/pull/841#discussion_r5",
+			// An edit names its comment by node id; the number the response
+			// returns is what lines its row up with the comment's other rows.
+			name:       "an edit",
+			field:      "updatePullRequestReviewComment",
+			body:       `{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_kwEdited","databaseId":5,"url":"https://github.com/acme/widgets/pull/841#discussion_r5"}}}}`,
+			wantID:     "5",
+			wantNodeID: "PRRC_kwEdited",
+			wantURL:    "https://github.com/acme/widgets/pull/841#discussion_r5",
+		},
+		{
+			name:    "an issue comment edit",
+			field:   "updateIssueComment",
+			body:    `{"data":{"updateIssueComment":{"issueComment":{"url":"https://github.com/acme/widgets/pull/841#issuecomment-6"}}}}`,
+			wantID:  "6",
+			wantURL: "https://github.com/acme/widgets/pull/841#issuecomment-6",
+		},
+		{
+			// Its payload holds no comment, so there is nothing to read.
+			name:  "an issue comment delete",
+			field: "deleteIssueComment",
+			body:  `{"data":{"deleteIssueComment":{"clientMutationId":null}}}`,
 		},
 	}
 	for _, tc := range tests {
@@ -1284,8 +1355,8 @@ func TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL(t *testing.T) {
 		Status:  200,
 		GraphQL: &GraphQLFacts{Fields: []string{"archiveRepository"}, Subject: "R_kwWidgets"},
 	})
-	if !ok || archived.Target() != "R_kwWidgets" || archived.ExternalID != "R_kwWidgets" {
-		t.Errorf("archive = %+v (ok=%v), want the node id as target and id", archived, ok)
+	if !ok || archived.Target() != "R_kwWidgets" || archived.NodeID != "R_kwWidgets" || archived.ExternalID != "" {
+		t.Errorf("archive = %+v (ok=%v), want the node id as target and node id, and no external id", archived, ok)
 	}
 
 	// A create whose response could not be read keeps no target rather than

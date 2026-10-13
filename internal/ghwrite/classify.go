@@ -74,7 +74,17 @@ type Shape struct {
 	// create, whose id exists only in the response (see CreatesObject). For a
 	// reaction it is the object the reaction lands ON, not the reaction itself:
 	// the log's question is what the run did to which object.
+	//
+	// It is never a GraphQL node id. One kind of object carries one kind of id
+	// here whichever transport the act came through, so a comment's rows share
+	// its number; a GraphQL write whose response did not disclose that number
+	// leaves this empty, and its node id is in NodeID.
 	ExternalID string
+
+	// NodeID is the GraphQL node id of the object acted on — the one a create
+	// made, read from its response, or the one any other GraphQL act named in
+	// its request. Empty where neither disclosed one.
+	NodeID string
 
 	// InReplyTo is the review comment a reply threads under, from the path. 0
 	// for every other shape.
@@ -156,11 +166,11 @@ type Observation struct {
 	ExternalID string
 	URL        string
 
-	// NodeID is the created object's GraphQL node id, read from the same
-	// response as ExternalID. It is kept apart from ExternalID because the two
-	// name one object in two id spaces: a REST path addresses a comment by its
-	// number, while a GraphQL edit or delete addresses it by node id, and a later
-	// write is matched against whichever its own transport uses.
+	// NodeID is the object's GraphQL node id, read from the same response as
+	// ExternalID. It is kept apart from ExternalID because the two name one
+	// object in two id spaces: a REST path addresses a comment by its number,
+	// while a GraphQL edit or delete addresses it by node id, and a later write
+	// is matched against whichever its own transport uses.
 	NodeID string
 
 	// GraphQL, when set, marks this as a write performed through the GraphQL
@@ -218,6 +228,7 @@ func Resolve(obs Observation) (Shape, bool) {
 	if obs.ExternalID != "" {
 		s.ExternalID = obs.ExternalID
 	}
+	s.NodeID = obs.NodeID
 	if s.NumberFromObjectURL {
 		// Either collection's url: a pull request and an issue are both
 		// addressed by the number their own link carries.

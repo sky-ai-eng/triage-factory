@@ -360,6 +360,7 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 		action     string
 		target     string
 		externalID string
+		nodeID     string
 		url        string
 	}{
 		{
@@ -379,17 +380,18 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 			mutation: "closePullRequest",
 			action:   domain.ActionPRClosed,
 			// gh selects only the id back, so the node id is all this row can
-			// honestly carry.
-			target:     ghePRNodeID,
-			externalID: ghePRNodeID,
+			// honestly carry — as its target and its node id, never as an
+			// external id, which for a pull request is its number.
+			target: ghePRNodeID,
+			nodeID: ghePRNodeID,
 		},
 		{
-			name:       "pr merge",
-			args:       []string{"pr", "merge", "42", "-R", ghePROwner + "/" + ghePRRepo, "--merge"},
-			mutation:   "mergePullRequest",
-			action:     domain.ActionPRMerged,
-			target:     ghePRNodeID,
-			externalID: ghePRNodeID,
+			name:     "pr merge",
+			args:     []string{"pr", "merge", "42", "-R", ghePROwner + "/" + ghePRRepo, "--merge"},
+			mutation: "mergePullRequest",
+			action:   domain.ActionPRMerged,
+			target:   ghePRNodeID,
+			nodeID:   ghePRNodeID,
 		},
 	}
 
@@ -420,6 +422,9 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 			}
 			if shape.ExternalID != tc.externalID {
 				t.Errorf("external id = %q, want %q", shape.ExternalID, tc.externalID)
+			}
+			if shape.NodeID != tc.nodeID {
+				t.Errorf("node id = %q, want %q", shape.NodeID, tc.nodeID)
 			}
 			if w.URL != tc.url {
 				t.Errorf("url = %q, want %q", w.URL, tc.url)

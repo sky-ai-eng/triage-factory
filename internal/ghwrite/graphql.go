@@ -145,7 +145,7 @@ func (f GraphQLFacts) Mutation() string {
 // rows read identically to the equivalent verb's.
 var graphQLMutations = map[string]graphQLShape{
 	"addComment":                    {action: domain.ActionCommentPosted, creates: true, comment: []string{"commentEdge", "node"}},
-	"updateIssueComment":            {action: domain.ActionCommentEdited},
+	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}},
 	"deleteIssueComment":            {action: domain.ActionCommentDeleted},
 	"createPullRequest":             {action: domain.ActionPRCreated, creates: true, provenance: true, numberFromURL: true},
 	"updatePullRequest":             {action: domain.ActionPREdited},
@@ -223,8 +223,8 @@ var graphQLMutations = map[string]graphQLShape{
 	// as its REST twin is — except in the form that names a pending review,
 	// which the gate refuses and the classifier never names (stagedMutations).
 	"addPullRequestReviewThreadReply": {action: domain.ActionCommentPosted, creates: true, comment: []string{"comment"}},
-	"updatePullRequestReviewComment":  {action: domain.ActionReviewCommentEdited},
-	"deletePullRequestReviewComment":  {action: domain.ActionReviewCommentDeleted},
+	"updatePullRequestReviewComment":  {action: domain.ActionReviewCommentEdited, comment: []string{"pullRequestReviewComment"}},
+	"deletePullRequestReviewComment":  {action: domain.ActionReviewCommentDeleted, comment: []string{"pullRequestReviewComment"}},
 
 	// addPullRequestReviewThread stays out, and now permanently. It stages a
 	// thread on a PENDING review — nothing is published until the review is
@@ -268,10 +268,12 @@ type graphQLShape struct {
 	// number under a collection, and a repository is addressed by having
 	// nothing under it at all.
 	repoFromURL bool
-	// comment is the path through the payload to the comment a create made,
-	// for the creates whose response is read for that comment's ids. It names
-	// one object exactly because the payload nests others beside it — the
-	// pull request, the thread — and each of those has an id of its own.
+	// comment is the path through the payload to the comment the mutation
+	// created or acted on, for the mutations whose response is read for that
+	// comment's ids. It names one object exactly because the payload nests
+	// others beside it — the pull request, the thread — and each of those has an
+	// id of its own. deleteIssueComment has none: its payload returns nothing
+	// but the client's own mutation id.
 	comment []string
 }
 
@@ -530,16 +532,17 @@ type GraphQLResponse struct {
 	// URL is where the object the act made or touched now lives.
 	URL string
 
-	// ExternalID and NodeID are a created comment's numeric id and node id, for
-	// the mutations whose table entry locates that comment in the payload. Each
-	// is empty where the selection set returned nothing it could come from.
+	// ExternalID and NodeID are a comment's numeric id and node id, for the
+	// mutations whose table entry locates that comment in the payload. Each is
+	// empty where the selection set returned nothing it could come from.
 	ExternalID string
 	NodeID     string
 }
 
 // ReadGraphQLResponse extracts what a GraphQL response can add to an audit row:
-// whether the write actually failed, where the object it made now lives, and —
-// for a comment create — that comment's ids.
+// whether the write actually failed, where the object it made or touched now
+// lives, and — for a comment the mutation created or acted on — that comment's
+// ids.
 //
 // It is read against the facts of the request that produced it. The mutation
 // they name is the payload to search, so the scan starts inside the act's own
@@ -570,8 +573,8 @@ func ReadGraphQLResponse(body []byte, facts GraphQLFacts) GraphQLResponse {
 	return read
 }
 
-// createdComment reads a created comment's url and ids out of the comment's own
-// object, reached by following path from the mutation's payload. Never the first
+// createdComment reads a comment's url and ids out of the comment's own object,
+// reached by following path from the mutation's payload. Never the first
 // id found anywhere: the payload may also carry the pull request and the thread
 // the comment hangs off, and their ids name those objects, not this one.
 //
@@ -747,21 +750,13 @@ func classifyGraphQL(facts GraphQLFacts) (Shape, bool) {
 		// reaches a row as anything but a denial.
 		return Shape{}, false
 	}
-	s := Shape{
+	return Shape{
 		Action:              entry.action,
 		Subject:             facts.Subject,
 		CreatesObject:       entry.creates,
 		CarriesProvenance:   entry.provenance,
 		NumberFromObjectURL: entry.numberFromURL,
-	}
-	if !entry.creates {
-		// The act was performed ON the object the variables named, so that node
-		// id is its id. A create's id belongs to the object it made, which the
-		// request could not have known — it comes from the response or not at
-		// all (see resolveGraphQL).
-		s.ExternalID = facts.Subject
-	}
-	return s, true
+	}, true
 }
 
 // resolveGraphQL completes a GraphQL shape with what the response disclosed.
@@ -779,10 +774,19 @@ func resolveGraphQL(obs Observation) (Shape, bool) {
 	}
 	entry := graphQLMutations[obs.GraphQL.Mutation()]
 	if entry.comment != nil {
-		// A created comment's id was read out of its own object in the response
+		// The comment's id was read out of its own object in the response
 		// (ReadGraphQLResponse). Its url locates the pull request or issue it
 		// hangs off, and the number there is that object's, never the comment's.
 		s.ExternalID = obs.ExternalID
+	}
+	// The node id of the object the act was performed on. Anything but a
+	// create names that object in its request, which is authoritative about
+	// what was acted on; a request that spelled its arguments inline discloses
+	// no subject, and the response's id stands in where it returned one. A
+	// create's request names only the parent, so its node id is the response's.
+	s.NodeID = obs.NodeID
+	if !s.CreatesObject && s.Subject != "" {
+		s.NodeID = s.Subject
 	}
 	// A repository's url is read by its own parser and never by the object one:
 	// "…/octo/repo" would otherwise have to be told apart from "…/octo/repo/pull/7"

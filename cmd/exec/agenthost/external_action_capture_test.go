@@ -800,6 +800,48 @@ func TestGHChannelWriteAction_GraphQLCarriesProvenanceWhereItIsAsked(t *testing.
 	}
 }
 
+// TestGHChannelWriteAction_CommentRowsShareTheNumber: a comment's create, edit,
+// and delete rows carry its number in external_id whatever transport each came
+// through, and its node id in detail_json. A GraphQL write names the comment by
+// node id, which therefore never lands in external_id; where the response did
+// not return the number, the row has none.
+func TestGHChannelWriteAction_CommentRowsShareTheNumber(t *testing.T) {
+	const nodeID = "IC_kwShared"
+	created := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		URL:        "https://github.com/octo/repo/pull/9#issuecomment-55",
+		ExternalID: "55",
+		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"addComment"}, Subject: "PR_kwParent"},
+	}, domain.CredentialGitHubApp)
+	edited := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		URL:        "https://github.com/octo/repo/pull/9#issuecomment-55",
+		ExternalID: "55",
+		GraphQL:    &ghwrite.GraphQLFacts{Fields: []string{"updateIssueComment"}, Subject: nodeID},
+	}, domain.CredentialGitHubApp)
+	restEdited := GHChannelWriteAction(ghwrite.Observation{
+		Method: "PATCH", Path: "/repos/octo/repo/issues/comments/55", Status: 200,
+	}, domain.CredentialGitHubApp)
+	deleted := GHChannelWriteAction(ghwrite.Observation{
+		Method: "POST", Path: "/graphql", Status: 200,
+		GraphQL: &ghwrite.GraphQLFacts{Fields: []string{"deleteIssueComment"}, Subject: nodeID},
+	}, domain.CredentialGitHubApp)
+
+	for name, act := range map[string]*domain.ExternalAction{"create": created, "graphql edit": edited, "rest edit": restEdited} {
+		if act.ExternalID != "55" {
+			t.Errorf("%s external_id = %q, want the comment's number 55", name, act.ExternalID)
+		}
+	}
+	if deleted.ExternalID != "" {
+		t.Errorf("delete external_id = %q, want empty — its response named no number", deleted.ExternalID)
+	}
+	for name, act := range map[string]*domain.ExternalAction{"graphql edit": edited, "delete": deleted} {
+		if !strings.Contains(act.DetailJSON, `"node_id":"`+nodeID+`"`) {
+			t.Errorf("%s detail_json = %q, want the node id its request named", name, act.DetailJSON)
+		}
+	}
+}
+
 // TestGHChannelWriteAction_GraphQLRefusalIsAnAttempt: the endpoint answers a
 // refused mutation with 200 and an errors array, so without reading it a merge
 // that never happened would be logged as one that did.

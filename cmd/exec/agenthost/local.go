@@ -2611,12 +2611,13 @@ func graphQLFallbackWriteAction(obs ghwrite.Observation, credential string) *dom
 // are settled before this sees them.
 //
 // detail_json carries the act's own context (the thread a reply answers), the
-// created object's node id where the response returned one, and, for the shapes
-// that ask for it, the raw method and path. A reply's row otherwise matches
+// object's GraphQL node id where the request or response disclosed one, and,
+// for the shapes that ask for it, the raw method and path. A reply's row otherwise matches
 // `gh pr comment-reply`'s, while a PR create or a review submit is required to
-// say which channel it came through. The node id is recorded because a later
-// GraphQL edit or delete names the comment by node id, and the comment's number
-// cannot be matched against it.
+// say which channel it came through. The node id lives here rather than in
+// external_id, which holds the object's own number whatever the transport: a
+// GraphQL edit or delete names a comment only by node id, and a row keyed on it
+// would not line up with the same comment's other rows.
 func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	act := &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
@@ -2630,8 +2631,8 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credent
 	if shape.InReplyTo > 0 {
 		detail["in_reply_to"] = shape.InReplyTo
 	}
-	if obs.NodeID != "" {
-		detail["node_id"] = obs.NodeID
+	if shape.NodeID != "" {
+		detail["node_id"] = shape.NodeID
 	}
 	if shape.CarriesProvenance {
 		// Which call performed the act, in whatever terms that transport has: a
