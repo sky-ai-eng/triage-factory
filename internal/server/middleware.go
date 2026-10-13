@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 
@@ -620,44 +622,97 @@ const devFrontendOrigin = "http://localhost:5173"
 // indicate cross-site since cross-site mutating requests must set it.
 func (s *Server) withCSRFOriginCheck(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.deployCfg == nil {
-			next.ServeHTTP(w, r)
-			return
-		}
 		switch r.Method {
 		case http.MethodGet, http.MethodHead, http.MethodOptions:
 			next.ServeHTTP(w, r)
 			return
 		}
-		// A Bearer request needs no origin check. This wrapper runs OUTSIDE
-		// withSession, so it sees the header and not whether the token behind
-		// it is any good — and that is sufficient, because what CSRF defends
-		// against is a browser attaching an AMBIENT credential to a request
-		// the user's page did not intend, and a cross-site browser context
-		// cannot attach an Authorization header at all without a CORS
-		// preflight this server never approves. So the header's presence
-		// already says the request was made deliberately by its sender.
-		// Whether the credential is good is withSession's decision, one layer
-		// in, and a bad one is refused there rather than here.
-		if _, ok := bearerCredential(r.Header.Get("Authorization")); ok {
-			next.ServeHTTP(w, r)
+		if s.foreignOrigin(r) {
+			writeCrossOriginRejected(w)
 			return
-		}
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			next.ServeHTTP(w, r)
-			return
-		}
-		if origin != s.deployCfg.publicURL {
-			if !s.deployCfg.trustDevFrontendOrigin || origin != devFrontendOrigin {
-				httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
-					Reason: httpx.ReasonForbidden, Message: "cross-origin request rejected",
-				})
-				return
-			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// foreignOrigin reports whether r is a browser request sent from a page this
+// deployment does not serve: its Origin is neither publicURL nor (local dev
+// only) devFrontendOrigin. withCSRFOriginCheck applies it to mutating routes
+// and handleWS to the websocket handshake, which browsers send cross-origin
+// without any CORS gate.
+//
+// deployCfg nil: false (shouldn't happen after boot, but safe).
+func (s *Server) foreignOrigin(r *http.Request) bool {
+	if s.deployCfg == nil {
+		return false
+	}
+	// A Bearer request needs no origin check. This runs OUTSIDE withSession,
+	// so it sees the header and not whether the token behind it is any good —
+	// and that is sufficient, because what the check defends against is a
+	// browser attaching an AMBIENT credential to a request the user's page did
+	// not intend, and a cross-site browser context cannot attach an
+	// Authorization header at all without a CORS preflight this server never
+	// approves (nor to a websocket handshake, which takes no custom headers).
+	// So the header's presence already says the request was made deliberately
+	// by its sender. Whether the credential is good is withSession's decision,
+	// one layer in, and a bad one is refused there rather than here.
+	if _, ok := bearerCredential(r.Header.Get("Authorization")); ok {
+		return false
+	}
+	origin := r.Header.Get("Origin")
+	if origin == "" || origin == s.deployCfg.publicURL {
+		return false
+	}
+	return !s.deployCfg.trustDevFrontendOrigin || origin != devFrontendOrigin
+}
+
+func writeCrossOriginRejected(w http.ResponseWriter) {
+	httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+		Reason: httpx.ReasonForbidden, Message: "cross-origin request rejected",
+	})
+}
+
+// withForeignHostCheck rejects every request whose Host names something other
+// than this machine, when deployCfg.rejectForeignHosts is set (local mode only,
+// via RejectForeignHosts). It is the DNS-rebinding defense: local mode has no
+// authentication, so a page on attacker.example whose name later resolves to
+// 127.0.0.1 would be same-origin with itself while talking to this server and
+// could read any GET response. The browser sends that page's name as Host, and
+// a rebinding attack needs a DNS name to rebind, so the accepted set is
+// "localhost", any IP literal, and the hostname of publicURL. IP literals cover
+// a --host 0.0.0.0 instance browsed by address.
+//
+// Multi mode never sets the flag: every route there needs a session the
+// rebinding page does not have, and a reverse proxy in front of it may rewrite
+// Host to an upstream name.
+func (s *Server) withForeignHostCheck(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.deployCfg == nil || !s.deployCfg.rejectForeignHosts || s.localHost(r.Host) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		httpx.WriteErrors(w, http.StatusForbidden, httpx.ErrorItem{
+			Reason: httpx.ReasonForbidden, Message: "request Host does not name this server",
+		})
+	})
+}
+
+// localHost reports whether host (a Host header value, port optional) is one
+// withForeignHostCheck accepts.
+func (s *Server) localHost(host string) bool {
+	name := host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		name = h
+	}
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "["), "]")
+	if name == "" {
+		return false
+	}
+	if strings.EqualFold(name, "localhost") || net.ParseIP(name) != nil {
+		return true
+	}
+	u, err := url.Parse(s.deployCfg.publicURL)
+	return err == nil && u.Hostname() != "" && strings.EqualFold(name, u.Hostname())
 }
 
 // sidCookieName resolves at request time: __Host-sid for HTTPS

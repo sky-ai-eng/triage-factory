@@ -53,8 +53,9 @@ func httpSpanName(_ string, r *http.Request) string {
 }
 
 // tracedHandler is the server's outermost handler chain: the mux, then the
-// security headers, then otelhttp on the outside. Both Handler() and
-// ListenAndServeContext build it through here so the two can't drift.
+// local-mode Host check, then the security headers, then otelhttp on the
+// outside. Both Handler() and ListenAndServeContext build it through here so
+// the two can't drift.
 //
 // otelhttp is outermost deliberately: what it doesn't wrap produces no
 // span, and the responses TF generates *around* the mux — the JSON 404, a
@@ -62,7 +63,7 @@ func httpSpanName(_ string, r *http.Request) string {
 // ones worth seeing when a client reports a route "not working".
 func (s *Server) tracedHandler() http.Handler {
 	return otelhttp.NewHandler(
-		s.withSecurityHeaders(s.mux),
+		s.withSecurityHeaders(s.withForeignHostCheck(s.mux)),
 		"http.server", // unused; httpSpanName ignores the operation
 		// Server spans record url.path, and TF's API is not all opaque
 		// ids — GET /api/repos/by-name/{owner}/{repo} and the dashboard's

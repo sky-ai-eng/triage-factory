@@ -173,6 +173,12 @@ type ConnIdentity struct {
 // internal/server (which would be the wrong direction architecturally).
 // The wrapper handler that mounts this lives in internal/server and pulls
 // ClaimsFrom + OrgIDFrom before invoking us.
+//
+// The caller also owns the Origin policy and must refuse a cross-origin
+// handshake before calling HandleWS. The library's built-in check is skipped
+// because it compares Origin against r.Host, which a reverse proxy may rewrite
+// and a DNS-rebinding page controls; the caller instead checks Origin against
+// the deployment's configured URL.
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request, id ConnIdentity) {
 	conn, err := ws.Accept(w, r, &ws.AcceptOptions{
 		InsecureSkipVerify: true,

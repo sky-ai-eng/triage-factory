@@ -46,7 +46,18 @@ import (
 // auto-reconnect from re-scoping to (and re-streaming) the org the user
 // no longer belongs to. A non-member active org is treated as
 // no_active_org, the same 409 the FE handles by re-picking.
+//
+// Origin gate: a browser opens a websocket to any origin without a CORS
+// check, so a handshake from a page this deployment does not serve is refused
+// here, by the same predicate the mutating routes use. Without it, any site
+// the user visits could subscribe to a local-mode instance's broadcasts
+// (local mode authenticates nothing) or, in multi mode, ride a same-site
+// page's Lax session cookie.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if s.foreignOrigin(r) {
+		writeCrossOriginRejected(w)
+		return
+	}
 	var userID string
 	if claims := ClaimsFrom(r.Context()); claims != nil {
 		userID = claims.Subject
