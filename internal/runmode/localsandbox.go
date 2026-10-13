@@ -10,10 +10,11 @@ import (
 
 // Local-mode OS sandbox posture. A single knob — TF_LOCAL_SANDBOX (on/off)
 // — that decides whether a local delegated agent run executes inside a
-// bubblewrap mount namespace instead of as a plain child of this process.
+// bubblewrap mount and pid namespace instead of as a plain child of this
+// process.
 //
 // It is courtesy isolation, not a security boundary: same uid, shared
-// network, shared /proc. What it buys is that a confused or wandering agent
+// network. What it buys is that a confused or wandering agent
 // cannot read a sibling run's worktree, the SQLite DB, or the operator's
 // home directory. Multi mode's gVisor jail is the boundary that backs a
 // multi-tenant promise; this one backs no promise, which is exactly why it

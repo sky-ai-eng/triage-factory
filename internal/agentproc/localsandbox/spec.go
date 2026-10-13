@@ -2,8 +2,8 @@
 // delegated agent run in a mount namespace.
 //
 // It is courtesy isolation, not a security boundary — same uid, shared
-// network, shared /proc, and the agent could in principle break out the way
-// any same-uid process can. The framing is internal/pushpolicy's: local mode
+// network, and the agent could in principle break out the way any same-uid
+// process can. The framing is internal/pushpolicy's: local mode
 // is not a security boundary and cannot be made one. What the namespace does
 // buy is that a confused or wandering agent cannot read a sibling run's
 // worktree, the SQLite database, or the operator's home directory — the three
@@ -15,17 +15,23 @@
 // The mount plan is whole-host-read-only, then mask-and-bind-back: everything
 // is visible ro, four trees are replaced by empty tmpfs (the operator's home,
 // the TF state root, the temp dir, /run), and only the paths this run legibly
-// needs are bound back through the masks. Masking /run is what puts the OS
-// keychain out of reach — the session D-Bus and Secret Service sockets live
-// under /run/user/<uid> — which is a real credential win that falls out of the
-// plan rather than being built for.
+// needs are bound back through the masks. Masking /run removes the session
+// D-Bus and Secret Service socket paths (they live under /run/user/<uid>) from
+// the run's filesystem view. That is path hiding and no more: the network
+// namespace is shared, so a bus listening on an abstract socket is not covered
+// by any mount mask.
 //
-// Two things are deliberately NOT unshared. The network stays the host's,
-// because the run's git proxy, gh injector and LLM endpoint are all loopback.
-// The pid namespace stays the host's, because agentproc's teardown contract is
-// Setpgid plus a kill of the process group, and a nested pid namespace would
-// put the agent's children on the other side of it; --die-with-parent is the
-// backstop that covers what --unshare-pid would have.
+// The pid namespace is private. The masks only hide paths in this mount
+// namespace, and /proc/<pid>/root of a same-uid host process resolves in that
+// process's own mount namespace, so a shared pid namespace would leave every
+// host process of the operator's a way around them. Teardown is unaffected:
+// agentproc's Setpgid plus kill of the process group ends bwrap and the
+// namespace's init, and the kernel kills the rest, which also reaches a
+// descendant that left the group with setsid. --die-with-parent covers the
+// caller dying first.
+//
+// The network is deliberately NOT unshared, because the run's git proxy, gh
+// injector and LLM endpoint are all loopback.
 package localsandbox
 
 import (
