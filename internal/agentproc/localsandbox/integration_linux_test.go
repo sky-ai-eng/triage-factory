@@ -377,8 +377,12 @@ func killMatching(token string) {
 	}
 }
 
+// waitFor polls cond until it holds or the deadline passes. The deadline is
+// generous because it only bounds the failing case: a passing test returns on
+// the first poll that sees the condition, and a loaded CI runner can take
+// seconds to schedule a fork.
 func waitFor(cond func() bool) bool {
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if cond() {
 			return true
