@@ -27,3 +27,12 @@ func TestCommentArtifacts_SQLite(t *testing.T) {
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }
+
+// TestArtifactUpsert_SQLite runs the shared artifact upsert conformance suite
+// against the SQLite backend, a fresh in-memory DB per subtest.
+func TestArtifactUpsert_SQLite(t *testing.T) {
+	dbtest.RunArtifactUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}

@@ -41,6 +41,20 @@ func TestCommentArtifacts_Postgres(t *testing.T) {
 	})
 }
 
+// TestArtifactUpsert_Postgres runs the shared artifact upsert conformance suite
+// against the Postgres backend, both pools wired against AdminDB like the scope
+// suite above.
+func TestArtifactUpsert_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunArtifactUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		h.Reset(t)
+		orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "upsert")
+		return stores, orgID, teamID
+	})
+}
+
 // TestArtifactStore_Postgres_ReturnedRowUnderClaims runs the artifact upsert
 // through the app pool inside a claims-carrying transaction, where the
 // artifacts RLS policies apply. On a BYPASSRLS connection RETURNING hands back

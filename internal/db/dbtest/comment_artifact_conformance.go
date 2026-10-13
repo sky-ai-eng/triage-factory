@@ -15,9 +15,8 @@ import (
 // that knows only the node id finds the row by, and whether TF posted the
 // comment, which only ever turns on and is what tells TF's comments from
 // people's. It also pins that a conversation comment and a review comment with
-// the same number are two rows, and that a write without details keeps the
-// details an earlier write stored. The factory is ExternalObjectScopeFactory's:
-// a fresh, empty org and a team per call.
+// the same number are two rows. The factory is ExternalObjectScopeFactory's: a
+// fresh, empty org and a team per call.
 func RunCommentArtifactConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -170,28 +169,6 @@ func RunCommentArtifactConformance(t *testing.T, mk ExternalObjectScopeFactory) 
 		}
 		if _, err := s.Artifacts.PostedByTFDedupKeysSystem(ctx, orgID, "", []string{ours}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("PostedByTFDedupKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
-		}
-	})
-
-	t.Run("A_write_without_details_keeps_the_stored_details", func(t *testing.T) {
-		s, orgID, teamID := mk(t)
-		reply := comment(teamID, hostA, domain.GitHubReviewComment, 11)
-		reply.DetailsJSON = `{"in_reply_to":10}`
-		first, err := s.Artifacts.UpsertSystem(ctx, orgID, reply)
-		if err != nil {
-			t.Fatalf("UpsertSystem (reply): %v", err)
-		}
-		edited, err := s.Artifacts.UpsertSystem(ctx, orgID, comment(teamID, hostA, domain.GitHubReviewComment, 11))
-		if err != nil {
-			t.Fatalf("UpsertSystem (edit): %v", err)
-		}
-		if edited.ID != first.ID || edited.DetailsJSON != `{"in_reply_to":10}` {
-			t.Errorf("row after an edit = %+v, want row %s with its details kept", edited, first.ID)
-		}
-		replaced := comment(teamID, hostA, domain.GitHubReviewComment, 11)
-		replaced.DetailsJSON = `{"in_reply_to":12}`
-		if got, err := s.Artifacts.UpsertSystem(ctx, orgID, replaced); err != nil || got.DetailsJSON != `{"in_reply_to":12}` {
-			t.Errorf("row after a write with details = %+v, %v; want the new details", got, err)
 		}
 	})
 }
