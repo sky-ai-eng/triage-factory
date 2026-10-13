@@ -50,6 +50,20 @@ type Artifact struct {
 	ExternalID string `json:"external_id,omitempty"`
 	URL        string `json:"url,omitempty"`
 
+	// NodeID is the backing object's GraphQL node id, where the object has one
+	// and a writer learned it. A GitHub comment carries it: a GraphQL edit or
+	// delete names a comment by node id alone, so a write that arrives without
+	// the comment's number finds the row through it
+	// (ArtifactStore.GetByNodeIDSystem). Preserve-on-empty, like ExternalID.
+	NodeID string `json:"node_id,omitempty"`
+
+	// PostedByTF marks a comment row whose comment TF posted. A run that edits
+	// or deletes someone else's comment still leaves a row, because the row
+	// records what the run did to that comment, so the row existing does not
+	// mean TF wrote the comment; this does. Only the writer that posts a
+	// comment sets it, and a later write never clears it.
+	PostedByTF bool `json:"posted_by_tf,omitempty"`
+
 	// State is the per-Kind lifecycle position. Use the ArtifactState*
 	// consts; not DB-constrained so the set stays extensible.
 	State string `json:"state"`

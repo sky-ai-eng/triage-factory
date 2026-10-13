@@ -56,6 +56,9 @@ const (
 	// PR's own page, which is what lets the audit row locate an object the
 	// request named only by node id.
 	gheCommentURL = "https://ghe.test/octo/repo/pull/42#issuecomment-7"
+	// The comment's node id, which `gh pr comment` does not select, so the
+	// injector reads the comment back for it.
+	gheCommentNodeID = "IC_kwWireComment"
 	// The review comment a thread reply creates, as GitHub links it.
 	gheReplyNodeID = "PRRC_kwWireReply"
 	gheReplyURL    = "https://ghe.test/octo/repo/pull/42#discussion_r8"
@@ -85,6 +88,9 @@ func fakeGHE(t *testing.T, commentExtra string) (*httptest.Server, func() string
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/meta"):
 			_, _ = w.Write([]byte(`{"verifiable_password_authentication":false}`))
+
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v3/repos/"+ghePROwner+"/"+ghePRRepo+"/issues/comments/7":
+			_, _ = w.Write([]byte(`{"id":7,"node_id":"` + gheCommentNodeID + `","html_url":"` + gheCommentURL + `"}`))
 
 		case !strings.HasSuffix(r.URL.Path, "/graphql"):
 			w.WriteHeader(http.StatusNotFound)
@@ -369,9 +375,11 @@ func TestGHWire_PorcelainWritesAreAudited(t *testing.T) {
 			mutation: "addComment",
 			action:   domain.ActionCommentPosted,
 			// The request named only a node id; the response located it, and
-			// the anchor on that url is the comment's own number.
+			// the anchor on that url is the comment's own number. The
+			// comment's node id is read back from the comment.
 			target:     ghePROwner + "/" + ghePRRepo + "#" + strconv.Itoa(ghePRNumber),
 			externalID: "7",
+			nodeID:     gheCommentNodeID,
 			url:        gheCommentURL,
 		},
 		{

@@ -773,45 +773,65 @@ func (c *Client) DismissReview(ctx context.Context, owner, repo string, number, 
 	return err
 }
 
-// AddComment adds a top-level issue comment to a PR and returns its id.
-func (c *Client) AddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
-	id, _, err := c.AddCommentWithURL(ctx, owner, repo, number, body)
-	return id, err
+// CommentRef is a comment a write made or acted on, as far as GitHub's
+// response named it: which numbering it is in, its number, its GraphQL node id,
+// and its page link. The host-side artifact recorder (cmd/exec/agenthost) keys
+// the comment's artifact on the space and the number, and stores the node id so
+// a later GraphQL edit or delete naming only that id finds the row. A field the
+// response did not carry is zero; a delete's response carries none.
+type CommentRef struct {
+	Space   domain.GitHubCommentSpace
+	ID      int
+	NodeID  string
+	HTMLURL string
 }
 
-// AddCommentWithURL is AddComment but also returns the new comment's html_url
-// — the canonical web link GitHub computes, correct for issues-vs-pulls and
-// for GHES without us having to assemble it. The host-side artifact recorder
-// (cmd/exec/agenthost) keys the comment artifact on the id and stamps this url;
-// the agent-facing AddComment drops it because the IPC surface doesn't carry a
-// comment url back to the sandbox.
-func (c *Client) AddCommentWithURL(ctx context.Context, owner, repo string, number int, body string) (int, string, error) {
+// commentRefFrom reads a comment's coordinates out of the REST object a create
+// or an edit returned.
+func commentRefFrom(space domain.GitHubCommentSpace, data []byte) (CommentRef, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return CommentRef{}, err
+	}
+	return CommentRef{Space: space, ID: intVal(raw, "id"), NodeID: strVal(raw, "node_id"), HTMLURL: strVal(raw, "html_url")}, nil
+}
+
+// AddComment adds a top-level issue comment to a PR and returns its id.
+func (c *Client) AddComment(ctx context.Context, owner, repo string, number int, body string) (int, error) {
+	ref, err := c.PostComment(ctx, owner, repo, number, body)
+	return ref.ID, err
+}
+
+// PostComment is AddComment returning the whole CommentRef. Its html_url is
+// the canonical web link GitHub computes, correct for issues-vs-pulls and for
+// GHES without us having to assemble it; the agent-facing AddComment drops it
+// because the IPC surface doesn't carry a comment url back to the sandbox.
+func (c *Client) PostComment(ctx context.Context, owner, repo string, number int, body string) (CommentRef, error) {
 	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/issues/%d/comments", owner, repo, number), map[string]any{
 		"body": body,
 	})
 	if err != nil {
-		return 0, "", err
+		return CommentRef{}, err
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return 0, "", err
-	}
-	return intVal(raw, "id"), strVal(raw, "html_url"), nil
+	return commentRefFrom(domain.GitHubIssueComment, data)
 }
 
-// ReplyToComment replies to a review comment thread.
+// ReplyToComment replies to a review comment thread and returns the reply's id.
 func (c *Client) ReplyToComment(ctx context.Context, owner, repo string, number, commentID int, body string) (int, error) {
+	ref, err := c.PostReply(ctx, owner, repo, number, commentID, body)
+	return ref.ID, err
+}
+
+// PostReply is ReplyToComment returning the whole CommentRef. The reply is a
+// review comment itself, in the thread's numbering.
+func (c *Client) PostReply(ctx context.Context, owner, repo string, number, commentID int, body string) (CommentRef, error) {
 	data, err := c.Post(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/comments/%d/replies", owner, repo, number, commentID), map[string]any{
 		"body": body,
 	})
 	if err != nil {
-		return 0, err
+		return CommentRef{}, err
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return 0, err
-	}
-	return intVal(raw, "id"), nil
+	return commentRefFrom(domain.GitHubReviewComment, data)
 }
 
 // ReactToComment adds a reaction to a comment. Tries issue comments first, then review comments.
@@ -833,19 +853,28 @@ func (c *Client) UpdateComment(ctx context.Context, owner, repo string, commentI
 	return err
 }
 
-// UpdateCommentScoped is UpdateComment that also reports whether the comment it
-// updated was a top-level issue comment (true) or a review line-comment (false,
-// reached via the pulls/comments fallback). The host-side artifact recorder
-// keys off this so it records only standalone comments — review line-comments
-// ride the review artifact, not a comment artifact (TFAC-466). isIssueComment is
-// meaningful only when err is nil.
-func (c *Client) UpdateCommentScoped(ctx context.Context, owner, repo string, commentID int, body string) (isIssueComment bool, err error) {
+// UpdateCommentScoped is UpdateComment that also returns the comment it
+// updated: a conversation comment, or a review comment reached through the
+// pulls/comments fallback, with the node id and link from the edited object.
+// The host-side artifact recorder keys the comment's row on which of the two it
+// was. The ref is meaningful only when err is nil; a body that does not parse
+// still leaves its Space and ID set, since the edit landed.
+func (c *Client) UpdateCommentScoped(ctx context.Context, owner, repo string, commentID int, body string) (CommentRef, error) {
 	payload := map[string]any{"body": body}
-	if _, err = c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID), payload); err == nil {
-		return true, nil
+	space := domain.GitHubIssueComment
+	data, err := c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID), payload)
+	if err != nil {
+		space = domain.GitHubReviewComment
+		if data, err = c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID), payload); err != nil {
+			return CommentRef{}, err
+		}
 	}
-	_, err = c.Patch(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID), payload)
-	return false, err
+	ref, perr := commentRefFrom(space, data)
+	if perr != nil {
+		ref = CommentRef{Space: space}
+	}
+	ref.ID = commentID
+	return ref, nil
 }
 
 // DeleteComment deletes a comment. Tries issue comments first, then review comments.
@@ -854,17 +883,18 @@ func (c *Client) DeleteComment(ctx context.Context, owner, repo string, commentI
 	return err
 }
 
-// DeleteCommentScoped is DeleteComment that also reports whether the comment it
-// deleted was a top-level issue comment (true) or a review line-comment (false,
-// reached via the pulls/comments fallback). Same contract as UpdateCommentScoped
-// — only standalone comments are recorded as artifacts. isIssueComment is
-// meaningful only when err is nil.
-func (c *Client) DeleteCommentScoped(ctx context.Context, owner, repo string, commentID int) (isIssueComment bool, err error) {
-	if _, err = c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)); err == nil {
-		return true, nil
+// DeleteCommentScoped is DeleteComment that also returns which comment it
+// deleted: a conversation comment, or a review comment reached through the
+// pulls/comments fallback. GitHub answers a delete with no body, so the ref
+// carries only the space and the number. Meaningful only when err is nil.
+func (c *Client) DeleteCommentScoped(ctx context.Context, owner, repo string, commentID int) (CommentRef, error) {
+	if _, err := c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/issues/comments/%d", owner, repo, commentID)); err == nil {
+		return CommentRef{Space: domain.GitHubIssueComment, ID: commentID}, nil
 	}
-	_, err = c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID))
-	return false, err
+	if _, err := c.Delete(ctx, fmt.Sprintf("/repos/%s/%s/pulls/comments/%d", owner, repo, commentID)); err != nil {
+		return CommentRef{}, err
+	}
+	return CommentRef{Space: domain.GitHubReviewComment, ID: commentID}, nil
 }
 
 // restPR is the subset of the REST pull-request object (GET

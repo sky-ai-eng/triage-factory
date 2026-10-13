@@ -46,13 +46,16 @@ type ArtifactStore interface {
 	// a.Scope is refused with ErrExternalObjectScopeRequired: the same dedup
 	// key in two scopes is two objects.
 	//
-	// external_id and url are preserve-on-empty: an upsert that leaves them
-	// empty keeps whatever the row already holds rather than blanking it.
-	// They are the backing object's stable coordinates (PR number / issue
-	// key, html link) — once known they only fill in, never legitimately
-	// clear — so a later writer that can't supply them (reconciliation, or a
-	// mutation that can't compute the URL) won't erase an earlier writer's
-	// value. To intentionally change them, pass the new non-empty value.
+	// external_id, url and node_id are preserve-on-empty: an upsert that
+	// leaves them empty keeps whatever the row already holds rather than
+	// blanking it. They are the backing object's stable coordinates (PR
+	// number / issue key, html link, GraphQL node id) — once known they only
+	// fill in, never legitimately clear — so a later writer that can't supply
+	// them (reconciliation, or a mutation that can't compute the URL) won't
+	// erase an earlier writer's value. To intentionally change them, pass the
+	// new non-empty value. details_json is preserve-on-empty too, so a comment
+	// edit that cannot restate a reply's thread does not erase it. posted_by_tf
+	// only turns on: a write passing false leaves a true row true.
 	//
 	// Runs on the app pool in Postgres (RLS-active), so the caller must be
 	// inside a claims-set tx (request handler or SyntheticClaimsWithTx). A
@@ -176,6 +179,34 @@ type ArtifactStore interface {
 	// the comment. org_id stays bound as defense in depth. Identical to a
 	// plain org read in SQLite.
 	PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
+
+	// PostedByTFDedupKeysSystem returns the subset of dedupKeys whose
+	// artifact in scope records a comment TF posted (domain.Artifact's
+	// PostedByTF), as a set. It is the lookup that tells TF's GitHub comments
+	// from people's: a run that edits or deletes a person's comment leaves a
+	// row too, so a row existing is not the answer. Build GitHub comment keys
+	// with domain.GitHubCommentDedupKey. An empty scope is refused with
+	// ErrExternalObjectScopeRequired.
+	//
+	// Admin pool (BYPASSRLS) in Postgres, like PresentDedupKeysSystem: its
+	// readers are background jobs with no claims, and the artifact belongs to
+	// whichever team's run posted the comment. org_id stays bound as defense
+	// in depth. Identical to a plain org read in SQLite.
+	PostedByTFDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
+
+	// GetByNodeIDSystem returns the artifact in scope carrying the GraphQL
+	// node id nodeID, or nil when none does (an empty nodeID included). A
+	// GraphQL edit or delete names a GitHub comment by node id alone, and its
+	// response may not return the comment's number, which is what the row is
+	// keyed on, so the recorder finds the row through this. Should two rows
+	// ever carry one node id, the newest answers. An empty scope is refused
+	// with ErrExternalObjectScopeRequired.
+	//
+	// Admin pool (BYPASSRLS) in Postgres: the recorder holds no claims, and
+	// the row may belong to another team's run that recorded the object first.
+	// org_id stays bound as defense in depth. Identical to a plain org read in
+	// SQLite.
+	GetByNodeIDSystem(ctx context.Context, orgID, scope, nodeID string) (*domain.Artifact, error)
 
 	// ListByConversationSystem is the admin-pool (BYPASSRLS) variant of ListByConversation for
 	// system-service readers that hold a real (org_id) identity but no

@@ -348,7 +348,7 @@ func TestBufferBody_UnknownLengthStillBuffers(t *testing.T) {
 // oversize probe: a body of exactly maxBufferedBody is buffered and its created
 // object read, not skipped.
 func TestInjector_BodyAtExactlyCapStillParses(t *testing.T) {
-	head := `{"id":777,"html_url":"https://github.com/octo/repo/pull/42#issuecomment-777","body":"`
+	head := `{"id":777,"node_id":"IC_kwCap","html_url":"https://github.com/octo/repo/pull/42#issuecomment-777","body":"`
 	tail := `"}`
 	pad := strings.Repeat("y", maxBufferedBody-len(head)-len(tail))
 	commentJSON := head + pad + tail
@@ -809,7 +809,7 @@ func TestInjector_RESTWritesAreUnaffectedByTheGraphQLCapture(t *testing.T) {
 		b, _ := io.ReadAll(r.Body)
 		gotReq <- string(b)
 		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{"id":7,"html_url":"https://github.com/acme/widgets/issues/1#issuecomment-7"}`))
+		_, _ = w.Write([]byte(`{"id":7,"node_id":"IC_kwREST","html_url":"https://github.com/acme/widgets/issues/1#issuecomment-7"}`))
 	}))
 	defer upstream.Close()
 
@@ -1013,5 +1013,121 @@ func TestInjector_BufferRequestOverCapKeepsTheStrongerPromise(t *testing.T) {
 	}
 	if string(got) != body {
 		t.Errorf("re-presented body is %d bytes, want the original %d byte-for-byte", len(got), len(body))
+	}
+}
+
+// TestInjector_CreatedCommentNodeIDIsReadBack pins the one request the
+// injector makes of its own: a comment created without its node id in the
+// response is read back once, with the run's real credential, and the node id
+// rides the observation. A read that fails or names another comment leaves the
+// id empty and the write reported, and no other write reads anything.
+func TestInjector_CreatedCommentNodeIDIsReadBack(t *testing.T) {
+	const commentURL = "https://github.com/acme/widgets/pull/841#issuecomment-7"
+	addComment := graphQLEnvelope(t,
+		`mutation CommentCreate($input:AddCommentInput!){addComment(input:$input){commentEdge{node{url}}}}`,
+		map[string]any{"input": map[string]any{"body": "pushed a fix", "subjectId": "PR_kwReadBack"}})
+	merge := graphQLEnvelope(t,
+		`mutation($input:MergePullRequestInput!){mergePullRequest(input:$input){clientMutationId}}`,
+		map[string]any{"input": map[string]any{"pullRequestId": "PR_kwReadBack"}})
+
+	cases := []struct {
+		name     string
+		body     string
+		response string
+		readBack func(w http.ResponseWriter)
+		wantRead bool
+		wantNode string
+	}{
+		{
+			name:     "a comment created without its node id",
+			body:     addComment,
+			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
+			readBack: func(w http.ResponseWriter) {
+				_, _ = w.Write([]byte(`{"id":7,"node_id":"IC_kwReadBack","html_url":"` + commentURL + `"}`))
+			},
+			wantRead: true,
+			wantNode: "IC_kwReadBack",
+		},
+		{
+			name:     "a read-back that fails",
+			body:     addComment,
+			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
+			readBack: func(w http.ResponseWriter) {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			},
+			wantRead: true,
+		},
+		{
+			name:     "a read-back naming another comment",
+			body:     addComment,
+			response: `{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`,
+			readBack: func(w http.ResponseWriter) {
+				_, _ = w.Write([]byte(`{"id":8,"node_id":"IC_kwOther"}`))
+			},
+			wantRead: true,
+		},
+		{
+			name:     "a comment created with its node id",
+			body:     addComment,
+			response: `{"data":{"addComment":{"commentEdge":{"node":{"id":"IC_kwInline","url":"` + commentURL + `"}}}}}`,
+			wantNode: "IC_kwInline",
+		},
+		{
+			name:     "a refused comment",
+			body:     addComment,
+			response: `{"data":{"addComment":null},"errors":[{"message":"no"}]}`,
+		},
+		{
+			name:     "a write that creates no comment",
+			body:     merge,
+			response: `{"data":{"mergePullRequest":{"clientMutationId":null}}}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var reads []string
+			var readAuth string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.Method == http.MethodGet {
+					reads = append(reads, r.URL.Path)
+					readAuth = r.Header.Get("Authorization")
+					if tc.readBack != nil {
+						tc.readBack(w)
+					}
+					return
+				}
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer upstream.Close()
+
+			writes := make(chan ObservedWrite, 2)
+			client, host := newInjectorWithWrites(t, upstream.URL,
+				func(_ context.Context, w ObservedWrite) { writes <- w })
+			req, _ := http.NewRequest(http.MethodPost, "https://"+host+"/api/graphql", strings.NewReader(tc.body))
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatalf("request: %v", err)
+			}
+			_ = resp.Body.Close()
+
+			select {
+			case w := <-writes:
+				if w.NodeID != tc.wantNode {
+					t.Errorf("observed node id = %q, want %q", w.NodeID, tc.wantNode)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("no write audit")
+			}
+			switch {
+			case tc.wantRead && (len(reads) != 1 || reads[0] != "/repos/acme/widgets/issues/comments/7"):
+				t.Errorf("reads = %q, want the one read of comment 7", reads)
+			case tc.wantRead && readAuth != "token ghs_realtoken":
+				t.Errorf("read-back authorization = %q, want the run's real credential", readAuth)
+			case !tc.wantRead && len(reads) != 0:
+				t.Errorf("reads = %q, want none", reads)
+			}
+		})
 	}
 }

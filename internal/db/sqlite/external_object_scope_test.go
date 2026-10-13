@@ -18,3 +18,12 @@ func TestExternalObjectScope_SQLite(t *testing.T) {
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
 	})
 }
+
+// TestCommentArtifacts_SQLite runs the shared comment-artifact conformance
+// suite against the SQLite backend, a fresh in-memory DB per subtest.
+func TestCommentArtifacts_SQLite(t *testing.T) {
+	dbtest.RunCommentArtifactConformance(t, func(t *testing.T) (db.Stores, string, string) {
+		t.Helper()
+		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}

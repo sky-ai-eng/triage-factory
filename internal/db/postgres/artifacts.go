@@ -43,8 +43,8 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // pgConversationColumns uses.
 const pgArtifactColumns = `
 	id, COALESCE(conversation_id::text, ''), org_id, team_id, provider, kind, scope, target,
-	COALESCE(external_id, ''), COALESCE(url, ''), state, dedup_key,
-	COALESCE(details_json, ''), created_at, updated_at
+	COALESCE(external_id, ''), COALESCE(url, ''), COALESCE(node_id, ''), posted_by_tf,
+	state, dedup_key, COALESCE(details_json, ''), created_at, updated_at
 `
 
 // pgArtifactNonTerminalPredicate is the SQL WHERE fragment selecting the
@@ -88,13 +88,16 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 	res, err := s.admin.ExecContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
-			 external_id, url, state, dedup_key, details_json, updated_at, scope)
+			 external_id, url, state, dedup_key, details_json, updated_at, scope,
+			 node_id, posted_by_tf)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
-		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13)
+		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
+		        NULLIF($14, ''), $15)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING`,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
+		a.NodeID, a.PostedByTF,
 	)
 	if err != nil {
 		return false, err
@@ -119,19 +122,23 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	// a.ID is honored on insert (parity with SQLite); an empty a.ID falls
 	// back to gen_random_uuid() server-side.
 	//
-	// target/external_id/url are preserved-on-empty: they are the backing
-	// object's stable coordinates (resource key / PR number / issue key, html
-	// link) — once known they only ever fill in or migrate to a more specific
-	// value (pending PR owner/repo → owner/repo#123), never legitimately clear.
-	// A later upsert that can't supply them — a reconciliation pass, a Jira
-	// mutation whose conversation can't compute the browse URL, or a GitHub
-	// comment-update/delete that only knows the comment id, not its PR number —
-	// must not blank a value an earlier writer already stored. external_id/url
-	// are NULLIFed to NULL on insert, so COALESCE preserves them; target is NOT
-	// NULL, so NULLIF('','') folds an empty incoming target to NULL first. A
-	// non-empty incoming value still overwrites (the intentional-change /
-	// migration path). state/details_json stay last-writer-wins by design
-	// (state tracks the latest action).
+	// target/external_id/url/node_id are preserved-on-empty: they are the
+	// backing object's stable coordinates (resource key / PR number / issue
+	// key, html link, GraphQL node id) — once known they only ever fill in or
+	// migrate to a more specific value (pending PR owner/repo →
+	// owner/repo#123), never legitimately clear. A later upsert that can't
+	// supply them — a reconciliation pass, a Jira mutation whose conversation
+	// can't compute the browse URL, or a GitHub comment-update/delete that only
+	// knows the comment id, not its PR number — must not blank a value an
+	// earlier writer already stored. external_id/url/node_id are NULLIFed to
+	// NULL on insert, so COALESCE preserves them; target is NOT NULL, so
+	// NULLIF('','') folds an empty incoming target to NULL first. A non-empty
+	// incoming value still overwrites (the intentional-change / migration
+	// path). details_json is preserved-on-empty for the same reason: a comment
+	// edit or delete cannot restate the thread a reply answers. state stays
+	// last-writer-wins by design (it tracks the latest action), and
+	// posted_by_tf only ever turns on: a later edit of a comment TF posted does
+	// not know who posted it, and must not unsay it.
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
@@ -145,22 +152,27 @@ func (s *artifactStore) upsert(ctx context.Context, q queryer, orgID string, a d
 	row := q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, target,
-			 external_id, url, state, dedup_key, details_json, updated_at, scope)
+			 external_id, url, state, dedup_key, details_json, updated_at, scope,
+			 node_id, posted_by_tf)
 		VALUES (COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()),
 		        NULLIF($2, '')::uuid, $3, $4, $5, $6, $7,
-		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13)
+		        NULLIF($8, ''), NULLIF($9, ''), $10, $11, NULLIF($12, ''), now(), $13,
+		        NULLIF($14, ''), $15)
 		ON CONFLICT (org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(EXCLUDED.target, ''), artifacts.target),
 			external_id  = COALESCE(EXCLUDED.external_id, artifacts.external_id),
 			url          = COALESCE(EXCLUDED.url, artifacts.url),
+			node_id      = COALESCE(EXCLUDED.node_id, artifacts.node_id),
+			posted_by_tf = artifacts.posted_by_tf OR EXCLUDED.posted_by_tf,
 			state        = EXCLUDED.state,
-			details_json = EXCLUDED.details_json,
+			details_json = COALESCE(EXCLUDED.details_json, artifacts.details_json),
 			updated_at   = now()
 		RETURNING `+pgArtifactColumns,
 		a.ID, a.ConversationID, orgID, a.TeamID, a.Provider, a.Kind, a.Target,
 		a.ExternalID, a.URL, a.State, a.DedupKey, a.DetailsJSON, a.Scope,
+		a.NodeID, a.PostedByTF,
 	)
 	var out domain.Artifact
 	if err := scanArtifact(row, &out); err != nil {
@@ -337,6 +349,63 @@ func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope
 		present[key] = true
 	}
 	return present, rows.Err()
+}
+
+// GetByNodeIDSystem reads the newest row in scope carrying nodeID, on the
+// admin pool (BYPASSRLS): its callers record a run's writes, and the row may
+// belong to whichever team's run first recorded the object. idx_artifacts_node_id
+// serves it. org_id stays bound as defense in depth.
+func (s *artifactStore) GetByNodeIDSystem(ctx context.Context, orgID, scope, nodeID string) (*domain.Artifact, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	if nodeID == "" {
+		return nil, nil
+	}
+	row := s.admin.QueryRowContext(ctx, `
+		SELECT `+pgArtifactColumns+`
+		FROM artifacts
+		WHERE org_id = $1 AND scope = $2 AND node_id = $3
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, orgID, scope, nodeID)
+	var a domain.Artifact
+	if err := scanArtifact(row, &a); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+// PostedByTFDedupKeysSystem is PresentDedupKeysSystem narrowed to the rows
+// recording a comment TF posted. Admin pool, for the same reason.
+func (s *artifactStore) PostedByTFDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	posted := map[string]bool{}
+	if len(dedupKeys) == 0 {
+		return posted, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT dedup_key
+		FROM artifacts
+		WHERE org_id = $1 AND scope = $2 AND dedup_key = ANY($3) AND posted_by_tf
+	`, orgID, scope, dedupKeys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		posted[key] = true
+	}
+	return posted, rows.Err()
 }
 
 func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
@@ -533,6 +602,7 @@ type rowScanner interface {
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
 	return sc.Scan(
 		&a.ID, &a.ConversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
-		&a.ExternalID, &a.URL, &a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
+		&a.ExternalID, &a.URL, &a.NodeID, &a.PostedByTF,
+		&a.State, &a.DedupKey, &a.DetailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	)
 }

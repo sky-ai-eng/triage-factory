@@ -44,7 +44,8 @@ var _ db.ArtifactStore = (*artifactStore)(nil)
 // scanArtifact. Same order the Postgres impl projects.
 const artifactColumns = `
 	id, conversation_id, org_id, team_id, provider, kind, scope, target,
-	external_id, url, state, dedup_key, details_json, created_at, updated_at
+	external_id, url, node_id, posted_by_tf,
+	state, dedup_key, details_json, created_at, updated_at
 `
 
 func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artifact) (domain.Artifact, error) {
@@ -67,19 +68,23 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	// leaves them rather than risk a row whose discriminators disagree with
 	// its key.
 	//
-	// target/external_id/url are preserved-on-empty: they are the backing
-	// object's stable coordinates (resource key / PR number / issue key, html
-	// link) — once known they only ever fill in or migrate to a more specific
-	// value (pending PR owner/repo → owner/repo#123), never legitimately clear.
-	// A later upsert that can't supply them — a reconciliation pass, a Jira
-	// mutation whose conversation can't compute the browse URL, or a GitHub
-	// comment-update/delete that only knows the comment id, not its PR number —
-	// must not blank a value an earlier writer already stored. external_id/url
-	// are NULLIFed to NULL on insert, so COALESCE preserves them; target is NOT
-	// NULL, so NULLIF('','') folds an empty incoming target to NULL first. A
-	// non-empty incoming value still overwrites (the intentional-change /
-	// migration path). state/details_json stay last-writer-wins by design
-	// (state tracks the latest action).
+	// target/external_id/url/node_id are preserved-on-empty: they are the
+	// backing object's stable coordinates (resource key / PR number / issue
+	// key, html link, GraphQL node id) — once known they only ever fill in or
+	// migrate to a more specific value (pending PR owner/repo →
+	// owner/repo#123), never legitimately clear. A later upsert that can't
+	// supply them — a reconciliation pass, a Jira mutation whose conversation
+	// can't compute the browse URL, or a GitHub comment-update/delete that only
+	// knows the comment id, not its PR number — must not blank a value an
+	// earlier writer already stored. external_id/url/node_id are NULLIFed to
+	// NULL on insert, so COALESCE preserves them; target is NOT NULL, so
+	// NULLIF('','') folds an empty incoming target to NULL first. A non-empty
+	// incoming value still overwrites (the intentional-change / migration
+	// path). details_json is preserved-on-empty for the same reason: a comment
+	// edit or delete cannot restate the thread a reply answers. state stays
+	// last-writer-wins by design (it tracks the latest action), and
+	// posted_by_tf only ever turns on: a later edit of a comment TF posted does
+	// not know who posted it, and must not unsay it.
 	//
 	// conversation_id AND team_id are both preserved-on-conflict, NOT last-writer-wins:
 	// the artifact belongs to its CREATING conversation (domain.Artifact's doc),
@@ -93,20 +98,23 @@ func (s *artifactStore) Upsert(ctx context.Context, orgID string, a domain.Artif
 	row := s.q.QueryRowContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, posted_by_tf, state, dedup_key, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, scope, dedup_key) DO UPDATE SET
 			conversation_id       = artifacts.conversation_id,
 			team_id      = artifacts.team_id,
 			target       = COALESCE(NULLIF(excluded.target, ''), artifacts.target),
 			external_id  = COALESCE(excluded.external_id, artifacts.external_id),
 			url          = COALESCE(excluded.url, artifacts.url),
+			node_id      = COALESCE(excluded.node_id, artifacts.node_id),
+			posted_by_tf = artifacts.posted_by_tf OR excluded.posted_by_tf,
 			state        = excluded.state,
-			details_json = excluded.details_json,
+			details_json = COALESCE(excluded.details_json, artifacts.details_json),
 			updated_at   = CURRENT_TIMESTAMP
 		RETURNING `+artifactColumns,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
-		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
+		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), a.PostedByTF,
+		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	var out domain.Artifact
 	if err := scanArtifact(row, &out); err != nil {
@@ -144,11 +152,12 @@ func (s *artifactStore) InsertArtifactIfAbsentSystem(ctx context.Context, orgID 
 	res, err := s.q.ExecContext(ctx, `
 		INSERT INTO artifacts
 			(id, conversation_id, org_id, team_id, provider, kind, scope, target,
-			 external_id, url, state, dedup_key, details_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			 external_id, url, node_id, posted_by_tf, state, dedup_key, details_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING`,
 		id, nullIfEmpty(a.ConversationID), orgID, a.TeamID, a.Provider, a.Kind, a.Scope, a.Target,
-		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
+		nullIfEmpty(a.ExternalID), nullIfEmpty(a.URL), nullIfEmpty(a.NodeID), a.PostedByTF,
+		a.State, a.DedupKey, nullIfEmpty(a.DetailsJSON),
 	)
 	if err != nil {
 		return false, err
@@ -292,6 +301,48 @@ func (s *artifactStore) ListPendingReviewsByTargetSystem(ctx context.Context, or
 }
 
 func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
+	return s.dedupKeysWhere(ctx, orgID, scope, dedupKeys, "")
+}
+
+// PostedByTFDedupKeysSystem is PresentDedupKeysSystem narrowed to the rows
+// recording a comment TF posted.
+func (s *artifactStore) PostedByTFDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error) {
+	return s.dedupKeysWhere(ctx, orgID, scope, dedupKeys, " AND posted_by_tf")
+}
+
+// GetByNodeIDSystem reads the newest row in scope carrying nodeID, or nil when
+// none does. Identical to a plain org read in SQLite (no admin/app split).
+func (s *artifactStore) GetByNodeIDSystem(ctx context.Context, orgID, scope, nodeID string) (*domain.Artifact, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	if nodeID == "" {
+		return nil, nil
+	}
+	row := s.q.QueryRowContext(ctx, `
+		SELECT `+artifactColumns+`
+		FROM artifacts
+		WHERE org_id = ? AND scope = ? AND node_id = ?
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1
+	`, orgID, scope, nodeID)
+	var a domain.Artifact
+	if err := scanArtifact(row, &a); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &a, nil
+}
+
+// dedupKeysWhere returns the subset of dedupKeys with a row in scope, as a
+// set, narrowed by extra: a fixed predicate fragment the two callers above
+// pass as a literal, never a value.
+func (s *artifactStore) dedupKeysWhere(ctx context.Context, orgID, scope string, dedupKeys []string, extra string) (map[string]bool, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err
 	}
@@ -311,7 +362,7 @@ func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope
 		rows, err := s.q.QueryContext(ctx, `
 			SELECT dedup_key
 			FROM artifacts
-			WHERE org_id = ? AND scope = ? AND dedup_key IN (`+strings.Join(placeholders, ", ")+`)
+			WHERE org_id = ? AND scope = ? AND dedup_key IN (`+strings.Join(placeholders, ", ")+`)`+extra+`
 		`, args...)
 		if err != nil {
 			return nil, err
@@ -561,16 +612,18 @@ func scanArtifactRows(rows *sql.Rows) ([]domain.Artifact, error) {
 // unifies *sql.Row and *sql.Rows so this serves both the single-row Upsert
 // RETURNING and the list paths.
 func scanArtifact(sc rowScanner, a *domain.Artifact) error {
-	var conversationID, externalID, url, detailsJSON sql.NullString
+	var conversationID, externalID, url, nodeID, detailsJSON sql.NullString
 	if err := sc.Scan(
 		&a.ID, &conversationID, &a.OrgID, &a.TeamID, &a.Provider, &a.Kind, &a.Scope, &a.Target,
-		&externalID, &url, &a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
+		&externalID, &url, &nodeID, &a.PostedByTF,
+		&a.State, &a.DedupKey, &detailsJSON, &a.CreatedAt, &a.UpdatedAt,
 	); err != nil {
 		return err
 	}
 	a.ConversationID = conversationID.String
 	a.ExternalID = externalID.String
 	a.URL = url.String
+	a.NodeID = nodeID.String
 	a.DetailsJSON = detailsJSON.String
 	return nil
 }

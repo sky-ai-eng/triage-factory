@@ -30,14 +30,17 @@ import (
 // which this answers, so it never falls through to the review-comments path.
 func startFakeGitHubComments(t *testing.T) *httptest.Server {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		switch r.Method {
-		case http.MethodPost:
-			_, _ = io.WriteString(w, `{"id":777,"html_url":"https://github.com/octo/repo/pull/1#issuecomment-777"}`)
-		case http.MethodPatch:
-			_, _ = io.WriteString(w, `{"id":777,"html_url":"https://github.com/octo/repo/pull/1#issuecomment-777"}`)
-		case http.MethodDelete:
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/replies"):
+			// A reply is a review comment, linked by its discussion anchor on
+			// the org's own GitHub.
+			_, _ = io.WriteString(w, `{"id":777,"node_id":"PRRC_kw777","html_url":"`+srv.URL+`/octo/repo/pull/1#discussion_r777"}`)
+		case r.Method == http.MethodPost, r.Method == http.MethodPatch:
+			_, _ = io.WriteString(w, `{"id":777,"node_id":"IC_kw777","html_url":"https://github.com/octo/repo/pull/1#issuecomment-777"}`)
+		case r.Method == http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			_, _ = io.WriteString(w, `{}`)
@@ -97,8 +100,9 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 
 // TestLocalClient_GithubAddComment_RecordsArtifact pins a standalone comment
 // landing one `comment` artifact with the full coordinates the add path knows —
-// target owner/repo#N, the comment id, its html_url, state posted, deduped on
-// github:comment:<id> — across both write paths.
+// target owner/repo#N, the comment id and node id, its html_url, state posted,
+// marked posted by TF, deduped on github:comment:<id> — across both write
+// paths.
 func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -124,7 +128,8 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 			if a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindComment ||
 				a.Target != "octo/repo#1" || a.ExternalID != "777" ||
 				a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" ||
-				a.State != domain.ArtifactStateCommentPosted || a.DedupKey != "github:comment:777" {
+				a.State != domain.ArtifactStateCommentPosted || a.DedupKey != "github:comment:777" ||
+				a.NodeID != "IC_kw777" || !a.PostedByTF {
 				t.Errorf("comment artifact mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -172,18 +177,22 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	if a.State != domain.ArtifactStateCommentDeleted || a.DedupKey != "github:comment:777" {
 		t.Errorf("delete did not retire in place: %+v", a)
 	}
-	// The id-only update/delete paths must inherit, not blank, the add's coordinates.
-	if a.Target != "octo/repo#1" || a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" || a.ExternalID != "777" {
+	// The id-only update/delete paths must inherit, not blank, the add's
+	// coordinates, and must not unsay that TF posted the comment.
+	if a.Target != "octo/repo#1" || a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" || a.ExternalID != "777" ||
+		a.NodeID != "IC_kw777" || !a.PostedByTF {
 		t.Errorf("retire blanked the add's stable coordinates: %+v", a)
 	}
 }
 
-// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded pins the
-// scope boundary: comment-update / comment-delete fall back to the
-// pulls/comments (review line-comment) endpoint when the id isn't a top-level
-// issue comment. Those ride the review artifact, so even though the action
-// succeeds via the fallback, no comment artifact is written.
-func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded(t *testing.T) {
+// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow pins
+// comment-update / comment-delete on a review comment, which they reach by
+// falling back to the pulls/comments endpoint when the id isn't a conversation
+// comment. The edit and the delete land on one row keyed in the review
+// comments' numbering, carrying the node id the edit's response returned, and
+// the row does not claim TF posted the comment: these verbs edit a person's
+// comment as readily as TF's own.
+func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// The issues-comments endpoint 404s (id is not a top-level comment);
@@ -196,7 +205,7 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded(t *test
 		}
 		switch r.Method {
 		case http.MethodPatch:
-			_, _ = io.WriteString(w, `{"id":999}`)
+			_, _ = io.WriteString(w, `{"id":999,"node_id":"PRRC_kw999","html_url":"https://github.com/octo/repo/pull/1#discussion_r999"}`)
 		case http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
 		default:
@@ -211,11 +220,113 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_NotRecorded(t *test
 	if err := client.GithubUpdateComment(ctx, "octo", "repo", 999, "edit a review comment"); err != nil {
 		t.Fatalf("update via the review fallback must still succeed: %v", err)
 	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 {
+		t.Fatalf("want 1 artifact after the edit, got %d: %+v", len(arts), arts)
+	}
+	if a := arts[0]; a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 999) ||
+		a.State != domain.ArtifactStateCommentPosted || a.NodeID != "PRRC_kw999" || a.ExternalID != "999" || a.PostedByTF {
+		t.Errorf("review comment edit artifact = %+v, want the review comment's row, posted, with its node id, not posted by TF", a)
+	}
+
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", 999); err != nil {
 		t.Fatalf("delete via the review fallback must still succeed: %v", err)
 	}
-	if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
-		t.Errorf("a review line-comment update/delete must record no comment artifact, got %+v", arts)
+	arts = listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 {
+		t.Fatalf("the delete should retire the edit's row, got %d artifacts: %+v", len(arts), arts)
+	}
+	if a := arts[0]; a.State != domain.ArtifactStateCommentDeleted || a.NodeID != "PRRC_kw999" || a.PostedByTF {
+		t.Errorf("review comment after delete = %+v, want it deleted with its node id kept", a)
+	}
+	posted, err := stores.Artifacts.PostedByTFDedupKeysSystem(ctx, info.OrgID, arts[0].Scope, []string{arts[0].DedupKey})
+	if err != nil {
+		t.Fatalf("PostedByTFDedupKeysSystem: %v", err)
+	}
+	if len(posted) != 0 {
+		t.Errorf("posted-by-TF lookup = %v, want the person's comment the run edited left out", posted)
+	}
+}
+
+// TestLocalClient_GithubReplyToComment_RecordsArtifact pins a thread reply's
+// own `comment` artifact: keyed in the review comments' numbering, posted by
+// TF, carrying the reply's node id, its discussion link, the PR-shaped target,
+// and the comment it answers in its details.
+func TestLocalClient_GithubReplyToComment_RecordsArtifact(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, false)
+
+	id, err := client.GithubReplyToComment(context.Background(), "octo", "repo", 1, 555, "fixed in the next push")
+	if err != nil {
+		t.Fatalf("GithubReplyToComment: %v", err)
+	}
+	if id != 777 {
+		t.Fatalf("reply id = %d, want 777", id)
+	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 {
+		t.Fatalf("want 1 artifact, got %d: %+v", len(arts), arts)
+	}
+	a := arts[0]
+	if a.Kind != domain.ArtifactKindComment || a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) ||
+		a.Target != "octo/repo#1" || a.ExternalID != "777" || a.NodeID != "PRRC_kw777" ||
+		a.URL != gh.URL+"/octo/repo/pull/1#discussion_r777" || a.State != domain.ArtifactStateCommentPosted ||
+		!a.PostedByTF || a.DetailsJSON != `{"in_reply_to":555}` {
+		t.Errorf("reply artifact = %+v", a)
+	}
+}
+
+// TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows pins that a
+// conversation comment and a review comment GitHub happened to number alike are
+// recorded as two comments: the two numberings are separate, so the key names
+// which one a number is in.
+func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	ctx := context.Background()
+
+	commentID, err := client.GithubAddComment(ctx, "octo", "repo", 1, "a conversation comment")
+	if err != nil {
+		t.Fatalf("GithubAddComment: %v", err)
+	}
+	replyID, err := client.GithubReplyToComment(ctx, "octo", "repo", 1, 555, "a thread reply")
+	if err != nil {
+		t.Fatalf("GithubReplyToComment: %v", err)
+	}
+	if commentID != replyID {
+		t.Fatalf("the fake numbered the two %d and %d; the case needs one number", commentID, replyID)
+	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 2 {
+		t.Fatalf("want 2 artifacts for two comments numbered %d, got %d: %+v", commentID, len(arts), arts)
+	}
+	keys := map[string]bool{arts[0].DedupKey: true, arts[1].DedupKey: true}
+	if !keys[domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 777)] || !keys[domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777)] {
+		t.Errorf("keys = %v, want one in each numbering", keys)
+	}
+}
+
+// TestLocalClient_GithubUpdateComment_PersonsComment_NotPostedByTF pins that an
+// edit of a conversation comment TF never recorded mints a row that records the
+// edit and does not claim the comment, so the posted-by-TF lookup leaves it out.
+func TestLocalClient_GithubUpdateComment_PersonsComment_NotPostedByTF(t *testing.T) {
+	gh := startFakeGitHubComments(t)
+	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
+	ctx := context.Background()
+
+	if err := client.GithubUpdateComment(ctx, "octo", "repo", 777, "tidied a person's comment"); err != nil {
+		t.Fatalf("GithubUpdateComment: %v", err)
+	}
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 || arts[0].PostedByTF || arts[0].DedupKey != "github:comment:777" {
+		t.Fatalf("artifacts = %+v, want one row for comment 777 not posted by TF", arts)
+	}
+	posted, err := stores.Artifacts.PostedByTFDedupKeysSystem(ctx, info.OrgID, arts[0].Scope, []string{"github:comment:777"})
+	if err != nil {
+		t.Fatalf("PostedByTFDedupKeysSystem: %v", err)
+	}
+	if len(posted) != 0 {
+		t.Errorf("posted-by-TF lookup = %v, want the edited comment left out", posted)
 	}
 }
 

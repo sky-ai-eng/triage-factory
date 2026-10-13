@@ -1405,3 +1405,48 @@ func TestParseGraphQLRequest_CycleAroundARealMutationIsStillNamed(t *testing.T) 
 		t.Errorf("classify = %+v (ok=%v), want the attempted merge named", shape, classified)
 	}
 }
+
+// TestComment_NamesTheNumberingOfEveryCommentAct pins Shape.Comment across both
+// transports: each act that posts, edits or deletes a comment names which of
+// GitHub's two numberings the comment is in, since its artifact is keyed on the
+// pair, and a reaction to a comment, which leaves the comment as it was, names
+// none.
+func TestComment_NamesTheNumberingOfEveryCommentAct(t *testing.T) {
+	rest := []struct {
+		method, path string
+		want         domain.GitHubCommentSpace
+	}{
+		{"POST", "/repos/acme/widgets/issues/7/comments", domain.GitHubIssueComment},
+		{"PATCH", "/repos/acme/widgets/issues/comments/5", domain.GitHubIssueComment},
+		{"DELETE", "/repos/acme/widgets/issues/comments/5", domain.GitHubIssueComment},
+		{"POST", "/repos/acme/widgets/pulls/7/comments/5/replies", domain.GitHubReviewComment},
+		{"PATCH", "/repos/acme/widgets/pulls/comments/5", domain.GitHubReviewComment},
+		{"DELETE", "/repos/acme/widgets/pulls/comments/5", domain.GitHubReviewComment},
+		{"POST", "/repos/acme/widgets/issues/comments/5/reactions", ""},
+		{"POST", "/repos/acme/widgets/pulls/comments/5/reactions", ""},
+		{"PATCH", "/repos/acme/widgets/pulls/7", ""},
+	}
+	for _, c := range rest {
+		s, ok := Classify(c.method, c.path)
+		if !ok || s.Comment != c.want {
+			t.Errorf("Classify(%s %s).Comment = %q (ok=%v), want %q", c.method, c.path, s.Comment, ok, c.want)
+		}
+	}
+
+	graphql := map[string]domain.GitHubCommentSpace{
+		"addComment":                      domain.GitHubIssueComment,
+		"updateIssueComment":              domain.GitHubIssueComment,
+		"deleteIssueComment":              domain.GitHubIssueComment,
+		"addPullRequestReviewThreadReply": domain.GitHubReviewComment,
+		"updatePullRequestReviewComment":  domain.GitHubReviewComment,
+		"deletePullRequestReviewComment":  domain.GitHubReviewComment,
+		"addReaction":                     "",
+		"mergePullRequest":                "",
+	}
+	for mutation, want := range graphql {
+		s, ok := classifyGraphQL(GraphQLFacts{Fields: []string{mutation}})
+		if !ok || s.Comment != want {
+			t.Errorf("classifyGraphQL(%s).Comment = %q (ok=%v), want %q", mutation, s.Comment, ok, want)
+		}
+	}
+}
