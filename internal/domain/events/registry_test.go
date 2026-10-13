@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"maps"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -89,6 +90,48 @@ func TestRegistryFieldSchemaGeneration(t *testing.T) {
 	for k, v := range want {
 		if got[k] != v {
 			t.Errorf("field %q: got type %q, want %q", k, got[k], v)
+		}
+	}
+}
+
+// TestIssueLabelEventFields pins the predicate fields of the Jira and Linear
+// label events. Every one is a string or an identity list, so the predicate
+// editor renders them with the field types it already has; the editor picks
+// the identity kind of assignee_in from the event's source.
+func TestIssueLabelEventFields(t *testing.T) {
+	jira := map[string]string{
+		"assignee_in": "string_list",
+		"project":     "string",
+		"label_name":  "string",
+		"has_label":   "string",
+	}
+	linear := map[string]string{
+		"assignee_in":     "string_list",
+		"linear_team_key": "string",
+		"label_name":      "string",
+		"label_group":     "string",
+		"has_label":       "string",
+	}
+	for eventType, want := range map[string]map[string]string{
+		domain.EventJiraIssueLabelAdded:     jira,
+		domain.EventJiraIssueLabelRemoved:   jira,
+		domain.EventLinearIssueLabelAdded:   linear,
+		domain.EventLinearIssueLabelRemoved: linear,
+	} {
+		s, ok := Get(eventType)
+		if !ok {
+			t.Errorf("%s is not registered", eventType)
+			continue
+		}
+		got := map[string]string{}
+		for _, f := range s.Fields {
+			got[f.Name] = f.Type
+		}
+		if !maps.Equal(got, want) {
+			t.Errorf("%s fields = %v, want %v", eventType, got, want)
+		}
+		if s.Ownership != OwnershipOwned {
+			t.Errorf("%s ownership = %v, want owned, like every Jira and Linear issue event but available", eventType, s.Ownership)
 		}
 	}
 }

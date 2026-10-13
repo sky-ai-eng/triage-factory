@@ -327,11 +327,17 @@ type LinearSnapshot struct {
 	// whoever created the issue. Both are empty for an issue an integration
 	// created, and on snapshots that predate the fields. Linear does not let
 	// the creator change.
-	Creator       string   `json:"creator,omitempty"`
-	CreatorUserID string   `json:"creator_user_id,omitempty"`
-	Priority      int      `json:"priority"` // 0 = no priority, 1 = urgent … 4 = low
-	PriorityLabel string   `json:"priority_label"`
-	Labels        []string `json:"labels"`
+	Creator       string `json:"creator,omitempty"`
+	CreatorUserID string `json:"creator_user_id,omitempty"`
+	Priority      int    `json:"priority"` // 0 = no priority, 1 = urgent … 4 = low
+	PriorityLabel string `json:"priority_label"`
+	// Labels are the label names, sorted, which is what predicates and
+	// body_updated read. LabelRefs are the same labels with their ids, which
+	// the label diff compares on, so a label renamed in Linear is not a
+	// removal and an addition. LabelRefs is empty on snapshots that predate
+	// it; the diff compares those by name.
+	Labels    []string         `json:"labels"`
+	LabelRefs []LinearLabelRef `json:"label_refs,omitempty"`
 	// TeamID is the Linear team's UUID, the unit a TF team tracks.
 	TeamID           string `json:"team_id"`
 	TeamKey          string `json:"team_key"`
@@ -356,6 +362,13 @@ type LinearSnapshot struct {
 // members through LinearStateRef.SameState.
 func (s LinearSnapshot) StateRef() LinearStateRef {
 	return s.State
+}
+
+// LinearLabelRef is one label on a Linear issue: its id and its name. The name
+// is the label's own, without the group it may sit in.
+type LinearLabelRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // LinearStateRef is one Linear workflow state: its id, its display name, and

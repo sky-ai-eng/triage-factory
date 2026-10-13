@@ -88,10 +88,13 @@ type ChildIssue struct {
 }
 
 // Label is an issue label: a team's own, or one defined for the whole
-// workspace.
+// workspace. Name is the label's own name, without its group's.
 type Label struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Group is the name of the label group the label sits in, "" when it is
+	// in none. Only ListLabels reads it; an issue's labels leave it empty.
+	Group string `json:"group,omitempty"`
 }
 
 // Issue is a Linear issue as the IssueFields fragment selects it. Its JSON
@@ -114,8 +117,8 @@ type Issue struct {
 	Creator  *User         `json:"creator"`
 	Parent   *IssueRef     `json:"parent"`
 	Team     Team          `json:"team"`
-	// Labels are label names, sorted.
-	Labels []string `json:"labels"`
+	// Labels are sorted by name.
+	Labels []Label `json:"labels"`
 
 	// The timestamps are RFC 3339, or "" when unset.
 	CreatedAt   string `json:"createdAt"`
@@ -166,7 +169,7 @@ type issueNode struct {
 	Parent        *IssueRef     `json:"parent"`
 	Team          Team          `json:"team"`
 	Labels        struct {
-		Nodes    []labelName `json:"nodes"`
+		Nodes    []labelNode `json:"nodes"`
 		PageInfo pageInfo    `json:"pageInfo"`
 	} `json:"labels"`
 	Comments struct {
@@ -178,16 +181,42 @@ type issueNode struct {
 	} `json:"children"`
 }
 
-type labelName struct {
-	Name string `json:"name"`
+// labelNode is a label as a document selects it. parent is selected only by
+// labelsQuery.
+type labelNode struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Parent *struct {
+		Name string `json:"name"`
+	} `json:"parent"`
+}
+
+func (n labelNode) toLabel() Label {
+	l := Label{ID: n.ID, Name: n.Name}
+	if n.Parent != nil {
+		l.Group = n.Parent.Name
+	}
+	return l
+}
+
+// sortedLabels converts label nodes to Labels sorted by name, then id, so two
+// labels sharing a name across groups still sort the same way every time.
+func sortedLabels(nodes []labelNode) []Label {
+	labels := make([]Label, 0, len(nodes))
+	for _, n := range nodes {
+		labels = append(labels, n.toLabel())
+	}
+	sort.Slice(labels, func(i, j int) bool {
+		if labels[i].Name != labels[j].Name {
+			return labels[i].Name < labels[j].Name
+		}
+		return labels[i].ID < labels[j].ID
+	})
+	return labels
 }
 
 func (n issueNode) toIssue() Issue {
-	labels := make([]string, 0, len(n.Labels.Nodes))
-	for _, l := range n.Labels.Nodes {
-		labels = append(labels, l.Name)
-	}
-	sort.Strings(labels)
+	labels := sortedLabels(n.Labels.Nodes)
 	var last *Comment
 	if len(n.Comments.Nodes) > 0 {
 		c := n.Comments.Nodes[len(n.Comments.Nodes)-1]

@@ -30,17 +30,18 @@ import "github.com/sky-ai-eng/triage-factory/internal/domain"
 // -----------------------------------------------------------------------------
 
 type JiraIssueAssignedMetadata struct {
-	Assignee          string `json:"assignee"`            // Jira display name
-	AssigneeAccountID string `json:"assignee_account_id"` // Atlassian stable identifier
-	Reporter          string `json:"reporter"`
-	ReporterAccountID string `json:"reporter_account_id"`
-	IssueKey          string `json:"issue_key"` // "PROJ-123"
-	IssueID           string `json:"issue_id"`  // Jira's numeric issue id
-	Project           string `json:"project"`   // "SKY"
-	IssueType         string `json:"issue_type"`
-	Priority          string `json:"priority"`
-	Status            string `json:"status"`
-	Summary           string `json:"summary"`
+	Assignee          string   `json:"assignee"`            // Jira display name
+	AssigneeAccountID string   `json:"assignee_account_id"` // Atlassian stable identifier
+	Reporter          string   `json:"reporter"`
+	ReporterAccountID string   `json:"reporter_account_id"`
+	IssueKey          string   `json:"issue_key"` // "PROJ-123"
+	IssueID           string   `json:"issue_id"`  // Jira's numeric issue id
+	Project           string   `json:"project"`   // "SKY"
+	IssueType         string   `json:"issue_type"`
+	Priority          string   `json:"priority"`
+	Status            string   `json:"status"`
+	Summary           string   `json:"summary"`
+	Labels            []string `json:"labels"`
 }
 
 type JiraIssueAssignedPredicate struct {
@@ -50,6 +51,7 @@ type JiraIssueAssignedPredicate struct {
 	IssueType  *string  `json:"issue_type,omitempty" doc:"Filter by issue type (Story, Bug, Task, ...)."`
 	Priority   *string  `json:"priority,omitempty" doc:"Exact-match on priority name."`
 	Status     *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'In Progress')."`
+	HasLabel   *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
 func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
@@ -58,7 +60,8 @@ func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -66,15 +69,16 @@ func (p JiraIssueAssignedPredicate) Matches(m JiraIssueAssignedMetadata) bool {
 // -----------------------------------------------------------------------------
 
 type JiraIssueAvailableMetadata struct {
-	Reporter          string `json:"reporter"`
-	ReporterAccountID string `json:"reporter_account_id"`
-	IssueKey          string `json:"issue_key"`
-	IssueID           string `json:"issue_id"`
-	Project           string `json:"project"`
-	IssueType         string `json:"issue_type"`
-	Priority          string `json:"priority"`
-	Status            string `json:"status"`
-	Summary           string `json:"summary"`
+	Reporter          string   `json:"reporter"`
+	ReporterAccountID string   `json:"reporter_account_id"`
+	IssueKey          string   `json:"issue_key"`
+	IssueID           string   `json:"issue_id"`
+	Project           string   `json:"project"`
+	IssueType         string   `json:"issue_type"`
+	Priority          string   `json:"priority"`
+	Status            string   `json:"status"`
+	Summary           string   `json:"summary"`
+	Labels            []string `json:"labels"`
 }
 
 type JiraIssueAvailablePredicate struct {
@@ -83,6 +87,7 @@ type JiraIssueAvailablePredicate struct {
 	IssueType  *string  `json:"issue_type,omitempty"`
 	Priority   *string  `json:"priority,omitempty"`
 	Status     *string  `json:"status,omitempty" doc:"Filter by the issue's current status (e.g. 'To Do', 'Backlog')."`
+	HasLabel   *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
 func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool {
@@ -90,7 +95,8 @@ func (p JiraIssueAvailablePredicate) Matches(m JiraIssueAvailableMetadata) bool 
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -225,17 +231,18 @@ func (p JiraIssueCompletedPredicate) Matches(m JiraIssueCompletedMetadata) bool 
 // -----------------------------------------------------------------------------
 
 type JiraIssueBecameAtomicMetadata struct {
-	Assignee          string `json:"assignee"`
-	AssigneeAccountID string `json:"assignee_account_id"`
-	Reporter          string `json:"reporter"`
-	ReporterAccountID string `json:"reporter_account_id"`
-	IssueKey          string `json:"issue_key"`
-	IssueID           string `json:"issue_id"`
-	Project           string `json:"project"`
-	IssueType         string `json:"issue_type"`
-	Priority          string `json:"priority"`
-	Status            string `json:"status"`
-	Summary           string `json:"summary"`
+	Assignee          string   `json:"assignee"`
+	AssigneeAccountID string   `json:"assignee_account_id"`
+	Reporter          string   `json:"reporter"`
+	ReporterAccountID string   `json:"reporter_account_id"`
+	IssueKey          string   `json:"issue_key"`
+	IssueID           string   `json:"issue_id"`
+	Project           string   `json:"project"`
+	IssueType         string   `json:"issue_type"`
+	Priority          string   `json:"priority"`
+	Status            string   `json:"status"`
+	Summary           string   `json:"summary"`
+	Labels            []string `json:"labels"`
 }
 
 type JiraIssueBecameAtomicPredicate struct {
@@ -245,6 +252,7 @@ type JiraIssueBecameAtomicPredicate struct {
 	IssueType  *string  `json:"issue_type,omitempty"`
 	Priority   *string  `json:"priority,omitempty"`
 	Status     *string  `json:"status,omitempty"`
+	HasLabel   *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear this label."`
 }
 
 func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata) bool {
@@ -253,7 +261,50 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 		strEq(p.Project, m.Project) &&
 		strEq(p.IssueType, m.IssueType) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
+// issue:label_added / issue:label_removed — open-set discriminator, as on
+// GitHub: the label's name is in label_name and is the event's dedup_key, and
+// labels is the issue's whole set after the change. A Jira label is a plain
+// string with no id and cannot be renamed, so the name is its identity. Never
+// emitted on first discovery: the labels an issue already has when TF first
+// sees it are its baseline, and has_label on assigned / available /
+// became_atomic is how a rule matches them. Not suppressed on an issue with
+// open subtasks, unlike assigned / available: someone added the label on
+// purpose, and suppressing it would make the label silently do nothing.
+// -----------------------------------------------------------------------------
+
+type JiraIssueLabelMetadata struct {
+	Assignee          string   `json:"assignee"`
+	AssigneeAccountID string   `json:"assignee_account_id"`
+	Reporter          string   `json:"reporter"`
+	ReporterAccountID string   `json:"reporter_account_id"`
+	IssueKey          string   `json:"issue_key"`
+	IssueID           string   `json:"issue_id"`
+	Project           string   `json:"project"`
+	IssueType         string   `json:"issue_type"`
+	Priority          string   `json:"priority"`
+	Status            string   `json:"status"`
+	Summary           string   `json:"summary"`
+	LabelName         string   `json:"label_name"` // also the event's dedup_key
+	Labels            []string `json:"labels"`     // the issue's labels after the change
+}
+
+type JiraIssueLabelPredicate struct {
+	AssigneeIn []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Atlassian account IDs)."`
+	Project    *string  `json:"project,omitempty" doc:"Scope to a specific Jira project key."`
+	LabelName  *string  `json:"label_name,omitempty" doc:"Match only this specific label (e.g. 'tf-agent')."`
+	HasLabel   *string  `json:"has_label,omitempty" doc:"Require the issue to bear this label after the change."`
+}
+
+func (p JiraIssueLabelPredicate) Matches(m JiraIssueLabelMetadata) bool {
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeAccountID) &&
+		strEq(p.Project, m.Project) &&
+		strEq(p.LabelName, m.LabelName) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -378,6 +429,8 @@ func init() {
 	Register(NewSchema[JiraIssueCommentedMetadata, JiraIssueCommentedPredicate](domain.EventJiraIssueCommented, OwnershipOwned))
 	Register(NewSchema[JiraIssueCompletedMetadata, JiraIssueCompletedPredicate](domain.EventJiraIssueCompleted, OwnershipOwned))
 	Register(NewSchema[JiraIssueBecameAtomicMetadata, JiraIssueBecameAtomicPredicate](domain.EventJiraIssueBecameAtomic, OwnershipOwned))
+	Register(NewSchema[JiraIssueLabelMetadata, JiraIssueLabelPredicate](domain.EventJiraIssueLabelAdded, OwnershipOwned))
+	Register(NewSchema[JiraIssueLabelMetadata, JiraIssueLabelPredicate](domain.EventJiraIssueLabelRemoved, OwnershipOwned))
 	Register(NewSchema[JiraIssueUnreachableMetadata, JiraIssueUnreachablePredicate](domain.EventJiraIssueUnreachable, OwnershipOwned))
 	Register(NewSchema[JiraIssueKeyChangedMetadata, JiraIssueKeyChangedPredicate](domain.EventJiraIssueKeyChanged, OwnershipOwned))
 }

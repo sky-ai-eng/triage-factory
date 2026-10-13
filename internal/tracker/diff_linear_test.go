@@ -139,7 +139,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 			if tc.curr != nil {
 				tc.curr(&curr)
 			}
-			evts := DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, nil)
+			evts := DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, nil, nil)
 			var got []want
 			for _, e := range evts {
 				got = append(got, want{e.EventType, e.DedupKey})
@@ -165,7 +165,7 @@ func TestDiffLinearSnapshots(t *testing.T) {
 func TestDiffLinearSnapshots_DoneIsTheTeams(t *testing.T) {
 	prev, curr := linSnap(), linSnap()
 	curr.State = linDone
-	evts := DiffLinearSnapshots(prev, curr, "ent-1", nil, nil)
+	evts := DiffLinearSnapshots(prev, curr, "ent-1", nil, nil, nil)
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssueStatusChanged}) {
 		t.Errorf("events with no done set = %v, want status_changed alone", got)
 	}
@@ -182,7 +182,7 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	var all []domain.Event
 	var comments []NewComment
 	diff := func(prev, curr domain.LinearSnapshot) {
-		all = append(all, DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, comments)...)
+		all = append(all, DiffLinearSnapshots(prev, curr, "ent-1", linDoneSet, comments, nil)...)
 	}
 	base := linSnap()
 	unassigned := base
@@ -205,6 +205,10 @@ func TestLinearEvents_EveryTypeCarriesTeamID(t *testing.T) {
 	comments = nil
 	diff(base, done)         // completed
 	diff(withChildren, base) // became_atomic
+	labelled := base
+	withLabels(&labelled, linLabel("l-bug", "Bug"))
+	diff(base, labelled) // label_added
+	diff(labelled, base) // label_removed
 	moved := base
 	moved.Identifier, moved.TeamID, moved.TeamKey = "OPS-77", "team-ops", "OPS"
 	diff(base, moved) // identifier_changed

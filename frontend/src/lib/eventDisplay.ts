@@ -162,6 +162,16 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'All subtasks closed — parent ticket is now an atomic work unit',
     color: 'bg-blue-500/10 text-blue-600',
   },
+  'jira:issue:label_added': {
+    label: 'Label Added',
+    description: 'A label was added to an issue',
+    color: 'bg-violet-500/10 text-violet-600',
+  },
+  'jira:issue:label_removed': {
+    label: 'Label Removed',
+    description: 'A label was removed from an issue',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
   'jira:issue:key_changed': {
     label: 'Key Changed',
     description: 'Issue moved to another project, or its project key was renamed',
@@ -202,6 +212,16 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
   'linear:issue:body_updated': {
     label: 'Issue Body Updated',
     description: 'The issue description was edited or cleared',
+    color: 'bg-slate-500/10 text-slate-600',
+  },
+  'linear:issue:label_added': {
+    label: 'Label Added',
+    description: 'A label was added to an issue',
+    color: 'bg-violet-500/10 text-violet-600',
+  },
+  'linear:issue:label_removed': {
+    label: 'Label Removed',
+    description: 'A label was removed from an issue',
     color: 'bg-slate-500/10 text-slate-600',
   },
   'linear:issue:parent_changed': {

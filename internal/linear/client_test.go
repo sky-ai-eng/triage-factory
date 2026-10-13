@@ -415,7 +415,7 @@ const issueJSON = `{
   "creator": null,
   "parent": {"id": "uuid-0", "identifier": "TFAC-1"},
   "team": {"id": "team-1", "key": "TFAC", "name": "Triage Factory", "private": false},
-  "labels": {"nodes": [{"name": "zeta"}, {"name": "alpha"}]},
+  "labels": {"nodes": [{"id": "l-z", "name": "zeta"}, {"id": "l-a", "name": "alpha"}]},
   "comments": {"nodes": [{"id": "c9", "createdAt": "2026-09-19T14:00:00.000Z", "user": {"id": "u2", "name": "Grace", "displayName": "grace"}, "botActor": null}]},
   "children": {"nodes": [{"id": "uuid-2", "identifier": "TFAC-87", "state": {"id": "s3", "name": "Done", "type": "completed", "position": 3}}]}
 }`
@@ -434,7 +434,7 @@ func TestGetIssue_DecodesTheFragment(t *testing.T) {
 		Assignee:  &User{ID: "u1", Name: "Ada", DisplayName: "ada", Email: "ada@example.com", Active: true},
 		Parent:    &IssueRef{ID: "uuid-0", Identifier: "TFAC-1"},
 		Team:      Team{ID: "team-1", Key: "TFAC", Name: "Triage Factory"},
-		Labels:    []string{"alpha", "zeta"},
+		Labels:    []Label{{ID: "l-a", Name: "alpha"}, {ID: "l-z", Name: "zeta"}},
 		CreatedAt: "2026-09-18T15:00:00.000Z", UpdatedAt: "2026-09-19T15:00:00.000Z",
 		LastComment: &Comment{ID: "c9", CreatedAt: "2026-09-19T14:00:00.000Z", User: &User{ID: "u2", Name: "Grace", DisplayName: "grace"}},
 		Children: []ChildIssue{{ID: "uuid-2", Identifier: "TFAC-87",
@@ -982,7 +982,7 @@ func TestGetIssue_CompletesTruncatedConnections(t *testing.T) {
 	const truncatedIssue = `{"data":{"issue":{"id":"uuid-1","identifier":"ENG-1","title":"Epic",
 		"state":{"id":"s1","name":"Todo","type":"unstarted","position":1},
 		"team":{"id":"t1","key":"ENG","name":"Eng"},
-		"labels":{"nodes":[{"name":"b"}],"pageInfo":{"hasNextPage":true}},
+		"labels":{"nodes":[{"id":"l-b","name":"b"}],"pageInfo":{"hasNextPage":true}},
 		"comments":{"nodes":[]},
 		"children":{"nodes":[{"id":"c1","identifier":"ENG-2","state":{"id":"s1"}}],"pageInfo":{"hasNextPage":true}}}}}`
 	s := newStub(t, func(n int, req recordedRequest) reply {
@@ -991,7 +991,7 @@ func TestGetIssue_CompletesTruncatedConnections(t *testing.T) {
 		case strings.Contains(req.Query, "query Issue("):
 			return reply{body: truncatedIssue}
 		case strings.Contains(req.Query, "query IssueLabels"):
-			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"name":"c"},{"name":"a"},{"name":"b"}],"pageInfo":{"hasNextPage":false,"endCursor":"l1"}}}}}`}
+			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"id":"l-c","name":"c"},{"id":"l-a","name":"a"},{"id":"l-b","name":"b"}],"pageInfo":{"hasNextPage":false,"endCursor":"l1"}}}}}`}
 		case strings.Contains(req.Query, "query IssueChildren") && after == "null":
 			return reply{body: `{"data":{"issue":{"children":{"nodes":[{"id":"c1","identifier":"ENG-2","state":{"id":"s1"}}],"pageInfo":{"hasNextPage":true,"endCursor":"k1"}}}}}`}
 		case strings.Contains(req.Query, "query IssueChildren") && after == `"k1"`:
@@ -1005,8 +1005,9 @@ func TestGetIssue_CompletesTruncatedConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetIssue: %v", err)
 	}
-	if !reflect.DeepEqual(issue.Labels, []string{"a", "b", "c"}) {
-		t.Errorf("labels = %v, want every label, sorted", issue.Labels)
+	want := []Label{{ID: "l-a", Name: "a"}, {ID: "l-b", Name: "b"}, {ID: "l-c", Name: "c"}}
+	if !reflect.DeepEqual(issue.Labels, want) {
+		t.Errorf("labels = %v, want every label with its id, sorted", issue.Labels)
 	}
 	var children []string
 	for _, c := range issue.Children {
@@ -1028,11 +1029,11 @@ func TestGetIssue_CompletesTruncatedConnections(t *testing.T) {
 func TestSearchIssues_CompletesOnlyTruncatedIssues(t *testing.T) {
 	s := newStub(t, func(_ int, req recordedRequest) reply {
 		if strings.Contains(req.Query, "query IssueLabels") {
-			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"name":"x"},{"name":"y"}],"pageInfo":{"hasNextPage":false}}}}}`}
+			return reply{body: `{"data":{"issue":{"labels":{"nodes":[{"id":"l-x","name":"x"},{"id":"l-y","name":"y"}],"pageInfo":{"hasNextPage":false}}}}}`}
 		}
 		return reply{body: `{"data":{"issues":{"nodes":[
-			{"id":"u1","identifier":"ENG-1","labels":{"nodes":[{"name":"x"}],"pageInfo":{"hasNextPage":true}}},
-			{"id":"u2","identifier":"ENG-2","labels":{"nodes":[{"name":"z"}],"pageInfo":{"hasNextPage":false}}}
+			{"id":"u1","identifier":"ENG-1","labels":{"nodes":[{"id":"l-x","name":"x"}],"pageInfo":{"hasNextPage":true}}},
+			{"id":"u2","identifier":"ENG-2","labels":{"nodes":[{"id":"l-z","name":"z"}],"pageInfo":{"hasNextPage":false}}}
 		],"pageInfo":{"hasNextPage":false}}}}`}
 	})
 
@@ -1040,11 +1041,41 @@ func TestSearchIssues_CompletesOnlyTruncatedIssues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SearchIssues: %v", err)
 	}
-	if !reflect.DeepEqual(page.Items[0].Labels, []string{"x", "y"}) || !reflect.DeepEqual(page.Items[1].Labels, []string{"z"}) {
+	if !reflect.DeepEqual(page.Items[0].Labels, []Label{{ID: "l-x", Name: "x"}, {ID: "l-y", Name: "y"}}) ||
+		!reflect.DeepEqual(page.Items[1].Labels, []Label{{ID: "l-z", Name: "z"}}) {
 		t.Errorf("labels = %v / %v", page.Items[0].Labels, page.Items[1].Labels)
 	}
 	if n := len(s.requests()); n != 2 {
 		t.Errorf("requests = %d, want the search plus one completion", n)
+	}
+}
+
+// TestListLabels_ReadsEachLabelsGroup: the team's label list carries the group
+// each label sits in, which two labels sharing a name in different groups are
+// told apart by.
+func TestListLabels_ReadsEachLabelsGroup(t *testing.T) {
+	s := newStub(t, scripted(reply{body: `{"data":{"issueLabels":{"nodes":[
+		{"id":"l-hard","name":"Hard","parent":{"name":"Difficulty"}},
+		{"id":"l-med-size","name":"Medium","parent":{"name":"Size"}},
+		{"id":"l-bug","name":"Bug","parent":null},
+		{"id":"l-med-diff","name":"Medium","parent":{"name":"Difficulty"}}
+	],"pageInfo":{"hasNextPage":false}}}}`}))
+
+	labels, err := s.client().ListLabels(context.Background(), "team-1")
+	if err != nil {
+		t.Fatalf("ListLabels: %v", err)
+	}
+	want := []Label{
+		{ID: "l-bug", Name: "Bug"},
+		{ID: "l-hard", Name: "Hard", Group: "Difficulty"},
+		{ID: "l-med-diff", Name: "Medium", Group: "Difficulty"},
+		{ID: "l-med-size", Name: "Medium", Group: "Size"},
+	}
+	if !reflect.DeepEqual(labels, want) {
+		t.Errorf("labels =\n%+v\nwant\n%+v", labels, want)
+	}
+	if q := s.requests()[0].Query; !strings.Contains(q, "parent { name }") {
+		t.Errorf("label list does not select the group:\n%s", q)
 	}
 }
 

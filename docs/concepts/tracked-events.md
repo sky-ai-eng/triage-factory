@@ -75,6 +75,8 @@ untouched for a switch back.
 | **Issue Available** | `jira:issue:available` | An unassigned issue appears in the pickup queue, or an assigned issue becomes unassigned |
 | **Priority Changed** | `jira:issue:priority_changed` | The `priority` field changes |
 | **New Comment** | `jira:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) |
+| **Label Added** | `jira:issue:label_added` | A label is added. `dedup_key` is the label name — see [Labels](#labels) |
+| **Label Removed** | `jira:issue:label_removed` | A label is removed. `dedup_key` is the label name |
 
 ### Informational
 
@@ -157,6 +159,43 @@ How the new comments are found:
 When a comment read fails, or reading which comments are TF's does, the
 snapshot keeps its previous comment fields and the next cycle reports the same
 comments.
+
+#### Labels
+
+`label_added` and `label_removed` exist for Jira and Linear issues as they do
+for GitHub pull requests: one event per label added or removed since the last
+cycle. `label_name` names the label and `labels` is the issue's whole set after
+the change. Predicates can filter on `label_name`, `has_label`, `assignee_in`,
+and `project` (Jira) or `linear_team_key` (Linear).
+
+- **Jira** labels are plain strings with no id, and cannot be renamed, so they
+  compare by name and the `dedup_key` is the name.
+- **Linear** labels have ids and can be renamed, so they compare by id, the way
+  workflow states do: a renamed label emits nothing, and the snapshot stores the
+  new name. The `dedup_key` is the label's id, so a label renamed after it was
+  added and then added again does not open a second task. A snapshot stored
+  before label ids were recorded compares by name for its first refresh; a label
+  it lost in that refresh is keyed by its name.
+- A Linear label can sit in a group (a "Difficulty" group holding Easy, Medium
+  and Hard), and its name is only its own, so two groups can each hold a
+  "Medium". `label_group` names the group, empty for a label in none, and
+  predicates can filter on it. Switching a single-select group from one value
+  to another emits a `label_removed` and a `label_added` in the same cycle.
+  The group is read from the team's label list, once per cycle and only when one
+  of the team's issues has a label change, because selecting it on every issue
+  would add to the batch read's complexity. When that read fails, the snapshot
+  keeps its previous labels and the next cycle reports the change. Each read is
+  a `tracker.linear.label_groups` span, with outcome `failed` or `rate_limited`
+  when it did not succeed, so a read that fails every cycle (one the credential
+  is not allowed to make, say) shows up there rather than only in a warning.
+
+The labels an issue already has when TF first sees it are its baseline, like
+every other field, and emit nothing. `assigned`, `available` and
+`became_atomic` carry `labels` and take `has_label`, so a rule such as
+"`available`, `has_label: tf-agent`" matches an issue that was labelled before
+discovery. Label events are not suppressed on an issue with open subtasks or
+sub-issues, as `assigned` and `available` are: someone added the label on
+purpose. Removing a label does not close a `label_added` task.
 
 #### Identity
 
@@ -295,6 +334,8 @@ nothing is assigned to, so the second query returns nothing.
 | **Priority Changed** | `linear:issue:priority_changed` | `priority` changes | new priority label |
 | **New Comment** | `linear:issue:commented` | Someone other than TF commented since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments) | — |
 | **Issue Became Atomic** | `linear:issue:became_atomic` | The last open sub-issue closes, on an issue not itself done | — |
+| **Label Added** | `linear:issue:label_added` | A label is added. Labels compare by id, so a label renamed in Linear is not a change — see [Labels](#labels) | label id |
+| **Label Removed** | `linear:issue:label_removed` | A label is removed | label id |
 
 ### Informational
 
@@ -328,7 +369,9 @@ the fields its event adds
 `previous_body_hash`/`body_hash`, `old_parent`/`new_parent`, `final_status`,
 `last_status`, `reason`, `comment_id`/`commenter`/`commenter_user_id`/
 `commenter_user_ids`, `old_identifier`/`old_linear_team_id`/
-`old_linear_team_key`). `linear_team_id` is what the router's team gate reads
+`old_linear_team_key`, `label_name`/`label_group`, and `labels` on
+`assigned`, `available`, `became_atomic`, `body_updated` and the label
+events). `linear_team_id` is what the router's team gate reads
 (with `old_linear_team_id` on `identifier_changed`, see below), and
 `assignee_user_id` is what assignee-centric routing joins against a
 member's bound Linear identity. `creator_user_id` is what `creator_in` matches
@@ -507,7 +550,8 @@ which it is matched on once known) and `scope` (the org's Jira site).
 - `status`, `status_id` — compared by id
 - `assignee` (display name), `assignee_account_id`, `priority`
 - `reporter` (display name), `reporter_account_id` — the account id is derived as the assignee's is (Cloud `accountId`, else Data Center `key`, else `name`). Carried on `assigned`, `available` and `became_atomic`, where `reporter_in` matches it. A reporter change emits nothing
-- `labels[]`, `issue_type`, `parent_key`
+- `labels[]` — compared by name for `label_added` / `label_removed`
+- `issue_type`, `parent_key`
 - `comment_count`, `last_comment_id`, `last_comment_at` — the newest comment; empty while it is past the page the batch read returns and has not been read
 - `open_subtask_count` — subtasks not in a configured done status
 - `created_at`, `updated_at`
@@ -526,7 +570,8 @@ UUID, which it is matched on) and `scope` (the org's Linear workspace id).
 - `assignee` (display name), `assignee_user_id`
 - `creator` (display name), `creator_user_id` — empty for an issue an integration created. Linear does not let the creator change, so it is never diffed
 - `priority` (0 = none, 1 = urgent … 4 = low), `priority_label`
-- `labels[]`
+- `labels[]` — label names, which predicates and `body_updated` read
+- `label_refs[]` — `{id, name}` for each label; the label diff compares by id. Absent on a snapshot stored before it existed, and for an issue with no labels
 - `team_id`, `team_key`
 - `parent_id`, `parent_identifier`
 - `last_comment_id`, `last_comment_at`
