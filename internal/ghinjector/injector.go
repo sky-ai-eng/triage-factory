@@ -659,7 +659,7 @@ func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 		Status: resp.StatusCode,
 	}
 	if len(body) > 0 {
-		w.ExternalID, w.URL = parseCreatedObject(body)
+		w.ExternalID, w.NodeID, w.URL = parseCreatedObject(body)
 	}
 	s.cfg.ObserveWrite(context.Background(), w)
 }
@@ -684,7 +684,8 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 		GraphQL: facts,
 	}
 	if len(body) > 0 {
-		w.Errored, w.URL = ghwrite.ReadGraphQLResponse(body, facts.Mutation())
+		read := ghwrite.ReadGraphQLResponse(body, *facts)
+		w.Errored, w.URL, w.ExternalID, w.NodeID = read.Errored, read.URL, read.ExternalID, read.NodeID
 	} else {
 		w.ResponseUnread = true
 	}
@@ -743,19 +744,20 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	return nil
 }
 
-// parseCreatedObject reads the id and html url of the object a create response
-// names. Both empty when the body doesn't parse or carries no id — a 2xx
-// without a recognizable object still happened, so the caller records the act
-// and lets the deep link degrade.
-func parseCreatedObject(body []byte) (externalID, url string) {
+// parseCreatedObject reads the id, node id, and html url of the object a create
+// response names. All empty when the body doesn't parse or carries no id — a
+// 2xx without a recognizable object still happened, so the caller records the
+// act and lets the deep link degrade.
+func parseCreatedObject(body []byte) (externalID, nodeID, url string) {
 	var o struct {
 		ID      int64  `json:"id"`
+		NodeID  string `json:"node_id"`
 		HTMLURL string `json:"html_url"`
 	}
 	if err := json.Unmarshal(body, &o); err != nil || o.ID == 0 {
-		return "", ""
+		return "", "", ""
 	}
-	return strconv.FormatInt(o.ID, 10), o.HTMLURL
+	return strconv.FormatInt(o.ID, 10), o.NodeID, o.HTMLURL
 }
 
 // bufferBody reads the whole response body into memory and re-presents it to

@@ -559,6 +559,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 				Path:           w.Path,
 				Status:         w.Status,
 				ExternalID:     w.ExternalID,
+				NodeID:         w.NodeID,
 				URL:            w.URL,
 				Errored:        w.Errored,
 				ResponseUnread: w.ResponseUnread,
@@ -601,10 +602,11 @@ func ghWriteFactsToWire(f *ghwrite.GraphQLFacts) *agentproc.GraphQLWriteFacts {
 		return nil
 	}
 	return &agentproc.GraphQLWriteFacts{
-		Operation:  f.Operation,
-		Mutations:  f.Fields,
-		Subject:    f.Subject,
-		Unreadable: f.Unreadable,
+		Operation:   f.Operation,
+		Mutations:   f.Fields,
+		Subject:     f.Subject,
+		Unreadable:  f.Unreadable,
+		NamesReview: f.NamesReview,
 	}
 }
 

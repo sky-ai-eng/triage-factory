@@ -18,9 +18,10 @@ import (
 // That is a real widening of what the injector does, and it is scoped as
 // narrowly as the job allows: the envelope's three known members, the top level
 // of the operation that runs (plus the fragments that operation spreads into
-// it), and a node id out of the variables. Nothing walks the arguments, and no
-// text an agent or a stranger wrote is ever interpreted — see gqldoc.go for what
-// the reader refuses to look at.
+// it), a node id out of the variables, and whether the request names a pending
+// review anywhere. Nothing walks the arguments, and no text an agent or a
+// stranger wrote is ever interpreted — see gqldoc.go for what the reader
+// refuses to look at.
 //
 // The mutation names below are the vocabulary GitHub's schema defines, mapped
 // onto the same domain actions the REST shapes produce. One act, one name,
@@ -103,6 +104,21 @@ type GraphQLFacts struct {
 	// (one of the reasons above). It never suppresses the row — an unreadable
 	// write is still a write — it only means the row takes the fallback.
 	Unreadable string
+
+	// NamesReview reports that the request supplied a pullRequestReviewId,
+	// in its document or its variables. Only the mutations in stagedMutations
+	// read it: for them the review input is optional, and supplying one stages
+	// the act on that pending review instead of performing it.
+	NamesReview bool
+
+	// ResponseAliased reports that the document aliases some field to a name
+	// the response read takes values from (responseReadNames). A response
+	// member is keyed by its alias, so under that name the response holds
+	// whatever field the alias pointed at — a comment's body under databaseId
+	// — and ReadGraphQLResponse reads no url or id from it. Only that read uses
+	// it, and it runs in the process that read the request, so the fact does not
+	// cross the relay.
+	ResponseAliased bool
 }
 
 // Mutation returns the single top-level field this request invoked, or empty
@@ -128,8 +144,8 @@ func (f GraphQLFacts) Mutation() string {
 // downstream reads this log to answer. The rest deliberately do not, so their
 // rows read identically to the equivalent verb's.
 var graphQLMutations = map[string]graphQLShape{
-	"addComment":                    {action: domain.ActionCommentPosted, creates: true},
-	"updateIssueComment":            {action: domain.ActionCommentEdited},
+	"addComment":                    {action: domain.ActionCommentPosted, creates: true, comment: []string{"commentEdge", "node"}},
+	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}},
 	"deleteIssueComment":            {action: domain.ActionCommentDeleted},
 	"createPullRequest":             {action: domain.ActionPRCreated, creates: true, provenance: true, numberFromURL: true},
 	"updatePullRequest":             {action: domain.ActionPREdited},
@@ -202,6 +218,14 @@ var graphQLMutations = map[string]graphQLShape{
 	"archiveRepository":       {action: domain.ActionRepoArchived},
 	"unarchiveRepository":     {action: domain.ActionRepoUnarchived},
 
+	// Review comments. No porcelain command sends any of these, so they arrive
+	// only through `gh api graphql`. A thread reply is a comment posted, exactly
+	// as its REST twin is — except in the form that names a pending review,
+	// which the gate refuses and the classifier never names (stagedMutations).
+	"addPullRequestReviewThreadReply": {action: domain.ActionCommentPosted, creates: true, comment: []string{"comment"}},
+	"updatePullRequestReviewComment":  {action: domain.ActionReviewCommentEdited, comment: []string{"pullRequestReviewComment"}},
+	"deletePullRequestReviewComment":  {action: domain.ActionReviewCommentDeleted, comment: []string{"pullRequestReviewComment"}},
+
 	// addPullRequestReviewThread stays out, and now permanently. It stages a
 	// thread on a PENDING review — nothing is published until the review is
 	// submitted — so every verb above would overstate it. The refusal policy
@@ -244,6 +268,13 @@ type graphQLShape struct {
 	// number under a collection, and a repository is addressed by having
 	// nothing under it at all.
 	repoFromURL bool
+	// comment is the path through the payload to the comment the mutation
+	// created or acted on, for the mutations whose response is read for that
+	// comment's ids. It names one object exactly because the payload nests
+	// others beside it — the pull request, the thread — and each of those has an
+	// id of its own. deleteIssueComment has none: its payload returns nothing
+	// but the client's own mutation id.
+	comment []string
 }
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
@@ -307,7 +338,13 @@ func ParseGraphQLRequest(body []byte) (GraphQLFacts, bool) {
 	}
 
 	fields, unreadable := resolveTopLevelFields(op.sel, document.fragments)
-	facts := GraphQLFacts{Operation: op.name, Fields: fields, Subject: subject}
+	facts := GraphQLFacts{
+		Operation:       op.name,
+		Fields:          fields,
+		Subject:         subject,
+		NamesReview:     documentNames(envelope.Query, reviewInput) || variablesName(envelope.Variables, reviewInput),
+		ResponseAliased: documentAliasesOnto(envelope.Query, responseReadNames),
+	}
 	switch {
 	case unreadable != "":
 		// Some part of the selection could not be accounted for, so the fields
@@ -372,6 +409,8 @@ var graphQLSubjectKeys = []string{
 	// thing those mutations disclose about the object acted on.
 	"labelableId",
 	"lockableId",
+	"pullRequestReviewThreadId",
+	"pullRequestReviewCommentId",
 	"commentId",
 	"repositoryId",
 	"id",
@@ -409,6 +448,43 @@ func subjectFromVariables(raw json.RawMessage) string {
 	return pickSubject(vars)
 }
 
+// reviewInput is the input field a review mutation names its pending review by.
+// GitHub declares it only on input types, never on an object a selection set
+// could return, so finding it in a request means the request supplied it.
+const reviewInput = "pullRequestReviewId"
+
+// variablesName reports whether name is a key of the variables object, or of an
+// object one of the variables holds. Those are the two places an input field can
+// sit in the variables: a variable either carries the input object whole, or is
+// placed into a field of one the document spells out, and the second form names
+// the field in the document, where documentNames finds it.
+//
+// Presence is the whole test, a null value included. The answer decides a
+// refusal, and a request that spells the field out with no value loses only the
+// field it did not need.
+func variablesName(raw json.RawMessage, name string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var vars map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &vars); err != nil {
+		return false
+	}
+	if _, ok := vars[name]; ok {
+		return true
+	}
+	for _, value := range vars {
+		var object map[string]json.RawMessage
+		if err := json.Unmarshal(value, &object); err != nil {
+			continue
+		}
+		if _, ok := object[name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func pickSubject(vars map[string]json.RawMessage) string {
 	for _, key := range graphQLSubjectKeys {
 		raw, ok := vars[key]
@@ -430,30 +506,198 @@ func pickSubject(vars map[string]json.RawMessage) string {
 // drive an unbounded descent.
 const maxResponseDepth = 6
 
-// ReadGraphQLResponse extracts the two things a GraphQL response can add to an
-// audit row: whether the write actually failed, and where the object it made
-// now lives.
+// responseReadNames are the response members ReadGraphQLResponse takes values
+// from — the url and ids it reads, and every member on the path to a created
+// comment. Aliasing a field to any of them puts that field's value where the
+// read expects a GitHub-assigned one: a parent alias swaps in another object
+// whole, a leaf alias swaps in text.
+var responseReadNames = func() map[string]bool {
+	names := map[string]bool{"url": true, "id": true, "databaseId": true, "fullDatabaseId": true}
+	for _, entry := range graphQLMutations {
+		for _, member := range entry.comment {
+			names[member] = true
+		}
+	}
+	return names
+}()
+
+// GraphQLResponse is what one GraphQL response adds to an audit row.
+type GraphQLResponse struct {
+	// Errored reports an errors array. GraphQL answers a refused mutation with
+	// 200 and an errors member, so without it a merge the server rejected would
+	// be logged as a merge that happened — the failure the REST side avoids by
+	// reading the status code.
+	Errored bool
+
+	// URL is where the object the act made or touched now lives.
+	URL string
+
+	// ExternalID and NodeID are a comment's numeric id and node id, for the
+	// mutations whose table entry locates that comment in the payload. Each is
+	// empty where the selection set returned nothing it could come from.
+	ExternalID string
+	NodeID     string
+}
+
+// ReadGraphQLResponse extracts what a GraphQL response can add to an audit row:
+// whether the write actually failed, where the object it made or touched now
+// lives, and — for a comment the mutation created or acted on — that comment's
+// ids.
 //
-// The errors array is the load-bearing half. GraphQL answers a refused mutation
-// with 200 and an errors member, so without reading it a merge the server
-// rejected would be logged as a merge that happened — the exact failure the
-// REST side avoids by reading the status code.
-//
-// field names the mutation whose payload to search, so the scan starts inside
-// the act's own result and cannot wander into some other part of the response.
-func ReadGraphQLResponse(body []byte, field string) (errored bool, objectURL string) {
+// It is read against the facts of the request that produced it. The mutation
+// they name is the payload to search, so the scan starts inside the act's own
+// result and cannot wander into some other part of the response. And a request
+// that aliased a field onto a name this read relies on gets the errors check
+// and nothing else: the row is better without a url or an id than with one the
+// request's author chose.
+func ReadGraphQLResponse(body []byte, facts GraphQLFacts) GraphQLResponse {
 	var payload struct {
 		Data   map[string]json.RawMessage `json:"data"`
 		Errors []json.RawMessage          `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return false, ""
+		return GraphQLResponse{}
 	}
-	errored = len(payload.Errors) > 0
-	if field == "" {
-		return errored, ""
+	read := GraphQLResponse{Errored: len(payload.Errors) > 0}
+	field := facts.Mutation()
+	if field == "" || facts.ResponseAliased {
+		return read
 	}
-	return errored, findObjectURL(payload.Data[field], maxResponseDepth)
+	result := payload.Data[field]
+	if path := graphQLMutations[field].comment; path != nil {
+		read.URL, read.ExternalID, read.NodeID = createdComment(result, path)
+	}
+	if read.URL == "" {
+		read.URL = findObjectURL(result, maxResponseDepth)
+	}
+	return read
+}
+
+// createdComment reads a comment's url and ids out of the comment's own object,
+// reached by following path from the mutation's payload. Never the first
+// id found anywhere: the payload may also carry the pull request and the thread
+// the comment hangs off, and their ids name those objects, not this one.
+//
+// The numeric id comes from databaseId where the selection returned it, from
+// fullDatabaseId (GitHub's replacement for it on review comments) next, and
+// otherwise from the comment url's own anchor, which is all gh's porcelain
+// selects. GitHub assigns every one of these values; a request that aliased
+// another field to one of their names never reaches this read, and each value
+// is still read only in the shape GitHub gives it and otherwise left empty.
+func createdComment(result json.RawMessage, path []string) (objectURL, externalID, nodeID string) {
+	object := jsonObject(result)
+	for _, key := range path {
+		object = jsonObject(object[key])
+	}
+	if object == nil {
+		return "", "", ""
+	}
+	objectURL = urlMember(object["url"])
+	nodeID = nodeIDMember(object["id"])
+	externalID = databaseIDMember(object["databaseId"], false)
+	if externalID == "" {
+		externalID = databaseIDMember(object["fullDatabaseId"], true)
+	}
+	if externalID == "" {
+		externalID = commentIDFromURL(objectURL)
+	}
+	return objectURL, externalID, nodeID
+}
+
+// jsonObject decodes one JSON object's members, or returns nil for anything
+// else — including a member that is absent, so a path can be followed without
+// checking each step.
+func jsonObject(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		return nil
+	}
+	return object
+}
+
+// urlMember reads a url member: a string that parses as an absolute url, or
+// nothing.
+func urlMember(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" {
+		return ""
+	}
+	if u, err := url.Parse(value); err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return value
+}
+
+// nodeIDMember reads a node id: a string of the characters GitHub's node ids
+// are made of, in either of its encodings, within the bound a request's subject
+// is held to.
+func nodeIDMember(raw json.RawMessage) string {
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil || value == "" || len(value) > maxSubjectLength {
+		return ""
+	}
+	for _, c := range value {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.ContainsRune("_-=+/", c):
+		default:
+			return ""
+		}
+	}
+	return value
+}
+
+// databaseIDMember reads a database id: a positive integer, spelled the way
+// GitHub spells the member carrying it — a JSON number for databaseId, and a
+// string of digits for fullDatabaseId, whose BigInt type GitHub encodes as a
+// string.
+func databaseIDMember(raw json.RawMessage, quoted bool) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	text := string(raw)
+	if quoted {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			return ""
+		}
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil || n <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(n, 10)
+}
+
+// commentAnchors are the url fragments GitHub links a comment by, each followed
+// by the comment's numeric id: an issue or pull request conversation comment,
+// and a review comment.
+var commentAnchors = []string{"issuecomment-", "discussion_r"}
+
+// commentIDFromURL reads a comment's numeric id out of its url's anchor, or
+// returns empty for a url that carries none.
+func commentIDFromURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	for _, anchor := range commentAnchors {
+		id, ok := strings.CutPrefix(u.Fragment, anchor)
+		if !ok {
+			continue
+		}
+		n, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || n <= 0 {
+			return ""
+		}
+		return strconv.FormatInt(n, 10)
+	}
+	return ""
 }
 
 // findObjectURL descends a mutation payload for the first "url" member holding
@@ -466,13 +710,8 @@ func findObjectURL(raw json.RawMessage, depth int) string {
 	}
 	var object map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &object); err == nil {
-		if candidate, ok := object["url"]; ok {
-			var value string
-			if err := json.Unmarshal(candidate, &value); err == nil && value != "" {
-				if u, err := url.Parse(value); err == nil && u.Scheme != "" && u.Host != "" {
-					return value
-				}
-			}
+		if found := urlMember(object["url"]); found != "" {
+			return found
 		}
 		for _, member := range object {
 			if found := findObjectURL(member, depth-1); found != "" {
@@ -505,22 +744,19 @@ func classifyGraphQL(facts GraphQLFacts) (Shape, bool) {
 	if !known {
 		return Shape{}, false
 	}
-	s := Shape{
+	if _, staged := stagedMutations[field]; staged && facts.NamesReview {
+		// Staged on a pending review rather than performed, so no verb in the
+		// table describes it. The gate refuses this form, which is why it never
+		// reaches a row as anything but a denial.
+		return Shape{}, false
+	}
+	return Shape{
 		Action:              entry.action,
 		Subject:             facts.Subject,
 		CreatesObject:       entry.creates,
 		CarriesProvenance:   entry.provenance,
 		NumberFromObjectURL: entry.numberFromURL,
-	}
-	if !entry.creates {
-		// The act was performed ON the object the variables named, so that node
-		// id is its id. A create's id belongs to the object it made, which the
-		// request could not have known — it comes from the response or not at
-		// all, and "not at all" is the honest answer for the mutations whose
-		// selection sets return only a url.
-		s.ExternalID = facts.Subject
-	}
-	return s, true
+	}, true
 }
 
 // resolveGraphQL completes a GraphQL shape with what the response disclosed.
@@ -536,11 +772,27 @@ func resolveGraphQL(obs Observation) (Shape, bool) {
 	if !ok {
 		return Shape{}, false
 	}
+	entry := graphQLMutations[obs.GraphQL.Mutation()]
+	if entry.comment != nil {
+		// The comment's id was read out of its own object in the response
+		// (ReadGraphQLResponse). Its url locates the pull request or issue it
+		// hangs off, and the number there is that object's, never the comment's.
+		s.ExternalID = obs.ExternalID
+	}
+	// The node id of the object the act was performed on. Anything but a
+	// create names that object in its request, which is authoritative about
+	// what was acted on; a request that spelled its arguments inline discloses
+	// no subject, and the response's id stands in where it returned one. A
+	// create's request names only the parent, so its node id is the response's.
+	s.NodeID = obs.NodeID
+	if !s.CreatesObject && s.Subject != "" {
+		s.NodeID = s.Subject
+	}
 	// A repository's url is read by its own parser and never by the object one:
 	// "…/octo/repo" would otherwise have to be told apart from "…/octo/repo/pull/7"
 	// by shape alone, and a table entry knows which of the two its mutation
 	// returns.
-	if graphQLMutations[obs.GraphQL.Mutation()].repoFromURL {
+	if entry.repoFromURL {
 		if owner, repo, parsed := ParseRepoURL(obs.URL); parsed {
 			s.Owner, s.Repo = owner, repo
 		}

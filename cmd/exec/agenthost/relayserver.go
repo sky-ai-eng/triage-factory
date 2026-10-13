@@ -646,10 +646,11 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 		return nil
 	}
 	return &ghwrite.GraphQLFacts{
-		Operation:  w.Operation,
-		Fields:     w.Mutations,
-		Subject:    w.Subject,
-		Unreadable: w.Unreadable,
+		Operation:   w.Operation,
+		Fields:      w.Mutations,
+		Subject:     w.Subject,
+		Unreadable:  w.Unreadable,
+		NamesReview: w.NamesReview,
 	}
 }
 
@@ -707,6 +708,7 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 			Path:           a.Path,
 			Status:         a.Status,
 			ExternalID:     a.ExternalID,
+			NodeID:         a.NodeID,
 			URL:            a.URL,
 			Errored:        a.Errored,
 			ResponseUnread: a.ResponseUnread,

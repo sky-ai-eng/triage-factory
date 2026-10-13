@@ -2610,11 +2610,14 @@ func graphQLFallbackWriteAction(obs ghwrite.Observation, credential string) *dom
 // coordinates with what the response said, so a created object's id and number
 // are settled before this sees them.
 //
-// detail_json carries the act's own context (the thread a reply answers) and,
-// for the shapes that ask for it, the raw method and path. That is the whole of
-// the difference between these rows and the exec verbs': a reply is required to
-// read identically to `gh pr comment-reply`'s row, while a PR create or a
-// review submit is required to say which channel it came through.
+// detail_json carries the act's own context (the thread a reply answers), the
+// object's GraphQL node id where the request or response disclosed one, and,
+// for the shapes that ask for it, the raw method and path. A reply's row otherwise matches
+// `gh pr comment-reply`'s, while a PR create or a review submit is required to
+// say which channel it came through. The node id lives here rather than in
+// external_id, which holds the object's own number whatever the transport: a
+// GraphQL edit or delete names a comment only by node id, and a row keyed on it
+// would not line up with the same comment's other rows.
 func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	act := &domain.ExternalAction{
 		Provider:   domain.ArtifactProviderGitHub,
@@ -2627,6 +2630,9 @@ func ghSemanticWriteAction(shape ghwrite.Shape, obs ghwrite.Observation, credent
 	detail := map[string]any{}
 	if shape.InReplyTo > 0 {
 		detail["in_reply_to"] = shape.InReplyTo
+	}
+	if shape.NodeID != "" {
+		detail["node_id"] = shape.NodeID
 	}
 	if shape.CarriesProvenance {
 		// Which call performed the act, in whatever terms that transport has: a

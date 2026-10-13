@@ -31,6 +31,12 @@ import "strings"
 // is read exactly like an operation's — names only, everything under it skipped
 // — and resolution touches each definition at most once, so a document cannot
 // spend this process's time by nesting or by pointing fragments at each other.
+//
+// Two other questions are answered, each by one pass over the same tokens that
+// compares names and reads nothing else — no value, no string, no position in
+// the grammar: does a given name appear anywhere in the document
+// (documentNames), and does the document alias some field to one of a set of
+// names (documentAliasesOnto)?
 
 // gqlOperation names the three operation keywords. Only mutations are
 // audited; the other two are recognized so a document that mixes them can still
@@ -171,6 +177,56 @@ func resolveTopLevelFields(sel gqlSelection, fragments map[string]gqlFragment) (
 		unreadable = GraphQLTooManyFields
 	}
 	return fields, unreadable
+}
+
+// documentNames reports whether name appears anywhere in the document as a name
+// token — an argument or input field, a variable, an alias. It does not ask where,
+// which is what lets it see an input spelled inline, in a variable's default, or
+// inside a fragment, without this reader learning to walk any of them.
+//
+// A string is one token and never a name, so the same word inside a comment
+// body cannot match. A document the scanner cannot tokenize answers true: the
+// caller asks this to decide a refusal, and a scan that stopped short cannot show
+// the name is absent.
+func documentNames(doc, name string) bool {
+	sc := &gqlScanner{src: doc}
+	for {
+		tok, more := sc.next()
+		if !more {
+			return sc.bad
+		}
+		if tok.name(name) {
+			return true
+		}
+	}
+}
+
+// documentAliasesOnto reports whether the document aliases any field to one of
+// names, at any depth and in any fragment. An alias has one token shape: a name,
+// a colon, and the name of the field it stands for. Nothing else in a document
+// has it except a variable definition, which a `$` precedes, and an argument or
+// input field given an enum, a boolean, or a null — which counts as an alias
+// here, costing that request the values the caller would have read.
+//
+// A document the scanner cannot tokenize answers true, for the same reason
+// documentNames does.
+func documentAliasesOnto(doc string, names map[string]bool) bool {
+	sc := &gqlScanner{src: doc}
+	// The last four tokens, oldest first: the alias candidate is the second,
+	// so the one before it can rule out a variable definition.
+	var window [4]gqlToken
+	for {
+		tok, more := sc.next()
+		if !more {
+			return sc.bad
+		}
+		window = [4]gqlToken{window[1], window[2], window[3], tok}
+		alias, colon, field := window[1], window[2], window[3]
+		if alias.kind == gqlKindName && names[alias.text] && colon.punct(":") &&
+			field.kind == gqlKindName && !window[0].punct("$") {
+			return true
+		}
+	}
 }
 
 // parseDocument reads a document's top level: its operations, and the fragments

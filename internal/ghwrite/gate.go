@@ -70,7 +70,8 @@ import (
 // exemption path built before anyone has asked for it gets used because it
 // exists, and the refusal it was built around stops holding.
 const (
-	// GateReasonReview covers submitting a review and staging a thread on one.
+	// GateReasonReview covers submitting a review, and staging a thread or a
+	// thread reply on one.
 	GateReasonReview = "review"
 	// GateReasonRepoCreate covers minting a repository, by any of the four
 	// spellings GitHub offers.
@@ -149,6 +150,16 @@ var gatedMutations = map[string]string{
 	"addPullRequestReviewThread": GateReasonReview,
 }
 
+// stagedMutations are gated in one form only: the form that names a pending
+// review (GraphQLFacts.NamesReview). addPullRequestReviewThreadReply posts a
+// reply to a thread when sent alone, and with a pullRequestReviewId it stages the
+// reply on that review instead — the position addPullRequestReviewThread is
+// always in, refused for the same reason. The classifier reads this table too,
+// so the staged form is never recorded as the comment the other form posts.
+var stagedMutations = map[string]string{
+	"addPullRequestReviewThreadReply": GateReasonReview,
+}
+
 // Gate reports whether this request is a shape a run may not perform. ok is
 // false for everything else, which is nearly all traffic: every read, and every
 // write outside the three families.
@@ -221,6 +232,9 @@ func gateGraphQL(facts GraphQLFacts) (Refusal, bool) {
 	}
 	for _, field := range facts.Fields {
 		if reason, gated := gatedMutations[field]; gated {
+			return Refusal{Reason: reason, Mutation: field}, true
+		}
+		if reason, gated := stagedMutations[field]; gated && facts.NamesReview {
 			return Refusal{Reason: reason, Mutation: field}, true
 		}
 		entry, known := graphQLMutations[field]
@@ -303,6 +317,11 @@ func (r Refusal) Explain() Explanation {
 			"approval — and a review posted here would have none of it."
 		e.NextStep = "Use the Triage Factory review verbs instead: `gh pr start-review`, then " +
 			"`add-review-comment` for each finding, then `finalize-review`."
+		if _, staged := stagedMutations[r.Mutation]; staged {
+			e.NextStep = "To answer the thread now, send the same reply without `pullRequestReviewId`. " +
+				"To leave findings as a review, use the Triage Factory review verbs instead: " +
+				"`gh pr start-review`, then `add-review-comment` for each finding, then `finalize-review`."
+		}
 	case GateReasonRepoCreate:
 		e.Policy = "Triage Factory refuses repository creation with this run's credential. Polling, task " +
 			"routing, and this run's own credential are all scoped to a set of repositories chosen before " +

@@ -120,6 +120,7 @@ type RecordGHWriteArgs struct {
 	Path           string             `json:"path"`
 	Status         int                `json:"status"`
 	ExternalID     string             `json:"external_id,omitempty"`
+	NodeID         string             `json:"node_id,omitempty"`
 	URL            string             `json:"url,omitempty"`
 	Errored        bool               `json:"errored,omitempty"`
 	ResponseUnread bool               `json:"response_unread,omitempty"`
@@ -145,6 +146,9 @@ type GraphQLWriteFacts struct {
 	// Unreadable names why the request resolved to no single act, empty when it
 	// resolved cleanly.
 	Unreadable string `json:"unreadable,omitempty"`
+	// NamesReview reports that the request supplied a pending review's id. The
+	// gate reads it, so it crosses on authorize_gh_write as well as here.
+	NamesReview bool `json:"names_review,omitempty"`
 }
 
 // AuthorizeGHWriteArgs is authorize_gh_write's payload: one request the

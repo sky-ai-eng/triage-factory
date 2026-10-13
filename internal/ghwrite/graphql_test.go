@@ -31,6 +31,10 @@ func envelope(t *testing.T, query, operationName string, variables any) []byte {
 // input wraps variables the way every mutation gh sends does.
 func input(fields map[string]any) map[string]any { return map[string]any{"input": fields} }
 
+// mutation is the facts of a request that selected one field and aliased
+// nothing the response read relies on.
+func mutation(field string) GraphQLFacts { return GraphQLFacts{Fields: []string{field}} }
+
 // TestParseGraphQLRequest_ReadsRecordNothing is the acceptance floor and the
 // performance one at once: the endpoint's traffic is overwhelmingly reads, and
 // every one of them must resolve to "no write happened" — not to an unnamed row
@@ -603,6 +607,255 @@ func TestParseGraphQLRequest_SubjectFromTopLevelVariables(t *testing.T) {
 	}
 }
 
+// TestParseGraphQLRequest_NamesReview: a thread reply that supplies a pending
+// review's id is staged on it, so the request has to say whether it supplied one
+// — and must say so however the input was spelled, because the gate reads the
+// answer and a spelling it missed would be the way past it.
+func TestParseGraphQLRequest_NamesReview(t *testing.T) {
+	const reply = `addPullRequestReviewThreadReply`
+	tests := []struct {
+		name      string
+		query     string
+		variables any
+		want      bool
+	}{
+		{
+			name:      "the input object as one variable",
+			query:     `mutation($input:AddPullRequestReviewThreadReplyInput!){` + reply + `(input:$input){comment{url}}}`,
+			variables: input(map[string]any{"pullRequestReviewThreadId": "PRRT_x", "pullRequestReviewId": "PRR_x", "body": "b"}),
+			want:      true,
+		},
+		{
+			// A variable may carry the input under any name.
+			name:      "the input object under another name",
+			query:     `mutation($r:AddPullRequestReviewThreadReplyInput!){` + reply + `(input:$r){comment{url}}}`,
+			variables: map[string]any{"r": map[string]any{"pullRequestReviewThreadId": "PRRT_x", "pullRequestReviewId": "PRR_x"}},
+			want:      true,
+		},
+		{
+			name:      "an inline input placing a variable",
+			query:     `mutation($t:ID!,$p:ID){` + reply + `(input:{pullRequestReviewThreadId:$t,pullRequestReviewId:$p,body:"b"}){comment{url}}}`,
+			variables: map[string]any{"t": "PRRT_x", "p": "PRR_x"},
+			want:      true,
+		},
+		{
+			name:  "an inline literal",
+			query: `mutation{` + reply + `(input:{pullRequestReviewThreadId:"PRRT_x",pullRequestReviewId:"PRR_x",body:"b"}){comment{url}}}`,
+			want:  true,
+		},
+		{
+			// Supplied by a default the variables never override.
+			name:  "a variable's default",
+			query: `mutation($input:AddPullRequestReviewThreadReplyInput={pullRequestReviewThreadId:"PRRT_x",pullRequestReviewId:"PRR_x",body:"b"}){` + reply + `(input:$input){comment{url}}}`,
+			want:  true,
+		},
+		{
+			name:  "inside a fragment",
+			query: `mutation{...F} fragment F on Mutation{` + reply + `(input:{pullRequestReviewThreadId:"PRRT_x",pullRequestReviewId:"PRR_x",body:"b"}){comment{url}}}`,
+			want:  true,
+		},
+		{
+			name:      "a reply posted in public",
+			query:     `mutation($input:AddPullRequestReviewThreadReplyInput!){` + reply + `(input:$input){comment{url}}}`,
+			variables: input(map[string]any{"pullRequestReviewThreadId": "PRRT_x", "body": "b"}),
+		},
+		{
+			// A string is never a name: a reply quoting the input's name is a
+			// reply about it, not one supplying it.
+			name:  "the name inside the reply's text",
+			query: `mutation{` + reply + `(input:{pullRequestReviewThreadId:"PRRT_x",body:"set pullRequestReviewId: x"}){comment{url}}}`,
+		},
+		{
+			name:      "the name as a variable's value",
+			query:     `mutation($input:AddPullRequestReviewThreadReplyInput!){` + reply + `(input:$input){comment{url}}}`,
+			variables: input(map[string]any{"pullRequestReviewThreadId": "PRRT_x", "body": "pullRequestReviewId"}),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, "", tc.variables))
+			if !ok || facts.Mutation() != reply {
+				t.Fatalf("facts = %+v (ok=%v), want the reply named", facts, ok)
+			}
+			if facts.NamesReview != tc.want {
+				t.Errorf("names review = %v, want %v", facts.NamesReview, tc.want)
+			}
+			// The staged form is not the comment the other form posts.
+			_, classified := classifyGraphQL(facts)
+			if classified == tc.want {
+				t.Errorf("classified = %v for a reply that names a review = %v", classified, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseGraphQLRequest_ResponseAliased: an alias onto a name the response
+// read relies on is found wherever it sits, and nothing else that shares its
+// colon is mistaken for one — except an argument given an enum or a null, which
+// costs that request its url and ids and nothing more.
+func TestParseGraphQLRequest_ResponseAliased(t *testing.T) {
+	const reply = `addPullRequestReviewThreadReply(input:$input)`
+	const head = `mutation($input:AddPullRequestReviewThreadReplyInput!){`
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{name: "the selection gh would send", query: head + reply + `{comment{id databaseId url}}}`},
+		{name: "an alias onto an id", query: head + reply + `{comment{databaseId: body}}}`, want: true},
+		{name: "an alias onto the url", query: head + reply + `{comment{url:bodyText}}}`, want: true},
+		{
+			// Every value under the parent would be GitHub's, of another object.
+			name:  "an alias onto a parent",
+			query: head + reply + `{comment: clientMutationId}}`,
+			want:  true,
+		},
+		{
+			name:  "an alias across a comment and commas",
+			query: head + reply + "{comment{databaseId # x\n , : body}}}",
+			want:  true,
+		},
+		{
+			name:  "an alias inside a fragment",
+			query: head + reply + `{comment{...F}}} fragment F on PullRequestReviewComment{id:body}`,
+			want:  true,
+		},
+		{name: "an alias onto some other name", query: head + reply + `{comment{text: body url}}}`},
+		{
+			name:  "a variable definition",
+			query: `mutation($id:ID!){updatePullRequestReviewComment(input:{pullRequestReviewCommentId:$id,body:"b"}){pullRequestReviewComment{url}}}`,
+		},
+		{
+			name:  "an argument given a variable",
+			query: `mutation($id:ID!){deletePullRequestReviewComment(input:{id:$id}){pullRequestReviewComment{id url}}}`,
+		},
+		{
+			name:  "an argument given a string",
+			query: `mutation{deletePullRequestReviewComment(input:{id:"PRRC_x"}){pullRequestReviewComment{id url}}}`,
+		},
+		{name: "the shape inside a string", query: head + `addPullRequestReviewThreadReply(input:{pullRequestReviewThreadId:"x",body:"databaseId: body"}){comment{url}}}`},
+		{
+			name:  "an argument given a null",
+			query: `mutation{deletePullRequestReviewComment(input:{id:null}){clientMutationId}}`,
+			want:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, "", nil))
+			if !ok || facts.Mutation() == "" {
+				t.Fatalf("facts = %+v (ok=%v), want one mutation named", facts, ok)
+			}
+			if facts.ResponseAliased != tc.want {
+				t.Errorf("response aliased = %v, want %v", facts.ResponseAliased, tc.want)
+			}
+		})
+	}
+}
+
+// TestGraphQLReviewCommentFamily: the review-comment mutations no porcelain
+// command sends. A reply is keyed on what it created, so its row's id comes from
+// the response; an edit and a delete are keyed on the comment they named, by
+// the node id GraphQL addresses it with.
+func TestGraphQLReviewCommentFamily(t *testing.T) {
+	tests := []struct {
+		name        string
+		query       string
+		variables   any
+		action      string
+		subject     string
+		wantID      string
+		wantCreates bool
+	}{
+		{
+			name:        "reply",
+			query:       `mutation($input:AddPullRequestReviewThreadReplyInput!){addPullRequestReviewThreadReply(input:$input){comment{url}}}`,
+			variables:   input(map[string]any{"pullRequestReviewThreadId": "PRRT_kwThread", "body": "ack"}),
+			action:      domain.ActionCommentPosted,
+			subject:     "PRRT_kwThread",
+			wantCreates: true,
+		},
+		{
+			name:      "edit",
+			query:     `mutation($input:UpdatePullRequestReviewCommentInput!){updatePullRequestReviewComment(input:$input){pullRequestReviewComment{id}}}`,
+			variables: input(map[string]any{"pullRequestReviewCommentId": "PRRC_kwEdit", "body": "revised"}),
+			action:    domain.ActionReviewCommentEdited,
+			subject:   "PRRC_kwEdit",
+		},
+		{
+			name:      "delete",
+			query:     `mutation($input:DeletePullRequestReviewCommentInput!){deletePullRequestReviewComment(input:$input){clientMutationId}}`,
+			variables: input(map[string]any{"id": "PRRC_kwDelete"}),
+			action:    domain.ActionReviewCommentDeleted,
+			subject:   "PRRC_kwDelete",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			facts, ok := ParseGraphQLRequest(envelope(t, tc.query, "", tc.variables))
+			if !ok {
+				t.Fatal("a review-comment mutation read as no write")
+			}
+			shape, classified := classifyGraphQL(facts)
+			if !classified {
+				t.Fatalf("facts %+v did not classify", facts)
+			}
+			if shape.Action != tc.action || shape.Subject != tc.subject || shape.ExternalID != tc.wantID ||
+				shape.CreatesObject != tc.wantCreates {
+				t.Errorf("shape = %+v, want action %q, subject %q, id %q, creates %v",
+					shape, tc.action, tc.subject, tc.wantID, tc.wantCreates)
+			}
+		})
+	}
+
+	// A reply's row takes the id its response named, on the pull request its url
+	// locates.
+	shape, ok := Resolve(Observation{
+		Status:     200,
+		URL:        "https://github.com/acme/widgets/pull/841#discussion_r456",
+		ExternalID: "456",
+		NodeID:     "PRRC_kwReply",
+		GraphQL:    &GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}, Subject: "PRRT_kwThread"},
+	})
+	if !ok || shape.ExternalID != "456" || shape.NodeID != "PRRC_kwReply" || shape.Target() != "acme/widgets#841" {
+		t.Errorf("reply = %+v (ok=%v), want comment 456 (PRRC_kwReply) on acme/widgets#841", shape, ok)
+	}
+
+	// An edit's row carries the same number when its response returned one,
+	// and its node id from the request that named it.
+	edit, ok := Resolve(Observation{
+		Status:     200,
+		URL:        "https://github.com/acme/widgets/pull/841#discussion_r456",
+		ExternalID: "456",
+		NodeID:     "PRRC_kwReply",
+		GraphQL:    &GraphQLFacts{Fields: []string{"updatePullRequestReviewComment"}, Subject: "PRRC_kwReply"},
+	})
+	if !ok || edit.ExternalID != "456" || edit.NodeID != "PRRC_kwReply" {
+		t.Errorf("edit = %+v (ok=%v), want the reply's number and node id", edit, ok)
+	}
+
+	// A delete whose response named nothing has no number to record. Its node
+	// id is never filed as one: external_id holds one kind of id per object.
+	deleted, ok := Resolve(Observation{
+		Status:  200,
+		GraphQL: &GraphQLFacts{Fields: []string{"deletePullRequestReviewComment"}, Subject: "PRRC_kwReply"},
+	})
+	if !ok || deleted.ExternalID != "" || deleted.NodeID != "PRRC_kwReply" {
+		t.Errorf("delete = %+v (ok=%v), want no number and the node id the request named", deleted, ok)
+	}
+
+	// A request that spelled its arguments inline names no subject; the
+	// response's id stands in.
+	inline, ok := Resolve(Observation{
+		Status:  200,
+		NodeID:  "PRRC_kwReply",
+		GraphQL: &GraphQLFacts{Fields: []string{"updatePullRequestReviewComment"}},
+	})
+	if !ok || inline.NodeID != "PRRC_kwReply" {
+		t.Errorf("inline edit = %+v (ok=%v), want the response's node id", inline, ok)
+	}
+}
+
 // TestParseGraphQLRequest_DocumentOddities: comments, block strings, and
 // directives all appear in legitimate documents, and each is a way a naive
 // scan could lose track of where the top level is.
@@ -626,10 +879,11 @@ func TestParseGraphQLRequest_DocumentOddities(t *testing.T) {
 // way the equivalent verb's row does.
 func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 	obs := Observation{
-		Method: "POST",
-		Path:   "/graphql",
-		Status: 200,
-		URL:    "https://github.com/acme/widgets/pull/841#issuecomment-99",
+		Method:     "POST",
+		Path:       "/graphql",
+		Status:     200,
+		URL:        "https://github.com/acme/widgets/pull/841#issuecomment-99",
+		ExternalID: "99",
 		GraphQL: &GraphQLFacts{
 			Fields:  []string{"addComment"},
 			Subject: "PR_kwLocate",
@@ -642,12 +896,16 @@ func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 	if shape.Target() != "acme/widgets#841" {
 		t.Errorf("target = %q, want acme/widgets#841 from the response url", shape.Target())
 	}
-	// The comment's own id is not in gh's selection set, and the number in that
-	// url identifies the pull request the comment hangs off — not the comment.
-	// Empty is the honest answer; the number would be a wrong one.
-	if shape.ExternalID != "" {
+	// The row is keyed on the comment the response named, never on the number
+	// in the url's path, which is the pull request's.
+	if shape.ExternalID != "99" {
+		t.Errorf("external id = %q, want the comment's own id 99", shape.ExternalID)
+	}
+	obs.ExternalID = ""
+	if shape, _ := Resolve(obs); shape.ExternalID != "" {
 		t.Errorf("external id = %q, want empty — that url's number is the PR's, not the comment's", shape.ExternalID)
 	}
+	obs.ExternalID = "99"
 
 	// A created pull request IS the object its url names, so there the number is
 	// the id, matching what the REST create records and what every other surface
@@ -666,6 +924,30 @@ func TestResolveGraphQL_ResponseLocatesTheObject(t *testing.T) {
 	shape, ok = Resolve(obs)
 	if !ok || shape.Target() != "PR_kwLocate" {
 		t.Errorf("shape = %+v (ok=%v), want the node id as the target", shape, ok)
+	}
+}
+
+// TestResolveGraphQL_NodeIDIsNeverTheExternalID holds the rule across the whole
+// table: external_id carries one kind of id per object whichever transport the
+// act came through, so a node id the request named lands in NodeID and never
+// there.
+func TestResolveGraphQL_NodeIDIsNeverTheExternalID(t *testing.T) {
+	const subject = "N_kwSubject"
+	for name := range graphQLMutations {
+		shape, ok := Resolve(Observation{
+			Status:  200,
+			GraphQL: &GraphQLFacts{Fields: []string{name}, Subject: subject},
+		})
+		if !ok {
+			t.Errorf("%s did not resolve", name)
+			continue
+		}
+		if shape.ExternalID == subject {
+			t.Errorf("%s filed the request's node id as its external id", name)
+		}
+		if !shape.CreatesObject && shape.NodeID != subject {
+			t.Errorf("%s node id = %q, want the %q its request named", name, shape.NodeID, subject)
+		}
 	}
 }
 
@@ -710,45 +992,178 @@ func TestObservation_GraphQLErrorsAreNotSuccesses(t *testing.T) {
 	}
 }
 
-// TestReadGraphQLResponse covers both things the response contributes: whether
-// the write failed, and where the created object went.
+// TestReadGraphQLResponse covers what the response contributes: whether the
+// write failed, and where the created object went.
 func TestReadGraphQLResponse(t *testing.T) {
 	t.Run("errors", func(t *testing.T) {
 		body := []byte(`{"data":{"mergePullRequest":null},"errors":[{"message":"Pull request is not mergeable"}]}`)
-		errored, url := ReadGraphQLResponse(body, "mergePullRequest")
-		if !errored {
+		read := ReadGraphQLResponse(body, mutation("mergePullRequest"))
+		if !read.Errored {
 			t.Error("an errors array did not register as a failure")
 		}
-		if url != "" {
-			t.Errorf("url = %q, want none", url)
+		if read.URL != "" {
+			t.Errorf("url = %q, want none", read.URL)
 		}
 	})
 
 	t.Run("created object url", func(t *testing.T) {
 		body := []byte(`{"data":{"addComment":{"commentEdge":{"node":{"url":"https://github.com/acme/widgets/pull/841#issuecomment-7"}}}}}`)
-		errored, url := ReadGraphQLResponse(body, "addComment")
-		if errored {
+		read := ReadGraphQLResponse(body, mutation("addComment"))
+		if read.Errored {
 			t.Error("a clean response registered as a failure")
 		}
-		if url != "https://github.com/acme/widgets/pull/841#issuecomment-7" {
-			t.Errorf("url = %q, want the created comment's link", url)
+		if read.URL != "https://github.com/acme/widgets/pull/841#issuecomment-7" {
+			t.Errorf("url = %q, want the created comment's link", read.URL)
 		}
 	})
 
 	t.Run("scans only the named mutation's payload", func(t *testing.T) {
 		// A url sitting under some other member is not this act's object.
 		body := []byte(`{"data":{"closePullRequest":{"pullRequest":{"id":"PR_x"}},"other":{"url":"https://github.com/a/b/pull/1"}}}`)
-		_, url := ReadGraphQLResponse(body, "closePullRequest")
-		if url != "" {
-			t.Errorf("url = %q, want none — the scan must not wander outside the act's payload", url)
+		if read := ReadGraphQLResponse(body, mutation("closePullRequest")); read.URL != "" {
+			t.Errorf("url = %q, want none — the scan must not wander outside the act's payload", read.URL)
 		}
 	})
 
 	t.Run("unparseable body", func(t *testing.T) {
-		if errored, url := ReadGraphQLResponse([]byte("not json"), "addComment"); errored || url != "" {
-			t.Errorf("errored=%v url=%q, want the zero reading for a body that did not parse", errored, url)
+		if read := ReadGraphQLResponse([]byte("not json"), mutation("addComment")); read != (GraphQLResponse{}) {
+			t.Errorf("read = %+v, want the zero reading for a body that did not parse", read)
 		}
 	})
+}
+
+// TestReadGraphQLResponse_AliasedRequestReadsOnlyErrors: under an aliased name
+// the response holds whatever the alias pointed at, which nothing can tell from
+// a GitHub-assigned value of the right shape. The read keeps the one member no
+// alias can reach — the errors array — and nothing else.
+func TestReadGraphQLResponse_AliasedRequestReadsOnlyErrors(t *testing.T) {
+	// What GitHub returns for `comment{databaseId: body url}` when the reply's
+	// body is a number someone chose.
+	body := []byte(`{"data":{"addPullRequestReviewThreadReply":{"comment":{"databaseId":"123",` +
+		`"url":"https://github.com/acme/widgets/pull/841#discussion_r123"}}},"errors":[{"message":"partial"}]}`)
+	facts := GraphQLFacts{Fields: []string{"addPullRequestReviewThreadReply"}, ResponseAliased: true}
+	read := ReadGraphQLResponse(body, facts)
+	if want := (GraphQLResponse{Errored: true}); read != want {
+		t.Errorf("read = %+v, want %+v — an aliased request's members are not GitHub's", read, want)
+	}
+}
+
+// TestReadGraphQLResponse_CreatedCommentIDs: a comment create's row is keyed on
+// the comment it made, by its number and its node id, read from the comment's
+// own object and from nowhere else in the payload.
+func TestReadGraphQLResponse_CreatedCommentIDs(t *testing.T) {
+	tests := []struct {
+		name       string
+		field      string
+		body       string
+		wantID     string
+		wantNodeID string
+		wantURL    string
+	}{
+		{
+			// gh pr comment's selection, verbatim: only the url, whose anchor is
+			// the comment's own number.
+			name:    "the porcelain's url",
+			field:   "addComment",
+			body:    `{"data":{"addComment":{"commentEdge":{"node":{"url":"https://github.com/acme/widgets/pull/841#issuecomment-7"}}}}}`,
+			wantID:  "7",
+			wantURL: "https://github.com/acme/widgets/pull/841#issuecomment-7",
+		},
+		{
+			// The subject sits beside the edge with an id and url of its own,
+			// both naming the pull request.
+			name:  "a selection that also returns the subject",
+			field: "addComment",
+			body: `{"data":{"addComment":{"subject":{"id":"PR_kwSubject","url":"https://github.com/acme/widgets/pull/841"},` +
+				`"commentEdge":{"node":{"id":"IC_kwNew","databaseId":123,"url":"https://github.com/acme/widgets/pull/841#issuecomment-123"}}}}}`,
+			wantID:     "123",
+			wantNodeID: "IC_kwNew",
+			wantURL:    "https://github.com/acme/widgets/pull/841#issuecomment-123",
+		},
+		{
+			// A review comment's anchor is its discussion link.
+			name:  "a thread reply's url",
+			field: "addPullRequestReviewThreadReply",
+			body: `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_kwReply",` +
+				`"url":"https://github.com/acme/widgets/pull/841#discussion_r456"}}}}`,
+			wantID:     "456",
+			wantNodeID: "PRRC_kwReply",
+			wantURL:    "https://github.com/acme/widgets/pull/841#discussion_r456",
+		},
+		{
+			// The pull request nests inside the comment with ids of its own,
+			// which are not the comment's.
+			name:  "a thread reply that also selects its pull request",
+			field: "addPullRequestReviewThreadReply",
+			body: `{"data":{"addPullRequestReviewThreadReply":{"comment":{"pullRequest":{"id":"PR_kwOther","databaseId":9},` +
+				`"databaseId":456}}}}`,
+			wantID: "456",
+		},
+		{
+			// GitHub types it as a BigInt and encodes it as a string.
+			name:   "fullDatabaseId",
+			field:  "addPullRequestReviewThreadReply",
+			body:   `{"data":{"addPullRequestReviewThreadReply":{"comment":{"fullDatabaseId":"9007199254740993"}}}}`,
+			wantID: "9007199254740993",
+		},
+		{
+			name:  "only the node id",
+			field: "addPullRequestReviewThreadReply",
+			body: `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"PRRC_kwOnly"},` +
+				`"clientMutationId":null}}}`,
+			wantNodeID: "PRRC_kwOnly",
+		},
+		{
+			// Members not in the shape GitHub gives them — what an alias of some
+			// other field under these names produces — are not ids.
+			name:  "members in the wrong shape",
+			field: "addPullRequestReviewThreadReply",
+			body: `{"data":{"addPullRequestReviewThreadReply":{"comment":{"id":"a reply body","databaseId":"456",` +
+				`"fullDatabaseId":457,"url":"not a url"}}}}`,
+		},
+		{
+			name:  "nothing to read",
+			field: "addPullRequestReviewThreadReply",
+			body:  `{"data":{"addPullRequestReviewThreadReply":{"clientMutationId":null}}}`,
+		},
+		{
+			// An edit names its comment by node id; the number the response
+			// returns is what lines its row up with the comment's other rows.
+			name:       "an edit",
+			field:      "updatePullRequestReviewComment",
+			body:       `{"data":{"updatePullRequestReviewComment":{"pullRequestReviewComment":{"id":"PRRC_kwEdited","databaseId":5,"url":"https://github.com/acme/widgets/pull/841#discussion_r5"}}}}`,
+			wantID:     "5",
+			wantNodeID: "PRRC_kwEdited",
+			wantURL:    "https://github.com/acme/widgets/pull/841#discussion_r5",
+		},
+		{
+			name:    "an issue comment edit",
+			field:   "updateIssueComment",
+			body:    `{"data":{"updateIssueComment":{"issueComment":{"url":"https://github.com/acme/widgets/pull/841#issuecomment-6"}}}}`,
+			wantID:  "6",
+			wantURL: "https://github.com/acme/widgets/pull/841#issuecomment-6",
+		},
+		{
+			// Its payload holds no comment, so there is nothing to read.
+			name:  "an issue comment delete",
+			field: "deleteIssueComment",
+			body:  `{"data":{"deleteIssueComment":{"clientMutationId":null}}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			read := ReadGraphQLResponse([]byte(tc.body), mutation(tc.field))
+			if read.ExternalID != tc.wantID {
+				t.Errorf("external id = %q, want %q", read.ExternalID, tc.wantID)
+			}
+			if read.NodeID != tc.wantNodeID {
+				t.Errorf("node id = %q, want %q", read.NodeID, tc.wantNodeID)
+			}
+			if read.URL != tc.wantURL {
+				t.Errorf("url = %q, want %q", read.URL, tc.wantURL)
+			}
+		})
+	}
 }
 
 // TestGraphQLTable_ActionsAreKnownVocabulary keeps the table from inventing a
@@ -760,6 +1175,8 @@ func TestGraphQLTable_ActionsAreKnownVocabulary(t *testing.T) {
 		domain.ActionCommentPosted:        true,
 		domain.ActionCommentEdited:        true,
 		domain.ActionCommentDeleted:       true,
+		domain.ActionReviewCommentEdited:  true,
+		domain.ActionReviewCommentDeleted: true,
 		domain.ActionPRCreated:            true,
 		domain.ActionPREdited:             true,
 		domain.ActionPRClosed:             true,
@@ -824,7 +1241,8 @@ func FuzzParseGraphQLRequest(f *testing.F) {
 		facts, ok := ParseGraphQLRequest(body)
 		if !ok {
 			// "No write here" must be unambiguous: nothing may ride along with it.
-			if facts.Mutation() != "" || facts.Unreadable != "" || facts.Subject != "" {
+			if facts.Mutation() != "" || facts.Unreadable != "" || facts.Subject != "" || facts.NamesReview ||
+				facts.ResponseAliased {
 				t.Fatalf("ok=false carried facts %+v; a read must resolve to nothing at all", facts)
 			}
 			return
@@ -937,8 +1355,8 @@ func TestResolveGraphQL_RepoCreateIsLocatedByItsOwnURL(t *testing.T) {
 		Status:  200,
 		GraphQL: &GraphQLFacts{Fields: []string{"archiveRepository"}, Subject: "R_kwWidgets"},
 	})
-	if !ok || archived.Target() != "R_kwWidgets" || archived.ExternalID != "R_kwWidgets" {
-		t.Errorf("archive = %+v (ok=%v), want the node id as target and id", archived, ok)
+	if !ok || archived.Target() != "R_kwWidgets" || archived.NodeID != "R_kwWidgets" || archived.ExternalID != "" {
+		t.Errorf("archive = %+v (ok=%v), want the node id as target and node id, and no external id", archived, ok)
 	}
 
 	// A create whose response could not be read keeps no target rather than
