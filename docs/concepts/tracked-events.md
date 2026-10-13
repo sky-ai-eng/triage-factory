@@ -184,7 +184,10 @@ and `project` (Jira) or `linear_team_key` (Linear).
   The group is read from the team's label list, once per cycle and only when one
   of the team's issues has a label change, because selecting it on every issue
   would add to the batch read's complexity. When that read fails, the snapshot
-  keeps its previous labels and the next cycle reports the change.
+  keeps its previous labels and the next cycle reports the change. Each read is
+  a `tracker.linear.label_groups` span, with outcome `failed` or `rate_limited`
+  when it did not succeed, so a read that fails every cycle (one the credential
+  is not allowed to make, say) shows up there rather than only in a warning.
 
 The labels an issue already has when TF first sees it are its baseline, like
 every other field, and emit nothing. `assigned`, `available` and

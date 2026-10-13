@@ -123,12 +123,14 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	added, removed := linearLabelChanges(prev, curr)
 	for _, l := range added {
 		emit(domain.EventLinearIssueLabelAdded, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
-			LinearIssueIdentity: id, LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
+			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+			LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
 		})
 	}
 	for _, l := range removed {
 		emit(domain.EventLinearIssueLabelRemoved, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
-			LinearIssueIdentity: id, LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
+			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+			LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
 		})
 	}
 

@@ -656,8 +656,6 @@ func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSna
 		return nil, err
 	}
 	if err != nil {
-		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear label list read failed; the issue's label changes are diffed again next cycle",
-			"source_id", snap.Identifier, "linear_team_id", snap.TeamID, "error", err)
 		snap.Labels, snap.LabelRefs = prev.Labels, prev.LabelRefs
 		return nil, nil
 	}
@@ -667,16 +665,30 @@ func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSna
 // forTeam reads a team's label groups, or returns the read this cycle already
 // made. A failed read is kept too, so the team's other issues do not each ask
 // again; a rate limit is not, since it ends the cycle.
+//
+// Each read is a span whose outcome is failed or rate_limited when it did not
+// succeed. A read that fails every cycle, such as one the credential is not
+// allowed to make, holds back every label event on the team indefinitely, and
+// the span is where that shows.
 func (g *linearLabelGroups) forTeam(ctx context.Context, teamID string) (map[string]string, error) {
 	if r, ok := g.read[teamID]; ok {
 		return r.groups, r.err
 	}
+	ctx, span := tracer.Start(ctx, "tracker.linear.label_groups")
+	defer span.End()
 	labels, err := g.client.ListLabels(ctx, teamID)
 	if errors.Is(err, linear.ErrRateLimited) {
+		span.SetAttributes(telemetry.Outcome("rate_limited"))
 		return nil, err
 	}
 	r := linearTeamLabelGroups{err: err}
-	if err == nil {
+	if err != nil {
+		span.SetStatus(codes.Error, "label list read")
+		span.SetAttributes(telemetry.Outcome("failed"))
+		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear label list read failed; label changes on the team's issues are reported on a later cycle",
+			"linear_team_id", teamID, "error", err)
+	} else {
+		span.SetAttributes(telemetry.Count(len(labels)))
 		r.groups = make(map[string]string, len(labels))
 		for _, l := range labels {
 			if l.Group != "" {

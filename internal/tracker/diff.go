@@ -532,8 +532,10 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 func jiraLabelMetadata(curr domain.JiraSnapshot, label string) events.JiraIssueLabelMetadata {
 	return events.JiraIssueLabelMetadata{
 		Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+		Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 		IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
-		IssueType: curr.IssueType, Summary: curr.Summary,
+		IssueType: curr.IssueType, Priority: curr.Priority,
+		Status: curr.Status, Summary: curr.Summary,
 		LabelName: label, Labels: curr.Labels,
 	}
 }

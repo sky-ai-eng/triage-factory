@@ -280,10 +280,14 @@ func (p JiraIssueBecameAtomicPredicate) Matches(m JiraIssueBecameAtomicMetadata)
 type JiraIssueLabelMetadata struct {
 	Assignee          string   `json:"assignee"`
 	AssigneeAccountID string   `json:"assignee_account_id"`
+	Reporter          string   `json:"reporter"`
+	ReporterAccountID string   `json:"reporter_account_id"`
 	IssueKey          string   `json:"issue_key"`
 	IssueID           string   `json:"issue_id"`
 	Project           string   `json:"project"`
 	IssueType         string   `json:"issue_type"`
+	Priority          string   `json:"priority"`
+	Status            string   `json:"status"`
 	Summary           string   `json:"summary"`
 	LabelName         string   `json:"label_name"` // also the event's dedup_key
 	Labels            []string `json:"labels"`     // the issue's labels after the change

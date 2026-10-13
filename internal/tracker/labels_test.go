@@ -7,8 +7,13 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -41,6 +46,7 @@ func jiraLabelSnap(labels ...string) domain.JiraSnapshot {
 	return domain.JiraSnapshot{
 		ID: "10001", Key: "SKY-1", Summary: "Fix the thing", Status: "To Do",
 		Assignee: testUser, AssigneeAccountID: testUserAccountID,
+		Reporter: "Grace", ReporterAccountID: "557058:grace",
 		IssueType: "Task", Priority: "High", Labels: labels,
 		UpdatedAt: "2026-10-01T10:00:00.000+0000",
 	}
@@ -88,7 +94,9 @@ func TestDiffJira_LabelMetadataAndPredicates(t *testing.T) {
 	meta := decodeMetadata[events.JiraIssueLabelMetadata](t, *evt)
 	want := events.JiraIssueLabelMetadata{
 		Assignee: testUser, AssigneeAccountID: testUserAccountID,
-		IssueKey: "SKY-1", IssueID: "10001", Project: "SKY", IssueType: "Task", Summary: "Fix the thing",
+		Reporter: "Grace", ReporterAccountID: "557058:grace",
+		IssueKey: "SKY-1", IssueID: "10001", Project: "SKY", IssueType: "Task",
+		Priority: "High", Status: "To Do", Summary: "Fix the thing",
 		LabelName: "tf-agent", Labels: []string{"backend", "tf-agent"},
 	}
 	if !reflect.DeepEqual(meta, want) {
@@ -266,7 +274,8 @@ func TestDiffLinear_GroupSwitchCarriesTheGroup(t *testing.T) {
 	gotAdded := decodeMetadata[events.LinearIssueLabelMetadata](t, *addedEvt)
 	wantAdded := events.LinearIssueLabelMetadata{
 		LinearIssueIdentity: linearIdentity(curr),
-		LabelName:           "Hard", LabelGroup: "Difficulty", Labels: []string{"Bug", "Hard"},
+		Priority:            "Medium", Status: "Todo",
+		LabelName: "Hard", LabelGroup: "Difficulty", Labels: []string{"Bug", "Hard"},
 	}
 	if !reflect.DeepEqual(gotAdded, wantAdded) {
 		t.Errorf("label_added metadata = %+v, want %+v", gotAdded, wantAdded)
@@ -339,6 +348,44 @@ func TestDiffLinear_LabelledAtDiscoveryMatchesHasLabel(t *testing.T) {
 }
 
 // --- Linear refresh -----------------------------------------------------------
+
+// traceRecorder is installed on the OTel global once for the package: the
+// package's tracer resolves through the global delegate, which binds to the
+// first provider installed, so a recorder installed per test would capture
+// nothing after the first.
+var (
+	traceOnce     sync.Once
+	traceRecorder = tracetest.NewSpanRecorder()
+)
+
+// recordSpans returns a function reporting the spans ended since it was
+// called.
+func recordSpans(t *testing.T) func() []sdktrace.ReadOnlySpan {
+	t.Helper()
+	traceOnce.Do(func() {
+		otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(traceRecorder)))
+	})
+	start := len(traceRecorder.Ended())
+	return func() []sdktrace.ReadOnlySpan { return traceRecorder.Ended()[start:] }
+}
+
+// spanOutcomes is the outcome attribute of each span named name, in order.
+func spanOutcomes(spans []sdktrace.ReadOnlySpan, name string) []string {
+	var out []string
+	for _, s := range spans {
+		if s.Name() != name {
+			continue
+		}
+		outcome := ""
+		for _, a := range s.Attributes() {
+			if a.Key == "outcome" {
+				outcome = a.Value.AsString()
+			}
+		}
+		out = append(out, outcome)
+	}
+	return out
+}
 
 func linIssueLabels(labels ...domain.LinearLabelRef) []linear.Label {
 	out := make([]linear.Label, 0, len(labels))
@@ -487,27 +534,39 @@ func TestRefreshLinear_PreIDSnapshot(t *testing.T) {
 func TestRefreshLinear_LabelListReadFails(t *testing.T) {
 	fx := newLinearFixture(t)
 	fx.client.labels[linTeamID] = teamLabels()
-	is := linIssue(1)
-	fx.seed(t, is)
+	is, other := linIssue(1), linIssue(2)
+	fx.seed(t, is, other)
 
 	is.Labels = linIssueLabels(labelHard)
 	is.Priority, is.PriorityLabel = 1, "Urgent"
+	other.Labels = linIssueLabels(labelAgent)
 	fx.client.put(is)
+	fx.client.put(other)
 	fx.client.fail = func(call string, _ int) error {
 		if strings.HasPrefix(call, "labels:") {
 			return errors.New("linear: 502")
 		}
 		return nil
 	}
+	spans := recordSpans(t)
 	evts, err := fx.cycle(t, linRules())
 	if err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
+	}
+	if got := spanOutcomes(spans(), "tracker.linear.label_groups"); !slices.Equal(got, []string{"failed"}) {
+		t.Errorf("label list read span outcomes = %v, want one failed read", got)
 	}
 	if got := eventTypes(evts); !slices.Equal(got, []string{domain.EventLinearIssuePriorityChanged}) {
 		t.Fatalf("events = %v, want priority_changed alone", got)
 	}
 	if snap := fx.snapshot(t, "ENG-1"); len(snap.Labels) != 0 || len(snap.LabelRefs) != 0 || snap.PriorityLabel != "Urgent" {
 		t.Errorf("snapshot = %+v, want the old labels kept and the rest moved on", snap)
+	}
+	if snap := fx.snapshot(t, "ENG-2"); len(snap.Labels) != 0 {
+		t.Errorf("ENG-2 labels = %v, want them kept: the team's failed read is reused, not retried", snap.Labels)
+	}
+	if n := labelListReads(fx.client); n != 1 {
+		t.Errorf("label list read %d times, want one failed read for the team", n)
 	}
 	if !fx.pollCompleted() {
 		t.Error("a failed label list read ended the cycle")
@@ -518,11 +577,17 @@ func TestRefreshLinear_LabelListReadFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RefreshLinear: %v", err)
 	}
-	if got := labelEvents(evts); !slices.Equal(got, []labelEvent{{domain.EventLinearIssueLabelAdded, labelHard.ID}}) {
-		t.Fatalf("label events = %v, want the deferred label_added", got)
+	cmp := func(a, b labelEvent) int { return strings.Compare(a.dedupKey, b.dedupKey) }
+	got := labelEvents(evts)
+	slices.SortFunc(got, cmp)
+	want := []labelEvent{{domain.EventLinearIssueLabelAdded, labelAgent.ID}, {domain.EventLinearIssueLabelAdded, labelHard.ID}}
+	if !slices.Equal(got, want) {
+		t.Fatalf("label events = %v, want both deferred label_added events", got)
 	}
-	if m := decodeMetadata[events.LinearIssueLabelMetadata](t, *findEvent(evts, domain.EventLinearIssueLabelAdded)); m.LabelGroup != "Difficulty" {
-		t.Errorf("deferred label_added group = %q, want Difficulty", m.LabelGroup)
+	for _, e := range evts {
+		if m := decodeMetadata[events.LinearIssueLabelMetadata](t, e); m.LabelGroup != difficulty[e.DedupKey] {
+			t.Errorf("deferred %s group = %q, want %q", m.LabelName, m.LabelGroup, difficulty[e.DedupKey])
+		}
 	}
 }
 
@@ -541,9 +606,13 @@ func TestRefreshLinear_LabelListRateLimited(t *testing.T) {
 		}
 		return nil
 	}
+	spans := recordSpans(t)
 	evts, err := fx.cycle(t, linRules())
 	if !errors.Is(err, linear.ErrRateLimited) {
 		t.Fatalf("err = %v, want the rate limit", err)
+	}
+	if got := spanOutcomes(spans(), "tracker.linear.label_groups"); !slices.Equal(got, []string{"rate_limited"}) {
+		t.Errorf("label list read span outcomes = %v, want one rate-limited read", got)
 	}
 	if len(evts) != 0 || fx.pollCompleted() {
 		t.Errorf("events = %v, poll completed = %v; want nothing", eventTypes(evts), fx.pollCompleted())

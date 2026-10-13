@@ -263,6 +263,8 @@ func (p LinearIssueParentChangedPredicate) Matches(m LinearIssueParentChangedMet
 
 type LinearIssueLabelMetadata struct {
 	LinearIssueIdentity
+	Priority   string   `json:"priority"` // priority label
+	Status     string   `json:"status"`   // state name
 	LabelName  string   `json:"label_name"`
 	LabelGroup string   `json:"label_group"` // "" for a label in no group
 	Labels     []string `json:"labels"`      // the issue's label names after the change
