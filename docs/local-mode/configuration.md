@@ -159,8 +159,11 @@ by default. Inside it a run sees its own worktree, its own gh config, TF's git
 hooks and toolchain, and any directory you explicitly granted the run — and
 nothing else. Your home directory, the TF database and clone cache, every
 concurrent run's worktree, and `/run` (where the OS keychain's session sockets
-live) are all replaced by empty directories. The run also sees only its own
-processes, not TF or anything else running as you.
+live) are replaced by empty directories, and only what the run needs is bound
+back through them: its exec-verb socket at `/run/tf.sock`, the resolver files
+DNS needs on hosts where `/etc/resolv.conf` points into `/run` (systemd-resolved),
+and `~/.claude`. The run also sees only its own processes, not TF or anything
+else running as you.
 
 This is **courtesy isolation, not a security boundary**. The agent runs as you,
 shares your network, and could break out on purpose the way any process running

@@ -210,20 +210,45 @@ func TestSandbox_IsolationProperties(t *testing.T) {
 	// in, not merely from its mount view. A path-based mask hides a name in
 	// THIS namespace's filesystem, but /proc/<pid>/root of a process outside
 	// it resolves in that process's own mount namespace, so every same-uid
-	// host process would be a way around the masks above. The test process is
-	// the host process: it is what spawned bwrap, and it is as same-uid and
-	// as visible as any other.
+	// host process would be a way around the masks above.
+	//
+	// The host process is identified by its command line, never its pid:
+	// pid numbers are local to a namespace, so the same number can name an
+	// unrelated process inside. The same scan finds a sleep started from
+	// inside, which proves it can see processes at all and keeps a broken
+	// scan from passing as an invisible host.
 	t.Run("host processes are not visible", func(t *testing.T) {
-		out, err := run("ls /proc")
+		hostToken := fmt.Sprintf("%d.%d", 710000+os.Getpid(), time.Now().UnixNano()%1000)
+		innerToken := hostToken + "9"
+		hostSleep := exec.Command("sleep", hostToken)
+		if err := hostSleep.Start(); err != nil {
+			t.Fatalf("start host sleep: %v", err)
+		}
+		t.Cleanup(func() { _ = hostSleep.Process.Kill(); _ = hostSleep.Wait() })
+		if !waitFor(func() bool { return countMatching(hostToken) > 0 }) {
+			t.Fatal("the host sleep never started")
+		}
+
+		out, err := run(`sleep ` + innerToken + ` &
+inner=$!
+for p in /proc/[0-9]*; do
+	case "$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)" in
+	"sleep ` + hostToken + ` ") echo host ;;
+	"sleep ` + innerToken + ` ") echo inner ;;
+	esac
+done
+kill $inner`)
 		if err != nil {
-			t.Fatalf("ls /proc: %v (%s)", err, out)
+			t.Fatalf("scan /proc: %v (%s)", err, out)
 		}
-		hostPID := strconv.Itoa(os.Getpid())
-		for _, entry := range strings.Fields(out) {
-			if entry == hostPID {
-				t.Fatalf("host pid %s is listed in /proc inside the namespace; the agent shares the host's pid namespace", hostPID)
-			}
+		found := strings.Fields(out)
+		if !slices.Contains(found, "inner") {
+			t.Fatalf("the scan did not find a process started inside the namespace, so it proves nothing: %q", out)
 		}
+		if slices.Contains(found, "host") {
+			t.Errorf("a host process is visible in /proc inside the namespace; the agent shares the host's pid namespace")
+		}
+
 		// /proc/1 is the namespace's own init, not the host's: it has to
 		// exist and has to be a bwrap process.
 		comm, err := run("cat /proc/1/comm")
