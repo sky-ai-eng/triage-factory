@@ -266,6 +266,11 @@ func (t *Tracker) linearNewComments(ctx context.Context, client LinearClient, sc
 	if snap.LastCommentID == "" || snap.LastCommentID == prev.LastCommentID || linearCommentOlder(snap.LastCommentAt, prev.LastCommentAt) {
 		return nil, nil
 	}
+	// The filter is strictly after prev's newest, so a comment sharing its
+	// millisecond is missed unless it is snap's newest, which is added back
+	// below. It would have to be committed after the last poll read prev's
+	// newest yet stamped the same millisecond. An inclusive filter would
+	// instead report again any comment that already shared that millisecond.
 	read, err := client.ListCommentsSince(ctx, snap.ID, prev.LastCommentAt)
 	if errors.Is(err, linear.ErrRateLimited) {
 		return nil, err
@@ -286,7 +291,7 @@ func (t *Tracker) linearNewComments(ctx context.Context, client LinearClient, sc
 		}
 		fresh = append(fresh, linearComment(c))
 	}
-	slices.SortStableFunc(fresh, func(a, b NewComment) int { return strings.Compare(a.CreatedAt, b.CreatedAt) })
+	slices.SortStableFunc(fresh, func(a, b NewComment) int { return compareCommentTimes(a.CreatedAt, b.CreatedAt) })
 	if err := t.markTFComments(ctx, domain.ArtifactProviderLinear, scope, snap.ID, fresh); err != nil {
 		trackerLog.WarnContext(ctx, "reading which linear comments TF posted failed; the issue's new comments are read again next cycle",
 			"source_id", snap.Identifier, "error", err)
@@ -294,6 +299,18 @@ func (t *Tracker) linearNewComments(ctx context.Context, client LinearClient, sc
 		return nil, nil
 	}
 	return fresh, nil
+}
+
+// compareCommentTimes orders two comment times by the moment they name, so a
+// time written in another offset or precision still sorts where it belongs. A
+// time that does not parse is compared as text.
+func compareCommentTimes(a, b string) int {
+	ta, okA := domain.ParseExternalTime(a)
+	tb, okB := domain.ParseExternalTime(b)
+	if okA && okB {
+		return ta.Compare(tb)
+	}
+	return strings.Compare(a, b)
 }
 
 // keepLinearComments puts prev's newest comment back on snap.

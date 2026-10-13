@@ -520,6 +520,21 @@ func TestListCommentsSince_FiltersOnCreatedAndWalksEveryPage(t *testing.T) {
 	}
 }
 
+func TestListCommentsSince_OrdersByTheMomentNotTheText(t *testing.T) {
+	// 10:00+01:00 is 09:00Z, before c2, though its text sorts after.
+	s := newStub(t, scripted(reply{body: `{"data":{"issue":{"comments":{"nodes":[
+		{"id":"c2","createdAt":"2026-09-19T09:30:00.000Z"},
+		{"id":"c1","createdAt":"2026-09-19T10:00:00.000+01:00"}
+	],"pageInfo":{"hasNextPage":false}}}}}`}))
+	got, err := s.client().ListCommentsSince(context.Background(), "uuid-1", "")
+	if err != nil {
+		t.Fatalf("ListCommentsSince: %v", err)
+	}
+	if len(got) != 2 || got[0].ID != "c1" || got[1].ID != "c2" {
+		t.Errorf("comments = %+v, want c1 then c2", got)
+	}
+}
+
 func TestListCommentsSince_NoMarkerReadsEveryComment(t *testing.T) {
 	s := newStub(t, scripted(reply{body: `{"data":{"issue":{"comments":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}`}))
 	if _, err := s.client().ListCommentsSince(context.Background(), "uuid-1", ""); err != nil {

@@ -696,6 +696,28 @@ func TestRefreshLinear_Commented(t *testing.T) {
 		}
 	})
 
+	t.Run("comment times in different offsets", func(t *testing.T) {
+		// 10:00+01:00 is 09:00Z: Bob's comment is the older one, though its
+		// text sorts after Ada's.
+		fx := newLinearFixture(t)
+		fx.seed(t, linIssue(1))
+		is := fx.client.byID[linIssue(1).ID]
+		bob := linear.Comment{ID: "c-1", CreatedAt: "2026-10-01T10:00:00.000+01:00", User: &linear.User{ID: "u-bob", Name: "Bob"}}
+		ada := linear.Comment{ID: "c-2", CreatedAt: "2026-10-01T09:30:00.000Z", User: &linear.User{ID: "u-ada", Name: "Ada"}}
+		fx.client.comments[is.ID] = []linear.Comment{ada, bob}
+		is.LastComment = &ada
+		fx.client.put(is)
+
+		evts, err := fx.cycle(t, linRules())
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := commentedSources()[1].meta(t, onlyCommented(t, evts, domain.EventLinearIssueCommented))
+		if want := (commentedMeta{CommentID: "c-2", Commenter: "Ada", AuthorID: "u-ada", AuthorIDs: []string{"u-bob", "u-ada"}}); !commentedMetaEqual(got, want) {
+			t.Errorf("metadata = %+v, want %+v (ordered by the moment, not the text)", got, want)
+		}
+	})
+
 	t.Run("the newest comment deleted", func(t *testing.T) {
 		fx := newLinearFixture(t)
 		is := linIssue(1)

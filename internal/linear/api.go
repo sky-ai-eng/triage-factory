@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 const (
@@ -388,8 +389,20 @@ func (c *Client) ListCommentsSince(ctx context.Context, issueID, since string) (
 	if err != nil {
 		return nil, fmt.Errorf("linear: comments of issue %s: %w", issueID, err)
 	}
-	sort.SliceStable(comments, func(i, j int) bool { return comments[i].CreatedAt < comments[j].CreatedAt })
+	sort.SliceStable(comments, func(i, j int) bool { return createdBefore(comments[i].CreatedAt, comments[j].CreatedAt) })
 	return comments, nil
+}
+
+// createdBefore reports whether creation time a is before b, comparing the
+// moments they name rather than their text. A time that does not parse is
+// compared as text.
+func createdBefore(a, b string) bool {
+	ta, errA := time.Parse(time.RFC3339Nano, a)
+	tb, errB := time.Parse(time.RFC3339Nano, b)
+	if errA == nil && errB == nil {
+		return ta.Before(tb)
+	}
+	return a < b
 }
 
 // AssignIssue assigns an issue to a user. UnassignIssue clears it.
