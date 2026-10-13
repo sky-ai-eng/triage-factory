@@ -67,7 +67,7 @@ func commentedSources() []commentedSource {
 			name:      "linear",
 			eventType: domain.EventLinearIssueCommented,
 			diff: func(comments []NewComment) []domain.Event {
-				return DiffLinearSnapshots(linSnap(), linSnap(), testEntityID, linDoneSet, comments)
+				return DiffLinearSnapshots(linSnap(), linSnap(), testEntityID, linDoneSet, comments, nil)
 			},
 			meta: func(t *testing.T, evt domain.Event) commentedMeta {
 				var m struct {
@@ -163,7 +163,7 @@ func commentedMetaEqual(a, b commentedMeta) bool {
 func TestDiffLinearCommented_IntegrationComment(t *testing.T) {
 	evts := DiffLinearSnapshots(linSnap(), linSnap(), testEntityID, linDoneSet, []NewComment{
 		linearComment(linear.Comment{ID: "c-1", CreatedAt: "2026-10-01T09:00:00.000Z", BotActor: &linear.BotActor{Name: "GitHub"}}),
-	})
+	}, nil)
 	evt := findEvent(evts, domain.EventLinearIssueCommented)
 	if evt == nil {
 		t.Fatalf("no commented event in %v", eventTypes(evts))

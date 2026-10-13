@@ -23,15 +23,17 @@ import (
 // fakeLinear is an in-memory LinearClient. Issues live in byID; a search
 // returns whatever the test put under the query's kind and team; GetIssues
 // and GetIssue answer from byID, by UUID. comments holds each issue's comments
-// for ListCommentsSince. fail lets a test make a call return an error;
-// notFound makes both reads answer not-found for an id, and batchOmits makes
-// only the batch read leave it out.
+// for ListCommentsSince, and labels each team's label list for ListLabels.
+// fail lets a test make a call return an error; notFound makes both reads
+// answer not-found for an id, and batchOmits makes only the batch read leave
+// it out.
 type fakeLinear struct {
 	mu         sync.Mutex
 	viewer     linear.User
 	search     map[string][]linear.Issue // "pickup:<team>" / "assigned:<team>"
 	byID       map[string]linear.Issue
 	comments   map[string][]linear.Comment
+	labels     map[string][]linear.Label // a team's label list, by team id
 	calls      []string
 	filters    []linear.IssueFilter
 	batches    [][]string
@@ -46,6 +48,7 @@ func newFakeLinear() *fakeLinear {
 		search:   map[string][]linear.Issue{},
 		byID:     map[string]linear.Issue{},
 		comments: map[string][]linear.Comment{},
+		labels:   map[string][]linear.Label{},
 	}
 }
 
@@ -130,6 +133,15 @@ func (f *fakeLinear) ListCommentsSince(_ context.Context, issueID, since string)
 	return out, nil
 }
 
+func (f *fakeLinear) ListLabels(_ context.Context, teamID string) ([]linear.Label, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.record("labels:" + teamID); err != nil {
+		return nil, err
+	}
+	return slices.Clone(f.labels[teamID]), nil
+}
+
 func (f *fakeLinear) callLog() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -165,7 +177,7 @@ func linIssue(n int) linear.Issue {
 		PriorityLabel: "Medium",
 		State:         linState(linTodo),
 		Team:          linear.Team{ID: linTeamID, Key: "ENG"},
-		Labels:        []string{},
+		Labels:        []linear.Label{},
 		UpdatedAt:     linUpdatedAt,
 	}
 }

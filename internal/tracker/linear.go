@@ -92,6 +92,7 @@ type LinearClient interface {
 	GetIssues(ctx context.Context, ids []string) ([]linear.Issue, error)
 	GetIssue(ctx context.Context, idOrIdentifier string) (*linear.Issue, error)
 	ListCommentsSince(ctx context.Context, issueID, since string) ([]linear.Comment, error)
+	ListLabels(ctx context.Context, teamID string) ([]linear.Label, error)
 }
 
 // linearIssueState is an issue's diff-scope snapshot plus its description,
@@ -191,7 +192,8 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 		prevs[e.ID] = &prev
 	}
 
-	refreshed, missing, err := t.refreshLinearBatches(ctx, client, orgID, scope, entities, prevs, teams, allDone)
+	labelGroups := newLinearLabelGroups(client)
+	refreshed, missing, err := t.refreshLinearBatches(ctx, client, orgID, scope, entities, prevs, teams, allDone, labelGroups)
 	emitted += refreshed
 	if err != nil {
 		return emitted, err
@@ -199,7 +201,7 @@ func (t *Tracker) RefreshLinear(ctx context.Context, scope string, client Linear
 
 	// The candidates arrive in the order the entities were listed, which is
 	// oldest-polled first.
-	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, missing, prevs, teams, allDone)
+	confirmed, err := t.confirmLinearIndividually(ctx, client, orgID, scope, missing, prevs, teams, allDone, labelGroups)
 	emitted += confirmed
 	if err != nil {
 		return emitted, err
@@ -297,7 +299,7 @@ func (t *Tracker) seedDiscoveredLinear(ctx context.Context, scope string, state 
 			// arriving through the assigned-to-viewer query is itself the
 			// assignment. The event commits with the first snapshot; seeding
 			// first would retire it unseen.
-			evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID), nil)
+			evts := DiffLinearSnapshots(domain.LinearSnapshot{}, snap, entity.ID, teams.doneForTeam(snap.TeamID), nil, nil)
 			if ok, enqueued, err := t.emitWithSnapshotCAS(ctx, orgID, entity.ID, string(snapJSON), entity.PollSeq, evts); err != nil {
 				trackerLog.Error("seed assigned linear snapshot+event failed", "source_id", snap.Identifier, "error", err)
 			} else if !ok {
@@ -412,7 +414,7 @@ func (t *Tracker) renameLinearEntity(ctx context.Context, scope string, e domain
 // entities Linear did not return, which the caller asks about one at a time. A
 // failed batch ends the refresh: a rate limit is returned as itself, so the
 // caller sees linear.ErrRateLimited.
-func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient, orgID, scope string, entities []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (emitted int, missing []domain.Entity, err error) {
+func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient, orgID, scope string, entities []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef, labelGroups *linearLabelGroups) (emitted int, missing []domain.Entity, err error) {
 	ctx, span := tracer.Start(ctx, "tracker.linear.batch_fetch",
 		trace.WithAttributes(telemetry.Count(len(entities))))
 	defer span.End()
@@ -442,7 +444,7 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 				missing = append(missing, e)
 				continue
 			}
-			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], issue, teams, allDone)
+			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], issue, teams, allDone, labelGroups)
 			emitted += n
 			if err != nil {
 				span.SetAttributes(telemetry.Outcome("rate_limited"))
@@ -462,7 +464,7 @@ func (t *Tracker) refreshLinearBatches(ctx context.Context, client LinearClient,
 // an issue that does come back is applied like any refreshed one. Any other
 // failure is no evidence either way, and the entity is asked about again on a
 // later cycle, behind the candidates not yet asked.
-func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearClient, orgID, scope string, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
+func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearClient, orgID, scope string, candidates []domain.Entity, prevs map[string]*domain.LinearSnapshot, teams LinearRules, allDone []domain.LinearStateRef, labelGroups *linearLabelGroups) (int, error) {
 	if len(candidates) == 0 {
 		return 0, nil
 	}
@@ -494,7 +496,7 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 		}
 		switch {
 		case err == nil:
-			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], *issue, teams, allDone)
+			n, err := t.applyLinearIssue(ctx, client, orgID, scope, e, prevs[e.ID], *issue, teams, allDone, labelGroups)
 			emitted += n
 			if err != nil {
 				span.SetAttributes(telemetry.Outcome("rate_limited"))
@@ -532,9 +534,9 @@ func (t *Tracker) confirmLinearIndividually(ctx context.Context, client LinearCl
 // entity with no snapshot (one a source pause cleared) is renamed without one,
 // as it is seeded without every other event.
 //
-// The only error is a rate limit on the read of the issue's new comments,
-// which ends the cycle; the entity is then left as it was.
-func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef) (int, error) {
+// The only error is a rate limit on the read of the issue's new comments or of
+// its team's labels, which ends the cycle; the entity is then left as it was.
+func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, orgID, scope string, e domain.Entity, prev *domain.LinearSnapshot, issue linear.Issue, teams LinearRules, allDone []domain.LinearStateRef, labelGroups *linearLabelGroups) (int, error) {
 	state := linearIssueToState(issue, allDone)
 	snap := state.Snap
 	renamed := false
@@ -597,7 +599,11 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, org
 	if err != nil {
 		return 0, err
 	}
-	evts := DiffLinearSnapshots(*prev, snap, e.ID, done, comments)
+	groups, err := labelGroups.forChange(ctx, *prev, &snap)
+	if err != nil {
+		return 0, err
+	}
+	evts := DiffLinearSnapshots(*prev, snap, e.ID, done, comments, groups)
 	if owed, ok := t.closeOwed(ctx, orgID, e.ID, terminal(*prev), terminal(snap)); ok {
 		evts = append(evts, owed)
 	}
@@ -614,6 +620,72 @@ func (t *Tracker) applyLinearIssue(ctx context.Context, client LinearClient, org
 	}
 	t.mirrorLinearText(orgID, e, state)
 	return enqueued, nil
+}
+
+// linearLabelGroups reads the label groups of a cycle's Linear teams, each
+// team's at most once per cycle and only when an issue in it has a label
+// change to report: an issue's own labels carry no group, because selecting
+// the parent on every issue would add to the batch read's complexity.
+type linearLabelGroups struct {
+	client LinearClient
+	read   map[string]linearTeamLabelGroups // by Linear team id
+}
+
+// linearTeamLabelGroups is one team's read: each label's group by label id,
+// holding only labels that sit in one, or the error the read failed with.
+type linearTeamLabelGroups struct {
+	groups map[string]string
+	err    error
+}
+
+func newLinearLabelGroups(client LinearClient) *linearLabelGroups {
+	return &linearLabelGroups{client: client, read: map[string]linearTeamLabelGroups{}}
+}
+
+// forChange returns the label groups of snap's team when snap's labels differ
+// from prev's, and nil when they do not. A rate limit is returned and ends the
+// cycle. Any other failure puts prev's labels back on snap, so the change is
+// diffed, with its groups, on a later cycle rather than reported now without
+// them, where a label_group predicate would silently miss it.
+func (g *linearLabelGroups) forChange(ctx context.Context, prev domain.LinearSnapshot, snap *domain.LinearSnapshot) (map[string]string, error) {
+	if added, removed := linearLabelChanges(prev, *snap); len(added) == 0 && len(removed) == 0 {
+		return nil, nil
+	}
+	groups, err := g.forTeam(ctx, snap.TeamID)
+	if errors.Is(err, linear.ErrRateLimited) {
+		return nil, err
+	}
+	if err != nil {
+		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "linear label list read failed; the issue's label changes are diffed again next cycle",
+			"source_id", snap.Identifier, "linear_team_id", snap.TeamID, "error", err)
+		snap.Labels, snap.LabelRefs = prev.Labels, prev.LabelRefs
+		return nil, nil
+	}
+	return groups, nil
+}
+
+// forTeam reads a team's label groups, or returns the read this cycle already
+// made. A failed read is kept too, so the team's other issues do not each ask
+// again; a rate limit is not, since it ends the cycle.
+func (g *linearLabelGroups) forTeam(ctx context.Context, teamID string) (map[string]string, error) {
+	if r, ok := g.read[teamID]; ok {
+		return r.groups, r.err
+	}
+	labels, err := g.client.ListLabels(ctx, teamID)
+	if errors.Is(err, linear.ErrRateLimited) {
+		return nil, err
+	}
+	r := linearTeamLabelGroups{err: err}
+	if err == nil {
+		r.groups = make(map[string]string, len(labels))
+		for _, l := range labels {
+			if l.Group != "" {
+				r.groups[l.ID] = l.Group
+			}
+		}
+	}
+	g.read[teamID] = r
+	return r.groups, r.err
 }
 
 // mirrorLinearText brings the entity's title and description up to the
@@ -837,11 +909,13 @@ func linearStateRef(s linear.WorkflowState) domain.LinearStateRef {
 // stored description. allDone classifies sub-issues: one whose state is not in
 // it, or whose state is unknown, counts as open.
 func linearIssueToState(issue linear.Issue, allDone []domain.LinearStateRef) linearIssueState {
-	labels := issue.Labels
-	if labels == nil {
-		// [] rather than null, so a stored snapshot and a fresh one marshal
-		// the same and an unchanged issue is not a snapshot write.
-		labels = []string{}
+	// [] rather than null, so a stored snapshot and a fresh one marshal the
+	// same and an unchanged issue is not a snapshot write.
+	labels := make([]string, 0, len(issue.Labels))
+	var labelRefs []domain.LinearLabelRef
+	for _, l := range issue.Labels {
+		labels = append(labels, l.Name)
+		labelRefs = append(labelRefs, domain.LinearLabelRef{ID: l.ID, Name: l.Name})
 	}
 	snap := domain.LinearSnapshot{
 		ID:            issue.ID,
@@ -852,6 +926,7 @@ func linearIssueToState(issue linear.Issue, allDone []domain.LinearStateRef) lin
 		Priority:      issue.Priority,
 		PriorityLabel: issue.PriorityLabel,
 		Labels:        labels,
+		LabelRefs:     labelRefs,
 		TeamID:        issue.Team.ID,
 		TeamKey:       issue.Team.Key,
 		URL:           issue.URL,

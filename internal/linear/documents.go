@@ -22,7 +22,7 @@ fragment IssueFields on Issue {
   creator { id name displayName email }
   parent { id identifier }
   team { id key name private }
-  labels(first: 25) { nodes { name } pageInfo { hasNextPage } }
+  labels(first: 25) { nodes { id name } pageInfo { hasNextPage } }
   comments(last: 1) { nodes { ` + commentFields + ` } }
   children(first: 25) {
     nodes { id identifier state { id name type position } }
@@ -92,7 +92,7 @@ const issueLabelsQuery = `
 query IssueLabels($id: String!, $first: Int!, $after: String) {
   issue(id: $id) {
     labels(first: $first, after: $after) {
-      nodes { name }
+      nodes { id name }
       ` + pageInfoFields + `
     }
   }
@@ -135,6 +135,9 @@ query SearchIssues($filter: IssueFilter, $first: Int!, $after: String) {
   }
 }` + issueFieldsFragment
 
+// labelsQuery reads the labels an issue in a team can carry, each with the
+// group it sits in. The group is read here and not on an issue's labels, where
+// it would add to the batch read's complexity for every issue.
 const labelsQuery = `
 query Labels($teamID: ID!, $first: Int!, $after: String) {
   issueLabels(
@@ -142,7 +145,7 @@ query Labels($teamID: ID!, $first: Int!, $after: String) {
     first: $first
     after: $after
   ) {
-    nodes { id name }
+    nodes { id name parent { name } }
     ` + pageInfoFields + `
   }
 }`

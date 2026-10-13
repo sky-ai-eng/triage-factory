@@ -173,7 +173,7 @@ func TestLinearCreator_OnEveryEvent(t *testing.T) {
 			if tc.curr != nil {
 				tc.curr(&curr)
 			}
-			evt := findEvent(DiffLinearSnapshots(prev, curr, testEntityID, linDoneSet, nil), tc.eventType)
+			evt := findEvent(DiffLinearSnapshots(prev, curr, testEntityID, linDoneSet, nil, nil), tc.eventType)
 			if evt == nil {
 				t.Fatalf("no %s event", tc.eventType)
 			}
@@ -209,7 +209,7 @@ func TestLinearCreator_IntegrationCreated(t *testing.T) {
 	if snap.Creator != "" || snap.CreatorUserID != "" {
 		t.Fatalf("snapshot creator = (%q, %q), want empty", snap.Creator, snap.CreatorUserID)
 	}
-	evt := findEvent(DiffLinearSnapshots(domain.LinearSnapshot{}, snap, testEntityID, linDoneSet, nil), domain.EventLinearIssueAvailable)
+	evt := findEvent(DiffLinearSnapshots(domain.LinearSnapshot{}, snap, testEntityID, linDoneSet, nil, nil), domain.EventLinearIssueAvailable)
 	if evt == nil {
 		t.Fatal("no available event")
 	}

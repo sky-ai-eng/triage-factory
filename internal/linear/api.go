@@ -197,16 +197,16 @@ func (c *Client) GetWorkflowState(ctx context.Context, id string) (state Workflo
 }
 
 // ListLabels returns the labels an issue in a team can carry: the team's own
-// and the workspace's, sorted by name.
+// and the workspace's, sorted by name, each with its group.
 func (c *Client) ListLabels(ctx context.Context, teamID string) ([]Label, error) {
 	if err := requireID("team id", teamID); err != nil {
 		return nil, err
 	}
-	labels, err := collect(func(after string) ([]Label, pageInfo, error) {
+	nodes, err := collect(func(after string) ([]labelNode, pageInfo, error) {
 		var data struct {
 			IssueLabels struct {
-				Nodes    []Label  `json:"nodes"`
-				PageInfo pageInfo `json:"pageInfo"`
+				Nodes    []labelNode `json:"nodes"`
+				PageInfo pageInfo    `json:"pageInfo"`
 			} `json:"issueLabels"`
 		}
 		vars := map[string]any{"teamID": teamID, "first": listPageSize, "after": nullable(after)}
@@ -218,8 +218,7 @@ func (c *Client) ListLabels(ctx context.Context, teamID string) ([]Label, error)
 	if err != nil {
 		return nil, err
 	}
-	sort.SliceStable(labels, func(i, j int) bool { return labels[i].Name < labels[j].Name })
-	return labels, nil
+	return sortedLabels(nodes), nil
 }
 
 // GetIssue returns one issue by its UUID or its identifier ("ENG-123"). An
@@ -630,12 +629,12 @@ func (c *Client) issues(ctx context.Context, nodes []issueNode) ([]Issue, error)
 }
 
 // issueLabels walks every label of one issue.
-func (c *Client) issueLabels(ctx context.Context, id string) ([]labelName, error) {
-	return collect(func(after string) ([]labelName, pageInfo, error) {
+func (c *Client) issueLabels(ctx context.Context, id string) ([]labelNode, error) {
+	return collect(func(after string) ([]labelNode, pageInfo, error) {
 		var data struct {
 			Issue *struct {
 				Labels struct {
-					Nodes    []labelName `json:"nodes"`
+					Nodes    []labelNode `json:"nodes"`
 					PageInfo pageInfo    `json:"pageInfo"`
 				} `json:"labels"`
 			} `json:"issue"`

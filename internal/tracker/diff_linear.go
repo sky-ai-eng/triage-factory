@@ -29,9 +29,15 @@ const linearNoParent = "none"
 // comments is every comment made since prev, oldest first, with TF's marked
 // (linearNewComments): the snapshot holds only the newest.
 //
+// Labels are compared by id (linearLabelChanges), so a label renamed in Linear
+// is not a change. labelGroups maps a label's id to the name of the label group
+// it sits in; a label it does not name is reported in no group. The issue's
+// own labels carry no group, so the caller reads the groups from the team's
+// label list (linearLabelGroups).
+//
 // Every event's source time is the issue's updatedAt, which Linear bumps for
 // each change diffed here, except commented's, which is its comment's.
-func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef, comments []NewComment) []domain.Event {
+func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done []domain.LinearStateRef, comments []NewComment, labelGroups map[string]string) []domain.Event {
 	terminal := func(snap domain.LinearSnapshot) bool {
 		return domain.ContainsState(done, snap.StateRef())
 	}
@@ -56,10 +62,12 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		case curr.AssigneeUserID != "":
 			emit(domain.EventLinearIssueAssigned, "", events.LinearIssueAssignedMetadata{
 				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+				Labels: curr.Labels,
 			})
 		default:
 			emit(domain.EventLinearIssueAvailable, "", events.LinearIssueAvailableMetadata{
 				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+				Labels: curr.Labels,
 			})
 		}
 		return evts
@@ -92,10 +100,12 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 		if curr.AssigneeUserID != "" {
 			emit(domain.EventLinearIssueAssigned, "", events.LinearIssueAssignedMetadata{
 				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+				Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventLinearIssueAvailable, "", events.LinearIssueAvailableMetadata{
 				LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+				Labels: curr.Labels,
 			})
 		}
 	}
@@ -103,6 +113,22 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	if prev.Priority != curr.Priority && curr.PriorityLabel != "" {
 		emit(domain.EventLinearIssuePriorityChanged, curr.PriorityLabel, events.LinearIssuePriorityChangedMetadata{
 			LinearIssueIdentity: id, OldPriority: prev.PriorityLabel, NewPriority: curr.PriorityLabel,
+		})
+	}
+
+	// Keyed on the label's id, as parent_changed is on the parent's: a label
+	// renamed after it was added, then added again, is the same label and must
+	// not open a second task. Not gated on open sub-issues: someone added the
+	// label on purpose.
+	added, removed := linearLabelChanges(prev, curr)
+	for _, l := range added {
+		emit(domain.EventLinearIssueLabelAdded, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
+			LinearIssueIdentity: id, LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
+		})
+	}
+	for _, l := range removed {
+		emit(domain.EventLinearIssueLabelRemoved, linearLabelDedupKey(l), events.LinearIssueLabelMetadata{
+			LinearIssueIdentity: id, LabelName: l.Name, LabelGroup: labelGroups[l.ID], Labels: curr.Labels,
 		})
 	}
 
@@ -133,6 +159,7 @@ func DiffLinearSnapshots(prev, curr domain.LinearSnapshot, entityID string, done
 	if prev.OpenChildCount > 0 && curr.OpenChildCount == 0 && !terminal(curr) {
 		emit(domain.EventLinearIssueBecameAtomic, "", events.LinearIssueBecameAtomicMetadata{
 			LinearIssueIdentity: id, Priority: curr.PriorityLabel, Status: curr.State.Name,
+			Labels: curr.Labels,
 		})
 	}
 
@@ -154,6 +181,52 @@ func linearIdentifierChangedEvents(prev, curr domain.LinearSnapshot, entityID st
 		OldLinearTeamKey:    prev.TeamKey,
 	}, &entityID, time.Now(), &evts)
 	return evts
+}
+
+// linearLabelChanges is the labels curr has that prev does not, and the ones
+// prev has that curr does not, compared by id so a renamed label is neither.
+// A prev stored before label ids were recorded has names alone, and that one
+// diff compares by name: a label it lost is returned with its name and no id.
+func linearLabelChanges(prev, curr domain.LinearSnapshot) (added, removed []domain.LinearLabelRef) {
+	if len(prev.LabelRefs) != len(prev.Labels) {
+		addedNames, removedNames := labelChanges(prev.Labels, curr.Labels)
+		addedSet := toSet(addedNames)
+		for _, l := range curr.LabelRefs {
+			if addedSet[l.Name] {
+				added = append(added, l)
+			}
+		}
+		for _, name := range removedNames {
+			removed = append(removed, domain.LinearLabelRef{Name: name})
+		}
+		return added, removed
+	}
+	prevIDs := make(map[string]bool, len(prev.LabelRefs))
+	for _, l := range prev.LabelRefs {
+		prevIDs[l.ID] = true
+	}
+	currIDs := make(map[string]bool, len(curr.LabelRefs))
+	for _, l := range curr.LabelRefs {
+		currIDs[l.ID] = true
+		if !prevIDs[l.ID] {
+			added = append(added, l)
+		}
+	}
+	for _, l := range prev.LabelRefs {
+		if !currIDs[l.ID] {
+			removed = append(removed, l)
+		}
+	}
+	return added, removed
+}
+
+// linearLabelDedupKey is a label event's dedup_key: the label's id, or its name
+// for a label only a snapshot from before label ids were recorded knew of.
+func linearLabelDedupKey(l domain.LinearLabelRef) string {
+	if l.ID != "" {
+		return l.ID
+	}
+	return l.Name
 }
 
 // linearIdentity is the identity block every Linear event's metadata carries.

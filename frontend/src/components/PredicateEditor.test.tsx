@@ -58,6 +58,8 @@ describe('PredicateEditor identity allowlists', () => {
     ['linear:issue:assigned', 'assignee_in', 'lin-me'],
     ['linear:issue:available', 'creator_in', 'lin-me'],
     ['linear:issue:commented', 'commenter_in', 'lin-me'],
+    ['linear:issue:label_added', 'assignee_in', 'lin-me'],
+    ['linear:issue:label_removed', 'assignee_in', 'lin-me'],
     ['jira:issue:assigned', 'reporter_in', '557058:abc-me'],
     ['jira:issue:commented', 'commenter_in', '557058:abc-me'],
     ['github:pr:opened', 'author_in', 'octocat'],

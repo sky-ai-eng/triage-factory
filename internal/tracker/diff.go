@@ -361,6 +361,11 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 // dedup_key stay names — they are the vocabulary a user writes predicates in,
 // and the name is what a reader of the event sees.
 //
+// Labels are compared by name, which is a Jira label's identity: it has no id
+// and cannot be renamed. label_added / label_removed are keyed on the name, as
+// on GitHub, and are not gated on open subtasks the way assigned / available
+// are, because someone added the label on purpose.
+//
 // The actor-identity fields on emitted metadata
 // (Assignee/AssigneeAccountID, Reporter/ReporterAccountID) are copied
 // verbatim from the snapshot. Predicate matching against assignee_in /
@@ -410,14 +415,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
-				Status: curr.Status, Summary: curr.Summary,
+				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
 				IssueType: curr.IssueType, Priority: curr.Priority,
-				Status: curr.Status, Summary: curr.Summary,
+				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		}
 		return evts
@@ -465,14 +470,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
-				Status: curr.Status, Summary: curr.Summary,
+				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		} else {
 			emit(domain.EventJiraIssueAvailable, "", events.JiraIssueAvailableMetadata{
 				Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 				IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 				IssueType: curr.IssueType, Priority: curr.Priority,
-				Status: curr.Status, Summary: curr.Summary,
+				Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 			})
 		}
 	}
@@ -484,6 +489,14 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 			OldPriority: prev.Priority, NewPriority: curr.Priority,
 		})
+	}
+
+	addedLabels, removedLabels := labelChanges(prev.Labels, curr.Labels)
+	for _, label := range addedLabels {
+		emit(domain.EventJiraIssueLabelAdded, label, jiraLabelMetadata(curr, label))
+	}
+	for _, label := range removedLabels {
+		emit(domain.EventJiraIssueLabelRemoved, label, jiraLabelMetadata(curr, label))
 	}
 
 	// New comments: one event for the ones TF did not post, however many,
@@ -508,11 +521,21 @@ func DiffJiraSnapshots(prev, curr domain.JiraSnapshot, entityID string, doneStat
 			Reporter: curr.Reporter, ReporterAccountID: curr.ReporterAccountID,
 			IssueKey: curr.Key, IssueID: curr.ID, Project: project,
 			IssueType: curr.IssueType, Priority: curr.Priority,
-			Status: curr.Status, Summary: curr.Summary,
+			Status: curr.Status, Summary: curr.Summary, Labels: curr.Labels,
 		})
 	}
 
 	return evts
+}
+
+// jiraLabelMetadata is the metadata of a label event on curr, for label.
+func jiraLabelMetadata(curr domain.JiraSnapshot, label string) events.JiraIssueLabelMetadata {
+	return events.JiraIssueLabelMetadata{
+		Assignee: curr.Assignee, AssigneeAccountID: curr.AssigneeAccountID,
+		IssueKey: curr.Key, IssueID: curr.ID, Project: extractProject(curr.Key),
+		IssueType: curr.IssueType, Summary: curr.Summary,
+		LabelName: label, Labels: curr.Labels,
+	}
 }
 
 // jiraKeyChangedEvents is key_changed for an issue whose key went from prev's
@@ -610,6 +633,26 @@ func emitWithFallback(eventType, dedupKey, fallbackAt string, metadata any, enti
 		evt.OccurredAt = t
 	}
 	*evts = append(*evts, evt)
+}
+
+// labelChanges is the labels in curr and not in prev, in curr's order, and the
+// ones in prev and not in curr, in prev's, each named once.
+func labelChanges(prev, curr []string) (added, removed []string) {
+	prevSet, currSet := toSet(prev), toSet(curr)
+	seen := map[string]bool{}
+	for _, l := range curr {
+		if !prevSet[l] && !seen[l] {
+			seen[l] = true
+			added = append(added, l)
+		}
+	}
+	for _, l := range prev {
+		if !currSet[l] && !seen[l] {
+			seen[l] = true
+			removed = append(removed, l)
+		}
+	}
+	return added, removed
 }
 
 func toSet(items []string) map[string]bool {

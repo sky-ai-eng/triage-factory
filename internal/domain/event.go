@@ -115,6 +115,10 @@ const (
 	EventJiraIssueBecameAtomic    = "jira:issue:became_atomic"
 	EventJiraIssueUnreachable     = "jira:issue:unreachable"
 	EventJiraIssueBodyUpdated     = "jira:issue:body_updated"
+	// Labels — per-action, as on GitHub; label_name in metadata and the
+	// dedup_key.
+	EventJiraIssueLabelAdded   = "jira:issue:label_added"
+	EventJiraIssueLabelRemoved = "jira:issue:label_removed"
 	// EventJiraIssueKeyChanged is a tracked issue answering under a new key: a
 	// move to another project, or its project's key renamed. The issue's id
 	// did not change, so the entity is renamed and carries on; this event is
@@ -136,6 +140,10 @@ const (
 	EventLinearIssueParentChanged   = "linear:issue:parent_changed"
 	EventLinearIssueBecameAtomic    = "linear:issue:became_atomic"
 	EventLinearIssueUnreachable     = "linear:issue:unreachable"
+	// Labels — per-action, as on GitHub and Jira, except that the dedup_key
+	// is the label's id: a Linear label can be renamed.
+	EventLinearIssueLabelAdded   = "linear:issue:label_added"
+	EventLinearIssueLabelRemoved = "linear:issue:label_removed"
 	// EventLinearIssueIdentifierChanged is a tracked issue answering under a
 	// new identifier: a move to another Linear team, or its team's key
 	// renamed. The issue's UUID did not change, so the entity is renamed and
@@ -306,6 +314,8 @@ func AllEventTypes() []EventType {
 		{ID: EventJiraIssuePriorityChanged, Source: "jira", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new_priority)"},
 		{ID: EventJiraIssueCommented, Source: "jira", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventJiraIssueBodyUpdated, Source: "jira", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
+		{ID: EventJiraIssueLabelAdded, Source: "jira", Category: "issue", Label: "Label Added", Description: "A label was added to an issue (uses dedup_key=label name)"},
+		{ID: EventJiraIssueLabelRemoved, Source: "jira", Category: "issue", Label: "Label Removed", Description: "A label was removed from an issue (uses dedup_key=label name)"},
 		{ID: EventJiraIssueCompleted, Source: "jira", Category: "issue", Label: "Issue Completed", Description: "Issue was marked as done"},
 		{ID: EventJiraIssueBecameAtomic, Source: "jira", Category: "issue", Label: "Issue Became Atomic", Description: "Last open subtask closed — parent is now an atomic work unit"},
 		{ID: EventJiraIssueUnreachable, Source: "jira", Category: "issue", Label: "Issue Unreachable", Description: "Triage Factory no longer follows a tracked issue — Jira will not resolve it (deleted, or no longer visible to the configured credential; Jira answers both the same way), it moved to a project no rule configures, or the org's Jira base URL now names another site. Never inferred from its absence in a search"},
@@ -318,6 +328,8 @@ func AllEventTypes() []EventType {
 		{ID: EventLinearIssuePriorityChanged, Source: "linear", Category: "issue", Label: "Priority Changed", Description: "Issue priority was changed (uses dedup_key=new priority label)"},
 		{ID: EventLinearIssueCommented, Source: "linear", Category: "issue", Label: "New Comment", Description: "Someone other than Triage Factory commented on an issue (one event per poll, naming every commenter)"},
 		{ID: EventLinearIssueBodyUpdated, Source: "linear", Category: "issue", Label: "Issue Body Updated", Description: "The description of a tracked issue was edited or cleared"},
+		{ID: EventLinearIssueLabelAdded, Source: "linear", Category: "issue", Label: "Label Added", Description: "A label was added to an issue (uses dedup_key=label id)"},
+		{ID: EventLinearIssueLabelRemoved, Source: "linear", Category: "issue", Label: "Label Removed", Description: "A label was removed from an issue (uses dedup_key=label id)"},
 		{ID: EventLinearIssueParentChanged, Source: "linear", Category: "issue", Label: "Parent Changed", Description: "Issue was moved under another parent, or its parent was removed (uses dedup_key=new parent UUID, or none)"},
 		{ID: EventLinearIssueCompleted, Source: "linear", Category: "issue", Label: "Issue Completed", Description: "Issue entered one of its team's done states"},
 		{ID: EventLinearIssueBecameAtomic, Source: "linear", Category: "issue", Label: "Issue Became Atomic", Description: "Last open sub-issue closed — parent is now an atomic work unit"},

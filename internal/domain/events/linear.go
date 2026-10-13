@@ -44,8 +44,9 @@ type LinearIssueIdentity struct {
 
 type LinearIssueAssignedMetadata struct {
 	LinearIssueIdentity
-	Priority string `json:"priority"` // priority label
-	Status   string `json:"status"`   // state name
+	Priority string   `json:"priority"` // priority label
+	Status   string   `json:"status"`   // state name
+	Labels   []string `json:"labels"`   // label names
 }
 
 type LinearIssueAssignedPredicate struct {
@@ -54,6 +55,7 @@ type LinearIssueAssignedPredicate struct {
 	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
 	Priority      *string  `json:"priority,omitempty" doc:"Exact-match on the priority label (Urgent, High, Medium, Low, No priority)."`
 	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Todo')."`
+	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueAssignedPredicate) Matches(m LinearIssueAssignedMetadata) bool {
@@ -61,7 +63,8 @@ func (p LinearIssueAssignedPredicate) Matches(m LinearIssueAssignedMetadata) boo
 		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -70,8 +73,9 @@ func (p LinearIssueAssignedPredicate) Matches(m LinearIssueAssignedMetadata) boo
 
 type LinearIssueAvailableMetadata struct {
 	LinearIssueIdentity
-	Priority string `json:"priority"`
-	Status   string `json:"status"`
+	Priority string   `json:"priority"`
+	Status   string   `json:"status"`
+	Labels   []string `json:"labels"`
 }
 
 type LinearIssueAvailablePredicate struct {
@@ -79,13 +83,15 @@ type LinearIssueAvailablePredicate struct {
 	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
 	Priority      *string  `json:"priority,omitempty"`
 	Status        *string  `json:"status,omitempty" doc:"Filter by the issue's current state name (e.g. 'Backlog')."`
+	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueAvailablePredicate) Matches(m LinearIssueAvailableMetadata) bool {
 	return stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -238,6 +244,47 @@ func (p LinearIssueParentChangedPredicate) Matches(m LinearIssueParentChangedMet
 }
 
 // -----------------------------------------------------------------------------
+// issue:label_added / issue:label_removed — the Jira events' siblings, with
+// one difference: a Linear label has an id and can be renamed, so labels are
+// compared by id and the dedup_key is the label's id. A rename is not a
+// removal and an addition, and a label renamed after it was added and then
+// added again does not open a second task. label_name is the name the label
+// has now, which is what a predicate is written in.
+//
+// A label can sit in a group (a "Difficulty" group holding Easy / Medium /
+// Hard), and its name is only its own, so two groups can each hold a
+// "Medium". label_group is the group's name, empty for a label in none.
+// Switching a single-select group from one value to another is a removal and
+// an addition in the same poll, each carrying the group.
+//
+// Never emitted on first discovery, and not suppressed on an issue with open
+// sub-issues, for the reasons the Jira events give.
+// -----------------------------------------------------------------------------
+
+type LinearIssueLabelMetadata struct {
+	LinearIssueIdentity
+	LabelName  string   `json:"label_name"`
+	LabelGroup string   `json:"label_group"` // "" for a label in no group
+	Labels     []string `json:"labels"`      // the issue's label names after the change
+}
+
+type LinearIssueLabelPredicate struct {
+	AssigneeIn    []string `json:"assignee_in,omitempty" doc:"Match issues assigned to anyone in this list (Linear user IDs)."`
+	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
+	LabelName     *string  `json:"label_name,omitempty" doc:"Match only a label of this name (e.g. 'tf-agent')."`
+	LabelGroup    *string  `json:"label_group,omitempty" doc:"Match only a label in this label group (e.g. 'Difficulty')."`
+	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to bear a label of this name after the change."`
+}
+
+func (p LinearIssueLabelPredicate) Matches(m LinearIssueLabelMetadata) bool {
+	return stringInSliceFold(p.AssigneeIn, m.AssigneeUserID) &&
+		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
+		strEq(p.LabelName, m.LabelName) &&
+		strEq(p.LabelGroup, m.LabelGroup) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
 // issue:became_atomic — the last open sub-issue closed. The belated discovery
 // path, exactly as on Jira: a parent with open sub-issues is discovered
 // without an assigned/available event, and this is the event that creates its
@@ -246,8 +293,9 @@ func (p LinearIssueParentChangedPredicate) Matches(m LinearIssueParentChangedMet
 
 type LinearIssueBecameAtomicMetadata struct {
 	LinearIssueIdentity
-	Priority string `json:"priority"`
-	Status   string `json:"status"`
+	Priority string   `json:"priority"`
+	Status   string   `json:"status"`
+	Labels   []string `json:"labels"`
 }
 
 type LinearIssueBecameAtomicPredicate struct {
@@ -256,6 +304,7 @@ type LinearIssueBecameAtomicPredicate struct {
 	LinearTeamKey *string  `json:"linear_team_key,omitempty" doc:"Scope to a specific Linear team key (e.g. ENG)."`
 	Priority      *string  `json:"priority,omitempty"`
 	Status        *string  `json:"status,omitempty"`
+	HasLabel      *string  `json:"has_label,omitempty" doc:"Require the issue to currently bear a label of this name."`
 }
 
 func (p LinearIssueBecameAtomicPredicate) Matches(m LinearIssueBecameAtomicMetadata) bool {
@@ -263,7 +312,8 @@ func (p LinearIssueBecameAtomicPredicate) Matches(m LinearIssueBecameAtomicMetad
 		stringInSliceFold(p.CreatorIn, m.CreatorUserID) &&
 		strEq(p.LinearTeamKey, m.LinearTeamKey) &&
 		strEq(p.Priority, m.Priority) &&
-		strEq(p.Status, m.Status)
+		strEq(p.Status, m.Status) &&
+		hasLabel(p.HasLabel, m.Labels)
 }
 
 // -----------------------------------------------------------------------------
@@ -348,6 +398,8 @@ func init() {
 	Register(NewSchema[LinearIssueCompletedMetadata, LinearIssueCompletedPredicate](domain.EventLinearIssueCompleted, OwnershipOwned))
 	Register(NewSchema[LinearIssueBodyUpdatedMetadata, LinearIssueBodyUpdatedPredicate](domain.EventLinearIssueBodyUpdated, OwnershipOwned))
 	Register(NewSchema[LinearIssueParentChangedMetadata, LinearIssueParentChangedPredicate](domain.EventLinearIssueParentChanged, OwnershipOwned))
+	Register(NewSchema[LinearIssueLabelMetadata, LinearIssueLabelPredicate](domain.EventLinearIssueLabelAdded, OwnershipOwned))
+	Register(NewSchema[LinearIssueLabelMetadata, LinearIssueLabelPredicate](domain.EventLinearIssueLabelRemoved, OwnershipOwned))
 	Register(NewSchema[LinearIssueBecameAtomicMetadata, LinearIssueBecameAtomicPredicate](domain.EventLinearIssueBecameAtomic, OwnershipOwned))
 	Register(NewSchema[LinearIssueUnreachableMetadata, LinearIssueUnreachablePredicate](domain.EventLinearIssueUnreachable, OwnershipOwned))
 	Register(NewSchema[LinearIssueIdentifierChangedMetadata, LinearIssueIdentifierChangedPredicate](domain.EventLinearIssueIdentifierChanged, OwnershipOwned))

@@ -960,6 +960,7 @@ func recordCarryOverAssignedEvent(ctx context.Context, events_ db.EventStore, or
 		Priority:          snap.Priority,
 		Status:            snap.Status,
 		Summary:           snap.Summary,
+		Labels:            snap.Labels,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
@@ -990,6 +991,7 @@ func recordCarryOverAvailableEvent(ctx context.Context, events_ db.EventStore, o
 		Priority:          snap.Priority,
 		Status:            snap.Status,
 		Summary:           snap.Summary,
+		Labels:            snap.Labels,
 	}
 	metaJSON, err := json.Marshal(meta)
 	if err != nil {
