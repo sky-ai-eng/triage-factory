@@ -21,8 +21,10 @@ import (
 // A drop is counted at whichever of four stages lost it. They are stages of
 // one funnel, not independent failures — a record passes through the ones that
 // exist for its placement (a local-mode run has no relay at all, so its only
-// reachable stage is the write) and is counted at most once, at the stage that
-// finally lost it.
+// reachable stage is the write) and is counted at the stage that finally lost
+// it, never at two. The write stage counts what it lost rather than the record
+// that carried it: a record whose artifact and then its action-alone fallback
+// both fail counts twice there, once under each.
 const (
 	// dropStageRelaySend — the sidecar gave the record up without the
 	// orchestrator ever applying it: its args did not marshal, its queue was

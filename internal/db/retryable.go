@@ -66,12 +66,13 @@ func IsRetryable(err error) bool {
 }
 
 // retryableSQLState reports whether a Postgres SQLSTATE names a transient
-// failure: the connection exception class, the concurrency refusals of class
-// 40 (but not 40002, an integrity violation at commit), a lock or statement
-// timeout, the server shutting down or not yet accepting connections, and a
-// full connection table.
+// failure: the connection exception class (but not 08P01, a protocol
+// violation, which a new connection repeats), the concurrency refusals of
+// class 40 (but not 40002, an integrity violation at commit), a lock or
+// statement timeout, the server shutting down or not yet accepting
+// connections, and a full connection table.
 func retryableSQLState(code string) bool {
-	if len(code) == 5 && code[:2] == "08" {
+	if len(code) == 5 && code[:2] == "08" && code != "08P01" {
 		return true
 	}
 	switch code {

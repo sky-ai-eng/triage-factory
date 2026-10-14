@@ -530,3 +530,29 @@ func TestUpsertArtifact_DirectFailureIsTheCallersToHandle(t *testing.T) {
 		t.Fatalf("drops = %v; want none: the caller got the error", got)
 	}
 }
+
+// TestRelayServer_WireDedupKeyIsNotTrusted: a relayed external write's ledger
+// key is derived on this side, whatever key the sidecar put on the action. A
+// key the sidecar chose could equal another run's deterministic one — here an
+// egress denial's — and suppress that run's real row.
+func TestRelayServer_WireDedupKeyIsNotTrusted(t *testing.T) {
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	forged := domain.EgressDenialDedupKey("another-conversation", "api.github.com:443")
+	args, _ := json.Marshal(recordExternalWriteArgs{Action: &domain.ExternalAction{
+		Provider: domain.ArtifactProviderGitHub, Action: domain.ActionGHChannelWrite,
+		Target: "acme/widgets", Credential: domain.CredentialGitHubApp, DedupKey: forged,
+	}})
+	key := uuid.NewString()
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, opRecordExternalWrite, key, args); err != nil {
+		t.Fatalf("DispatchRecord: %v", err)
+	}
+	acts := listExternalActions(t, stores)
+	if len(acts) != 1 {
+		t.Fatalf("ledger rows = %d; want 1", len(acts))
+	}
+	if want := domain.RelayedRecordDedupKey(info.ConversationID, key, 0); acts[0].DedupKey != want {
+		t.Fatalf("dedup key = %q; want the derived %q, not the sidecar's %q", acts[0].DedupKey, want, forged)
+	}
+}

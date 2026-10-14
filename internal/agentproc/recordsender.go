@@ -102,7 +102,7 @@ var defaultRecordSendPolicy = recordSendPolicy{
 
 // drainAnswerSlack is how much longer the orchestrator waits for the drain's
 // answer than the sidecar waits for its queue to empty.
-const drainAnswerSlack = 5 * time.Second
+const drainAnswerSlack = 2 * time.Second
 
 var (
 	errRecordQueueFull = errors.New("agentproc: audit record queue full")

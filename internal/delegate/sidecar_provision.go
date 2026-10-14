@@ -67,7 +67,9 @@ type runSidecar struct {
 // last chance for records the sidecar still holds — ones the orchestrator
 // could not apply yet — to land, and the only way the ones that never will
 // get counted (drainAuditRecords). On a healthy run the queue is already empty
-// and it answers at once.
+// and it answers at once; records still waiting on the orchestrator, or a
+// sidecar that has stopped answering, hold the teardown for the drain's bound
+// (agentproc.DrainRecords: the sidecar's 10s wait plus a little slack).
 //
 // The file removal sits exactly there — after the sidecar is dead so nothing
 // can re-create them behind it, and before the index is released so the
@@ -125,7 +127,8 @@ func (rs *runSidecar) drainAuditRecords() {
 
 // slowCellTeardown is how long a cell teardown may take before it is logged.
 // The work is an audit-record drain (immediate unless records are still
-// waiting on the orchestrator), a supervision-socket close, a SIGKILL, two
+// waiting on the orchestrator or the sidecar has stopped answering), a
+// supervision-socket close, a SIGKILL, two
 // unlinks and a brokered network teardown — none of which waits on the agent —
 // so a teardown past this is holding a scarce slot for a reason worth naming.
 const slowCellTeardown = 2 * time.Second

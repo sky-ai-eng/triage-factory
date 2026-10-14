@@ -225,7 +225,12 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 		stage = dropStageRelayDecode
 		err = s.dispatchCoreRecord(withRelayedRecord(ctx, rec), op, args)
 	default:
-		_, err = dispatchProviderOp(withRelayedRecord(ctx, rec), s.stores, s.info, namespace, op, args)
+		// Capped like every core record op: the record lane serves one record
+		// at a time, so a provider handler that never returned would hold
+		// every record behind it.
+		pctx, cancel := context.WithTimeout(withRelayedRecord(ctx, rec), recordPushRelayTimeout)
+		_, err = dispatchProviderOp(pctx, s.stores, s.info, namespace, op, args)
+		cancel()
 	}
 	if err != nil {
 		recordSpanError(span, err)
@@ -811,6 +816,16 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		var a recordExternalWriteArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed external write: %w", err)
+		}
+		// The ledger key is this side's to choose, like the identity and scope
+		// the funnel stamps over whatever the wire said: it is derived from the
+		// record's key under this run's conversation (mintActionDedupKey). A key
+		// the sidecar chose could equal another run's deterministic one — a
+		// branch push's, an egress denial's — and the row it wrote first would
+		// suppress that run's real one. No action the sidecar builds carries a
+		// key of its own; the ops whose rows have one build them here.
+		if a.Action != nil {
+			a.Action.DedupKey = ""
 		}
 		// The write already landed upstream; Record is best-effort and self-bounds
 		// its own recording. Cap it so a wedged store can't pin the frame goroutine.

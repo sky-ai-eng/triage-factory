@@ -530,8 +530,8 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // runs wrap in the kicking-off user's synthetic claims. Returns the stored
 // row. Each write is retried on a retryable error like the recording funnel's
 // (withRecordRetry) — the upsert is idempotent and the push row's dedup key is
-// deterministic — on the caller's context: the caller is waiting on the stored
-// row. When the artifact write fails, the action is written on its own
+// deterministic — but on the caller's own context, since the caller is waiting
+// for the result. When the artifact write fails, the action is written on its own
 // (recordActionAlone) before the artifact's error is returned, so a push whose
 // artifact could not be recorded still leaves its ledger row. Inside a relayed
 // record the artifact's failure is also the record's (dropRelayedArtifact).

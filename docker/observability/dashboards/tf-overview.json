@@ -2627,7 +2627,7 @@
         "type": "prometheus",
         "uid": "tf-prometheus"
       },
-      "description": "Where in the funnel each record was lost. `record` is the database write and is the only stage a local-mode deployment can reach \u2014 there is no sidecar and no relay there, so the other three staying empty is the path not taken, not a gap. `relay_send` is the sidecar reporting, at the end of the run, records the orchestrator never applied; `relay_decode` is a payload that arrived and could not be turned back into a record; `relay_dispatch` is a provider's own record handler failing. A record is counted once, at the stage that finally lost it.",
+      "description": "Where in the funnel each record was lost. `record` is the database write and is the only stage a local-mode deployment can reach \u2014 there is no sidecar and no relay there, so the other three staying empty is the path not taken, not a gap. `relay_send` is the sidecar reporting, at the end of the run, records the orchestrator never applied; `relay_decode` is a payload that arrived and could not be turned back into a record; `relay_dispatch` is a provider's own record handler failing. A record is counted at the stage that finally lost it, never at two; the `record` stage counts each row it lost, so a record whose artifact and action both failed counts twice there.",
       "fieldConfig": {
         "defaults": {
           "color": {

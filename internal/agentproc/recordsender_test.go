@@ -70,7 +70,8 @@ func (o *fakeOrchestrator) waitApplied(t *testing.T, n int) []sidecarproto.Relay
 	deadline := time.After(5 * time.Second)
 	for {
 		o.mu.Lock()
-		if len(o.applied) >= n {
+		got := len(o.applied)
+		if got >= n {
 			out := append([]sidecarproto.RelayRecordBody(nil), o.applied...)
 			o.mu.Unlock()
 			return out
@@ -79,7 +80,7 @@ func (o *fakeOrchestrator) waitApplied(t *testing.T, n int) []sidecarproto.Relay
 		select {
 		case <-o.changed:
 		case <-deadline:
-			t.Fatalf("only %d of %d records were applied", len(o.applied), n)
+			t.Fatalf("only %d of %d records were applied", got, n)
 		}
 	}
 }

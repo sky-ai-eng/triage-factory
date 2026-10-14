@@ -29,6 +29,7 @@ func TestIsRetryable(t *testing.T) {
 		{"serialization failure", &pgconn.PgError{Code: "40001"}, true},
 		{"deadlock", fmt.Errorf("commit: %w", &pgconn.PgError{Code: "40P01"}), true},
 		{"connection exception class", &pgconn.PgError{Code: "08006"}, true},
+		{"protocol violation", &pgconn.PgError{Code: "08P01"}, false},
 		{"statement timeout", &pgconn.PgError{Code: "57014"}, true},
 		{"admin shutdown", &pgconn.PgError{Code: "57P01"}, true},
 		{"unique violation", &pgconn.PgError{Code: "23505"}, false},
