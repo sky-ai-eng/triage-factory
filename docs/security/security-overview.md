@@ -69,10 +69,12 @@ On Linux, local runs do get a **mount and pid namespace** by default
 deliberately not a boundary — same uid, shared network — so nothing in this
 document rests on it. What it buys is that a confused or prompt-injected agent
 cannot read a sibling run's worktree, the TF database, or the operator's home
-directory by path without deliberately breaking out, and that it does not see
-the OS keychain's session socket paths. It makes no claim that the keychain is
-unreachable. Everything a compromised local agent could do to the machine
-before, it can still do if it tries.
+directory by path without deliberately breaking out, that it cannot change the
+Claude Code configuration under `~/.claude` that the operator's own sessions
+load and execute, and that it does not see the OS keychain's session socket
+paths. It makes no claim that the keychain is unreachable. Everything a
+compromised local agent could do to the machine before, it can still do if it
+tries.
 
 ---
 

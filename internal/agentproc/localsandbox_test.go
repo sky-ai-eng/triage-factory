@@ -41,6 +41,16 @@ func stubBwrap(t *testing.T) string {
 	return bin
 }
 
+// sandboxSpec returns a Spec for runRoot under a throwaway HOME, so the
+// transcript dir Preflight creates lands there rather than in the developer's
+// real ~/.claude.
+func sandboxSpec(t *testing.T, runRoot string) *localsandbox.Spec {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	return &localsandbox.Spec{RunRoot: runRoot, ClaudeProjectDir: filepath.Join(home, ".claude", "projects", "-run")}
+}
+
 // TestNewDirectCommand_NilSandboxIsUnchanged is the TF_LOCAL_SANDBOX=off
 // acceptance in test form: with no Spec, the spawn must be the one that
 // shipped before the sandbox existed — same argv, same env, byte for byte.
@@ -97,7 +107,7 @@ func TestNewDirectCommand_SandboxPrefixesBwrapAndMarks(t *testing.T) {
 
 	cmd, err := newDirectCommand(context.Background(), RunOptions{
 		Cwd:          runRoot,
-		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+		LocalSandbox: sandboxSpec(t, runRoot),
 	}, []string{"wrapper.mjs"})
 	if err != nil {
 		t.Fatalf("newDirectCommand: %v", err)
@@ -143,7 +153,7 @@ func TestNewDirectCommand_SandboxStripsInheritedMarkerFirst(t *testing.T) {
 
 	cmd, err := newDirectCommand(context.Background(), RunOptions{
 		Cwd:          runRoot,
-		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+		LocalSandbox: sandboxSpec(t, runRoot),
 	}, []string{"wrapper.mjs"})
 	if err != nil {
 		t.Fatalf("newDirectCommand: %v", err)
@@ -174,7 +184,7 @@ func TestNewDirectCommand_SandboxSynthesizesFallbackIdentity(t *testing.T) {
 	if err := os.MkdirAll(runRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	spec := &localsandbox.Spec{RunRoot: runRoot}
+	spec := sandboxSpec(t, runRoot)
 
 	cmd, err := newDirectCommand(context.Background(), RunOptions{Cwd: runRoot, LocalSandbox: spec}, []string{"wrapper.mjs"})
 	if err != nil {
@@ -247,7 +257,7 @@ func TestDirectArgv_FoldsInAddDirGrants(t *testing.T) {
 	argv, err := directArgv(RunOptions{
 		Cwd:          runRoot,
 		AddDirs:      []string{grant},
-		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+		LocalSandbox: sandboxSpec(t, runRoot),
 	}, []string{"wrapper.mjs"})
 	if err != nil {
 		t.Fatalf("directArgv: %v", err)
@@ -271,7 +281,7 @@ func TestDirectArgv_SandboxFailsRatherThanDegrades(t *testing.T) {
 
 	argv, err := directArgv(RunOptions{
 		Cwd:          missing,
-		LocalSandbox: &localsandbox.Spec{RunRoot: missing},
+		LocalSandbox: sandboxSpec(t, missing),
 	}, []string{"wrapper.mjs"})
 	if err == nil {
 		t.Fatalf("directArgv = %v, want an error for a run tree that is not on disk", argv)
@@ -316,7 +326,7 @@ func TestDirectArgv_ResolvesNodeAbsolutely(t *testing.T) {
 
 	argv, err := directArgv(RunOptions{
 		Cwd:          runRoot,
-		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+		LocalSandbox: sandboxSpec(t, runRoot),
 	}, []string{"wrapper.mjs"})
 	if err != nil {
 		// A Go build that ignores the GODEBUG still refuses the relative
@@ -361,7 +371,7 @@ func TestDirectArgv_BindsResolverPathsBack(t *testing.T) {
 
 	argv, err := directArgv(RunOptions{
 		Cwd:          runRoot,
-		LocalSandbox: &localsandbox.Spec{RunRoot: runRoot},
+		LocalSandbox: sandboxSpec(t, runRoot),
 	}, []string{"wrapper.mjs"})
 	if err != nil {
 		t.Fatalf("directArgv: %v", err)

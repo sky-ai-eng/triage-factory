@@ -504,7 +504,7 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 	// agenthost daemon its exec verbs dial. nil (and free) in multi mode and
 	// whenever the operator opted out; a failure fails the run rather than
 	// dropping the agent onto the operator's filesystem unannounced.
-	localSbx, err := s.startLocalSandbox(conversationID, namespace, ghChannel, agenthost.ConversationInfo{
+	localSbx, err := s.startLocalSandbox(conversationID, namespace, claudeCwd, ghChannel, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           creatorUserID,
 		ConversationID:   conversationID,

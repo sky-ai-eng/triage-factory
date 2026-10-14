@@ -41,6 +41,9 @@ func Args(spec Spec, host Host) ([]string, error) {
 			return nil, fmt.Errorf("localsandbox: %q is not an absolute path (the mount plan binds every path at its real location)", p)
 		}
 	}
+	if err := checkClaudeProjectDir(spec, host); err != nil {
+		return nil, err
+	}
 
 	// The whole host, read-only, plus the two pseudo-filesystems that cannot
 	// simply be carried over: a minimal /dev (no host disks, no /dev/kmsg)
@@ -102,10 +105,19 @@ func Args(spec Spec, host Host) ([]string, error) {
 	}
 
 	// Phase 2 — everything that comes back through them. -try on the
-	// host-owned directories, which may legitimately not exist yet on a fresh
-	// install (no hooks written, no gh fetched, no ~/.claude); strict on the
-	// run's own, which Preflight has already established are there.
-	args = appendBindTry(args, "--bind-try", host.ClaudeDir)
+	// host-owned paths, which may legitimately not exist yet on a fresh
+	// install (no hooks written, no gh fetched, no Claude Code login); strict
+	// on the run's own, which Preflight has already established are there.
+	//
+	// ~/.claude first, one entry at a time: the operator's configuration ro,
+	// the credential file and this run's transcript directory rw. The rest of
+	// ~/.claude is whatever Claude Code creates on the home tmpfs during the
+	// run, so nothing else the run writes there reaches the host.
+	for _, name := range claudeConfig {
+		args = appendBindTry(args, "--ro-bind-try", filepath.Join(host.ClaudeDir, name))
+	}
+	args = appendBindTry(args, "--bind-try", filepath.Join(host.ClaudeDir, claudeCredentialsFile))
+	args = append(args, "--bind", spec.ClaudeProjectDir, spec.ClaudeProjectDir)
 	args = appendBindTry(args, "--ro-bind-try", host.HooksDir, host.GHBinDir)
 	args = appendBindTry(args, "--bind-try", spec.GHChannelDir)
 	args = append(args, "--bind", spec.RunRoot, spec.RunRoot)
@@ -171,15 +183,17 @@ func dedupe(paths []string) []string {
 // an --add-dir grant, the agenthost socket — is named by this run and must be
 // there: a grant that silently vanishes leaves the agent reading an empty
 // directory as if it were the answer, which is worse than a failed run. A
-// host-owned path — the hooks dir, the pinned gh dir, ~/.claude — may
-// legitimately not exist yet on a fresh install, so Args binds those with
-// -try and this function only ensures ~/.claude, whose absence would send the
-// run's transcript to a tmpfs that disappears with the namespace.
+// host-owned path — the hooks dir, the pinned gh dir, the ~/.claude
+// configuration — may legitimately not exist yet on a fresh install, so Args
+// binds those with -try. This function creates the run's transcript
+// directory, whose absence would send the transcript to a tmpfs that
+// disappears with the namespace.
 func Preflight(spec Spec, host Host) error {
-	if host.ClaudeDir != "" {
-		if err := os.MkdirAll(host.ClaudeDir, 0o700); err != nil {
-			return fmt.Errorf("localsandbox: create %s: %w", host.ClaudeDir, err)
-		}
+	if err := checkClaudeProjectDir(spec, host); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(spec.ClaudeProjectDir, 0o700); err != nil {
+		return fmt.Errorf("localsandbox: create %s: %w", spec.ClaudeProjectDir, err)
 	}
 	if err := mustExist(spec.RunRoot, "run root"); err != nil {
 		return err
@@ -193,6 +207,25 @@ func Preflight(spec Spec, host Host) error {
 		if err := mustExist(dir, "--add-dir grant"); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// checkClaudeProjectDir holds Spec.ClaudeProjectDir to the one place it may
+// name. It is the only rw bind under ~/.claude besides the credential file,
+// so a value outside ~/.claude/projects would hand the run write access to a
+// path the operator's own sessions read. Preflight checks it too, because
+// Preflight creates the directory and runs before Args.
+func checkClaudeProjectDir(spec Spec, host Host) error {
+	if host.ClaudeDir == "" {
+		return errors.New("localsandbox: Host.ClaudeDir is required")
+	}
+	if spec.ClaudeProjectDir == "" {
+		return errors.New("localsandbox: Spec.ClaudeProjectDir is required (without it the run's transcript is discarded with the namespace)")
+	}
+	projects := filepath.Join(host.ClaudeDir, "projects")
+	if !filepath.IsAbs(spec.ClaudeProjectDir) || filepath.Dir(filepath.Clean(spec.ClaudeProjectDir)) != projects {
+		return fmt.Errorf("localsandbox: Spec.ClaudeProjectDir %q is not a directory directly under %s", spec.ClaudeProjectDir, projects)
 	}
 	return nil
 }
