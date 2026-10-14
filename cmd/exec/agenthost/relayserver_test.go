@@ -103,7 +103,7 @@ func TestRelayServer_RecordPushRoutesToRecorder(t *testing.T) {
 	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
 
 	args, _ := json.Marshal(agentproc.RecordPushArgs{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, args)
 
 	got := <-recorded
 	want := gitproxy.PushedRef{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200}
@@ -120,7 +120,7 @@ func TestRelayServer_RecordDenialRoutesToRecorder(t *testing.T) {
 	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
 
 	args, _ := json.Marshal(agentproc.RecordDenialArgs{Owner: "acme", Repo: "widgets", Ref: "refs/heads/main", Op: "push", Reason: "off-ref"})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordDenial, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial, args)
 
 	got := <-recorded
 	if got.Owner != "acme" || got.Repo != "widgets" || got.Reason != "off-ref" {
@@ -142,8 +142,8 @@ func TestRelayServer_EgressDenialWritesAuditRow(t *testing.T) {
 		Reason: `host "api.github.com" is not on the sandbox egress allowlist`,
 	})
 	// Relayed twice, as a probing agent would: one row.
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, args)
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
@@ -169,7 +169,7 @@ func TestRelayServer_GHWriteWritesAuditRow(t *testing.T) {
 	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
 		Method: "PUT", Path: "/repos/octo/repo/pulls/7/merge", Status: 404,
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
@@ -202,7 +202,7 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 		NodeID:     "PRRC_kwRelay",
 		URL:        "https://github.com/acme/widgets/pull/841#discussion_r777",
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
@@ -249,7 +249,7 @@ func TestRelayServer_GraphQLWriteWritesAuditRow(t *testing.T) {
 			Subject:   "PR_kwRelay",
 		},
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {
@@ -280,7 +280,7 @@ func TestRelayServer_GraphQLRefusalRelaysAsAnAttempt(t *testing.T) {
 			Subject:   "PR_kwRelayRefused",
 		},
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+	relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
 
 	acts := listExternalActions(t, stores)
 	if len(acts) != 1 {

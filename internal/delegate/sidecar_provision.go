@@ -57,10 +57,17 @@ type runSidecar struct {
 }
 
 // Close tears the run sidecar down in the order that keeps the veth alive
-// under anything still using it: stop the refresh relay, stop the supervision
-// reader, SIGKILL the sidecar (freeing its proxies + unsealed bundle), remove
-// the per-run files that sidecar left under the socket root, then tear down the
-// network the proxies were bound on and release its subnet index. Safe on nil.
+// under anything still using it: stop the refresh relay, drain the sidecar's
+// audit records, stop the supervision reader, SIGKILL the sidecar (freeing its
+// proxies + unsealed bundle), remove the per-run files that sidecar left under
+// the socket root, then tear down the network the proxies were bound on and
+// release its subnet index. Safe on nil.
+//
+// The drain comes before anything that would cut the sidecar off: it is the
+// last chance for records the sidecar still holds — ones the orchestrator
+// could not apply yet — to land, and the only way the ones that never will
+// get counted (drainAuditRecords). On a healthy run the queue is already empty
+// and it answers at once.
 //
 // The file removal sits exactly there — after the sidecar is dead so nothing
 // can re-create them behind it, and before the index is released so the
@@ -77,6 +84,7 @@ func (rs *runSidecar) Close() {
 		rs.relayOnce.Do(func() { close(rs.stopRelay) })
 	}
 	if rs.conn != nil {
+		rs.drainAuditRecords()
 		_ = rs.conn.Close()
 	}
 	if rs.proc != nil {
@@ -99,10 +107,27 @@ func (rs *runSidecar) Close() {
 	}
 }
 
+// drainAuditRecords asks the sidecar to finish delivering the audit records it
+// holds and counts the ones it never delivered. The sidecar bounds its own
+// wait, so a degraded run's teardown is held up by at most that. A drain that
+// gets no answer — the sidecar is already gone — has nothing it can count:
+// whatever the sidecar held went with it.
+func (rs *runSidecar) drainAuditRecords() {
+	ctx := context.Background()
+	undelivered, err := agentproc.DrainRecords(ctx, rs.conn)
+	if err != nil {
+		dispatchLog.Warn("sidecar did not answer the audit-record drain; records it still held are lost uncounted",
+			"conversation", rs.conversationID, "error", err)
+		return
+	}
+	agenthost.CountUndeliveredRecords(ctx, rs.conversationID, undelivered)
+}
+
 // slowCellTeardown is how long a cell teardown may take before it is logged.
-// The work is a supervision-socket close, a SIGKILL, two unlinks and a
-// brokered network teardown — none of which waits on the agent — so a teardown
-// past this is holding a scarce slot for a reason worth naming.
+// The work is an audit-record drain (immediate unless records are still
+// waiting on the orchestrator), a supervision-socket close, a SIGKILL, two
+// unlinks and a brokered network teardown — none of which waits on the agent —
+// so a teardown past this is holding a scarce slot for a reason worth naming.
 const slowCellTeardown = 2 * time.Second
 
 // credRelayNudge is a one-shot request to the credential-refresh relay: re-read

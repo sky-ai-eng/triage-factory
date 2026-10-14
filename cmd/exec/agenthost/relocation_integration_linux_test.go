@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -56,13 +57,12 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 				return nil, err
 			}
 			return relaySrv.DispatchCall(ctx, env.Namespace, env.Op, env.Args)
-		case sidecarproto.KindRelayNotify:
-			var env sidecarproto.RelayCallBody
+		case sidecarproto.KindRelayRecord:
+			var env sidecarproto.RelayRecordBody
 			if err := json.Unmarshal(body, &env); err != nil {
 				return nil, err
 			}
-			relaySrv.DispatchNotify(ctx, env.Namespace, env.Op, env.Args)
-			return nil, nil
+			return nil, relaySrv.DispatchRecord(ctx, env.Namespace, env.Op, env.Key, env.Args)
 		default:
 			return nil, nil
 		}
@@ -77,7 +77,7 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 
 	// Host the exec-verb socket server the way the sidecar does: a relay-backed
 	// Server on the real /run/tf socket with the sandbox grant.
-	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, info, nil), nil)
+	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil), nil)
 	hd, mount, err := StartWithServer(agentSrv, info.ConversationID)
 	if err != nil {
 		t.Fatalf("StartWithServer (relocated host): %v", err)

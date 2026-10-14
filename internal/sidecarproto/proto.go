@@ -70,13 +70,27 @@ const (
 	// sidecar cannot address another org's data.
 	KindRelayCall Kind = "relay_call"
 
-	// KindRelayNotify is the fire-and-forget twin of KindRelayCall for
-	// audit-record ops that must never block the external write they follow —
-	// a denied git op, a completed push, an external-write record. Same
-	// (namespace, op) envelope; no response awaited. The orchestrator serves
-	// it best-effort against its stores (the write already landed upstream);
-	// a dropped notify costs at most one audit row, never the agent's action.
-	KindRelayNotify Kind = "relay_notify"
+	// KindRelayRecord is the sidecar → orchestrator envelope for an audit
+	// record: the row describing an act that already happened — a denied git
+	// op, a completed push, an exec verb's external write. It is a Call. The
+	// orchestrator answers once the record is applied, or once it knows the
+	// record never can be; an error answer means "not applied, send it again".
+	// The sidecar sends one record at a time and resends it, under the same
+	// RelayRecordBody.Key, until it gets an answer without an error, so the
+	// orchestrator must be able to apply one record twice.
+	//
+	// A Conn serves these frames on a lane of their own, one at a time and in
+	// arrival order (see Conn), because the order records are applied in is
+	// visible: several artifact fields are last-writer-wins, and a comment's
+	// delete finds nothing to update if its post has not been applied yet.
+	KindRelayRecord Kind = "relay_record"
+
+	// KindDrainRecords is the orchestrator's request, at the end of a run, that
+	// the sidecar finish delivering the audit records it still holds and then
+	// stop sending. The answer (DrainRecordsResult) names every record it never
+	// delivered, so the orchestrator, which holds the metrics exporter, can
+	// count them. A Call.
+	KindDrainRecords Kind = "drain_records"
 )
 
 // Frame is one newline-delimited JSON message. Body is the Kind-specific
@@ -121,6 +135,18 @@ func (f HandlerFunc) Handle(ctx context.Context, kind Kind, body json.RawMessage
 // Handler wired.
 var ErrNoHandler = errors.New("sidecarproto: no handler for inbound request")
 
+// ErrRecordLaneFull is the answer to a KindRelayRecord frame that arrived
+// while the record lane already held recordLaneLimit frames. The record was not
+// applied; the sender resends it after a backoff, so the reader never has to
+// wait for room.
+var ErrRecordLaneFull = errors.New("sidecarproto: record lane full")
+
+// recordLaneLimit bounds the KindRelayRecord frames waiting for the record
+// lane. A sender keeps one record in flight, so the lane normally holds one;
+// the room above that is for a resend that arrived while the attempt it
+// replaces was still being served.
+const recordLaneLimit = 64
+
 // ErrClosed is returned by Call once the Conn's read loop has stopped
 // (peer hung up, or Close was called) — every in-flight and subsequent Call
 // fails with it rather than blocking forever.
@@ -129,6 +155,10 @@ var ErrClosed = errors.New("sidecarproto: connection closed")
 // Conn is one end of the duplex supervision channel. Construct with New,
 // then use Call/Notify to talk to the peer; inbound requests are dispatched
 // to the Handler passed to New. Safe for concurrent use.
+//
+// Inbound requests are served concurrently, one goroutine each, with one
+// exception: KindRelayRecord frames are served by a single goroutine in the
+// order they arrived, each finishing before the next starts.
 type Conn struct {
 	w   *json.Encoder
 	rwc io.Closer
@@ -138,6 +168,12 @@ type Conn struct {
 	wmu sync.Mutex
 
 	handler Handler
+
+	// records is the record lane: KindRelayRecord frames wait here, in the
+	// order the reader took them off the wire, for serveRecords. Buffered so the
+	// reader never waits on a slow record; a frame that finds it full is
+	// answered with ErrRecordLaneFull instead.
+	records chan Frame
 
 	mu       sync.Mutex
 	nextID   uint64
@@ -161,10 +197,13 @@ func New(rwc io.ReadWriteCloser, handler Handler) *Conn {
 		rwc:     rwc,
 		handler: handler,
 		pending: make(map[uint64]chan Frame),
+		records: make(chan Frame, recordLaneLimit),
 		done:    make(chan struct{}),
 	}
 	// Recovers — see readLoop.
 	go c.readLoop(bufio.NewReader(rwc))
+	// Cannot panic on its own — see serveRecords.
+	go c.serveRecords()
 	return c
 }
 
@@ -243,8 +282,8 @@ func (c *Conn) Call(ctx context.Context, kind Kind, reqBody any, respBody any) e
 }
 
 // Notify sends a one-way message (no response awaited). Use for best-effort
-// signals — the hello key publish, a denial audit record — where the sender
-// doesn't need to sequence on delivery.
+// signals — the hello key publish — where the sender doesn't need to sequence
+// on delivery or learn whether it arrived.
 func (c *Conn) Notify(kind Kind, body any) error {
 	payload, err := marshalBody(body)
 	if err != nil {
@@ -350,6 +389,17 @@ func (c *Conn) deliverResponse(f Frame) {
 }
 
 func (c *Conn) dispatchRequest(f Frame) {
+	if f.Kind == KindRelayRecord {
+		select {
+		case c.records <- f:
+		default:
+			// Answered off the reader, like every response: the write can wait
+			// on the peer, and the reader must not. respond is frame
+			// bookkeeping over stdlib marshaling and cannot panic.
+			go c.respond(f, nil, ErrRecordLaneFull)
+		}
+		return
+	}
 	// One goroutine per inbound request: a slow authorize callback must not
 	// head-of-line-block the reader from delivering the response to a Call
 	// this side has open. The control channel's request rate is low.
@@ -360,20 +410,46 @@ func (c *Conn) dispatchRequest(f Frame) {
 	// bookkeeping over stdlib marshaling and cannot panic on its own.
 	go func() {
 		respBody, err := c.serveGuarded(f)
-		if f.ID == 0 {
-			// Notify — no response frame.
-			return
-		}
-		resp := Frame{Kind: f.Kind, ID: f.ID, IsResponse: true}
-		if err != nil {
-			resp.Err = err.Error()
-		} else if payload, mErr := marshalBody(respBody); mErr != nil {
-			resp.Err = fmt.Sprintf("marshal response: %v", mErr)
-		} else {
-			resp.Body = payload
-		}
-		_ = c.writeFrame(resp)
+		c.respond(f, respBody, err)
 	}()
+}
+
+// serveRecords is the record lane's only server. It takes record frames in the
+// order the reader queued them and serves each to completion before taking the
+// next, so two records are never applied at once or out of order — including a
+// resend that arrives while the attempt it replaces is still being served,
+// which then waits behind it.
+//
+// It cannot panic on its own: serveGuarded turns a panicking handler into that
+// record's error answer, and respond is frame bookkeeping over stdlib
+// marshaling.
+func (c *Conn) serveRecords() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case f := <-c.records:
+			respBody, err := c.serveGuarded(f)
+			c.respond(f, respBody, err)
+		}
+	}
+}
+
+// respond writes the response frame for request f: respBody on success, err's
+// text otherwise. A notify (id 0) gets no response frame.
+func (c *Conn) respond(f Frame, respBody any, err error) {
+	if f.ID == 0 {
+		return
+	}
+	resp := Frame{Kind: f.Kind, ID: f.ID, IsResponse: true}
+	if err != nil {
+		resp.Err = err.Error()
+	} else if payload, mErr := marshalBody(respBody); mErr != nil {
+		resp.Err = fmt.Sprintf("marshal response: %v", mErr)
+	} else {
+		resp.Body = payload
+	}
+	_ = c.writeFrame(resp)
 }
 
 // serveGuarded runs the handler under a panic guard, converting a panicking

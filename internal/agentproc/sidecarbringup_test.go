@@ -128,7 +128,7 @@ func TestBringUpSidecar_HandshakeAndProxyEnv(t *testing.T) {
 type fakeRelayDispatcher struct {
 	callReply json.RawMessage
 	calls     chan sidecarproto.RelayCallBody
-	notifies  chan sidecarproto.RelayCallBody
+	records   chan sidecarproto.RelayRecordBody
 }
 
 func (f *fakeRelayDispatcher) DispatchCall(_ context.Context, ns, op string, args json.RawMessage) (json.RawMessage, error) {
@@ -136,8 +136,9 @@ func (f *fakeRelayDispatcher) DispatchCall(_ context.Context, ns, op string, arg
 	return f.callReply, nil
 }
 
-func (f *fakeRelayDispatcher) DispatchNotify(_ context.Context, ns, op string, args json.RawMessage) {
-	f.notifies <- sidecarproto.RelayCallBody{Namespace: ns, Op: op, Args: args}
+func (f *fakeRelayDispatcher) DispatchRecord(_ context.Context, ns, op, key string, args json.RawMessage) error {
+	f.records <- sidecarproto.RelayRecordBody{Namespace: ns, Op: op, Key: key, Args: args}
+	return nil
 }
 
 func bringUpWithDispatcher(t *testing.T, relay RelayDispatcher) *scriptedSidecar {
@@ -208,21 +209,25 @@ func TestBringUpSidecar_RelayCallRoutesToDispatcher(t *testing.T) {
 	}
 }
 
-func TestBringUpSidecar_RelayNotifyRoutesToDispatcher(t *testing.T) {
-	relay := &fakeRelayDispatcher{notifies: make(chan sidecarproto.RelayCallBody, 1)}
+func TestBringUpSidecar_RelayRecordRoutesToDispatcher(t *testing.T) {
+	relay := &fakeRelayDispatcher{records: make(chan sidecarproto.RelayRecordBody, 1)}
 	sc := bringUpWithDispatcher(t, relay)
 
-	// The sidecar's git proxy reports a completed push (a fire-and-forget
-	// Notify); the supervisor must route it to the dispatcher without awaiting
-	// a reply.
-	if err := NotifyRelay(sc.conn, RelayNamespaceCore, OpRecordPush,
+	// The sidecar's git proxy records a completed push through the run's
+	// record sender; the supervisor must route it, key included, to the
+	// dispatcher.
+	sender := NewRecordSender(sc.conn)
+	if err := sender.Send(RelayNamespaceCore, OpRecordPush,
 		RecordPushArgs{Repo: "acme/widgets", Ref: "refs/heads/feature", NewSHA: "deadbeef", Created: true, Status: 200}); err != nil {
-		t.Fatalf("relay notify: %v", err)
+		t.Fatalf("send record: %v", err)
 	}
 	select {
-	case got := <-relay.notifies:
+	case got := <-relay.records:
 		if got.Namespace != RelayNamespaceCore || got.Op != OpRecordPush {
 			t.Fatalf("dispatcher saw wrong op: %s/%s", got.Namespace, got.Op)
+		}
+		if got.Key == "" {
+			t.Fatal("dispatcher saw a record with no key")
 		}
 		var a RecordPushArgs
 		if err := json.Unmarshal(got.Args, &a); err != nil {
@@ -232,6 +237,6 @@ func TestBringUpSidecar_RelayNotifyRoutesToDispatcher(t *testing.T) {
 			t.Fatalf("dispatcher saw wrong args: %+v", a)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("push notify was never routed to the dispatcher")
+		t.Fatal("push record was never routed to the dispatcher")
 	}
 }

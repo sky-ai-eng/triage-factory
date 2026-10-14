@@ -74,15 +74,21 @@ func (s *sidecarSupervisor) Handle(ctx context.Context, kind sidecarproto.Kind, 
 		// the op's own result shape.
 		return s.relay.DispatchCall(ctx, env.Namespace, env.Op, env.Args)
 
-	case sidecarproto.KindRelayNotify:
-		var env sidecarproto.RelayCallBody
+	case sidecarproto.KindRelayRecord:
+		var env sidecarproto.RelayRecordBody
 		if err := json.Unmarshal(body, &env); err != nil {
-			return nil, err
+			// Acknowledged, not refused: an error answer asks the sidecar to
+			// send the record again, and these same bytes would fail the same
+			// way, holding every record queued behind them for the rest of the
+			// run. The sidecar is this binary, so only a broken or compromised
+			// one can send this.
+			agentprocLog.Warn("dropping an audit record whose envelope does not decode", "error", err)
+			return nil, nil
 		}
-		if s.relay != nil {
-			s.relay.DispatchNotify(ctx, env.Namespace, env.Op, env.Args)
+		if s.relay == nil {
+			return nil, nil
 		}
-		return nil, nil
+		return nil, s.relay.DispatchRecord(ctx, env.Namespace, env.Op, env.Key, env.Args)
 
 	default:
 		return nil, fmt.Errorf("agentproc: unexpected sidecar request kind %q", kind)

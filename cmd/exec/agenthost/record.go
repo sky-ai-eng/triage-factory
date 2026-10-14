@@ -92,19 +92,22 @@ func recordActionTx(ctx context.Context, ts db.TxStores, orgID string, act *doma
 }
 
 // recordActionAlone appends act in a write of its own, on the pool the run's
-// writes take. It is what a funnel falls back to when the artifact composed
-// with act failed: a manual run's transaction rolled the action back with it,
-// and an event-triggered run never reached it. The ledger row is the audit log
-// of record and does not depend on the artifact. The commonest way the
-// artifact fails while the action would not is RLS: artifacts are keyed
-// org-wide but updated team-scoped, so a manual run acting on an object
-// another team's run recorded first cannot update that row, while the ledger
-// row it appends is only org-scoped.
+// writes take, retried like every write-stage write (withRecordRetry). It is
+// what a funnel falls back to when the artifact composed with act failed: a
+// manual run's transaction rolled the action back with it, and an
+// event-triggered run never reached it. The ledger row is the audit log of
+// record and does not depend on the artifact. The commonest way the artifact
+// fails while the action would not is RLS: artifacts are keyed org-wide but
+// updated team-scoped, so a manual run acting on an object another team's run
+// recorded first cannot update that row, while the ledger row it appends is
+// only org-scoped.
 func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationInfo, act *domain.ExternalAction) error {
-	return withWriteInfo(ctx, stores, info,
-		func() error { return recordActionSystemInfo(ctx, stores, info, act) },
-		func(ts db.TxStores) error { return recordActionTx(ctx, ts, info.OrgID, act) },
-	)
+	return withRecordRetry(ctx, func() error {
+		return withWriteInfo(ctx, stores, info,
+			func() error { return recordActionSystemInfo(ctx, stores, info, act) },
+			func(ts db.TxStores) error { return recordActionTx(ctx, ts, info.OrgID, act) },
+		)
+	})
 }
 
 // deletesUnrecordedComment reports whether a retires a comment that has no
@@ -117,9 +120,14 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 	if a == nil || a.Kind != domain.ArtifactKindComment || a.State != domain.ArtifactStateCommentDeleted {
 		return false
 	}
-	present, err := stores.Artifacts.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
+	var present map[string]bool
+	err := withRecordRetry(ctx, func() error {
+		var e error
+		present, e = stores.Artifacts.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
+		return e
+	})
 	if err != nil {
-		recordAuditDrop(ctx, dropStageRecord, recordDropOp(a, nil))
+		recordWriteDrop(ctx, recordDropOp(a, nil), err)
 		agenthostLog.Warn("reading a deleted comment's artifact failed; recording the action without it",
 			"conversation", info.ConversationID, "error", err)
 		return true
@@ -148,11 +156,15 @@ func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info Conver
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
 // failure is logged and swallowed — it must never unwind the agent's
-// already-applied action. Swallowed, but counted: this is the last stage of
-// the audit funnel auditstats.go measures, and the only one a local-mode
-// deployment (no sidecar, no relay) can reach. A failed artifact never costs
-// the action: the action is then written on its own (recordActionAlone), and
-// each failure is counted against what it lost.
+// already-applied action. Nobody else will retry it either, so the funnel does
+// (record_retry.go): it runs on a context of its own, detached from the
+// caller's, fixes the action's dedup key before the first attempt, and retries
+// each write that fails on a retryable error. What still fails is swallowed,
+// but counted: this is the last stage of the audit funnel auditstats.go
+// measures, and the only one a local-mode deployment (no sidecar, no relay)
+// can reach. A failed artifact never costs the action: the action is then
+// written on its own (recordActionAlone), and each failure is counted against
+// what it lost.
 func RecordExternalWrite(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact, act *domain.ExternalAction) {
 	if a != nil {
 		if stores.Artifacts == nil {
@@ -166,7 +178,10 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	}
 	if act != nil {
 		stampActionIdentityInfo(act, info)
+		mintActionDedupKey(ctx, info, act)
 	}
+	ctx, cancel := recordContext(ctx)
+	defer cancel()
 
 	// The artifact write itself, under the relay op that carried it (a
 	// sandboxed run) or under whatever ambient span exists. A CHILD rather
@@ -191,37 +206,39 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// written with it, or the action alone once the artifact's failure has been
 	// reported on its own.
 	lost := a
-	err := stampScopeInfo(ctx, stores, info.OrgID, a, act)
+	err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, stores, info.OrgID, a, act) })
 	if err == nil && deletesUnrecordedComment(ctx, stores, info, a) {
 		a, lost = nil, nil
 	}
 	if err == nil {
 		var artifactErr error
-		err = withWriteInfo(ctx, stores, info,
-			func() error {
-				artifactErr = nil
-				if a != nil {
-					if _, e := stores.Artifacts.UpsertSystem(ctx, info.OrgID, *a); e != nil {
-						artifactErr = e
-						return e
+		err = withRecordRetry(ctx, func() error {
+			return withWriteInfo(ctx, stores, info,
+				func() error {
+					artifactErr = nil
+					if a != nil {
+						if _, e := stores.Artifacts.UpsertSystem(ctx, info.OrgID, *a); e != nil {
+							artifactErr = e
+							return e
+						}
 					}
-				}
-				return recordActionSystemInfo(ctx, stores, info, act)
-			},
-			func(ts db.TxStores) error {
-				artifactErr = nil
-				if a != nil {
-					if _, e := ts.Artifacts.Upsert(ctx, info.OrgID, *a); e != nil {
-						artifactErr = e
-						return e
+					return recordActionSystemInfo(ctx, stores, info, act)
+				},
+				func(ts db.TxStores) error {
+					artifactErr = nil
+					if a != nil {
+						if _, e := ts.Artifacts.Upsert(ctx, info.OrgID, *a); e != nil {
+							artifactErr = e
+							return e
+						}
 					}
-				}
-				return recordActionTx(ctx, ts, info.OrgID, act)
-			},
-		)
+					return recordActionTx(ctx, ts, info.OrgID, act)
+				},
+			)
+		})
 		if artifactErr != nil && act != nil {
 			recordSpanError(span, artifactErr)
-			recordAuditDrop(ctx, dropStageRecord, recordDropOp(a, nil))
+			recordWriteDrop(ctx, recordDropOp(a, nil), artifactErr)
 			agenthostLog.Warn("artifact recording failed; recording the action without it",
 				"conversation", info.ConversationID, "kind", a.Kind, "target", a.Target, "error", artifactErr)
 			err = recordActionAlone(ctx, stores, info, act)
@@ -237,7 +254,7 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 			target = act.Target
 		}
 		recordSpanError(span, err)
-		recordAuditDrop(ctx, dropStageRecord, recordDropOp(lost, act))
+		recordWriteDrop(ctx, recordDropOp(lost, act), err)
 		agenthostLog.Warn("external write recording failed (action already applied)",
 			"conversation", info.ConversationID, "kind", kind, "target", target, "error", err)
 	}

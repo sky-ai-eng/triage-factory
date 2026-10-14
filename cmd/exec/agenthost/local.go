@@ -2725,9 +2725,10 @@ func GHWriteDeniedAction(req ghwrite.Request, ref ghwrite.Refusal, credential st
 // made outside the jail and the sandbox never names its own denials.
 //
 // Unlike the other recorders here this one is NOT best-effort by intent — its
-// caller is a relay Call rather than a notify precisely so the refusal record
-// cannot be silently lost — but a store failure still only costs the row, never
-// the refusal: the request is already being turned down by the time this runs.
+// caller is a relay Call rather than a queued record precisely so the refusal
+// row is written before the refusal is answered — but a store failure still
+// only costs the row, never the refusal: the request is already being turned
+// down by the time this runs.
 func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) {
 	c.recordBotAction(ctx, GHWriteDeniedAction(req, ref, c.githubCredential()))
 }

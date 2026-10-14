@@ -115,10 +115,14 @@ providers.
   incident**: an agent wrote something under an org credential, the write
   landed upstream, and TF has no `external_actions` row for it.
 
-  This exists because the audit pipeline is fire-and-forget by contract. The
-  external act has already happened by the time TF records it, so nothing
-  downstream may fail the act to save the record — which means a failure is
-  swallowed, and until it was counted, a hole in the log was invisible.
+  The external act has already happened by the time TF records it, so nothing
+  downstream may fail the act to save the record, and the agent has moved on.
+  TF tries hard to land the row anyway: the database write is retried when it
+  fails on a connection error, a serialization failure or a timeout, on a
+  budget of its own that the end of the run does not cut short; and in a
+  sandboxed run the credential sidecar holds each record until the
+  orchestrator acknowledges it, resending it until it lands. What is still lost
+  is counted here.
 
   `stage` says where it was lost, and only the last of the four is reachable in
   local mode (there is no sidecar and no relay there, so the rest staying empty
@@ -126,10 +130,10 @@ providers.
 
   | `stage` | What was lost |
   | --- | --- |
-  | `relay_send` | The run's credential sidecar could not put the record on the supervision channel, and said so over that same channel. |
-  | `relay_decode` | The record arrived at the orchestrator and could not be decoded, or named an op this binary has no handler for. |
-  | `relay_dispatch` | A provider's own notify handler (Slack, …) ran and failed. |
-  | `record` | The record reached the database write and the write failed. |
+  | `relay_send` | The run's credential sidecar gave the record up before the orchestrator applied it: it was still unacknowledged when the run ended, its queue was full, or it could not be encoded. Reported by the sidecar when the run's cell is torn down. |
+  | `relay_decode` | The record arrived at the orchestrator and could not be decoded, carried no valid key, or named an op this binary has no handler for. |
+  | `relay_dispatch` | A provider's own record handler (Slack, …) ran and failed. |
+  | `record` | The record reached the database write and the write failed for good: on an error a retry cannot fix, or once its retries ran out. In a sandboxed run a write that keeps failing on a retryable error is not counted here; the sidecar resends the record, and it is counted at `relay_send` if the run ends first. |
 
   `op` names what was being recorded, in the vocabulary of its stage: a
   `<namespace>.<op>` relay pair for the relay stages (`core.record_gh_write`,
@@ -146,9 +150,12 @@ providers.
   collapsed to `other`.
 
   One loss is outside what this can measure, and is accepted rather than
-  fixed: a record written as a run is torn down can lose to the supervision
-  channel closing, which takes the report of its own loss with it. There is no
-  durable spool — the decision was counters first, revisit if they ever fire.
+  fixed: records still held by a sidecar that dies before its cell is torn
+  down — the sidecar crashes, or the executor does — go with it, and so does
+  the report of their loss. The sidecar keeps its queue in memory only. A spool
+  on disk would not help: the supervision channel is never re-established, and
+  the teardown that follows deletes the run's files, so nothing would ever
+  replay it.
 
   Alertable at the first occurrence:
 
@@ -767,7 +774,7 @@ of runs that were stopped.
 What happens after agent-live appears as separate, punctual traces that **link
 back** to the engagement root: `permission.prompt` (the human wait, which the
 run's own duration accounting deliberately discounts), `relay.call` /
-`relay.notify` (each exec verb the sandboxed agent relayed out),
+`relay.record` (each exec verb and audit record the sandboxed agent relayed out),
 `git.authorize` and `git.record_push`, `artifact.record`,
 `workspace.snapshot`, and `engagement.complete`, which carries the run's cost,
 duration and turn count. Open any of them and the links menu walks to the
@@ -920,7 +927,7 @@ requests to GitHub, Jira, Slack, and the LLM providers:
   `external_actions` log is missing a write that really happened. See
   [dropped audit records](#dropped-audit-records) for what each stage means,
   which of them local mode can reach, and the one loss the counters
-  deliberately cannot see.
+  cannot see.
 - **Connections.** `tf_upstream_requests_total` and
   `tf_upstream_retries_total`, each by `upstream` and `outcome`, and the number
   of orgs per upstream with a `transient` or `auth` attempt in the last 5

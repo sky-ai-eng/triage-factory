@@ -56,9 +56,9 @@ func TestRelayRuntime_InsertConversationWorktreeBindsConversationIdentity(t *tes
 	}
 }
 
-func (c directDispatchConn) notify(namespace, op string, args any) {
+func (c directDispatchConn) record(namespace, op string, args any) {
 	raw, _ := json.Marshal(args)
-	c.srv.DispatchNotify(context.Background(), namespace, op, raw)
+	_ = c.srv.DispatchRecord(context.Background(), namespace, op, uuid.NewString(), raw)
 }
 
 func TestRelayRuntime_RoundTripsCoreOps(t *testing.T) {

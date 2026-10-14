@@ -50,6 +50,12 @@ type credRuntime struct {
 	// conn is constructed (the conn needs this runtime as its Handler first).
 	conn *sidecarproto.Conn
 
+	// records is the run's one audit-record sender on conn, set beside it.
+	// Every record this process sends goes through it — the proxies' and the
+	// exec verbs' alike — because a single sender is what keeps them in the
+	// order the acts happened.
+	records *agentproc.RecordSender
+
 	// sharedOrigin is the run's fake-GHE origin listener, bound by the broker on
 	// a privileged port and handed down at launch. nil when none was passed, in
 	// which case the gh injector binds an ephemeral port itself and the sandbox's
@@ -84,8 +90,11 @@ func newCredRuntime() (*credRuntime, error) {
 
 // setConn wires the supervision channel after construction (the conn is built
 // with this runtime as its Handler, so the runtime can't be handed the conn
-// at construction time).
-func (r *credRuntime) setConn(c *sidecarproto.Conn) { r.conn = c }
+// at construction time), and starts the run's audit-record sender on it.
+func (r *credRuntime) setConn(c *sidecarproto.Conn) {
+	r.conn = c
+	r.records = agentproc.NewRecordSender(c)
+}
 
 // setSharedOriginListener adopts the broker-bound shared-origin listener (nil is
 // fine — see the field's doc). Called once at startup, before the supervision
@@ -124,6 +133,8 @@ func (r *credRuntime) Handle(ctx context.Context, kind sidecarproto.Kind, body j
 		return nil, r.acceptSealedBundle(body)
 	case sidecarproto.KindStartProxies:
 		return r.startProxies(ctx, body)
+	case sidecarproto.KindDrainRecords:
+		return r.records.Drain(ctx), nil
 	default:
 		return nil, fmt.Errorf("runsidecar: unexpected request kind %q", kind)
 	}
@@ -376,7 +387,7 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 	// selects its bot token from it, and the verbs explain a refusal from its
 	// source manifest — live reads, so a mid-run brain re-seal is picked up.
 	// The orchestrator is never asked for a secret.
-	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, info, r), proxyCreds)
+	srv := agenthost.NewServerWithRuntime(agenthost.NewRelayRuntime(r.conn, r.records, info, r), proxyCreds)
 	hd, _, err := startAgentHostSocket(srv, info.ConversationID)
 	if err != nil {
 		return fmt.Errorf("runsidecar: start agenthost: %w", err)
@@ -520,7 +531,8 @@ func (r *credRuntime) startGHInjector(hostVethIP, upstream, conversationID strin
 // ghInjectorConfig builds the gh channel's per-run wiring, the sibling of
 // gitProxyConfig: the TokenSource reads the held bundle's single
 // team-set-scoped CLIToken live (so a mid-run re-seal is picked up), and the
-// two fire-and-forget callbacks relay to the orchestrator, which holds the DB.
+// two callbacks relay to the orchestrator, which holds the DB: the observed
+// write as a queued audit record, the authorization as a call.
 //
 // Split from startGHInjector so a test can assert on the wiring alone, without
 // the listener bring-up around it.
@@ -547,7 +559,7 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			return gh.CLIToken.Token, nil
 		},
 		ObserveWrite: func(_ context.Context, w ghinjector.ObservedWrite) {
-			// Fire-and-forget: the request already transited, and the
+			// Queued, not awaited: the request already transited, and the
 			// orchestrator holds the DB that turns it into an audit row.
 			// Every mutating REST call rides this, including the refused ones the
 			// artifact path drops. The created object's coordinates ride along
@@ -567,10 +579,10 @@ func (r *credRuntime) ghInjectorConfig(upstream string, cert tls.Certificate, to
 			// A GraphQL write is named in its request, which only this process
 			// ever saw — the orchestrator receives the act's name or nothing.
 			args.GraphQL = ghWriteFactsToWire(w.GraphQL)
-			r.notifyAudit(agentproc.OpRecordGHWrite, args)
+			r.recordAudit(agentproc.OpRecordGHWrite, args)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, _ ghwrite.Refusal) bool {
-			// A Call, not a notify: the agent's request is held until the
+			// A Call, not a record: the agent's request is held until the
 			// orchestrator answers, because a refusal that raced the forward
 			// would not be one. The orchestrator re-derives the decision from
 			// the shared table and writes the denial row before replying, so
@@ -874,21 +886,23 @@ func (r *credRuntime) llmSource(ctx context.Context) (map[string]string, time.Ti
 // and repeated denials are the clearest signal available that an agent is
 // probing for a way out — the reason this hook exists at all.
 func (r *credRuntime) recordEgressDenial(_ context.Context, denied egressproxy.DeniedConnect) {
-	r.notifyAudit(agentproc.OpRecordEgressDenial,
+	r.recordAudit(agentproc.OpRecordEgressDenial,
 		agentproc.RecordEgressDenialArgs{Target: denied.Target, Reason: denied.Reason})
 }
 
-// notifyAudit relays one audit record to the orchestrator, which holds the DB
-// that turns it into a row. Every audit relay this process sends goes through
-// here so that a record lost on the way is reported rather than discarded: this
+// recordAudit queues one audit record for the orchestrator, which holds the DB
+// that turns it into a row. It goes through the run's one record sender, the
+// same one the exec verbs record through, so records reach the orchestrator in
+// the order the acts happened and are resent until it has applied them. A
+// record the sender gives up on is counted at the end-of-run drain: this
 // process installs no meter provider and opens no listener, so the only place a
 // drop can be counted is the side it was headed for.
 //
 // Void, like every caller expects — the external act it describes already
 // happened, and no audit record may fail the thing it is a record of.
-func (r *credRuntime) notifyAudit(op string, args any) {
-	if err := agentproc.NotifyRelayAudit(r.conn, agentproc.RelayNamespaceCore, op, args); err != nil {
-		sidecarLog.Warn("relaying an audit record failed", "op", op, "error", err)
+func (r *credRuntime) recordAudit(op string, args any) {
+	if err := r.records.Send(agentproc.RelayNamespaceCore, op, args); err != nil {
+		sidecarLog.Warn("queueing an audit record failed", "op", op, "error", err)
 	}
 }
 
@@ -935,7 +949,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			}, nil
 		},
 		RecordDenial: func(_ context.Context, denied gitproxy.DeniedGitOp) {
-			r.notifyAudit(agentproc.OpRecordDenial,
+			r.recordAudit(agentproc.OpRecordDenial,
 				agentproc.RecordDenialArgs{
 					Owner:  denied.Owner,
 					Repo:   denied.Repo,
@@ -950,7 +964,7 @@ func (r *credRuntime) gitProxyConfig(upstream string) *agentproc.GitProxyConfig 
 			// in this sandbox (StartRunProxies sets PushCaptureProxy), so this
 			// relay is the sole push-capture path on the executor — without it
 			// no executor push reaches the audit log.
-			r.notifyAudit(agentproc.OpRecordPush,
+			r.recordAudit(agentproc.OpRecordPush,
 				agentproc.RecordPushArgs{
 					Repo:    push.Repo,
 					Ref:     push.Ref,

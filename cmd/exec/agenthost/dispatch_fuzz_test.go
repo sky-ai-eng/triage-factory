@@ -41,7 +41,7 @@ func (fuzzRelayConn) call(_ context.Context, namespace, op string, _, out any) e
 	return fmt.Errorf("fuzz fixture: relay %s/%s unavailable", namespace, op)
 }
 
-func (fuzzRelayConn) notify(string, string, any) {}
+func (fuzzRelayConn) record(string, string, any) {}
 
 // fuzzRelayResult delivers a canned op result through the same marshal/unmarshal
 // hop the real relay uses, so the runtime decodes it exactly as it would a wire
