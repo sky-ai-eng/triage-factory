@@ -61,6 +61,10 @@ type RecordSender struct {
 	wake chan struct{}
 	// stop closes when Drain stops the sender.
 	stop chan struct{}
+	// exited closes when the sending goroutine returns, however it returns —
+	// so a Drain after a panic in it reports at once rather than waiting for a
+	// queue nothing will empty.
+	exited chan struct{}
 }
 
 // recordConn is the slice of *sidecarproto.Conn a RecordSender drives,
@@ -122,6 +126,7 @@ func newRecordSender(conn recordConn, policy recordSendPolicy) *RecordSender {
 		undelivered: map[recordName]int{},
 		wake:        make(chan struct{}, 1),
 		stop:        make(chan struct{}),
+		exited:      make(chan struct{}),
 	}
 	// Recovers — see run.
 	go s.run()
@@ -184,6 +189,7 @@ func (s *RecordSender) Drain(ctx context.Context) sidecarproto.DrainRecordsResul
 		case <-empty:
 		case <-ctx.Done():
 		case <-s.conn.Done():
+		case <-s.exited:
 		}
 	}
 
@@ -219,6 +225,7 @@ func (s *RecordSender) Drain(ctx context.Context) sidecarproto.DrainRecordsResul
 // panic because it runs in the sidecar (see cmd/runsidecar's goroutine rule);
 // a panic ends delivery, and the records still queued are lost with it.
 func (s *RecordSender) run() {
+	defer close(s.exited)
 	defer func() {
 		if rec := recover(); rec != nil {
 			agentprocLog.Error("audit record sender panicked; queued records will not be delivered",

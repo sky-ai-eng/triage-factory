@@ -556,3 +556,38 @@ func TestRelayServer_WireDedupKeyIsNotTrusted(t *testing.T) {
 		t.Fatalf("dedup key = %q; want the derived %q, not the sidecar's %q", acts[0].DedupKey, want, forged)
 	}
 }
+
+// TestRelayServer_EveryRecordApplicationHasADeadline: the record lane serves
+// one record at a time, so every application runs under a deadline — the ops
+// that set no timeout of their own included, like a git denial or a provider's
+// record.
+func TestRelayServer_EveryRecordApplicationHasADeadline(t *testing.T) {
+	t.Cleanup(ResetProviders)
+	deadlines := make(chan bool, 2)
+	RegisterProviderOp("acmeprov", "record_thing",
+		func(ctx context.Context, _ db.Stores, _ ConversationInfo, _ json.RawMessage) (any, error) {
+			_, ok := ctx.Deadline()
+			deadlines <- ok
+			return nil, nil
+		})
+	git := &agentproc.GitProxyConfig{
+		RecordDenial: func(ctx context.Context, _ gitproxy.DeniedGitOp) {
+			_, ok := ctx.Deadline()
+			deadlines <- ok
+		},
+	}
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, git)
+
+	denial, _ := json.Marshal(agentproc.RecordDenialArgs{Owner: "acme", Repo: "widgets", Op: "push", Reason: "off-ref"})
+	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordDenial, denial); err != nil {
+		t.Fatalf("denial: %v", err)
+	}
+	if err := relayRecord(t, s, "acmeprov", "record_thing", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("provider record: %v", err)
+	}
+	for _, name := range []string{"git denial", "provider record"} {
+		if !<-deadlines {
+			t.Errorf("%s ran with no deadline", name)
+		}
+	}
+}

@@ -199,9 +199,17 @@ var errRecordPanicked = errors.New("agenthost: applying an audit record panicked
 // any other failure that would repeat: answered with an error, the record
 // would be resent and panic again, holding every record queued behind it for
 // the rest of the run.
+//
+// Every application is capped at recordPushRelayTimeout, for the same reason:
+// the record lane serves one record at a time, so one that never finished
+// would hold every record behind it. The cap reaches only what honours its
+// context — the write funnel runs on a budget of its own (recordContext), and
+// nothing can stop a handler that ignores both.
 func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key string, args json.RawMessage) (answer error) {
 	ctx, span := s.startRelayOp(ctx, "relay.record", namespace, op)
 	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
 			recordSpanError(span, errRecordPanicked)
@@ -225,12 +233,7 @@ func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key str
 		stage = dropStageRelayDecode
 		err = s.dispatchCoreRecord(withRelayedRecord(ctx, rec), op, args)
 	default:
-		// Capped like every core record op: the record lane serves one record
-		// at a time, so a provider handler that never returned would hold
-		// every record behind it.
-		pctx, cancel := context.WithTimeout(withRelayedRecord(ctx, rec), recordPushRelayTimeout)
-		_, err = dispatchProviderOp(pctx, s.stores, s.info, namespace, op, args)
-		cancel()
+		_, err = dispatchProviderOp(withRelayedRecord(ctx, rec), s.stores, s.info, namespace, op, args)
 	}
 	if err != nil {
 		recordSpanError(span, err)

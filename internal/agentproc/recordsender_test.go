@@ -289,3 +289,40 @@ func TestRecordSender_CountsWhatNeverEnteredTheQueue(t *testing.T) {
 		}
 	}
 }
+
+// panickingConn is a channel whose every call panics, standing in for a bug in
+// the sending goroutine.
+type panickingConn struct{ done chan struct{} }
+
+func (c panickingConn) Call(context.Context, sidecarproto.Kind, any, any) error {
+	panic("sender bug")
+}
+
+func (c panickingConn) Done() <-chan struct{} { return c.done }
+
+// TestRecordSender_DrainDoesNotWaitOnADeadSender: once the sending goroutine
+// is gone, nothing will empty the queue, so a drain reports what it holds at
+// once instead of waiting out its bound.
+func TestRecordSender_DrainDoesNotWaitOnADeadSender(t *testing.T) {
+	policy := testRecordSendPolicy
+	policy.drainWait = 5 * time.Second
+	sender := newRecordSender(panickingConn{done: make(chan struct{})}, policy)
+
+	if err := sender.Send(RelayNamespaceCore, OpRecordPush, pushRecord("a")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	select {
+	case <-sender.exited:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the sending goroutine did not exit after panicking")
+	}
+
+	start := time.Now()
+	res := sender.Drain(context.Background())
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("Drain took %v; want it to return at once on a dead sender", took)
+	}
+	if len(res.Undelivered) != 1 || res.Undelivered[0].Op != OpRecordPush || res.Undelivered[0].Count != 1 {
+		t.Fatalf("undelivered = %+v; want the one queued push", res.Undelivered)
+	}
+}
