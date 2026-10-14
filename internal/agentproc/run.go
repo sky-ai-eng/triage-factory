@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -643,7 +644,9 @@ func Run(ctx context.Context, opts RunOptions, sink Sink) (*Outcome, error) {
 // fast with a typed error rather than waiting for the SDK to ENOAUTH
 // inside the subprocess. The resolver returns an empty map when no
 // per-org credentials are configured; mergeEnv detects that and
-// preserves the inherited env (subscription / shell-env fallback).
+// preserves the inherited env (subscription / shell-env fallback), and
+// the auth surface of the operator's own Claude Code settings is
+// forwarded on top of it (operatorAuth).
 //
 // Setpgid + the Cancel hook give the caller hard teardown: cancelling
 // runCtx SIGKILLs the whole process group so children the agent spawned
@@ -653,6 +656,13 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	creds, err := resolveCredentials(runCtx, opts.Secrets, opts.OrgID, opts.Model, opts.LLMResolver)
 	if err != nil {
 		return nil, fmt.Errorf("resolve credentials for org %q: %w", opts.OrgID, err)
+	}
+	var auth operatorAuth
+	if len(creds) == 0 {
+		auth = loadOperatorAuth()
+	}
+	if auth.settings != "" {
+		nodeArgs = append(slices.Clip(nodeArgs), "--settings", auth.settings)
 	}
 	argv, err := directArgv(opts, nodeArgs)
 	if err != nil {
@@ -728,6 +738,10 @@ func newDirectCommand(runCtx context.Context, opts RunOptions, nodeArgs []string
 	// dir — wins over any inherited copy under exec's last-wins duplicate
 	// resolution. Empty when the run has no channel.
 	hookEnv = append(hookEnv, directGHChannelEnv(opts.GHChannel)...)
+	// The operator's settings env goes over the inherited env, the order
+	// Claude Code itself applies the two in. Empty when a credential was
+	// resolved.
+	parentEnv = append(parentEnv, auth.env...)
 	cmd.Env = githooks.DirectAgentEnv(mergeEnv(parentEnv, hookEnv, creds), identityPairs...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

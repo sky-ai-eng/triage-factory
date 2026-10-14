@@ -20,9 +20,9 @@
 // Auth resolves through the SDK's own env-var/keychain logic — we
 // deliberately don't touch ANTHROPIC_API_KEY, CLAUDE_CODE_USE_BEDROCK,
 // AWS creds, or the macOS keychain entry here. Whatever the parent
-// process (Triage Factory binary) put in env wins, and the SDK
-// transparently falls back to the user's local Claude Code OAuth login
-// when nothing is set, billing against their Pro/Max subscription.
+// process (Triage Factory binary) put in env and --settings wins, and the
+// SDK falls back to the user's local Claude Code OAuth login when nothing
+// is set, billing against their Pro/Max subscription.
 import { query } from "@anthropic-ai/claude-agent-sdk"
 import { randomUUID } from "node:crypto"
 import { createInterface } from "node:readline"
@@ -72,6 +72,16 @@ function parseArgs(argv) {
         break
       case "--permission-mode":
         opts.permissionMode = next()
+        break
+      case "--setting-sources":
+        // An empty value becomes [], which loads no settings file at all;
+        // leaving the option unset would load every source.
+        opts.settingSources = next().split(",").filter(Boolean)
+        break
+      case "--settings":
+        // A JSON object, handed to the SDK as one so it is validated here
+        // rather than read by Claude Code as a file path.
+        opts.settings = JSON.parse(next())
         break
       case "--claude-bin":
         // Explicit Claude binary (local-mode TF_CLAUDE_BINARY override). The Go

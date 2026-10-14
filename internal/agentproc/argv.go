@@ -17,6 +17,30 @@ import "strconv"
 // follow-up message, never a question tool.
 const disallowedTools = "AskUserQuestion"
 
+// settingSources is the --setting-sources value of an SDK spawn: the
+// settings files at the run's cwd, and never the operator's own. Left unset,
+// Claude Code loads ~/.claude/settings.json too, and that file's permission
+// rules merge with the allowlist, its env overrides the credential TF
+// resolved, and its hooks, plugins and instructions join every run.
+//
+// project stays because a run's staged skills (<runRoot>/.claude/skills) and
+// a repository's CLAUDE.md are both discovered through it. Nothing writes a
+// run root's settings files, and Claude Code refuses an agent's own writes to
+// them. What a run still needs from the operator's settings, the auth surface
+// of a "system credentials" setup, is forwarded by operatorAuth instead.
+//
+// A spawn with no Cwd (the system jobs and the model probe) loads no settings
+// file at all. It runs in whatever directory TF was started from, and Claude
+// Code reads project settings from the cwd, so started from the operator's
+// home, the project settings file is ~/.claude/settings.json itself. Those
+// spawns have no project to load anyway.
+func settingSources(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return "project"
+}
+
 // defaultPermissionMode is the posture a run gets when RunOptions leaves
 // PermissionMode empty: an off-allowlist tool call goes to the canUseTool
 // handler when one is wired, and is denied when none is.
@@ -60,15 +84,16 @@ func BuildArgs(opts RunOptions) []string {
 		args = append(args, "--model", opts.Model)
 	}
 	// Always sent. The SDK leaves an omitted mode to Claude Code, which
-	// applies the operator's own settings defaultMode and, with telemetry
-	// off or a third-party provider, starts in auto — where a classifier,
-	// not the allowlist, decides whether an unlisted tool runs. Every caller
-	// that leaves PermissionMode empty is relying on the allowlist.
+	// applies a settings defaultMode and, with telemetry off or a
+	// third-party provider, starts in auto — where a classifier, not the
+	// allowlist, decides whether an unlisted tool runs. Every caller that
+	// leaves PermissionMode empty is relying on the allowlist.
 	permissionMode := opts.PermissionMode
 	if permissionMode == "" {
 		permissionMode = defaultPermissionMode
 	}
 	args = append(args, "--permission-mode", permissionMode)
+	args = append(args, "--setting-sources", settingSources(opts.Cwd))
 	args = append(args,
 		"--output-format", "stream-json",
 		"--verbose",

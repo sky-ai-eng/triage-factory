@@ -63,18 +63,8 @@ func TestArgs_MountPlan(t *testing.T) {
 		"--tmpfs", "/home/dev/.triagefactory",
 		"--tmpfs", "/run",
 		"--tmpfs", "/tmp",
-		// Then everything that comes back through them. ~/.claude first, by
-		// entry: the operator's configuration ro, the credential and this
-		// run's transcript rw, and never the directory itself.
-		"--ro-bind-try", "/home/dev/.claude/settings.json", "/home/dev/.claude/settings.json",
-		"--ro-bind-try", "/home/dev/.claude/CLAUDE.md", "/home/dev/.claude/CLAUDE.md",
-		"--ro-bind-try", "/home/dev/.claude/rules", "/home/dev/.claude/rules",
-		"--ro-bind-try", "/home/dev/.claude/skills", "/home/dev/.claude/skills",
-		"--ro-bind-try", "/home/dev/.claude/commands", "/home/dev/.claude/commands",
-		"--ro-bind-try", "/home/dev/.claude/agents", "/home/dev/.claude/agents",
-		"--ro-bind-try", "/home/dev/.claude/output-styles", "/home/dev/.claude/output-styles",
-		"--ro-bind-try", "/home/dev/.claude/plugins", "/home/dev/.claude/plugins",
-		"--ro-bind-try", "/home/dev/.claude/hooks", "/home/dev/.claude/hooks",
+		// Then everything that comes back through them. ~/.claude first: the
+		// credential and this run's transcript, and never the directory itself.
 		"--bind-try", "/home/dev/.claude/.credentials.json", "/home/dev/.claude/.credentials.json",
 		"--bind", testProjectDir, testProjectDir,
 		"--ro-bind-try", "/home/dev/.triagefactory/hooks", "/home/dev/.triagefactory/hooks",
@@ -254,16 +244,16 @@ func TestPreflight_RefusesATranscriptDirOutsideProjects(t *testing.T) {
 }
 
 // TestArgs_ClaudeDirIsNeverBoundWhole states the property the golden encodes
-// on its own: nothing binds ~/.claude itself, and the only rw binds beneath
-// it are the credential file and this run's transcript directory. Anything
-// else rw there would reach paths the operator's own sessions load.
+// on its own: nothing binds ~/.claude itself, and the only binds beneath it
+// are the credential file and this run's transcript directory. Anything else
+// writable there would reach paths the operator's own sessions load.
 func TestArgs_ClaudeDirIsNeverBoundWhole(t *testing.T) {
 	host := testHost()
 	got, err := Args(Spec{RunRoot: "/tmp/triagefactory-runs/rk1", ClaudeProjectDir: testProjectDir}, host)
 	if err != nil {
 		t.Fatalf("Args: %v", err)
 	}
-	writable := map[string]bool{
+	allowed := map[string]bool{
 		filepath.Join(host.ClaudeDir, claudeCredentialsFile): true,
 		testProjectDir: true,
 	}
@@ -276,8 +266,8 @@ func TestArgs_ClaudeDirIsNeverBoundWhole(t *testing.T) {
 			t.Errorf("%s binds ~/.claude whole", flag)
 		}
 		under := strings.HasPrefix(src, host.ClaudeDir+string(filepath.Separator))
-		if under && !strings.HasPrefix(flag, "--ro-") && !writable[src] {
-			t.Errorf("%s %s is writable under ~/.claude", flag, src)
+		if under && !allowed[src] {
+			t.Errorf("%s %s binds an entry of ~/.claude", flag, src)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 
 func TestBuildArgs_InitialInvocation(t *testing.T) {
 	got := BuildArgs(RunOptions{
+		Cwd:          "/tmp/triagefactory-runs/rk1",
 		Message:      "do the thing",
 		Model:        "sonnet-4-6",
 		AllowedTools: "Read,Write",
@@ -17,6 +18,7 @@ func TestBuildArgs_InitialInvocation(t *testing.T) {
 		"-p", "do the thing",
 		"--model", "sonnet-4-6",
 		"--permission-mode", "default",
+		"--setting-sources", "project",
 		"--output-format", "stream-json",
 		"--verbose",
 		"--allowedTools", "Read,Write",
@@ -108,6 +110,38 @@ func TestBuildArgs_DisallowsAskUserQuestion(t *testing.T) {
 		}
 		if got[idx+1] != "AskUserQuestion" {
 			t.Errorf("%s: --disallowedTools value = %q, want AskUserQuestion", name, got[idx+1])
+		}
+	}
+}
+
+// TestBuildArgs_LoadsOnlyProjectSettings pins that no spawn loads the
+// operator's user settings: one-shot, interactive and resume runs name the
+// project source alone, and a spawn with no cwd of its own names none, since
+// its cwd is wherever TF was started and may be the operator's home. Left to
+// Claude Code's default, the operator's permission rules would merge with the
+// allowlist.
+func TestBuildArgs_LoadsOnlyProjectSettings(t *testing.T) {
+	const cwd = "/tmp/triagefactory-runs/rk1"
+	cases := map[string]struct {
+		opts RunOptions
+		want string
+	}{
+		"one-shot":    {RunOptions{Cwd: cwd, Message: "hi"}, "project"},
+		"interactive": {RunOptions{Cwd: cwd, Interactive: true, PermissionPrompts: true}, "project"},
+		"resume":      {RunOptions{Cwd: cwd, Message: "hi", SessionID: "sess-123"}, "project"},
+		"no cwd":      {RunOptions{Message: "score these"}, ""},
+	}
+	for name, tc := range cases {
+		got := BuildArgs(tc.opts)
+		idx := slices.Index(got, "--setting-sources")
+		if idx < 0 || idx+1 >= len(got) {
+			t.Fatalf("%s: expected --setting-sources flag: %v", name, got)
+		}
+		if got[idx+1] != tc.want {
+			t.Errorf("%s: --setting-sources value = %q, want %q", name, got[idx+1], tc.want)
+		}
+		if slices.Contains(got, "--settings") {
+			t.Errorf("%s: BuildArgs emits --settings; only the spawn adds it, and only without a resolved credential: %v", name, got)
 		}
 	}
 }
