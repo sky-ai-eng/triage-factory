@@ -366,7 +366,7 @@ func TestReconcile_Transitions(t *testing.T) {
 		branches: map[string]bool{"octo/repo/feature": false}, // gone
 	}
 	res := &fakeResolver{client: newStubClient(t, stub)}
-	rc := NewReconciler(res, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
@@ -403,7 +403,7 @@ func TestReconcile_PRClosed(t *testing.T) {
 	stub := &stubGH{prs: map[string]string{
 		"PR_3": prNodeJSON("PR_3", 3, "CLOSED", false, false),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -467,7 +467,7 @@ func TestReconcile_DraftMarkedReadyRunsTheResolvedHook(t *testing.T) {
 	seedArt(draft)
 
 	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "OPEN", false, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	var (
 		mu       sync.Mutex
 		resolved []string
@@ -506,7 +506,7 @@ func TestReconcile_OpenNeverReturnsToDraft(t *testing.T) {
 	seedArt(open)
 
 	stub := &stubGH{prs: map[string]string{"PR_8": prNodeJSON("PR_8", 8, "OPEN", true, false)}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	hookRan := false
 	rc.SetPullRequestResolvedHook(func(context.Context, string, string) { hookRan = true })
 
@@ -572,7 +572,7 @@ func TestReconcile_SingleConversationScope(t *testing.T) {
 		"PR_7": prNodeJSON("PR_7", 7, "MERGED", false, true),
 		"PR_8": prNodeJSON("PR_8", 8, "MERGED", false, true),
 	}}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 
 	convAArts, err := stores.Artifacts.ListByConversation(ctx, runmode.LocalDefaultOrgID, convA)
 	if err != nil {
@@ -604,7 +604,7 @@ func TestRunner_SuppressesCancelErrorOnShutdown(t *testing.T) {
 	t.Cleanup(func() { reconcileLog = prev })
 
 	stores, _, _ := reconcileTestStores(t)
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, &stubGH{})}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	r := NewRunner(rc, runmode.LocalDefaultOrgID)
 
 	// An already-cancelled ctx makes the cycle's first DB call (ListNonTerminalBySystem)
@@ -666,7 +666,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	client := github.NewClientWithHTTPClient(srv.URL, "test-token",
 		&http.Client{Transport: &cancelAfterFetchRT{t: t, base: http.DefaultTransport, cancel: cancel}})
-	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 
 	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, conversationID)
 	if err != nil {
@@ -689,7 +689,7 @@ func TestReconcile_WriteBackSurvivesCallerCancel(t *testing.T) {
 // test wants the count via the org-wide path.
 func reconcileSet(t *testing.T, stores db.Stores, res clientResolver, orgID string) ([]domain.Artifact, error) {
 	t.Helper()
-	rc := NewReconciler(res, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(res, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), orgID)
 	if err != nil {
 		return nil, err
@@ -733,67 +733,120 @@ func assertState(t *testing.T, stores db.Stores, orgID, dedupKey, want string) {
 	t.Errorf("artifact %s not found", dedupKey)
 }
 
-// --- gh-channel PR-artifact backstop (TFAC-669) ---
+// --- PR-artifact backstop ---
 
-// openPRsStub serves the REST open-PR listing ListOpenPRs issues, returning the
-// canned PRs for GET /repos/{o}/{r}/pulls?state=open. Any other path 404s.
-func openPRsStub(t *testing.T, prsJSON string) *github.Client {
+// pullsStub serves GetPRBasic's REST GET /repos/{o}/{r}/pulls/{n} from canned
+// PR objects keyed by number, and records every path requested. Anything else
+// 404s.
+type pullsStub struct {
+	mu    sync.Mutex
+	pulls map[int]string
+	calls []string
+}
+
+func newPullsStub(t *testing.T, pulls map[int]string) (*pullsStub, *github.Client) {
 	t.Helper()
+	st := &pullsStub{pulls: pulls}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		st.mu.Lock()
+		st.calls = append(st.calls, r.Method+" "+r.URL.Path)
+		st.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls") && r.URL.Query().Get("state") == "open" {
-			_, _ = w.Write([]byte(prsJSON))
-			return
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls/") {
+			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			number, _ := strconv.Atoi(seg[len(seg)-1])
+			if body, ok := st.pulls[number]; ok {
+				_, _ = w.Write([]byte(body))
+				return
+			}
 		}
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 	}))
 	t.Cleanup(srv.Close)
-	return github.NewClient(srv.URL, "test-token")
+	return st, github.NewClient(srv.URL, "test-token")
 }
 
-// prArtifactFor returns the pull_request artifact for repoPath#number, or nil.
+func (st *pullsStub) requested() []string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return append([]string(nil), st.calls...)
+}
+
+// pullJSON is one PR object as GET /repos/octo/repo/pulls/{n} returns it.
+func pullJSON(number int, head, title, body string, draft bool) string {
+	b, _ := json.Marshal(map[string]any{
+		"number": number, "node_id": fmt.Sprintf("PR_%d", number), "title": title, "body": body,
+		"state": "open", "draft": draft, "merged": false,
+		"html_url": fmt.Sprintf("https://github.com/octo/repo/pull/%d", number),
+		"head":     map[string]any{"ref": head, "sha": "sha1"},
+		"base":     map[string]any{"ref": "main"},
+	})
+	return string(b)
+}
+
+// recordPRCreated writes the pr_created ledger row the create verb writes for
+// repoPath#number, opened by conversationID in toState, linked at url.
+func recordPRCreated(t *testing.T, stores db.Stores, scope, conversationID, repoPath string, number int, toState, url string) {
+	t.Helper()
+	if err := stores.ExternalActions.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalAction{
+		TeamID:         runmode.LocalDefaultTeamID,
+		Provider:       domain.ArtifactProviderGitHub,
+		Scope:          scope,
+		Action:         domain.ActionPRCreated,
+		Target:         domain.PullRequestTarget(repoPath, number),
+		ExternalID:     strconv.Itoa(number),
+		URL:            url,
+		ToState:        toState,
+		ConversationID: conversationID,
+		Credential:     domain.CredentialGitHubApp,
+	}); err != nil {
+		t.Fatalf("record pr_created for %s#%d: %v", repoPath, number, err)
+	}
+}
+
+// prArtifactFor returns the pull_request artifact for repoPath#number on the
+// test host, in any state, or nil.
 func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) *domain.Artifact {
 	t.Helper()
-	arts, err := stores.Artifacts.ListNonTerminalBySystem(context.Background(), runmode.LocalDefaultOrgID)
+	arts, _, err := stores.Artifacts.ListByOrgSystem(context.Background(), runmode.LocalDefaultOrgID, db.ArtifactListOpts{})
 	if err != nil {
 		t.Fatalf("list artifacts: %v", err)
 	}
 	want := domain.PullRequestDedupKey(repoPath, number)
 	for i := range arts {
-		if arts[i].DedupKey == want {
+		if arts[i].Scope == reconcileTestHost && arts[i].DedupKey == want {
 			return &arts[i]
 		}
 	}
 	return nil
 }
 
-// TestBackstop_RecordsPRFromBranchMatch is the severed-observation recovery: a
-// conversation pushed a branch (its git:branch artifact), an open PR exists on
-// that branch, but no pull_request artifact was recorded (the injector
-// observation never fired). The backstop discovers the PR and records it, linked
-// to the pushing conversation.
-func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
+func newBackstopReconciler(stores db.Stores, client *github.Client) *Reconciler {
+	return NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+}
+
+// TestBackstop_RecordsPRFromItsLedgerRow is the gap the backstop closes: the
+// create verb opened a draft PR and wrote its pr_created row, but the artifact
+// write beside it failed. The backstop records the artifact, owned by the
+// conversation the ledger row names — not the one that pushed the PR's branch
+// first, whose branch artifact keeps its owner.
+func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
-	seedConversation("octo/repo#5", "conv-1")
+	seedConversation("octo/repo#1", "conv-pusher")
+	seedConversation("octo/repo#2", "conv-opener")
 
 	br, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
 	if !ok {
 		t.Fatal("branch artifact builder rejected a valid ref")
 	}
-	br.ConversationID = "conv-1"
+	br.ConversationID = "conv-pusher"
 	seedArt(br)
+	recordPRCreated(t, stores, reconcileTestHost, "conv-opener", "octo/repo", 5,
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
 
-	// Sanity: no PR artifact before the backstop.
-	if prArtifactFor(t, stores, "octo/repo", 5) != nil {
-		t.Fatal("a PR artifact already existed before the backstop")
-	}
-
-	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
-		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
-
-	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+	_, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "My PR", "What it does", true)})
+	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
 
@@ -801,18 +854,27 @@ func TestBackstop_RecordsPRFromBranchMatch(t *testing.T) {
 	if got == nil {
 		t.Fatal("backstop did not record the PR artifact")
 	}
-	if got.ConversationID != "conv-1" {
-		t.Errorf("PR artifact conversation = %q, want conv-1 (the pushing conversation)", got.ConversationID)
+	if got.ConversationID != "conv-opener" || got.TeamID != runmode.LocalDefaultTeamID {
+		t.Errorf("PR artifact owner = (%q, %q), want (conv-opener, %s): the ledger row names who opened it",
+			got.ConversationID, got.TeamID, runmode.LocalDefaultTeamID)
 	}
-	if got.State != domain.ArtifactStatePROpen || got.ExternalID != "5" {
-		t.Errorf("PR artifact = state %q external_id %q, want open / 5", got.State, got.ExternalID)
+	if got.State != domain.ArtifactStatePRDraft || got.ExternalID != "5" || got.URL != "https://github.com/octo/repo/pull/5" {
+		t.Errorf("PR artifact = state %q external_id %q url %q, want draft / 5 / the PR's link", got.State, got.ExternalID, got.URL)
+	}
+	d, _ := domain.ParsePRArtifactDetails(got.DetailsJSON)
+	if d.NodeID != "PR_5" || d.HeadBranch != "feature-x" || d.Base != "main" || d.Proposed.Title != "My PR" || d.Proposed.Body != "What it does" {
+		t.Errorf("PR artifact details = %+v, want node PR_5, feature-x → main, and the PR's title and body as proposed", d)
+	}
+	if br := findArtifact(t, stores, runmode.LocalDefaultOrgID, br.DedupKey); br.ConversationID != "conv-pusher" {
+		t.Errorf("branch artifact owner = %q, want conv-pusher left as it was", br.ConversationID)
 	}
 }
 
-// TestBackstop_Idempotent asserts re-running the backstop on an already-recorded
-// PR changes nothing (negative space) — and never regresses a state a prior
-// writer advanced.
-func TestBackstop_Idempotent(t *testing.T) {
+// TestBackstop_IgnoresPRWithoutLedgerRow pins that a PR TF never opened gets no
+// artifact. A person opened a draft from a branch a run pushed: there is no
+// pr_created row for it, so nothing is recorded, nothing is fetched, and the
+// conversation that pushed the branch owes no approval for it.
+func TestBackstop_IgnoresPRWithoutLedgerRow(t *testing.T) {
 	stores, seedConversation, seedArt := reconcileTestStores(t)
 	seedConversation("octo/repo#5", "conv-1")
 
@@ -823,31 +885,125 @@ func TestBackstop_Idempotent(t *testing.T) {
 	br.ConversationID = "conv-1"
 	seedArt(br)
 
-	// The observation path already recorded this PR, and it later merged.
+	stub, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "A person's draft", "", true)})
+	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+
+	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
+		t.Fatalf("backstop recorded a PR TF never opened: %+v", got)
+	}
+	if calls := stub.requested(); len(calls) != 0 {
+		t.Errorf("backstop called GitHub with no pr_created row to act on: %v", calls)
+	}
+	arts, err := stores.Artifacts.ListByConversationSystem(context.Background(), runmode.LocalDefaultOrgID, "conv-1")
+	if err != nil {
+		t.Fatalf("list conversation artifacts: %v", err)
+	}
+	if domain.HasUnresolvedArtifacts(arts) {
+		t.Error("the pushing conversation shows an unresolved artifact for a PR TF never opened")
+	}
+}
+
+// TestBackstop_Idempotent pins that a PR with an artifact is never fetched or
+// rewritten — whatever state a prior writer advanced it to — and that a PR the
+// backstop recorded is left alone on the next pass.
+func TestBackstop_Idempotent(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+
+	// The verb recorded PR 5, and it later merged.
 	merged := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "feature-x", "main",
 		"https://github.com/octo/repo/pull/5", "My PR", "body", false)
 	merged.ConversationID = "conv-1"
 	merged.State = domain.ArtifactStatePRMerged
 	seedArt(merged)
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePROpen, "https://github.com/octo/repo/pull/5")
+	// PR 7's artifact write failed.
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 7, domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
 
-	prsJSON := `[{"number":5,"node_id":"PR_5","title":"My PR","html_url":"https://github.com/octo/repo/pull/5",` +
-		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
-
-	// A merged PR drops out of the non-terminal set, so run twice to prove the
-	// insert-if-absent write neither duplicates nor resurrects it.
+	stub, client := newPullsStub(t, map[int]string{
+		5: pullJSON(5, "feature-x", "My PR", "body", false),
+		7: pullJSON(7, "feature-y", "Another", "body", true),
+	})
+	rc := newBackstopReconciler(stores, client)
 	for i := 0; i < 2; i++ {
-		if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+		if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 			t.Fatalf("backstop pass %d: %v", i, err)
 		}
 	}
 
-	// Merged is terminal → absent from the non-terminal list; assert exactly one
-	// PR row total via a fresh reconcile-store query would need conn access, so
-	// assert through the store: no NEW open PR row was minted (the merged row is
-	// untouched, not resurrected to open).
+	if got := prArtifactFor(t, stores, "octo/repo", 5); got == nil || got.State != domain.ArtifactStatePRMerged {
+		t.Errorf("recorded PR 5 = %+v, want it left merged", got)
+	}
+	if got := prArtifactFor(t, stores, "octo/repo", 7); got == nil || got.State != domain.ArtifactStatePRDraft {
+		t.Errorf("PR 7 = %+v, want it recorded as a draft", got)
+	}
+	if calls := stub.requested(); len(calls) != 1 || !strings.HasSuffix(calls[0], "/pulls/7") {
+		t.Errorf("GitHub calls = %v, want one fetch of PR 7 across both passes", calls)
+	}
+}
+
+// TestBackstop_SkipsRowOfARenamedRepository pins that a ledger row whose
+// repository was renamed since is not recorded again under the old name. The
+// rename moved the PR's artifact to the new name and rewrote the row's link,
+// but not its target, so the target's key finds no artifact.
+func TestBackstop_SkipsRowOfARenamedRepository(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/platform#5", "conv-1")
+
+	moved := domain.NewPullRequestArtifact("octo/platform", 5, "PR_5", "feature-x", "main",
+		"https://github.com/octo/platform/pull/5", "My PR", "body", true)
+	moved.ConversationID = "conv-1"
+	seedArt(moved)
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePRDraft,
+		"https://github.com/octo/platform/pull/5")
+
+	stub, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "My PR", "body", true)})
+	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
+
 	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
-		t.Errorf("backstop resurrected the merged PR into the non-terminal set: %+v", got)
+		t.Errorf("backstop recorded the renamed repository's PR again under its old name: %+v", got)
+	}
+	if calls := stub.requested(); len(calls) != 0 {
+		t.Errorf("backstop called GitHub for a row it skips: %v", calls)
+	}
+}
+
+// TestReconcileOrg_BackfilledPRTakesGitHubState pins the cycle's order: a PR
+// the backstop records in the state the verb opened it in is reconciled in the
+// same cycle. A draft merged on GitHub ends merged, stamped as resolved there,
+// and the resolved hook runs for the conversation that opened it.
+func TestReconcileOrg_BackfilledPRTakesGitHubState(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	const conversationID = "77777777-7777-7777-7777-777777777777"
+	seedConversation("ent-7", conversationID)
+	recordPRCreated(t, stores, reconcileTestHost, conversationID, "octo/repo", 7, domain.ArtifactStatePRDraft,
+		"https://github.com/octo/repo/pull/7")
+
+	stub := &stubGH{
+		prFinal: map[int][2]string{7: {"My PR", "body"}},
+		prs:     map[string]string{"PR_7": prNodeJSON("PR_7", 7, "MERGED", true, true)},
+	}
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	var resolved []string
+	rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
+
+	if err := rc.ReconcileOrg(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("ReconcileOrg: %v", err)
+	}
+
+	got := prArtifactFor(t, stores, "octo/repo", 7)
+	if got == nil || got.State != domain.ArtifactStatePRMerged {
+		t.Fatalf("PR 7 = %+v, want it recorded and reconciled to merged in one cycle", got)
+	}
+	if d, _ := domain.ParsePRArtifactDetails(got.DetailsJSON); d.Resolution != domain.PRResolutionGitHub {
+		t.Errorf("resolution = %q, want github", d.Resolution)
+	}
+	if len(resolved) != 1 || resolved[0] != conversationID {
+		t.Errorf("resolved hook ran for %v, want [%s]", resolved, conversationID)
 	}
 }
 
@@ -886,7 +1042,7 @@ func TestReconcile_SkipsArtifactsOnAnotherHost(t *testing.T) {
 			"octo/repo/own":       false,
 		},
 	}
-	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.Orgs, nil)
+	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	if err := rc.ReconcileOrg(ctx, runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("ReconcileOrg: %v", err)
 	}
@@ -899,28 +1055,24 @@ func TestReconcile_SkipsArtifactsOnAnotherHost(t *testing.T) {
 	}
 }
 
-// TestBackstop_RecordsOnTheCurrentHostOnly pins the backstop's scope: a PR it
-// records is on the org's current GitHub host, where the client found it, and
-// a branch pushed on another host is never matched against that host's PRs.
+// TestBackstop_RecordsOnTheCurrentHostOnly pins the backstop's scope: it
+// works from pr_created rows on the org's current GitHub host, where its
+// client looks, and records what it finds there. A row from another host is
+// another host's PR, and is neither fetched nor recorded.
 func TestBackstop_RecordsOnTheCurrentHostOnly(t *testing.T) {
-	stores, seedConversation, seedArt := reconcileTestStores(t)
+	stores, seedConversation, _ := reconcileTestStores(t)
 	seedConversation("octo/repo#5", "conv-1")
 	seedConversation("octo/repo#6", "conv-2")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePRDraft,
+		"https://github.com/octo/repo/pull/5")
+	recordPRCreated(t, stores, "https://ghe.example.com", "conv-2", "octo/repo", 6, domain.ArtifactStatePRDraft,
+		"https://ghe.example.com/octo/repo/pull/6")
 
-	own, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-x", "sha1", true)
-	own.ConversationID = "conv-1"
-	seedArt(own)
-	elsewhere, _ := domain.NewBranchArtifact("octo/repo", "refs/heads/feature-y", "sha2", true)
-	elsewhere.ConversationID = "conv-2"
-	elsewhere.Scope = "https://ghe.example.com"
-	seedArt(elsewhere)
-
-	prsJSON := `[{"number":5,"node_id":"PR_5","title":"Mine","html_url":"https://github.com/octo/repo/pull/5",` +
-		`"state":"open","draft":false,"head":{"ref":"feature-x","sha":"sha1"},"base":{"ref":"main"}},` +
-		`{"number":6,"node_id":"PR_6","title":"Same branch name, other host","html_url":"https://github.com/octo/repo/pull/6",` +
-		`"state":"open","draft":false,"head":{"ref":"feature-y","sha":"sha2"},"base":{"ref":"main"}}]`
-	rc := NewReconciler(&fakeResolver{client: openPRsStub(t, prsJSON)}, stores.Artifacts, stores.Orgs, nil)
-	if err := rc.BackfillPRArtifactsForBranches(context.Background(), runmode.LocalDefaultOrgID, nil); err != nil {
+	stub, client := newPullsStub(t, map[int]string{
+		5: pullJSON(5, "feature-x", "Mine", "", true),
+		6: pullJSON(6, "feature-y", "Same repo name, other host", "", true),
+	})
+	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
 
@@ -929,7 +1081,12 @@ func TestBackstop_RecordsOnTheCurrentHostOnly(t *testing.T) {
 		t.Fatalf("recorded PR = %+v, want conv-1's PR on %s", got, reconcileTestHost)
 	}
 	if got := prArtifactFor(t, stores, "octo/repo", 6); got != nil {
-		t.Errorf("a branch pushed on another host was matched to a PR on %s: %+v", reconcileTestHost, got)
+		t.Errorf("a PR opened on another host was recorded on %s: %+v", reconcileTestHost, got)
+	}
+	for _, c := range stub.requested() {
+		if strings.HasSuffix(c, "/pulls/6") {
+			t.Errorf("another host's PR was fetched through the current host's client: %s", c)
+		}
 	}
 }
 

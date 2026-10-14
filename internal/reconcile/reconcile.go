@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/conversationevent"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -47,8 +48,9 @@ type clientResolver interface {
 type Reconciler struct {
 	resolver  clientResolver
 	artifacts db.ArtifactStore
-	orgs      db.OrgsStore   // read for the org's current GitHub host
-	ws        *websocket.Hub // nil-safe: broadcasts are skipped when unset (tests)
+	actions   db.ExternalActionStore // read for the pr_created rows the backstop works from
+	orgs      db.OrgsStore           // read for the org's current GitHub host
+	ws        *websocket.Hub         // nil-safe: broadcasts are skipped when unset (tests)
 	// prResolved runs after a pull request's draft → open transition commits.
 	// nil skips it (tests, and the window before the spawner is wired).
 	prResolved PullRequestResolvedHook
@@ -64,8 +66,8 @@ type PullRequestResolvedHook func(ctx context.Context, orgID, conversationID str
 
 // NewReconciler builds the shared reconciler. ws may be nil (broadcasts become
 // no-ops); the stores + resolver are required.
-func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
-	return &Reconciler{resolver: resolver, artifacts: artifacts, orgs: orgs, ws: ws}
+func NewReconciler(resolver clientResolver, artifacts db.ArtifactStore, actions db.ExternalActionStore, orgs db.OrgsStore, ws *websocket.Hub) *Reconciler {
+	return &Reconciler{resolver: resolver, artifacts: artifacts, actions: actions, orgs: orgs, ws: ws}
 }
 
 // onCurrentHost returns the org's current GitHub host and the artifacts of
@@ -96,118 +98,147 @@ func (rc *Reconciler) HasPullRequestResolvedHook() bool {
 	return rc.prResolved != nil
 }
 
-// ReconcileOrg lists the org's reconcilable non-terminal artifacts (admin pool,
-// org-wide) and reconciles them, then runs the gh-channel PR-artifact backstop.
-// The Tier-1 Runner's per-cycle body.
+// ReconcileOrg runs the PR-artifact backstop, then lists the org's
+// reconcilable non-terminal artifacts (admin pool, org-wide) and reconciles
+// them. The backstop goes first so a pull request it records is brought to
+// GitHub's current state in the same cycle, through the same transition — and
+// the same resolved hook — as a pull request recorded when it was opened. The
+// Tier-1 Runner's per-cycle body.
 func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
+	// Best-effort — a backstop failure never aborts the reconcile cycle.
+	if err := rc.BackfillPRArtifacts(ctx, orgID); err != nil {
+		reconcileLog.Warn("PR artifact backstop failed", "org", orgID, "error", err)
+	}
 	arts, err := rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
 	if err != nil {
 		return fmt.Errorf("list non-terminal artifacts: %w", err)
 	}
-	if _, err := rc.Reconcile(ctx, orgID, arts); err != nil {
-		return err
-	}
-	// Backstop: record PRs that exist on a conversation's pushed branch with
-	// no artifact behind them (the create's own record was lost to a crash
-	// between the GitHub call and the write). Best-effort — a failure here
-	// never aborts the reconcile cycle.
-	if err := rc.BackfillPRArtifactsForBranches(ctx, orgID, arts); err != nil {
-		reconcileLog.Warn("PR artifact backstop failed", "org", orgID, "error", err)
-	}
-	return nil
+	_, err = rc.Reconcile(ctx, orgID, arts)
+	return err
 }
 
-// BackfillPRArtifactsForBranches is the PR-artifact backstop. The create verb
-// records its pull request best-effort after the GitHub call lands, so a crash
-// between the two leaves a pull request with no artifact; a human opening one
-// by hand on a branch a run pushed leaves the same gap. For each conversation
-// that pushed a branch (its git:branch artifact carries the full ref), it
-// discovers the open PR on that branch and records the pull_request artifact
-// via the insert-if-absent write. Idempotent by construction: a PR the verb (or
-// a prior pass) already recorded is left untouched, so re-running changes
-// nothing.
+// prBackstopWindow is how far back the backstop reads the ledger. A missing
+// artifact is normally recorded on the first cycle after its pull request was
+// opened. The window is long enough that a row is still read after the
+// backstop could not run for days (the control plane down, the org's GitHub
+// unreachable), and bounded so that each cycle reads a week of one org's
+// pr_created rows rather than every one it has.
+const prBackstopWindow = 7 * 24 * time.Hour
+
+// BackfillPRArtifacts is the PR-artifact backstop. TF opens a pull request only
+// through the create verb (`tfac exec gh pr create`); the gh-channel gate
+// refuses every other way of creating one. The verb writes the pull_request
+// artifact and its pr_created ledger row in one write, and when the artifact
+// write fails it writes the ledger row alone. That is the only case this pass
+// handles: a pull request the verb opened whose ledger row landed and whose
+// artifact did not. When the row and the artifact are both lost, this pass has
+// nothing to find; recovering that record is the recording path's job, and
+// once its row lands this pass handles it like any other.
 //
-// arts is the org's already-listed non-terminal set (branch artifacts included),
-// passed in by ReconcileOrg to avoid a second list; a nil arts makes this
-// self-list (the boot pass). Only branches on the org's current GitHub host
-// are matched, and a recorded pull request takes that host as its scope: it
-// was found there, from a branch pushed there. Best-effort per repo — a
-// per-owner credential or GitHub failure skips that repo this pass.
-func (rc *Reconciler) BackfillPRArtifactsForBranches(ctx context.Context, orgID string, arts []domain.Artifact) error {
-	if arts == nil {
-		var err error
-		arts, err = rc.artifacts.ListNonTerminalBySystem(ctx, orgID)
-		if err != nil {
-			return fmt.Errorf("list non-terminal artifacts: %w", err)
-		}
-	}
-	host, arts, err := rc.onCurrentHost(ctx, orgID, arts)
+// The ledger row decides both questions the pass answers. Whether TF opened
+// the pull request: one with no pr_created row was opened by someone else (a
+// person working from a branch a run pushed, for example) and gets no
+// artifact, because an artifact for it would hold its task open on an approval
+// for something TF never proposed. And who opened it: the row names the
+// conversation and team, and they own the artifact, whichever conversation
+// pushed the branch.
+//
+// The pass reads the pr_created rows on the org's current GitHub host from the
+// last prBackstopWindow, keeps those whose pull request has no artifact, and
+// fetches each of those from GitHub for what the row does not carry (node id,
+// refs, title, body). When every pull request already has its artifact, it
+// makes no GitHub call. The artifact is recorded in the state the verb opened
+// the pull request in, and the reconcile that follows applies any transition
+// since. The write is insert-if-absent, so a pull request recorded after the
+// presence check is left untouched and repeating the pass changes nothing.
+//
+// A row whose link no longer names the repository in its target belongs to a
+// repository renamed since. A rename rewrites the link and the artifact's key
+// but never the row's target, so the target no longer finds the artifact, and
+// the row is skipped rather than recorded a second time under the old name.
+// Best-effort per pull request: a credential or GitHub failure skips it this
+// pass.
+func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) error {
+	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)
 	}
+	created, _, err := rc.actions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{
+		Provider: domain.ArtifactProviderGitHub,
+		Action:   domain.ActionPRCreated,
+		Since:    time.Now().UTC().Add(-prBackstopWindow),
+	})
+	if err != nil {
+		return fmt.Errorf("list pr_created actions: %w", err)
+	}
 
-	// (owner/repo) → (branch → the conversation that pushed it). Only pushed
-	// branch artifacts anchored to a live conversation are candidates.
-	type convRef struct{ conversationID, teamID string }
-	byRepo := map[string]map[string]convRef{}
-	for _, a := range arts {
-		if a.Kind != domain.ArtifactKindBranch || a.State != domain.ArtifactStateBranchPushed {
-			continue
+	type openedPR struct {
+		owner, repo string
+		number      int
+		act         domain.ExternalAction
+	}
+	byKey := map[string]openedPR{}
+	for _, act := range created {
+		if act.Scope != host || act.ConversationID == "" {
+			continue // another host's, or its conversation was purged — nothing to attribute to
 		}
-		if a.ConversationID == "" || a.Target == "" {
-			continue // detached from its conversation, or malformed — can't attribute a PR
-		}
-		branch, ok := strings.CutPrefix(a.ExternalID, "refs/heads/")
+		owner, repo, number, ok := domain.ParsePRTarget(act.Target)
 		if !ok {
 			continue
 		}
-		if byRepo[a.Target] == nil {
-			byRepo[a.Target] = map[string]convRef{}
+		if !domain.GitHubURLNamesRepo(act.URL, host, owner+"/"+repo) {
+			continue // renamed since it was opened
 		}
-		byRepo[a.Target][branch] = convRef{conversationID: a.ConversationID, teamID: a.TeamID}
+		byKey[domain.PullRequestDedupKey(owner+"/"+repo, number)] = openedPR{owner: owner, repo: repo, number: number, act: act}
 	}
-	if len(byRepo) == 0 {
+	if len(byKey) == 0 {
 		return nil
 	}
+	keys := make([]string, 0, len(byKey))
+	for k := range byKey {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	present, err := rc.artifacts.PresentDedupKeysSystem(ctx, orgID, host, keys)
+	if err != nil {
+		return fmt.Errorf("read recorded pull requests: %w", err)
+	}
 
-	for repoPath, byBranch := range byRepo {
-		owner, repo, ok := strings.Cut(repoPath, "/")
-		if !ok || owner == "" || repo == "" {
+	for _, key := range keys {
+		if present[key] {
 			continue
 		}
-		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
+		pr := byKey[key]
+		repoPath := pr.owner + "/" + pr.repo
+		client, err := rc.resolver.ClientFor(ctx, orgID, pr.owner)
 		if err != nil {
-			reconcileLog.Warn("backstop: resolve github client failed; skipping repo this pass",
-				"org", orgID, "repo", repoPath, "error", err)
+			reconcileLog.Warn("backstop: resolve github client failed; skipping PR this pass",
+				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
 			continue
 		}
-		prs, _, _, err := client.ListOpenPRs(ctx, owner, repo, "")
+		live, err := client.GetPRBasic(ctx, pr.owner, pr.repo, pr.number)
 		if err != nil {
-			reconcileLog.Warn("backstop: list open PRs failed; skipping repo this pass",
-				"org", orgID, "repo", repoPath, "error", err)
+			reconcileLog.Warn("backstop: fetch PR failed; skipping PR this pass",
+				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
 			continue
 		}
-		for _, pr := range prs {
-			ref, matched := byBranch[pr.Snapshot.HeadRef]
-			if !matched {
-				continue // no conversation of this org pushed this PR's head branch
-			}
-			art := domain.NewPullRequestArtifact(repoPath, pr.Snapshot.Number, pr.NodeID,
-				pr.Snapshot.HeadRef, pr.Snapshot.BaseRef, pr.Snapshot.URL, pr.Snapshot.Title, "", pr.Snapshot.IsDraft)
-			art.ConversationID = ref.conversationID
-			art.OrgID = orgID
-			art.TeamID = ref.teamID
-			art.Scope = host
-			inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
-			if err != nil {
-				reconcileLog.Warn("backstop: record PR artifact failed",
-					"org", orgID, "repo", repoPath, "pr", pr.Snapshot.Number, "error", err)
-				continue
-			}
-			if inserted {
-				reconcileLog.Info("backstop: recorded PR artifact from branch match",
-					"org", orgID, "repo", repoPath, "pr", pr.Snapshot.Number, "conversation", ref.conversationID)
-			}
+		// The proposed snapshot is what GitHub holds now: the body the verb
+		// sent, unless someone has edited it since.
+		art := domain.NewPullRequestArtifact(repoPath, pr.number, live.NodeID, live.HeadRef, live.BaseRef,
+			live.HTMLURL, live.Title, live.Body, pr.act.ToState == domain.ArtifactStatePRDraft)
+		art.ConversationID = pr.act.ConversationID
+		art.OrgID = orgID
+		art.TeamID = pr.act.TeamID
+		art.Scope = host
+		inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
+		if err != nil {
+			reconcileLog.Warn("backstop: record PR artifact failed",
+				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
+			continue
+		}
+		if inserted {
+			reconcileLog.Info("backstop: recorded PR artifact from its pr_created row",
+				"org", orgID, "repo", repoPath, "pr", pr.number, "conversation", pr.act.ConversationID)
 		}
 	}
 	return nil
