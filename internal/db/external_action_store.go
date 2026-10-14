@@ -30,9 +30,12 @@ import (
 //
 // Both Record paths use ON CONFLICT(org_id, scope, dedup_key) DO NOTHING —
 // append-only, never a mutation. An empty entry.DedupKey is filled with a uuid
-// (a unique, non-colliding key) so the row is an unconditional append; only the
-// branch push passes a deterministic key (domain.BranchPushDedupKey) so the git
-// hook+proxy twin collapses. An empty entry.Scope is refused with
+// (a unique, non-colliding key) so the row is an unconditional append. A
+// caller that sets one gets the collapse: the natural keys of the branch push
+// and the egress denial (domain.BranchPushDedupKey, domain.EgressDenialDedupKey),
+// and the per-act key the agent's recording funnel fixes before its first
+// attempt, so a retried write lands on the row it may already have written.
+// An empty entry.Scope is refused with
 // ErrExternalObjectScopeRequired. SQLite is N=1 and unscoped; both pools
 // collapse to the one connection.
 //
@@ -47,8 +50,8 @@ type ExternalActionStore interface {
 	// empty (the impls generate a uuid; Postgres via gen_random_uuid()).
 	// occurred_at is stamped server-side (the column DEFAULT). An empty
 	// entry.DedupKey is filled with a uuid so the append never collides; a
-	// non-empty key (the branch push) enables the ON CONFLICT DO NOTHING twin
-	// collapse. Empty optional columns serialize to SQL NULL. A returned error
+	// non-empty key enables the ON CONFLICT DO NOTHING collapse (see the type
+	// doc for who sets one). Empty optional columns serialize to SQL NULL. A returned error
 	// rolls back the surrounding transaction — the action and its audit row are
 	// atomic (intentional).
 	//

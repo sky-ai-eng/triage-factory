@@ -202,10 +202,10 @@ const (
 	// git proxy's outcome capture so the audit log never omits an attempted
 	// external write, while the branch artifact is deliberately NOT written
 	// (artifacts track only work that exists). detail_json carries
-	// {sha, new, http_status}. Appended unconditionally (no dedup key): each
-	// failed attempt is its own audit event, and sharing branch_pushed's
-	// deterministic key would let a failed attempt swallow the later
-	// successful push of the same (conversation, ref, sha).
+	// {sha, new, http_status}. No natural key (each act's key is its own; see
+	// ExternalAction.DedupKey): each failed attempt is its own audit event,
+	// and sharing branch_pushed's deterministic key would let a failed attempt
+	// swallow the later successful push of the same (conversation, ref, sha).
 	ActionBranchPushFailed = "branch_push_failed"
 
 	// Git operation denied by the per-run least-privilege gate — the git proxy
@@ -237,10 +237,10 @@ const (
 	// we could not read" are different operational facts, and only the second
 	// one should ever be worth investigating.
 	//
-	// Appended unconditionally (no dedup key): every refused attempt is its own
-	// event, exactly like ActionGitDenied, which this follows in every respect
-	// — a per-run least-privilege gate turning down an act, recorded as a
-	// security signal.
+	// No natural key (each act's key is its own; see ExternalAction.DedupKey):
+	// every refused attempt is its own event, exactly like ActionGitDenied,
+	// which this follows in every respect — a per-run least-privilege gate
+	// turning down an act, recorded as a security signal.
 	ActionGHWriteDenied = "gh_write_denied"
 
 	// The fallback for a write the agent made through the real-`gh` credential
@@ -252,8 +252,8 @@ const (
 	//
 	// detail_json carries {method, path, http_status}, plus "attempted" naming
 	// the semantic action a refused write was reaching for — a 404'd merge is
-	// an attempt, never a merge. Appended unconditionally (no dedup key): each
-	// attempt is its own event, exactly like ActionBranchPushFailed.
+	// an attempt, never a merge. No natural key: each attempt is its own event,
+	// exactly like ActionBranchPushFailed.
 	ActionGHChannelWrite = "gh_channel_write"
 
 	// The same fallback one transport over: a GraphQL write through that
