@@ -672,17 +672,20 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 
 	allItems := append(openItems, terminalItems...)
 
-	// The reviews submitted since each pull request's stored marker, read
-	// before Phase 3 so that phase stays off the network. A pull request whose
-	// review count and newest review did not move is not read; a quiet seed
-	// diffs nothing, so it is not read either.
+	// The reviews submitted and the conversation comments made since each
+	// pull request's stored markers, read before Phase 3 so that phase stays
+	// off the network. A pull request whose newest review, review count and
+	// newest comment did not move is not read; a quiet seed diffs nothing, so
+	// it is not read either.
 	newReviews := make(map[string][]NewReview)
+	newComments := make(map[string][]NewComment)
 	for _, item := range allItems {
 		snap, ok := refreshed[item.nodeID]
 		if !ok || item.seed {
 			continue
 		}
 		newReviews[item.nodeID] = t.githubNewReviews(ctx, client, scope, item.nodeID, item.snap, &snap)
+		newComments[item.nodeID] = t.githubNewComments(ctx, client, scope, item.nodeID, item.snap, &snap)
 		refreshed[item.nodeID] = snap
 	}
 
@@ -743,7 +746,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID])
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID], newComments[item.nodeID])
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so

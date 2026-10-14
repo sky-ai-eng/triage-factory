@@ -10,9 +10,12 @@ import (
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	jiraclient "github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // jiraCommentPageSize is how many comments one read of an issue's comment list
@@ -20,14 +23,14 @@ import (
 // read.
 const jiraCommentPageSize = 50
 
-// NewComment is a comment made on a tracked issue since the snapshot a diff
-// compares against. AuthorID is the identity a commenter_in allowlist holds:
-// the Jira author's stable id (jira.StableUserID, the rule assignee_in's values
-// follow), or the Linear user id, which is empty for a comment an integration
-// posted.
+// NewComment is a comment made on a tracked issue or pull request since the
+// snapshot a diff compares against. AuthorID is the identity a commenter_in
+// allowlist holds: the Jira author's stable id (jira.StableUserID, the rule
+// assignee_in's values follow), the Linear user id, which is empty for a
+// comment an integration posted, or the GitHub login.
 type NewComment struct {
 	ID        string
-	Author    string // display name
+	Author    string // display name; on GitHub, the login
 	AuthorID  string
 	CreatedAt string
 	// ByTF is set when TF posted the comment. An agent's comment is recorded
@@ -66,26 +69,41 @@ func commentedAt(c NewComment, issueUpdatedAt string) string {
 }
 
 // markTFComments sets ByTF on each comment TF posted: each with a `comment`
-// artifact in scope under the key the agent's comment verb records it with.
-// resource is the issue's artifact resource (domain.EntityArtifactResource).
-// With no resource there is no key to look for, and every comment is taken as
-// a person's.
-func (t *Tracker) markTFComments(ctx context.Context, provider, scope, resource string, comments []NewComment) error {
-	if len(comments) == 0 || resource == "" {
-		return nil
+// artifact in scope under the key the agent's comment verbs record it with,
+// which key spells from the comment's id. A comment key spells as "" has no
+// key to look for, and is taken as a person's.
+func (t *Tracker) markTFComments(ctx context.Context, scope string, comments []NewComment, key func(commentID string) string) error {
+	keys := make([]string, 0, len(comments))
+	for _, c := range comments {
+		if k := key(c.ID); k != "" {
+			keys = append(keys, k)
+		}
 	}
-	keys := make([]string, len(comments))
-	for i, c := range comments {
-		keys[i] = domain.ArtifactDedupKey(provider, domain.ArtifactKindComment, resource, c.ID)
+	if len(keys) == 0 {
+		return nil
 	}
 	present, err := t.artifacts.PresentDedupKeysSystem(ctx, t.orgID, scope, keys)
 	if err != nil {
 		return err
 	}
 	for i := range comments {
-		comments[i].ByTF = present[keys[i]]
+		if k := key(comments[i].ID); k != "" {
+			comments[i].ByTF = present[k]
+		}
 	}
 	return nil
+}
+
+// issueCommentKey spells the key a comment on a Jira or Linear issue is
+// recorded under. resource is the issue's artifact resource
+// (domain.EntityArtifactResource); with none there is no key.
+func issueCommentKey(provider, resource string) func(string) string {
+	return func(commentID string) string {
+		if resource == "" {
+			return ""
+		}
+		return domain.ArtifactDedupKey(provider, domain.ArtifactKindComment, resource, commentID)
+	}
 }
 
 // --- Jira ------------------------------------------------------------------
@@ -126,7 +144,7 @@ func (t *Tracker) jiraNewComments(ctx context.Context, c *jiraCycle, prev domain
 	}
 	fresh := jiraCommentsSince(prev, curr.CommentCount, known)
 	resource := domain.EntityArtifactResource(domain.ArtifactProviderJira, c.scope, curr.ID)
-	if err := t.markTFComments(ctx, domain.ArtifactProviderJira, c.scope, resource, fresh); err != nil {
+	if err := t.markTFComments(ctx, c.scope, fresh, issueCommentKey(domain.ArtifactProviderJira, resource)); err != nil {
 		trackerLog.WarnContext(ctx, "reading which jira comments TF posted failed; the issue's new comments are read again next cycle",
 			"source_id", curr.Key, "error", err)
 		keepJiraComments(prev, curr)
@@ -292,7 +310,7 @@ func (t *Tracker) linearNewComments(ctx context.Context, client LinearClient, sc
 		fresh = append(fresh, linearComment(c))
 	}
 	slices.SortStableFunc(fresh, func(a, b NewComment) int { return compareCommentTimes(a.CreatedAt, b.CreatedAt) })
-	if err := t.markTFComments(ctx, domain.ArtifactProviderLinear, scope, snap.ID, fresh); err != nil {
+	if err := t.markTFComments(ctx, scope, fresh, issueCommentKey(domain.ArtifactProviderLinear, snap.ID)); err != nil {
 		trackerLog.WarnContext(ctx, "reading which linear comments TF posted failed; the issue's new comments are read again next cycle",
 			"source_id", snap.Identifier, "error", err)
 		keepLinearComments(prev, snap)
@@ -330,4 +348,160 @@ func linearComment(c linear.Comment) NewComment {
 		nc.Author = c.BotActor.Name
 	}
 	return nc
+}
+
+// --- GitHub ----------------------------------------------------------------
+
+// CommentReader reads a page of a pull request's conversation comments.
+// *ghclient.Client satisfies it.
+type CommentReader interface {
+	PRCommentsBefore(ctx context.Context, prNodeID, before string) (ghclient.PRCommentPage, error)
+}
+
+// githubNewComments returns the conversation comments made on the pull request
+// since prev, oldest first with TF's marked, and settles curr's comment marker
+// and count.
+//
+// GitHub lists a pull request's comments in the order they were made, so a new
+// comment is always the newest one. The comments are read only when curr's
+// newest is newer than prev's marker; an older one means the marker's comment
+// was deleted, and nothing is new. The read pages back from the end of the list
+// to the first page that reaches a comment no newer than the marker.
+//
+// A prev without the marker was seeded from the REST listing of open pull
+// requests, or stored before the marker existed. One that counted comments was
+// stored from a GraphQL read, so its count holds: the new comments are the
+// last ones, as many as the count rose by. One that counted none may be a REST
+// seed, whose count says nothing, so the comments already on the pull request
+// are taken as seen and curr's marker becomes the baseline. That costs the
+// event for a pull request stored with no comments before the marker existed
+// and first commented on in the poll that stores it.
+//
+// A failed read, of the comments or of which are TF's, puts prev's marker and
+// count back on curr and returns none, so the next poll reads the same comments
+// again.
+func (t *Tracker) githubNewComments(ctx context.Context, client CommentReader, scope, prNodeID string, prev domain.PRSnapshot, curr *domain.PRSnapshot) []NewComment {
+	if curr.CommentMarker == nil {
+		return nil
+	}
+	if prev.CommentMarker != nil {
+		if !prev.CommentMarker.After(curr.CommentMarker.CreatedAt, curr.CommentMarker.ID) {
+			return nil
+		}
+	} else if prev.CommentCount == 0 || curr.CommentCount <= prev.CommentCount {
+		return nil
+	}
+
+	read, total, err := t.readGitHubComments(ctx, client, prNodeID, prev)
+	if err != nil {
+		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "github comment read failed; the pull request's new comments are read again next cycle",
+			"repo", curr.Repo, "number", curr.Number, "error", err)
+		keepGitHubComments(prev, curr)
+		return nil
+	}
+	newest := *curr.CommentMarker
+	for _, c := range read {
+		newest = newest.Newer(domain.CommentMarker{ID: c.ID, CreatedAt: c.CreatedAt})
+	}
+	fresh := githubCommentsSince(prev, total, read)
+	if err := t.markTFComments(ctx, scope, fresh, githubCommentKey); err != nil {
+		trackerLog.WarnContext(ctx, "reading which github comments TF posted failed; the pull request's new comments are read again next cycle",
+			"repo", curr.Repo, "number", curr.Number, "error", err)
+		keepGitHubComments(prev, curr)
+		return nil
+	}
+	curr.CommentMarker, curr.CommentCount = &newest, total
+	return fresh
+}
+
+// readGitHubComments reads the pull request's conversation comments a page at a
+// time from the end of the list backwards, oldest first, and returns them with
+// the count of comments as of the read. It stops at the first page that
+// reaches back to a comment no newer than prev's marker, or, when prev has
+// none, once it holds as many comments as the count rose by.
+func (t *Tracker) readGitHubComments(ctx context.Context, client CommentReader, prNodeID string, prev domain.PRSnapshot) (read []ghclient.PRComment, total int, err error) {
+	ctx, span := tracer.Start(ctx, "tracker.github.read_comments")
+	defer func() {
+		span.SetAttributes(telemetry.Count(len(read)))
+		if err != nil {
+			span.SetStatus(codes.Error, "read comments")
+		}
+		span.End()
+	}()
+
+	before := ""
+	for first := true; ; first = false {
+		page, err := client.PRCommentsBefore(ctx, prNodeID, before)
+		if err != nil {
+			return nil, 0, err
+		}
+		if first {
+			total = page.TotalCount
+		}
+		read = append(slices.Clone(page.Comments), read...)
+		if !page.HasPrevious || page.Before == "" || githubReadReachesPrev(prev, total, read) {
+			break
+		}
+		before = page.Before
+	}
+	slices.SortStableFunc(read, func(a, b ghclient.PRComment) int {
+		am := domain.CommentMarker{ID: a.ID, CreatedAt: a.CreatedAt}
+		switch {
+		case am.After(b.CreatedAt, b.ID):
+			return -1
+		case (domain.CommentMarker{ID: b.ID, CreatedAt: b.CreatedAt}).After(a.CreatedAt, a.ID):
+			return 1
+		}
+		return 0
+	})
+	return read, total, nil
+}
+
+// githubReadReachesPrev reports whether the comments read from the end of the
+// list, oldest first, reach back far enough to hold every comment new since
+// prev.
+func githubReadReachesPrev(prev domain.PRSnapshot, total int, read []ghclient.PRComment) bool {
+	if len(read) == 0 {
+		return false
+	}
+	if prev.CommentMarker != nil {
+		return !prev.CommentMarker.After(read[0].CreatedAt, read[0].ID)
+	}
+	return len(read) >= total-prev.CommentCount
+}
+
+// githubCommentsSince returns the comments in read, oldest first, made after
+// prev's marker, or, when prev has none, the last ones, as many as the count
+// rose by.
+func githubCommentsSince(prev domain.PRSnapshot, total int, read []ghclient.PRComment) []NewComment {
+	if prev.CommentMarker == nil {
+		read = read[max(0, len(read)-max(0, total-prev.CommentCount)):]
+	}
+	fresh := []NewComment{}
+	for _, c := range read {
+		if prev.CommentMarker == nil || prev.CommentMarker.After(c.CreatedAt, c.ID) {
+			fresh = append(fresh, NewComment{ID: strconv.FormatInt(c.ID, 10), Author: c.Author, AuthorID: c.Author, CreatedAt: c.CreatedAt})
+		}
+	}
+	return fresh
+}
+
+// githubCommentKey spells the key a conversation comment TF posted on a pull
+// request is recorded under, the same through the exec verbs and through the
+// raw gh channel. An id that is not a number names no comment.
+func githubCommentKey(commentID string) string {
+	id, err := strconv.ParseInt(commentID, 10, 64)
+	if err != nil {
+		return ""
+	}
+	return domain.GitHubCommentDedupKey(domain.GitHubIssueComment, id)
+}
+
+// keepGitHubComments puts prev's comment marker and count back on curr.
+func keepGitHubComments(prev domain.PRSnapshot, curr *domain.PRSnapshot) {
+	curr.CommentMarker, curr.CommentCount = nil, prev.CommentCount
+	if prev.CommentMarker != nil {
+		marker := *prev.CommentMarker
+		curr.CommentMarker = &marker
+	}
 }
