@@ -17,8 +17,8 @@ func linearConfigFor(url string) linear.Config {
 	return cfg
 }
 
+// Not parallel: see TestCaptureGitHubIdentity.
 func TestValidateLinear_AppUserEmailRule(t *testing.T) {
-	t.Parallel()
 	cases := map[string]struct {
 		email string
 		isApp bool
@@ -31,7 +31,6 @@ func TestValidateLinear_AppUserEmailRule(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(`{"data":{
 					"viewer":{"id":"u1","name":"TF","displayName":"tf","email":"` + tc.email + `"},
@@ -56,8 +55,8 @@ func TestValidateLinear_AppUserEmailRule(t *testing.T) {
 	}
 }
 
+// Not parallel: see TestCaptureGitHubIdentity.
 func TestValidateLinear_RejectedIsNotUnreachable(t *testing.T) {
-	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"errors":[{"message":"Authentication required, not authenticated","extensions":{"code":"AUTHENTICATION_ERROR"}}]}`))
