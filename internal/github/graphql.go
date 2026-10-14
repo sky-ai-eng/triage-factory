@@ -443,14 +443,21 @@ type gqlNewestReview struct {
 // gqlBigInt is a GraphQL BigInt, which GitHub encodes as a string of digits.
 // fullDatabaseId has this type; the Int databaseId it replaces cannot hold the
 // ids review and comment numbering has reached. A JSON number decodes too, and
-// null or an unparseable value decodes as zero.
+// null or an unparseable value decodes as zero rather than failing the whole
+// response. An unparseable value is logged: the schema says it cannot happen,
+// so one that does is a change on GitHub's side that would otherwise surface
+// only as ids of zero.
 type gqlBigInt int64
 
 func (n *gqlBigInt) UnmarshalJSON(data []byte) error {
+	*n = 0
+	if string(data) == "null" {
+		return nil
+	}
 	text := strings.Trim(string(data), `"`)
 	v, err := strconv.ParseInt(text, 10, 64)
 	if err != nil {
-		*n = 0
+		githubLog.Warn("github returned a BigInt id that does not parse; decoding it as zero", "value", string(data))
 		return nil
 	}
 	*n = gqlBigInt(v)

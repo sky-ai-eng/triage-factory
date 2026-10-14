@@ -162,3 +162,30 @@ func TestPRReviewsBefore_MissingPullRequest(t *testing.T) {
 		t.Error("PRReviewsBefore on a missing pull request returned no error")
 	}
 }
+
+// TestGQLBigInt_Decode pins that an id decodes from GitHub's string encoding
+// and from a JSON number, and that null or an unparseable value decodes as
+// zero without failing the response around it.
+func TestGQLBigInt_Decode(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want gqlBigInt
+	}{
+		{`"5499358193"`, 5499358193},
+		{`5499358193`, 5499358193},
+		{`null`, 0},
+		{`"not-a-number"`, 0},
+	} {
+		var got struct {
+			ID gqlBigInt `json:"id"`
+		}
+		got.ID = 7
+		if err := json.Unmarshal([]byte(`{"id": `+tc.in+`}`), &got); err != nil {
+			t.Errorf("decode %s: %v", tc.in, err)
+			continue
+		}
+		if got.ID != tc.want {
+			t.Errorf("decode %s = %d, want %d", tc.in, got.ID, tc.want)
+		}
+	}
+}
