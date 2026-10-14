@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -84,8 +85,11 @@ type ExternalAction struct {
 	Credential string `json:"credential"`
 	// DedupKey is the natural per-action key. A branch push carries a deterministic
 	// BranchPushDedupKey so the git hook+proxy twin collapses under ON CONFLICT DO
-	// NOTHING; every other action leaves this empty and the store fills a uuid, so
-	// the row is an unconditional append (a repeated action is never dropped).
+	// NOTHING; every other action carries a key minted for that one act, so a
+	// repeated action is never dropped while a retried write of the same act is.
+	// The agent's recording funnel mints it before its first write attempt (a
+	// uuid, or RelayedRecordDedupKey for a relayed record); a writer that leaves
+	// it empty gets a uuid from the store.
 	DedupKey string `json:"dedup_key"`
 	// DetailJSON carries the action-specific payload (e.g. {"sha":...,"new":true}
 	// for a branch push, {"status":...} for a transition). Empty → SQL NULL.
@@ -418,8 +422,8 @@ func ExternalActionTypes() []string {
 // scope, dedup_key) DO NOTHING — while a genuinely new push (a force-push to the same
 // ref, or new commits) carries a different sha and is recorded as its own row.
 // This is one of the two actions with a deterministic natural key (the other is
-// EgressDenialDedupKey); every other action leaves DedupKey empty (the store
-// fills a uuid) so it can never be deduped away.
+// EgressDenialDedupKey); every other action's key names that one act (see
+// ExternalAction.DedupKey), so it can never be deduped against another.
 func BranchPushDedupKey(conversationID, ref, sha string) string {
 	return strings.Join([]string{"branch", conversationID, ref, sha}, ":")
 }
@@ -438,6 +442,23 @@ func BranchPushDedupKey(conversationID, ref, sha string) string {
 // same host — org-wide, for the lifetime of the table.
 func EgressDenialDedupKey(conversationID, target string) string {
 	return strings.Join([]string{"egress", conversationID, target}, ":")
+}
+
+// RelayedRecordDedupKey builds the dedup key for the nth action (from 0) a
+// relayed audit record writes: "relay:<conversationID>:<recordKey>:<n>".
+// recordKey is the key the sidecar minted when it queued the record, which
+// every resend of that record carries unchanged — so applying a record a second
+// time, after an acknowledgement that never arrived, lands on the same key and
+// collapses under ON CONFLICT(org_id, scope, dedup_key) DO NOTHING instead of
+// appending a second row. n tells apart the actions one record writes, in the
+// order its application writes them.
+//
+// The conversation id comes from the orchestrator's own record of the run,
+// never from the wire. The sidecar chooses recordKey, so namespacing it under
+// the conversation is what keeps a sidecar from choosing a key that collides
+// with another run's rows.
+func RelayedRecordDedupKey(conversationID, recordKey string, n int) string {
+	return strings.Join([]string{"relay", conversationID, recordKey, strconv.Itoa(n)}, ":")
 }
 
 // ExternalActionListOpts bounds + filters a list read for the action-log feeds.

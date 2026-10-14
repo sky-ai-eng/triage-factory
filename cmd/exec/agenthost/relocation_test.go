@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
@@ -34,13 +35,12 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 				return nil, err
 			}
 			return srv.DispatchCall(ctx, env.Namespace, env.Op, env.Args)
-		case sidecarproto.KindRelayNotify:
-			var env sidecarproto.RelayCallBody
+		case sidecarproto.KindRelayRecord:
+			var env sidecarproto.RelayRecordBody
 			if err := json.Unmarshal(body, &env); err != nil {
 				return nil, err
 			}
-			srv.DispatchNotify(ctx, env.Namespace, env.Op, env.Args)
-			return nil, nil
+			return nil, srv.DispatchRecord(ctx, env.Namespace, env.Op, env.Key, env.Args)
 		default:
 			return nil, nil
 		}
@@ -55,7 +55,7 @@ func TestRelocation_RelayRuntimeOverRealConn(t *testing.T) {
 	})
 
 	// The sidecar's runtime — the real exported constructor, over the real conn.
-	rt := NewRelayRuntime(sidecarConn, info, nil)
+	rt := NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

@@ -36,7 +36,7 @@ func dialRuntime(t *testing.T) (*sidecarproto.Conn, *credRuntime) {
 }
 
 // dialRuntimeWithHandler is dialRuntime with an orchestrator-side handler, for
-// the tests that assert on what the sidecar relays UP (the audit notifies).
+// the tests that assert on what the sidecar relays UP (the audit records).
 func dialRuntimeWithHandler(t *testing.T, h sidecarproto.Handler) (*sidecarproto.Conn, *credRuntime) {
 	t.Helper()
 	rt, err := newCredRuntime()
@@ -271,7 +271,7 @@ func TestRuntime_LLMSourceReflectsRefresh(t *testing.T) {
 // path for a refused sandbox connection: the sidecar starts the run's proxies
 // through the same StartRunProxies call the orchestrator asks for, the agent's
 // own egress env is used to attempt an off-allowlist CONNECT, and the denial
-// must arrive at the orchestrator as a record_egress_denial notify.
+// must arrive at the orchestrator as a record_egress_denial record.
 //
 // This is the regression test for the class of failure that let the egress
 // audit hook sit unwired for a release: nothing asserted the production
@@ -283,16 +283,16 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	notifies := make(chan sidecarproto.RelayCallBody, 4)
+	records := make(chan sidecarproto.RelayRecordBody, 4)
 	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
-		if kind != sidecarproto.KindRelayNotify {
+		if kind != sidecarproto.KindRelayRecord {
 			return nil, nil
 		}
-		var rc sidecarproto.RelayCallBody
+		var rc sidecarproto.RelayRecordBody
 		if err := json.Unmarshal(body, &rc); err != nil {
 			return nil, err
 		}
-		notifies <- rc
+		records <- rc
 		return nil, nil
 	})
 	orch, rt := dialRuntimeWithHandler(t, handler)
@@ -341,7 +341,7 @@ func TestRuntime_EgressDenialRelaysToOrchestrator(t *testing.T) {
 	deadline := time.After(4 * time.Second)
 	for {
 		select {
-		case got := <-notifies:
+		case got := <-records:
 			if got.Op != agentproc.OpRecordEgressDenial {
 				continue
 			}
@@ -435,16 +435,16 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			}))
 			defer upstream.Close()
 
-			notifies := make(chan sidecarproto.RelayCallBody, 4)
+			records := make(chan sidecarproto.RelayRecordBody, 4)
 			handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
-				if kind != sidecarproto.KindRelayNotify {
+				if kind != sidecarproto.KindRelayRecord {
 					return nil, nil
 				}
-				var rc sidecarproto.RelayCallBody
+				var rc sidecarproto.RelayRecordBody
 				if err := json.Unmarshal(body, &rc); err != nil {
 					return nil, err
 				}
-				notifies <- rc
+				records <- rc
 				return nil, nil
 			})
 			orch, rt := dialRuntimeWithHandler(t, handler)
@@ -511,7 +511,7 @@ func TestRuntime_GHInjectorRelaysWriteAudit(t *testing.T) {
 			deadline := time.After(4 * time.Second)
 			for {
 				select {
-				case got := <-notifies:
+				case got := <-records:
 					if got.Op != agentproc.OpRecordGHWrite {
 						continue
 					}
@@ -733,5 +733,46 @@ func TestGitHubUpstreamsFromBundle(t *testing.T) {
 				t.Errorf("githubUpstreams = (%q, %q), want (%q, %q)", git, api, tt.wantGit, tt.wantAPI)
 			}
 		})
+	}
+}
+
+// TestRuntime_DrainRecordsStopsTheSender drives the end-of-run drain the
+// orchestrator sends as a cell is torn down: it reaches the runtime's record
+// sender, answers once the queue is delivered, and leaves the sender refusing
+// anything after it.
+func TestRuntime_DrainRecordsStopsTheSender(t *testing.T) {
+	records := make(chan sidecarproto.RelayRecordBody, 1)
+	handler := sidecarproto.HandlerFunc(func(_ context.Context, kind sidecarproto.Kind, body json.RawMessage) (any, error) {
+		if kind != sidecarproto.KindRelayRecord {
+			return nil, nil
+		}
+		var rc sidecarproto.RelayRecordBody
+		if err := json.Unmarshal(body, &rc); err != nil {
+			return nil, err
+		}
+		records <- rc
+		return nil, nil
+	})
+	orch, rt := dialRuntimeWithHandler(t, handler)
+
+	rt.recordAudit(agentproc.OpRecordEgressDenial, agentproc.RecordEgressDenialArgs{Target: "example.com:443", Reason: "not allowed"})
+	select {
+	case got := <-records:
+		if got.Op != agentproc.OpRecordEgressDenial || got.Key == "" {
+			t.Fatalf("record = %+v; want a keyed egress denial", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the record never reached the orchestrator")
+	}
+
+	undelivered, err := agentproc.DrainRecords(context.Background(), orch)
+	if err != nil {
+		t.Fatalf("DrainRecords: %v", err)
+	}
+	if len(undelivered) != 0 {
+		t.Fatalf("undelivered = %+v; want none: the record was acknowledged", undelivered)
+	}
+	if err := rt.records.Send(agentproc.RelayNamespaceCore, agentproc.OpRecordEgressDenial, agentproc.RecordEgressDenialArgs{}); err == nil {
+		t.Fatal("a record sent after the drain was accepted; want it refused")
 	}
 }

@@ -3,13 +3,17 @@ package agenthost
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -160,33 +164,108 @@ func (s *RelayServer) dispatch(ctx context.Context, namespace, op string, args j
 	return dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args)
 }
 
-// DispatchNotify serves a fire-and-forget audit relay op best-effort — and is
-// the single place a notify that produced no record is accounted for, the way
-// DispatchCall is the single instrumented point for the request/response half.
-//
-// The two failure stages it separates differ in whose fault they are: the core
-// half can only fail before a handler runs (an undecodable payload, an op this
-// binary has no case for), while a provider op fails inside a handler that did
-// run. A core notify whose own DB write fails is NOT counted here — that write
-// is void by contract and counts itself at the write stage, so nothing is
-// counted twice.
-func (s *RelayServer) DispatchNotify(ctx context.Context, namespace, op string, args json.RawMessage) {
-	ctx, span := s.startRelayOp(ctx, "relay.notify", namespace, op)
-	defer span.End()
+// errRecordDeferred is DispatchRecord's answer for a record one of whose
+// writes failed on a retryable error past the write stage's own retries. It
+// tells the sidecar the record was not applied, and to send it again.
+var errRecordDeferred = errors.New("agenthost: audit record not applied; a write failed on a retryable error")
 
+// errRecordPanicked marks the span of a record whose application panicked.
+var errRecordPanicked = errors.New("agenthost: applying an audit record panicked")
+
+// DispatchRecord applies one audit record the sidecar relayed, and is the
+// single place a relayed record is accounted for, the way DispatchCall is the
+// single instrumented point for the request/response half. See
+// agentproc.RelayDispatcher for what its answer tells the sidecar.
+//
+// A record can be applied more than once — the sidecar resends one it has not
+// seen acknowledged — and key is what makes that safe: it is the same on every
+// resend, and the record's ledger row takes its dedup key from it
+// (mintActionDedupKey), so a second application conflicts with the first
+// instead of appending a second row.
+//
+// Three outcomes. A record that never becomes a write — undecodable, an op
+// with no case here, a provider handler that errored — is counted at its relay
+// stage and acknowledged, since sending it again would fail the same way. A
+// record one of whose writes failed on a retryable error past the write
+// stage's own retries is deferred: nothing is counted, and the sidecar is told
+// to send it again. Anything else is acknowledged, after counting whatever the
+// write stage lost for good (relayedRecord.countHeld). So every record is
+// counted at most once, at the stage that finally lost it.
+//
+// The two relay stages differ in whose fault the failure is: the core half can
+// only fail before a handler runs (an undecodable payload, an op this binary
+// has no case for), while a provider op fails inside a handler that did run.
+// A handler that panics is the dispatch stage too, and is acknowledged like
+// any other failure that would repeat: answered with an error, the record
+// would be resent and panic again, holding every record queued behind it for
+// the rest of the run.
+//
+// Every application is capped at recordPushRelayTimeout, for the same reason:
+// the record lane serves one record at a time, so one that never finished
+// would hold every record behind it. The cap reaches only what honours its
+// context — the write funnel runs on a budget of its own (recordContext), and
+// nothing can stop a handler that ignores both.
+func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key string, args json.RawMessage) (answer error) {
+	ctx, span := s.startRelayOp(ctx, "relay.record", namespace, op)
+	defer span.End()
+	ctx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+	defer cancel()
+	defer func() {
+		if r := recover(); r != nil {
+			recordSpanError(span, errRecordPanicked)
+			recordAuditDrop(ctx, dropStageRelayDispatch, relayDropOp(namespace, op))
+			agenthostLog.Error("applying a relayed audit record panicked; record dropped",
+				"namespace", namespace, "op", op, "panic", fmt.Sprint(r), "stack", string(debug.Stack()))
+			answer = nil
+		}
+	}()
+
+	rec := &relayedRecord{key: key}
 	var err error
 	stage := dropStageRelayDispatch
-	if namespace == agentproc.RelayNamespaceCore {
+	switch {
+	case uuid.Validate(key) != nil:
+		// The key is the record's idempotency, so a record without a usable
+		// one cannot be applied safely; only a broken sidecar sends one.
 		stage = dropStageRelayDecode
-		err = s.dispatchCoreNotify(ctx, op, args)
-	} else {
-		_, err = dispatchProviderOp(ctx, s.stores, s.info, namespace, op, args)
+		err = fmt.Errorf("agenthost: relayed record %s/%s carries no valid key", namespace, op)
+	case namespace == agentproc.RelayNamespaceCore:
+		stage = dropStageRelayDecode
+		err = s.dispatchCoreRecord(withRelayedRecord(ctx, rec), op, args)
+	default:
+		_, err = dispatchProviderOp(withRelayedRecord(ctx, rec), s.stores, s.info, namespace, op, args)
 	}
 	if err != nil {
 		recordSpanError(span, err)
 		recordAuditDrop(ctx, stage, relayDropOp(namespace, op))
-		agenthostLog.Warn("relay notify failed; audit record dropped",
+		agenthostLog.Warn("relayed audit record failed; record dropped",
 			"namespace", namespace, "op", op, "error", err)
+		return nil
+	}
+	if rec.deferred {
+		recordSpanError(span, errRecordDeferred)
+		agenthostLog.Warn("relayed audit record deferred; the sidecar will send it again",
+			"namespace", namespace, "op", op, "conversation", s.info.ConversationID)
+		return errRecordDeferred
+	}
+	rec.countHeld(ctx)
+	return nil
+}
+
+// CountUndeliveredRecords counts the audit records a run's sidecar gave up on,
+// as its end-of-run drain reported them (agentproc.DrainRecords), at the send
+// stage: none of them was ever applied here. Both the names and the counts
+// came off the wire from the one process deliberately exposed to hostile
+// text, so the names are clamped like every relay-stage label and a count
+// that is not positive is ignored.
+func CountUndeliveredRecords(ctx context.Context, conversationID string, undelivered []sidecarproto.UndeliveredRecords) {
+	for _, u := range undelivered {
+		if u.Count <= 0 {
+			continue
+		}
+		recordAuditDrops(ctx, dropStageRelaySend, relayDropOp(u.Namespace, u.Op), int64(u.Count))
+		agenthostLog.Warn("sidecar never delivered audit records",
+			"conversation", conversationID, "namespace", u.Namespace, "op", u.Op, "count", u.Count)
 	}
 }
 
@@ -362,7 +441,7 @@ func (s *RelayServer) dispatchCoreCall(ctx context.Context, op string, args json
 		if err := json.Unmarshal(args, &a); err != nil {
 			return nil, err
 		}
-		// Relayed as a CALL, never a notify: the sidecar's auto-post path blocks
+		// Relayed as a CALL, never a record: the sidecar's auto-post path blocks
 		// on the claim's answer — publishing without knowing whether it won the
 		// CAS is exactly the double-submit this guards.
 		moved, err := s.rt.TransitionReviewState(ctx, a.ArtifactID, a.From, a.To, a.ExternalID, a.URL, a.DetailsJSON)
@@ -654,14 +733,15 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 	}
 }
 
-// dispatchCoreNotify serves the "core" fire-and-forget audit ops.
+// dispatchCoreRecord applies the "core" audit records.
 //
 // Its error return is narrow on purpose: every op below either records
 // something or is void by contract, so the only way this returns non-nil is
 // that the payload never became a record at all — an undecodable frame or an op
-// with no case here. That is what makes DispatchNotify's decode stage a real
-// stage rather than a catch-all.
-func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args json.RawMessage) error {
+// with no case here. That is what makes DispatchRecord's decode stage a real
+// stage rather than a catch-all. A write that fails reports itself through the
+// relayed record on ctx instead (recordWriteDrop).
+func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args json.RawMessage) error {
 	switch op {
 	case agentproc.OpRecordDenial:
 		var a agentproc.RecordDenialArgs
@@ -740,6 +820,16 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed external write: %w", err)
 		}
+		// The ledger key is this side's to choose, like the identity and scope
+		// the funnel stamps over whatever the wire said: it is derived from the
+		// record's key under this run's conversation (mintActionDedupKey). A key
+		// the sidecar chose could equal another run's deterministic one — a
+		// branch push's, an egress denial's — and the row it wrote first would
+		// suppress that run's real one. No action the sidecar builds carries a
+		// key of its own; the ops whose rows have one build them here.
+		if a.Action != nil {
+			a.Action.DedupKey = ""
+		}
 		// The write already landed upstream; Record is best-effort and self-bounds
 		// its own recording. Cap it so a wedged store can't pin the frame goroutine.
 		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
@@ -757,21 +847,8 @@ func (s *RelayServer) dispatchCoreNotify(ctx context.Context, op string, args js
 		defer cancel()
 		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.ExternalID, a.URL)
 
-	case agentproc.OpRecordRelayDrop:
-		var a agentproc.RecordRelayDropArgs
-		if err := json.Unmarshal(args, &a); err != nil {
-			return fmt.Errorf("agenthost: decode relayed drop report: %w", err)
-		}
-		// The one notify that carries no record: the sidecar is reporting that a
-		// record never made it onto the wire. Counted against the SENDING stage,
-		// naming the op that lost it — not against this frame, which arrived
-		// fine. See agentproc.NotifyRelayAudit for the half this cannot see.
-		recordAuditDrop(ctx, dropStageRelaySend, relayDropOp(a.Namespace, a.Op))
-		agenthostLog.Warn("sidecar could not relay an audit record",
-			"namespace", a.Namespace, "op", a.Op, "conversation", s.info.ConversationID)
-
 	default:
-		return fmt.Errorf("agenthost: unsupported core relay notify op %q", op)
+		return fmt.Errorf("agenthost: unsupported core relay record op %q", op)
 	}
 	return nil
 }

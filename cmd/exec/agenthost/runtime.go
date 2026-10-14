@@ -122,7 +122,9 @@ type Runtime interface {
 	// Relay / RelayNotify are the generic provider-op escape hatch: a provider
 	// handler (Slack, future) reaches its own org-bound policy op by namespace
 	// without a typed Runtime method per op. Core built-ins use the typed
-	// methods above; providers use these.
+	// methods above; providers use these. RelayNotify is for a provider's audit
+	// record: never awaited, and on the sidecar delivered like every other
+	// record — in order, resent until the orchestrator has applied it.
 	Relay(ctx context.Context, namespace, op string, args, out any) error
 	RelayNotify(ctx context.Context, namespace, op string, args any)
 
@@ -526,43 +528,58 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // (stampScopeInfo) onto a and upserts it, composing the branch-push external
 // action into the SAME write. Event-triggered runs route admin-pool; manual
 // runs wrap in the kicking-off user's synthetic claims. Returns the stored
-// row. When the artifact write fails, the action is written on its own
+// row. Each write is retried on a retryable error like the recording funnel's
+// (withRecordRetry) — the upsert is idempotent and the push row's dedup key is
+// deterministic — but on the caller's own context, since the caller is waiting
+// for the result. When the artifact write fails, the action is written on its own
 // (recordActionAlone) before the artifact's error is returned, so a push whose
-// artifact could not be recorded still leaves its ledger row.
+// artifact could not be recorded still leaves its ledger row. Inside a relayed
+// record the artifact's failure is also the record's (dropRelayedArtifact).
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
 	a.ConversationID = r.info.ConversationID
 	act := branchPushActionInfo(a, r.info, r.githubCredential(ctx, a))
-	if err := stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, act); err != nil {
+	if err := withRecordRetry(ctx, func() error { return stampScopeInfo(ctx, r.stores, r.info.OrgID, &a, act) }); err != nil {
+		r.dropBranchPush(ctx, a, act, err)
 		return domain.Artifact{}, err
 	}
 	if r.info.IsEventTriggered {
-		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
+		var stored domain.Artifact
+		err := withRecordRetry(ctx, func() error {
+			var e error
+			stored, e = r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
+			return e
+		})
 		if err != nil {
+			dropRelayedArtifact(ctx, a, err)
 			r.recordBranchPushAlone(ctx, a, act)
 			return domain.Artifact{}, err
 		}
-		if rerr := recordActionSystemInfo(ctx, r.stores, r.info, act); rerr != nil {
-			agenthostLog.Warn("branch external-action recording failed (push already applied)",
-				"conversation", r.info.ConversationID, "target", a.Target, "error", rerr)
+		if rerr := withRecordRetry(ctx, func() error { return recordActionSystemInfo(ctx, r.stores, r.info, act) }); rerr != nil {
+			r.dropBranchPush(ctx, a, act, rerr)
 		}
 		return stored, nil
 	}
 	var out domain.Artifact
 	var artifactErr error
-	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
-		artifactErr = nil
-		stored, uerr := ts.Artifacts.Upsert(ctx, r.info.OrgID, a)
-		if uerr != nil {
-			artifactErr = uerr
-			return uerr
-		}
-		out = stored
-		return recordActionTx(ctx, ts, r.info.OrgID, act)
+	err := withRecordRetry(ctx, func() error {
+		return r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+			artifactErr = nil
+			stored, uerr := ts.Artifacts.Upsert(ctx, r.info.OrgID, a)
+			if uerr != nil {
+				artifactErr = uerr
+				return uerr
+			}
+			out = stored
+			return recordActionTx(ctx, ts, r.info.OrgID, act)
+		})
 	})
 	if artifactErr != nil {
+		dropRelayedArtifact(ctx, a, artifactErr)
 		r.recordBranchPushAlone(ctx, a, act)
+	} else if err != nil {
+		r.dropBranchPush(ctx, a, act, err)
 	}
 	return out, err
 }
@@ -575,10 +592,35 @@ func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Arti
 		return
 	}
 	if err := recordActionAlone(ctx, r.stores, r.info, act); err != nil {
-		recordAuditDrop(ctx, dropStageRecord, recordDropOp(nil, act))
-		agenthostLog.Warn("branch external-action recording failed (push already applied)",
-			"conversation", r.info.ConversationID, "target", a.Target, "error", err)
+		r.dropBranchPush(ctx, a, act, err)
 	}
+}
+
+// dropBranchPush accounts for a branch-push row that was not written, cause
+// being the error that lost it. A nil act (an artifact that is not a branch)
+// lost no row.
+func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Artifact, act *domain.ExternalAction, cause error) {
+	if act == nil {
+		return
+	}
+	recordWriteDrop(ctx, recordDropOp(nil, act), cause)
+	agenthostLog.Warn("branch external-action recording failed (push already applied)",
+		"conversation", r.info.ConversationID, "target", a.Target, "error", cause)
+}
+
+// dropRelayedArtifact accounts for an artifact that a relayed record — a
+// sidecar's record_push — failed to write, cause being the error that lost it.
+// There the artifact is the record's loss like the ledger row beside it, as it
+// is in the recording funnel: held until the record's outcome is known, and
+// deferring the record when another attempt can land it, so the sidecar's
+// resend retries the artifact too. Every other caller of UpsertArtifact is
+// waiting on its result and gets the error back to handle, so outside a
+// relayed record this does nothing.
+func dropRelayedArtifact(ctx context.Context, a domain.Artifact, cause error) {
+	if relayedRecordFrom(ctx) == nil {
+		return
+	}
+	recordWriteDrop(ctx, recordDropOp(&a, nil), cause)
 }
 
 // githubCredential names the credential to stamp on the branch-push row for
@@ -756,13 +798,14 @@ type HeldBundle interface {
 	Sources() domain.SourceManifest
 }
 
-// relayConn is the slice of *sidecarproto.Conn the relayRuntime needs, declared
-// as an interface so a test can drive it without a real supervision channel.
-// (agentproc.CallRelay/NotifyRelay take the concrete *sidecarproto.Conn, so the
-// production relayRuntime wraps one; see newRelayRuntime.)
+// relayConn is what the relayRuntime needs of the supervision channel —
+// request/response calls, and audit records handed to the run's record sender —
+// declared as an interface so a test can drive it without a real channel.
+// (agentproc.CallRelay takes the concrete *sidecarproto.Conn, so the production
+// relayRuntime wraps one; see newRelayRuntime.)
 type relayConn interface {
 	call(ctx context.Context, namespace, op string, args, out any) error
-	notify(namespace, op string, args any)
+	record(namespace, op string, args any)
 }
 
 func newRelayRuntime(conn relayConn, info ConversationInfo, held HeldBundle) *relayRuntime {
@@ -898,22 +941,21 @@ func (r *relayRuntime) TransitionReviewState(ctx context.Context, artifactID, fr
 }
 
 func (r *relayRuntime) Record(_ context.Context, a *domain.Artifact, act *domain.ExternalAction) {
-	// Fire-and-forget: the external write already landed upstream, so the audit
-	// record must never block the op that follows it (mirrors the void
-	// RecordExternalWrite). A dropped notify costs one audit row, never the
-	// agent's action.
-	r.conn.notify(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act})
+	// Queued, not awaited: the external write already landed upstream, so the
+	// audit record must never block the op that follows it (mirrors the void
+	// RecordExternalWrite). The run's record sender delivers it in order and
+	// resends it until the orchestrator has applied it.
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordExternalWrite, recordExternalWriteArgs{Artifact: a, Action: act})
 }
 
 func (r *relayRuntime) RecordReadTouch(_ context.Context, provider, target, externalID, url string) {
-	// Fire-and-forget, mirroring Record: the read already returned, so the touch
-	// must never block it. A dropped notify costs one touch row, re-established
-	// on the next addressed hit or poll.
-	r.conn.notify(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url})
+	// Queued, mirroring Record: the read already returned, so the touch must
+	// never block it.
+	r.conn.record(agentproc.RelayNamespaceCore, opRecordReadTouch, recordReadTouchArgs{Provider: provider, Target: target, ExternalID: externalID, URL: url})
 }
 
-// MemoryLoad relays as a call (not a notify): unlike the fire-and-forget touch,
-// the agent waits on the returned memory. The best-effort touch it records
+// MemoryLoad relays as a call (not a record): unlike the queued touch, the
+// agent waits on the returned memory. The best-effort touch it records
 // happens orchestrator-side inside loadEntityMemory, so a relay round-trip
 // carries only the read result back.
 func (r *relayRuntime) MemoryLoad(ctx context.Context, source, sourceID, externalID string, limit int) (*MemoryLoadResult, error) {
@@ -929,7 +971,7 @@ func (r *relayRuntime) Relay(ctx context.Context, namespace, op string, args, ou
 }
 
 func (r *relayRuntime) RelayNotify(_ context.Context, namespace, op string, args any) {
-	r.conn.notify(namespace, op, args)
+	r.conn.record(namespace, op, args)
 }
 
 // ProviderCredential returns the provider's sealed keyed set from the held
@@ -979,22 +1021,25 @@ func (r *relayRuntime) SourceManifest(context.Context) (domain.SourceManifest, e
 }
 
 // sidecarRelayConn adapts a live supervision channel to relayConn — the
-// production backing for a sidecar-hosted runtime (agentproc.CallRelay/NotifyRelay
-// over *sidecarproto.Conn).
-type sidecarRelayConn struct{ conn *sidecarproto.Conn }
+// production backing for a sidecar-hosted runtime: calls go straight over the
+// channel (agentproc.CallRelay), records through the run's one record sender.
+type sidecarRelayConn struct {
+	conn    *sidecarproto.Conn
+	records *agentproc.RecordSender
+}
 
 func (c sidecarRelayConn) call(ctx context.Context, namespace, op string, args, out any) error {
 	return agentproc.CallRelay(ctx, c.conn, namespace, op, args, out)
 }
 
-func (c sidecarRelayConn) notify(namespace, op string, args any) {
-	// The audit sender, not the raw one: a record that never reaches the wire is
-	// reported back over the same channel where that is still possible, so the
-	// orchestrator can count it. Still fire-and-forget for the caller — the
-	// external write already landed, and nothing here may fail the op that
-	// follows it.
-	if err := agentproc.NotifyRelayAudit(c.conn, namespace, op, args); err != nil {
-		agenthostLog.Warn("relaying an audit record failed", "namespace", namespace, "op", op, "error", err)
+func (c sidecarRelayConn) record(namespace, op string, args any) {
+	// The sender is shared with everything else in the sidecar that records,
+	// which is what keeps records in the order the acts happened. Never
+	// awaited — the external write already landed, and nothing here may fail
+	// the op that follows it. A record the sender refuses is one it has
+	// already counted for the end-of-run drain.
+	if err := c.records.Send(namespace, op, args); err != nil {
+		agenthostLog.Warn("queueing an audit record failed", "namespace", namespace, "op", op, "error", err)
 	}
 }
 
@@ -1007,8 +1052,9 @@ func NewDirectRuntime(stores db.Stores, info ConversationInfo) Runtime {
 
 // NewRelayRuntime builds the sidecar's runtime over a live supervision channel:
 // every DB effect relays to the orchestrator, the sidecar holds no stores.
-// providerCreds reads the sidecar's held bundle for a provider's sealed keyed
-// set (nil when the run carries no provider credentials).
-func NewRelayRuntime(conn *sidecarproto.Conn, info ConversationInfo, held HeldBundle) Runtime {
-	return newRelayRuntime(sidecarRelayConn{conn: conn}, info, held)
+// records is the run's one record sender on that channel, which the runtime's
+// audit records go through. held reads the sidecar's bundle for a provider's
+// sealed keyed set (nil when the run carries no provider credentials).
+func NewRelayRuntime(conn *sidecarproto.Conn, records *agentproc.RecordSender, info ConversationInfo, held HeldBundle) Runtime {
+	return newRelayRuntime(sidecarRelayConn{conn: conn, records: records}, info, held)
 }

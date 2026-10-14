@@ -161,12 +161,11 @@ type StartProxiesResult struct {
 	GHChannelToken string `json:"gh_channel_token,omitempty"`
 }
 
-// RelayCallBody is the payload of both KindRelayCall and KindRelayNotify: the
-// generic sidecar → orchestrator relay envelope. Namespace + Op name the op
-// (core reads/authz/records under "core"; a provider's policy ops under its
-// namespace); Args is the op-specific request, opaque to this transport (the
-// op's registered handler owns the shape on both ends). A Call's response is
-// the op's marshaled result carried in the Frame body; a Notify awaits none.
+// RelayCallBody is KindRelayCall's payload: the generic sidecar → orchestrator
+// relay envelope. Namespace + Op name the op (core reads/authz under "core"; a
+// provider's policy ops under its namespace); Args is the op-specific request,
+// opaque to this transport (the op's registered handler owns the shape on both
+// ends). The response is the op's marshaled result carried in the Frame body.
 //
 // The envelope deliberately carries NO org id — the orchestrator binds
 // identity from the supervised run's ConversationInfo, so a sidecar cannot steer an op
@@ -176,4 +175,37 @@ type RelayCallBody struct {
 	Namespace string          `json:"ns"`
 	Op        string          `json:"op"`
 	Args      json.RawMessage `json:"args,omitempty"`
+}
+
+// RelayRecordBody is KindRelayRecord's payload: one audit record, in the same
+// (namespace, op, args) shape as RelayCallBody and, like it, with no org id.
+//
+// Key names the record rather than the attempt: the sidecar mints it once,
+// when the record is queued, and every resend carries it unchanged. It is how
+// the orchestrator applies a record twice without writing two rows — the
+// ledger row's dedup key is derived from it — so a resend after an answer was
+// lost costs nothing.
+type RelayRecordBody struct {
+	Namespace string          `json:"ns"`
+	Op        string          `json:"op"`
+	Key       string          `json:"key"`
+	Args      json.RawMessage `json:"args,omitempty"`
+}
+
+// DrainRecordsResult is KindDrainRecords' response payload: the audit records
+// the sidecar gave up on, grouped by op. A record is here if it was still
+// unacknowledged when the drain's wait ran out, or if it never entered the
+// queue at all (its args did not marshal, or the queue was full). Empty when
+// everything was delivered.
+type DrainRecordsResult struct {
+	Undelivered []UndeliveredRecords `json:"undelivered,omitempty"`
+}
+
+// UndeliveredRecords counts the undelivered records of one op. Nothing of the
+// records themselves crosses: what the orchestrator does with this is count
+// it, and the namespace and op are all a count is labelled with.
+type UndeliveredRecords struct {
+	Namespace string `json:"ns"`
+	Op        string `json:"op"`
+	Count     int    `json:"count"`
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -324,4 +325,150 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+// recordCall sends one KindRelayRecord frame as a Call, the way a sidecar's
+// record sender does, and reports its outcome on the returned channel.
+func recordCall(c *Conn, op string) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		done <- c.Call(ctx, KindRelayRecord, RelayRecordBody{Namespace: "core", Op: op, Key: op}, nil)
+	}()
+	return done
+}
+
+// recordOp decodes the op a record frame carries.
+func recordOp(t *testing.T, body json.RawMessage) string {
+	t.Helper()
+	var env RelayRecordBody
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Errorf("decode record: %v", err)
+	}
+	return env.Op
+}
+
+// TestConn_RecordsAreServedOneAtATimeInOrder: a second record is not handed to
+// the handler until the first has returned, whatever their arrival gap — which
+// is what keeps a comment's delete from being applied before its post.
+func TestConn_RecordsAreServedOneAtATimeInOrder(t *testing.T) {
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	server := HandlerFunc(func(_ context.Context, kind Kind, body json.RawMessage) (any, error) {
+		if kind != KindRelayRecord {
+			return nil, nil
+		}
+		op := recordOp(t, body)
+		started <- op
+		if op == "first" {
+			<-release
+		}
+		return nil, nil
+	})
+	client, _ := pipeConns(t, nil, server)
+
+	first := recordCall(client, "first")
+	if got := <-started; got != "first" {
+		t.Fatalf("first record served = %q", got)
+	}
+	second := recordCall(client, "second")
+	select {
+	case got := <-started:
+		t.Fatalf("record %q was served while the first was still being served", got)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first record: %v", err)
+	}
+	select {
+	case got := <-started:
+		if got != "second" {
+			t.Fatalf("second record served = %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the second record was never served")
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second record: %v", err)
+	}
+}
+
+// TestConn_ASlowRecordDoesNotHoldCalls: a record being served blocks only the
+// records behind it. A Call on the same connection is still served, and this
+// side's own Calls still get their answers.
+func TestConn_ASlowRecordDoesNotHoldCalls(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	recordStarted := make(chan struct{})
+	server := HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
+		switch kind {
+		case KindRelayRecord:
+			close(recordStarted)
+			<-release
+			return nil, nil
+		case KindStartProxies:
+			return StartProxiesResult{Env: []string{"OK=1"}}, nil
+		}
+		return nil, nil
+	})
+	client, _ := pipeConns(t, nil, server)
+
+	_ = recordCall(client, "slow")
+	<-recordStarted
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var res StartProxiesResult
+	if err := client.Call(ctx, KindStartProxies, StartProxiesBody{}, &res); err != nil {
+		t.Fatalf("Call behind a slow record: %v", err)
+	}
+	if len(res.Env) != 1 || res.Env[0] != "OK=1" {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+// TestConn_AFullRecordLaneAnswersAtOnce: once the lane is full, a further
+// record is refused immediately with ErrRecordLaneFull rather than queued
+// behind the reader, so the sender backs off and resends instead of waiting.
+func TestConn_AFullRecordLaneAnswersAtOnce(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	started := make(chan struct{}, 1)
+	server := HandlerFunc(func(_ context.Context, kind Kind, _ json.RawMessage) (any, error) {
+		if kind == KindRelayRecord {
+			select {
+			case started <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return nil, nil
+	})
+	client, server2 := pipeConns(t, nil, server)
+
+	_ = recordCall(client, "being-served")
+	<-started
+	// Fill the lane behind the record being served.
+	for i := 0; i < recordLaneLimit; i++ {
+		_ = recordCall(client, "queued")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(server2.records) < recordLaneLimit {
+		if time.Now().After(deadline) {
+			t.Fatalf("lane holds %d records; want %d", len(server2.records), recordLaneLimit)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case err := <-recordCall(client, "overflow"):
+		if err == nil || !strings.Contains(err.Error(), ErrRecordLaneFull.Error()) {
+			t.Fatalf("overflowing record = %v; want %v", err, ErrRecordLaneFull)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a record arriving at a full lane was not answered")
+	}
 }

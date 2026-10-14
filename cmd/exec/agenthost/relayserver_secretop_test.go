@@ -22,7 +22,7 @@ import (
 var credentialOpSubstrings = []string{"secret", "cred", "unseal", "token", "key"}
 
 // extractServedCoreRelayOpLabels parses relayserver.go and returns a label for
-// every case in dispatchCoreCall's and dispatchCoreNotify's `switch op` — the
+// every case in dispatchCoreCall's and dispatchCoreRecord's `switch op` — the
 // ops the RelayServer actually serves, read from the live source rather than a
 // hand-maintained mirror. A named const case yields its identifier
 // (agentproc.OpAuthorizeRepo → OpAuthorizeRepo, opGetTask → opGetTask); a raw
@@ -38,7 +38,7 @@ func extractServedCoreRelayOpLabels(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("parse relayserver.go: %v", err)
 	}
-	wantFuncs := map[string]bool{"dispatchCoreCall": true, "dispatchCoreNotify": true}
+	wantFuncs := map[string]bool{"dispatchCoreCall": true, "dispatchCoreRecord": true}
 	seenFunc := map[string]bool{}
 	var labels []string
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -132,7 +132,7 @@ func TestRelayServer_ServesNoCredentialBearingOp(t *testing.T) {
 
 // recordingRelayConn is a relayConn that fails the test if the credential path
 // ever reaches across the supervision channel. ProviderCredential must resolve
-// entirely from the held bundle, so any call/notify here is a defect.
+// entirely from the held bundle, so any call/record here is a defect.
 type recordingRelayConn struct{ t *testing.T }
 
 func (c recordingRelayConn) call(_ context.Context, namespace, op string, _, _ any) error {
@@ -140,8 +140,8 @@ func (c recordingRelayConn) call(_ context.Context, namespace, op string, _, _ a
 	return nil
 }
 
-func (c recordingRelayConn) notify(namespace, op string, _ any) {
-	c.t.Fatalf("ProviderCredential notified %s/%s to the orchestrator — provider creds must resolve locally", namespace, op)
+func (c recordingRelayConn) record(namespace, op string, _ any) {
+	c.t.Fatalf("ProviderCredential recorded %s/%s to the orchestrator — provider creds must resolve locally", namespace, op)
 }
 
 // TestRelayRuntime_ProviderCredentialNeverRelays pins the other half of the

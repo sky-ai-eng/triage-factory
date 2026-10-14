@@ -124,6 +124,7 @@ func gateRequest(r *http.Request, facts *ghwrite.GraphQLFacts) (ghwrite.Request,
 // than trusting this side's reading, so a bug here can only refuse more.
 //
 // The hook is also where the refusal is RECORDED, which is why it is a call and
-// not a notification: a denial is the security record of the request, and one
-// that rode a fire-and-forget channel could be lost without a trace.
+// not a queued audit record: a denial is the security record of the request,
+// so it is written before the refusal is answered rather than at some point
+// after it.
 type AuthorizeWrite func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool

@@ -9,6 +9,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 	"go.opentelemetry.io/otel/attribute"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
@@ -134,8 +135,9 @@ func TestAuditDrop_SuccessfulWriteCountsNothing(t *testing.T) {
 }
 
 // TestAuditDrop_RelayDecodeFailureIsCounted is the relay half of the
-// acceptance: a notify whose payload never becomes a record is counted at the
-// decode stage, naming the op it arrived under.
+// acceptance: a record whose payload never becomes a write is counted at the
+// decode stage, naming the op it arrived under — and acknowledged, since the
+// same bytes would fail the same way on every resend.
 func TestAuditDrop_RelayDecodeFailureIsCounted(t *testing.T) {
 	reader := installTestAuditDrops(t)
 	stores, info := newCaptureStores(t, true)
@@ -143,11 +145,13 @@ func TestAuditDrop_RelayDecodeFailureIsCounted(t *testing.T) {
 
 	// Well-formed JSON, wrong shape for this op — the failure a version skew or
 	// a corrupted frame produces, rather than a syntactically broken one.
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
-		json.RawMessage(`{"status":"not-an-int"}`))
+	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite,
+		json.RawMessage(`{"status":"not-an-int"}`)); err != nil {
+		t.Fatalf("an undecodable record was answered %v; want it acknowledged, so the sidecar does not resend it", err)
+	}
 
 	if acts := listExternalActions(t, stores); len(acts) != 0 {
-		t.Fatalf("an undecodable notify wrote %d rows; want none", len(acts))
+		t.Fatalf("an undecodable record wrote %d rows; want none", len(acts))
 	}
 	got := collectDrops(t, reader)
 	wantOp := agentproc.RelayNamespaceCore + "." + agentproc.OpRecordGHWrite
@@ -156,14 +160,37 @@ func TestAuditDrop_RelayDecodeFailureIsCounted(t *testing.T) {
 	}
 }
 
-// TestAuditDrop_UnsupportedNotifyOpIsCounted: an op with no case here lost a
+// TestAuditDrop_RecordWithoutAKeyIsCounted: the key is what makes applying a
+// record twice safe, so a record without a usable one is not applied at all.
+// It is counted at the decode stage and acknowledged.
+func TestAuditDrop_RecordWithoutAKeyIsCounted(t *testing.T) {
+	reader := installTestAuditDrops(t)
+	stores, info := newCaptureStores(t, true)
+	s := NewRelayServer(stores, info, nil)
+
+	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{Method: "PUT", Path: "/repos/acme/widgets/pulls/7/merge", Status: 404})
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, "not-a-key", args); err != nil {
+		t.Fatalf("DispatchRecord = %v; want the keyless record acknowledged", err)
+	}
+	if acts := listExternalActions(t, stores); len(acts) != 0 {
+		t.Fatalf("a keyless record wrote %d rows; want none", len(acts))
+	}
+	wantOp := agentproc.RelayNamespaceCore + "." + agentproc.OpRecordGHWrite
+	if n := collectDrops(t, reader)[dropStageRelayDecode][wantOp]; n != 1 {
+		t.Fatalf("want one %s drop under op=%s", dropStageRelayDecode, wantOp)
+	}
+}
+
+// TestAuditDrop_UnsupportedRecordOpIsCounted: an op with no case here lost a
 // record just as surely as an undecodable one, and its name came off the wire,
 // so it is counted under the clamp rather than verbatim.
-func TestAuditDrop_UnsupportedNotifyOpIsCounted(t *testing.T) {
+func TestAuditDrop_UnsupportedRecordOpIsCounted(t *testing.T) {
 	reader := installTestAuditDrops(t)
 	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, "record_something_invented", json.RawMessage(`{}`))
+	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, "record_something_invented", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("an unsupported record was answered %v; want it acknowledged", err)
+	}
 
 	got := collectDrops(t, reader)
 	if n := got[dropStageRelayDecode][dropOpOther]; n != 1 {
@@ -171,26 +198,28 @@ func TestAuditDrop_UnsupportedNotifyOpIsCounted(t *testing.T) {
 	}
 }
 
-// TestAuditDrop_SidecarSendReportIsCounted: the sidecar's report that a record
-// never reached the wire lands at the SEND stage, not the receive one — the
-// frame carrying the report arrived fine; the record it describes did not.
-func TestAuditDrop_SidecarSendReportIsCounted(t *testing.T) {
+// TestAuditDrop_UndeliveredRecordsAreCountedAtTheSendStage: what the sidecar's
+// end-of-run drain reports it never delivered lands at the SEND stage, by op
+// and count — none of it was ever applied here.
+func TestAuditDrop_UndeliveredRecordsAreCountedAtTheSendStage(t *testing.T) {
 	reader := installTestAuditDrops(t)
-	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
-	args, _ := json.Marshal(agentproc.RecordRelayDropArgs{
-		Namespace: agentproc.RelayNamespaceCore,
-		Op:        agentproc.OpRecordGHWrite,
+	CountUndeliveredRecords(context.Background(), "conv", []sidecarproto.UndeliveredRecords{
+		{Namespace: agentproc.RelayNamespaceCore, Op: agentproc.OpRecordGHWrite, Count: 3},
+		{Namespace: agentproc.RelayNamespaceCore, Op: agentproc.OpRecordPush, Count: 1},
+		// Not a count anything can be: ignored rather than subtracted.
+		{Namespace: agentproc.RelayNamespaceCore, Op: agentproc.OpRecordDenial, Count: -4},
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordRelayDrop, args)
 
 	got := collectDrops(t, reader)
-	wantOp := agentproc.RelayNamespaceCore + "." + agentproc.OpRecordGHWrite
-	if n := got[dropStageRelaySend][wantOp]; n != 1 {
-		t.Fatalf("drops = %v; want one %s drop under op=%s", got, dropStageRelaySend, wantOp)
+	if n := got[dropStageRelaySend][agentproc.RelayNamespaceCore+"."+agentproc.OpRecordGHWrite]; n != 3 {
+		t.Errorf("drops = %v; want three %s drops of the gh write", got, dropStageRelaySend)
 	}
-	if _, counted := got[dropStageRelayDecode]; counted {
-		t.Errorf("drops = %v; the report's own frame decoded fine and must not count", got)
+	if n := got[dropStageRelaySend][agentproc.RelayNamespaceCore+"."+agentproc.OpRecordPush]; n != 1 {
+		t.Errorf("drops = %v; want one %s drop of the push", got, dropStageRelaySend)
+	}
+	if _, counted := got[dropStageRelaySend][agentproc.RelayNamespaceCore+"."+agentproc.OpRecordDenial]; counted {
+		t.Errorf("drops = %v; a negative count must not be counted", got)
 	}
 }
 
@@ -200,18 +229,14 @@ func TestAuditDrop_SidecarSendReportIsCounted(t *testing.T) {
 // be an unbounded-cardinality write into the orchestrator's exporter.
 func TestAuditDrop_WireOpNamesAreClamped(t *testing.T) {
 	reader := installTestAuditDrops(t)
-	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
-	for _, a := range []agentproc.RecordRelayDropArgs{
-		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_one"},
-		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_two"},
+	CountUndeliveredRecords(context.Background(), "conv", []sidecarproto.UndeliveredRecords{
+		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_one", Count: 1},
+		{Namespace: agentproc.RelayNamespaceCore, Op: "invented_two", Count: 1},
 		// An unregistered namespace: nothing serves it, so there is no name to
 		// vouch for.
-		{Namespace: "not_a_provider", Op: agentproc.OpRecordGHWrite},
-	} {
-		args, _ := json.Marshal(a)
-		s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordRelayDrop, args)
-	}
+		{Namespace: "not_a_provider", Op: agentproc.OpRecordGHWrite, Count: 1},
+	})
 
 	got := collectDrops(t, reader)
 	if len(got[dropStageRelaySend]) != 1 || got[dropStageRelaySend][dropOpOther] != 3 {
@@ -233,12 +258,15 @@ func TestAuditDrop_RegisteredProviderOpIsNamed(t *testing.T) {
 		})
 	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
 
-	// The send stage: the sidecar reporting it could not relay that provider's
+	// The send stage: the sidecar reporting it never delivered that provider's
 	// record.
-	args, _ := json.Marshal(agentproc.RecordRelayDropArgs{Namespace: "acmeprov", Op: "record_thing"})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordRelayDrop, args)
+	CountUndeliveredRecords(context.Background(), "conv", []sidecarproto.UndeliveredRecords{
+		{Namespace: "acmeprov", Op: "record_thing", Count: 1},
+	})
 	// The dispatch stage: the same op arriving and its handler failing.
-	s.DispatchNotify(context.Background(), "acmeprov", "record_thing", json.RawMessage(`{}`))
+	if err := relayRecord(t, s, "acmeprov", "record_thing", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("a failed provider record was answered %v; want it acknowledged", err)
+	}
 
 	got := collectDrops(t, reader)
 	if n := got[dropStageRelaySend]["acmeprov.record_thing"]; n != 1 {
@@ -249,7 +277,7 @@ func TestAuditDrop_RegisteredProviderOpIsNamed(t *testing.T) {
 	}
 }
 
-// TestAuditDrop_RelayedRecordThatLandsCountsNothing: a notify that decodes and
+// TestAuditDrop_RelayedRecordThatLandsCountsNothing: a record that decodes and
 // writes is silent at every stage — the relay stages must not fire on the
 // healthy path any more than the write stage does.
 func TestAuditDrop_RelayedRecordThatLandsCountsNothing(t *testing.T) {
@@ -260,12 +288,35 @@ func TestAuditDrop_RelayedRecordThatLandsCountsNothing(t *testing.T) {
 	args, _ := json.Marshal(agentproc.RecordGHWriteArgs{
 		Method: "PUT", Path: "/repos/acme/widgets/pulls/7/merge", Status: 404,
 	})
-	s.DispatchNotify(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args)
+	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordGHWrite, args); err != nil {
+		t.Fatalf("relayRecord: %v", err)
+	}
 
 	if acts := listExternalActions(t, stores); len(acts) != 1 {
 		t.Fatalf("want the relayed row written, got %d", len(acts))
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; want none on a relay that landed", got)
+	}
+}
+
+// TestAuditDrop_PanickingRecordIsCountedAndAcknowledged: a record whose
+// handler panics would panic again on every resend, so it is counted at the
+// dispatch stage and acknowledged rather than left to hold the records behind
+// it.
+func TestAuditDrop_PanickingRecordIsCountedAndAcknowledged(t *testing.T) {
+	reader := installTestAuditDrops(t)
+	t.Cleanup(ResetProviders)
+	RegisterProviderOp("acmeprov", "record_thing",
+		func(context.Context, db.Stores, ConversationInfo, json.RawMessage) (any, error) {
+			panic("handler bug")
+		})
+	s := NewRelayServer(db.Stores{}, ConversationInfo{}, nil)
+
+	if err := relayRecord(t, s, "acmeprov", "record_thing", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("a panicking record was answered %v; want it acknowledged", err)
+	}
+	if n := collectDrops(t, reader)[dropStageRelayDispatch]["acmeprov.record_thing"]; n != 1 {
+		t.Fatalf("want one %s drop under op=acmeprov.record_thing", dropStageRelayDispatch)
 	}
 }

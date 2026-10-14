@@ -22,20 +22,20 @@ import (
 const RelayNamespaceCore = "core"
 
 // Core op names. authorize_repo answers the git proxy's per-push decision;
-// record_denial / record_push are its fire-and-forget audit records. The
-// exec verb-trace DB ops are added to this catalog alongside the relocated
-// agenthost; they share the same envelope.
+// record_denial / record_push are its audit records, sent as KindRelayRecord
+// through the run's RecordSender. The exec verb-trace DB ops are added to this
+// catalog alongside the relocated agenthost; they share the same envelope.
 const (
 	OpAuthorizeRepo = "authorize_repo"
 	OpRecordDenial  = "record_denial"
 	OpRecordPush    = "record_push"
-	// OpRecordEgressDenial is the egress proxy's fire-and-forget report of a
-	// refused CONNECT. Same shape as record_denial, one layer down: the proxy
+	// OpRecordEgressDenial is the egress proxy's audit record of a refused
+	// CONNECT. Same shape as record_denial, one layer down: the proxy
 	// runs in the capless sidecar and the audit row is a DB write, so the
 	// coordinates travel up and the orchestrator writes.
 	OpRecordEgressDenial = "record_egress_denial"
-	// OpRecordGHWrite is the gh-channel injector's fire-and-forget report of a
-	// write it forwarded, with the upstream's outcome. It covers every mutating
+	// OpRecordGHWrite is the gh-channel injector's audit record of a write it
+	// forwarded, with the upstream's outcome. It covers every mutating
 	// REST method and every GraphQL mutation, on both outcomes, so an edit, a
 	// merge, and a refused write all leave a trace.
 	// A GraphQL write carries what its request envelope disclosed alongside the
@@ -44,17 +44,11 @@ const (
 	// OpAuthorizeGHWrite is the gh-channel injector's per-request decision on a
 	// shape the refusal policy gates — a merge, a submitted review, a
 	// repository creation, or a GraphQL request whose act could not be read.
-	// A Call rather than a notify for two reasons: the request is held until
+	// A Call rather than a record for two reasons: the request is held until
 	// the answer arrives (a refusal that raced the forward would be no refusal
-	// at all), and the denial row is written by the handler, so it cannot be
-	// lost the way a fire-and-forget audit record can.
+	// at all), and the denial row is written by the handler before it answers,
+	// so the row is in the ledger by the time the agent sees the refusal.
 	OpAuthorizeGHWrite = "authorize_gh_write"
-	// OpRecordRelayDrop is the sidecar's report that one of the audit notifies
-	// above never reached the wire. It carries no record — the record is what
-	// was lost — only the name of the op that lost it, so the orchestrator can
-	// count a hole in the log of record. See NotifyRelayAudit for what this can
-	// and cannot observe.
-	OpRecordRelayDrop = "record_relay_drop"
 )
 
 // AuthorizeRepoArgs / AuthorizeRepoReply are the authorize_repo op's payloads
@@ -186,59 +180,23 @@ type RecordPushArgs struct {
 	Status  int    `json:"status"`
 }
 
-// RecordRelayDropArgs is record_relay_drop's payload: the namespace and op of
-// the audit notify that was lost. Nothing else — a report carrying the dropped
-// record would just be the notify that already failed.
-//
-// The pair travels split rather than pre-joined so the orchestrator resolves it
-// through the same naming path it uses for the notifies it serves, and so it
-// can tell a core op from a provider one without parsing. It treats both as
-// untrusted: they arrive from the one process deliberately exposed to hostile
-// text, and what they name becomes a metric label.
-type RecordRelayDropArgs struct {
-	Namespace string `json:"namespace"`
-	Op        string `json:"op"`
-}
-
-// NotifyRelayAudit sends a fire-and-forget audit op and, when the send itself
-// fails, tells the orchestrator that a record was lost. The orchestrator holds
-// the metrics exporter — the per-run sidecar opens no listener and installs no
-// meter provider — so a drop is countable only where it can be reported to,
-// which makes the report a relay op like any other.
-//
-// What it can observe is bounded by the channel it reports over, and the bound
-// is worth stating because it is the whole residual: a Conn collapses
-// permanently on a write error or a close, so any send failure of that kind
-// takes the drop report down with it. What survives to be reported is the
-// marshal failure — the case where the payload was never encodable and the
-// channel is fine. The unreportable half is the teardown race, where a notify
-// written as the run is torn down loses to the conn close; the returned error
-// is the caller's to log, and that log line is all that case ever gets.
-func NotifyRelayAudit(conn *sidecarproto.Conn, namespace, op string, args any) error {
-	err := NotifyRelay(conn, namespace, op, args)
-	if err == nil {
-		return nil
-	}
-	// Deliberately NOT recursive: the report goes out as a plain notify, so a
-	// dead channel ends the attempt here rather than looping on itself.
-	_ = NotifyRelay(conn, RelayNamespaceCore, OpRecordRelayDrop,
-		RecordRelayDropArgs{Namespace: namespace, Op: op})
-	return err
-}
-
 // RelayDispatcher serves the sidecar's org-bound relay ops. The concrete impl
 // (agenthost.RelayServer) holds the run's db.Stores + ConversationInfo + git gate and
 // binds identity from ConversationInfo, so a relayed op can never be steered at another
-// org. DispatchCall serves a request/response op (KindRelayCall); DispatchNotify
-// serves a fire-and-forget audit op (KindRelayNotify) best-effort. The
-// supervisor holds one of these for the run's lifetime.
+// org. DispatchCall serves a request/response op (KindRelayCall); DispatchRecord
+// applies an audit record (KindRelayRecord). The supervisor holds one of these
+// for the run's lifetime.
 type RelayDispatcher interface {
 	// DispatchCall serves (namespace, op) with the request args and returns the
 	// op's marshaled result, or an error whose text relays back to the sidecar.
 	DispatchCall(ctx context.Context, namespace, op string, args json.RawMessage) (json.RawMessage, error)
-	// DispatchNotify serves a fire-and-forget audit op. It returns nothing — a
-	// failure is logged host-side and swallowed, never surfaced to the sidecar.
-	DispatchNotify(ctx context.Context, namespace, op string, args json.RawMessage)
+	// DispatchRecord applies one audit record. nil tells the sidecar it may
+	// forget the record: it was applied, or it never can be (an undecodable
+	// record, an op nothing serves), which the dispatcher has already counted.
+	// An error tells the sidecar the record was not applied and to send it
+	// again, under the same key, so the dispatcher must be able to apply one
+	// record twice without writing two rows.
+	DispatchRecord(ctx context.Context, namespace, op, key string, args json.RawMessage) error
 }
 
 // CallRelay is the sidecar-side sender for a request/response relay op: marshal
@@ -251,15 +209,4 @@ func CallRelay(ctx context.Context, conn *sidecarproto.Conn, namespace, op strin
 		return fmt.Errorf("agentproc: marshal relay %s/%s args: %w", namespace, op, err)
 	}
 	return conn.Call(ctx, sidecarproto.KindRelayCall, sidecarproto.RelayCallBody{Namespace: namespace, Op: op, Args: raw}, out)
-}
-
-// NotifyRelay is the sidecar-side sender for a fire-and-forget relay op. Marshal
-// failures are non-fatal (the op is best-effort audit) and returned for logging
-// only.
-func NotifyRelay(conn *sidecarproto.Conn, namespace, op string, args any) error {
-	raw, err := json.Marshal(args)
-	if err != nil {
-		return fmt.Errorf("agentproc: marshal relay %s/%s args: %w", namespace, op, err)
-	}
-	return conn.Notify(sidecarproto.KindRelayNotify, sidecarproto.RelayCallBody{Namespace: namespace, Op: op, Args: raw})
 }
