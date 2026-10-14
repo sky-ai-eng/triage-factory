@@ -24,7 +24,7 @@ func TestClassify_TableShapes(t *testing.T) {
 			path:   "/repos/acme/widgets/pulls/841/comments/555/replies",
 			want: Shape{
 				Action: domain.ActionCommentPosted, Owner: "acme", Repo: "widgets",
-				Number: 841, InReplyTo: 555, CreatesObject: true,
+				Number: 841, InReplyTo: 555, CreatesObject: true, Comment: domain.GitHubReviewComment,
 			},
 		},
 		{
@@ -33,7 +33,7 @@ func TestClassify_TableShapes(t *testing.T) {
 			path:   "/api/v3/repos/acme/widgets/pulls/841/comments/555/replies",
 			want: Shape{
 				Action: domain.ActionCommentPosted, Owner: "acme", Repo: "widgets",
-				Number: 841, InReplyTo: 555, CreatesObject: true,
+				Number: 841, InReplyTo: 555, CreatesObject: true, Comment: domain.GitHubReviewComment,
 			},
 		},
 		{
@@ -42,32 +42,32 @@ func TestClassify_TableShapes(t *testing.T) {
 			path:   "/repos/acme/widgets/issues/7/comments",
 			want: Shape{
 				Action: domain.ActionCommentPosted, Owner: "acme", Repo: "widgets",
-				Number: 7, CreatesObject: true,
+				Number: 7, CreatesObject: true, Comment: domain.GitHubIssueComment,
 			},
 		},
 		{
 			name:   "issue comment edit",
 			method: "PATCH",
 			path:   "/repos/acme/widgets/issues/comments/5",
-			want:   Shape{Action: domain.ActionCommentEdited, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionCommentEdited, Owner: "acme", Repo: "widgets", ExternalID: "5", Comment: domain.GitHubIssueComment},
 		},
 		{
 			name:   "issue comment delete",
 			method: "DELETE",
 			path:   "/repos/acme/widgets/issues/comments/5",
-			want:   Shape{Action: domain.ActionCommentDeleted, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionCommentDeleted, Owner: "acme", Repo: "widgets", ExternalID: "5", Comment: domain.GitHubIssueComment},
 		},
 		{
 			name:   "review comment edit",
 			method: "PATCH",
 			path:   "/repos/acme/widgets/pulls/comments/5",
-			want:   Shape{Action: domain.ActionReviewCommentEdited, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionReviewCommentEdited, Owner: "acme", Repo: "widgets", ExternalID: "5", Comment: domain.GitHubReviewComment},
 		},
 		{
 			name:   "review comment delete",
 			method: "DELETE",
 			path:   "/repos/acme/widgets/pulls/comments/5",
-			want:   Shape{Action: domain.ActionReviewCommentDeleted, Owner: "acme", Repo: "widgets", ExternalID: "5"},
+			want:   Shape{Action: domain.ActionReviewCommentDeleted, Owner: "acme", Repo: "widgets", ExternalID: "5", Comment: domain.GitHubReviewComment},
 		},
 		{
 			name:   "pull request edit",

@@ -90,6 +90,13 @@ type Shape struct {
 	// for every other shape.
 	InReplyTo int
 
+	// Comment is the numbering the comment this act posted, edited or deleted
+	// is in: a conversation comment or a review comment. Empty for every act
+	// that is not one of those three on a comment, a reaction to a comment
+	// included. It is what decides which of the two id spaces ExternalID is
+	// in, so the comment's artifact is keyed on the pair.
+	Comment domain.GitHubCommentSpace
+
 	// Subject is the node id a GraphQL request named for the object it acted on,
 	// standing in for the coordinates a REST path would have carried. Empty for
 	// every REST shape, and for a GraphQL request whose response located the
@@ -167,10 +174,11 @@ type Observation struct {
 	URL        string
 
 	// NodeID is the object's GraphQL node id, read from the same response as
-	// ExternalID. It is kept apart from ExternalID because the two name one
-	// object in two id spaces: a REST path addresses a comment by its number,
-	// while a GraphQL edit or delete addresses it by node id, and a later write
-	// is matched against whichever its own transport uses.
+	// ExternalID, or for a created comment whose response lacked it, read back
+	// from the comment by the injector. It is kept apart from ExternalID because
+	// the two name one object in two id spaces: a REST path addresses a comment
+	// by its number, while a GraphQL edit or delete addresses it by node id, and
+	// a later write is matched against whichever its own transport uses.
 	NodeID string
 
 	// GraphQL, when set, marks this as a write performed through the GraphQL
@@ -308,6 +316,34 @@ func ParseRepoURL(raw string) (owner, repo string, ok bool) {
 		return "", "", false
 	}
 	return segs[0], segs[1], true
+}
+
+// CommentPath is the REST path a comment is read at, from its repository, its
+// numbering and its number: /repos/{o}/{r}/issues/comments/{id} for a
+// conversation comment, /repos/{o}/{r}/pulls/comments/{id} for a review
+// comment. The path is unescaped, for a url's Path. ok is false for a
+// numbering outside the two, a number that is not a positive integer, or an
+// owner or repo that is empty or a dot segment, none of which names a comment.
+func CommentPath(owner, repo string, space domain.GitHubCommentSpace, id string) (string, bool) {
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil || n <= 0 {
+		return "", false
+	}
+	for _, seg := range []string{owner, repo} {
+		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "/") {
+			return "", false
+		}
+	}
+	collection := ""
+	switch space {
+	case domain.GitHubIssueComment:
+		collection = "issues"
+	case domain.GitHubReviewComment:
+		collection = "pulls"
+	default:
+		return "", false
+	}
+	return fmt.Sprintf("/repos/%s/%s/%s/comments/%d", owner, repo, collection, n), true
 }
 
 // parseObjectURL scans for the first of the given collection segments with two
@@ -458,8 +494,10 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		switch {
 		case len(rest) == 2 && method == "PATCH":
 			s.Action = domain.ActionReviewCommentEdited
+			s.Comment = domain.GitHubReviewComment
 		case len(rest) == 2 && method == "DELETE":
 			s.Action = domain.ActionReviewCommentDeleted
+			s.Comment = domain.GitHubReviewComment
 		case len(rest) == 3 && rest[2] == "reactions" && method == "POST":
 			s.Action = domain.ActionReactionAdded
 		case len(rest) == 4 && rest[2] == "reactions" && method == "DELETE":
@@ -505,6 +543,7 @@ func classifyPulls(s Shape, method string, rest []string) (Shape, bool) {
 		s.Action = domain.ActionCommentPosted
 		s.InReplyTo = reply
 		s.CreatesObject = true
+		s.Comment = domain.GitHubReviewComment
 	case len(rest) == 2 && rest[1] == "requested_reviewers" && method == "POST":
 		// `gh pr edit --add-reviewer` sends this alongside its GraphQL edit, so a
 		// single user command legitimately produces two rows — two requests, two
@@ -545,8 +584,10 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 		switch {
 		case len(rest) == 2 && method == "PATCH":
 			s.Action = domain.ActionCommentEdited
+			s.Comment = domain.GitHubIssueComment
 		case len(rest) == 2 && method == "DELETE":
 			s.Action = domain.ActionCommentDeleted
+			s.Comment = domain.GitHubIssueComment
 		case len(rest) == 3 && rest[2] == "reactions" && method == "POST":
 			s.Action = domain.ActionReactionAdded
 		case len(rest) == 4 && rest[2] == "reactions" && method == "DELETE":
@@ -570,6 +611,7 @@ func classifyIssues(s Shape, method string, rest []string) (Shape, bool) {
 	case len(rest) == 2 && rest[1] == "comments" && method == "POST":
 		s.Action = domain.ActionCommentPosted
 		s.CreatesObject = true
+		s.Comment = domain.GitHubIssueComment
 	case len(rest) == 2 && rest[1] == "reactions" && method == "POST":
 		s.Action = domain.ActionReactionAdded
 	case len(rest) == 3 && rest[1] == "reactions" && method == "DELETE":

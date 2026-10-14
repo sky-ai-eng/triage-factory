@@ -939,7 +939,10 @@ CREATE TABLE public.repositories (
 -- (domain.ExternalObjectScope): the GitHub host, the Jira site, the Linear
 -- workspace id; target and dedup_key are only unique inside it. team_id is
 -- denormalized from the conversation so reads scope by team; conversation_id is
--- nullable so the row survives a purge.
+-- nullable so the row survives a purge. node_id is the object's GraphQL node
+-- id, which a GitHub comment row carries so a GraphQL delete naming the comment
+-- by node id alone finds its row. A comment row exists only for a comment TF
+-- posted.
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -955,6 +958,7 @@ CREATE TABLE public.artifacts (
     state text NOT NULL,
     dedup_key text NOT NULL,
     details_json text,
+    node_id text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );
@@ -1858,6 +1862,9 @@ CREATE INDEX idx_artifacts_org_created ON public.artifacts USING btree (org_id, 
 
 
 CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (conversation_id);
+
+
+CREATE INDEX idx_artifacts_node_id ON public.artifacts USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
 
 
 CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);

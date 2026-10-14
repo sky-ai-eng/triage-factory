@@ -150,6 +150,12 @@
 // write as an attempt. A request whose document names no mutation is a read and
 // reports nothing at all, which is nearly all of this endpoint's traffic.
 //
+// The injector makes one request of its own. When a comment create's response
+// lacks the comment's node id, which is the case for every `gh pr comment`, it
+// reads the comment back once before reporting the write (fillCommentNodeID):
+// the comment's artifact needs that id before a GraphQL delete that names the
+// comment by node id alone can arrive.
+//
 // The callback is not a policy: reporting a write neither permits nor prevents
 // it. It fires after the request has already transited, so a refused request
 // never reaches it — its one row is the refusal, written by the gate.
@@ -174,6 +180,7 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/credmiss"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/logging"
@@ -249,7 +256,9 @@ type Config struct {
 
 	// ObserveWrite, when non-nil, is called for every mutating REST request the
 	// injector forwarded, whatever the outcome — the write audit's callback.
-	// Called inline on the response path, so the callback must not block.
+	// Called inline on the response path, so the callback must not block. A
+	// comment create whose response lacked the comment's node id has it read
+	// back first (fillCommentNodeID), so the observation carries it.
 	ObserveWrite func(ctx context.Context, w ObservedWrite)
 
 	// AuthorizeWrite decides the gated shapes and records their refusals. See
@@ -661,6 +670,7 @@ func (s *Server) auditWrite(resp *http.Response, graphql bool, body []byte) {
 	if len(body) > 0 {
 		w.ExternalID, w.NodeID, w.URL = parseCreatedObject(body)
 	}
+	s.fillCommentNodeID(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
 }
 
@@ -689,7 +699,97 @@ func (s *Server) auditGraphQLWrite(resp *http.Response, facts *ghwrite.GraphQLFa
 	} else {
 		w.ResponseUnread = true
 	}
+	s.fillCommentNodeID(&w)
 	s.cfg.ObserveWrite(context.Background(), w)
+}
+
+// commentNodeIDTimeout bounds the read fillCommentNodeID makes. The agent's
+// response waits on it, so it is short: reading one comment takes well under a
+// second on a healthy GitHub, and past this the write is reported without the
+// id rather than held.
+const commentNodeIDTimeout = 5 * time.Second
+
+// maxCommentReadBody caps the read-back comment's body. A comment is at most a
+// few tens of KB of JSON; the cap guards only against a pathological upstream.
+const maxCommentReadBody = 1 << 20
+
+// fillCommentNodeID reads back the node id of a comment the write just
+// created, when the create's response did not carry it. gh's `pr comment`
+// selects only the new comment's url, so its response never does. The id is
+// needed before anything else about the comment arrives: a GraphQL delete
+// names the comment by node id alone and its response names nothing
+// (deleteIssueComment returns only clientMutationId), so the comment's artifact
+// has to hold the node id first.
+//
+// One GET of the comment, through the upstream and credential the write itself
+// used, made before the write is reported and so before the agent's response is
+// released. Every other write, and a create whose response carried the id, is
+// untouched. A failed read is logged and leaves the id empty; the write is
+// reported either way.
+func (s *Server) fillCommentNodeID(w *ObservedWrite) {
+	if w.NodeID != "" || !w.Succeeded() {
+		return
+	}
+	shape, ok := ghwrite.Resolve(*w)
+	if !ok || shape.Action != domain.ActionCommentPosted || shape.Comment == "" {
+		return
+	}
+	path, ok := ghwrite.CommentPath(shape.Owner, shape.Repo, shape.Comment, shape.ExternalID)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), commentNodeIDTimeout)
+	defer cancel()
+	nodeID, err := s.readCommentNodeID(ctx, path, shape.ExternalID)
+	if err != nil {
+		injectorLog.Warn("read back a created comment's node id failed; recording the comment without it",
+			"conversation", s.cfg.ConversationID, "comment", shape.ExternalID, "error", err)
+		return
+	}
+	w.NodeID = nodeID
+}
+
+// readCommentNodeID GETs the comment at path from the REST upstream and returns
+// its node id. The object read back must be the comment asked for: a body
+// naming another id, or no node id, is an error rather than a value.
+func (s *Server) readCommentNodeID(ctx context.Context, path, wantID string) (string, error) {
+	tok, err := s.cfg.TokenSource(ctx)
+	if err != nil {
+		return "", err
+	}
+	if tok == "" {
+		return "", errors.New("no credential")
+	}
+	u := *s.restURL
+	u.Path = singleJoiningSlash(s.restURL.Path, path)
+	u.RawPath = ""
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "token "+tok)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	transport := s.proxy.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	resp, err := (&http.Client{Transport: transport}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("GET %s: status %d", path, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxCommentReadBody))
+	if err != nil {
+		return "", err
+	}
+	id, nodeID, _ := parseCreatedObject(body)
+	if id != wantID || nodeID == "" {
+		return "", fmt.Errorf("GET %s: response names comment %q with node id %q", path, id, nodeID)
+	}
+	return nodeID, nil
 }
 
 // auditWantsBody reports whether the write audit needs this response's body:

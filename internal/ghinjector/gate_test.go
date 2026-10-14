@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -468,8 +469,14 @@ func TestGate_RequestUnreadIsRefused(t *testing.T) {
 // against a proxy that refused everything.
 func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 	const commentURL = "https://github.com/acme/widgets/pull/841#issuecomment-7"
-	g := newGatedRun(t, func(w http.ResponseWriter, _ *http.Request) {
+	g := newGatedRun(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			// The injector's read-back of the comment's node id, which the
+			// mutation's selection did not return.
+			_, _ = w.Write([]byte(`{"id":7,"node_id":"IC_kwGate","html_url":"` + commentURL + `"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"data":{"addComment":{"commentEdge":{"node":{"url":"` + commentURL + `"}}}}}`))
 	})
 	resp := g.do(t, http.MethodPost, "/api/graphql",
@@ -481,8 +488,8 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 	}
 
 	forwarded, decisions := g.snap()
-	if len(forwarded) != 1 {
-		t.Fatalf("forwarded = %q, want the comment to reach GitHub", forwarded)
+	if want := []string{"POST /graphql", "GET /repos/acme/widgets/issues/comments/7"}; !slices.Equal(forwarded, want) {
+		t.Fatalf("forwarded = %q, want the comment to reach GitHub and then the injector's one read of it %q", forwarded, want)
 	}
 	if len(decisions) != 0 {
 		t.Errorf("decisions = %+v, want none — an ungated write is never asked about", decisions)
@@ -496,6 +503,9 @@ func TestGate_UngatedWriteStillTransitsAndAudits(t *testing.T) {
 		}
 		if shape.Action != "comment_posted" {
 			t.Errorf("audited act = %q, want comment_posted — its own semantic row", shape.Action)
+		}
+		if shape.ExternalID != "7" || shape.NodeID != "IC_kwGate" {
+			t.Errorf("audited comment = %q / %q, want 7 and the node id read back", shape.ExternalID, shape.NodeID)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("an ungated write left no audit row")

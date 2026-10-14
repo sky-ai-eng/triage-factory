@@ -111,11 +111,10 @@ func (s *Spawner) startLocalGHChannel(ctx context.Context, orgID, conversationID
 			if !storesSet {
 				return
 			}
-			// Same builder the relayed (multi) path calls, on the same
+			// Same recorder the relayed (multi) path calls, on the same
 			// observation type, so a write audited here is byte-identical to one
-			// audited from a sandbox.
-			agenthost.RecordExternalWrite(ctx, stores, info, nil,
-				agenthost.GHChannelWriteAction(w, credential))
+			// audited from a sandbox, comment artifact included.
+			agenthost.RecordGHChannelWrite(ctx, stores, info, w, credential)
 		},
 		AuthorizeWrite: func(ctx context.Context, req ghwrite.Request, ref ghwrite.Refusal) bool {
 			// The same decision the sandbox path relays, minus the relay and

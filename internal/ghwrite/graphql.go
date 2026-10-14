@@ -144,9 +144,9 @@ func (f GraphQLFacts) Mutation() string {
 // downstream reads this log to answer. The rest deliberately do not, so their
 // rows read identically to the equivalent verb's.
 var graphQLMutations = map[string]graphQLShape{
-	"addComment":                    {action: domain.ActionCommentPosted, creates: true, comment: []string{"commentEdge", "node"}},
-	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}},
-	"deleteIssueComment":            {action: domain.ActionCommentDeleted},
+	"addComment":                    {action: domain.ActionCommentPosted, creates: true, comment: []string{"commentEdge", "node"}, space: domain.GitHubIssueComment},
+	"updateIssueComment":            {action: domain.ActionCommentEdited, comment: []string{"issueComment"}, space: domain.GitHubIssueComment},
+	"deleteIssueComment":            {action: domain.ActionCommentDeleted, space: domain.GitHubIssueComment},
 	"createPullRequest":             {action: domain.ActionPRCreated, creates: true, provenance: true, numberFromURL: true},
 	"updatePullRequest":             {action: domain.ActionPREdited},
 	"closePullRequest":              {action: domain.ActionPRClosed},
@@ -222,9 +222,9 @@ var graphQLMutations = map[string]graphQLShape{
 	// only through `gh api graphql`. A thread reply is a comment posted, exactly
 	// as its REST twin is — except in the form that names a pending review,
 	// which the gate refuses and the classifier never names (stagedMutations).
-	"addPullRequestReviewThreadReply": {action: domain.ActionCommentPosted, creates: true, comment: []string{"comment"}},
-	"updatePullRequestReviewComment":  {action: domain.ActionReviewCommentEdited, comment: []string{"pullRequestReviewComment"}},
-	"deletePullRequestReviewComment":  {action: domain.ActionReviewCommentDeleted, comment: []string{"pullRequestReviewComment"}},
+	"addPullRequestReviewThreadReply": {action: domain.ActionCommentPosted, creates: true, comment: []string{"comment"}, space: domain.GitHubReviewComment},
+	"updatePullRequestReviewComment":  {action: domain.ActionReviewCommentEdited, comment: []string{"pullRequestReviewComment"}, space: domain.GitHubReviewComment},
+	"deletePullRequestReviewComment":  {action: domain.ActionReviewCommentDeleted, comment: []string{"pullRequestReviewComment"}, space: domain.GitHubReviewComment},
 
 	// addPullRequestReviewThread stays out, and now permanently. It stages a
 	// thread on a PENDING review — nothing is published until the review is
@@ -275,6 +275,10 @@ type graphQLShape struct {
 	// id of its own. deleteIssueComment has none: its payload returns nothing
 	// but the client's own mutation id.
 	comment []string
+	// space is the numbering of the comment the mutation posted, edited or
+	// deleted, Shape.Comment's value. Empty for every mutation that does none
+	// of those to a comment.
+	space domain.GitHubCommentSpace
 }
 
 // ParseGraphQLRequest reads one GraphQL request body into the facts an audit
@@ -756,6 +760,7 @@ func classifyGraphQL(facts GraphQLFacts) (Shape, bool) {
 		CreatesObject:       entry.creates,
 		CarriesProvenance:   entry.provenance,
 		NumberFromObjectURL: entry.numberFromURL,
+		Comment:             entry.space,
 	}, true
 }
 

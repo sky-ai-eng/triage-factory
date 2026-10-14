@@ -217,6 +217,15 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 	if !strings.Contains(a.DetailJSON, `"in_reply_to":555`) || !strings.Contains(a.DetailJSON, `"node_id":"PRRC_kwRelay"`) {
 		t.Errorf("detail_json = %q, want the thread the reply landed on and the reply's node id", a.DetailJSON)
 	}
+	// The reply's own comment artifact lands beside the row, on this side.
+	arts := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(arts) != 1 {
+		t.Fatalf("want 1 comment artifact for the relayed reply, got %d: %+v", len(arts), arts)
+	}
+	if c := arts[0]; c.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) ||
+		c.ExternalID != "777" || c.NodeID != "PRRC_kwRelay" {
+		t.Errorf("relayed reply artifact = %+v, want the reply's numbers", c)
+	}
 }
 
 // TestRelayServer_GraphQLWriteWritesAuditRow pins the GraphQL hop end to end.

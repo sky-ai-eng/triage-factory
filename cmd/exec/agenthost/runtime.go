@@ -526,7 +526,9 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // (stampScopeInfo) onto a and upserts it, composing the branch-push external
 // action into the SAME write. Event-triggered runs route admin-pool; manual
 // runs wrap in the kicking-off user's synthetic claims. Returns the stored
-// row.
+// row. When the artifact write fails, the action is written on its own
+// (recordActionAlone) before the artifact's error is returned, so a push whose
+// artifact could not be recorded still leaves its ledger row.
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
@@ -538,6 +540,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 	if r.info.IsEventTriggered {
 		stored, err := r.stores.Artifacts.UpsertSystem(ctx, r.info.OrgID, a)
 		if err != nil {
+			r.recordBranchPushAlone(ctx, a, act)
 			return domain.Artifact{}, err
 		}
 		if rerr := recordActionSystemInfo(ctx, r.stores, r.info, act); rerr != nil {
@@ -547,15 +550,35 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		return stored, nil
 	}
 	var out domain.Artifact
+	var artifactErr error
 	err := r.stores.Tx.SyntheticClaimsWithTx(ctx, r.info.OrgID, r.info.UserID, func(ts db.TxStores) error {
+		artifactErr = nil
 		stored, uerr := ts.Artifacts.Upsert(ctx, r.info.OrgID, a)
 		if uerr != nil {
+			artifactErr = uerr
 			return uerr
 		}
 		out = stored
 		return recordActionTx(ctx, ts, r.info.OrgID, act)
 	})
+	if artifactErr != nil {
+		r.recordBranchPushAlone(ctx, a, act)
+	}
 	return out, err
+}
+
+// recordBranchPushAlone writes the branch-push row of an artifact whose own
+// write failed, best-effort. A nil act (an artifact that is not a branch) has
+// nothing to write.
+func (r *directRuntime) recordBranchPushAlone(ctx context.Context, a domain.Artifact, act *domain.ExternalAction) {
+	if act == nil {
+		return
+	}
+	if err := recordActionAlone(ctx, r.stores, r.info, act); err != nil {
+		recordAuditDrop(ctx, dropStageRecord, recordDropOp(nil, act))
+		agenthostLog.Warn("branch external-action recording failed (push already applied)",
+			"conversation", r.info.ConversationID, "target", a.Target, "error", err)
+	}
 }
 
 // githubCredential names the credential to stamp on the branch-push row for
