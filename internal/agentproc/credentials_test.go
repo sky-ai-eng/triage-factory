@@ -516,6 +516,62 @@ func TestMergeEnv_PreservesParentEnvWhenNoResolvedCreds(t *testing.T) {
 	}
 }
 
+// providerEnvByCategory is one variable from each kind of provider
+// configuration credentialEnvKeys and credentialEnvPrefixes cover, keyed by
+// the kind. The strip and forward tests share it, because the two are one
+// list doing two jobs.
+var providerEnvByCategory = map[string]string{
+	"provider switch":           "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD=1",
+	"skip-auth flag":            "CLAUDE_CODE_SKIP_VERTEX_AUTH=1",
+	"endpoint override":         "ANTHROPIC_UNIX_SOCKET=/run/api.sock",
+	"AWS endpoint prefix":       "AWS_ENDPOINT_URL_BEDROCK=https://bedrock.example",
+	"Vertex":                    "ANTHROPIC_VERTEX_PROJECT_ID=vertex-project",
+	"Vertex region prefix":      "VERTEX_REGION_CLAUDE_4_5_SONNET=us-east5",
+	"Foundry":                   "ANTHROPIC_FOUNDRY_RESOURCE=foundry-resource",
+	"Anthropic on AWS":          "ANTHROPIC_AWS_WORKSPACE_ID=aws-workspace",
+	"Anthropic on Google":       "ANTHROPIC_GOOGLE_CLOUD_LOCATION=global",
+	"Bedrock":                   "ANTHROPIC_BEDROCK_REGION_PREFIX=eu",
+	"Anthropic federation":      "ANTHROPIC_WORKSPACE_ID=federation-workspace",
+	"Claude Code credential":    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-operator",
+	"Claude Code fd credential": "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=3",
+	"model pin":                 "ANTHROPIC_DEFAULT_FABLE_MODEL=claude-fable-5-1",
+}
+
+// providerEnvPassthrough is env neither job touches: names that only share a
+// prefix's letters somewhere other than the start, and ANTHROPIC_* settings
+// that select no provider.
+var providerEnvPassthrough = []string{
+	"VERTEX_REGIONAL=x",
+	"MY_VERTEX_REGION_CLAUDE_4_5_SONNET=x",
+	"MY_AWS_ENDPOINT_URL=x",
+	"ANTHROPIC_BETAS=context-1m",
+	"ANTHROPIC_LOG=debug",
+}
+
+// TestMergeEnv_StripsEveryProviderCategoryWhenResolved pins the strip job
+// across the provider surface: with a resolved credential, none of the
+// operator's provider configuration survives into the run, including a
+// per-model VERTEX_REGION_ name the list matches only by prefix.
+func TestMergeEnv_StripsEveryProviderCategoryWhenResolved(t *testing.T) {
+	parent := append([]string{"PATH=/usr/bin"}, providerEnvPassthrough...)
+	for _, kv := range providerEnvByCategory {
+		parent = append(parent, kv)
+	}
+
+	merged := mergeEnv(parent, nil, map[string]string{"ANTHROPIC_API_KEY": "sk-stored"})
+
+	for category, kv := range providerEnvByCategory {
+		if containsKey(merged, kv) {
+			t.Errorf("%s %q survived a resolved credential", category, kv)
+		}
+	}
+	for _, kv := range append([]string{"PATH=/usr/bin", "ANTHROPIC_API_KEY=sk-stored"}, providerEnvPassthrough...) {
+		if !containsKey(merged, kv) {
+			t.Errorf("merged env is missing %q: %v", kv, merged)
+		}
+	}
+}
+
 func TestFilterEnv_HandlesValuesContainingEquals(t *testing.T) {
 	// env values often contain '=' (PATH, structured tokens). Filter
 	// must split on the *first* '=' only, never strip a var whose
@@ -612,7 +668,7 @@ func TestResolveCredentials_OptionalBedrockFieldErrorsPropagate(t *testing.T) {
 // or casing drift in the leak-guard list — drift here weakens the
 // multi-mode safety net silently. Doesn't enforce alphabetical
 // order (the list is grouped by category for readability), just
-// no-dupes + upper-case.
+// no-dupes + upper-case, and no key a prefix already covers.
 func TestCredentialEnvKeysWellFormed(t *testing.T) {
 	seen := make(map[string]struct{}, len(credentialEnvKeys))
 	for _, k := range credentialEnvKeys {
@@ -623,9 +679,16 @@ func TestCredentialEnvKeysWellFormed(t *testing.T) {
 	}
 	// Don't enforce alphabetical, but flag obvious typos by
 	// requiring upper-case (env vars are conventionally upper).
-	for _, k := range credentialEnvKeys {
+	for _, k := range append(append([]string(nil), credentialEnvKeys...), credentialEnvPrefixes...) {
 		if strings.ToUpper(k) != k {
 			t.Errorf("credential env key %q is not upper-case", k)
+		}
+	}
+	for _, k := range credentialEnvKeys {
+		for _, p := range credentialEnvPrefixes {
+			if strings.HasPrefix(k, p) {
+				t.Errorf("credentialEnvKeys lists %q, which prefix %q already matches", k, p)
+			}
 		}
 	}
 }

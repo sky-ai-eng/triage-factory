@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +81,38 @@ func TestReadOperatorAuth_ForwardsOnlyTheAuthSurface(t *testing.T) {
 	}
 	if !slices.Equal(auth.env, wantEnv) {
 		t.Errorf("env = %v, want %v", auth.env, wantEnv)
+	}
+}
+
+// TestReadOperatorAuth_ForwardsEveryProviderCategory pins the forward job
+// across the provider surface: a Vertex, Foundry, Anthropic-on-cloud or
+// gateway setup that lives in the settings env authenticates the same way
+// under TF as it does in Claude Code, a per-model VERTEX_REGION_ name
+// included.
+func TestReadOperatorAuth_ForwardsEveryProviderCategory(t *testing.T) {
+	env := map[string]string{}
+	var want []string
+	for _, kv := range providerEnvByCategory {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+		want = append(want, kv)
+	}
+	for _, kv := range providerEnvPassthrough {
+		k, v, _ := strings.Cut(kv, "=")
+		env[k] = v
+	}
+	body, err := json.Marshal(map[string]any{"env": env})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	auth, err := readOperatorAuth(writeOperatorSettings(t, string(body)))
+	if err != nil {
+		t.Fatalf("readOperatorAuth: %v", err)
+	}
+	slices.Sort(want)
+	if !slices.Equal(auth.env, want) {
+		t.Errorf("env = %v, want %v", auth.env, want)
 	}
 }
 

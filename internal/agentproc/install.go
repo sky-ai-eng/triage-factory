@@ -18,7 +18,7 @@ import (
 // Pinned SDK version. Bump on Triage Factory release after verifying the
 // new release in a spike — see scripts/clean-slate.sh notes. Keep the
 // package.json template in sync with this constant.
-const sdkVersion = "0.3.287"
+const sdkVersion = "0.3.296"
 
 // Embedded shim that translates the flag-based argv BuildArgs emits into
 // Agent SDK Options. Materialized to disk at first install so the Node
@@ -251,7 +251,7 @@ func parseNodeMajor(version string) (int, error) {
 // or compromised transitive dependency can't ride a postinstall hook to
 // execute arbitrary code at install time — npm postinstall is the most
 // commonly abused supply-chain channel. Verified against the pinned
-// tree (package-lock.json): none of its 109 packages set
+// tree (package-lock.json): none of its 111 packages set
 // hasInstallScript, and the SDK's per-platform native binaries
 // (@anthropic-ai/claude-agent-sdk-<os>-<arch>) ship prebuilt, selected
 // by npm via optionalDependencies os/cpu fields — no build step to lose.

@@ -132,7 +132,7 @@ func TestWrapperSettingsFlagsReachSDKOptions(t *testing.T) {
 // puts on a permission prompt: the SDK's own toolUseID for the gated call,
 // emitted as tool_call_id, with the SDK's prompt copy alongside it. The reply
 // is keyed by that same id, and an allow with no override echoes the original
-// input back as updatedInput (the SDK's CLI rejects a bare allow).
+// input back as updatedInput.
 func TestWrapperPermissionRequestUsesToolUseID(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
