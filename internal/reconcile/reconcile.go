@@ -186,6 +186,10 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 		if !ok {
 			continue
 		}
+		// TODO(TFAC-1087): match the row to its artifact by the PR's node id, so
+		// a PR whose repository was renamed since is backfilled under the
+		// current name rather than skipped, and the result stops depending on
+		// the row's link being spelled on the configured host.
 		if !domain.GitHubURLNamesRepo(act.URL, host, owner+"/"+repo) {
 			continue // renamed since it was opened
 		}
