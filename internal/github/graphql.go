@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -42,13 +43,24 @@ const prBaseFields = `
 	latestReviews(first: 20) {
 		nodes {
 			id
+			fullDatabaseId
 			author { __typename login }
 			state
 			submittedAt
+			comments { totalCount }
 		}
 	}
-	reviews(first: 1) { totalCount }
+	reviews(last: 1, states: [` + submittedReviewStates + `]) {
+		totalCount
+		nodes { fullDatabaseId submittedAt }
+	}
 `
+
+// submittedReviewStates are the review states a pull request's reviews are
+// read in. PENDING is left out: the connection would return the viewer's own
+// unsubmitted review, which nobody else can see and which has no submission
+// time to order it by.
+const submittedReviewStates = `APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED`
 
 // prDiscoveryFragment is a lightweight GraphQL fragment for discovery
 // and for refreshing terminal (merged/closed) PRs. It fetches PR
@@ -345,7 +357,7 @@ type gqlPR struct {
 	ChangedFiles   int             `json:"changedFiles"`
 	ReviewRequests gqlRRNodes      `json:"reviewRequests"`
 	LatestReviews  gqlRevNodes     `json:"latestReviews"`
-	Reviews        gqlCount        `json:"reviews"`
+	Reviews        gqlNewestReview `json:"reviews"`
 	Commits        gqlCommits      `json:"commits"`
 	Labels         gqlLabelNodes   `json:"labels"`
 	Comments       gqlCount        `json:"comments"`
@@ -410,10 +422,46 @@ type gqlReviewer struct {
 type gqlRevNodes struct {
 	Nodes []struct {
 		ID          string    `json:"id"`
+		DatabaseID  gqlBigInt `json:"fullDatabaseId"`
 		Author      gqlAuthor `json:"author"`
 		State       string    `json:"state"`
 		SubmittedAt string    `json:"submittedAt"`
+		Comments    gqlCount  `json:"comments"`
 	} `json:"nodes"`
+}
+
+// gqlNewestReview is the submitted-reviews connection read to its last node:
+// how many submitted reviews the pull request has, and the last of them.
+type gqlNewestReview struct {
+	TotalCount int `json:"totalCount"`
+	Nodes      []struct {
+		DatabaseID  gqlBigInt `json:"fullDatabaseId"`
+		SubmittedAt string    `json:"submittedAt"`
+	} `json:"nodes"`
+}
+
+// gqlBigInt is a GraphQL BigInt, which GitHub encodes as a string of digits.
+// fullDatabaseId has this type; the Int databaseId it replaces cannot hold the
+// ids review and comment numbering has reached. A JSON number decodes too, and
+// null or an unparseable value decodes as zero rather than failing the whole
+// response. An unparseable value is logged: the schema says it cannot happen,
+// so one that does is a change on GitHub's side that would otherwise surface
+// only as ids of zero.
+type gqlBigInt int64
+
+func (n *gqlBigInt) UnmarshalJSON(data []byte) error {
+	*n = 0
+	if string(data) == "null" {
+		return nil
+	}
+	text := strings.Trim(string(data), `"`)
+	v, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		githubLog.Warn("github returned a BigInt id that does not parse; decoding it as zero", "value", string(data))
+		return nil
+	}
+	*n = gqlBigInt(v)
+	return nil
 }
 
 // gqlAuthor is a GraphQL Actor. Typename is selected beside Login because
@@ -507,6 +555,29 @@ type gqlLabelNodes struct {
 	Nodes []struct {
 		Name string `json:"name"`
 	} `json:"nodes"`
+}
+
+// newestReview is the marker for the pull request's newest submitted review:
+// the newer of the submitted-reviews connection's last node and each
+// reviewer's latest review. GitHub documents no order for the connection, and
+// if it lists reviews by creation, a review started as pending and submitted
+// later sits where it was started rather than last. That review is its
+// reviewer's latest, so latestReviews covers the case for the first 20
+// reviewers.
+func (pr gqlPR) newestReview() *domain.ReviewMarker {
+	var m domain.ReviewMarker
+	consider := func(id gqlBigInt, submittedAt string) {
+		if submittedAt != "" {
+			m = m.Newer(domain.ReviewMarker{ID: int64(id), SubmittedAt: submittedAt})
+		}
+	}
+	for _, n := range pr.Reviews.Nodes {
+		consider(n.DatabaseID, n.SubmittedAt)
+	}
+	for _, rev := range pr.LatestReviews.Nodes {
+		consider(rev.DatabaseID, rev.SubmittedAt)
+	}
+	return &m
 }
 
 // toSnapshot builds a full snapshot with CheckRuns populated — used by
@@ -646,13 +717,16 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	for _, rev := range pr.LatestReviews.Nodes {
 		if login := rev.Author.restLogin(); login != "" {
 			snap.Reviews = append(snap.Reviews, domain.ReviewState{
-				ID:          rev.ID,
-				Author:      login,
-				State:       rev.State,
-				SubmittedAt: rev.SubmittedAt,
+				ID:           rev.ID,
+				DatabaseID:   int64(rev.DatabaseID),
+				Author:       login,
+				State:        rev.State,
+				SubmittedAt:  rev.SubmittedAt,
+				CommentCount: rev.Comments.TotalCount,
 			})
 		}
 	}
+	snap.ReviewMarker = pr.newestReview()
 
 	// Labels
 	for _, l := range pr.Labels.Nodes {

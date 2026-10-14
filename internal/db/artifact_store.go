@@ -180,6 +180,20 @@ type ArtifactStore interface {
 	// plain org read in SQLite.
 	PresentDedupKeysSystem(ctx context.Context, orgID, scope string, dedupKeys []string) (map[string]bool, error)
 
+	// PresentExternalIDsSystem returns the subset of externalIDs that an
+	// artifact of the given provider and kind in scope carries as its
+	// external_id, as a set. The tracker reads it to tell a review TF
+	// submitted, whose review artifact carries the review's numeric id once
+	// it is posted, from one a person submitted. idx_artifacts_external_id
+	// serves it. An empty scope is refused with
+	// ErrExternalObjectScopeRequired.
+	//
+	// Admin pool (BYPASSRLS) in Postgres, as PresentDedupKeysSystem: the
+	// tracker holds no claims, and the artifact belongs to whichever team's
+	// run submitted the review. org_id stays bound as defense in depth.
+	// Identical to a plain org read in SQLite.
+	PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error)
+
 	// GetByNodeIDSystem returns the artifact in scope carrying the GraphQL
 	// node id nodeID, or nil when none does (an empty nodeID included). A
 	// GraphQL delete names a GitHub comment by node id alone, and its response

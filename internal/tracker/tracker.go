@@ -670,6 +670,22 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 	}
 
+	allItems := append(openItems, terminalItems...)
+
+	// The reviews submitted since each pull request's stored marker, read
+	// before Phase 3 so that phase stays off the network. A pull request whose
+	// review count and newest review did not move is not read; a quiet seed
+	// diffs nothing, so it is not read either.
+	newReviews := make(map[string][]NewReview)
+	for _, item := range allItems {
+		snap, ok := refreshed[item.nodeID]
+		if !ok || item.seed {
+			continue
+		}
+		newReviews[item.nodeID] = t.githubNewReviews(ctx, client, scope, item.nodeID, item.snap, &snap)
+		refreshed[item.nodeID] = snap
+	}
+
 	// Phase 3: Diff + emit events.
 	//
 	// No network here — snapshot comparison plus the entity writes each
@@ -677,7 +693,6 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// before it is a database problem, not a GitHub one.
 	ctx, diffSpan := tracer.Start(ctx, "tracker.github.diff_emit")
 
-	allItems := append(openItems, terminalItems...)
 	eventsEmitted := 0
 
 	for _, item := range allItems {
@@ -728,7 +743,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver)
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID])
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so

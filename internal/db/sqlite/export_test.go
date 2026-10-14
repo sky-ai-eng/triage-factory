@@ -11,3 +11,7 @@ var ParseDBDatetimeForTest = parseDBDatetime
 // PRCreatedWithoutArtifactQueryForTest exposes the PR backstop read's
 // statement so the query-plan test can EXPLAIN exactly what the store runs.
 var PRCreatedWithoutArtifactQueryForTest = prCreatedWithoutArtifactQuery
+
+// PresentExternalIDsQueryForTest exposes the review-id lookup's statement up
+// to its IN list so the query-plan test can EXPLAIN what the store runs.
+var PresentExternalIDsQueryForTest = presentExternalIDsQuery

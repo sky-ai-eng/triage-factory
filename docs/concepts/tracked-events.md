@@ -16,27 +16,93 @@ Events are emitted once per transition, not continuously. If a PR stays in the s
 
 ## GitHub PR Events
 
-### Actionable (shown in triage queue by default)
+The `dedup_key` column is the open-set discriminator a task is keyed on; at
+most one active task exists per entity, event type and `dedup_key`.
 
-| Event | ID | Trigger |
-|-------|----|---------|
-| **Changes Requested** | `github:pr:changes_requested` | A reviewer's latest review state changes to `CHANGES_REQUESTED` |
-| **CI Failed** | `github:pr:ci_failed` | The head commit's `statusCheckRollup` transitions to `FAILURE` or `ERROR` |
-| **Review Requested** | `github:pr:review_requested` | A user/team appears in the PR's `reviewRequests` that wasn't there before. Matches the session user directly or via any team they belong to (fetched from `GET /user/teams`, stored as `org/slug`). Detects both initial requests and re-requests after changes |
-| **Merge Conflicts** | `github:pr:conflicts` | The PR's `mergeable` state transitions to `CONFLICTING` |
-| **Ready for Review** | `github:pr:ready_for_review` | The PR's `isDraft` changes from `true` to `false` |
-| **PR Approved** | `github:pr:approved` | A reviewer's latest review state changes to `APPROVED` |
-| **Mentioned** | `github:pr:mentioned` | PR discovered via `mentions:{user}` search. Note: new @mentions on an already-tracked PR cannot be detected without parsing comment bodies |
+### Actionable
 
-### Informational (hidden by default, toggleable)
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Review Requested** | `github:pr:review_requested` | A user or team appears in the PR's review requests, and it is an identity TF knows: a user's login, or a team (`org/slug`) a user belongs to. One event per such reviewer. In local mode, not emitted on a PR the local user authored, where only a team they are on can be requested. A PR seen for the first time emits it for every request already on it | `user:<login>` / `team:<org>/<slug>` |
+| **Changes Requested** | `github:pr:review_changes_requested` | A review requesting changes was submitted — see [Reviews](#reviews) | — |
+| **Review: Commented** | `github:pr:review_commented` | A review with comments only was submitted, a reply in a review thread included — see [Reviews](#reviews) | — |
+| **CI Check Failed** | `github:pr:ci_check_failed` | A check run on the head commit completes with `failure`, `timed_out`, `cancelled` or `action_required`. One event per check run; a check run already failing last cycle, by id, does not emit again, and a re-run is a new check run | — |
+| **Merge Conflicts** | `github:pr:conflicts` | `mergeable` changes to `CONFLICTING` | — |
+| **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
+| **Label Added** | `github:pr:label_added` | A label is added | label name |
+| **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
+| **Mentioned** | `github:pr:mentioned` | In the catalog; the tracker does not emit it yet | — |
 
-| Event | ID | Trigger |
-|-------|----|---------|
-| **CI Passed** | `github:pr:ci_passed` | The head commit's `statusCheckRollup` transitions to `SUCCESS` |
-| **Authored PR** | `github:pr:opened` | First time an authored PR is discovered |
-| **PR Merged** | `github:pr:merged` | The PR's `merged` field changes to `true` |
-| **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it |
-| **PR Unreachable** | `github:pr:unreachable` | TF will no longer follow a tracked PR — see below |
+### Informational
+
+| Event | ID | Trigger | `dedup_key` |
+|-------|----|---------|-------------|
+| **Review: Approved** | `github:pr:review_approved` | An approving review was submitted — see [Reviews](#reviews) | — |
+| **Review: Dismissed** | `github:pr:review_dismissed` | A reviewer's latest review was dismissed — see [Reviews](#reviews) | — |
+| **Review Request Removed** | `github:pr:review_request_removed` | A reviewer TF knows drops off the review requests, because they reviewed or the request was withdrawn. Closes that reviewer's `review_requested` task | `user:<login>` / `team:<org>/<slug>` |
+| **CI Check Passed** | `github:pr:ci_check_passed` | A check run completes with any other conclusion (`success`, `neutral`, `skipped`, `stale`) and was not already passing | — |
+| **New Commits** | `github:pr:new_commits` | The head commit changes | — |
+| **PR Body Updated** | `github:pr:body_updated` | The complete PR body changes, including clearing it | — |
+| **PR Merged** | `github:pr:merged` | `merged` changes to `true` | — |
+| **PR Closed** | `github:pr:closed` | The PR is closed without merging | — |
+| **PR Opened** | `github:pr:opened` | In the catalog; the tracker does not emit it | — |
+| **PR Unreachable** | `github:pr:unreachable` | TF will no longer follow a tracked PR — see below | — |
+
+A PR is first stored from the REST listing of open PRs, which carries its
+review requests but no check runs or reviews. Its review requests emit then,
+and the GraphQL refresh that follows in the same cycle reports the check runs,
+reviews and merge conflicts already on it.
+
+#### Reviews
+
+Every submitted review emits one event, by its state: `review_approved`,
+`review_changes_requested` or `review_commented`. A reviewer's second comment
+review emits as their first did, and two reviews one person submitted between
+cycles are two events, oldest first. A reply in a review thread posted outside
+a pending review is a review of its own on GitHub, holding the reply, so it
+emits `review_commented` too. Inline comments reach TF only through reviews.
+
+Each event's metadata names the review: `reviewer` (a login, spelled
+`<slug>[bot]` for a bot), `review_id` (the numeric id), `comment_count` (its
+inline comments) and `paths` (the distinct files those comments are on). Its
+time is the review's submission.
+
+A review TF submitted emits nothing: its `review` artifact carries the review's
+id once it is posted. Neither does a thread reply TF posted: a comment review
+each of whose comments TF recorded as a `comment` artifact. As with Jira and
+Linear comments, the match is on ids, not on the author. A review read in the
+moment between TF's post and the artifact write counts as a person's. The PR
+author's own replies emit like anyone's, and so does a bot's review.
+
+`review_dismissed` reports a change to a review already submitted: a
+reviewer's latest review turning `DISMISSED`. It carries that review's id and
+comment count, and an empty `paths`.
+
+How the new reviews are found:
+
+- The batch read returns how many submitted reviews the PR has and the newest
+  of them, stored as `review_count` and `review_marker`. A PR whose count and
+  newest review did not move is not read again.
+- Otherwise a follow-up query pages through the PR's submitted reviews from the
+  end of GitHub's list backwards, with each review's state, author, submission
+  time and its comments' ids and files. A review submitted after the stored
+  marker is new. GitHub does not document the order of that list: a review
+  started as pending sits where it was started if the list is by creation, so
+  the read goes on until the reviews it found make up the rise in the count.
+- Pending reviews are never read. The list would otherwise return the
+  credential's own unsubmitted review.
+- When the follow-up read fails, or reading which reviews are TF's does, the
+  snapshot keeps its previous `review_count` and `review_marker` and the next
+  cycle reports the same reviews.
+- A snapshot stored without `review_marker`, from before it existed or seeded
+  from the REST listing of open PRs, compares each reviewer's latest review
+  instead, as earlier versions did: one event per reviewer whose latest review
+  changed state, carrying that review's id and comment count and an empty
+  `paths`. This is how a newly discovered PR reports the reviews already on it.
+  The next cycle diffs against the marker that refresh stored.
+- The refresh gate skips an open PR whose `updatedAt` and head commit did not
+  move for up to ten minutes. A review that did not advance `updatedAt` waits
+  for that floor.
 
 #### PR Unreachable
 
@@ -536,8 +602,9 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `additions`, `deletions`, `changed_files`
 - `check_runs[]` — structured per-check-run data for the current head SHA, deduped by name (latest execution wins). Each entry: `id`, `name`, `status`, `conclusion`, `completed_at`, `details_url`, `workflow_run_id`. `details_url` is GitHub's `details_url` — the CI provider's "more info" link (for Actions: `/actions/runs/N/job/M`; for third-party CI: provider-defined), not GitHub's narrower check-run page URL.
 - `review_requests[]` — pending reviewer identifiers: user logins for direct requests, `org/slug` for team requests
-- `reviews[]` — latest review per reviewer (author, state, submitted_at)
-- `review_count` — total number of reviews submitted
+- `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `state`, `submitted_at`, `comment_count`
+- `review_count` — the number of submitted reviews
+- `review_marker` — the newest submitted review TF has read, `{id, submitted_at}`; see [Reviews](#reviews)
 - `labels[]`, `comment_count`, `updated_at`
 
 `author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.

@@ -57,6 +57,12 @@ type PRSnapshot struct {
 	ReviewRequests []string      `json:"review_requests"` // logins of users/teams with pending requests
 	Reviews        []ReviewState `json:"reviews"`         // latest review per reviewer
 	ReviewCount    int           `json:"review_count"`    // total reviews submitted
+	// ReviewMarker is the newest submitted review, the point the next poll
+	// reads new reviews from. nil on a snapshot stored before the marker
+	// existed and on one seeded from the REST listing of open pull requests,
+	// which carries no reviews; the diff against such a snapshot compares each
+	// reviewer's latest review instead.
+	ReviewMarker *ReviewMarker `json:"review_marker,omitempty"`
 
 	// Metadata
 	Labels       []string `json:"labels"`
@@ -111,10 +117,46 @@ type ReviewState struct {
 	// Empty on snapshots from before the field existed and on paths that
 	// don't request it; the review-transition diff keys on Author+State and
 	// never reads ID, so its absence is inert there.
-	ID          string `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
+	// DatabaseID is the review's numeric id, the one REST and the review
+	// events carry. Zero on snapshots from before the field existed.
+	DatabaseID  int64  `json:"database_id,omitempty"`
 	Author      string `json:"author"` // reviewer login, REST-spelled ("<slug>[bot]" for a bot)
 	State       string `json:"state"`  // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"`
+	// CommentCount is how many inline comments the review holds.
+	CommentCount int `json:"comment_count,omitempty"`
+}
+
+// ReviewMarker names a pull request's newest submitted review by its numeric
+// id and submission time. A zero marker means the pull request has no
+// submitted review.
+type ReviewMarker struct {
+	ID          int64  `json:"id,omitempty"`
+	SubmittedAt string `json:"submitted_at,omitempty"`
+}
+
+// After reports whether the review submitted at submittedAt with id id is
+// newer than m: by submission time, or by id when the times are equal or
+// either does not parse.
+func (m ReviewMarker) After(submittedAt string, id int64) bool {
+	t, okT := ParseExternalTime(submittedAt)
+	mt, okM := ParseExternalTime(m.SubmittedAt)
+	if okT && okM && !t.Equal(mt) {
+		return t.After(mt)
+	}
+	if okT != okM {
+		return okT
+	}
+	return id > m.ID
+}
+
+// Newer returns whichever of m and o names the newer review.
+func (m ReviewMarker) Newer(o ReviewMarker) ReviewMarker {
+	if m.After(o.SubmittedAt, o.ID) {
+		return o
+	}
+	return m
 }
 
 // CheckRun is a single execution of a CI check on a commit.

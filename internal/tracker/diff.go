@@ -20,9 +20,14 @@ import (
 // routing target. A nil resolver means no reviewer is TF-known — review-request
 // events are suppressed, which is the right degraded behavior.
 //
+// reviews is every review submitted since prev, oldest first, with TF's marked
+// (githubNewReviews). The snapshot holds only the newest, so the caller reads
+// them. A prev without the review marker has none read, and the diff compares
+// each reviewer's latest review instead.
+//
 // Not a pure function for the review-request branch: the resolver may consult
 // stores (multi-mode). Every other branch is pure.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver) []domain.Event {
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver, reviews []NewReview) []domain.Event {
 	now := time.Now()
 	eid := &entityID
 	authorIsSelf := curr.Author == username
@@ -273,46 +278,75 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 		}
 	}
 
-	// --- Per-review events -------------------------------------------------
-	// Emit one event per review state transition, split by review type.
-	prevReviews := reviewMap(prev.Reviews)
-	currReviews := reviewMap(curr.Reviews)
-
-	for reviewer, currState := range currReviews {
-		prevState := prevReview(prevReviews, currReviews, reviewer)
-		if currState.State == prevState.State {
-			continue
+	// --- Review events -----------------------------------------------------
+	// emitReview emits the event for one review by its state. paths is nil
+	// for a review whose comments were not read.
+	emitReview := func(state, reviewer string, reviewID int64, commentCount int, paths []string, submittedAt string) {
+		if paths == nil {
+			paths = []string{}
 		}
-
-		switch currState.State {
+		switch state {
 		case "CHANGES_REQUESTED":
-			emitAt(domain.EventGitHubPRReviewChangesRequested, "", currState.SubmittedAt, events.GitHubPRReviewChangesRequestedMetadata{
-				Author:   curr.Author,
-				Reviewer: reviewer,
-				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+			emitAt(domain.EventGitHubPRReviewChangesRequested, "", submittedAt, events.GitHubPRReviewChangesRequestedMetadata{
+				Author: curr.Author, Reviewer: reviewer,
+				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
+				Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "APPROVED":
-			emitAt(domain.EventGitHubPRReviewApproved, "", currState.SubmittedAt, events.GitHubPRReviewApprovedMetadata{
-				Author:   curr.Author,
-				Reviewer: reviewer,
-				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+			emitAt(domain.EventGitHubPRReviewApproved, "", submittedAt, events.GitHubPRReviewApprovedMetadata{
+				Author: curr.Author, Reviewer: reviewer,
+				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
+				Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "COMMENTED":
-			emitAt(domain.EventGitHubPRReviewCommented, "", currState.SubmittedAt, events.GitHubPRReviewCommentedMetadata{
-				Author:   curr.Author,
-				Reviewer: reviewer,
-				ReviewID: 0, CommentCount: 0, Repo: curr.Repo, PRNumber: curr.Number,
+			emitAt(domain.EventGitHubPRReviewCommented, "", submittedAt, events.GitHubPRReviewCommentedMetadata{
+				Author: curr.Author, Reviewer: reviewer,
+				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
+				Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
 		case "DISMISSED":
-			emitAt(domain.EventGitHubPRReviewDismissed, "", currState.SubmittedAt, events.GitHubPRReviewDismissedMetadata{
-				Author:   curr.Author,
-				Reviewer: reviewer,
-				ReviewID: 0, Repo: curr.Repo, PRNumber: curr.Number,
+			emitAt(domain.EventGitHubPRReviewDismissed, "", submittedAt, events.GitHubPRReviewDismissedMetadata{
+				Author: curr.Author, Reviewer: reviewer,
+				ReviewID: reviewID, CommentCount: commentCount, Paths: paths,
+				Repo: curr.Repo, PRNumber: curr.Number,
 				IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 			})
+		}
+	}
+	prevReviews := reviewMap(prev.Reviews)
+	currReviews := reviewMap(curr.Reviews)
+
+	if prev.ReviewMarker == nil {
+		// A snapshot without the review marker: one event per reviewer whose
+		// latest review changed state, by that state.
+		for reviewer, currState := range currReviews {
+			prevState := prevReview(prevReviews, currReviews, reviewer)
+			if currState.State == prevState.State {
+				continue
+			}
+			emitReview(currState.State, reviewer, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
+		}
+	} else {
+		// One event per review submitted since prev, by its state. TF's own
+		// reviews and thread replies emit nothing, nor does a review with no
+		// author to attribute it to. A review already dismissed by the time it
+		// was read is left to the dismissal check below.
+		for _, r := range reviews {
+			if r.ByTF || r.Author == "" || r.State == "DISMISSED" {
+				continue
+			}
+			emitReview(r.State, r.Author, r.ID, r.CommentCount, r.Paths, r.SubmittedAt)
+		}
+		// A dismissal changes a review already submitted rather than adding
+		// one: a reviewer's latest review turned DISMISSED.
+		for _, currState := range curr.Reviews {
+			if currState.State != "DISMISSED" || prevReview(prevReviews, currReviews, currState.Author).State == "DISMISSED" {
+				continue
+			}
+			emitReview(currState.State, currState.Author, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
 		}
 	}
 
