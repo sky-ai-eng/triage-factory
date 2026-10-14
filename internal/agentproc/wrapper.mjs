@@ -293,7 +293,7 @@ async function runStreamingInput(options, permissionPrompts) {
           resolve(decision)
         }
         // Stash the original input alongside the settle: an allow
-        // response that doesn't override the input must echo it back
+        // response that doesn't override the input echoes it back
         // as updatedInput (see the permission_response handler).
         pendingPerms.set(toolCallID, { settle, toolInput })
         // If the turn is interrupted, the SDK aborts this signal — resolve
@@ -366,13 +366,12 @@ async function runStreamingInput(options, permissionPrompts) {
           break
         }
         if (ctl.behavior === "allow") {
-          // updatedInput is mandatory on an allow: sdk.d.ts declares it
-          // optional, but the CLI bundled with the SDK validates the
-          // result against a schema that requires it — a bare
-          // {behavior:"allow"} comes back as "Tool permission request
-          // failed: ZodError…" and the tool call is rejected. An allow
-          // with no explicit override therefore echoes the original
-          // input: approve means "run with the input you asked about".
+          // An allow always carries updatedInput: the Go side's override
+          // when it sent one, the original input otherwise, so approve
+          // means "run with the input you asked about". sdk.d.ts declares
+          // the field optional and the bundled CLI falls back to the
+          // original input on a bare allow; sending it keeps the decision
+          // from depending on that fallback.
           pending.settle({ behavior: "allow", updatedInput: ctl.updated_input ?? pending.toolInput })
         } else {
           pending.settle({ behavior: "deny", message: ctl.message ?? "denied by user" })

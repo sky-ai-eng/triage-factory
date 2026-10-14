@@ -137,53 +137,65 @@ const (
 // precedence guard that operates in front of it (and after it, as
 // the resolver's output flows through both).
 //
-// Sourced from a SDK source-grep of @anthropic-ai/claude-agent-sdk
-// (sdk.mjs / assistant.mjs / bridge.mjs) plus the official Claude
-// Code on Bedrock docs at code.claude.com/docs/en/amazon-bedrock.
-// When the SDK ships new env-driven auth surfaces, add them here
-// AND, if they're persisted per-org, add the matching secret key
-// in the catalog above + the resolver branch in resolveCredentials.
+// The reference for the list is Claude Code's own catalog of provider and
+// auth configuration: the env keys it ignores in a settings file when a host
+// manages the provider. The list keeps what in that catalog selects,
+// configures, authenticates or redirects a provider, and adds the Anthropic
+// federation identity, which the catalog leaves out. It omits the
+// metadata-service endpoints of the AWS and Google credential chains. A
+// stored credential outranks them, and the machine sets them, not a settings
+// file.
 //
-// Categories:
-//   - ANTHROPIC_*: direct Anthropic API auth + Anthropic-side
-//     workforce identity / federation tokens
-//   - AWS_*: standard AWS credential-chain env vars consumed by the
-//     downstream @aws-sdk Bedrock client + the Bedrock API key path
-//   - CLAUDE_CODE_USE_*: provider-selection toggles (Bedrock,
-//     Mantle, Vertex, Foundry, AnthropicAWS — leaving an operator's
-//     toggle in place could route a request to the wrong provider)
-//   - Endpoint overrides: ANTHROPIC_BEDROCK_BASE_URL etc — could
-//     redirect traffic to an operator-controlled proxy
+// On a run with a resolved credential, a stray ANTHROPIC_UNIX_SOCKET sends a
+// request carrying the stored key to whatever listens on the socket, a stray
+// provider toggle switches the run to a provider TF configured nothing for,
+// and a stray model pin spends the org's credential on a model nobody chose.
+// Credentials that Claude Code currently ranks below a stored API key are
+// listed anyway, so that precedence never depends on Claude Code's internal
+// ordering. When an SDK bump adds a provider or its configuration, add it
+// here, or to credentialEnvPrefixes for a family named per model or per
+// service. If the new credential is persisted per org, also add its secret
+// key to the catalog above and the resolver branch to resolveCredentials.
 //
-// TODO(TFAC-1089): the list lags Claude Code's provider surface.
-// ANTHROPIC_UNIX_SOCKET and CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD survive the
-// strip and override a stored key, and Vertex and Foundry configuration is
-// neither stripped nor forwarded from the operator's settings env.
+// The same keys are the env loadOperatorAuth forwards from the operator's
+// settings file on a run with no resolved credential, so a provider whose
+// configuration is missing here can't authenticate from that file.
 var credentialEnvKeys = []string{
-	// Anthropic direct API auth + Anthropic-side identity.
+	// Anthropic direct API auth + Anthropic-side workforce identity
+	// (OIDC federation, or a named profile under ANTHROPIC_CONFIG_DIR).
 	"ANTHROPIC_API_KEY",
 	"ANTHROPIC_AUTH_TOKEN",
 	"ANTHROPIC_BASE_URL",
+	"ANTHROPIC_UNIX_SOCKET",
 	"ANTHROPIC_CUSTOM_HEADERS",
 	"ANTHROPIC_FEDERATION_RULE_ID",
 	"ANTHROPIC_IDENTITY_TOKEN",
 	"ANTHROPIC_IDENTITY_TOKEN_FILE",
 	"ANTHROPIC_ORGANIZATION_ID",
+	"ANTHROPIC_WORKSPACE_ID",
 	"ANTHROPIC_PROFILE",
+	"ANTHROPIC_CONFIG_DIR",
 	"ANTHROPIC_SCOPE",
 	"ANTHROPIC_SERVICE_ACCOUNT_ID",
 
-	// Bedrock / Mantle endpoint URLs + service tier + model ID.
-	// ANTHROPIC_MODEL crosses categories (used by direct API too)
-	// but stripping it on resolved-creds is safer than leaking a
-	// parent's pinned model.
-	"ANTHROPIC_BEDROCK_BASE_URL",
-	"ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
-	"ANTHROPIC_BEDROCK_SERVICE_TIER",
+	// Claude Code's own credentials: an OAuth token, the file descriptors
+	// it reads a key or token from, and the cache lifetime of an
+	// apiKeyHelper's key.
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_API_KEY_HELPER_TTL_MS",
+
+	// Model pins. ANTHROPIC_MODEL is used by every provider. Stripping the
+	// pins on resolved creds is safer than leaking a parent's pinned model.
 	"ANTHROPIC_MODEL",
+	"ANTHROPIC_DEFAULT_MODEL",
 	"ANTHROPIC_DEFAULT_OPUS_MODEL",
 	"ANTHROPIC_DEFAULT_SONNET_MODEL",
 	"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+	"ANTHROPIC_DEFAULT_FABLE_MODEL",
+	"ANTHROPIC_SMALL_FAST_MODEL",
 	"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
 
 	// Provider-selection toggles. Leaving CLAUDE_CODE_USE_VERTEX in
@@ -192,9 +204,53 @@ var credentialEnvKeys = []string{
 	"CLAUDE_CODE_USE_BEDROCK",
 	"CLAUDE_CODE_USE_MANTLE",
 	"CLAUDE_CODE_USE_VERTEX",
-	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
 	"CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD",
+	"CLAUDE_CODE_USE_GATEWAY",
+
+	// Skip-auth flags: each makes Claude Code send a provider's requests
+	// unsigned, for a proxy that attaches the credential itself.
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
 	"CLAUDE_CODE_SKIP_MANTLE_AUTH",
+	"CLAUDE_CODE_SKIP_VERTEX_AUTH",
+	"CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+	"CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH",
+	"CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
+
+	// Bedrock / Mantle endpoints, service tier and inference-profile
+	// region prefix.
+	"ANTHROPIC_BEDROCK_BASE_URL",
+	"ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+	"ANTHROPIC_BEDROCK_SERVICE_TIER",
+	"ANTHROPIC_BEDROCK_REGION_PREFIX",
+
+	// Vertex: endpoint, project, region and the Google credential chain.
+	// The per-model region overrides are a prefix in
+	// credentialEnvPrefixes.
+	"ANTHROPIC_VERTEX_BASE_URL",
+	"ANTHROPIC_VERTEX_PROJECT_ID",
+	"CLOUD_ML_REGION",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"GOOGLE_CLOUD_PROJECT",
+	"GCLOUD_PROJECT",
+
+	// Foundry.
+	"ANTHROPIC_FOUNDRY_BASE_URL",
+	"ANTHROPIC_FOUNDRY_RESOURCE",
+	"ANTHROPIC_FOUNDRY_API_KEY",
+	"ANTHROPIC_FOUNDRY_AUTH_TOKEN",
+
+	// Anthropic on AWS.
+	"ANTHROPIC_AWS_BASE_URL",
+	"ANTHROPIC_AWS_API_KEY",
+	"ANTHROPIC_AWS_WORKSPACE_ID",
+
+	// Anthropic on Google Cloud.
+	"ANTHROPIC_GOOGLE_CLOUD_BASE_URL",
+	"ANTHROPIC_GOOGLE_CLOUD_PROJECT",
+	"ANTHROPIC_GOOGLE_CLOUD_LOCATION",
+	"ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
 
 	// AWS standard credential chain + Bedrock-specific API key.
 	// The @aws-sdk client reads all of these by default; an
@@ -212,6 +268,43 @@ var credentialEnvKeys = []string{
 	"AWS_ROLE_ARN",
 	"AWS_ROLE_SESSION_NAME",
 	"AWS_BEARER_TOKEN_BEDROCK",
+}
+
+// credentialEnvPrefixes extends credentialEnvKeys to the families whose names
+// Claude Code adds to as it grows, so the guard covers a new member without an
+// edit here.
+var credentialEnvPrefixes = []string{
+	// One Vertex region override per model (VERTEX_REGION_CLAUDE_4_5_SONNET
+	// and so on); every new model adds one.
+	"VERTEX_REGION_",
+	// The AWS SDK's endpoint overrides, global and per service.
+	// AWS_ENDPOINT_URL_BEDROCK sends Bedrock's control-plane calls, the
+	// bearer token attached, wherever it points.
+	"AWS_ENDPOINT_URL",
+}
+
+// credentialEnvKeySet indexes credentialEnvKeys for isCredentialEnvKey.
+var credentialEnvKeySet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(credentialEnvKeys))
+	for _, k := range credentialEnvKeys {
+		set[k] = struct{}{}
+	}
+	return set
+}()
+
+// isCredentialEnvKey reports whether key is named by credentialEnvKeys or
+// starts with one of credentialEnvPrefixes. The match is case-sensitive, for
+// the reason filterEnvFunc gives.
+func isCredentialEnvKey(key string) bool {
+	if _, ok := credentialEnvKeySet[key]; ok {
+		return true
+	}
+	for _, p := range credentialEnvPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // The credential resolution below answers one question: which provider's
@@ -584,7 +677,7 @@ func addBedrockConfig(ctx context.Context, secrets SecretsReader, orgID, model s
 }
 
 // mergeEnv composes the subprocess env. When per-org credentials are
-// resolved (creds non-empty), every key in credentialEnvKeys is
+// resolved (creds non-empty), every key isCredentialEnvKey matches is
 // stripped from the inherited env first — so a shell-set
 // ANTHROPIC_API_KEY can't override the org-scoped key via
 // last-entry-wins semantics. When the resolver returned empty (no
@@ -602,7 +695,7 @@ func mergeEnv(parentEnv, extraEnv []string, creds map[string]string) []string {
 		out = append(out, parentEnv...)
 	} else {
 		// Filter credential keys out of the parent env.
-		out = filterEnv(parentEnv, credentialEnvKeys)
+		out = filterEnvFunc(parentEnv, isCredentialEnvKey)
 	}
 
 	out = append(out, extraEnv...)
@@ -614,21 +707,27 @@ func mergeEnv(parentEnv, extraEnv []string, creds map[string]string) []string {
 }
 
 // filterEnv returns a copy of env with any KEY=... entry whose KEY
-// is in remove dropped. Case-sensitive match on the key — matches
+// is in remove dropped.
+func filterEnv(env, remove []string) []string {
+	skip := make(map[string]struct{}, len(remove))
+	for _, k := range remove {
+		skip[k] = struct{}{}
+	}
+	return filterEnvFunc(env, func(key string) bool {
+		_, found := skip[key]
+		return found
+	})
+}
+
+// filterEnvFunc returns a copy of env with any KEY=... entry whose KEY
+// drop reports dropped. Case-sensitive match on the key — matches
 // POSIX env semantics (the load-bearing target since multi-mode
 // + gVisor requires Linux). Windows env var names are case-
 // insensitive at the OS layer, so a parent's "Anthropic_Api_Key"
 // would slip past the leak guard there; that's acceptable because
 // Windows is only a local-mode target where the leak guard's
 // multi-tenant rationale doesn't apply.
-func filterEnv(env, remove []string) []string {
-	if len(remove) == 0 {
-		return append([]string(nil), env...)
-	}
-	skip := make(map[string]struct{}, len(remove))
-	for _, k := range remove {
-		skip[k] = struct{}{}
-	}
+func filterEnvFunc(env []string, drop func(key string) bool) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
 		// Split on the first '=' — env values may contain '='
@@ -638,7 +737,7 @@ func filterEnv(env, remove []string) []string {
 			out = append(out, e)
 			continue
 		}
-		if _, found := skip[e[:eq]]; found {
+		if drop(e[:eq]) {
 			continue
 		}
 		out = append(out, e)

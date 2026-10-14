@@ -133,19 +133,21 @@ else:
 - `apiKeyHelper`, `proxyAuthHelper`, `awsAuthRefresh`, `awsCredentialExport`
   and `gcpAuthRefresh`.
 - From `env`, the same credential variables a stored key strips: the
-  `ANTHROPIC_*` key, token, base URL, identity and model variables, the
-  `CLAUDE_CODE_USE_*` provider switches, the Bedrock and Mantle endpoint
-  variables, and the AWS credential chain (`credentialEnvKeys` in
-  `internal/agentproc/credentials.go` is the full list). They take precedence
+  `ANTHROPIC_*` key, token, base URL, identity and model variables, Claude
+  Code's own OAuth token and credential file descriptors, the
+  `CLAUDE_CODE_USE_*` provider switches and `CLAUDE_CODE_SKIP_*_AUTH` flags,
+  each provider's endpoint, project, region and resource variables (Bedrock,
+  Mantle, Vertex, Foundry, Anthropic on AWS and Anthropic on Google Cloud,
+  including the per-model `VERTEX_REGION_*` overrides), and the AWS and Google
+  credential chains (`credentialEnvKeys` and `credentialEnvPrefixes` in
+  `internal/agentproc/credentials.go` are the full list). They take precedence
   over the same variables in Triage Factory's environment, as they do in Claude
   Code.
 
 Everything else in that `env` stays behind. That includes proxy and CA settings
 (`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`), which would also reach the
-agent's shell commands, and Vertex's and Foundry's own configuration
-(`ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `ANTHROPIC_FOUNDRY_RESOURCE`
-and the like). Set those in Triage Factory's environment instead. With a stored
-key, nothing from the file is passed on.
+agent's shell commands. Set those in Triage Factory's environment instead. With
+a stored key, nothing from the file is passed on.
 
 Where exactly they land, and how the encrypted-file backend works, is covered in
 [Secret storage](secret-storage.md).

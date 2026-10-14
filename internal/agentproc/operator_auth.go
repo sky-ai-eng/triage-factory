@@ -25,11 +25,12 @@ var operatorAuthHelperKeys = []string{
 
 // operatorAuth is the part of the operator's ~/.claude/settings.json that a
 // run started without a TF-resolved credential still honors: the auth helper
-// commands, and the settings env narrowed to credentialEnvKeys. Under
-// "Use system Claude Code credentials" these are how an operator who set up
-// Claude Code with a gateway, Bedrock, or an apiKeyHelper authenticates, and
-// they are the only keys of that file a run sees. A run with a resolved
-// credential forwards none of it, so the stored key decides.
+// commands, and the settings env narrowed to the keys isCredentialEnvKey
+// matches. Under "Use system Claude Code credentials" these are how an
+// operator who set up Claude Code with a gateway, Bedrock, Vertex, Foundry or
+// an apiKeyHelper authenticates, and they are the only keys of that file a
+// run sees. A run with a resolved credential forwards none of it, so the
+// stored key decides.
 //
 // The env half rides the process environment rather than --settings because
 // the SDK hands --settings to Claude Code in argv, where any local user can
@@ -95,8 +96,11 @@ func readOperatorAuth(path string) (operatorAuth, error) {
 
 	var env map[string]json.RawMessage
 	if json.Unmarshal(file["env"], &env) == nil {
-		for _, key := range credentialEnvKeys {
-			if value, ok := settingsEnvValue(env[key]); ok {
+		for key, raw := range env {
+			if !isCredentialEnvKey(key) {
+				continue
+			}
+			if value, ok := settingsEnvValue(raw); ok {
 				auth.env = append(auth.env, key+"="+value)
 			}
 		}

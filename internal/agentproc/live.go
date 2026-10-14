@@ -29,9 +29,8 @@ import (
 // sends both; the wrapper prefers blocks if anything ever did.
 //
 // On an allow, updated_input optionally overrides the tool input; when
-// omitted the wrapper echoes the original input back to the SDK (its CLI
-// requires updatedInput on every allow result, so "absent" cannot mean
-// "send nothing").
+// omitted the wrapper echoes the original input back to the SDK, so every
+// allow it sends names the input it approved.
 //
 // stdout (wrapper → Go): the existing SDK envelopes (system/assistant/
 // user/result) the StreamState parser already consumes, PLUS control
