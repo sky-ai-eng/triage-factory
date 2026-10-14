@@ -61,7 +61,8 @@ type Artifact struct {
 	// or deletes someone else's comment still leaves a row, because the row
 	// records what the run did to that comment, so the row existing does not
 	// mean TF wrote the comment; this does. Only the writer that posts a
-	// comment sets it, and a later write never clears it.
+	// comment sets it, and a later write never clears it. Nor does a target
+	// say who posted it: an edit stamps owner/repo#N when it knows the PR.
 	PostedByTF bool `json:"posted_by_tf,omitempty"`
 
 	// State is the per-Kind lifecycle position. Use the ArtifactState*

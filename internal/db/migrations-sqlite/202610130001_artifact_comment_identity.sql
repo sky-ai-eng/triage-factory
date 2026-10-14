@@ -13,11 +13,14 @@ CREATE INDEX idx_artifacts_node_id ON artifacts (org_id, scope, node_id) WHERE n
 -- baseline's column.
 ALTER TABLE artifacts ADD COLUMN posted_by_tf BOOLEAN NOT NULL DEFAULT 0;
 
--- Every Jira and Linear comment row was written by the verb that posts the
--- comment. A GitHub comment row was posted by TF when it has a target: the
--- verb that posts one stamps owner/repo#N, and the edit and delete verbs, which
--- also mint a row for a comment someone else wrote, leave the target empty and
--- the store keeps an empty target from overwriting a stamped one.
+-- The backfill holds only for the rows this migration finds, all written before
+-- the column existed. Each Jira and Linear comment row among them was written
+-- by the verb that posts the comment. A GitHub comment row among them was
+-- posted by TF exactly when it has a target: the posting verb stamped
+-- owner/repo#N, and the edit and delete verbs, which also mint a row for a
+-- comment someone else wrote, left the target empty, which the store never lets
+-- overwrite a stamped one. On a row written after this migration a target says
+-- nothing about who posted the comment; posted_by_tf does.
 UPDATE artifacts SET posted_by_tf = 1
  WHERE kind = 'comment'
    AND (provider IN ('jira', 'linear') OR (provider = 'github' AND target <> ''));

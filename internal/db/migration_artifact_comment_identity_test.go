@@ -8,11 +8,11 @@ import (
 )
 
 // The migration that adds node_id and posted_by_tf to artifacts
-// (202610130001). posted_by_tf starts on for the comment rows a posting verb
-// wrote: every Jira and Linear comment, and a GitHub comment the add verb
-// stamped a target on. A GitHub comment with no target was minted by an edit
-// or a delete of someone else's comment, and every other kind is no comment
-// at all; both stay off.
+// (202610130001). Among the rows written before it, posted_by_tf starts on for
+// the comment rows a posting verb wrote: every Jira and Linear comment, and a
+// GitHub comment the add verb stamped a target on. A GitHub comment with no
+// target was minted by an edit or a delete of someone else's comment, and
+// every other kind is no comment at all; both stay off.
 func TestMigrate_ArtifactCommentIdentityBackfillsPostedByTF(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, 202610110001)
 	seedGitHubHostOrg(t, database)

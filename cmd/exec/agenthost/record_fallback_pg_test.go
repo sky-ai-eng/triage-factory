@@ -11,13 +11,13 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 )
 
-// TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow is the case that
-// motivated recording the action on its own. Artifacts are keyed org-wide but
-// updated team-scoped: a manual run in team B, acting on a comment team A's run
-// recorded, cannot update A's row under its user's claims, and the refused
-// upsert used to roll back the ledger row written in the same transaction. The
-// row must survive, A's artifact must be left as it was, and the same holds
-// for a branch push, whose ledger row is composed inside the artifact upsert.
+// TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow pins that a
+// ledger row survives an artifact write RLS refuses. Artifacts are keyed
+// org-wide but updated team-scoped, so a manual run in team B acting on a
+// comment team A's run recorded cannot update A's row under its user's claims.
+// The refused upsert must not take the ledger row with it, A's artifact must be
+// left as it was, and the same holds for a branch push, whose ledger row is
+// composed inside the artifact upsert.
 func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 	h := pgtest.Shared(t)
 	h.Reset(t)
