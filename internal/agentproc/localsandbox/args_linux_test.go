@@ -14,6 +14,10 @@ import (
 	"testing"
 )
 
+// testProjectDir is the transcript directory every case below names. Its
+// value is what worktree.ClaudeProjectDir computes for testHost's cwd.
+const testProjectDir = "/home/dev/.claude/projects/-tmp-triagefactory-runs-rk1"
+
 // testHost is the layout every case below is computed against — fixed
 // literals rather than the developer's real home, so the golden argv is the
 // same on every machine.
@@ -36,11 +40,12 @@ func testHost() Host {
 // it, silently changes what the agent can reach.
 func TestArgs_MountPlan(t *testing.T) {
 	spec := Spec{
-		RunRoot:         "/tmp/triagefactory-runs/rk1",
-		GHChannelDir:    "/home/dev/.triagefactory/gh-channel/conv-1",
-		AgentHostSocket: "/home/dev/.triagefactory/agenthost/conv-1.sock",
-		AddDirs:         []string{"/home/dev/notes", "/srv/shared"},
-		ReadOnly:        []string{"/home/dev/.nvm/versions/node/v22/bin/node", "/home/dev/src/tf/triagefactory"},
+		RunRoot:          "/tmp/triagefactory-runs/rk1",
+		ClaudeProjectDir: testProjectDir,
+		GHChannelDir:     "/home/dev/.triagefactory/gh-channel/conv-1",
+		AgentHostSocket:  "/home/dev/.triagefactory/agenthost/conv-1.sock",
+		AddDirs:          []string{"/home/dev/notes", "/srv/shared"},
+		ReadOnly:         []string{"/home/dev/.nvm/versions/node/v22/bin/node", "/home/dev/src/tf/triagefactory"},
 	}
 
 	got, err := Args(spec, testHost())
@@ -58,8 +63,20 @@ func TestArgs_MountPlan(t *testing.T) {
 		"--tmpfs", "/home/dev/.triagefactory",
 		"--tmpfs", "/run",
 		"--tmpfs", "/tmp",
-		// Then everything that comes back through them.
-		"--bind-try", "/home/dev/.claude", "/home/dev/.claude",
+		// Then everything that comes back through them. ~/.claude first, by
+		// entry: the operator's configuration ro, the credential and this
+		// run's transcript rw, and never the directory itself.
+		"--ro-bind-try", "/home/dev/.claude/settings.json", "/home/dev/.claude/settings.json",
+		"--ro-bind-try", "/home/dev/.claude/CLAUDE.md", "/home/dev/.claude/CLAUDE.md",
+		"--ro-bind-try", "/home/dev/.claude/rules", "/home/dev/.claude/rules",
+		"--ro-bind-try", "/home/dev/.claude/skills", "/home/dev/.claude/skills",
+		"--ro-bind-try", "/home/dev/.claude/commands", "/home/dev/.claude/commands",
+		"--ro-bind-try", "/home/dev/.claude/agents", "/home/dev/.claude/agents",
+		"--ro-bind-try", "/home/dev/.claude/output-styles", "/home/dev/.claude/output-styles",
+		"--ro-bind-try", "/home/dev/.claude/plugins", "/home/dev/.claude/plugins",
+		"--ro-bind-try", "/home/dev/.claude/hooks", "/home/dev/.claude/hooks",
+		"--bind-try", "/home/dev/.claude/.credentials.json", "/home/dev/.claude/.credentials.json",
+		"--bind", testProjectDir, testProjectDir,
 		"--ro-bind-try", "/home/dev/.triagefactory/hooks", "/home/dev/.triagefactory/hooks",
 		"--ro-bind-try", "/home/dev/.triagefactory/bin", "/home/dev/.triagefactory/bin",
 		"--bind-try", "/home/dev/.triagefactory/gh-channel/conv-1", "/home/dev/.triagefactory/gh-channel/conv-1",
@@ -85,8 +102,9 @@ func TestArgs_MountPlan(t *testing.T) {
 // empty and the agent reads that emptiness as an answer.
 func TestArgs_AddDirsWinOverTheMasks(t *testing.T) {
 	got, err := Args(Spec{
-		RunRoot: "/tmp/triagefactory-runs/rk1",
-		AddDirs: []string{"/home/dev/notes"},
+		RunRoot:          "/tmp/triagefactory-runs/rk1",
+		ClaudeProjectDir: testProjectDir,
+		AddDirs:          []string{"/home/dev/notes"},
 	}, testHost())
 	if err != nil {
 		t.Fatalf("Args: %v", err)
@@ -107,7 +125,7 @@ func TestArgs_AddDirsWinOverTheMasks(t *testing.T) {
 func TestArgs_MasksTMPDIRAlongsideTmp(t *testing.T) {
 	host := testHost()
 	host.TempDir = "/var/tmp/dev"
-	got, err := Args(Spec{RunRoot: "/var/tmp/dev/triagefactory-runs/rk1"}, host)
+	got, err := Args(Spec{RunRoot: "/var/tmp/dev/triagefactory-runs/rk1", ClaudeProjectDir: testProjectDir}, host)
 	if err != nil {
 		t.Fatalf("Args: %v", err)
 	}
@@ -132,7 +150,7 @@ func TestArgs_MasksTMPDIRAlongsideTmp(t *testing.T) {
 // bind whose source is an empty string, so the omission is what keeps an
 // unprovisioned channel a degraded run rather than a failed one.
 func TestArgs_OmitsAbsentOptionalPaths(t *testing.T) {
-	got, err := Args(Spec{RunRoot: "/tmp/triagefactory-runs/rk1"}, testHost())
+	got, err := Args(Spec{RunRoot: "/tmp/triagefactory-runs/rk1", ClaudeProjectDir: testProjectDir}, testHost())
 	if err != nil {
 		t.Fatalf("Args: %v", err)
 	}
@@ -161,8 +179,16 @@ func TestArgs_RejectsIncompleteSpecs(t *testing.T) {
 		{name: "no run root", spec: Spec{}, host: testHost()},
 		{name: "no home", spec: Spec{RunRoot: "/tmp/r"}, host: Host{Cwd: "/tmp/r"}},
 		{name: "no cwd", spec: Spec{RunRoot: "/tmp/r"}, host: Host{Home: "/home/dev"}},
-		{name: "relative grant", spec: Spec{RunRoot: "/tmp/r", AddDirs: []string{"notes"}}, host: testHost()},
-		{name: "relative bind-back", spec: Spec{RunRoot: "/tmp/r", ReadOnly: []string{"node"}}, host: testHost()},
+		{name: "relative grant", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: testProjectDir, AddDirs: []string{"notes"}}, host: testHost()},
+		{name: "relative bind-back", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: testProjectDir, ReadOnly: []string{"node"}}, host: testHost()},
+		{name: "no claude dir", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: testProjectDir}, host: Host{Home: "/home/dev", Cwd: "/tmp/r"}},
+		{name: "no transcript dir", spec: Spec{RunRoot: "/tmp/r"}, host: testHost()},
+		// Each of these would make a path the operator's own sessions read
+		// writable from inside the namespace.
+		{name: "transcript dir is a config entry", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: "/home/dev/.claude/hooks"}, host: testHost()},
+		{name: "transcript dir is all of projects", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: "/home/dev/.claude/projects"}, host: testHost()},
+		{name: "transcript dir climbs out of projects", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: "/home/dev/.claude/projects/../plugins"}, host: testHost()},
+		{name: "relative transcript dir", spec: Spec{RunRoot: "/tmp/r", ClaudeProjectDir: "projects/-r"}, host: testHost()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -182,7 +208,7 @@ func TestPreflight_NamesAMissingGrant(t *testing.T) {
 	host.ClaudeDir = filepath.Join(root, "claude")
 	missing := filepath.Join(root, "gone")
 
-	err := Preflight(Spec{RunRoot: root, AddDirs: []string{missing}}, host)
+	err := Preflight(Spec{RunRoot: root, ClaudeProjectDir: filepath.Join(host.ClaudeDir, "projects", "-run"), AddDirs: []string{missing}}, host)
 	if err == nil {
 		t.Fatal("Preflight accepted a grant that does not exist")
 	}
@@ -191,20 +217,68 @@ func TestPreflight_NamesAMissingGrant(t *testing.T) {
 	}
 }
 
-// TestPreflight_CreatesClaudeDir pins the one directory Preflight makes
-// rather than demands: without it the bind has no source, and the run's
+// TestPreflight_CreatesTheTranscriptDir pins the one directory Preflight
+// makes rather than demands: without it the bind has no source, and the run's
 // transcript lands in a tmpfs that vanishes with the namespace — taking the
 // park-and-resume path's warm cache with it.
-func TestPreflight_CreatesClaudeDir(t *testing.T) {
+func TestPreflight_CreatesTheTranscriptDir(t *testing.T) {
 	root := t.TempDir()
 	host := testHost()
 	host.ClaudeDir = filepath.Join(root, "claude")
+	projectDir := filepath.Join(host.ClaudeDir, "projects", "-run")
 
-	if err := Preflight(Spec{RunRoot: root}, host); err != nil {
+	if err := Preflight(Spec{RunRoot: root, ClaudeProjectDir: projectDir}, host); err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
-	if info, err := os.Stat(host.ClaudeDir); err != nil || !info.IsDir() {
-		t.Fatalf("Preflight did not create %s (err=%v)", host.ClaudeDir, err)
+	if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+		t.Fatalf("Preflight did not create %s (err=%v)", projectDir, err)
+	}
+}
+
+// TestPreflight_RefusesATranscriptDirOutsideProjects pins that the location
+// check runs before the directory is created, not only in Args: Preflight
+// runs first, and a directory it made at a bad path would already be on the
+// host when Args refused the plan.
+func TestPreflight_RefusesATranscriptDirOutsideProjects(t *testing.T) {
+	root := t.TempDir()
+	host := testHost()
+	host.ClaudeDir = filepath.Join(root, "claude")
+	bad := filepath.Join(host.ClaudeDir, "skills")
+
+	if err := Preflight(Spec{RunRoot: root, ClaudeProjectDir: bad}, host); err == nil {
+		t.Fatal("Preflight accepted a transcript dir outside ~/.claude/projects")
+	}
+	if _, err := os.Stat(bad); !os.IsNotExist(err) {
+		t.Errorf("Preflight created %s before refusing it (err=%v)", bad, err)
+	}
+}
+
+// TestArgs_ClaudeDirIsNeverBoundWhole states the property the golden encodes
+// on its own: nothing binds ~/.claude itself, and the only rw binds beneath
+// it are the credential file and this run's transcript directory. Anything
+// else rw there would reach paths the operator's own sessions load.
+func TestArgs_ClaudeDirIsNeverBoundWhole(t *testing.T) {
+	host := testHost()
+	got, err := Args(Spec{RunRoot: "/tmp/triagefactory-runs/rk1", ClaudeProjectDir: testProjectDir}, host)
+	if err != nil {
+		t.Fatalf("Args: %v", err)
+	}
+	writable := map[string]bool{
+		filepath.Join(host.ClaudeDir, claudeCredentialsFile): true,
+		testProjectDir: true,
+	}
+	for i := 0; i+1 < len(got); i++ {
+		flag, src := got[i], got[i+1]
+		if !strings.HasPrefix(flag, "--") || !strings.Contains(flag, "bind") {
+			continue
+		}
+		if src == host.ClaudeDir {
+			t.Errorf("%s binds ~/.claude whole", flag)
+		}
+		under := strings.HasPrefix(src, host.ClaudeDir+string(filepath.Separator))
+		if under && !strings.HasPrefix(flag, "--ro-") && !writable[src] {
+			t.Errorf("%s %s is writable under ~/.claude", flag, src)
+		}
 	}
 }
 
@@ -550,8 +624,9 @@ func TestArgs_BindsResolverPathsBackThroughTheRunMask(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			spec := Spec{
-				RunRoot:  "/tmp/triagefactory-runs/rk1",
-				ReadOnly: []string{c.resolver, "/run/systemd/resolve"},
+				RunRoot:          "/tmp/triagefactory-runs/rk1",
+				ClaudeProjectDir: testProjectDir,
+				ReadOnly:         []string{c.resolver, "/run/systemd/resolve"},
 			}
 			got, err := Args(spec, testHost())
 			if err != nil {

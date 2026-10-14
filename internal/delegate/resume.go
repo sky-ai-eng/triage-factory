@@ -440,7 +440,7 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	// A resume gets the same isolation the initial invocation had — the
 	// namespace is per-invocation, like the gh channel above, so a cold resume
 	// builds its own plan and its own agenthost daemon over the same run tree.
-	localSbx, err := s.startLocalSandbox(conversationID, opts.Namespace, ghChannel, agenthost.ConversationInfo{
+	localSbx, err := s.startLocalSandbox(conversationID, opts.Namespace, cwd, ghChannel, agenthost.ConversationInfo{
 		OrgID:            orgID,
 		UserID:           creatorUserID,
 		ConversationID:   conversationID,

@@ -15,7 +15,20 @@
 // The mount plan is whole-host-read-only, then mask-and-bind-back: everything
 // is visible ro, four trees are replaced by empty tmpfs (the operator's home,
 // the TF state root, the temp dir, /run), and only the paths this run legibly
-// needs are bound back through the masks. Masking /run removes the session
+// needs are bound back through the masks.
+//
+// ~/.claude comes back entry by entry rather than whole, because it is the one
+// directory under the home mask that other Claude Code processes read as
+// configuration: a hook written into ~/.claude/settings.json runs, outside any
+// namespace, the next time the operator starts Claude Code. The run gets the
+// operator's configuration read-only (claudeConfig), the credential file and
+// its own transcript directory read-write, and a private ~/.claude on the home
+// tmpfs for everything else Claude Code writes while it runs. The credential
+// stays readable, and that is not fixable here: the agent's own process holds
+// it to authenticate, and its tool calls share that process's uid and pid
+// namespace.
+//
+// Masking /run removes the session
 // D-Bus and Secret Service socket paths (they live under /run/user/<uid>) from
 // the run's filesystem view. That is path hiding and no more: the network
 // namespace is shared, so a bus listening on an abstract socket is not covered
@@ -52,6 +65,43 @@ const Binary = "bwrap"
 // drift test in internal/delegate — the package that wires both — cross-checks
 // the two spellings agree.
 const AgentHostSocketDest = "/run/tf.sock"
+
+// claudeConfig are the entries of ~/.claude a run gets back read-only: what
+// the operator configures Claude Code with, as opposed to what Claude Code
+// writes while it runs. A run reads the operator's user settings and the hooks
+// they name, installed plugins, memory, rules, skills, slash commands,
+// subagents and output styles, and cannot change any of them.
+//
+// hooks is not a directory Claude Code defines. It is where the scripts that
+// settings.json hooks name conventionally live, and a script missing from the
+// namespace turns a hook that works in the operator's sessions into one that
+// fails in every run. A script settings.json names from anywhere else under
+// ~/.claude is not visible to a run.
+//
+// An entry absent on the host is skipped. If the run creates one, it lands on
+// the home tmpfs and is discarded with the namespace.
+var claudeConfig = []string{
+	"settings.json",
+	"CLAUDE.md",
+	"rules",
+	"skills",
+	"commands",
+	"agents",
+	"output-styles",
+	"plugins",
+	"hooks",
+}
+
+// claudeCredentialsFile is the Claude Code credential file under ~/.claude,
+// bound back rw by itself. It has to be writable: an OAuth refresh rewrites
+// it, and a refresh that never reached the host would leave the operator's own
+// sessions holding the pre-refresh tokens. Claude Code writes it by staging a
+// file beside it and renaming that into place. The rename onto a bind-mounted
+// file fails with EBUSY, Claude Code falls back to writing the file in place,
+// and that write reaches the host; the staged file is created on the home
+// tmpfs and never does. The fallback is Claude Code's, not ours, so an SDK
+// bump has to keep it: without it a refresh during a run lands nowhere.
+const claudeCredentialsFile = ".credentials.json"
 
 // ErrNotInstalled and ErrNamespaceRefused are the two ways the probe fails,
 // and they are separate sentinels because the operator fixes them differently
@@ -129,6 +179,15 @@ type Spec struct {
 	// exactly as an unprovisioned channel does outside the sandbox.
 	GHChannelDir string
 
+	// ClaudeProjectDir is the directory Claude Code keeps this run's session
+	// transcript in, ~/.claude/projects/<encoded cwd>, bound rw. It is the only
+	// directory under ~/.claude the run can write through to the host, and it
+	// has to be: a park-and-resume reads the transcript back from there. The
+	// caller computes it with the same function the resume path reads it
+	// through, so the two cannot name different directories. Required, and
+	// must sit directly under Host.ClaudeDir/projects.
+	ClaudeProjectDir string
+
 	// AgentHostSocket is the host path of this run's agenthost socket, bound
 	// at AgentHostSocketDest. Empty leaves the run with no exec-verb daemon,
 	// which the jailed CLI reports as a launch wiring bug rather than
@@ -181,11 +240,9 @@ type Host struct {
 	// bookkeeping that keys off it stays correct. Required.
 	Home string
 
-	// ClaudeDir is ~/.claude, bound back rw through the home mask. It holds
-	// the Claude Code credential and this run's transcript, and both need to
-	// outlive the namespace — a park-and-resume reads the transcript back
-	// from the host. Documented hole: the agent can read the operator's
-	// Claude config along with its own transcripts.
+	// ClaudeDir is ~/.claude. It is not bound back whole: the claudeConfig
+	// entries come back ro, the credential file rw, and Spec.ClaudeProjectDir
+	// rw. Required.
 	ClaudeDir string
 
 	// StateRoot is <home>/.triagefactory, masked with a tmpfs so the SQLite

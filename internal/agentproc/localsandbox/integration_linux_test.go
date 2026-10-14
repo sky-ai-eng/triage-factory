@@ -60,8 +60,10 @@ func TestSandbox_IsolationProperties(t *testing.T) {
 	write(filepath.Join(runRoot, "mine.txt"), "my work")
 	write(filepath.Join(grant, "granted.txt"), "granted work")
 
-	host := Host{Home: home, ClaudeDir: filepath.Join(home, ".claude"), StateRoot: stateRoot, TempDir: tempDir, Cwd: runRoot}
-	spec := Spec{RunRoot: runRoot, AddDirs: []string{grant}}
+	claudeDir := filepath.Join(home, ".claude")
+	projectDir := filepath.Join(claudeDir, "projects", "-run")
+	host := Host{Home: home, ClaudeDir: claudeDir, StateRoot: stateRoot, TempDir: tempDir, Cwd: runRoot}
+	spec := Spec{RunRoot: runRoot, ClaudeProjectDir: projectDir, AddDirs: []string{grant}}
 	if err := Preflight(spec, host); err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
@@ -260,6 +262,82 @@ kill $inner`)
 		}
 	})
 
+	// ~/.claude is the one place under the home mask that other Claude Code
+	// processes load as configuration, so nothing the run writes there may
+	// reach the host except its own transcript and the credential refresh.
+	t.Run("~/.claude configuration is read-only and the rest stays inside", func(t *testing.T) {
+		for _, d := range []string{filepath.Join(claudeDir, "hooks"), filepath.Join(claudeDir, "projects", "-other")} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		write(filepath.Join(claudeDir, "settings.json"), `{"hooks":{}}`)
+		write(filepath.Join(claudeDir, "hooks", "stop.sh"), "echo stop")
+		write(filepath.Join(claudeDir, claudeCredentialsFile), "old token")
+		write(filepath.Join(claudeDir, "projects", "-other", "session.jsonl"), "another project's transcript")
+		// Each call is a fresh namespace, so the entries above exist when bwrap
+		// binds them. Failures are expected; the host side is what is checked.
+		attempt := func(script string) string {
+			out, _ := run(script)
+			return out
+		}
+
+		if out := attempt("cat " + filepath.Join(claudeDir, "settings.json")); out != `{"hooks":{}}` {
+			t.Errorf("the operator's settings are not readable from inside: %q", out)
+		}
+		attempt("echo planted > " + filepath.Join(claudeDir, "settings.json"))
+		attempt("rm -f " + filepath.Join(claudeDir, "settings.json"))
+		attempt("echo planted > " + filepath.Join(claudeDir, "hooks", "stop.sh"))
+		attempt("echo planted > " + filepath.Join(claudeDir, "CLAUDE.md"))
+		attempt("mkdir -p " + filepath.Join(claudeDir, "shell-snapshots") + " && echo planted > " + filepath.Join(claudeDir, "shell-snapshots", "snapshot.sh"))
+		if out := attempt("cat " + filepath.Join(claudeDir, "projects", "-other", "session.jsonl")); strings.Contains(out, "another project's transcript") {
+			t.Errorf("another project's transcript is readable from inside: %q", out)
+		}
+		attempt("echo planted > " + filepath.Join(claudeDir, "projects", "-other", "session.jsonl"))
+
+		for path, want := range map[string]string{
+			filepath.Join(claudeDir, "settings.json"):                       `{"hooks":{}}`,
+			filepath.Join(claudeDir, "hooks", "stop.sh"):                    "echo stop",
+			filepath.Join(claudeDir, "projects", "-other", "session.jsonl"): "another project's transcript",
+		} {
+			if got, err := os.ReadFile(path); err != nil || string(got) != want {
+				t.Errorf("%s on the host = %q (err=%v), want it untouched: %q", path, got, err, want)
+			}
+		}
+		for _, path := range []string{filepath.Join(claudeDir, "CLAUDE.md"), filepath.Join(claudeDir, "shell-snapshots")} {
+			if _, err := os.Stat(path); !os.IsNotExist(err) {
+				t.Errorf("%s written inside the namespace reached the host (err=%v)", path, err)
+			}
+		}
+
+		// The transcript is the run's own and has to outlive the namespace.
+		if out, err := run("echo turn > " + filepath.Join(projectDir, "session.jsonl")); err != nil {
+			t.Fatalf("transcript write: %v (%s)", err, out)
+		}
+		if got, err := os.ReadFile(filepath.Join(projectDir, "session.jsonl")); err != nil || strings.TrimSpace(string(got)) != "turn" {
+			t.Errorf("the run's transcript did not reach the host: %q (err=%v)", got, err)
+		}
+
+		// The credential refresh. Claude Code stages the new file beside the
+		// old one and renames it into place; onto a bind-mounted file that
+		// rename fails (EBUSY), and Claude Code falls back to writing in
+		// place. The fallback is what has to reach the host.
+		creds := filepath.Join(claudeDir, claudeCredentialsFile)
+		staged := creds + ".tmp"
+		if out, err := run("echo new > " + staged + " && mv " + staged + " " + creds); err == nil {
+			t.Errorf("renaming onto the bound credential file succeeded (%q); the plan no longer binds it as a file", out)
+		}
+		if out, err := run("echo refreshed > " + creds); err != nil {
+			t.Fatalf("in-place credential write: %v (%s)", err, out)
+		}
+		if got, err := os.ReadFile(creds); err != nil || strings.TrimSpace(string(got)) != "refreshed" {
+			t.Errorf("the refreshed credential did not reach the host: %q (err=%v)", got, err)
+		}
+		if _, err := os.Stat(staged); !os.IsNotExist(err) {
+			t.Errorf("the staged credential reached the host (err=%v)", err)
+		}
+	})
+
 	t.Run("the run tree is writable but the host root is not", func(t *testing.T) {
 		if out, err := run("echo x > /etc/tf-sandbox-probe"); err == nil {
 			t.Errorf("a write outside every bind succeeded: %q", out)
@@ -296,7 +374,7 @@ func TestSandbox_ProcessGroupKillReachesDetachedDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	host := Host{Home: home, ClaudeDir: filepath.Join(home, ".claude"), StateRoot: filepath.Join(home, ".triagefactory"), TempDir: filepath.Join(base, "tmp"), Cwd: runRoot}
-	spec := Spec{RunRoot: runRoot}
+	spec := Spec{RunRoot: runRoot, ClaudeProjectDir: filepath.Join(home, ".claude", "projects", "-run")}
 	if err := Preflight(spec, host); err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}

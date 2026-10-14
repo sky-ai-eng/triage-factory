@@ -162,8 +162,12 @@ concurrent run's worktree, and `/run` (where the OS keychain's session sockets
 live) are replaced by empty directories, and only what the run needs is bound
 back through them: its exec-verb socket at `/run/tf.sock`, the resolver files
 DNS needs on hosts where `/etc/resolv.conf` points into `/run` (systemd-resolved),
-and `~/.claude`. The run also sees only its own processes, not TF or anything
-else running as you.
+and three kinds of entry from `~/.claude`. Your Claude Code configuration
+(`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`,
+`output-styles`, `plugins`, `hooks`) comes back read-only. The credential file
+and the run's own transcript directory come back writable. Everything else the
+run writes under `~/.claude` is discarded when it ends. The run also sees only
+its own processes, not TF or anything else running as you.
 
 This is **courtesy isolation, not a security boundary**. The agent runs as you,
 shares your network, and could break out on purpose the way any process running
@@ -173,13 +177,18 @@ were one `cat` away before. It hides the keychain's socket paths and does
 nothing more for the keychain: the network namespace is shared, so services on
 loopback or on an abstract unix socket stay reachable.
 
-Two consequences worth knowing:
+Three consequences worth knowing:
 
 - Each run's worktree becomes a self-contained clone rather than a zero-copy
   linked worktree, because the shared bare clone cache isn't visible inside the
   namespace. That costs clone time and disk.
-- The agent can still read `~/.claude` — its own transcripts live there, and so
-  does the Claude Code credential the run authenticates with.
+- The agent can read the Claude Code credential the run authenticates with, and
+  can write it, because a token refresh during the run has to reach your own
+  sessions. It cannot change your settings, hooks, plugins or skills, or
+  another project's transcripts.
+- A hook in your `settings.json` whose script lives elsewhere in your home
+  directory, including elsewhere in `~/.claude`, fails inside a run, because
+  the script is not visible there. Keep hook scripts in `~/.claude/hooks`.
 
 `TF_LOCAL_SANDBOX=off` turns it off, and agents then run with your full user's
 powers, exactly as they did before. Set it if TF itself runs inside a container

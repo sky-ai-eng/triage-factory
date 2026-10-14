@@ -61,12 +61,19 @@ func (c *localSandboxChannel) runSpec() *localsandbox.Spec {
 // A failure here fails the run. The boot probe already established that
 // bubblewrap works on this host, so there is nothing left that would make a
 // silent unsandboxed fallback the honest answer.
-func (s *Spawner) startLocalSandbox(conversationID, rootKey string, ghChannel *agentproc.GHChannelParams, info agenthost.ConversationInfo) (*localSandboxChannel, error) {
+func (s *Spawner) startLocalSandbox(conversationID, rootKey, cwd string, ghChannel *agentproc.GHChannelParams, info agenthost.ConversationInfo) (*localSandboxChannel, error) {
 	if !runmode.LocalSandboxEnabled() {
 		return nil, nil
 	}
 	if rootKey == "" {
 		return nil, errors.New("local sandbox: run-tree key is required")
+	}
+	// The run's transcript directory, resolved through the same function the
+	// resume path reads it back with, so the one directory under ~/.claude the
+	// plan lets the run write is the one resume looks in.
+	claudeProjectDir, err := worktree.ClaudeProjectDir(worktree.ResolveClaudeProjectCwd(cwd))
+	if err != nil {
+		return nil, fmt.Errorf("local sandbox: resolve the run's transcript dir: %w", err)
 	}
 	stores, ok := s.getStores()
 	if !ok {
@@ -80,8 +87,9 @@ func (s *Spawner) startLocalSandbox(conversationID, rootKey string, ghChannel *a
 		// Keyed by the run-tree key rather than the conversation: a blueprint's
 		// steps share one tree, so this is the same directory across them and
 		// the same directory a resumed step rebuilds at.
-		RunRoot:         worktree.RunRoot(rootKey),
-		AgentHostSocket: daemon.SocketPath(),
+		RunRoot:          worktree.RunRoot(rootKey),
+		ClaudeProjectDir: claudeProjectDir,
+		AgentHostSocket:  daemon.SocketPath(),
 	}
 	if ghChannel != nil {
 		// The conversation's own gh config + trust file. Only this
