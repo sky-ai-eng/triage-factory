@@ -121,8 +121,9 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 // artifact is normally recorded on the first cycle after its pull request was
 // opened. The window is long enough that a row is still read after the
 // backstop could not run for days (the control plane down, the org's GitHub
-// unreachable), and bounded so that each cycle reads a week of one org's
-// pr_created rows rather than every one it has.
+// unreachable). It bounds the rows the read returns, a week of one org's
+// pr_created rows, but not the rows it scans; the read in BackfillPRArtifacts
+// says what it scans.
 const prBackstopWindow = 7 * 24 * time.Hour
 
 // BackfillPRArtifacts is the PR-artifact backstop. TF opens a pull request only
@@ -163,6 +164,12 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)
 	}
+	// TODO(TFAC-1087): replace this read with one indexed query for the
+	// pr_created rows that have no artifact. This one scans far more than it
+	// returns, and does it twice, because it also runs a count nothing reads.
+	// On SQLite the time bound cannot narrow the index, so each cycle walks the
+	// org's whole ledger; on Postgres it reads every action in the window
+	// before filtering to pr_created.
 	created, _, err := rc.actions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{
 		Provider: domain.ArtifactProviderGitHub,
 		Action:   domain.ActionPRCreated,
