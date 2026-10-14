@@ -48,7 +48,12 @@ const optionsEchoStubSDK = `
 export function query({ options }) {
   return {
     async *[Symbol.asyncIterator]() {
-      yield { type: "stub_options", disallowedTools: options.disallowedTools ?? null }
+      yield {
+        type: "stub_options",
+        disallowedTools: options.disallowedTools ?? null,
+        settingSources: options.settingSources ?? null,
+        settings: options.settings ?? null,
+      }
     },
     async interrupt() {},
     async setPermissionMode() {},
@@ -82,6 +87,44 @@ func TestWrapperDisallowedToolsReachSDKOptions(t *testing.T) {
 	}
 	if strings.Contains(w.stderr.String(), "ignoring unknown arg --disallowedTools") {
 		t.Errorf("wrapper did not recognize --disallowedTools: %s", w.stderr.String())
+	}
+}
+
+// TestWrapperSettingsFlagsReachSDKOptions pins the two settings flags: the
+// source list becomes options.settingSources, which the SDK passes on only when
+// it is set (unset loads every source, the operator's included), and --settings
+// becomes an object, which the SDK serializes for Claude Code rather than
+// reading the string as a file path.
+func TestWrapperSettingsFlagsReachSDKOptions(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	w := startWrapper(t, node, optionsEchoStubSDK,
+		"--setting-sources", "project",
+		"--settings", `{"apiKeyHelper":"/usr/local/bin/key-helper"}`)
+	msg := w.next()
+	if msg["type"] != "stub_options" {
+		t.Fatalf("first non-ready line = %v, want stub_options", msg)
+	}
+	sources, _ := msg["settingSources"].([]any)
+	if len(sources) != 1 || sources[0] != "project" {
+		t.Errorf("settingSources = %v, want [project]", msg["settingSources"])
+	}
+	settings, ok := msg["settings"].(map[string]any)
+	if !ok || settings["apiKeyHelper"] != "/usr/local/bin/key-helper" {
+		t.Errorf("settings = %#v, want an object carrying apiKeyHelper", msg["settings"])
+	}
+	for _, flag := range []string{"--setting-sources", "--settings"} {
+		if strings.Contains(w.stderr.String(), "ignoring unknown arg "+flag+"\n") {
+			t.Errorf("wrapper did not recognize %s: %s", flag, w.stderr.String())
+		}
+	}
+
+	// An empty list is a setting, not an absent one: it loads no settings file.
+	none := startWrapper(t, node, optionsEchoStubSDK, "--setting-sources", "").next()
+	if sources, ok := none["settingSources"].([]any); !ok || len(sources) != 0 {
+		t.Errorf("settingSources for an empty flag = %#v, want []", none["settingSources"])
 	}
 }
 

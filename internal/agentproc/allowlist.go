@@ -7,7 +7,9 @@ import (
 // BuildAllowedTools returns the --allowedTools argument value passed to the
 // headless `claude -p` process. We can't rely on an OS sandbox (Claude Code's
 // /sandbox is interactive-only, and `-p` has no kernel isolation), so the
-// allowlist IS the security boundary. A local run's bubblewrap mount namespace
+// allowlist IS the security boundary. It is the whole list: a run loads no
+// user settings (settingSources), so the operator's own permission rules
+// neither widen nor narrow it. A local run's bubblewrap mount namespace
 // (internal/agentproc/localsandbox) does not change that: it runs as the same
 // uid on the same network and is courtesy isolation by construction, so it
 // narrows what an ACCIDENT reaches and nothing about what an allowlisted

@@ -265,7 +265,7 @@ kill $inner`)
 	// ~/.claude is the one place under the home mask that other Claude Code
 	// processes load as configuration, so nothing the run writes there may
 	// reach the host except its own transcript and the credential refresh.
-	t.Run("~/.claude configuration is read-only and the rest stays inside", func(t *testing.T) {
+	t.Run("~/.claude configuration is hidden and the rest stays inside", func(t *testing.T) {
 		for _, d := range []string{filepath.Join(claudeDir, "hooks"), filepath.Join(claudeDir, "projects", "-other")} {
 			if err := os.MkdirAll(d, 0o700); err != nil {
 				t.Fatal(err)
@@ -282,8 +282,8 @@ kill $inner`)
 			return out
 		}
 
-		if out := attempt("cat " + filepath.Join(claudeDir, "settings.json")); out != `{"hooks":{}}` {
-			t.Errorf("the operator's settings are not readable from inside: %q", out)
+		if out := attempt("cat " + filepath.Join(claudeDir, "settings.json")); strings.Contains(out, `{"hooks":{}}`) {
+			t.Errorf("the operator's settings are readable from inside: %q", out)
 		}
 		attempt("echo planted > " + filepath.Join(claudeDir, "settings.json"))
 		attempt("rm -f " + filepath.Join(claudeDir, "settings.json"))

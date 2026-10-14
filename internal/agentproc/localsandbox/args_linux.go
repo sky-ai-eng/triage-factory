@@ -109,13 +109,10 @@ func Args(spec Spec, host Host) ([]string, error) {
 	// install (no hooks written, no gh fetched, no Claude Code login); strict
 	// on the run's own, which Preflight has already established are there.
 	//
-	// ~/.claude first, one entry at a time: the operator's configuration ro,
-	// the credential file and this run's transcript directory rw. The rest of
-	// ~/.claude is whatever Claude Code creates on the home tmpfs during the
-	// run, so nothing else the run writes there reaches the host.
-	for _, name := range claudeConfig {
-		args = appendBindTry(args, "--ro-bind-try", filepath.Join(host.ClaudeDir, name))
-	}
+	// ~/.claude first, and only two entries of it: the credential file and
+	// this run's transcript directory, both rw. The rest of ~/.claude is
+	// whatever Claude Code creates on the home tmpfs during the run, so
+	// nothing else the run writes there reaches the host.
 	args = appendBindTry(args, "--bind-try", filepath.Join(host.ClaudeDir, claudeCredentialsFile))
 	args = append(args, "--bind", spec.ClaudeProjectDir, spec.ClaudeProjectDir)
 	args = appendBindTry(args, "--ro-bind-try", host.HooksDir, host.GHBinDir)

@@ -119,6 +119,34 @@ Triage Factory never reads those variables itself. Entering a key instead
 replaces them: the inherited credential variables are stripped from the agent's
 environment, so a stray shell variable can't override the stored key.
 
+Runs don't load your own Claude Code settings. Triage Factory starts Claude
+Code with project settings only, so `~/.claude/settings.json` adds no
+permission rules (allow or deny), hooks, plugins, MCP servers, status line or
+`env` to a run, and your user `CLAUDE.md`, rules, skills, agents and commands
+don't load. What a run may do is decided by Triage Factory's tool allowlist and
+push policy alone.
+
+The exception is authentication under *Use system Claude Code credentials*.
+Triage Factory reads that file and passes these keys on to the run, and nothing
+else:
+
+- `apiKeyHelper`, `proxyAuthHelper`, `awsAuthRefresh`, `awsCredentialExport`
+  and `gcpAuthRefresh`.
+- From `env`, the same credential variables a stored key strips: the
+  `ANTHROPIC_*` key, token, base URL, identity and model variables, the
+  `CLAUDE_CODE_USE_*` provider switches, the Bedrock and Mantle endpoint
+  variables, and the AWS credential chain (`credentialEnvKeys` in
+  `internal/agentproc/credentials.go` is the full list). They take precedence
+  over the same variables in Triage Factory's environment, as they do in Claude
+  Code.
+
+Everything else in that `env` stays behind. That includes proxy and CA settings
+(`HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`), which would also reach the
+agent's shell commands, and Vertex's and Foundry's own configuration
+(`ANTHROPIC_VERTEX_PROJECT_ID`, `CLOUD_ML_REGION`, `ANTHROPIC_FOUNDRY_RESOURCE`
+and the like). Set those in Triage Factory's environment instead. With a stored
+key, nothing from the file is passed on.
+
 Where exactly they land, and how the encrypted-file backend works, is covered in
 [Secret storage](secret-storage.md).
 
@@ -162,12 +190,12 @@ concurrent run's worktree, and `/run` (where the OS keychain's session sockets
 live) are replaced by empty directories, and only what the run needs is bound
 back through them: its exec-verb socket at `/run/tf.sock`, the resolver files
 DNS needs on hosts where `/etc/resolv.conf` points into `/run` (systemd-resolved),
-and three kinds of entry from `~/.claude`. Your Claude Code configuration
-(`settings.json`, `CLAUDE.md`, `rules`, `skills`, `commands`, `agents`,
-`output-styles`, `plugins`, `hooks`) comes back read-only. The credential file
-and the run's own transcript directory come back writable. Everything else the
-run writes under `~/.claude` is discarded when it ends. The run also sees only
-its own processes, not TF or anything else running as you.
+and two entries from `~/.claude`, both writable: the credential file and the
+run's own transcript directory. The rest of your Claude Code configuration is
+not visible to a run, which loads none of it anyway (see
+[Credentials](#credentials)), and everything else the run writes under
+`~/.claude` is discarded when it ends. The run also sees only its own
+processes, not TF or anything else running as you.
 
 This is **courtesy isolation, not a security boundary**. The agent runs as you,
 shares your network, and could break out on purpose the way any process running
@@ -186,9 +214,11 @@ Three consequences worth knowing:
   can write it, because a token refresh during the run has to reach your own
   sessions. It cannot change your settings, hooks, plugins or skills, or
   another project's transcripts.
-- A hook in your `settings.json` whose script lives elsewhere in your home
-  directory, including elsewhere in `~/.claude`, fails inside a run, because
-  the script is not visible there. Keep hook scripts in `~/.claude/hooks`.
+- An auth helper passed on from your `settings.json` (`apiKeyHelper` and the
+  rest) runs inside the namespace, so one that needs a file in your home
+  directory, whether its own script, `~/.aws` or `~/.config/gcloud`, fails
+  there. Keep the script outside your home directory, set the credential in
+  Triage Factory's environment, or enter a key in Settings.
 
 `TF_LOCAL_SANDBOX=off` turns it off, and agents then run with your full user's
 powers, exactly as they did before. Set it if TF itself runs inside a container

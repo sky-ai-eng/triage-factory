@@ -59,6 +59,9 @@ func sandboxSpec(t *testing.T, runRoot string) *localsandbox.Spec {
 // prefix that leaks onto the unsandboxed path fails here rather than in
 // somebody's local run.
 func TestNewDirectCommand_NilSandboxIsUnchanged(t *testing.T) {
+	// An empty HOME, so an auth helper in the developer's own Claude Code
+	// settings doesn't add --settings to the argv under test.
+	t.Setenv("HOME", t.TempDir())
 	opts := RunOptions{Cwd: t.TempDir(), ExtraEnv: []string{"TF_TEST_MARKER=1"}}
 
 	cmd, err := newDirectCommand(context.Background(), opts, []string{"wrapper.mjs", "--model", "x"})
