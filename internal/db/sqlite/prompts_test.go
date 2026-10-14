@@ -111,8 +111,8 @@ func seedSQLiteConversationsForStats(t *testing.T, conn *sql.DB, promptID string
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
-			VALUES (?, ?, 'exec-p', 1, ?, ?, 'completed', 100)
-		`, uuid.New().String(), conversationID, startedAt, startedAt); err != nil {
+			VALUES (?, ?, 'exec-p', 1, ?, ?, 'completed', ?)
+		`, uuid.New().String(), conversationID, startedAt, startedAt, 100+i); err != nil {
 			t.Fatalf("seed conversation claim %d: %v", i, err)
 		}
 		ids = append(ids, conversationID)

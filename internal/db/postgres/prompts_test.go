@@ -263,8 +263,8 @@ func seedPgConversationsForStats(t *testing.T, conn *sql.DB, orgID, userID, prom
 		}
 		if _, err := conn.Exec(`
 			INSERT INTO claims (id, org_id, conversation_id, executor_id, boot_epoch, claimed_at, released_at, outcome, duration_ms)
-			VALUES ($1, $2, $3, 'exec-p', 1, $4, $4, 'completed', 100)
-		`, uuid.New().String(), orgID, conversationID, startedAt); err != nil {
+			VALUES ($1, $2, $3, 'exec-p', 1, $4, $4, 'completed', $5)
+		`, uuid.New().String(), orgID, conversationID, startedAt, 100+i); err != nil {
 			t.Fatalf("seed run claim %d: %v", i, err)
 		}
 		ids = append(ids, conversationID)
