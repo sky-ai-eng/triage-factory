@@ -14,11 +14,9 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/procname"
 )
 
-// sidecarReapHelperEnv gates this test binary's re-exec branch — the same
-// idiom internal/procname's own test uses (procname_linux_test.go) and for
-// the same reason: a re-exec'd child sets its comm via SetTitle and then
-// blocks, so this suite can find and reap it by name without a built
-// triagefactory binary.
+// sidecarReapHelperEnv gates this test binary's re-exec branch: a re-exec'd
+// child sets its comm via SetTitle and then blocks, so this suite can find
+// and reap it by name without a built triagefactory binary.
 const sidecarReapHelperEnv = "TF_TEST_SIDECAR_REAP_HELPER"
 
 // reExecAsSidecarHelperIfRequested intercepts the re-exec branch this suite

@@ -4,33 +4,64 @@ package procname
 
 import (
 	"os"
-	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
-// helperEnv gates TestMain's re-exec branch, the standard os/exec
-// "TestHelperProcess" pattern (see cmd/capbroker/orchestrator_linux_test.go
-// for the same idiom): a test re-invokes this test binary with the env var
-// set, and TestMain calls SetTitle then reports /proc/self/comm instead of
-// running the test suite — needed because PR_SET_NAME only renames the
-// calling thread's comm, and a plain in-process call from within `go
-// test`'s own many-goroutine runtime has no guarantee of landing on the
-// thread-group leader that /proc/<pid>/comm reads back.
-const helperEnv = "PROCNAME_TEST_HELPER_TITLE"
-
-func TestMain(m *testing.M) {
-	if title := os.Getenv(helperEnv); title != "" {
-		SetTitle(title)
-		comm, err := os.ReadFile("/proc/self/comm")
-		if err != nil {
-			os.Stderr.WriteString(err.Error())
-			os.Exit(1)
-		}
-		os.Stdout.Write(comm)
-		os.Exit(0)
+// readComm returns the process's comm as `ps` and the compose smoke test read
+// it: /proc/self/comm, which is the thread-group leader's name.
+func readComm(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/comm")
+	if err != nil {
+		t.Fatalf("read /proc/self/comm: %v", err)
 	}
-	os.Exit(m.Run())
+	return strings.TrimRight(string(b), "\x00\n")
+}
+
+// onNonLeaderThread runs fn on an OS thread that is not the thread-group
+// leader. A goroutine locked to a thread keeps that thread to itself, so when
+// the first locked goroutine lands on the leader, a second one locked while
+// the first still holds it cannot.
+func onNonLeaderThread(t *testing.T, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		if unix.Gettid() != unix.Getpid() {
+			fn()
+			return
+		}
+		inner := make(chan struct{})
+		go func() {
+			defer close(inner)
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			if unix.Gettid() == unix.Getpid() {
+				t.Error("second locked goroutine also landed on the thread-group leader")
+				return
+			}
+			fn()
+		}()
+		<-inner
+	}()
+	<-done
+}
+
+// TestSetTitle_NamesTheProcessFromAnyThread pins that the name lands on the
+// thread-group leader whichever OS thread the caller is on. The Go scheduler
+// can move the main goroutine off the leader before main() reaches SetTitle,
+// and a name set on another thread is invisible to /proc/<pid>/comm.
+func TestSetTitle_NamesTheProcessFromAnyThread(t *testing.T) {
+	onNonLeaderThread(t, func() { SetTitle("tf-cap-broker") })
+	if got := readComm(t); got != "tf-cap-broker" {
+		t.Errorf("comm after SetTitle from a non-leader thread = %q, want tf-cap-broker", got)
+	}
 }
 
 func TestSetTitle_VisibleViaProcComm(t *testing.T) {
@@ -44,14 +75,8 @@ func TestSetTitle_VisibleViaProcComm(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.title, func(t *testing.T) {
-			cmd := exec.Command(os.Args[0])
-			cmd.Env = append(os.Environ(), helperEnv+"="+tt.title)
-			out, err := cmd.Output()
-			if err != nil {
-				t.Fatalf("helper subprocess: %v", err)
-			}
-			got := strings.TrimRight(string(out), "\x00\n")
-			if got != tt.want {
+			SetTitle(tt.title)
+			if got := readComm(t); got != tt.want {
 				t.Errorf("comm after SetTitle(%q) = %q, want %q", tt.title, got, tt.want)
 			}
 		})
