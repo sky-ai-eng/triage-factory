@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -21,7 +22,8 @@ import (
 //     here under the same org-scoped policy.
 //   - admin: admin pool (BYPASSRLS). RecordSystem routes here for the
 //     event-triggered bot exec choke point + the Jira board mirror (no JWT
-//     claims). ListByOrgSystem reads here, org-wide across teams.
+//     claims). ListByOrgSystem reads here, org-wide across teams, and so does
+//     ListPRCreatedWithoutArtifactSystem, the reconciler's PR backstop.
 //
 // org_id stays in every statement as defense in depth. Append-only: both Record
 // paths ON CONFLICT(org_id, scope, dedup_key) DO NOTHING — a duplicate is
@@ -48,7 +50,7 @@ const pgExternalActionColumns = `
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id::text, ''),
 	COALESCE(actor_user_id::text, ''), credential, dedup_key,
-	COALESCE(detail_json, ''), occurred_at
+	COALESCE(detail_json, ''), COALESCE(node_id, ''), occurred_at
 `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
@@ -76,17 +78,20 @@ func (s *externalActionStore) record(ctx context.Context, q queryer, orgID strin
 	_, err := q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, action, target, external_id, url,
-			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, scope,
+			 node_id)
 		VALUES (
 			COALESCE(NULLIF($1, '')::uuid, gen_random_uuid()), $2, NULLIF($3, '')::uuid,
 			$4, $5, $6, NULLIF($7, ''), NULLIF($8, ''), NULLIF($9, ''), NULLIF($10, ''),
 			NULLIF($11, '')::uuid, NULLIF($12, '')::uuid, $13,
-			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16
+			COALESCE(NULLIF($14, ''), gen_random_uuid()::text), NULLIF($15, ''), $16,
+			NULLIF($17, '')
 		)
 		ON CONFLICT (org_id, scope, dedup_key) DO NOTHING
 	`,
 		e.ID, orgID, e.TeamID, e.Provider, e.Action, e.Target, e.ExternalID, e.URL,
 		e.FromState, e.ToState, e.ConversationID, e.ActorUserID, e.Credential, e.DedupKey, e.DetailJSON, e.Scope,
+		e.NodeID,
 	)
 	return err
 }
@@ -148,6 +153,30 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	}
 	out, err := scanExternalActionRows(rows)
 	return out, total, err
+}
+
+// ListPRCreatedWithoutArtifactSystem is the PR backstop's read (see the
+// interface), on the admin pool: the backstop holds no claims, and the
+// artifact that answers for a row may belong to any team.
+func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT `+pgExternalActionColumns+`
+		  FROM external_actions ea
+		 WHERE ea.org_id = $1 AND ea.action = $2 AND ea.occurred_at >= $3
+		   AND ea.scope = $4 AND ea.node_id IS NOT NULL
+		   AND NOT EXISTS (
+		       SELECT 1 FROM artifacts a
+		        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id
+		   )
+		 ORDER BY ea.occurred_at, ea.id
+	`, orgID, domain.ActionPRCreated, since, scope)
+	if err != nil {
+		return nil, err
+	}
+	return scanExternalActionRows(rows)
 }
 
 // appendPgExternalActionFilters appends opts' optional provider/action/actor/time
@@ -223,6 +252,6 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
-		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
+		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.OccurredAt,
 	)
 }

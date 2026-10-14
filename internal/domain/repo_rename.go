@@ -182,17 +182,6 @@ func RewriteRepoURL(rawURL, host, oldSlug, newSlug string) (string, bool) {
 	return u.String(), true
 }
 
-// GitHubURLNamesRepo reports whether rawURL is a link on host whose path
-// starts with slug, read the way RewriteRepoURL reads it: the two segments
-// right after the host's own path, compared case-insensitively. It is how a
-// stored link is checked against the repository name recorded beside it: a
-// rename rewrites the link and leaves the recorded name, so the two stop
-// agreeing.
-func GitHubURLNamesRepo(rawURL, host, slug string) bool {
-	_, ok := RewriteRepoURL(rawURL, host, slug, slug)
-	return ok
-}
-
 // GitHubURLOnHost reports whether rawURL is a link on host, a GitHubHost value
 // (scheme, authority and any context path, with no trailing slash). It is how a
 // stored link is placed on a GitHub deployment before anything in it is read

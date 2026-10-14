@@ -130,14 +130,13 @@ func TestBranchRefOf(t *testing.T) {
 
 // --- integration: Reconcile end-to-end against a stub GitHub + real SQLite ---
 
-// stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query),
-// BranchesExist (GraphQL aliased repository query), and GetPRBasic (REST
-// GET /pulls/{n}). It records which PR node ids and branch refs were queried so
-// a test can assert terminal artifacts are never fetched.
+// stubGH is a canned GitHub endpoint for RefreshPRs (GraphQL nodes query) and
+// BranchesExist (GraphQL aliased repository query). It records which PR node
+// ids and branch refs were queried so a test can assert terminal artifacts are
+// never fetched.
 type stubGH struct {
 	prs      map[string]string // PR node id → JSON node body (RefreshPRs)
 	branches map[string]bool   // "owner/repo/branch" → exists; absent key = unknown
-	prFinal  map[int][2]string // PR number → {title, body} for GetPRBasic; absent → 404
 	reviews  map[string]string // review node id → PullRequestReview JSON body (GetReview); absent → node null
 	prCalls  map[string]bool   // PR node ids actually requested
 	refCalls map[string]bool   // branch refs actually requested ("owner/repo/branch")
@@ -149,25 +148,6 @@ func newStubServer(t *testing.T, s *stubGH) *httptest.Server {
 	s.refCalls = map[string]bool{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-
-		// GetPRBasic is a REST GET to /repos/{o}/{r}/pulls/{n}; GraphQL is always
-		// POST. Route on method.
-		if r.Method == http.MethodGet {
-			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-			number, _ := strconv.Atoi(seg[len(seg)-1])
-			tb, ok := s.prFinal[number]
-			if !ok {
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`{"message":"Not Found"}`))
-				return
-			}
-			body, _ := json.Marshal(map[string]any{
-				"number": number, "node_id": fmt.Sprintf("PR_%d", number),
-				"title": tb[0], "body": tb[1], "merged": true, "state": "closed",
-			})
-			_, _ = w.Write(body)
-			return
-		}
 
 		var req struct {
 			Query     string         `json:"query"`
@@ -239,8 +219,7 @@ func newStubClient(t *testing.T, s *stubGH) *github.Client {
 // memory — so the fetch itself succeeds on the live ctx, but everything
 // downstream observes a cancelled caller ctx. It's the deterministic way to
 // prove reconcile's write-back detaches (context.WithoutCancel): a server-side
-// cancel would race the client's own response read. The GetPRBasic in the
-// write-back is a GET on the detached writeCtx and passes through untouched.
+// cancel would race the client's own response read.
 type cancelAfterFetchRT struct {
 	t      *testing.T
 	base   http.RoundTripper
@@ -735,59 +714,82 @@ func assertState(t *testing.T, stores db.Stores, orgID, dedupKey, want string) {
 
 // --- PR-artifact backstop ---
 
-// pullsStub serves GetPRBasic's REST GET /repos/{o}/{r}/pulls/{n} from canned
-// PR objects keyed by number, and records every path requested. Anything else
-// 404s.
-type pullsStub struct {
+// backstopStub serves RefreshPRs' GraphQL nodes(ids:) from canned PR nodes
+// keyed by node id, answering null for an id it does not hold, and records
+// every request it receives: a node fetch as "nodes <ids>", anything else as
+// its method and path, which it answers 404.
+type backstopStub struct {
 	mu    sync.Mutex
-	pulls map[int]string
+	nodes map[string]string
 	calls []string
 }
 
-func newPullsStub(t *testing.T, pulls map[int]string) (*pullsStub, *github.Client) {
+func newBackstopStub(t *testing.T, nodes map[string]string) (*backstopStub, *github.Client) {
 	t.Helper()
-	st := &pullsStub{pulls: pulls}
+	st := &backstopStub{nodes: nodes}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		st.mu.Lock()
-		st.calls = append(st.calls, r.Method+" "+r.URL.Path)
-		st.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/pulls/") {
-			seg := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-			number, _ := strconv.Atoi(seg[len(seg)-1])
-			if body, ok := st.pulls[number]; ok {
-				_, _ = w.Write([]byte(body))
-				return
+		var req struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if r.Method == http.MethodPost {
+			_ = json.NewDecoder(r.Body).Decode(&req)
+		}
+		if !strings.Contains(req.Query, "nodes(ids:") {
+			st.record(r.Method + " " + r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			return
+		}
+		ids, _ := req.Variables["ids"].([]any)
+		names := make([]string, 0, len(ids))
+		parts := make([]string, 0, len(ids))
+		for _, idv := range ids {
+			id, _ := idv.(string)
+			names = append(names, id)
+			if body, ok := st.nodes[id]; ok {
+				parts = append(parts, body)
+			} else {
+				parts = append(parts, "null")
 			}
 		}
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+		st.record("nodes " + strings.Join(names, ","))
+		fmt.Fprintf(w, `{"data":{"nodes":[%s]}}`, strings.Join(parts, ","))
 	}))
 	t.Cleanup(srv.Close)
 	return st, github.NewClient(srv.URL, "test-token")
 }
 
-func (st *pullsStub) requested() []string {
+func (st *backstopStub) record(call string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	st.calls = append(st.calls, call)
+}
+
+func (st *backstopStub) requested() []string {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return append([]string(nil), st.calls...)
 }
 
-// pullJSON is one PR object as GET /repos/octo/repo/pulls/{n} returns it.
-func pullJSON(number int, head, title, body string, draft bool) string {
+// backstopPRNode is one open PR node as RefreshPRs' GraphQL fragment returns
+// it, in repository repoPath under the node id PR_<number>.
+func backstopPRNode(repoPath string, number int, head, title, body string, draft bool) string {
 	b, _ := json.Marshal(map[string]any{
-		"number": number, "node_id": fmt.Sprintf("PR_%d", number), "title": title, "body": body,
-		"state": "open", "draft": draft, "merged": false,
-		"html_url": fmt.Sprintf("https://github.com/octo/repo/pull/%d", number),
-		"head":     map[string]any{"ref": head, "sha": "sha1"},
-		"base":     map[string]any{"ref": "main"},
+		"id": fmt.Sprintf("PR_%d", number), "number": number, "title": title, "body": body,
+		"state": "OPEN", "isDraft": draft, "merged": false,
+		"headRefName": head, "baseRefName": "main",
+		"url":        fmt.Sprintf("https://github.com/%s/pull/%d", repoPath, number),
+		"repository": map[string]any{"nameWithOwner": repoPath},
 	})
 	return string(b)
 }
 
 // recordPRCreated writes the pr_created ledger row the create verb writes for
-// repoPath#number, opened by conversationID in toState, linked at url.
-func recordPRCreated(t *testing.T, stores db.Stores, scope, conversationID, repoPath string, number int, toState, url string) {
+// repoPath#number, opened by conversationID in toState, linked at url, under
+// the PR's node id (empty for a row written without one).
+func recordPRCreated(t *testing.T, stores db.Stores, scope, conversationID, repoPath string, number int, nodeID, toState, url string) {
 	t.Helper()
 	if err := stores.ExternalActions.RecordSystem(context.Background(), runmode.LocalDefaultOrgID, domain.ExternalAction{
 		TeamID:         runmode.LocalDefaultTeamID,
@@ -800,8 +802,33 @@ func recordPRCreated(t *testing.T, stores db.Stores, scope, conversationID, repo
 		ToState:        toState,
 		ConversationID: conversationID,
 		Credential:     domain.CredentialGitHubApp,
+		NodeID:         nodeID,
 	}); err != nil {
 		t.Fatalf("record pr_created for %s#%d: %v", repoPath, number, err)
+	}
+}
+
+// renameRepo tracks repository from on the test host under a provider id and
+// renames it to the slug to through the store's rename rewrite: the PR
+// artifacts keyed on the old name move to the new one, and the ledger rows
+// linked under it get a rewritten link, while their targets keep the old name.
+func renameRepo(t *testing.T, stores db.Stores, from, to string) {
+	t.Helper()
+	ctx := context.Background()
+	old := domain.RepoRefFromSlug(reconcileTestHost, from)
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, reconcileTestHost,
+		[]domain.TeamGitHubRepo{{Owner: old.Owner, Repo: old.Repo}}); err != nil {
+		t.Fatalf("track %s: %v", from, err)
+	}
+	old.ExternalID = "4242"
+	if filled, err := stores.Repos.FillMissingExternalIDsSystem(ctx, runmode.LocalDefaultOrgID, []domain.RepoRef{old}); err != nil || filled != 1 {
+		t.Fatalf("give %s its provider id: filled=%d err=%v", from, filled, err)
+	}
+	renamed := domain.RepoRefFromSlug(reconcileTestHost, to)
+	renamed.ExternalID = old.ExternalID
+	out, err := stores.Repos.RenameSystem(ctx, runmode.LocalDefaultOrgID, renamed)
+	if err != nil || !out.Renamed {
+		t.Fatalf("rename %s -> %s: outcome %+v, err %v", from, to, out, err)
 	}
 }
 
@@ -822,8 +849,13 @@ func prArtifactFor(t *testing.T, stores db.Stores, repoPath string, number int) 
 	return nil
 }
 
-func newBackstopReconciler(stores db.Stores, client *github.Client) *Reconciler {
-	return NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+// runBackstop runs one backstop pass for the test org through client.
+func runBackstop(t *testing.T, stores db.Stores, client *github.Client) {
+	t.Helper()
+	rc := NewReconciler(&fakeResolver{client: client}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
+	if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
+		t.Fatalf("backstop: %v", err)
+	}
 }
 
 // TestBackstop_RecordsPRFromItsLedgerRow is the gap the backstop closes: the
@@ -842,13 +874,11 @@ func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
 	}
 	br.ConversationID = "conv-pusher"
 	seedArt(br)
-	recordPRCreated(t, stores, reconcileTestHost, "conv-opener", "octo/repo", 5,
+	recordPRCreated(t, stores, reconcileTestHost, "conv-opener", "octo/repo", 5, "PR_5",
 		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
 
-	_, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "My PR", "What it does", true)})
-	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("backstop: %v", err)
-	}
+	stub, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "My PR", "What it does", true)})
+	runBackstop(t, stores, client)
 
 	got := prArtifactFor(t, stores, "octo/repo", 5)
 	if got == nil {
@@ -858,12 +888,16 @@ func TestBackstop_RecordsPRFromItsLedgerRow(t *testing.T) {
 		t.Errorf("PR artifact owner = (%q, %q), want (conv-opener, %s): the ledger row names who opened it",
 			got.ConversationID, got.TeamID, runmode.LocalDefaultTeamID)
 	}
-	if got.State != domain.ArtifactStatePRDraft || got.ExternalID != "5" || got.URL != "https://github.com/octo/repo/pull/5" {
-		t.Errorf("PR artifact = state %q external_id %q url %q, want draft / 5 / the PR's link", got.State, got.ExternalID, got.URL)
+	if got.State != domain.ArtifactStatePRDraft || got.ExternalID != "5" || got.URL != "https://github.com/octo/repo/pull/5" || got.NodeID != "PR_5" {
+		t.Errorf("PR artifact = state %q external_id %q url %q node_id %q, want draft / 5 / the PR's link / PR_5",
+			got.State, got.ExternalID, got.URL, got.NodeID)
 	}
 	d, _ := domain.ParsePRArtifactDetails(got.DetailsJSON)
 	if d.NodeID != "PR_5" || d.HeadBranch != "feature-x" || d.Base != "main" || d.Proposed.Title != "My PR" || d.Proposed.Body != "What it does" {
 		t.Errorf("PR artifact details = %+v, want node PR_5, feature-x → main, and the PR's title and body as proposed", d)
+	}
+	if calls := stub.requested(); len(calls) != 1 || calls[0] != "nodes PR_5" {
+		t.Errorf("GitHub calls = %v, want one node fetch of PR_5", calls)
 	}
 	if br := findArtifact(t, stores, runmode.LocalDefaultOrgID, br.DedupKey); br.ConversationID != "conv-pusher" {
 		t.Errorf("branch artifact owner = %q, want conv-pusher left as it was", br.ConversationID)
@@ -885,10 +919,8 @@ func TestBackstop_IgnoresPRWithoutLedgerRow(t *testing.T) {
 	br.ConversationID = "conv-1"
 	seedArt(br)
 
-	stub, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "A person's draft", "", true)})
-	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("backstop: %v", err)
-	}
+	stub, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "A person's draft", "", true)})
+	runBackstop(t, stores, client)
 
 	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
 		t.Fatalf("backstop recorded a PR TF never opened: %+v", got)
@@ -918,19 +950,18 @@ func TestBackstop_Idempotent(t *testing.T) {
 	merged.ConversationID = "conv-1"
 	merged.State = domain.ArtifactStatePRMerged
 	seedArt(merged)
-	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePROpen, "https://github.com/octo/repo/pull/5")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "PR_5",
+		domain.ArtifactStatePROpen, "https://github.com/octo/repo/pull/5")
 	// PR 7's artifact write failed.
-	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 7, domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 7, "PR_7",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
 
-	stub, client := newPullsStub(t, map[int]string{
-		5: pullJSON(5, "feature-x", "My PR", "body", false),
-		7: pullJSON(7, "feature-y", "Another", "body", true),
+	stub, client := newBackstopStub(t, map[string]string{
+		"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "My PR", "body", false),
+		"PR_7": backstopPRNode("octo/repo", 7, "feature-y", "Another", "body", true),
 	})
-	rc := newBackstopReconciler(stores, client)
 	for i := 0; i < 2; i++ {
-		if err := rc.BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
-			t.Fatalf("backstop pass %d: %v", i, err)
-		}
+		runBackstop(t, stores, client)
 	}
 
 	if got := prArtifactFor(t, stores, "octo/repo", 5); got == nil || got.State != domain.ArtifactStatePRMerged {
@@ -939,36 +970,103 @@ func TestBackstop_Idempotent(t *testing.T) {
 	if got := prArtifactFor(t, stores, "octo/repo", 7); got == nil || got.State != domain.ArtifactStatePRDraft {
 		t.Errorf("PR 7 = %+v, want it recorded as a draft", got)
 	}
-	if calls := stub.requested(); len(calls) != 1 || !strings.HasSuffix(calls[0], "/pulls/7") {
+	if calls := stub.requested(); len(calls) != 1 || calls[0] != "nodes PR_7" {
 		t.Errorf("GitHub calls = %v, want one fetch of PR 7 across both passes", calls)
 	}
 }
 
-// TestBackstop_SkipsRowOfARenamedRepository pins that a ledger row whose
-// repository was renamed since is not recorded again under the old name. The
-// rename moved the PR's artifact to the new name and rewrote the row's link,
-// but not its target, so the target's key finds no artifact.
-func TestBackstop_SkipsRowOfARenamedRepository(t *testing.T) {
-	stores, seedConversation, seedArt := reconcileTestStores(t)
-	seedConversation("octo/platform#5", "conv-1")
+// TestBackstop_BackfillsUnderTheRenamedRepositorysName pins that a PR whose
+// artifact write failed, in a repository renamed since, is backfilled under the
+// repository's current name and owned by the conversation the row names. The
+// rename rewrote the row's link but not its target, which still names the old
+// repository; the node id finds the PR wherever it lives now.
+func TestBackstop_BackfillsUnderTheRenamedRepositorysName(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "PR_5",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
+	renameRepo(t, stores, "octo/repo", "octo/platform")
 
-	moved := domain.NewPullRequestArtifact("octo/platform", 5, "PR_5", "feature-x", "main",
-		"https://github.com/octo/platform/pull/5", "My PR", "body", true)
-	moved.ConversationID = "conv-1"
-	seedArt(moved)
-	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePRDraft,
-		"https://github.com/octo/platform/pull/5")
+	_, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/platform", 5, "feature-x", "My PR", "body", true)})
+	runBackstop(t, stores, client)
 
-	stub, client := newPullsStub(t, map[int]string{5: pullJSON(5, "feature-x", "My PR", "body", true)})
-	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("backstop: %v", err)
+	got := prArtifactFor(t, stores, "octo/platform", 5)
+	if got == nil {
+		t.Fatal("backstop did not record the PR under the repository's current name")
 	}
+	if got.ConversationID != "conv-1" || got.TeamID != runmode.LocalDefaultTeamID || got.NodeID != "PR_5" ||
+		got.URL != "https://github.com/octo/platform/pull/5" || got.State != domain.ArtifactStatePRDraft {
+		t.Errorf("PR artifact = %+v, want conv-1's draft octo/platform#5 under node PR_5", got)
+	}
+	if old := prArtifactFor(t, stores, "octo/repo", 5); old != nil {
+		t.Errorf("backstop also recorded the PR under the repository's old name: %+v", old)
+	}
+}
 
-	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
-		t.Errorf("backstop recorded the renamed repository's PR again under its old name: %+v", got)
+// TestBackstop_RenamedRepositoryWithArtifactIsLeftAlone pins that the rename's
+// rewrite, which moved the PR's artifact to the new name and left the row's
+// target on the old one, does not read as a missing artifact: nothing is
+// recorded under the old name, and GitHub is not called.
+func TestBackstop_RenamedRepositoryWithArtifactIsLeftAlone(t *testing.T) {
+	stores, seedConversation, seedArt := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	recorded := domain.NewPullRequestArtifact("octo/repo", 5, "PR_5", "feature-x", "main",
+		"https://github.com/octo/repo/pull/5", "My PR", "body", true)
+	recorded.ConversationID = "conv-1"
+	seedArt(recorded)
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "PR_5",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
+	renameRepo(t, stores, "octo/repo", "octo/platform")
+
+	stub, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/platform", 5, "feature-x", "My PR", "body", true)})
+	runBackstop(t, stores, client)
+
+	if old := prArtifactFor(t, stores, "octo/repo", 5); old != nil {
+		t.Errorf("backstop recorded the renamed repository's PR again under its old name: %+v", old)
+	}
+	if moved := prArtifactFor(t, stores, "octo/platform", 5); moved == nil {
+		t.Error("the rename's artifact under octo/platform#5 is gone, want it in place")
 	}
 	if calls := stub.requested(); len(calls) != 0 {
-		t.Errorf("backstop called GitHub for a row it skips: %v", calls)
+		t.Errorf("backstop called GitHub for a PR that has its artifact: %v", calls)
+	}
+}
+
+// TestBackstop_IgnoresTheRowsLink pins that the row's link plays no part: a
+// row whose link is not spelled the way the configured host is (GitHub reports
+// the host with a port the org's setting leaves out, or under a name the org
+// reaches it by another way) is backfilled like any other.
+func TestBackstop_IgnoresTheRowsLink(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "PR_5",
+		domain.ArtifactStatePRDraft, "https://github.com:443/octo/repo/pull/5")
+
+	_, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "My PR", "body", true)})
+	runBackstop(t, stores, client)
+
+	if got := prArtifactFor(t, stores, "octo/repo", 5); got == nil || got.ConversationID != "conv-1" {
+		t.Errorf("PR artifact = %+v, want conv-1's PR recorded whatever its row's link says", got)
+	}
+}
+
+// TestBackstop_IgnoresRowWithoutNodeID pins that a pr_created row with no node
+// id, as every row written before the verb recorded one is, is never acted on:
+// no GitHub call and no artifact.
+func TestBackstop_IgnoresRowWithoutNodeID(t *testing.T) {
+	stores, seedConversation, _ := reconcileTestStores(t)
+	seedConversation("octo/repo#5", "conv-1")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
+
+	stub, client := newBackstopStub(t, map[string]string{"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "My PR", "body", true)})
+	runBackstop(t, stores, client)
+
+	if got := prArtifactFor(t, stores, "octo/repo", 5); got != nil {
+		t.Errorf("backstop recorded a PR from a row with no node id: %+v", got)
+	}
+	if calls := stub.requested(); len(calls) != 0 {
+		t.Errorf("backstop called GitHub for a row with no node id: %v", calls)
 	}
 }
 
@@ -980,13 +1078,10 @@ func TestReconcileOrg_BackfilledPRTakesGitHubState(t *testing.T) {
 	stores, seedConversation, _ := reconcileTestStores(t)
 	const conversationID = "77777777-7777-7777-7777-777777777777"
 	seedConversation("ent-7", conversationID)
-	recordPRCreated(t, stores, reconcileTestHost, conversationID, "octo/repo", 7, domain.ArtifactStatePRDraft,
-		"https://github.com/octo/repo/pull/7")
+	recordPRCreated(t, stores, reconcileTestHost, conversationID, "octo/repo", 7, "PR_7",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/7")
 
-	stub := &stubGH{
-		prFinal: map[int][2]string{7: {"My PR", "body"}},
-		prs:     map[string]string{"PR_7": prNodeJSON("PR_7", 7, "MERGED", true, true)},
-	}
+	stub := &stubGH{prs: map[string]string{"PR_7": prNodeJSON("PR_7", 7, "MERGED", true, true)}}
 	rc := NewReconciler(&fakeResolver{client: newStubClient(t, stub)}, stores.Artifacts, stores.ExternalActions, stores.Orgs, nil)
 	var resolved []string
 	rc.SetPullRequestResolvedHook(func(_ context.Context, _, id string) { resolved = append(resolved, id) })
@@ -1063,18 +1158,16 @@ func TestBackstop_RecordsOnTheCurrentHostOnly(t *testing.T) {
 	stores, seedConversation, _ := reconcileTestStores(t)
 	seedConversation("octo/repo#5", "conv-1")
 	seedConversation("octo/repo#6", "conv-2")
-	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, domain.ArtifactStatePRDraft,
-		"https://github.com/octo/repo/pull/5")
-	recordPRCreated(t, stores, "https://ghe.example.com", "conv-2", "octo/repo", 6, domain.ArtifactStatePRDraft,
-		"https://ghe.example.com/octo/repo/pull/6")
+	recordPRCreated(t, stores, reconcileTestHost, "conv-1", "octo/repo", 5, "PR_5",
+		domain.ArtifactStatePRDraft, "https://github.com/octo/repo/pull/5")
+	recordPRCreated(t, stores, "https://ghe.example.com", "conv-2", "octo/repo", 6, "PR_6",
+		domain.ArtifactStatePRDraft, "https://ghe.example.com/octo/repo/pull/6")
 
-	stub, client := newPullsStub(t, map[int]string{
-		5: pullJSON(5, "feature-x", "Mine", "", true),
-		6: pullJSON(6, "feature-y", "Same repo name, other host", "", true),
+	stub, client := newBackstopStub(t, map[string]string{
+		"PR_5": backstopPRNode("octo/repo", 5, "feature-x", "Mine", "", true),
+		"PR_6": backstopPRNode("octo/repo", 6, "feature-y", "Same repo name, other host", "", true),
 	})
-	if err := newBackstopReconciler(stores, client).BackfillPRArtifacts(context.Background(), runmode.LocalDefaultOrgID); err != nil {
-		t.Fatalf("backstop: %v", err)
-	}
+	runBackstop(t, stores, client)
 
 	got := prArtifactFor(t, stores, "octo/repo", 5)
 	if got == nil || got.Scope != reconcileTestHost || got.ConversationID != "conv-1" {
@@ -1083,10 +1176,8 @@ func TestBackstop_RecordsOnTheCurrentHostOnly(t *testing.T) {
 	if got := prArtifactFor(t, stores, "octo/repo", 6); got != nil {
 		t.Errorf("a PR opened on another host was recorded on %s: %+v", reconcileTestHost, got)
 	}
-	for _, c := range stub.requested() {
-		if strings.HasSuffix(c, "/pulls/6") {
-			t.Errorf("another host's PR was fetched through the current host's client: %s", c)
-		}
+	if calls := stub.requested(); len(calls) != 1 || calls[0] != "nodes PR_5" {
+		t.Errorf("GitHub calls = %v, want PR_5 alone fetched: another host's PR is not the current host's client's to fetch", calls)
 	}
 }
 

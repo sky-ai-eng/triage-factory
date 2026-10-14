@@ -369,8 +369,10 @@ type Stores struct {
 	// credential (the org GitHub App / org Jira service account). Holds both
 	// pools in Postgres: app for Record (the manual bot runs + server
 	// approval/board handlers, under claims, org-scoped RLS) and ListByTeam,
-	// admin for RecordSystem (event-triggered runs + the Jira mirror, no claims)
-	// and ListByOrgSystem (the org-wide governance read). Append-only — both
+	// admin for RecordSystem (event-triggered runs + the Jira mirror, no claims),
+	// ListByOrgSystem (the org-wide governance read) and
+	// ListPRCreatedWithoutArtifactSystem (the reconciler's PR backstop).
+	// Append-only — both
 	// Record paths ON CONFLICT DO NOTHING. SQLite is N=1 and unscoped. See
 	// TFAC-483.
 	ExternalActions ExternalActionStore

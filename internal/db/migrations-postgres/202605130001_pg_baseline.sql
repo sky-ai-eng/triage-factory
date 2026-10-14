@@ -437,7 +437,10 @@ CREATE TABLE public.access_change_log (
 -- scope is the provider namespace the acted-on object lives in, the value an
 -- entity of that provider is scoped under (domain.ExternalObjectScope): the
 -- GitHub host, the Jira site, the Linear workspace id. target and dedup_key are
--- only unique inside it.
+-- only unique inside it. node_id is the GraphQL node id of the object the
+-- action created, which only the create verb's pr_created row carries: the
+-- reconciler's PR backstop matches the row to its artifact by it, since a
+-- rename never changes it. Written once, like the rest of the record.
 CREATE TABLE public.external_actions (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     org_id uuid NOT NULL,
@@ -457,6 +460,7 @@ CREATE TABLE public.external_actions (
     credential text NOT NULL,
     dedup_key text NOT NULL,
     detail_json text,
+    node_id text,
     occurred_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -1844,6 +1848,12 @@ CREATE UNIQUE INDEX idx_external_actions_dedup ON public.external_actions USING 
 
 
 CREATE INDEX idx_external_actions_org_occurred ON public.external_actions USING btree (org_id, occurred_at DESC);
+
+
+-- The reconciler's PR backstop reads one org's pr_created rows from a recent
+-- window every cycle; this index reads only those rows rather than every
+-- action in the window.
+CREATE INDEX idx_external_actions_org_action_occurred ON public.external_actions USING btree (org_id, action, occurred_at);
 
 
 CREATE INDEX idx_external_actions_team_occurred ON public.external_actions USING btree (org_id, team_id, occurred_at DESC);

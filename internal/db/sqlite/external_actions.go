@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -33,7 +34,7 @@ const externalActionColumns = `
 	id, org_id, COALESCE(team_id, ''), provider, scope, action, target,
 	COALESCE(external_id, ''), COALESCE(current_url, url, ''), COALESCE(from_state, ''),
 	COALESCE(to_state, ''), COALESCE(conversation_id, ''), COALESCE(actor_user_id, ''),
-	credential, dedup_key, COALESCE(detail_json, ''), occurred_at
+	credential, dedup_key, COALESCE(detail_json, ''), COALESCE(node_id, ''), occurred_at
 `
 
 func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain.ExternalAction) error {
@@ -58,14 +59,14 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 	_, err := s.q.ExecContext(ctx, `
 		INSERT INTO external_actions
 			(id, org_id, team_id, provider, scope, action, target, external_id, url,
-			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 from_state, to_state, conversation_id, actor_user_id, credential, dedup_key, detail_json, node_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(org_id, scope, dedup_key) DO NOTHING
 	`,
 		id, orgID, nullIfEmpty(e.TeamID), e.Provider, e.Scope, e.Action, e.Target,
 		nullIfEmpty(e.ExternalID), nullIfEmpty(e.URL), nullIfEmpty(e.FromState),
 		nullIfEmpty(e.ToState), nullIfEmpty(e.ConversationID), nullIfEmpty(e.ActorUserID),
-		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON),
+		e.Credential, dedupKey, nullIfEmpty(e.DetailJSON), nullIfEmpty(e.NodeID),
 	)
 	return err
 }
@@ -147,6 +148,43 @@ func (s *externalActionStore) ListByConversation(ctx context.Context, orgID, con
 	return out, total, err
 }
 
+// prCreatedWithoutArtifactQuery is ListPRCreatedWithoutArtifactSystem's
+// statement, binding org_id, action, the time bound and scope in that order.
+// The time bound compares occurred_at directly, unlike the feeds' datetime()
+// form: a function around the column keeps it from narrowing the index, and
+// this read runs every reconcile cycle.
+const prCreatedWithoutArtifactQuery = `
+	SELECT ` + externalActionColumns + `
+	  FROM external_actions ea
+	 WHERE ea.org_id = ? AND ea.action = ? AND ea.occurred_at >= ?
+	   AND ea.scope = ? AND ea.node_id IS NOT NULL
+	   AND NOT EXISTS (
+	       SELECT 1 FROM artifacts a
+	        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id
+	   )
+	 ORDER BY ea.occurred_at, ea.id
+`
+
+// ListPRCreatedWithoutArtifactSystem is the PR backstop's read (see the
+// interface). occurred_at holds offset-free UTC text ('YYYY-MM-DD HH:MM:SS'
+// from the column default, with a fractional part on rows the UTC
+// normalization rewrote), so a bound rendered in the default's layout orders
+// against both shapes as text.
+func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	rows, err := s.q.QueryContext(ctx, prCreatedWithoutArtifactQuery,
+		orgID, domain.ActionPRCreated, since.UTC().Format(time.DateTime), scope)
+	if err != nil {
+		return nil, err
+	}
+	return scanExternalActionRows(rows)
+}
+
 // appendExternalActionFilters appends opts' optional provider/action/actor/time
 // predicates, the newest-first ORDER BY, and LIMIT/OFFSET to a SELECT whose WHERE
 // is already open. Time bounds wrap both sides in datetime() — the spend/artifact
@@ -223,6 +261,6 @@ func scanExternalAction(sc rowScanner, e *domain.ExternalAction) error {
 	return sc.Scan(
 		&e.ID, &e.OrgID, &e.TeamID, &e.Provider, &e.Scope, &e.Action, &e.Target,
 		&e.ExternalID, &e.URL, &e.FromState, &e.ToState, &e.ConversationID,
-		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.OccurredAt,
+		&e.ActorUserID, &e.Credential, &e.DedupKey, &e.DetailJSON, &e.NodeID, &e.OccurredAt,
 	)
 }

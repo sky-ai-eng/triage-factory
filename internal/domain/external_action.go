@@ -18,10 +18,10 @@ import (
 // Jira claim/swipe/done/requeue flows, already attributed natively in Jira).
 //
 // One amendment to "immutable", and exactly one: the record of the act —
-// Target, Action, DetailJSON, Credential, OccurredAt, and the url column as
-// captured — is frozen, while the POINTER to where the object now lives is
-// maintained. A repository rename fills the row's current_url column (in the
-// same transaction as the rest of its rewrite), and reads serve
+// Target, Action, DetailJSON, NodeID, Credential, OccurredAt, and the url
+// column as captured — is frozen, while the POINTER to where the object now
+// lives is maintained. A repository rename fills the row's current_url column
+// (in the same transaction as the rest of its rewrite), and reads serve
 // COALESCE(current_url, url) through the URL field below, so the feed's link
 // keeps resolving after the freed name is re-claimed by a different
 // repository. current_url is the only column an UPDATE may touch; rewriting
@@ -89,7 +89,15 @@ type ExternalAction struct {
 	DedupKey string `json:"dedup_key"`
 	// DetailJSON carries the action-specific payload (e.g. {"sha":...,"new":true}
 	// for a branch push, {"status":...} for a transition). Empty → SQL NULL.
-	DetailJSON string    `json:"detail_json,omitempty"`
+	DetailJSON string `json:"detail_json,omitempty"`
+	// NodeID is the GraphQL node id of the object the action created. Only a
+	// pr_created row from the create verb carries one: it is how the
+	// reconciler's backstop matches the row to the pull request's artifact,
+	// since a node id survives a repository rename and the target does not.
+	// Part of the record of the act, so written once. It is a column rather
+	// than a detail_json key because the Actions feed renders every detail key
+	// to people. Empty → SQL NULL.
+	NodeID     string    `json:"node_id,omitempty"`
 	OccurredAt time.Time `json:"occurred_at"`
 }
 
