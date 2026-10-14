@@ -66,4 +66,4 @@ go build -o ./triagefactory .
 
 ## First launch
 
-On first launch, setup walks you through connecting GitHub and/or Jira.
+On first launch, setup walks you through connecting GitHub, then optionally an issue tracker — Jira or Linear. Either tracker can also be added later in Settings.

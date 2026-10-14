@@ -18,15 +18,15 @@
   </a>
 </p>
 
-Triage Factory watches everything that needs attention across your GitHub and Jira — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
+Triage Factory watches everything that needs attention across your GitHub, Jira, and Linear — open PRs, review requests, CI failures, merge conflicts, assigned tickets — scores and ranks it with AI, and lets you delegate the work to Claude Code agents that run in isolation and stream back to a live dashboard. You decide what gets automated, and you can take over any agent's run at any point.
 
-It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, per-org row-level isolation, and every agent run confined to its own gVisor sandbox. Your code and credentials stay on your infrastructure, and the only things that leave it are API calls to the services you connect — GitHub, Jira, and your model provider. Local mode is fundamentally the same product, just with N=1 orgs, teams, and users.
+It's a single Go binary that runs on infrastructure you control. One developer runs it locally — SQLite, credentials in the OS keychain (or an encrypted file when no keychain is reachable). A whole organization runs the _same_ binary self-hosted in multi-tenant mode — Postgres, per-org row-level isolation, and every agent run confined to its own gVisor sandbox. Your code and credentials stay on your infrastructure, and the only things that leave it are API calls to the services you connect — GitHub, Jira, Linear, and your model provider. Local mode is fundamentally the same product, just with N=1 orgs, teams, and users.
 
 For a product tour and screenshots, see [triagefactory.com](https://www.triagefactory.com).
 
 ## How it works
 
-Work flows through an automation engine drawn as a factory floor. A durable **entity** (a PR, a Jira ticket) emits **events** as things happen to it — a review lands, CI fails, a label changes. Events that match your rules become **tasks**; a task you delegate becomes a **run** — one headless Claude Code execution inside an isolated git worktree. You map event types to prompts in a visual graph, so "review requested" routes to your review prompt and "Jira assigned" routes to your implementation prompt. Agents work autonomously and stream their activity back in real time; when a run finishes, you review and approve.
+Work flows through an automation engine drawn as a factory floor. A durable **entity** (a PR, a Jira ticket, a Linear issue) emits **events** as things happen to it — a review lands, CI fails, a label changes. Events that match your rules become **tasks**; a task you delegate becomes a **run** — one headless Claude Code execution inside an isolated git worktree. You map event types to prompts in a visual graph, so "review requested" routes to your review prompt and "Jira assigned" routes to your implementation prompt. Agents work autonomously and stream their activity back in real time; when a run finishes, you review and approve.
 
 ## Local or self-hosted
 
@@ -58,7 +58,7 @@ Triage Factory runs code written by an AI agent acting on untrusted input such a
 - [docs/local-mode/](docs/local-mode/README.md) — local mode: CLI flags, configuration, secret storage, running on a server
 - [docs/self-hosting/](docs/self-hosting/README.md) — multi-tenant self-hosting (install, scaling, SSO, monitoring)
 - [docs/security/](docs/security/README.md) — isolation tiers, security overview, privilege separation
-- [docs/concepts/tracked-events.md](docs/concepts/tracked-events.md) — the GitHub/Jira event taxonomy
+- [docs/concepts/tracked-events.md](docs/concepts/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
 - [CONTRIBUTING.md](CONTRIBUTING.md) — contribution terms
 
 ## License

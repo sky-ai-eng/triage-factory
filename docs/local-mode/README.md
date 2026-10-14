@@ -11,7 +11,7 @@ To install the binary, start with [INSTALLATION.md](../INSTALLATION.md).
 ## Guides
 
 - [Running](running.md) — CLI flags, `install` / `uninstall`, the exec subcommands
-- [Configuration](configuration.md) — settings storage, poll intervals, Jira setup, credentials
+- [Configuration](configuration.md) — settings storage, poll intervals, Jira and Linear setup, credentials
 - [Secret storage](secret-storage.md) — keychain vs. encrypted-file backend, `TF_SECRET_ENCRYPTION_KEY`
 - [Running on a server](headless.md) — a host with no keychain or browser: `TF_SECRET_ENCRYPTION_KEY`, reaching the UI, configuring there
 - [Environment tuning](tuning.md) — run concurrency (`TF_MAX_CONCURRENT_CLAIMS`), logging, tracing (`TF_TRACES_ENDPOINT` + a one-container Tempo), `TF_CLAUDE_BINARY`, agent-engine JIT
@@ -19,5 +19,5 @@ To install the binary, start with [INSTALLATION.md](../INSTALLATION.md).
 ## Product behavior (both modes)
 
 - [GitHub polling](../concepts/polling.md) — what the poller tracks
-- [Tracked events](../concepts/tracked-events.md) — the GitHub/Jira event taxonomy
+- [Tracked events](../concepts/tracked-events.md) — the GitHub/Jira/Linear event taxonomy
 - [Repo profiling](../concepts/repo-profiling.md) — how repos get summarized for scoring
