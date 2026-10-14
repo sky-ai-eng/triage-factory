@@ -108,7 +108,7 @@ func ParseDefaultBaseURL(raw string) (string, error) {
 //
 // Lowercasing is ASCII only. DNS names compare case-insensitively in ASCII
 // alone, and the SQLite migration that rewrites stored hosts into this form
-// (202610100002_host_case.sql) folds with lower(), which covers exactly that
+// (202610050001_provider_scopes_and_linear.sql) folds with lower(), which covers exactly that
 // range; the two must agree on every stored value.
 func CanonicalBaseURL(raw string) string {
 	s := strings.TrimRight(strings.TrimSpace(raw), "/")
