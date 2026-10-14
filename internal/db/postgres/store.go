@@ -362,7 +362,8 @@ func newStoreBundle(admin, app *sql.DB, secretKey *aead.Key) db.Stores {
 		// ExternalActions holds both pools (like Artifacts): app for Record
 		// (manual bot runs + server approval/board handlers, under claims) +
 		// ListByTeam, admin for RecordSystem (event-triggered runs + the Jira
-		// mirror, no claims) + ListByOrgSystem (the org-wide governance read).
+		// mirror, no claims) + ListByOrgSystem (the org-wide governance read) +
+		// ListPRCreatedWithoutArtifactSystem (the reconciler's PR backstop).
 		// Append-only audit log of org-credential external writes. See TFAC-483.
 		ExternalActions: newExternalActionStore(app, admin),
 		// Spend holds both pools: app for ListSpend + SpendByCategory (the

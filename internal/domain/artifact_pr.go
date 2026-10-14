@@ -110,6 +110,10 @@ func PullRequestDedupKey(repoPath string, number int) string {
 // state (draft vs open). Both Proposed and Snapshot start equal to the agent's
 // draft.
 //
+// The node id goes on the artifact's node_id column as well as in its details:
+// the column is what the reconciler's backstop matches a pr_created ledger row
+// against.
+//
 // This is the single source of truth for the PR-artifact shape, so the create
 // writer (the exec choke point) and any later reconciliation land on the same
 // deduped row. ConversationID/OrgID/TeamID are stamped by the recording client, not here.
@@ -137,6 +141,7 @@ func NewPullRequestArtifact(repoPath string, number int, nodeID, head, base, htm
 		Target:      PullRequestTarget(repoPath, number),
 		ExternalID:  strconv.Itoa(number),
 		URL:         htmlURL,
+		NodeID:      nodeID,
 		State:       state,
 		DedupKey:    PullRequestDedupKey(repoPath, number),
 		DetailsJSON: string(details),

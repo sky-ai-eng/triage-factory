@@ -54,7 +54,10 @@ type Artifact struct {
 	// and a writer learned it. A GitHub comment carries it: a GraphQL delete
 	// names a comment by node id alone, so a delete that arrives without the
 	// comment's number finds the row through it
-	// (ArtifactStore.GetByNodeIDSystem). Preserve-on-empty, like ExternalID.
+	// (ArtifactStore.GetByNodeIDSystem). A pull request carries it too: the
+	// reconciler's backstop matches a pr_created ledger row to its artifact by
+	// node id, which a repository rename does not change. Preserve-on-empty,
+	// like ExternalID.
 	NodeID string `json:"node_id,omitempty"`
 
 	// State is the per-Kind lifecycle position. Use the ArtifactState*

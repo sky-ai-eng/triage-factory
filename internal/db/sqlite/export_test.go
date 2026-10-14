@@ -7,3 +7,7 @@ package sqlite
 // reaches a build artifact — it's the standard Go pattern for
 // surfacing an unexported helper to an external test package.
 var ParseDBDatetimeForTest = parseDBDatetime
+
+// PRCreatedWithoutArtifactQueryForTest exposes the PR backstop read's
+// statement so the query-plan test can EXPLAIN exactly what the store runs.
+var PRCreatedWithoutArtifactQueryForTest = prCreatedWithoutArtifactQuery

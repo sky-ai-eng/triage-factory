@@ -121,9 +121,9 @@ func (rc *Reconciler) ReconcileOrg(ctx context.Context, orgID string) error {
 // artifact is normally recorded on the first cycle after its pull request was
 // opened. The window is long enough that a row is still read after the
 // backstop could not run for days (the control plane down, the org's GitHub
-// unreachable). It bounds the rows the read returns, a week of one org's
-// pr_created rows, but not the rows it scans; the read in BackfillPRArtifacts
-// says what it scans.
+// unreachable). It bounds both the rows the read returns and the rows it
+// scans: the read walks only the org's pr_created rows inside it
+// (ExternalActionStore.ListPRCreatedWithoutArtifactSystem).
 const prBackstopWindow = 7 * 24 * time.Hour
 
 // BackfillPRArtifacts is the PR-artifact backstop. TF opens a pull request only
@@ -145,114 +145,105 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // pushed the branch.
 //
 // The pass reads the pr_created rows on the org's current GitHub host from the
-// last prBackstopWindow, keeps those whose pull request has no artifact, and
-// fetches each of those from GitHub for what the row does not carry (node id,
-// refs, title, body). When every pull request already has its artifact, it
-// makes no GitHub call. The artifact is recorded in the state the verb opened
-// the pull request in, and the reconcile that follows applies any transition
-// since. The write is insert-if-absent, so a pull request recorded after the
-// presence check is left untouched and repeating the pass changes nothing.
+// last prBackstopWindow whose pull request has no artifact, matching the two by
+// the pull request's node id. A node id survives a repository rename, so the
+// match does not depend on the name the row recorded or on how its link spells
+// the host. A row written without a node id is never read, nor is one whose
+// conversation was purged, which leaves no one to own the artifact. It
+// fetches those pull requests by node id (RefreshPRs, batched per owner of the
+// row's target), which gives what the row does not carry: the repository's
+// current name, the number, link, refs, title and body. The artifact is
+// recorded under the current name, so a pull request in a repository renamed
+// since it was opened is backfilled where the rename's rewrite would have
+// moved it. When every pull request already has its artifact, the pass makes
+// no GitHub call.
 //
-// A row whose link no longer names the repository in its target belongs to a
-// repository renamed since. A rename rewrites the link and the artifact's key
-// but never the row's target, so the target no longer finds the artifact, and
-// the row is skipped rather than recorded a second time under the old name.
-// Best-effort per pull request: a credential or GitHub failure skips it this
-// pass.
+// The artifact is recorded in the state the verb opened the pull request in,
+// and the reconcile that follows applies any transition since. The write is
+// insert-if-absent, so a pull request recorded after the read is left
+// untouched and repeating the pass changes nothing. Best-effort per owner and
+// per pull request: a credential or GitHub failure skips it this pass.
 func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) error {
 	host, err := db.OrgGitHubHostSystem(ctx, rc.orgs, orgID)
 	if err != nil {
 		return fmt.Errorf("resolve github host: %w", err)
 	}
-	// TODO(TFAC-1087): replace this read with one indexed query for the
-	// pr_created rows that have no artifact. This one scans far more than it
-	// returns, and does it twice, because it also runs a count nothing reads.
-	// On SQLite the time bound cannot narrow the index, so each cycle walks the
-	// org's whole ledger; on Postgres it reads every action in the window
-	// before filtering to pr_created.
-	created, _, err := rc.actions.ListByOrgSystem(ctx, orgID, domain.ExternalActionListOpts{
-		Provider: domain.ArtifactProviderGitHub,
-		Action:   domain.ActionPRCreated,
-		Since:    time.Now().UTC().Add(-prBackstopWindow),
-	})
+	missing, err := rc.actions.ListPRCreatedWithoutArtifactSystem(ctx, orgID, host, time.Now().UTC().Add(-prBackstopWindow))
 	if err != nil {
-		return fmt.Errorf("list pr_created actions: %w", err)
+		return fmt.Errorf("list pr_created rows without an artifact: %w", err)
 	}
 
-	type openedPR struct {
-		owner, repo string
-		number      int
-		act         domain.ExternalAction
-	}
-	byKey := map[string]openedPR{}
-	for _, act := range created {
-		if act.Scope != host || act.ConversationID == "" {
-			continue // another host's, or its conversation was purged — nothing to attribute to
-		}
-		owner, repo, number, ok := domain.ParsePRTarget(act.Target)
+	byNodeID := map[string]domain.ExternalAction{}
+	nodeIDsByOwner := map[string]map[string]bool{}
+	for _, act := range missing {
+		owner, ok := prOwner(act.Target)
 		if !ok {
 			continue
 		}
-		// TODO(TFAC-1087): match the row to its artifact by the PR's node id, so
-		// a PR whose repository was renamed since is backfilled under the
-		// current name rather than skipped, and the result stops depending on
-		// the row's link being spelled on the configured host.
-		if !domain.GitHubURLNamesRepo(act.URL, host, owner+"/"+repo) {
-			continue // renamed since it was opened
+		// The read is oldest first, so a node id two rows share stays with the
+		// conversation that opened the pull request first.
+		if _, seen := byNodeID[act.NodeID]; seen {
+			continue
 		}
-		byKey[domain.PullRequestDedupKey(owner+"/"+repo, number)] = openedPR{owner: owner, repo: repo, number: number, act: act}
-	}
-	if len(byKey) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(byKey))
-	for k := range byKey {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	present, err := rc.artifacts.PresentDedupKeysSystem(ctx, orgID, host, keys)
-	if err != nil {
-		return fmt.Errorf("read recorded pull requests: %w", err)
+		byNodeID[act.NodeID] = act
+		addNodeID(nodeIDsByOwner, owner, act.NodeID)
 	}
 
-	for _, key := range keys {
-		if present[key] {
-			continue
-		}
-		pr := byKey[key]
-		repoPath := pr.owner + "/" + pr.repo
-		client, err := rc.resolver.ClientFor(ctx, orgID, pr.owner)
+	for _, owner := range ownerUnion(nodeIDsByOwner, nil) {
+		client, err := rc.resolver.ClientFor(ctx, orgID, owner)
 		if err != nil {
-			reconcileLog.Warn("backstop: resolve github client failed; skipping PR this pass",
-				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
+			reconcileLog.Warn("backstop: resolve github client failed; skipping owner this pass",
+				"org", orgID, "owner", owner, "error", err)
 			continue
 		}
-		live, err := client.GetPRBasic(ctx, pr.owner, pr.repo, pr.number)
+		ids := sortedKeys(nodeIDsByOwner[owner])
+		snaps, err := client.RefreshPRs(ctx, ids, false)
 		if err != nil {
-			reconcileLog.Warn("backstop: fetch PR failed; skipping PR this pass",
-				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
+			reconcileLog.Warn("backstop: fetch PRs failed; skipping owner this pass",
+				"org", orgID, "owner", owner, "count", len(ids), "error", err)
 			continue
 		}
-		// The proposed snapshot is what GitHub holds now: the body the verb
-		// sent, unless someone has edited it since.
-		art := domain.NewPullRequestArtifact(repoPath, pr.number, live.NodeID, live.HeadRef, live.BaseRef,
-			live.HTMLURL, live.Title, live.Body, pr.act.ToState == domain.ArtifactStatePRDraft)
-		art.ConversationID = pr.act.ConversationID
-		art.OrgID = orgID
-		art.TeamID = pr.act.TeamID
-		art.Scope = host
-		inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
-		if err != nil {
-			reconcileLog.Warn("backstop: record PR artifact failed",
-				"org", orgID, "repo", repoPath, "pr", pr.number, "error", err)
-			continue
-		}
-		if inserted {
-			reconcileLog.Info("backstop: recorded PR artifact from its pr_created row",
-				"org", orgID, "repo", repoPath, "pr", pr.number, "conversation", pr.act.ConversationID)
+		for _, nodeID := range ids {
+			act := byNodeID[nodeID]
+			snap, ok := snaps[nodeID]
+			if !ok {
+				reconcileLog.Warn("backstop: PR not found by its node id; skipping PR this pass",
+					"org", orgID, "target", act.Target, "node_id", nodeID)
+				continue
+			}
+			rc.recordBackfilledPR(ctx, orgID, host, act, snap)
 		}
 	}
 	return nil
+}
+
+// recordBackfilledPR records the pull_request artifact for the pr_created row
+// act from snap, GitHub's current copy of the pull request, under the
+// repository's current name. The proposed snapshot is what GitHub holds now:
+// the title and body the verb sent, unless someone has edited them since.
+func (rc *Reconciler) recordBackfilledPR(ctx context.Context, orgID, host string, act domain.ExternalAction, snap domain.PRSnapshot) {
+	target := domain.PullRequestTarget(snap.Repo, snap.Number)
+	if _, _, _, ok := domain.ParsePRTarget(target); !ok {
+		reconcileLog.Warn("backstop: PR snapshot names no repository and number; skipping PR this pass",
+			"org", orgID, "target", act.Target, "node_id", act.NodeID)
+		return
+	}
+	art := domain.NewPullRequestArtifact(snap.Repo, snap.Number, act.NodeID, snap.HeadRef, snap.BaseRef,
+		snap.URL, snap.Title, snap.Body, act.ToState == domain.ArtifactStatePRDraft)
+	art.ConversationID = act.ConversationID
+	art.OrgID = orgID
+	art.TeamID = act.TeamID
+	art.Scope = host
+	inserted, err := rc.artifacts.InsertArtifactIfAbsentSystem(ctx, orgID, art)
+	if err != nil {
+		reconcileLog.Warn("backstop: record PR artifact failed",
+			"org", orgID, "target", target, "error", err)
+		return
+	}
+	if inserted {
+		reconcileLog.Info("backstop: recorded PR artifact from its pr_created row",
+			"org", orgID, "target", target, "recorded_as", act.Target, "conversation", act.ConversationID)
+	}
 }
 
 // Reconcile refreshes each artifact in arts on the org's current GitHub host

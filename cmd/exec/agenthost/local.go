@@ -2390,9 +2390,11 @@ func newGithubCommentArtifact(ref ghclient.CommentRef, state string) *domain.Art
 // included — it is the durable record of what the agent drafted, so it has to be
 // what GitHub received rather than a reconstruction of it;
 // node_id / head_branch / base ride details_json for reconciliation and the
-// server's edit/approve handlers. A zero number (a 2xx whose body didn't parse)
-// has no stable key to dedup on, so recording is skipped with a debug
-// breadcrumb — the PR still opened. The `draft` flag selects the artifact's
+// server's edit/approve handlers, and the node id also lands on the artifact's
+// and the pr_created row's node_id columns, which the reconciler's backstop
+// matches the two on. A zero number (a 2xx whose body didn't parse) has no
+// stable key to dedup on, so recording is skipped with a debug breadcrumb —
+// the PR still opened. The `draft` flag selects the artifact's
 // initial state (draft vs open);
 // the new PR path always creates drafts, but recording the param keeps the row
 // honest if a standalone caller ever opens a non-draft.
@@ -2406,7 +2408,11 @@ func (c *LocalClient) recordGithubPR(ctx context.Context, owner, repo, head, bas
 		owner+"/"+repo, number, nodeID, head, base, htmlURL, title, body, draft,
 	)
 	// to=the created state (draft/open) so the feed can read "created as draft".
-	c.upsertGithubArtifact(ctx, a, githubAction(a, domain.ActionPRCreated, "", a.State, c.githubCredential()))
+	act := githubAction(a, domain.ActionPRCreated, "", a.State, c.githubCredential())
+	// The node id is what the reconciler's backstop matches this row to the
+	// artifact by, when the artifact write fails and the row lands alone.
+	act.NodeID = nodeID
+	c.upsertGithubArtifact(ctx, a, act)
 }
 
 // upsertGithubArtifact stamps the provider onto a and writes it best-effort via

@@ -1,7 +1,9 @@
 package sqlite_test
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -34,5 +36,29 @@ func TestArtifactUpsert_SQLite(t *testing.T) {
 	dbtest.RunArtifactUpsertConformance(t, func(t *testing.T) (db.Stores, string, string) {
 		t.Helper()
 		return sqlitestore.New(openSQLiteForTest(t)), runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID
+	})
+}
+
+// TestExternalActionNodeID_SQLite runs the shared ledger node-id conformance
+// suite against the SQLite backend, a fresh in-memory DB per subtest.
+func TestExternalActionNodeID_SQLite(t *testing.T) {
+	dbtest.RunExternalActionNodeIDConformance(t, func(t *testing.T) dbtest.ExternalActionNodeIDFixture {
+		t.Helper()
+		conn := openSQLiteForTest(t)
+		return dbtest.ExternalActionNodeIDFixture{
+			Stores:         sqlitestore.New(conn),
+			OrgID:          runmode.LocalDefaultOrgID,
+			TeamID:         runmode.LocalDefaultTeamID,
+			ConversationID: seedArtifactConversation(t, conn),
+			BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
+				t.Helper()
+				// datetime('now', ...) renders the 'YYYY-MM-DD HH:MM:SS' shape
+				// the column's CURRENT_TIMESTAMP default writes.
+				if _, err := conn.Exec(`UPDATE external_actions SET occurred_at = datetime('now', ?) WHERE id = ?`,
+					fmt.Sprintf("-%d seconds", int64(age.Seconds())), actionID); err != nil {
+					t.Fatalf("backdate occurred_at of %s: %v", actionID, err)
+				}
+			},
+		}
 	})
 }

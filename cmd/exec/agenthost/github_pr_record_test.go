@@ -95,6 +95,52 @@ func TestLocalClient_GithubCreatePR_RecordsArtifact(t *testing.T) {
 			if d.Snapshot != d.Proposed {
 				t.Errorf("snapshot should start equal to proposed: %+v vs %+v", d.Snapshot, d.Proposed)
 			}
+
+			// The node id is also on the artifact's column and the pr_created
+			// row: the reconciler's backstop matches the two by it.
+			if a.NodeID != "PR_kwDOABCD" {
+				t.Errorf("artifact node_id = %q, want PR_kwDOABCD", a.NodeID)
+			}
+			acts := listExternalActions(t, stores)
+			if len(acts) != 1 {
+				t.Fatalf("want 1 ledger row, got %d: %+v", len(acts), acts)
+			}
+			if act := acts[0]; act.Action != domain.ActionPRCreated || act.Target != "octo/repo#42" || act.NodeID != "PR_kwDOABCD" {
+				t.Errorf("ledger row = action %q target %q node_id %q, want pr_created on octo/repo#42 carrying PR_kwDOABCD",
+					act.Action, act.Target, act.NodeID)
+			}
+		})
+	}
+}
+
+// TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID pins that when
+// the artifact write fails, the pr_created row that lands alone still carries
+// the PR's node id. That row is all the reconciler's backstop has to find the
+// PR by, on both trigger types.
+func TestLocalClient_GithubCreatePR_FailedArtifactRowCarriesNodeID(t *testing.T) {
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
+		}
+		t.Run(name, func(t *testing.T) {
+			gh, _ := startFakeGitHubPRCreate(t)
+			conn, stores, info, client := newGithubRecordingClientConn(t, gh.URL, eventTriggered)
+			refuseArtifactWrites(t, conn)
+
+			if _, _, _, err := client.GithubCreatePR(
+				context.Background(), "octo", "repo", "feature/x", "main", "t", "b", true,
+			); err != nil {
+				t.Fatalf("GithubCreatePR: %v", err)
+			}
+
+			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Fatalf("artifacts = %+v, want none: the write was refused", arts)
+			}
+			acts := listExternalActions(t, stores)
+			if len(acts) != 1 || acts[0].Action != domain.ActionPRCreated || acts[0].NodeID != "PR_kwDOABCD" {
+				t.Errorf("ledger rows = %+v, want the one pr_created row carrying PR_kwDOABCD", acts)
+			}
 		})
 	}
 }

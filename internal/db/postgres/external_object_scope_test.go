@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/db/dbtest"
@@ -105,4 +106,31 @@ func TestArtifactStore_Postgres_ReturnedRowUnderClaims(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("WithUser: %v", err)
 	}
+}
+
+// TestExternalActionNodeID_Postgres runs the shared ledger node-id conformance
+// suite against the Postgres backend, both pools wired against AdminDB like the
+// scope suite above.
+func TestExternalActionNodeID_Postgres(t *testing.T) {
+	h := pgtest.Shared(t)
+	stores := pgstore.New(h.AdminDB, h.AdminDB, pgtest.SecretKey)
+	dbtest.RunExternalActionNodeIDConformance(t, func(t *testing.T) dbtest.ExternalActionNodeIDFixture {
+		t.Helper()
+		h.Reset(t)
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "nodeid")
+		return dbtest.ExternalActionNodeIDFixture{
+			Stores:         stores,
+			OrgID:          orgID,
+			TeamID:         teamID,
+			ConversationID: seedPgArtifactConversation(t, h, orgID, teamID, userID),
+			BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
+				t.Helper()
+				if _, err := h.AdminDB.Exec(
+					`UPDATE external_actions SET occurred_at = now() - make_interval(secs => $2) WHERE id = $1`,
+					actionID, age.Seconds()); err != nil {
+					t.Fatalf("backdate occurred_at of %s: %v", actionID, err)
+				}
+			},
+		}
+	})
 }
