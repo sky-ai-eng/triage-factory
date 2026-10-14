@@ -49,9 +49,9 @@ func (s *externalActionStore) Record(ctx context.Context, orgID string, e domain
 		id = uuid.New().String()
 	}
 	// An empty dedup_key is filled with a uuid so the append never collides (a
-	// repeated action is recorded, not dropped); only the branch push passes a
-	// deterministic key so its hook+proxy twin collapses. occurred_at is left to
-	// the column DEFAULT. Empty nullable fields → SQL NULL via nullIfEmpty.
+	// repeated action is recorded, not dropped); a caller-supplied key gets the
+	// ON CONFLICT collapse (who passes one is on db.ExternalActionStore).
+	// occurred_at is left to the column DEFAULT. Empty nullable fields → SQL NULL via nullIfEmpty.
 	dedupKey := e.DedupKey
 	if dedupKey == "" {
 		dedupKey = uuid.New().String()

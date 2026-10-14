@@ -124,7 +124,7 @@ func TestGitPushRecorder_SkipsNonBranchAndMalformed(t *testing.T) {
 // external-action audit row carrying the attempt's sha and HTTP status, so the
 // audit log never omits an attempted external write. A subsequent successful
 // push of the same ref then lands the artifact and the branch_pushed row as
-// usual (the failure row, having no dedup key, can't swallow it).
+// usual (the failure row, keyed for that one act, can't swallow it).
 func TestGitPushRecorder_RefusedPushRecordsAuditOnly(t *testing.T) {
 	stores, conversationID := newRecorderStores(t)
 	info := recorderInfo(conversationID)

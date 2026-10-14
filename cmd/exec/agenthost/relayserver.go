@@ -137,11 +137,12 @@ func NewRelayServer(stores db.Stores, info ConversationInfo, git *agentproc.GitP
 	}
 }
 
-// recordPushRelayTimeout bounds the orchestrator-side artifact write kicked off
-// by a relayed record_push, mirroring the in-process backstop's own cap
-// (gitproxy.recordPushTimeout) so a wedged store can't hold the supervision
-// channel's per-frame goroutine open indefinitely.
-const recordPushRelayTimeout = 30 * time.Second
+// relayWriteTimeout bounds a relayed record's whole application
+// (DispatchRecord): the record lane serves one record at a time and waits on
+// each. The same window as the in-process push backstop's cap
+// (gitproxy.recordPushTimeout). It reaches what honours its context; the
+// recording funnel writes on a budget of its own (recordWriteBudget).
+const relayWriteTimeout = 30 * time.Second
 
 // DispatchCall serves a request/response relay op. See agentproc.RelayDispatcher.
 func (s *RelayServer) DispatchCall(ctx context.Context, namespace, op string, args json.RawMessage) (json.RawMessage, error) {
@@ -200,7 +201,7 @@ var errRecordPanicked = errors.New("agenthost: applying an audit record panicked
 // would be resent and panic again, holding every record queued behind it for
 // the rest of the run.
 //
-// Every application is capped at recordPushRelayTimeout, for the same reason:
+// Every application is capped at relayWriteTimeout, for the same reason:
 // the record lane serves one record at a time, so one that never finished
 // would hold every record behind it. The cap reaches only what honours its
 // context — the write funnel runs on a budget of its own (recordContext), and
@@ -208,7 +209,7 @@ var errRecordPanicked = errors.New("agenthost: applying an audit record panicked
 func (s *RelayServer) DispatchRecord(ctx context.Context, namespace, op, key string, args json.RawMessage) (answer error) {
 	ctx, span := s.startRelayOp(ctx, "relay.record", namespace, op)
 	defer span.End()
-	ctx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
+	ctx, cancel := context.WithTimeout(ctx, relayWriteTimeout)
 	defer cancel()
 	defer func() {
 		if r := recover(); r != nil {
@@ -708,13 +709,11 @@ func (s *RelayServer) authorizeGHWrite(ctx context.Context, a agentproc.Authoriz
 	if !gated {
 		return true
 	}
-	// The agent is waiting on this call, so the recording is capped like every
-	// other DB effect reached from the supervision channel. A store that cannot
-	// be written costs the row; the refusal itself is this function's return
-	// value and does not depend on it.
-	recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-	defer cancel()
-	s.audit.RecordGHWriteDenied(recCtx, req, ref)
+	// The agent is waiting on this call, and the recording funnel bounds the
+	// row's write at its own budget (recordWriteBudget). A store that cannot be
+	// written costs the row; the refusal itself is this function's return value
+	// and does not depend on it.
+	s.audit.RecordGHWriteDenied(ctx, req, ref)
 	return false
 }
 
@@ -741,6 +740,11 @@ func graphQLFactsFromWire(w *agentproc.GraphQLWriteFacts) *ghwrite.GraphQLFacts 
 // with no case here. That is what makes DispatchRecord's decode stage a real
 // stage rather than a catch-all. A write that fails reports itself through the
 // relayed record on ctx instead (recordWriteDrop).
+//
+// No op here sets a timeout of its own. ctx carries DispatchRecord's cap
+// (relayWriteTimeout), which bounds everything that runs on it — the push's
+// artifact upsert, the read touch, the gh write's lookups — and the recording
+// funnel the ops end in writes on its own detached budget (recordWriteBudget).
 func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args json.RawMessage) error {
 	switch op {
 	case agentproc.OpRecordDenial:
@@ -768,22 +772,18 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		// conversation comes from THIS server's client, never the wire, so a
 		// sidecar cannot file a probe against another run — which also makes the
 		// dedup key unforgeable.
-		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-		defer cancel()
-		s.audit.RecordEgressDenied(recCtx, a.Target, a.Reason)
+		s.audit.RecordEgressDenied(ctx, a.Target, a.Reason)
 
 	case agentproc.OpRecordGHWrite:
 		var a agentproc.RecordGHWriteArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed gh write: %w", err)
 		}
-		// The request already transited; recording it is best-effort and capped
-		// like the other audit ops. Classification happens here rather than in
-		// the sidecar, so the wire carries only what was observed and the row's
-		// vocabulary stays on the side that owns it.
-		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-		defer cancel()
-		s.audit.RecordGHChannelWrite(recCtx, ghwrite.Observation{
+		// The request already transited; recording it is best-effort.
+		// Classification happens here rather than in the sidecar, so the wire
+		// carries only what was observed and the row's vocabulary stays on the
+		// side that owns it.
+		s.audit.RecordGHChannelWrite(ctx, ghwrite.Observation{
 			Method:         a.Method,
 			Path:           a.Path,
 			Status:         a.Status,
@@ -801,12 +801,7 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 			return fmt.Errorf("agenthost: decode relayed push: %w", err)
 		}
 		if s.git != nil && s.git.RecordPush != nil {
-			// The relayed push already completed upstream; the DB write here must
-			// not run unbounded on the shared control channel, so cap it at the
-			// same window the in-process backstop uses.
-			recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-			defer cancel()
-			s.git.RecordPush(recCtx, gitproxy.PushedRef{
+			s.git.RecordPush(ctx, gitproxy.PushedRef{
 				Repo:    a.Repo,
 				Ref:     a.Ref,
 				NewSHA:  a.NewSHA,
@@ -830,22 +825,14 @@ func (s *RelayServer) dispatchCoreRecord(ctx context.Context, op string, args js
 		if a.Action != nil {
 			a.Action.DedupKey = ""
 		}
-		// The write already landed upstream; Record is best-effort and self-bounds
-		// its own recording. Cap it so a wedged store can't pin the frame goroutine.
-		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-		defer cancel()
-		s.rt.Record(recCtx, a.Artifact, a.Action)
+		s.rt.Record(ctx, a.Artifact, a.Action)
 
 	case opRecordReadTouch:
 		var a recordReadTouchArgs
 		if err := json.Unmarshal(args, &a); err != nil {
 			return fmt.Errorf("agenthost: decode relayed read touch: %w", err)
 		}
-		// The read already returned; RecordReadTouch is best-effort. Cap it like
-		// the external-write path so a wedged store can't pin the frame goroutine.
-		recCtx, cancel := context.WithTimeout(ctx, recordPushRelayTimeout)
-		defer cancel()
-		s.rt.RecordReadTouch(recCtx, a.Provider, a.Target, a.ExternalID, a.URL)
+		s.rt.RecordReadTouch(ctx, a.Provider, a.Target, a.ExternalID, a.URL)
 
 	default:
 		return fmt.Errorf("agenthost: unsupported core relay record op %q", op)

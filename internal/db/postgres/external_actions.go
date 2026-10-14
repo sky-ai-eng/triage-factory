@@ -67,7 +67,8 @@ func (s *externalActionStore) RecordSystem(ctx context.Context, orgID string, e 
 // record inserts one audit row. A caller-supplied e.ID / e.DedupKey is honored
 // (parity with SQLite); an empty one falls back to gen_random_uuid() server-side
 // — for dedup_key that yields a unique, non-colliding key so the append never
-// drops a repeated action (only the branch push passes a deterministic key).
+// drops a repeated action. Who passes a key, and why, is on
+// db.ExternalActionStore.
 // occurred_at is left to the column DEFAULT now(). Empty nullable columns (”) →
 // NULL via NULLIF; the uuid columns cast after the NULLIF so an empty string
 // never reaches ::uuid. ON CONFLICT DO NOTHING keeps it append-only.

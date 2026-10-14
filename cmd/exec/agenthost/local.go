@@ -2516,8 +2516,10 @@ func (c *LocalClient) RecordEgressDenied(ctx context.Context, target, reason str
 // read off the request: the token is a placeholder by the time anything here
 // can see it, so the only side that knows is the one that swapped it.
 //
-// Appended unconditionally (no dedup key): each attempt is its own event, so a
-// retried edit and a refused one both leave their own row.
+// No natural key: each attempt is its own event, so a retried edit and a
+// refused one both leave their own row. The recording funnel gives each act a
+// key of its own (mintActionDedupKey), which collapses only a retried write of
+// the same act.
 func GHChannelWriteAction(obs ghwrite.Observation, credential string) *domain.ExternalAction {
 	if shape, ok := ghwrite.Resolve(obs); ok && obs.Succeeded() {
 		return ghSemanticWriteAction(shape, obs, credential)
@@ -2746,9 +2748,10 @@ func (c *LocalClient) RecordGHWriteDenied(ctx context.Context, req ghwrite.Reque
 // deliberately not written here — artifacts track only work that landed, and
 // the proxy wiring only upserts one on a 2xx. Host-side only (not on the
 // Client interface): like RecordGitDenied, the observer runs on the host, never
-// in the sandbox. No dedup key (recordBotAction's store fills a uuid), so
-// repeated failed attempts each leave their own row and a later successful push
-// of the same (run, ref, sha) can never be swallowed by a prior failure. No URL
+// in the sandbox. No natural key — the recording funnel gives each act a key of
+// its own (mintActionDedupKey) — so repeated failed attempts each leave their
+// own row and a later successful push of the same (run, ref, sha) can never be
+// swallowed by a prior failure. No URL
 // either — nothing landed, so a github.com branch link would dangle.
 // Best-effort: a recording failure is logged and swallowed.
 func (c *LocalClient) RecordGitPushFailed(ctx context.Context, repoPath, ref, sha string, created bool, httpStatus int) {
