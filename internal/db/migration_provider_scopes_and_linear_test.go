@@ -1,0 +1,839 @@
+package db
+
+import (
+	"database/sql"
+	"strings"
+	"testing"
+
+	"github.com/pressly/goose/v3"
+	_ "modernc.org/sqlite"
+
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
+	"github.com/sky-ai-eng/triage-factory/internal/runmode"
+)
+
+// providerScopesVersion is 202610050001_provider_scopes_and_linear.sql, and
+// beforeProviderScopes the version before it. Every fixture here is written in
+// the schema the migration starts from.
+const (
+	beforeProviderScopes  int64 = 202610030003
+	providerScopesVersion int64 = 202610050001
+)
+
+// The migration computes every scope it writes in SQL from the org's stored
+// base URLs, and every later read and write computes the same value in Go:
+// domain.EntityScope for an entity, EffectiveGitHubHost for a repository, a
+// team mapping and a placement pin, domain.ExternalObjectScope for an artifact
+// and an audit-ledger row. If the two disagreed, every pre-existing row would
+// sit under a scope no read asks for: the poller would mint a second entity
+// beside each one, the tracked set would read empty, and the next capture of
+// an object would mint a second artifact. So each case stages one row of each
+// kind under one org configuration, migrates, and requires every stored value
+// to equal what the Go side answers.
+func TestMigrate_ProviderScopesMatchGo(t *testing.T) {
+	cases := []struct {
+		name       string
+		githubBase *string // nil = no override recorded
+		jiraBase   *string // nil = Jira not configured
+	}{
+		{name: "defaults"},
+		{name: "empty settings", githubBase: ptr(""), jiraBase: ptr("")},
+		{name: "enterprise hosts", githubBase: ptr("https://ghe.example.com"), jiraBase: ptr("https://acme.atlassian.net")},
+		{name: "trailing slash", githubBase: ptr("https://ghe.example.com/"), jiraBase: ptr("https://jira.example.com/")},
+		{name: "trailing slashes", githubBase: ptr("https://ghe.example.com//"), jiraBase: ptr("https://jira.example.com//")},
+		{name: "context paths", githubBase: ptr("https://example.com/github/"), jiraBase: ptr("https://jira.example.com/jira/")},
+		{name: "surrounding whitespace", githubBase: ptr("  https://ghe.example.com/ "), jiraBase: ptr("\thttps://jira.example.com\n")},
+		// The scheme and authority compare case-insensitively and are stored
+		// lowercased; a context path keeps its case.
+		{name: "mixed case", githubBase: ptr("HTTPS://GHE.Example.com/GitHub/"), jiraBase: ptr("Https://Jira.Example.com/Jira")},
+		{name: "only slashes", githubBase: ptr(" / "), jiraBase: ptr(" / ")},
+		{name: "schemeless jira", jiraBase: ptr("jira.example.com")},
+		{name: "jira with no authority", jiraBase: ptr("https:///jira")},
+		{name: "jira with another scheme", jiraBase: ptr("ftp://jira.example.com")},
+	}
+	providers := []string{
+		domain.ArtifactProviderGitHub, domain.ArtifactProviderGit, domain.ArtifactProviderJira,
+		domain.ArtifactProviderLinear, domain.ArtifactProviderSlack, domain.ArtifactProviderNetwork,
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+			seedProviderScopesOrg(t, database)
+			var githubBase, jiraBase string
+			if tc.githubBase != nil {
+				githubBase = *tc.githubBase
+				setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "github", githubBase)
+			}
+			if tc.jiraBase != nil {
+				jiraBase = *tc.jiraBase
+				setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "jira", jiraBase)
+			}
+			site, siteOK := domain.JiraHost(jiraBase)
+
+			mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, title, url) VALUES
+				('e-github', 'github', 'octo/api#1', 'pr', 't', NULL),
+				('e-jira-stub', 'jira', 'KEY-1', 'issue', 't', NULL),
+				('e-jira-elsewhere', 'jira', 'KEY-3', 'issue', 't', 'https://Other.Example.com/Ctx/browse/KEY-3')`)
+			if siteOK {
+				// The url the tracker builds from the org's base URL.
+				mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, title, url) VALUES ('e-jira', 'jira', 'KEY-2', 'issue', 't', ?)`,
+					strings.TrimRight(strings.TrimSpace(jiraBase), "/")+"/browse/KEY-2")
+			}
+			mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source, external_id) VALUES ('r1', 'octo', 'api', 'github', '7')`)
+			mustExec(t, database, `INSERT INTO team_github_groups (team_id, github_org_login, github_team_slug) VALUES ('team-1', 'octo', 'core')`)
+			mustExec(t, database, `INSERT INTO placement_overrides (key_kind, key_value, replicas) VALUES ('repo', 'octo/api', 2)`)
+			for _, p := range providers {
+				mustExec(t, database, `INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key)
+					VALUES (?, 'team-1', ?, 'comment', 't', 'posted', ?)`, "a-"+p, p, p+":comment:k")
+				mustExec(t, database, `INSERT INTO external_actions (id, provider, action, target, credential, dedup_key)
+					VALUES (?, ?, 'comment_posted', 't', 'none', ?)`, "x-"+p, p, p+":k")
+			}
+
+			migrateProviderScopes(t, database)
+
+			settings := domain.OrgSettings{GitHubBaseURL: migratedGitHubBase(githubBase), JiraBaseURL: jiraBase}
+			githubHost := EffectiveGitHubHost(settings.GitHubBaseURL)
+			want := map[string]string{
+				`SELECT scope FROM entities WHERE id = 'e-github'`:                  domain.EntityScope("github", settings),
+				`SELECT scope FROM entities WHERE id = 'e-jira-stub'`:               domain.EntityScope("jira", settings),
+				`SELECT scope FROM entities WHERE id = 'e-jira-elsewhere'`:          "https://other.example.com/Ctx",
+				`SELECT host FROM repositories WHERE id = 'r1'`:                     githubHost,
+				`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`:      githubHost,
+				`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`: githubHost,
+			}
+			if siteOK {
+				want[`SELECT scope FROM entities WHERE id = 'e-jira'`] = site
+			}
+			for _, p := range providers {
+				scope := domain.ExternalObjectScope(p, settings)
+				want[`SELECT scope FROM artifacts WHERE id = 'a-`+p+`'`] = scope
+				want[`SELECT scope FROM external_actions WHERE id = 'x-`+p+`'`] = scope
+			}
+			// A stored base URL is rewritten into its canonical spelling, and
+			// one of only whitespace and slashes, which has none, is left as
+			// it is.
+			for kind, base := range map[string]*string{"github": tc.githubBase, "jira": tc.jiraBase} {
+				if base == nil {
+					continue
+				}
+				stored := ghbase.CanonicalBaseURL(*base)
+				if stored == "" {
+					stored = *base
+				}
+				want[`SELECT base_url FROM org_event_sources WHERE kind = '`+kind+`'`] = stored
+			}
+			for query, w := range want {
+				if got := queryString(t, database, query); got != w {
+					t.Errorf("%s = %q, want %q", query, got, w)
+				}
+			}
+		})
+	}
+}
+
+// Every column holding a GitHub host or Jira site is a key compared by exact
+// string, and every later read and write computes the spelling through
+// ghbase.CanonicalBaseURL. The migration computes it with SQLite string
+// functions; if the two disagreed on a value, every row holding it would sit
+// under a key no read asks for. Each case stores one spelling in every column
+// that holds a host or site, and as the org's base URLs, migrates, and requires
+// each column — and each scope derived from the base URLs — to hold what the Go
+// canonicalizer answers, and the derivations that key real reads to land on it.
+func TestMigrate_ProviderScopesStoreHostsCanonically(t *testing.T) {
+	columns := []string{
+		`SELECT base_url FROM org_event_sources WHERE kind = 'github'`,
+		`SELECT base_url FROM org_event_sources WHERE kind = 'jira'`,
+		`SELECT github_base_url FROM user_github_identities WHERE user_id = 'u1'`,
+		`SELECT jira_base_url FROM user_jira_identities WHERE user_id = 'u1'`,
+		`SELECT github_host FROM org_github_app_installations WHERE installation_id = '42'`,
+		`SELECT host FROM reachable_repositories WHERE credential_class = 'pat'`,
+		`SELECT host FROM reachable_repositories WHERE credential_class = 'byo_app'`,
+		`SELECT host FROM reachable_scopes WHERE credential_class = 'pat'`,
+		`SELECT scope FROM reachable_scopes WHERE credential_class = 'pat'`,
+		`SELECT host FROM reachable_scopes WHERE credential_class = 'byo_app'`,
+		`SELECT scope FROM entities WHERE id = 'e-jira'`,
+		// Derived from the org's GitHub base URL.
+		`SELECT host FROM repositories WHERE id = 'r1'`,
+		`SELECT host FROM team_github_groups WHERE team_id = 'team-1'`,
+		`SELECT scope FROM entities WHERE id = 'e-github'`,
+		`SELECT scope FROM artifacts WHERE id = 'a1'`,
+		`SELECT host FROM placement_overrides WHERE key_value = 'octo/api'`,
+	}
+	inputs := []string{
+		"https://GHE.Acme.com",
+		"https://GHE.Acme.com/",
+		"HTTPS://GHE.ACME.COM//",
+		"https://GHE.Acme.com:8443",
+		"https://GHE.Acme.com/GitHub/Ctx",
+		"https://GHE.Acme.com:8443/GitHub/Ctx/",
+		" https://Jira.Example.com/Jira ",
+		"http://[::1]:8080/Ctx",
+		"https://Ünicode.Example.com/Ü",
+		"https://ghe.acme.com",
+		"https://ghe.acme.com/GitHub",
+		"GHE.Acme.com/Path",
+	}
+	for _, in := range inputs {
+		t.Run(in, func(t *testing.T) {
+			database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+			seedProviderScopesOrg(t, database)
+			org := runmode.LocalDefaultOrgID
+			setOrgBaseURL(t, database, org, "github", in)
+			setOrgBaseURL(t, database, org, "jira", in)
+			mustExec(t, database, `INSERT INTO entities (id, source, source_id, kind, url) VALUES
+				('e-github', 'github', 'octo/api#1', 'pr', NULL), ('e-jira', 'jira', 'KEY-1', 'issue', ?)`, in+"/browse/KEY-1")
+			mustExec(t, database, `INSERT INTO repositories (id, owner, repo, source) VALUES ('r1', 'octo', 'api', 'github')`)
+			mustExec(t, database, `INSERT INTO team_github_groups (team_id, github_org_login, github_team_slug) VALUES ('team-1', 'octo', 'core')`)
+			mustExec(t, database, `INSERT INTO user_github_identities (user_id, github_base_url, login, source) VALUES ('u1', ?, 'octocat', 'pat')`, in)
+			mustExec(t, database, `INSERT INTO user_jira_identities (user_id, jira_base_url, account_id, source) VALUES ('u1', ?, 'acct', 'pat')`, in)
+			mustExec(t, database, `INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_login, github_host)
+				VALUES ('42', ?, 'Organization', 'octo', ?)`, org, in)
+			mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo) VALUES
+				(?, 'pat', NULL, ?, 'octo', 'api'), (?, 'byo_app', '42', NULL, 'octo', 'app')`, org, in, org)
+			mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'pat', ?), (?, 'byo_app', '42')`, org, in, org)
+			mustExec(t, database, `INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key)
+				VALUES ('a1', 'team-1', 'github', 'pull_request', 'octo/api#1', 'open', 'k')`)
+			mustExec(t, database, `INSERT INTO placement_overrides (key_kind, key_value) VALUES ('repo', 'octo/api')`)
+
+			migrateProviderScopes(t, database)
+
+			want := ghbase.CanonicalBaseURL(in)
+			for _, query := range columns {
+				if got := queryString(t, database, query); got != want {
+					t.Errorf("%s = %q after migrate, ghbase.CanonicalBaseURL = %q", query, got, want)
+				}
+			}
+
+			// The keys every read derives from the migrated setting land on
+			// the rewritten rows.
+			if got := EffectiveGitHubHost(want); got != want {
+				t.Errorf("EffectiveGitHubHost(migrated setting) = %q, want the stored host %q", got, want)
+			}
+			if got := NormalizeJiraHost(want); got != want {
+				t.Errorf("NormalizeJiraHost(migrated setting) = %q, want the stored site %q", got, want)
+			}
+			if got := domain.EntityScope("github", domain.OrgSettings{GitHubBaseURL: in}); got != want {
+				t.Errorf("domain.EntityScope(github, %q) = %q, want the migrated scope %q", in, got, want)
+			}
+			if site, ok := domain.JiraHost(in); ok && site != want {
+				t.Errorf("domain.JiraHost(%q) = %q, want the migrated scope %q", in, site, want)
+			}
+		})
+	}
+}
+
+// TestMigrate_ProviderScopesSettleCollisions stores rows that become one key
+// once their host is lowercased. The migration must not fail on any of them,
+// and each table settles the way its rule says: identities keep the most
+// recently updated row (a tie keeps the canonical one), the reachable-repo
+// cache keeps one row per key, and of two orgs' live installations of one id
+// that become one host, one keeps its old spelling, with its reach rows on
+// the same spelling.
+func TestMigrate_ProviderScopesSettleCollisions(t *testing.T) {
+	const (
+		current = "https://GHE.acme.com" // the org's setting
+		other   = "https://Ghe.Acme.com" // another spelling of the same host
+		canon   = "https://ghe.acme.com"
+		orgB    = "org-b"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	org := runmode.LocalDefaultOrgID
+	setOrgBaseURL(t, database, org, "github", current+"/")
+	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'b', 'B')`, orgB)
+	mustExec(t, database, `INSERT INTO users (id) VALUES ('u2')`)
+
+	// Identities: u1's newer row is non-canonical, u2's two rows tie.
+	mustExec(t, database, `INSERT INTO user_github_identities (user_id, github_base_url, login, source, updated_at) VALUES
+		('u1', ?, 'old-login', 'pat', '2026-01-01 00:00:00.000'),
+		('u1', ?, 'new-login', 'pat', '2026-02-01 00:00:00.000'),
+		('u2', ?, 'canonical-login', 'pat', '2026-01-01 00:00:00.000'),
+		('u2', ?, 'other-login', 'pat', '2026-01-01 00:00:00.000')`, canon, current, canon, other)
+	mustExec(t, database, `INSERT INTO user_jira_identities (user_id, jira_base_url, account_id, source, updated_at) VALUES
+		('u1', 'https://Jira.acme.com', 'old-account', 'pat', '2026-01-01 00:00:00.000'),
+		('u1', 'https://jira.acme.com', 'new-account', 'pat', '2026-02-01 00:00:00.000')`)
+
+	// The reachable-repo cache's PAT tier.
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, host, owner, repo, observed_at) VALUES
+		(?, 'pat', ?, 'octo', 'api', '2026-01-01 00:00:00.000'),
+		(?, 'pat', ?, 'Octo', 'API', '2026-02-01 00:00:00.000')`, org, canon, org, current)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope, refreshed_at) VALUES
+		(?, 'pat', ?, '2026-01-01 00:00:00.000'), (?, 'pat', ?, '2026-02-01 00:00:00.000')`, org, other, org, current)
+
+	// Two orgs' live installations of one id, on two spellings of one host.
+	mustExec(t, database, `INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_login, github_host) VALUES
+		('42', ?, 'Organization', 'acme', ?), ('42', ?, 'Organization', 'acme', ?)`, org, current, orgB, other)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo) VALUES
+		(?, 'byo_app', '42', 'acme', 'api'), (?, 'byo_app', '42', 'acme', 'web')`, org, orgB)
+
+	migrateProviderScopes(t, database)
+
+	if got := queryString(t, database, `SELECT base_url FROM org_event_sources WHERE kind = 'github'`); got != canon {
+		t.Errorf("github base_url = %q, want %q", got, canon)
+	}
+
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM user_github_identities WHERE user_id = 'u1'`); n != 1 {
+		t.Errorf("u1 github identities = %d, want 1", n)
+	}
+	if got := queryString(t, database, `SELECT login FROM user_github_identities WHERE user_id = 'u1' AND github_base_url = ?`, canon); got != "new-login" {
+		t.Errorf("u1 kept login %q, want the most recently updated row's new-login", got)
+	}
+	if got := queryString(t, database, `SELECT login FROM user_github_identities WHERE user_id = 'u2' AND github_base_url = ?`, canon); got != "canonical-login" {
+		t.Errorf("u2 kept login %q on a tie, want the canonical row's canonical-login", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM user_github_identities WHERE user_id = 'u2'`); n != 1 {
+		t.Errorf("u2 github identities = %d, want 1", n)
+	}
+	if got := queryString(t, database, `SELECT account_id FROM user_jira_identities WHERE user_id = 'u1' AND jira_base_url = 'https://jira.acme.com'`); got != "new-account" {
+		t.Errorf("u1 kept jira account %q, want new-account", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM user_jira_identities`); n != 1 {
+		t.Errorf("jira identities = %d, want 1", n)
+	}
+
+	if got := queryString(t, database, `SELECT owner FROM reachable_repositories WHERE credential_class = 'pat' AND host = ?`, canon); got != "Octo" {
+		t.Errorf("reachable row kept owner %q, want the most recently observed row's Octo", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_repositories WHERE credential_class = 'pat'`); n != 1 {
+		t.Errorf("PAT reachable rows = %d, want 1", n)
+	}
+	if got := queryString(t, database, `SELECT strftime('%Y-%m-%d', refreshed_at) FROM reachable_scopes WHERE credential_class = 'pat' AND scope = ?`, canon); got != "2026-02-01" {
+		t.Errorf("reachable scope kept refreshed_at %q, want the most recent", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM reachable_scopes`); n != 1 {
+		t.Errorf("reachable scopes = %d, want 1", n)
+	}
+
+	hosts := map[string]string{}
+	for _, o := range []string{org, orgB} {
+		host := queryString(t, database, `SELECT github_host FROM org_github_app_installations WHERE org_id = ?`, o)
+		hosts[host] = o
+		if reach := queryString(t, database, `SELECT host FROM reachable_repositories WHERE org_id = ? AND credential_class = 'byo_app'`, o); reach != host {
+			t.Errorf("org %s App reach row host = %q, want its installation's %q", o, reach, host)
+		}
+	}
+	if _, ok := hosts[canon]; !ok || len(hosts) != 2 {
+		t.Errorf("installation hosts = %v, want one on %q and the other on its old spelling", hosts, canon)
+	}
+
+	assertNoDanglingReferences(t, database)
+}
+
+// TestMigrate_EntityScopeKeepsEveryReference rebuilds the entities table under
+// rows that point at it, with foreign keys on. A rebuild that let the drop
+// cascade would delete every task, event and memory row with the old table.
+func TestMigrate_EntityScopeKeepsEveryReference(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `INSERT OR IGNORE INTO events_catalog (id, source, category, label, description) VALUES ('github:pr:opened', 'github', 'pr', 'Opened', '')`)
+	mustExec(t, database, `
+		INSERT INTO entities (id, source, source_id, kind, title, state, closed_at)
+		VALUES ('e1', 'github', 'octo/api#1', 'pr', 't', 'active', NULL),
+		       ('e2', 'github', 'octo/api#2', 'pr', 't', 'closed', CURRENT_TIMESTAMP)`)
+	mustExec(t, database, `INSERT INTO events (id, entity_id, event_type, dedup_key) VALUES ('ev1', 'e1', 'github:pr:opened', '')`)
+	mustExec(t, database, `
+		INSERT INTO tasks (id, entity_id, event_type, primary_event_id, status)
+		VALUES ('t1', 'e1', 'github:pr:opened', 'ev1', 'queued')`)
+
+	migrateProviderScopes(t, database)
+
+	for table, want := range map[string]int{"entities": 2, "events": 1, "tasks": 1} {
+		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table); n != want {
+			t.Errorf("%s rows = %d after the rebuild, want %d", table, n, want)
+		}
+	}
+	var state, extID sql.NullString
+	if err := database.QueryRow(`SELECT state, external_id FROM entities WHERE id = 'e2'`).Scan(&state, &extID); err != nil {
+		t.Fatalf("read e2: %v", err)
+	}
+	if state.String != "closed" || extID.Valid {
+		t.Errorf("e2 = state %q external_id %v, want closed with no id learned", state.String, extID)
+	}
+	assertNoDanglingReferences(t, database)
+
+	// The key is unique among active rows only: a closed row's key is free.
+	if _, err := database.Exec(`
+		INSERT INTO entities (id, source, scope, source_id, kind, state)
+		VALUES ('e3', 'github', 'https://github.com', 'octo/api#2', 'pr', 'active')
+	`); err != nil {
+		t.Errorf("a new active row under a closed row's key was refused: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO entities (id, source, scope, source_id, kind, state)
+		VALUES ('e4', 'github', 'https://github.com', 'octo/api#1', 'pr', 'active')
+	`); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("a second active row under one key: err=%v, want a UNIQUE violation", err)
+	}
+}
+
+// TestMigrate_GitHubHostKeepsReferencesAndSettlesDuplicateIDs migrates a
+// registry that two rows share one provider id in — nothing enforced the id's
+// uniqueness before — under the rows that reference it. The id stays on the
+// most recently updated row, every reference survives, and the new indexes
+// separate hosts.
+func TestMigrate_GitHubHostKeepsReferencesAndSettlesDuplicateIDs(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `
+		INSERT INTO repositories (id, owner, repo, source, external_id, updated_at)
+		VALUES ('r-old', 'octo', 'api', 'github', '7', '2026-01-01 00:00:00'),
+		       ('r-new', 'octo', 'platform', 'github', '7', '2026-02-01 00:00:00'),
+		       ('r-other', 'octo', 'web', 'github', '8', '2026-01-01 00:00:00')`)
+	mustExec(t, database, `
+		INSERT INTO team_github_repos (team_id, repository_id, org_id)
+		VALUES ('team-1', 'r-old', ?), ('team-1', 'r-other', ?)`, runmode.LocalDefaultOrgID, runmode.LocalDefaultOrgID)
+
+	migrateProviderScopes(t, database)
+
+	ids := map[string]sql.NullString{}
+	rows, err := database.Query(`SELECT id, external_id FROM repositories`)
+	if err != nil {
+		t.Fatalf("read repositories: %v", err)
+	}
+	for rows.Next() {
+		var id string
+		var ext sql.NullString
+		if err := rows.Scan(&id, &ext); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		ids[id] = ext
+	}
+	_ = rows.Close()
+	if ids["r-new"].String != "7" || ids["r-old"].Valid || ids["r-other"].String != "8" {
+		t.Errorf("external ids after migrate = %v, want the shared id only on the most recently updated row", ids)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM team_github_repos`); n != 2 {
+		t.Errorf("tracking rows = %d after migrate, want 2", n)
+	}
+	assertNoDanglingReferences(t, database)
+
+	// One name per host, and one id per host.
+	if _, err := database.Exec(`
+		INSERT INTO repositories (id, owner, repo, source, host, external_id)
+		VALUES ('r-ghe', 'OCTO', 'API', 'github', 'https://ghe.example.com', '7')
+	`); err != nil {
+		t.Errorf("the same name and id on another host was refused: %v", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO repositories (id, owner, repo, source, host)
+		VALUES ('r-dup', 'Octo', 'Api', 'github', 'https://github.com')
+	`); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("a second row under one name on one host: err=%v, want a UNIQUE violation", err)
+	}
+	if _, err := database.Exec(`
+		INSERT INTO repositories (id, owner, repo, source, host, external_id)
+		VALUES ('r-dup-id', 'octo', 'elsewhere', 'github', 'https://github.com', '8')
+	`); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("a second row under one id on one host: err=%v, want a UNIQUE violation", err)
+	}
+}
+
+// TestMigrate_ExternalObjectScopeKeysDedupWithinAScope pins the rebuilt keys:
+// every row survives the migration, a dedup key is unique only within a scope,
+// and a pin is keyed per host.
+func TestMigrate_ExternalObjectScopeKeysDedupWithinAScope(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	mustExec(t, database, `
+		INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key)
+		VALUES ('a1', 'team-1', 'github', 'pull_request', 'octo/api#1', 'open', 'github:pull_request:octo/api#1'),
+		       ('a2', 'team-1', 'git', 'branch', 'octo/api', 'pushed', 'git:branch:octo/api:refs/heads/x')`)
+	mustExec(t, database, `
+		INSERT INTO external_actions (id, provider, action, target, credential, dedup_key)
+		VALUES ('x1', 'github', 'branch_pushed', 'octo/api', 'github_app', 'branch:c:refs/heads/x:sha')`)
+	mustExec(t, database, `INSERT INTO placement_overrides (key_kind, key_value, pinned_instance_id) VALUES ('repo', 'octo/api', 'exec-1')`)
+
+	migrateProviderScopes(t, database)
+
+	for table, want := range map[string]int{"artifacts": 2, "external_actions": 1, "placement_overrides": 1} {
+		if n := queryInt(t, database, `SELECT COUNT(*) FROM `+table); n != want {
+			t.Errorf("%s rows = %d after the migration, want %d", table, n, want)
+		}
+	}
+	if got := queryString(t, database, `SELECT pinned_instance_id FROM placement_overrides WHERE key_value = 'octo/api'`); got != "exec-1" {
+		t.Errorf("pinned instance = %q after the rebuild, want exec-1", got)
+	}
+
+	for _, stmt := range []struct {
+		name, sql string
+		unique    bool
+	}{
+		{"an artifact under the same key in another scope", `
+			INSERT INTO artifacts (id, team_id, provider, scope, kind, target, state, dedup_key)
+			VALUES ('a3', 'team-1', 'github', 'https://ghe.example.com', 'pull_request', 'octo/api#1', 'open', 'github:pull_request:octo/api#1')`, false},
+		{"an artifact under the same key in the same scope", `
+			INSERT INTO artifacts (id, team_id, provider, scope, kind, target, state, dedup_key)
+			VALUES ('a4', 'team-1', 'github', 'https://github.com', 'pull_request', 'octo/api#1', 'open', 'github:pull_request:octo/api#1')`, true},
+		{"an action under the same key in another scope", `
+			INSERT INTO external_actions (id, provider, scope, action, target, credential, dedup_key)
+			VALUES ('x2', 'github', 'https://ghe.example.com', 'branch_pushed', 'octo/api', 'github_app', 'branch:c:refs/heads/x:sha')`, false},
+		{"an action under the same key in the same scope", `
+			INSERT INTO external_actions (id, provider, scope, action, target, credential, dedup_key)
+			VALUES ('x3', 'github', 'https://github.com', 'branch_pushed', 'octo/api', 'github_app', 'branch:c:refs/heads/x:sha')`, true},
+		{"a pin on the same repository on another host", `
+			INSERT INTO placement_overrides (key_kind, host, key_value, replicas) VALUES ('repo', 'https://ghe.example.com', 'octo/api', 3)`, false},
+		{"a second pin on the same repository and host", `
+			INSERT INTO placement_overrides (key_kind, host, key_value, replicas) VALUES ('repo', 'https://github.com', 'octo/api', 3)`, true},
+	} {
+		_, err := database.Exec(stmt.sql)
+		switch {
+		case stmt.unique && (err == nil || !strings.Contains(err.Error(), "UNIQUE")):
+			t.Errorf("%s: err = %v, want a UNIQUE violation", stmt.name, err)
+		case !stmt.unique && err != nil:
+			t.Errorf("%s was refused: %v", stmt.name, err)
+		}
+	}
+}
+
+// TestMigrate_InstallationsKeyedByHost covers the installation keys. The
+// fixture is written under the old ones: one install of a login per org across
+// every GitHub, one installation per id in the org, App reach rows and markers
+// that name no host, and an App marker whose installation no longer exists.
+// Afterwards a login and an id are each unique per host, every row carries
+// its installation's host, the orphan marker is gone, and the foreign key
+// holds a reach row to the installation on its own host.
+func TestMigrate_InstallationsKeyedByHost(t *testing.T) {
+	const (
+		org  = runmode.LocalDefaultOrgID
+		ghes = "https://ghe.example.com"
+		dot  = "https://github.com"
+	)
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	install := func(installationID, login, host string) error {
+		_, err := database.Exec(`
+			INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_login, github_host)
+			VALUES (?, ?, 'Organization', ?, ?)
+		`, installationID, org, login, host)
+		return err
+	}
+	mustExec(t, database, `INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_login, github_host, repository_selection)
+	         VALUES ('3', ?, 'Organization', 'acme', ?, 'selected')`, org, ghes)
+	if err := install("2", "acme", dot); err == nil {
+		t.Fatal("the same login on a second host was admitted before the migration; the fixture must start on the old key")
+	}
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, owner, repo)
+	         VALUES (?, 'byo_app', '3', 'acme', 'api')`, org)
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, host, owner, repo)
+	         VALUES (?, 'pat', ?, 'acme', 'personal')`, org, dot)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'byo_app', '3')`, org)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'byo_app', '9')`, org)
+	mustExec(t, database, `INSERT INTO reachable_scopes (org_id, credential_class, scope) VALUES (?, 'pat', ?)`, org, dot)
+
+	migrateProviderScopes(t, database)
+
+	if got := queryString(t, database, `SELECT repository_selection FROM org_github_app_installations
+	                                     WHERE org_id = ? AND github_host = ? AND installation_id = '3'`, org, ghes); got != "selected" {
+		t.Errorf("repository_selection = %q after the copy; want selected", got)
+	}
+
+	hosts := func(t *testing.T, query string) map[string]string {
+		t.Helper()
+		rows, err := database.Query(query, org)
+		if err != nil {
+			t.Fatalf("%s: %v", query, err)
+		}
+		defer rows.Close()
+		out := map[string]string{}
+		for rows.Next() {
+			var key, host string
+			if err := rows.Scan(&key, &host); err != nil {
+				t.Fatalf("scan: %v", err)
+			}
+			out[key] = host
+		}
+		return out
+	}
+	reach := hosts(t, `SELECT credential_class || ':' || repo, host FROM reachable_repositories WHERE org_id = ?`)
+	if len(reach) != 2 || reach["byo_app:api"] != ghes || reach["pat:personal"] != dot {
+		t.Errorf("reach rows = %v; want the App row on its installation's %s and the PAT row on %s", reach, ghes, dot)
+	}
+	scopes := hosts(t, `SELECT credential_class || ':' || scope, host FROM reachable_scopes WHERE org_id = ?`)
+	if len(scopes) != 2 || scopes["byo_app:3"] != ghes || scopes["pat:"+dot] != dot {
+		t.Errorf("scope markers = %v; want 3 on %s and the PAT marker on %s, and none for the missing installation 9", scopes, ghes, dot)
+	}
+
+	// A login is unique per host.
+	if err := install("2", "acme", dot); err != nil {
+		t.Errorf("the same login on a second host after the migration: %v", err)
+	}
+	if err := install("4", "acme", dot); err == nil || !strings.Contains(err.Error(), "UNIQUE") {
+		t.Errorf("the same login twice on one host after the migration: err=%v, want a UNIQUE violation", err)
+	}
+
+	// The same id on another host is another installation, with reach of its
+	// own on that host.
+	if err := install("3", "globex", dot); err != nil {
+		t.Fatalf("the same id on another host: %v", err)
+	}
+	mustExec(t, database, `INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo)
+	         VALUES (?, 'byo_app', '3', ?, 'globex', 'web')`, org, dot)
+	if _, err := database.Exec(`INSERT INTO reachable_repositories (org_id, credential_class, installation_id, host, owner, repo)
+	                            VALUES (?, 'byo_app', '3', 'https://elsewhere.example.com', 'acme', 'ghost')`, org); err == nil {
+		t.Error("an App reach row landed on a host where its installation does not exist; the foreign key must refuse it")
+	}
+	if _, err := database.Exec(`INSERT INTO org_github_app_installations (installation_id, org_id, account_type, account_login)
+	                            VALUES ('5', ?, 'Organization', 'initech')`, org); err == nil {
+		t.Error("an installation with no host landed; the column has no default to stand in for one")
+	}
+
+	// Deleting one host's installation takes its reach and nothing else.
+	mustExec(t, database, `DELETE FROM org_github_app_installations WHERE org_id = ? AND github_host = ? AND installation_id = '3'`, org, ghes)
+	reach = hosts(t, `SELECT credential_class || ':' || repo, host FROM reachable_repositories WHERE org_id = ?`)
+	if len(reach) != 2 || reach["byo_app:web"] != dot || reach["pat:personal"] != dot {
+		t.Errorf("reach rows after deleting the GHES installation = %v; want the github.com App row and the PAT row", reach)
+	}
+}
+
+// The migration takes 'completed' out of conversations.status. A verdict parks
+// the row `open`, and completed_at is what makes an `open` row concluded, so
+// the stamp has to survive the rewrite — and a row the old terminal write left
+// without one has to gain one, or it lands unsettled: live to the router and
+// claimable on undelivered input.
+//
+// Staged by migrating UP TO the previous version and writing rows the way the
+// old build did, for the same reason as TestMigrate_RetiresDeadConversationStatuses.
+func TestMigrate_ConversationVerdictParksOpen(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+
+	seedCompletedConversation(t, database, "stamped", "2026-01-02 03:04:05", nil, "user_cancelled")
+	seedCompletedConversation(t, database, "unstamped-ended", nil, "2026-01-03 00:00:00", nil)
+	seedCompletedConversation(t, database, "unstamped", nil, nil, nil)
+
+	if err := Migrate(database, "sqlite3"); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	read := func(id string) (status, outcome string, completedAt, parkReason sql.NullString) {
+		t.Helper()
+		if err := database.QueryRow(
+			`SELECT status, outcome, completed_at, park_reason FROM conversations WHERE id = ?`, id,
+		).Scan(&status, &outcome, &completedAt, &parkReason); err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		return status, outcome, completedAt, parkReason
+	}
+
+	status, outcome, completedAt, parkReason := read("stamped")
+	if status != "open" || outcome != "finish" {
+		t.Errorf("stamped row = (%q, %q), want (open, finish) — the verdict stays on the row", status, outcome)
+	}
+	if completedAt.String != "2026-01-02T03:04:05Z" {
+		t.Errorf("completed_at = %v, want the terminal write's stamp kept", completedAt)
+	}
+	if parkReason.Valid {
+		t.Errorf("park_reason = %q, want cleared — a verdict records no reason", parkReason.String)
+	}
+
+	if _, _, completedAt, _ := read("unstamped-ended"); completedAt.String != "2026-01-03T00:00:00Z" {
+		t.Errorf("unstamped ended row completed_at = %v, want its ended_at", completedAt)
+	}
+	if _, _, completedAt, _ := read("unstamped"); completedAt.String != "2026-01-01T00:00:00Z" {
+		t.Errorf("unstamped row completed_at = %v, want its started_at", completedAt)
+	}
+
+	if n := queryInt(t, database,
+		`SELECT COUNT(*) FROM conversations WHERE status = 'completed' OR (status = 'open' AND completed_at IS NULL AND outcome IS NOT NULL)`,
+	); n != 0 {
+		t.Errorf("%d conversations still read completed, or carry a verdict without a conclusion stamp", n)
+	}
+}
+
+// Among the artifact rows written before the migration, a GitHub comment row
+// with no target was left by an edit or a delete of a comment TF had not
+// posted, and is deleted, so a comment row existing means TF posted the
+// comment. The rows the posting verbs wrote stay, and so does every targetless
+// row of another provider or kind.
+func TestMigrate_ArtifactCommentIdentityKeepsOnlyCommentsTFPosted(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+
+	rows := []struct {
+		id, provider, kind, target, state string
+		kept                              bool
+	}{
+		{"gh-posted", "github", "comment", "octo/api#3", "posted", true},
+		{"gh-posted-then-deleted", "github", "comment", "octo/api#3", "deleted", true},
+		{"gh-edited", "github", "comment", "", "posted", false},
+		{"gh-deleted", "github", "comment", "", "deleted", false},
+		{"jira-posted", "jira", "comment", "ENG-1", "posted", true},
+		{"linear-posted", "linear", "comment", "ENG-2", "posted", true},
+		{"pr", "github", "pull_request", "octo/api#3", "open", true},
+		{"jira-targetless", "jira", "comment", "", "posted", true},
+		{"gh-targetless-branch", "github", "branch", "", "pushed", true},
+	}
+	for _, r := range rows {
+		mustExec(t, database, `
+			INSERT INTO artifacts (id, team_id, provider, kind, target, state, dedup_key)
+			VALUES (?, 'team-1', ?, ?, ?, ?, ?)
+		`, r.id, r.provider, r.kind, r.target, r.state, "key-"+r.id)
+	}
+
+	migrateProviderScopes(t, database)
+
+	for _, r := range rows {
+		var nodeID *string
+		err := database.QueryRow(`SELECT node_id FROM artifacts WHERE id = ?`, r.id).Scan(&nodeID)
+		switch {
+		case !r.kept && err == nil:
+			t.Errorf("%s survived the migration, want it deleted", r.id)
+		case r.kept && err != nil:
+			t.Errorf("read %s: %v, want it kept", r.id, err)
+		case r.kept && nodeID != nil:
+			t.Errorf("%s node_id = %q, want NULL", r.id, *nodeID)
+		}
+	}
+}
+
+// The migration runs outside goose's transaction, because its rebuilds need
+// foreign keys off, and opens one of its own. A statement failing part way
+// must commit nothing — the connection closing at the failed boot rolls the
+// transaction back — so the next boot can run the whole file again. The
+// failure is forced on a statement in the middle, after the Linear tables, the
+// conversation rewrite and the settings rewrite have run inside it.
+func TestMigrate_ProviderScopesFailureCommitsNothing(t *testing.T) {
+	database := openMigrationsTestDBAt(t, TestDSNMemory, beforeProviderScopes)
+	seedProviderScopesOrg(t, database)
+	setOrgBaseURL(t, database, runmode.LocalDefaultOrgID, "github", "HTTPS://GHE.Example.com/")
+	seedCompletedConversation(t, database, "c1", "2026-01-02 03:04:05", nil, nil)
+	mustExec(t, database, `CREATE TABLE entities_new (id TEXT)`)
+
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
+	}
+	gooseMu.Lock()
+	goose.SetBaseFS(treeFS)
+	upErr := goose.SetDialect("sqlite3")
+	if upErr == nil {
+		upErr = goose.UpTo(database, dir, providerScopesVersion)
+	}
+	gooseMu.Unlock()
+	if upErr == nil || !strings.Contains(upErr.Error(), "entities_new") {
+		t.Fatalf("goose.UpTo = %v, want the forced failure on entities_new", upErr)
+	}
+
+	// What closing the connection does.
+	if _, err := database.Exec(`ROLLBACK`); err != nil {
+		t.Fatalf("ROLLBACK: %v — the failure left no transaction open, so the statements before it committed", err)
+	}
+	if got := queryString(t, database, `SELECT status FROM conversations WHERE id = 'c1'`); got != "completed" {
+		t.Errorf("conversation status = %q after the failed migration, want completed", got)
+	}
+	if got := queryString(t, database, `SELECT base_url FROM org_event_sources WHERE kind = 'github'`); got != "HTTPS://GHE.Example.com/" {
+		t.Errorf("github base_url = %q after the failed migration, want it unchanged", got)
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM sqlite_master WHERE name = 'user_linear_identities'`); n != 0 {
+		t.Error("user_linear_identities exists after the failed migration")
+	}
+	if n := queryInt(t, database, `SELECT COUNT(*) FROM goose_db_version WHERE version_id = ?`, providerScopesVersion); n != 0 {
+		t.Error("the failed migration was recorded as applied")
+	}
+
+	mustExec(t, database, `DROP TABLE entities_new`)
+	migrateProviderScopes(t, database)
+	if got := queryString(t, database, `SELECT status FROM conversations WHERE id = 'c1'`); got != "open" {
+		t.Errorf("conversation status = %q after the retry, want open", got)
+	}
+	if n := queryInt(t, database, `PRAGMA foreign_keys`); n != 1 {
+		t.Error("foreign keys are off after the migration")
+	}
+}
+
+// seedProviderScopesOrg stages the local org, one team and one user; a migrated
+// database carries none of them until boot seeds them.
+func seedProviderScopesOrg(t *testing.T, database *sql.DB) {
+	t.Helper()
+	mustExec(t, database, `INSERT INTO orgs (id, slug, name) VALUES (?, 'local', 'Local')`, runmode.LocalDefaultOrgID)
+	mustExec(t, database, `INSERT INTO teams (id, org_id, slug, name) VALUES ('team-1', ?, 'core', 'Core')`, runmode.LocalDefaultOrgID)
+	mustExec(t, database, `INSERT INTO users (id) VALUES ('u1')`)
+}
+
+func setOrgBaseURL(t *testing.T, database *sql.DB, orgID, kind, base string) {
+	t.Helper()
+	mustExec(t, database, `INSERT INTO org_event_sources (org_id, kind, base_url) VALUES (?, ?, ?)
+		ON CONFLICT (org_id, kind) DO UPDATE SET base_url = excluded.base_url`, orgID, kind, base)
+}
+
+// seedCompletedConversation writes a conversation the way a terminal write of
+// the old build left it.
+func seedCompletedConversation(t *testing.T, database *sql.DB, id string, completedAt, endedAt, parkReason any) {
+	t.Helper()
+	mustExec(t, database, `
+		INSERT INTO conversations (id, type, origin, trigger_type, creator_user_id, visibility, team_id,
+		                           status, outcome, completed_at, ended_at, ended_reason, park_reason, started_at)
+		VALUES (?, 'delegation', 'interactive', 'event', NULL, 'team',
+		        '00000000-0000-0000-0000-000000000010', 'completed', 'finish',
+		        ?, ?, CASE WHEN ? IS NULL THEN NULL ELSE 'requeued' END, ?, '2026-01-01 00:00:00')
+	`, id, completedAt, endedAt, endedAt, parkReason)
+}
+
+func migrateProviderScopes(t *testing.T, database *sql.DB) {
+	t.Helper()
+	treeFS, dir, err := migrationsFor("sqlite3")
+	if err != nil {
+		t.Fatalf("migrationsFor: %v", err)
+	}
+	gooseMu.Lock()
+	goose.SetBaseFS(treeFS)
+	upErr := goose.SetDialect("sqlite3")
+	if upErr == nil {
+		upErr = goose.UpTo(database, dir, providerScopesVersion)
+	}
+	gooseMu.Unlock()
+	if upErr != nil {
+		t.Fatalf("goose.UpTo provider scopes: %v", upErr)
+	}
+}
+
+// migratedGitHubBase is the GitHub URL an org's migrated rows are keyed
+// under: its own, or, with none set, github.com — the GitHub such an org was
+// on, and the URL boot gives it when it uses GitHub
+// (integrations.AdoptSavedGitHubHost). Go resolves no host for an empty
+// setting, so the migration and the adoption are what agree on this one.
+func migratedGitHubBase(base string) string {
+	if ghbase.CanonicalBaseURL(base) == "" {
+		return ghbase.GitHubCom
+	}
+	return base
+}
+
+func assertNoDanglingReferences(t *testing.T, database *sql.DB) {
+	t.Helper()
+	rows, err := database.Query(`PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatalf("foreign_key_check: %v", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Error("foreign_key_check reports a dangling reference after the migration")
+	}
+}
+
+func mustExec(t *testing.T, database *sql.DB, query string, args ...any) {
+	t.Helper()
+	if _, err := database.Exec(query, args...); err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
+}
+
+func queryString(t *testing.T, database *sql.DB, query string, args ...any) string {
+	t.Helper()
+	var s string
+	if err := database.QueryRow(query, args...).Scan(&s); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return s
+}
+
+func queryInt(t *testing.T, database *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := database.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
+	}
+	return n
+}
+
+func ptr(s string) *string { return &s }
