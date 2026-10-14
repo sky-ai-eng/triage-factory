@@ -37,12 +37,12 @@ func TestRecordExternalWrite_FailedArtifactKeepsTheLedgerRow(t *testing.T) {
 
 			a := &domain.Artifact{
 				Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindComment,
-				ExternalID: "7", State: domain.ArtifactStateCommentDeleted,
+				Target: "octo/repo#1", ExternalID: "7", State: domain.ArtifactStateCommentPosted,
 				DedupKey: domain.GitHubCommentDedupKey(domain.GitHubIssueComment, 7),
 			}
 			act := &domain.ExternalAction{
-				Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentDeleted,
-				Target: "octo/repo", ExternalID: "7", Credential: domain.CredentialGitHubApp,
+				Provider: domain.ArtifactProviderGitHub, Action: domain.ActionCommentPosted,
+				Target: "octo/repo#1", ExternalID: "7", Credential: domain.CredentialGitHubApp,
 			}
 			RecordExternalWrite(context.Background(), stores, info, a, act)
 
@@ -50,8 +50,8 @@ func TestRecordExternalWrite_FailedArtifactKeepsTheLedgerRow(t *testing.T) {
 				t.Errorf("artifacts = %+v, want none: the write was refused", arts)
 			}
 			acts := listExternalActions(t, stores)
-			if len(acts) != 1 || acts[0].Action != domain.ActionCommentDeleted || acts[0].ConversationID != info.ConversationID {
-				t.Errorf("ledger rows = %+v, want the one comment_deleted row despite the refused artifact", acts)
+			if len(acts) != 1 || acts[0].Action != domain.ActionCommentPosted || acts[0].ConversationID != info.ConversationID {
+				t.Errorf("ledger rows = %+v, want the one comment_posted row despite the refused artifact", acts)
 			}
 		})
 	}

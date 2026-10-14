@@ -60,7 +60,7 @@ func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 		owned, err := stores.Artifacts.UpsertSystem(ctx, orgID, domain.Artifact{
 			ConversationID: convA, TeamID: teamA, Provider: domain.ArtifactProviderGitHub,
 			Kind: domain.ArtifactKindComment, Scope: scope, Target: "octo/api#3", ExternalID: "7",
-			NodeID: "IC_kw7", PostedByTF: true, State: domain.ArtifactStateCommentPosted, DedupKey: key,
+			NodeID: "IC_kw7", State: domain.ArtifactStateCommentPosted, DedupKey: key,
 		})
 		if err != nil {
 			t.Fatalf("seed team A's comment: %v", err)
@@ -81,7 +81,7 @@ func TestRecordExternalWrite_Postgres_CrossTeamKeepsTheLedgerRow(t *testing.T) {
 		if err != nil || got == nil {
 			t.Fatalf("read team A's comment: %v, %v", got, err)
 		}
-		if got.ID != owned.ID || got.State != domain.ArtifactStateCommentPosted || got.TeamID != teamA || !got.PostedByTF {
+		if got.ID != owned.ID || got.State != domain.ArtifactStateCommentPosted || got.TeamID != teamA {
 			t.Errorf("team A's comment = %+v, want it left as team A recorded it", got)
 		}
 	})

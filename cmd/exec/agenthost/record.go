@@ -107,6 +107,26 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 	)
 }
 
+// deletesUnrecordedComment reports whether a retires a comment that has no
+// row. A comment row exists only for a comment TF posted, so a delete never
+// creates one: a delete of a person's comment, or of one whose post was never
+// recorded, is recorded by its audit row alone. A failed read is answered the
+// same way and counted, since a row the delete created would claim the comment
+// was TF's.
+func deletesUnrecordedComment(ctx context.Context, stores db.Stores, info ConversationInfo, a *domain.Artifact) bool {
+	if a == nil || a.Kind != domain.ArtifactKindComment || a.State != domain.ArtifactStateCommentDeleted {
+		return false
+	}
+	present, err := stores.Artifacts.PresentDedupKeysSystem(ctx, info.OrgID, a.Scope, []string{a.DedupKey})
+	if err != nil {
+		recordAuditDrop(ctx, dropStageRecord, recordDropOp(a, nil))
+		agenthostLog.Warn("reading a deleted comment's artifact failed; recording the action without it",
+			"conversation", info.ConversationID, "error", err)
+		return true
+	}
+	return !present[a.DedupKey]
+}
+
 // RecordExternalWrite is the shared recording funnel behind every exec
 // choke-point write: it stamps the run's identity and the org's current scope
 // for each provider (stampScopeInfo) onto a and act (if present),
@@ -122,7 +142,8 @@ func recordActionAlone(ctx context.Context, stores db.Stores, info ConversationI
 // external write) — mirrors the former upsertGithubArtifact/upsertJiraArtifact
 // with act == nil. The caller is responsible for setting a.Provider (and any
 // other polymorphic fields) before calling — this function only stamps the
-// run-identity fields common to every provider.
+// run-identity fields common to every provider. A comment's delete is written
+// only over the comment's existing row (deletesUnrecordedComment).
 //
 // Best-effort throughout: every write here already happened against the
 // external system (GitHub/Jira/Slack) before this is called, so a recording
@@ -171,6 +192,9 @@ func RecordExternalWrite(ctx context.Context, stores db.Stores, info Conversatio
 	// reported on its own.
 	lost := a
 	err := stampScopeInfo(ctx, stores, info.OrgID, a, act)
+	if err == nil && deletesUnrecordedComment(ctx, stores, info, a) {
+		a, lost = nil, nil
+	}
 	if err == nil {
 		var artifactErr error
 		err = withWriteInfo(ctx, stores, info,

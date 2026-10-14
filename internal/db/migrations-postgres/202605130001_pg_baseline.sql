@@ -940,9 +940,9 @@ CREATE TABLE public.repositories (
 -- workspace id; target and dedup_key are only unique inside it. team_id is
 -- denormalized from the conversation so reads scope by team; conversation_id is
 -- nullable so the row survives a purge. node_id is the object's GraphQL node
--- id, which a GitHub comment row carries so a GraphQL edit or delete naming the
--- comment by node id alone finds its row. posted_by_tf marks a comment TF
--- posted, as against one a run only edited or deleted.
+-- id, which a GitHub comment row carries so a GraphQL delete naming the comment
+-- by node id alone finds its row. A comment row exists only for a comment TF
+-- posted.
 CREATE TABLE public.artifacts (
     id uuid DEFAULT gen_random_uuid() NOT NULL,
     conversation_id uuid,
@@ -959,7 +959,6 @@ CREATE TABLE public.artifacts (
     dedup_key text NOT NULL,
     details_json text,
     node_id text,
-    posted_by_tf boolean DEFAULT false NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     updated_at timestamp with time zone DEFAULT now() NOT NULL
 );

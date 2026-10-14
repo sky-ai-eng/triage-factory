@@ -7,31 +7,34 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// The migration that adds node_id and posted_by_tf to artifacts
-// (202610130001). Among the rows written before it, posted_by_tf starts on for
-// the comment rows a posting verb wrote: every Jira and Linear comment, and a
-// GitHub comment the add verb stamped a target on. A GitHub comment with no
-// target was minted by an edit or a delete of someone else's comment, and
-// every other kind is no comment at all; both stay off.
-func TestMigrate_ArtifactCommentIdentityBackfillsPostedByTF(t *testing.T) {
+// The migration that adds node_id to artifacts (202610130001). Among the rows
+// written before it, a GitHub comment row with no target was left by an edit or
+// a delete of a comment TF had not posted, and is deleted, so a comment row
+// existing means TF posted the comment. The rows the posting verbs wrote stay,
+// and so does every targetless row of another provider or kind.
+func TestMigrate_ArtifactCommentIdentityKeepsOnlyCommentsTFPosted(t *testing.T) {
 	database := openMigrationsTestDBAt(t, TestDSNMemory, 202610110001)
 	seedGitHubHostOrg(t, database)
 
 	rows := []struct {
-		id, provider, kind, target string
-		want                       bool
+		id, provider, kind, target, state string
+		kept                              bool
 	}{
-		{"gh-posted", "github", "comment", "octo/api#3", true},
-		{"gh-edited", "github", "comment", "", false},
-		{"jira-posted", "jira", "comment", "ENG-1", true},
-		{"linear-posted", "linear", "comment", "ENG-2", true},
-		{"pr", "github", "pull_request", "octo/api#3", false},
+		{"gh-posted", "github", "comment", "octo/api#3", "posted", true},
+		{"gh-posted-then-deleted", "github", "comment", "octo/api#3", "deleted", true},
+		{"gh-edited", "github", "comment", "", "posted", false},
+		{"gh-deleted", "github", "comment", "", "deleted", false},
+		{"jira-posted", "jira", "comment", "ENG-1", "posted", true},
+		{"linear-posted", "linear", "comment", "ENG-2", "posted", true},
+		{"pr", "github", "pull_request", "octo/api#3", "open", true},
+		{"jira-targetless", "jira", "comment", "", "posted", true},
+		{"gh-targetless-branch", "github", "branch", "", "pushed", true},
 	}
 	for _, r := range rows {
 		if _, err := database.Exec(`
 			INSERT INTO artifacts (id, team_id, provider, scope, kind, target, state, dedup_key)
-			VALUES (?, 'team-1', ?, 'https://github.com', ?, ?, 'posted', ?)
-		`, r.id, r.provider, r.kind, r.target, "key-"+r.id); err != nil {
+			VALUES (?, 'team-1', ?, 'https://github.com', ?, ?, ?, ?)
+		`, r.id, r.provider, r.kind, r.target, r.state, "key-"+r.id); err != nil {
 			t.Fatalf("seed artifact %s: %v", r.id, err)
 		}
 	}
@@ -52,15 +55,14 @@ func TestMigrate_ArtifactCommentIdentityBackfillsPostedByTF(t *testing.T) {
 	}
 
 	for _, r := range rows {
-		var posted bool
 		var nodeID *string
-		if err := database.QueryRow(`SELECT posted_by_tf, node_id FROM artifacts WHERE id = ?`, r.id).Scan(&posted, &nodeID); err != nil {
-			t.Fatalf("read artifact %s: %v", r.id, err)
-		}
-		if posted != r.want {
-			t.Errorf("%s posted_by_tf = %v, want %v", r.id, posted, r.want)
-		}
-		if nodeID != nil {
+		err := database.QueryRow(`SELECT node_id FROM artifacts WHERE id = ?`, r.id).Scan(&nodeID)
+		switch {
+		case !r.kept && err == nil:
+			t.Errorf("%s survived the migration, want it deleted", r.id)
+		case r.kept && err != nil:
+			t.Errorf("read %s: %v, want it kept", r.id, err)
+		case r.kept && nodeID != nil:
 			t.Errorf("%s node_id = %q, want NULL", r.id, *nodeID)
 		}
 	}

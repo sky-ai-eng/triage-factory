@@ -12,7 +12,7 @@ import (
 
 // RecordGHChannelWrite records one write the real-`gh` channel forwarded: the
 // audit row every write leaves (GHChannelWriteAction) and, for a comment the
-// write posted, edited or deleted, that comment's `comment` artifact
+// write posted or deleted, that comment's `comment` artifact
 // (ghChannelCommentArtifact), composed in one write through the shared funnel.
 //
 // Exported because local mode records it without a LocalClient in hand (the
@@ -26,18 +26,21 @@ func RecordGHChannelWrite(ctx context.Context, stores db.Stores, info Conversati
 }
 
 // ghChannelCommentArtifact builds the `comment` artifact a comment write
-// through the channel leaves, or nil when the write is not an accepted post,
-// edit or delete of a comment, or names no comment a row can be keyed on.
+// through the channel leaves, or nil when the write is not an accepted post or
+// delete of a comment, or names no comment a row can be keyed on. An edit
+// leaves none: the row stores no body, so an edit has nothing on it to change,
+// and its audit row records it.
 //
 // The row is the one the exec verbs write for the same comment, keyed on the
 // comment's numbering and its number (domain.GitHubCommentDedupKey), so a
-// comment posted through one door and edited through the other is one row. A
-// create's number is in its response; an edit or a delete names it in its REST
-// path, or in a GraphQL response that selected it. A GraphQL edit or delete
-// whose response did not return the number — deleteIssueComment's never does —
-// names the comment by node id alone, so the row is found by the node id an
-// earlier write stored. A node id no row carries leaves no artifact: there is
-// no number to key a new row on, and the audit row still records the act.
+// comment posted through one door and deleted through the other is one row. A
+// create's number is in its response; a REST delete names it in its path. A
+// GraphQL delete names the comment by node id alone, and its response never
+// returns the number, so the row is found by the node id the post stored. A
+// node id no row carries leaves no artifact: TF did not post that comment, or
+// its post was never recorded, and the audit row still records the delete. A
+// delete keyed by number leaves none for a comment TF did not post either
+// (RecordExternalWrite).
 func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info ConversationInfo, obs ghwrite.Observation) *domain.Artifact {
 	if !obs.Succeeded() {
 		return nil
@@ -46,9 +49,14 @@ func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info Conver
 	if !ok || shape.Comment == "" {
 		return nil
 	}
-	state := domain.ArtifactStateCommentPosted
-	if shape.Action == domain.ActionCommentDeleted || shape.Action == domain.ActionReviewCommentDeleted {
+	var state string
+	switch shape.Action {
+	case domain.ActionCommentPosted:
+		state = domain.ArtifactStateCommentPosted
+	case domain.ActionCommentDeleted, domain.ActionReviewCommentDeleted:
 		state = domain.ArtifactStateCommentDeleted
+	default:
+		return nil
 	}
 	a := &domain.Artifact{
 		Provider: domain.ArtifactProviderGitHub,
@@ -56,12 +64,8 @@ func ghChannelCommentArtifact(ctx context.Context, stores db.Stores, info Conver
 		NodeID:   shape.NodeID,
 		URL:      obs.URL,
 		State:    state,
-		// Only a post says who wrote the comment. An edit or a delete reaches
-		// a person's comment as readily as TF's own, and the store keeps an
-		// earlier post's mark when a later write leaves it unset.
-		PostedByTF: shape.Action == domain.ActionCommentPosted,
 	}
-	// owner/repo#N only: a path that names the comment by its own id carries
+	// owner/repo#N only: a delete names the comment by its own id and carries
 	// no PR number, and a repo-level target would overwrite the post's.
 	if shape.Owner != "" && shape.Number > 0 {
 		a.Target = shape.Target()

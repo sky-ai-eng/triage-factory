@@ -2239,11 +2239,11 @@ func (c *LocalClient) GithubUpdateComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	// The edit keeps the comment posted. A pending review's draft comments are
-	// edited through the server's staging path and never reach here, so the
-	// comment is a published one: a conversation comment, or a review comment
-	// reached through the pulls/comments fallback.
-	c.recordGithubCommentState(ctx, owner, repo, edited, domain.ArtifactStateCommentPosted)
+	// A pending review's draft comments are edited through the server's
+	// staging path and never reach here, so the comment is a published one: a
+	// conversation comment, or a review comment reached through the
+	// pulls/comments fallback.
+	c.recordBotAction(ctx, githubCommentAction(owner, repo, edited, false, c.githubCredential()))
 	return nil
 }
 
@@ -2256,9 +2256,7 @@ func (c *LocalClient) GithubDeleteComment(ctx context.Context, owner, repo strin
 	if err != nil {
 		return err
 	}
-	// Retire the artifact in place: the row persists for the audit ledger,
-	// flipped to the deleted state rather than dropped.
-	c.recordGithubCommentState(ctx, owner, repo, deleted, domain.ArtifactStateCommentDeleted)
+	c.recordGithubCommentDelete(ctx, owner, repo, deleted)
 	return nil
 }
 
@@ -2280,9 +2278,9 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 
 // --- github artifact recording (TFAC-466) ---
 //
-// Record one durable `comment` artifact per GitHub comment the agent posts,
-// edits or deletes via `exec gh pr` — a conversation comment, or a review
-// comment posted on its own (a thread reply). Comments inside a review TF
+// Record one durable `comment` artifact per GitHub comment the agent posts via
+// `exec gh pr` — a conversation comment, or a review comment posted on its own
+// (a thread reply). Comments inside a review TF
 // submitted are the exception: they belong to that review's artifact. Like the
 // Jira recording above this lives on the LocalClient, the single seam the multi
 // daemon dispatches every host-routed call through, so it covers both the
@@ -2290,14 +2288,14 @@ func (c *LocalClient) GithubDownloadArtifact(ctx context.Context, owner, repo, p
 // best-effort and on-success-only — the comment already posted, so a store
 // failure is logged and swallowed, never able to fail the action.
 //
-// A comment's post, edits and delete all key on its space and number
-// (domain.GitHubCommentDedupKey), so they collapse onto one row, whether each
-// came through these verbs or the raw gh channel: the post stamps the full
-// coordinates (target owner/repo#N, the comment's number and node id, its
-// html_url) and marks the row posted by TF, an edit bumps it in place, a delete
-// retires it to the deleted state. An edit or a delete knows only the
-// comment's number, not its PR number, so it leaves the target empty and leans
-// on the store preserving it (see ArtifactStore.Upsert).
+// The row is keyed on the comment's space and number
+// (domain.GitHubCommentDedupKey), so a comment posted through these verbs and
+// deleted through the raw gh channel, or the reverse, is one row. The post
+// stamps the full coordinates (target owner/repo#N, the comment's number and
+// node id, its html_url). An edit records only its audit row: the row stores no
+// body, so an edit has nothing on it to change. A delete retires the row to the
+// deleted state, and leaves no row for a comment TF did not post
+// (RecordExternalWrite).
 
 // recordGithubComment upserts the `comment` artifact for a comment this run
 // just posted, with every coordinate the post knows. inReplyTo is the review
@@ -2312,7 +2310,6 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 		return
 	}
 	a.Target = fmt.Sprintf("%s/%s#%d", owner, repo, number)
-	a.PostedByTF = true
 	act := githubAction(*a, domain.ActionCommentPosted, "", "", c.githubCredential())
 	if inReplyTo > 0 {
 		detail, _ := json.Marshal(map[string]any{"in_reply_to": inReplyTo})
@@ -2322,36 +2319,39 @@ func (c *LocalClient) recordGithubComment(ctx context.Context, owner, repo strin
 	c.upsertGithubArtifact(ctx, *a, act)
 }
 
-// recordGithubCommentState upserts the comment artifact for an edit (state
-// posted) or a delete (state deleted) of the comment ref names. These paths
-// carry the comment's number but not its PR number, so they leave the target
-// empty; the store preserves whatever the post stamped. If the comment was
-// never recorded (the agent edits a person's comment), the upsert mints a row
-// keyed on the comment, which truthfully records that this run touched it and
-// does not claim TF posted it.
-func (c *LocalClient) recordGithubCommentState(ctx context.Context, owner, repo string, ref ghclient.CommentRef, state string) {
-	a := newGithubCommentArtifact(ref, state)
+// recordGithubCommentDelete retires the artifact of the comment ref names to
+// the deleted state, beside the delete's audit row. The delete carries the
+// comment's number but not its PR number, so it leaves the row's target for the
+// store to preserve.
+func (c *LocalClient) recordGithubCommentDelete(ctx context.Context, owner, repo string, ref ghclient.CommentRef) {
+	act := githubCommentAction(owner, repo, ref, true, c.githubCredential())
+	a := newGithubCommentArtifact(ref, domain.ArtifactStateCommentDeleted)
 	if a == nil {
-		agenthostLog.Debug("github comment state change without an id; skipping artifact",
-			"conversation", c.info.ConversationID, "state", state)
+		c.recordBotAction(ctx, act)
 		return
 	}
-	// The audit action follows the state and the comment's space: an edit
-	// re-stamps the row posted, a delete flips it deleted.
+	c.upsertGithubArtifact(ctx, *a, act)
+}
+
+// githubCommentAction is the audit row for an edit or a delete of the comment
+// ref names, against the repository, which is all these call sites know: a
+// comment_* action for a conversation comment, a review_comment_* one for a
+// review comment.
+func githubCommentAction(owner, repo string, ref ghclient.CommentRef, deleted bool, credential string) *domain.ExternalAction {
 	action := domain.ActionCommentEdited
 	switch {
-	case ref.Space == domain.GitHubReviewComment && state == domain.ArtifactStateCommentDeleted:
+	case ref.Space == domain.GitHubReviewComment && deleted:
 		action = domain.ActionReviewCommentDeleted
 	case ref.Space == domain.GitHubReviewComment:
 		action = domain.ActionReviewCommentEdited
-	case state == domain.ArtifactStateCommentDeleted:
+	case deleted:
 		action = domain.ActionCommentDeleted
 	}
-	act := githubAction(*a, action, "", "", c.githubCredential())
-	// The row's own target stays empty for the store to preserve; the audit
-	// row names the repository, which is all this call site knows.
-	act.Target = owner + "/" + repo
-	c.upsertGithubArtifact(ctx, *a, act)
+	a := domain.Artifact{Target: owner + "/" + repo, URL: ref.HTMLURL}
+	if ref.ID > 0 {
+		a.ExternalID = strconv.Itoa(ref.ID)
+	}
+	return githubAction(a, action, "", "", credential)
 }
 
 // newGithubCommentArtifact is the `comment` artifact one act on the comment ref

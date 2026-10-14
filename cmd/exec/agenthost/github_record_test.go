@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,8 +102,7 @@ func newGithubRecordingClientConn(t *testing.T, ghURL string, eventTriggered boo
 // TestLocalClient_GithubAddComment_RecordsArtifact pins a standalone comment
 // landing one `comment` artifact with the full coordinates the add path knows —
 // target owner/repo#N, the comment id and node id, its html_url, state posted,
-// marked posted by TF, deduped on github:comment:<id> — across both write
-// paths.
+// deduped on github:comment:<id> — across both write paths.
 func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 	for _, eventTriggered := range []bool{true, false} {
 		name := "manual"
@@ -129,7 +129,7 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 				a.Target != "octo/repo#1" || a.ExternalID != "777" ||
 				a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" ||
 				a.State != domain.ArtifactStateCommentPosted || a.DedupKey != "github:comment:777" ||
-				a.NodeID != "IC_kw777" || !a.PostedByTF {
+				a.NodeID != "IC_kw777" {
 				t.Errorf("comment artifact mismatch: %+v", a)
 			}
 			if a.ConversationID != info.ConversationID || a.TeamID != runmode.LocalDefaultTeamID {
@@ -140,10 +140,10 @@ func TestLocalClient_GithubAddComment_RecordsArtifact(t *testing.T) {
 }
 
 // TestLocalClient_GithubCommentLifecycle_DedupsAndRetires pins that add →
-// comment-update → comment-delete collapse onto one row keyed on the comment id:
-// update bumps it in place (still posted), delete retires it to the deleted
-// state — and neither the update nor the delete (which carry only the id, not
-// the PR number) blanks the target/url the add stamped.
+// comment-update → comment-delete stay on one row keyed on the comment id: the
+// update leaves it as it is (still posted), the delete retires it to the
+// deleted state — and the delete (which carries only the id, not the PR
+// number) does not blank the target/url the add stamped.
 func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	gh := startFakeGitHubComments(t)
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
@@ -159,7 +159,7 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 
 	arts := listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("update should upsert the same row, got %d artifacts: %+v", len(arts), arts)
+		t.Fatalf("update should leave the one row, got %d artifacts: %+v", len(arts), arts)
 	}
 	if arts[0].State != domain.ArtifactStateCommentPosted || arts[0].Target != "octo/repo#1" ||
 		arts[0].URL != "https://github.com/octo/repo/pull/1#issuecomment-777" {
@@ -177,22 +177,20 @@ func TestLocalClient_GithubCommentLifecycle_DedupsAndRetires(t *testing.T) {
 	if a.State != domain.ArtifactStateCommentDeleted || a.DedupKey != "github:comment:777" {
 		t.Errorf("delete did not retire in place: %+v", a)
 	}
-	// The id-only update/delete paths must inherit, not blank, the add's
-	// coordinates, and must not unsay that TF posted the comment.
+	// The id-only delete must inherit, not blank, the add's coordinates.
 	if a.Target != "octo/repo#1" || a.URL != "https://github.com/octo/repo/pull/1#issuecomment-777" || a.ExternalID != "777" ||
-		a.NodeID != "IC_kw777" || !a.PostedByTF {
+		a.NodeID != "IC_kw777" {
 		t.Errorf("retire blanked the add's stable coordinates: %+v", a)
 	}
 }
 
-// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow pins
-// comment-update / comment-delete on a review comment, which they reach by
-// falling back to the pulls/comments endpoint when the id isn't a conversation
-// comment. The edit and the delete land on one row keyed in the review
-// comments' numbering, carrying the node id the edit's response returned, and
-// the row does not claim TF posted the comment: these verbs edit a person's
-// comment as readily as TF's own.
-func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow(t *testing.T) {
+// TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow pins
+// comment-update / comment-delete on a review comment TF posted, which they
+// reach by falling back to the pulls/comments endpoint when the id isn't a
+// conversation comment. The reply's row, keyed in the review comments'
+// numbering, is left as it is by the edit and retired by the delete, with the
+// reply's coordinates kept.
+func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RetiresItsRow(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// The issues-comments endpoint 404s (id is not a top-level comment);
@@ -204,7 +202,7 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow(t *te
 			return
 		}
 		switch r.Method {
-		case http.MethodPatch:
+		case http.MethodPost, http.MethodPatch:
 			_, _ = io.WriteString(w, `{"id":999,"node_id":"PRRC_kw999","html_url":"https://github.com/octo/repo/pull/1#discussion_r999"}`)
 		case http.MethodDelete:
 			w.WriteHeader(http.StatusNoContent)
@@ -217,16 +215,20 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow(t *te
 	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
 	ctx := context.Background()
 
+	if _, err := client.GithubReplyToComment(ctx, "octo", "repo", 1, 555, "a thread reply"); err != nil {
+		t.Fatalf("GithubReplyToComment: %v", err)
+	}
+	posted := listConversationArtifacts(t, stores, info.ConversationID)
+	if len(posted) != 1 || posted[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 999) {
+		t.Fatalf("artifacts after the reply = %+v, want the reply's one row", posted)
+	}
+
 	if err := client.GithubUpdateComment(ctx, "octo", "repo", 999, "edit a review comment"); err != nil {
 		t.Fatalf("update via the review fallback must still succeed: %v", err)
 	}
 	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	if len(arts) != 1 {
-		t.Fatalf("want 1 artifact after the edit, got %d: %+v", len(arts), arts)
-	}
-	if a := arts[0]; a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 999) ||
-		a.State != domain.ArtifactStateCommentPosted || a.NodeID != "PRRC_kw999" || a.ExternalID != "999" || a.PostedByTF {
-		t.Errorf("review comment edit artifact = %+v, want the review comment's row, posted, with its node id, not posted by TF", a)
+	if len(arts) != 1 || arts[0].ID != posted[0].ID || arts[0].State != domain.ArtifactStateCommentPosted {
+		t.Errorf("artifacts after the edit = %+v, want the reply's row still posted", arts)
 	}
 
 	if err := client.GithubDeleteComment(ctx, "octo", "repo", 999); err != nil {
@@ -234,23 +236,25 @@ func TestLocalClient_GithubCommentUpdateDelete_ReviewComment_RecordsItsRow(t *te
 	}
 	arts = listConversationArtifacts(t, stores, info.ConversationID)
 	if len(arts) != 1 {
-		t.Fatalf("the delete should retire the edit's row, got %d artifacts: %+v", len(arts), arts)
+		t.Fatalf("the delete should retire the reply's row, got %d artifacts: %+v", len(arts), arts)
 	}
-	if a := arts[0]; a.State != domain.ArtifactStateCommentDeleted || a.NodeID != "PRRC_kw999" || a.PostedByTF {
-		t.Errorf("review comment after delete = %+v, want it deleted with its node id kept", a)
+	if a := arts[0]; a.ID != posted[0].ID || a.State != domain.ArtifactStateCommentDeleted ||
+		a.NodeID != "PRRC_kw999" || a.Target != "octo/repo#1" || a.DetailsJSON != `{"in_reply_to":555}` {
+		t.Errorf("review comment after delete = %+v, want the reply's row deleted with its coordinates kept", a)
 	}
-	posted, err := stores.Artifacts.PostedByTFDedupKeysSystem(ctx, info.OrgID, arts[0].Scope, []string{arts[0].DedupKey})
-	if err != nil {
-		t.Fatalf("PostedByTFDedupKeysSystem: %v", err)
+	actions := map[string]int{}
+	for _, a := range listExternalActions(t, stores) {
+		actions[a.Action]++
 	}
-	if len(posted) != 0 {
-		t.Errorf("posted-by-TF lookup = %v, want the person's comment the run edited left out", posted)
+	want := map[string]int{domain.ActionCommentPosted: 1, domain.ActionReviewCommentEdited: 1, domain.ActionReviewCommentDeleted: 1}
+	if !maps.Equal(actions, want) {
+		t.Errorf("audit actions = %v, want %v", actions, want)
 	}
 }
 
 // TestLocalClient_GithubReplyToComment_RecordsArtifact pins a thread reply's
-// own `comment` artifact: keyed in the review comments' numbering, posted by
-// TF, carrying the reply's node id, its discussion link, the PR-shaped target,
+// own `comment` artifact: keyed in the review comments' numbering, carrying
+// the reply's node id, its discussion link, the PR-shaped target,
 // and the comment it answers in its details.
 func TestLocalClient_GithubReplyToComment_RecordsArtifact(t *testing.T) {
 	gh := startFakeGitHubComments(t)
@@ -271,7 +275,7 @@ func TestLocalClient_GithubReplyToComment_RecordsArtifact(t *testing.T) {
 	if a.Kind != domain.ArtifactKindComment || a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) ||
 		a.Target != "octo/repo#1" || a.ExternalID != "777" || a.NodeID != "PRRC_kw777" ||
 		a.URL != gh.URL+"/octo/repo/pull/1#discussion_r777" || a.State != domain.ArtifactStateCommentPosted ||
-		!a.PostedByTF || a.DetailsJSON != `{"in_reply_to":555}` {
+		a.DetailsJSON != `{"in_reply_to":555}` {
 		t.Errorf("reply artifact = %+v", a)
 	}
 }
@@ -306,27 +310,40 @@ func TestLocalClient_GithubComments_SameNumberInBothSpacesAreTwoRows(t *testing.
 	}
 }
 
-// TestLocalClient_GithubUpdateComment_PersonsComment_NotPostedByTF pins that an
-// edit of a conversation comment TF never recorded mints a row that records the
-// edit and does not claim the comment, so the posted-by-TF lookup leaves it out.
-func TestLocalClient_GithubUpdateComment_PersonsComment_NotPostedByTF(t *testing.T) {
-	gh := startFakeGitHubComments(t)
-	stores, info, client := newGithubRecordingClient(t, gh.URL, true)
-	ctx := context.Background()
+// TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoArtifact
+// pins that an edit and a delete of a conversation comment TF never posted
+// leave no artifact, so a comment row keeps meaning TF posted the comment; the
+// audit ledger records both.
+func TestLocalClient_GithubUpdateDeleteComment_PersonsComment_LeavesNoArtifact(t *testing.T) {
+	for _, eventTriggered := range []bool{true, false} {
+		name := "manual"
+		if eventTriggered {
+			name = "event-triggered"
+		}
+		t.Run(name, func(t *testing.T) {
+			gh := startFakeGitHubComments(t)
+			stores, info, client := newGithubRecordingClient(t, gh.URL, eventTriggered)
+			ctx := context.Background()
 
-	if err := client.GithubUpdateComment(ctx, "octo", "repo", 777, "tidied a person's comment"); err != nil {
-		t.Fatalf("GithubUpdateComment: %v", err)
-	}
-	arts := listConversationArtifacts(t, stores, info.ConversationID)
-	if len(arts) != 1 || arts[0].PostedByTF || arts[0].DedupKey != "github:comment:777" {
-		t.Fatalf("artifacts = %+v, want one row for comment 777 not posted by TF", arts)
-	}
-	posted, err := stores.Artifacts.PostedByTFDedupKeysSystem(ctx, info.OrgID, arts[0].Scope, []string{"github:comment:777"})
-	if err != nil {
-		t.Fatalf("PostedByTFDedupKeysSystem: %v", err)
-	}
-	if len(posted) != 0 {
-		t.Errorf("posted-by-TF lookup = %v, want the edited comment left out", posted)
+			if err := client.GithubUpdateComment(ctx, "octo", "repo", 777, "tidied a person's comment"); err != nil {
+				t.Fatalf("GithubUpdateComment: %v", err)
+			}
+			if err := client.GithubDeleteComment(ctx, "octo", "repo", 777); err != nil {
+				t.Fatalf("GithubDeleteComment: %v", err)
+			}
+			if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+				t.Errorf("artifacts = %+v, want none for a comment TF did not post", arts)
+			}
+			acts := listExternalActions(t, stores)
+			if len(acts) != 2 {
+				t.Fatalf("audit rows = %+v, want the edit's and the delete's", acts)
+			}
+			for _, a := range acts {
+				if a.ExternalID != "777" || a.Target != "octo/repo" {
+					t.Errorf("audit row = %+v, want comment 777 on octo/repo", a)
+				}
+			}
+		})
 	}
 }
 

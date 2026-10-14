@@ -223,8 +223,8 @@ func TestRelayServer_GHWriteClassifiesTheCreate(t *testing.T) {
 		t.Fatalf("want 1 comment artifact for the relayed reply, got %d: %+v", len(arts), arts)
 	}
 	if c := arts[0]; c.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) ||
-		c.ExternalID != "777" || c.NodeID != "PRRC_kwRelay" || !c.PostedByTF {
-		t.Errorf("relayed reply artifact = %+v, want the reply's numbers and posted by TF", c)
+		c.ExternalID != "777" || c.NodeID != "PRRC_kwRelay" {
+		t.Errorf("relayed reply artifact = %+v, want the reply's numbers", c)
 	}
 }
 

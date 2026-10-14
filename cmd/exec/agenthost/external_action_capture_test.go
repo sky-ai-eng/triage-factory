@@ -248,7 +248,7 @@ func TestCapture_GithubReply_RecordsCommentAction(t *testing.T) {
 			}
 			// The reply's own comment artifact.
 			arts := listConversationArtifacts(t, stores, info.ConversationID)
-			if len(arts) != 1 || arts[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) || !arts[0].PostedByTF {
+			if len(arts) != 1 || arts[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 777) {
 				t.Errorf("a review-thread reply should record its own comment artifact, got %+v", arts)
 			}
 			// And exactly one external action beside it.
@@ -310,9 +310,9 @@ func TestCapture_GithubReaction_RecordsArtifactlessAction(t *testing.T) {
 // TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction pins
 // that editing/deleting a PUBLISHED review comment via the pulls/comments
 // fallback is captured as a review_comment_edited / review_comment_deleted
-// action beside the comment's own artifact. (Pending-draft churn edits
-// human-side via the server staging path and is unrecorded, so reaching this
-// branch is published-by-construction.)
+// action. The run did not post the comment, so neither leaves an artifact.
+// (Pending-draft churn edits human-side via the server staging path and is
+// unrecorded, so reaching this branch is published-by-construction.)
 func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *testing.T) {
 	// A backend that 404s the issue-comments endpoint so the client falls back to
 	// the pulls (review line-comment) endpoint, which succeeds.
@@ -356,10 +356,8 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 				if err := client.GithubUpdateComment(context.Background(), "octo", "repo", 999, "edit a review comment"); err != nil {
 					t.Fatalf("GithubUpdateComment: %v", err)
 				}
-				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 ||
-					arts[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 999) ||
-					arts[0].State != domain.ArtifactStateCommentPosted {
-					t.Errorf("a review comment edit must record the comment's own artifact, got %+v", arts)
+				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+					t.Errorf("an edit of a comment the run did not post left artifacts %+v, want none", arts)
 				}
 				acts := listExternalActions(t, stores)
 				if len(acts) != 1 {
@@ -386,10 +384,8 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 				if err := client.GithubDeleteComment(context.Background(), "octo", "repo", 999); err != nil {
 					t.Fatalf("GithubDeleteComment: %v", err)
 				}
-				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 1 ||
-					arts[0].DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 999) ||
-					arts[0].State != domain.ArtifactStateCommentDeleted {
-					t.Errorf("a review comment delete must record the comment's own artifact, deleted, got %+v", arts)
+				if arts := listConversationArtifacts(t, stores, info.ConversationID); len(arts) != 0 {
+					t.Errorf("a delete of a comment the run did not post left artifacts %+v, want none", arts)
 				}
 				acts := listExternalActions(t, stores)
 				if len(acts) != 1 {
@@ -408,9 +404,9 @@ func TestCapture_GithubReviewCommentEditDelete_RecordsReviewCommentAction(t *tes
 }
 
 // TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction pins
-// that the standalone (top-level issue) comment path is unchanged by TFAC-485: an
-// edit still records ActionCommentEdited and a delete ActionCommentDeleted (via
-// the artifact+action funnel), NOT the review_comment_* actions.
+// that the standalone (top-level issue) comment path records ActionCommentEdited
+// for an edit and ActionCommentDeleted for a delete, NOT the review_comment_*
+// actions.
 func TestCapture_GithubStandaloneCommentEditDelete_StillRecordsCommentAction(t *testing.T) {
 	t.Run("edit records comment_edited", func(t *testing.T) {
 		gh := startFakeGitHubComments(t)

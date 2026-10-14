@@ -8,7 +8,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/ghwrite"
-	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
 // graphQLWrite is a successful GraphQL comment write as the injector reports
@@ -33,20 +32,10 @@ func onlyArtifact(t *testing.T, stores db.Stores, conversationID string) domain.
 	return arts[0]
 }
 
-// postedByTF reports whether the posted-by-TF lookup names a's key.
-func postedByTF(t *testing.T, stores db.Stores, a domain.Artifact) bool {
-	t.Helper()
-	got, err := stores.Artifacts.PostedByTFDedupKeysSystem(context.Background(), runmode.LocalDefaultOrgID, a.Scope, []string{a.DedupKey})
-	if err != nil {
-		t.Fatalf("PostedByTFDedupKeysSystem: %v", err)
-	}
-	return got[a.DedupKey]
-}
-
 // TestGHChannel_ThreadReplyRecordsCommentArtifact pins the reply acceptance for
 // both raw transports: a reply through `gh api` REST and one through
 // `gh api graphql` each leave a `comment` artifact in the review comments'
-// numbering, carrying the reply's number and node id and posted by TF.
+// numbering, carrying the reply's number and node id.
 func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
 	const replyURL = "https://github.com/octo/repo/pull/42#discussion_r8"
 	cases := []struct {
@@ -83,7 +72,7 @@ func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
 				if a.Provider != domain.ArtifactProviderGitHub || a.Kind != domain.ArtifactKindComment ||
 					a.DedupKey != domain.GitHubCommentDedupKey(domain.GitHubReviewComment, 8) ||
 					a.ExternalID != "8" || a.NodeID != "PRRC_kwReply" || a.Target != "octo/repo#42" ||
-					a.URL != replyURL || a.State != domain.ArtifactStateCommentPosted || !a.PostedByTF ||
+					a.URL != replyURL || a.State != domain.ArtifactStateCommentPosted ||
 					a.DetailsJSON != tc.wantDetails {
 					t.Errorf("reply artifact = %+v", a)
 				}
@@ -97,10 +86,10 @@ func TestGHChannel_ThreadReplyRecordsCommentArtifact(t *testing.T) {
 
 // TestGHChannel_CommentLifecycleByNodeID pins the edit and delete acceptance:
 // a comment posted through the channel, then edited and deleted through
-// GraphQL mutations that name it by node id alone, is one artifact that ends
-// deleted and still posted by TF. The conversation comment is `gh pr comment`'s
-// shape — its number off the url's anchor, its node id read back by the
-// injector — and the inline comment is a thread reply.
+// GraphQL mutations that name it by node id alone, is one artifact, which the
+// edit leaves as it is and the delete retires. The conversation comment is `gh
+// pr comment`'s shape — its number off the url's anchor, its node id read back
+// by the injector — and the inline comment is a thread reply.
 func TestGHChannel_CommentLifecycleByNodeID(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -133,8 +122,8 @@ func TestGHChannel_CommentLifecycleByNodeID(t *testing.T) {
 			client.RecordGHChannelWrite(ctx, tc.post)
 			posted := onlyArtifact(t, stores, info.ConversationID)
 			number := strconv.FormatInt(tc.number, 10)
-			if posted.ExternalID != number || posted.NodeID != tc.nodeID || !posted.PostedByTF {
-				t.Fatalf("posted artifact = %+v, want both ids and posted by TF", posted)
+			if posted.ExternalID != number || posted.NodeID != tc.nodeID {
+				t.Fatalf("posted artifact = %+v, want both ids", posted)
 			}
 
 			// Edit and delete name the comment by node id only, and their
@@ -151,9 +140,6 @@ func TestGHChannel_CommentLifecycleByNodeID(t *testing.T) {
 				deleted.DedupKey != domain.GitHubCommentDedupKey(tc.space, tc.number) ||
 				deleted.ExternalID != number || deleted.NodeID != tc.nodeID || deleted.Target != "octo/repo#42" {
 				t.Errorf("after the delete = %+v, want row %s deleted with its coordinates kept", deleted, posted.ID)
-			}
-			if !postedByTF(t, stores, deleted) {
-				t.Errorf("posted-by-TF lookup left out %s, want the comment TF posted named", deleted.DedupKey)
 			}
 			if acts := listExternalActions(t, stores); len(acts) != 3 {
 				t.Errorf("audit rows = %d, want one per write: %+v", len(acts), acts)
@@ -176,31 +162,14 @@ func TestGHChannel_DeleteByNodeIDFindsTheVerbsRow(t *testing.T) {
 	client.RecordGHChannelWrite(ctx, graphQLWrite("deleteIssueComment", "IC_kw777", "", "", ""))
 
 	a := onlyArtifact(t, stores, info.ConversationID)
-	if a.DedupKey != "github:comment:777" || a.State != domain.ArtifactStateCommentDeleted || !a.PostedByTF {
+	if a.DedupKey != "github:comment:777" || a.State != domain.ArtifactStateCommentDeleted {
 		t.Errorf("artifact = %+v, want the verb's row retired", a)
 	}
 }
 
-// TestGHChannel_PersonsCommentIsNotPostedByTF pins that an agent editing a
-// person's comment through the channel leaves a row recording the edit, and
-// that the posted-by-TF lookup does not return it.
-func TestGHChannel_PersonsCommentIsNotPostedByTF(t *testing.T) {
-	stores, info, client := newGithubRecordingClient(t, "https://github.com", true)
-	client.RecordGHChannelWrite(context.Background(), ghwrite.Observation{
-		Method: "PATCH", Path: "/repos/octo/repo/issues/comments/99", Status: 200,
-	})
-
-	a := onlyArtifact(t, stores, info.ConversationID)
-	if a.DedupKey != "github:comment:99" || a.ExternalID != "99" || a.PostedByTF || a.Target != "" {
-		t.Errorf("artifact = %+v, want a row for comment 99, not posted by TF and with no repo-level target", a)
-	}
-	if postedByTF(t, stores, a) {
-		t.Error("posted-by-TF lookup named a person's comment the run edited")
-	}
-}
-
 // TestGHChannel_NoCommentArtifact pins the writes that leave only their audit
-// row: a refused comment write, a node id no row carries, a reaction to a
+// row: a refused comment write, an edit or a delete of a comment TF did not
+// post (named by number or by a node id no row carries), a reaction to a
 // comment, and a non-comment write.
 func TestGHChannel_NoCommentArtifact(t *testing.T) {
 	cases := []struct {
@@ -213,6 +182,10 @@ func TestGHChannel_NoCommentArtifact(t *testing.T) {
 			o.Errored = true
 			return o
 		}()},
+		{"REST edit of a person's comment", ghwrite.Observation{Method: "PATCH", Path: "/repos/octo/repo/issues/comments/99", Status: 200}},
+		{"GraphQL edit of a person's comment", graphQLWrite("updateIssueComment", "IC_kwPerson", "99", "IC_kwPerson", "")},
+		{"REST delete of a person's comment", ghwrite.Observation{Method: "DELETE", Path: "/repos/octo/repo/issues/comments/99", Status: 204}},
+		{"REST delete of a person's review comment", ghwrite.Observation{Method: "DELETE", Path: "/repos/octo/repo/pulls/comments/99", Status: 204}},
 		{"delete of a node id no row carries", graphQLWrite("deleteIssueComment", "IC_kwUnknown", "", "", "")},
 		{"delete naming nothing", graphQLWrite("deleteIssueComment", "", "", "", "")},
 		{"reaction to a comment", ghwrite.Observation{Method: "POST", Path: "/repos/octo/repo/issues/comments/5/reactions", Status: 201}},
