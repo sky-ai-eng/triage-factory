@@ -95,6 +95,10 @@ const (
 	EventGitHubPRMentioned      = "github:pr:mentioned"
 	EventGitHubPRBodyUpdated    = "github:pr:body_updated"
 
+	// "Someone other than TF commented in a PR's conversation." One event per
+	// poll however many comments landed, naming the newest and every author.
+	EventGitHubPRCommented = "github:pr:commented"
+
 	// "Triage Factory no longer follows a tracked PR." Terminating, like
 	// merged/closed. Emitted without asking GitHub, for a PR polled from a host
 	// the org's GitHub base URL no longer names (reason scope_changed): the new
@@ -302,6 +306,7 @@ func AllEventTypes() []EventType {
 		{ID: EventGitHubPRConflicts, Source: "github", Category: "pr", Label: "Merge Conflicts", Description: "A PR has merge conflicts"},
 		{ID: EventGitHubPRReadyForReview, Source: "github", Category: "pr", Label: "Ready for Review", Description: "A draft PR was marked ready for review"},
 		{ID: EventGitHubPRMentioned, Source: "github", Category: "pr", Label: "Mentioned", Description: "You were @mentioned in a PR"},
+		{ID: EventGitHubPRCommented, Source: "github", Category: "pr", Label: "New Comment", Description: "Someone other than Triage Factory commented in a PR's conversation (one event per poll, naming every commenter)"},
 		{ID: EventGitHubPROpened, Source: "github", Category: "pr", Label: "PR Opened", Description: "A pull request was opened"},
 		{ID: EventGitHubPRMerged, Source: "github", Category: "pr", Label: "PR Merged", Description: "A pull request was merged"},
 		{ID: EventGitHubPRClosed, Source: "github", Category: "pr", Label: "PR Closed", Description: "A pull request was closed without merging"},

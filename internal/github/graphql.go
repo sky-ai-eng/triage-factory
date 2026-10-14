@@ -86,7 +86,10 @@ fragment PRDiscoveryFields on PullRequest {
 		}
 	}
 	labels(first: 10) { nodes { name } }
-	comments { totalCount }
+	comments(last: 1) {
+		totalCount
+		nodes { fullDatabaseId createdAt }
+	}
 	createdAt
 	updatedAt
 	mergedAt
@@ -146,7 +149,10 @@ fragment PRFullFields on PullRequest {
 		}
 	}
 	labels(first: 10) { nodes { name } }
-	comments { totalCount }
+	comments(last: 1) {
+		totalCount
+		nodes { fullDatabaseId createdAt }
+	}
 	createdAt
 	updatedAt
 	mergedAt
@@ -338,34 +344,34 @@ func (c *Client) refreshPRsBatch(ctx context.Context, nodeIDs []string, includeC
 // --- GraphQL response types ---
 
 type gqlPR struct {
-	ID             string          `json:"id"`
-	Number         int             `json:"number"`
-	Title          string          `json:"title"`
-	Body           json.RawMessage `json:"body"`
-	Author         gqlAuthor       `json:"author"`
-	State          string          `json:"state"`
-	IsDraft        bool            `json:"isDraft"`
-	Merged         bool            `json:"merged"`
-	Mergeable      string          `json:"mergeable"`
-	HeadRefName    string          `json:"headRefName"`
-	BaseRefName    string          `json:"baseRefName"`
-	URL            string          `json:"url"`
-	Repository     gqlRepo         `json:"repository"`
-	HeadRepository *gqlRepo        `json:"headRepository"`
-	Additions      int             `json:"additions"`
-	Deletions      int             `json:"deletions"`
-	ChangedFiles   int             `json:"changedFiles"`
-	ReviewRequests gqlRRNodes      `json:"reviewRequests"`
-	LatestReviews  gqlRevNodes     `json:"latestReviews"`
-	Reviews        gqlNewestReview `json:"reviews"`
-	Commits        gqlCommits      `json:"commits"`
-	Labels         gqlLabelNodes   `json:"labels"`
-	Comments       gqlCount        `json:"comments"`
-	CreatedAt      string          `json:"createdAt"`
-	UpdatedAt      string          `json:"updatedAt"`
-	MergedAt       string          `json:"mergedAt"`
-	ClosedAt       string          `json:"closedAt"`
-	TimelineItems  gqlTimeline     `json:"timelineItems"`
+	ID             string           `json:"id"`
+	Number         int              `json:"number"`
+	Title          string           `json:"title"`
+	Body           json.RawMessage  `json:"body"`
+	Author         gqlAuthor        `json:"author"`
+	State          string           `json:"state"`
+	IsDraft        bool             `json:"isDraft"`
+	Merged         bool             `json:"merged"`
+	Mergeable      string           `json:"mergeable"`
+	HeadRefName    string           `json:"headRefName"`
+	BaseRefName    string           `json:"baseRefName"`
+	URL            string           `json:"url"`
+	Repository     gqlRepo          `json:"repository"`
+	HeadRepository *gqlRepo         `json:"headRepository"`
+	Additions      int              `json:"additions"`
+	Deletions      int              `json:"deletions"`
+	ChangedFiles   int              `json:"changedFiles"`
+	ReviewRequests gqlRRNodes       `json:"reviewRequests"`
+	LatestReviews  gqlRevNodes      `json:"latestReviews"`
+	Reviews        gqlNewestReview  `json:"reviews"`
+	Commits        gqlCommits       `json:"commits"`
+	Labels         gqlLabelNodes    `json:"labels"`
+	Comments       gqlNewestComment `json:"comments"`
+	CreatedAt      string           `json:"createdAt"`
+	UpdatedAt      string           `json:"updatedAt"`
+	MergedAt       string           `json:"mergedAt"`
+	ClosedAt       string           `json:"closedAt"`
+	TimelineItems  gqlTimeline      `json:"timelineItems"`
 }
 
 // gqlTimeline is the heterogeneous PullRequest.timelineItems connection,
@@ -427,6 +433,17 @@ type gqlRevNodes struct {
 		State       string    `json:"state"`
 		SubmittedAt string    `json:"submittedAt"`
 		Comments    gqlCount  `json:"comments"`
+	} `json:"nodes"`
+}
+
+// gqlNewestComment is the conversation-comments connection read to its last
+// node: how many comments the pull request has, and the newest of them, since
+// GitHub lists a pull request's comments in the order they were made.
+type gqlNewestComment struct {
+	TotalCount int `json:"totalCount"`
+	Nodes      []struct {
+		DatabaseID gqlBigInt `json:"fullDatabaseId"`
+		CreatedAt  string    `json:"createdAt"`
 	} `json:"nodes"`
 }
 
@@ -580,6 +597,16 @@ func (pr gqlPR) newestReview() *domain.ReviewMarker {
 	return &m
 }
 
+// newestComment is the marker for the pull request's newest conversation
+// comment, the zero marker when it has none.
+func (pr gqlPR) newestComment() *domain.CommentMarker {
+	var m domain.CommentMarker
+	for _, n := range pr.Comments.Nodes {
+		m = m.Newer(domain.CommentMarker{ID: int64(n.DatabaseID), CreatedAt: n.CreatedAt})
+	}
+	return &m
+}
+
 // toSnapshot builds a full snapshot with CheckRuns populated — used by
 // RefreshPRs for open PRs.
 func (pr gqlPR) toSnapshot() domain.PRSnapshot { return pr.buildSnapshot(true) }
@@ -727,6 +754,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		}
 	}
 	snap.ReviewMarker = pr.newestReview()
+	snap.CommentMarker = pr.newestComment()
 
 	// Labels
 	for _, l := range pr.Labels.Nodes {
