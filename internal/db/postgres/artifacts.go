@@ -348,6 +348,37 @@ func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope
 	return present, rows.Err()
 }
 
+// PresentExternalIDsSystem runs on the admin pool (BYPASSRLS), as
+// PresentDedupKeysSystem: the tracker reads it with no claims, and a review's
+// artifact belongs to whichever team's run submitted it. idx_artifacts_external_id
+// serves it. org_id stays in the WHERE clause as defense in depth.
+func (s *artifactStore) PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error) {
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	if len(externalIDs) == 0 {
+		return present, nil
+	}
+	rows, err := s.admin.QueryContext(ctx, `
+		SELECT external_id
+		FROM artifacts
+		WHERE org_id = $1 AND scope = $2 AND provider = $3 AND kind = $4 AND external_id = ANY($5)
+	`, orgID, scope, provider, kind, externalIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		present[id] = true
+	}
+	return present, rows.Err()
+}
+
 // GetByNodeIDSystem reads the newest row in scope carrying nodeID, on the
 // admin pool (BYPASSRLS): its callers record a run's writes, and the row may
 // belong to whichever team's run first recorded the object. idx_artifacts_node_id

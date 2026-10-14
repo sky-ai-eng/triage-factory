@@ -131,17 +131,26 @@ func ReviewerDedupKeyTeam(orgSlug string) string { return "team:" + orgSlug }
 // — split-on-review-type: one event per situation-changing review type.
 // Metadata struct is duplicated across the four so each can evolve
 // independently.
+//
+// Every review event names one review: ReviewID is its numeric id,
+// CommentCount how many inline comments it holds, and Paths the distinct
+// files those comments are on, in the order the comments name them. A
+// dismissal, and an event diffed against a snapshot without the review
+// marker, names a reviewer's latest review, whose files are not read, so its
+// Paths is empty.
 // -----------------------------------------------------------------------------
 
 type GitHubPRReviewChangesRequestedMetadata struct {
-	Author   string   `json:"author"`
-	Reviewer string   `json:"reviewer"`
-	ReviewID int64    `json:"review_id"`
-	Repo     string   `json:"repo"`
-	PRNumber int      `json:"pr_number"`
-	IsDraft  bool     `json:"is_draft"`
-	HeadSHA  string   `json:"head_sha"`
-	Labels   []string `json:"labels"`
+	Author       string   `json:"author"`
+	Reviewer     string   `json:"reviewer"`
+	ReviewID     int64    `json:"review_id"`
+	CommentCount int      `json:"comment_count"`
+	Paths        []string `json:"paths"`
+	Repo         string   `json:"repo"`
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
 }
 
 type GitHubPRReviewChangesRequestedPredicate struct {
@@ -165,14 +174,16 @@ func (p GitHubPRReviewChangesRequestedPredicate) Matches(m GitHubPRReviewChanges
 }
 
 type GitHubPRReviewApprovedMetadata struct {
-	Author   string   `json:"author"`
-	Reviewer string   `json:"reviewer"`
-	ReviewID int64    `json:"review_id"`
-	Repo     string   `json:"repo"`
-	PRNumber int      `json:"pr_number"`
-	IsDraft  bool     `json:"is_draft"`
-	HeadSHA  string   `json:"head_sha"`
-	Labels   []string `json:"labels"`
+	Author       string   `json:"author"`
+	Reviewer     string   `json:"reviewer"`
+	ReviewID     int64    `json:"review_id"`
+	CommentCount int      `json:"comment_count"`
+	Paths        []string `json:"paths"`
+	Repo         string   `json:"repo"`
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
 }
 
 type GitHubPRReviewApprovedPredicate struct {
@@ -200,6 +211,7 @@ type GitHubPRReviewCommentedMetadata struct {
 	Reviewer     string   `json:"reviewer"`
 	ReviewID     int64    `json:"review_id"`
 	CommentCount int      `json:"comment_count"`
+	Paths        []string `json:"paths"`
 	Repo         string   `json:"repo"`
 	PRNumber     int      `json:"pr_number"`
 	IsDraft      bool     `json:"is_draft"`
@@ -228,14 +240,16 @@ func (p GitHubPRReviewCommentedPredicate) Matches(m GitHubPRReviewCommentedMetad
 }
 
 type GitHubPRReviewDismissedMetadata struct {
-	Author   string   `json:"author"`
-	Reviewer string   `json:"reviewer"`
-	ReviewID int64    `json:"review_id"`
-	Repo     string   `json:"repo"`
-	PRNumber int      `json:"pr_number"`
-	IsDraft  bool     `json:"is_draft"`
-	HeadSHA  string   `json:"head_sha"`
-	Labels   []string `json:"labels"`
+	Author       string   `json:"author"`
+	Reviewer     string   `json:"reviewer"`
+	ReviewID     int64    `json:"review_id"`
+	CommentCount int      `json:"comment_count"`
+	Paths        []string `json:"paths"`
+	Repo         string   `json:"repo"`
+	PRNumber     int      `json:"pr_number"`
+	IsDraft      bool     `json:"is_draft"`
+	HeadSHA      string   `json:"head_sha"`
+	Labels       []string `json:"labels"`
 }
 
 type GitHubPRReviewDismissedPredicate struct {

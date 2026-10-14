@@ -171,7 +171,7 @@ func TestClosePrepare_ReviewResolvedSnapshotReadFails_RequeuesThenClosesOnce(t *
 	r := newQueueWorkerRouter(t, database)
 	entityID := newEntity(t, database, "owner/repo#prepare-review")
 	taskID := seedTaskOfType(t, database, entityID, domain.EventGitHubPRReviewChangesRequested, "")
-	snap, _ := json.Marshal(domain.PRSnapshot{Reviews: []domain.ReviewState{{Author: "bob", State: "CHANGES_REQUESTED"}}})
+	snap, _ := json.Marshal(domain.PRSnapshot{Reviews: []domain.ReviewState{{Author: "bob", State: "APPROVED"}}})
 	if _, err := database.Exec(`UPDATE entities SET snapshot_json = ? WHERE id = ?`, string(snap), entityID); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}

@@ -100,7 +100,9 @@ var closeRelations = []closeRelation{
 	},
 	// A reviewer submitted a review (any verdict, including changes_requested)
 	// → their review_requested obligation is satisfied. Close only that
-	// reviewer's per-reviewer task (keyed by user dedup_key).
+	// reviewer's per-reviewer task (keyed by user dedup_key). A reviewer who
+	// submitted several reviews since the last poll closes it on the first;
+	// the rest find nothing to close.
 	{
 		onEvents: []string{
 			domain.EventGitHubPRReviewApproved,
@@ -113,8 +115,8 @@ var closeRelations = []closeRelation{
 		keep:    keepDedupKey,
 	},
 	// A review that is NOT a changes-request may also resolve the author's
-	// outstanding changes_requested task — but only once no OTHER reviewer
-	// still has changes outstanding.
+	// outstanding changes_requested task — but only once no reviewer still
+	// has changes outstanding.
 	{
 		onEvents: []string{
 			domain.EventGitHubPRReviewApproved,
@@ -567,10 +569,13 @@ func keepDedupKey(_ domain.Event, ctx closeContext, t domain.Task) bool {
 }
 
 // prepareReviewResolved gates review_changes_requested closes: the reviewer
-// must be identifiable AND no OTHER reviewer may still have changes outstanding.
+// must be identifiable AND no reviewer's latest review in the entity's
+// snapshot may still request changes. The event's own reviewer counts too: a
+// poll emits one event per review, so a reviewer who commented and then
+// requested changes since the last poll emits both, and the snapshot, which
+// is never older than the events committed with it, shows the request.
 func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt domain.Event, entityID string) (closeContext, bool, error) {
-	reviewer := reviewerFromMeta(evt)
-	if reviewer == "" {
+	if reviewerFromMeta(evt) == "" {
 		return nil, false, nil
 	}
 	snap, ok, err := r.prSnapshotForEntity(ctx, orgID, entityID)
@@ -578,7 +583,7 @@ func prepareReviewResolved(ctx context.Context, r *Router, orgID string, evt dom
 		return nil, false, err
 	}
 	for _, rs := range snap.Reviews {
-		if rs.State == "CHANGES_REQUESTED" && rs.Author != reviewer {
+		if rs.State == "CHANGES_REQUESTED" {
 			return nil, false, nil
 		}
 	}

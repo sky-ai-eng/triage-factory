@@ -14,8 +14,10 @@ import (
 // carries beyond the common columns: the comment's node id, which a later write
 // that knows only the node id finds the row by. It also pins that a
 // conversation comment and a review comment with the same number are two rows,
-// each found by the lookup that tells TF's comments from people's. The factory
-// is ExternalObjectScopeFactory's: a fresh, empty org and a team per call.
+// each found by the lookup that tells TF's comments from people's, and that a
+// submitted review is found by its numeric id, the lookup that tells TF's
+// reviews from people's. The factory is ExternalObjectScopeFactory's: a fresh,
+// empty org and a team per call.
 func RunCommentArtifactConformance(t *testing.T, mk ExternalObjectScopeFactory) {
 	t.Helper()
 	ctx := context.Background()
@@ -124,6 +126,41 @@ func RunCommentArtifactConformance(t *testing.T, mk ExternalObjectScopeFactory) 
 		}
 		if _, err := s.Artifacts.PresentDedupKeysSystem(ctx, orgID, "", []string{issue}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
 			t.Errorf("PresentDedupKeysSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
+		}
+	})
+
+	t.Run("Review_ids_are_read_by_kind_on_one_scope", func(t *testing.T) {
+		s, orgID, teamID := mk(t)
+		seed := func(a domain.Artifact, scope, externalID string) {
+			a.TeamID, a.Scope, a.ExternalID = teamID, scope, externalID
+			if _, err := s.Artifacts.UpsertSystem(ctx, orgID, a); err != nil {
+				t.Fatalf("seed %s %q on %s: %v", a.Kind, externalID, scope, err)
+			}
+		}
+		submitted := domain.NewReviewArtifact("octo/api", 3, "sha", "conv-a")
+		submitted.State = domain.ArtifactStateReviewSubmitted
+		seed(submitted, hostA, "6000000001")
+		seed(domain.NewReviewArtifact("octo/api", 3, "sha", "conv-b"), hostA, "")
+		seed(domain.NewReviewArtifact("octo/api", 3, "sha", "conv-c"), hostB, "6000000003")
+		pr := domain.Artifact{
+			Provider: domain.ArtifactProviderGitHub, Kind: domain.ArtifactKindPullRequest,
+			Target: "octo/api#4", State: domain.ArtifactStatePROpen, DedupKey: "github:pull_request:octo/api#4",
+		}
+		seed(pr, hostA, "6000000002")
+
+		got, err := s.Artifacts.PresentExternalIDsSystem(ctx, orgID, hostA, domain.ArtifactProviderGitHub, domain.ArtifactKindReview,
+			[]string{"6000000001", "6000000002", "6000000003", "6000000004"})
+		if err != nil {
+			t.Fatalf("PresentExternalIDsSystem: %v", err)
+		}
+		if want := map[string]bool{"6000000001": true}; !maps.Equal(got, want) {
+			t.Errorf("review ids present on %s = %v, want %v", hostA, got, want)
+		}
+		if got, err := s.Artifacts.PresentExternalIDsSystem(ctx, orgID, hostA, domain.ArtifactProviderGitHub, domain.ArtifactKindReview, nil); err != nil || len(got) != 0 {
+			t.Errorf("PresentExternalIDsSystem with no ids = %v, %v; want an empty set", got, err)
+		}
+		if _, err := s.Artifacts.PresentExternalIDsSystem(ctx, orgID, "", domain.ArtifactProviderGitHub, domain.ArtifactKindReview, []string{"6000000001"}); !errors.Is(err, db.ErrExternalObjectScopeRequired) {
+			t.Errorf("PresentExternalIDsSystem with no scope: err = %v, want ErrExternalObjectScopeRequired", err)
 		}
 	})
 }

@@ -368,6 +368,51 @@ func (s *artifactStore) PresentDedupKeysSystem(ctx context.Context, orgID, scope
 	return present, nil
 }
 
+// presentExternalIDsQuery is PresentExternalIDsSystem's statement up to its
+// IN list, which the caller closes with one placeholder per id.
+const presentExternalIDsQuery = `
+	SELECT external_id
+	FROM artifacts
+	WHERE org_id = ? AND scope = ? AND provider = ? AND kind = ? AND external_id IN (`
+
+func (s *artifactStore) PresentExternalIDsSystem(ctx context.Context, orgID, scope, provider, kind string, externalIDs []string) (map[string]bool, error) {
+	if err := assertLocalOrg(orgID); err != nil {
+		return nil, err
+	}
+	if err := db.RequireExternalObjectScope(scope); err != nil {
+		return nil, err
+	}
+	present := map[string]bool{}
+	// ?-placeholder IN list, chunked to stay inside SQLite's variable limit.
+	for _, chunk := range chunkIDs(externalIDs) {
+		placeholders := make([]string, len(chunk))
+		args := make([]any, 0, len(chunk)+4)
+		args = append(args, orgID, scope, provider, kind)
+		for i, id := range chunk {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		rows, err := s.q.QueryContext(ctx, presentExternalIDsQuery+strings.Join(placeholders, ", ")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			present[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return present, nil
+}
+
 func (s *artifactStore) CountByConversation(ctx context.Context, orgID string, conversationIDs []string) (map[string]int, error) {
 	if err := assertLocalOrg(orgID); err != nil {
 		return nil, err

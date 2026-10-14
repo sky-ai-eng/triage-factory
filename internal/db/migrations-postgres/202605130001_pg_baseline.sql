@@ -1877,6 +1877,11 @@ CREATE INDEX idx_artifacts_conversation ON public.artifacts USING btree (convers
 CREATE INDEX idx_artifacts_node_id ON public.artifacts USING btree (org_id, scope, node_id) WHERE (node_id IS NOT NULL);
 
 
+-- The GitHub poll tells a review TF submitted from a person's by whether a
+-- review artifact carries the review's numeric id as its external_id.
+CREATE INDEX idx_artifacts_external_id ON public.artifacts USING btree (org_id, scope, kind, external_id) WHERE (external_id IS NOT NULL);
+
+
 CREATE INDEX idx_conversation_memory_conversation ON public.conversation_memory USING btree (conversation_id);
 
 
