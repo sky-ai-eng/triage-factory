@@ -10,9 +10,12 @@ import (
 	"testing"
 )
 
+// The tests in this package that stand up an httptest.Server run without
+// t.Parallel. httpClient and the Linear client both send through
+// http.DefaultTransport's connection pool, and httptest.Server.Close calls
+// CloseIdleConnections on that pool, so one test's cleanup can break a pooled
+// connection another test's request is using.
 func TestCaptureGitHubIdentity(t *testing.T) {
-	t.Parallel()
-
 	var (
 		calls   []string
 		callsMu sync.Mutex
@@ -55,8 +58,6 @@ func TestCaptureGitHubIdentity(t *testing.T) {
 }
 
 func TestCaptureGitHubIdentityRequiresEmailPermission(t *testing.T) {
-	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v3/user" {
 			_, _ = w.Write([]byte(`{"id":583231,"login":"octocat"}`))
@@ -73,8 +74,6 @@ func TestCaptureGitHubIdentityRequiresEmailPermission(t *testing.T) {
 }
 
 func TestCaptureGitHubIdentityRequiresVerifiedPrimaryEmail(t *testing.T) {
-	t.Parallel()
-
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v3/user" {
 			_, _ = w.Write([]byte(`{"id":583231,"login":"octocat"}`))
@@ -91,9 +90,9 @@ func TestCaptureGitHubIdentityRequiresVerifiedPrimaryEmail(t *testing.T) {
 }
 
 // stubGitHubAPI points the package's shared client at a transport that answers
-// the two account endpoints and records the URLs they were asked for. It runs
-// without t.Parallel deliberately: the transport is package-global, and the
-// parallel tests above resume only after every sequential test has finished.
+// the two account endpoints and records the URLs they were asked for. Its
+// callers run without t.Parallel: the transport is package-global, so no other
+// test may send through httpClient while it is swapped.
 func stubGitHubAPI(t *testing.T, seen *[]string) {
 	t.Helper()
 	prev := httpClient.Transport
