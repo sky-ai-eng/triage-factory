@@ -84,6 +84,28 @@ func TestMatchPredicate_AuthorIn_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// A bot's PR carries its REST login ("<slug>[bot]"), so author_in names the
+// bot with the suffix; the bare slug does not match.
+func TestMatchPredicate_AuthorIn_BotLogin(t *testing.T) {
+	metaJSON, _ := json.Marshal(events.GitHubPRCICheckFailedMetadata{
+		Author:    "dependabot[bot]",
+		CheckName: "build",
+	})
+
+	for pred, want := range map[string]bool{
+		`{"author_in":["dependabot[bot]"]}`: true,
+		`{"author_in":["dependabot"]}`:      false,
+	} {
+		matched, err := matchPredicate(domain.EventGitHubPRCICheckFailed, pred, string(metaJSON))
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", pred, err)
+		}
+		if matched != want {
+			t.Errorf("%s: matched = %v, want %v", pred, matched, want)
+		}
+	}
+}
+
 func TestMatchPredicate_MultiField_AND(t *testing.T) {
 	meta := events.GitHubPRCICheckFailedMetadata{
 		Author:    "aidan",

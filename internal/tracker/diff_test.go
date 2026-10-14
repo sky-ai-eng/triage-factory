@@ -465,6 +465,112 @@ func TestDiff_Review_MultipleReviewers_IndependentEvents(t *testing.T) {
 	}
 }
 
+// --- Bot logins -------------------------------------------------------------
+
+func TestDiff_BotAuthor_EmitsRESTLogin(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "dependabot[bot]"
+	curr := basePRSnapshot()
+	curr.Author = "dependabot[bot]"
+	curr.Labels = []string{"dependencies"}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evt := findEvent(evts, domain.EventGitHubPRLabelAdded)
+	if evt == nil {
+		t.Fatalf("expected label_added, got %v", eventTypes(evts))
+	}
+	if meta := decodeMetadata[events.GitHubPRLabelAddedMetadata](t, *evt); meta.Author != "dependabot[bot]" {
+		t.Errorf("Author = %q, want dependabot[bot]", meta.Author)
+	}
+}
+
+func TestDiff_BotReviewer_EmitsRESTLogin(t *testing.T) {
+	prev := basePRSnapshot()
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{
+		{Author: "copilot-pull-request-reviewer[bot]", State: "COMMENTED"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	evt := findEvent(evts, domain.EventGitHubPRReviewCommented)
+	if evt == nil {
+		t.Fatalf("expected review_commented, got %v", eventTypes(evts))
+	}
+	if meta := decodeMetadata[events.GitHubPRReviewCommentedMetadata](t, *evt); meta.Reviewer != "copilot-pull-request-reviewer[bot]" {
+		t.Errorf("Reviewer = %q, want copilot-pull-request-reviewer[bot]", meta.Reviewer)
+	}
+}
+
+// A stored snapshot holds a bot's review under its bare slug. The first poll
+// that reads the same review as "<slug>[bot]" is the same reviewer in the same
+// state, so it emits nothing.
+func TestDiff_StoredBareBotReviewer_RespelledOnly_NoEvent(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Author = "dependabot"
+	prev.Reviews = []domain.ReviewState{{Author: "dependabot", State: "APPROVED"}}
+	curr := basePRSnapshot()
+	curr.Author = "dependabot[bot]"
+	curr.Reviews = []domain.ReviewState{{Author: "dependabot[bot]", State: "APPROVED"}}
+
+	if evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil); len(evts) != 0 {
+		t.Errorf("expected no events for a respelled bot login, got %v", eventTypes(evts))
+	}
+}
+
+// The stored bare-slug review still diffs against the bot's current state:
+// a real transition by the bot emits once, under the REST spelling.
+func TestDiff_StoredBareBotReviewer_StateChange_Emits(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Reviews = []domain.ReviewState{{Author: "dependabot", State: "COMMENTED"}}
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{{Author: "dependabot[bot]", State: "APPROVED"}}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRReviewApproved {
+		t.Fatalf("expected [review_approved], got %v", eventTypes(evts))
+	}
+	if meta := decodeMetadata[events.GitHubPRReviewApprovedMetadata](t, evts[0]); meta.Reviewer != "dependabot[bot]" {
+		t.Errorf("Reviewer = %q, want dependabot[bot]", meta.Reviewer)
+	}
+}
+
+// When curr holds reviews under both the bare slug and "<slug>[bot]", the bare
+// one is a person sharing the bot's name and keeps the stored review; the bot
+// is a new reviewer.
+func TestDiff_PersonSharingBotSlug_KeepsStoredReview(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Reviews = []domain.ReviewState{{Author: "acme", State: "APPROVED"}}
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{
+		{Author: "acme", State: "APPROVED"},
+		{Author: "acme[bot]", State: "APPROVED"},
+	}
+
+	evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil)
+	if len(evts) != 1 || evts[0].EventType != domain.EventGitHubPRReviewApproved {
+		t.Fatalf("expected one review_approved (the bot), got %v", eventTypes(evts))
+	}
+	if meta := decodeMetadata[events.GitHubPRReviewApprovedMetadata](t, evts[0]); meta.Reviewer != "acme[bot]" {
+		t.Errorf("Reviewer = %q, want acme[bot]", meta.Reviewer)
+	}
+}
+
+// A bot whose suffixed review is already stored compares against that review,
+// never the bare slug's.
+func TestDiff_StoredSuffixedBotReviewer_PreferredOverBareSlug(t *testing.T) {
+	prev := basePRSnapshot()
+	prev.Reviews = []domain.ReviewState{
+		{Author: "dependabot", State: "COMMENTED"},
+		{Author: "dependabot[bot]", State: "APPROVED"},
+	}
+	curr := basePRSnapshot()
+	curr.Reviews = []domain.ReviewState{{Author: "dependabot[bot]", State: "APPROVED"}}
+
+	if evts := DiffPRSnapshots(prev, curr, testEntityID, testUser, nil); len(evts) != 0 {
+		t.Errorf("expected no events, got %v", eventTypes(evts))
+	}
+}
+
 // --- Review requests --------------------------------------------------------
 
 func TestDiff_ReviewRequested_ForSelf(t *testing.T) {

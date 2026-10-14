@@ -17,7 +17,7 @@ const prBaseFields = `
 	number
 	title
 	body
-	author { login }
+	author { __typename login }
 	state
 	isDraft
 	merged
@@ -42,7 +42,7 @@ const prBaseFields = `
 	latestReviews(first: 20) {
 		nodes {
 			id
-			author { login }
+			author { __typename login }
 			state
 			submittedAt
 		}
@@ -416,8 +416,23 @@ type gqlRevNodes struct {
 	} `json:"nodes"`
 }
 
+// gqlAuthor is a GraphQL Actor. Typename is selected beside Login because
+// GraphQL spells a bot's login as its bare App slug ("dependabot"), while REST,
+// TF's own App identity and handler predicates spell it "dependabot[bot]".
+// Every login read off an Actor goes through restLogin.
 type gqlAuthor struct {
-	Login string `json:"login"`
+	Typename string `json:"__typename"`
+	Login    string `json:"login"`
+}
+
+// restLogin is the actor's login as REST spells it. A Bot login that already
+// carries the suffix is left alone, so a server that returns the REST form
+// through GraphQL is not double-suffixed.
+func (a gqlAuthor) restLogin() string {
+	if a.Typename == "Bot" && a.Login != "" && !strings.HasSuffix(a.Login, domain.GitHubBotLoginSuffix) {
+		return a.Login + domain.GitHubBotLoginSuffix
+	}
+	return a.Login
 }
 
 type gqlCount struct {
@@ -519,7 +534,7 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 		Title:        pr.Title,
 		Body:         body,
 		BodyHash:     bodyHash,
-		Author:       pr.Author.Login,
+		Author:       pr.Author.restLogin(),
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,
 		State:        pr.State,
@@ -629,10 +644,10 @@ func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
 	// here, rather than matching by author (which can't distinguish a fresh
 	// pending review from a prior submitted one by the same identity).
 	for _, rev := range pr.LatestReviews.Nodes {
-		if rev.Author.Login != "" {
+		if login := rev.Author.restLogin(); login != "" {
 			snap.Reviews = append(snap.Reviews, domain.ReviewState{
 				ID:          rev.ID,
-				Author:      rev.Author.Login,
+				Author:      login,
 				State:       rev.State,
 				SubmittedAt: rev.SubmittedAt,
 			})
