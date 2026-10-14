@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -29,7 +30,9 @@ type PromptStoreFactory func(t *testing.T) (store db.PromptStore, orgID, teamID 
 // rows in the conversations table for Stats assertions. statusByOffset maps
 // row index → status string (SeedConcluded / "failed" / "running"
 // etc., resolved through SeedStatus); the seeder generates one run per entry, with started_at
-// staggered across days so the per-day grouping has signal. Returns
+// staggered across days so the per-day grouping has signal. Run i carries
+// one message costing $0.01 and one released claim of 100+i ms, so an even
+// number of runs has a fractional average duration. Returns
 // the inserted run IDs in case the harness wants to clean them up
 // (it doesn't today — the per-test DB reset handles it). promptID is
 // the prompt's id the Stats subtests created via Create.
@@ -279,6 +282,40 @@ func RunPromptStoreConformance(t *testing.T, factory PromptStoreFactory) {
 		}
 		if len(stats.RunsPerDay) != 30 {
 			t.Fatalf("runs_per_day len=%d want 30", len(stats.RunsPerDay))
+		}
+		// The seeder's newest run starts now, so last-used is within the
+		// last minute; a nil here means the MAX(started_at) read failed.
+		if stats.LastUsedAt == nil {
+			t.Fatalf("last_used_at=nil want the newest run's started_at")
+		}
+		lastUsed, err := time.Parse(time.RFC3339, *stats.LastUsedAt)
+		if err != nil {
+			t.Fatalf("last_used_at=%q is not RFC3339: %v", *stats.LastUsedAt, err)
+		}
+		if age := time.Since(lastUsed); age < -time.Minute || age > time.Minute {
+			t.Errorf("last_used_at=%s is %s from now, want the newest seeded run (now)", *stats.LastUsedAt, age)
+		}
+	})
+
+	t.Run("Stats_FractionalAvgDurationRoundsToNearestMs", func(t *testing.T) {
+		// Two runs of 100 and 101 ms average 100.5. The average is a float in
+		// SQL on both dialects and an int on PromptStats, so the store has to
+		// round it, and both dialects have to round it the same way.
+		store, orgID, teamID, seedConversations := factory(t)
+		ctx := context.Background()
+
+		id := "avg-duration-p"
+		if _, err := store.Create(ctx, orgID, teamID, domain.Prompt{ID: id, Name: "AD", Body: "x", Source: "user"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		seedConversations(t, id, []string{SeedConcluded, SeedConcluded})
+
+		stats, err := store.Stats(ctx, orgID, id)
+		if err != nil {
+			t.Fatalf("stats: %v", err)
+		}
+		if stats.AvgDurationMs != 101 {
+			t.Errorf("avg_duration_ms=%d want 101 (100.5 rounded half away from zero)", stats.AvgDurationMs)
 		}
 	})
 

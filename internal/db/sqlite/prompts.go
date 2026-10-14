@@ -274,14 +274,17 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	// Per-run cost/duration derive in the inner projection (cost = the
 	// messages ledger's settlement SUM, duration = the claims' telemetry
 	// SUM); a run with nothing settled yields NULL there, which AVG
-	// ignores — the former stored-column semantics.
+	// ignores — the former stored-column semantics. AVG is REAL in SQLite,
+	// and database/sql refuses a fractional float into the int field, so the
+	// duration is rounded to an integer in SQL: ROUND is half away from zero,
+	// the same rounding Postgres's numeric::bigint applies.
 	if err := s.q.QueryRowContext(ctx, `
 		SELECT
 			COUNT(*),
 			COALESCE(SUM(CASE WHEN concluded THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
 			COALESCE(AVG(run_cost), 0),
-			COALESCE(AVG(run_duration), 0),
+			CAST(ROUND(COALESCE(AVG(run_duration), 0)) AS INTEGER),
 			COALESCE(SUM(run_cost), 0)
 		FROM (
 			SELECT c.status, `+db.ConcludedConversationSQL("c")+` AS concluded,
@@ -306,15 +309,21 @@ func (s *promptStore) Stats(ctx context.Context, orgID string, promptID string) 
 	// Last used — MAX() on an aggregate always returns one row
 	// (NULL if no matches). Log + continue on scan errors so the
 	// rest of the stats render rather than 500-ing the whole panel.
-	var lastUsed sql.NullTime
+	// MAX() drops the column's declared type, so the driver hands back
+	// the stored text rather than a time.Time; parse it ourselves.
+	var lastUsed sql.NullString
 	if err := s.q.QueryRowContext(ctx,
 		`SELECT MAX(started_at) FROM conversations WHERE prompt_id = ?`, promptID,
 	).Scan(&lastUsed); err != nil {
 		promptStatsLog.Error("scan max started_at failed", "prompt_id", promptID, "error", err)
-	}
-	if lastUsed.Valid {
-		formatted := lastUsed.Time.Format(time.RFC3339)
-		stats.LastUsedAt = &formatted
+	} else if lastUsed.Valid {
+		at, err := parseDBDatetime(lastUsed.String)
+		if err != nil {
+			promptStatsLog.Error("parse max started_at failed", "prompt_id", promptID, "value", lastUsed.String, "error", err)
+		} else {
+			formatted := at.UTC().Format(time.RFC3339)
+			stats.LastUsedAt = &formatted
+		}
 	}
 
 	// Runs per day (last 30 days). Build the 30-day skeleton so
