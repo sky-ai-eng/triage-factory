@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
@@ -278,7 +279,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	currReviews := reviewMap(curr.Reviews)
 
 	for reviewer, currState := range currReviews {
-		prevState := prevReviews[reviewer]
+		prevState := prevReview(prevReviews, currReviews, reviewer)
 		if currState.State == prevState.State {
 			continue
 		}
@@ -671,6 +672,27 @@ func reviewMap(reviews []domain.ReviewState) map[string]domain.ReviewState {
 		m[r.Author] = r
 	}
 	return m
+}
+
+// prevReview is prev's review by reviewer. A stored snapshot can key a bot's
+// review under its bare slug (GraphQL's spelling), so a bot reviewer prev holds
+// no review for falls back to that slug and diffs as the same reviewer rather
+// than a new one. It does not fall back when curr also holds a review under the
+// bare slug: that reviewer is a person whose login matches the bot's slug (an
+// App may be named after its owner's account), and the stored review may be
+// theirs.
+func prevReview(prev, curr map[string]domain.ReviewState, reviewer string) domain.ReviewState {
+	if r, ok := prev[reviewer]; ok {
+		return r
+	}
+	slug, isBot := strings.CutSuffix(reviewer, domain.GitHubBotLoginSuffix)
+	if !isBot {
+		return domain.ReviewState{}
+	}
+	if _, person := curr[slug]; person {
+		return domain.ReviewState{}
+	}
+	return prev[slug]
 }
 
 // extractProject extracts the project key from a Jira issue key (e.g. "ABC" from "ABC-123").

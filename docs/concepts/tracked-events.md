@@ -540,6 +540,8 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `review_count` — total number of reviews submitted
 - `labels[]`, `comment_count`, `updated_at`
 
+`author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.
+
 ### Jira Issue Snapshot
 
 The entity itself carries `source_id` (the key), `external_id` (the issue id,

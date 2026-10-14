@@ -7,6 +7,11 @@ import (
 	"strings"
 )
 
+// GitHubBotLoginSuffix ends a GitHub App bot's login as REST spells it
+// ("dependabot[bot]"). Snapshots, event metadata and handler predicates all use
+// that spelling; GraphQL's Bot.login omits the suffix.
+const GitHubBotLoginSuffix = "[bot]"
+
 // PRSnapshot is the extracted state we store for a GitHub pull request.
 // Every field here can trigger events when it changes between poll cycles.
 type PRSnapshot struct {
@@ -14,7 +19,7 @@ type PRSnapshot struct {
 	NodeID   string `json:"node_id"` // GitHub GraphQL node ID — stored in snapshot for entity-based refresh
 	Number   int    `json:"number"`
 	Title    string `json:"title"`
-	Author   string `json:"author"`    // login of the PR author
+	Author   string `json:"author"`    // login of the PR author, REST-spelled ("<slug>[bot]" for a bot)
 	Repo     string `json:"repo"`      // "owner/repo"
 	HeadRepo string `json:"head_repo"` // fork repo if different
 	URL      string `json:"url"`
@@ -107,8 +112,8 @@ type ReviewState struct {
 	// don't request it; the review-transition diff keys on Author+State and
 	// never reads ID, so its absence is inert there.
 	ID          string `json:"id,omitempty"`
-	Author      string `json:"author"`
-	State       string `json:"state"` // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+	Author      string `json:"author"` // reviewer login, REST-spelled ("<slug>[bot]" for a bot)
+	State       string `json:"state"`  // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
 	SubmittedAt string `json:"submitted_at"`
 }
 
