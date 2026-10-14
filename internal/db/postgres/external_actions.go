@@ -166,7 +166,7 @@ func (s *externalActionStore) ListPRCreatedWithoutArtifactSystem(ctx context.Con
 		SELECT `+pgExternalActionColumns+`
 		  FROM external_actions ea
 		 WHERE ea.org_id = $1 AND ea.action = $2 AND ea.occurred_at >= $3
-		   AND ea.scope = $4 AND ea.node_id IS NOT NULL
+		   AND ea.scope = $4 AND ea.node_id IS NOT NULL AND ea.conversation_id IS NOT NULL
 		   AND NOT EXISTS (
 		       SELECT 1 FROM artifacts a
 		        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id

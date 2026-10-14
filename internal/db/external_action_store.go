@@ -93,15 +93,17 @@ type ExternalActionStore interface {
 	ListByConversation(ctx context.Context, orgID, conversationID string, opts domain.ExternalActionListOpts) ([]domain.ExternalAction, int, error)
 
 	// ListPRCreatedWithoutArtifactSystem returns orgID's pr_created rows on
-	// scope that occurred at or after since, carry a node id, and have no
-	// artifact with that node id in the same org and scope — the pull requests
-	// the create verb opened whose artifact write failed. Oldest first
-	// (occurred_at, id). It is the reconciler's PR backstop read, run every
-	// cycle, so it is one query with no count: a time bound the
-	// (org_id, action, occurred_at) index narrows on, and a NOT EXISTS against
-	// artifacts on (org_id, scope, node_id), which idx_artifacts_node_id
-	// serves. A row with no node id is never returned. Admin pool (BYPASSRLS):
-	// the backstop has no claims and an artifact may belong to any team. An
-	// empty scope is refused with ErrExternalObjectScopeRequired.
+	// scope that occurred at or after since, carry a node id and a
+	// conversation, and have no artifact with that node id in the same org and
+	// scope — the pull requests the create verb opened whose artifact write
+	// failed. Oldest first (occurred_at, id). It is the reconciler's PR
+	// backstop read, run every cycle, so it is one query with no count: a time
+	// bound the (org_id, action, occurred_at) index narrows on, and a NOT
+	// EXISTS against artifacts on (org_id, scope, node_id), which
+	// idx_artifacts_node_id serves. A row with no node id has nothing to match
+	// an artifact on, and a row whose conversation was purged has no one to
+	// own one, so neither is returned. Admin pool (BYPASSRLS): the backstop has
+	// no claims and an artifact may belong to any team. An empty scope is
+	// refused with ErrExternalObjectScopeRequired.
 	ListPRCreatedWithoutArtifactSystem(ctx context.Context, orgID, scope string, since time.Time) ([]domain.ExternalAction, error)
 }

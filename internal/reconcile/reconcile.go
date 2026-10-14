@@ -148,13 +148,15 @@ const prBackstopWindow = 7 * 24 * time.Hour
 // last prBackstopWindow whose pull request has no artifact, matching the two by
 // the pull request's node id. A node id survives a repository rename, so the
 // match does not depend on the name the row recorded or on how its link spells
-// the host. A row written without a node id is never read. It fetches those
-// pull requests by node id (RefreshPRs, batched per owner of the row's target),
-// which gives what the row does not carry: the repository's current name, the
-// number, link, refs, title and body. The artifact is recorded under the
-// current name, so a pull request in a repository renamed since it was opened
-// is backfilled where the rename's rewrite would have moved it. When every
-// pull request already has its artifact, the pass makes no GitHub call.
+// the host. A row written without a node id is never read, nor is one whose
+// conversation was purged, which leaves no one to own the artifact. It
+// fetches those pull requests by node id (RefreshPRs, batched per owner of the
+// row's target), which gives what the row does not carry: the repository's
+// current name, the number, link, refs, title and body. The artifact is
+// recorded under the current name, so a pull request in a repository renamed
+// since it was opened is backfilled where the rename's rewrite would have
+// moved it. When every pull request already has its artifact, the pass makes
+// no GitHub call.
 //
 // The artifact is recorded in the state the verb opened the pull request in,
 // and the reconcile that follows applies any transition since. The write is
@@ -174,9 +176,6 @@ func (rc *Reconciler) BackfillPRArtifacts(ctx context.Context, orgID string) err
 	byNodeID := map[string]domain.ExternalAction{}
 	nodeIDsByOwner := map[string]map[string]bool{}
 	for _, act := range missing {
-		if act.ConversationID == "" {
-			continue // its conversation was purged — nothing to attribute to
-		}
 		owner, ok := prOwner(act.Target)
 		if !ok {
 			continue

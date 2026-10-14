@@ -157,7 +157,7 @@ const prCreatedWithoutArtifactQuery = `
 	SELECT ` + externalActionColumns + `
 	  FROM external_actions ea
 	 WHERE ea.org_id = ? AND ea.action = ? AND ea.occurred_at >= ?
-	   AND ea.scope = ? AND ea.node_id IS NOT NULL
+	   AND ea.scope = ? AND ea.node_id IS NOT NULL AND ea.conversation_id IS NOT NULL
 	   AND NOT EXISTS (
 	       SELECT 1 FROM artifacts a
 	        WHERE a.org_id = ea.org_id AND a.scope = ea.scope AND a.node_id = ea.node_id

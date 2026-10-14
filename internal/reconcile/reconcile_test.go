@@ -1051,8 +1051,7 @@ func TestBackstop_IgnoresTheRowsLink(t *testing.T) {
 }
 
 // TestBackstop_IgnoresRowWithoutNodeID pins that a pr_created row with no node
-// id, as every row written before the verb recorded one is, is never acted on:
-// no GitHub call and no artifact.
+// id is never acted on: no GitHub call and no artifact.
 func TestBackstop_IgnoresRowWithoutNodeID(t *testing.T) {
 	stores, seedConversation, _ := reconcileTestStores(t)
 	seedConversation("octo/repo#5", "conv-1")

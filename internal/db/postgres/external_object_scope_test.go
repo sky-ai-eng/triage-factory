@@ -117,11 +117,12 @@ func TestExternalActionNodeID_Postgres(t *testing.T) {
 	dbtest.RunExternalActionNodeIDConformance(t, func(t *testing.T) dbtest.ExternalActionNodeIDFixture {
 		t.Helper()
 		h.Reset(t)
-		orgID, _, teamID := pgtest.SeedOrgWithUser(t, h, "nodeid")
+		orgID, userID, teamID := pgtest.SeedOrgWithUser(t, h, "nodeid")
 		return dbtest.ExternalActionNodeIDFixture{
-			Stores: stores,
-			OrgID:  orgID,
-			TeamID: teamID,
+			Stores:         stores,
+			OrgID:          orgID,
+			TeamID:         teamID,
+			ConversationID: seedPgArtifactConversation(t, h, orgID, teamID, userID),
 			BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
 				t.Helper()
 				if _, err := h.AdminDB.Exec(

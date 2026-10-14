@@ -46,9 +46,10 @@ func TestExternalActionNodeID_SQLite(t *testing.T) {
 		t.Helper()
 		conn := openSQLiteForTest(t)
 		return dbtest.ExternalActionNodeIDFixture{
-			Stores: sqlitestore.New(conn),
-			OrgID:  runmode.LocalDefaultOrgID,
-			TeamID: runmode.LocalDefaultTeamID,
+			Stores:         sqlitestore.New(conn),
+			OrgID:          runmode.LocalDefaultOrgID,
+			TeamID:         runmode.LocalDefaultTeamID,
+			ConversationID: seedArtifactConversation(t, conn),
 			BackdateAction: func(t *testing.T, actionID string, age time.Duration) {
 				t.Helper()
 				// datetime('now', ...) renders the 'YYYY-MM-DD HH:MM:SS' shape
