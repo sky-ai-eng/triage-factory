@@ -533,7 +533,8 @@ func (r *directRuntime) DeleteConversationWorktree(ctx context.Context, reposito
 // deterministic — on the caller's context: the caller is waiting on the stored
 // row. When the artifact write fails, the action is written on its own
 // (recordActionAlone) before the artifact's error is returned, so a push whose
-// artifact could not be recorded still leaves its ledger row.
+// artifact could not be recorded still leaves its ledger row. Inside a relayed
+// record the artifact's failure is also the record's (dropRelayedArtifact).
 func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (domain.Artifact, error) {
 	a.OrgID = r.info.OrgID
 	a.TeamID = r.info.TeamID
@@ -551,6 +552,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 			return e
 		})
 		if err != nil {
+			dropRelayedArtifact(ctx, a, err)
 			r.recordBranchPushAlone(ctx, a, act)
 			return domain.Artifact{}, err
 		}
@@ -574,6 +576,7 @@ func (r *directRuntime) UpsertArtifact(ctx context.Context, a domain.Artifact) (
 		})
 	})
 	if artifactErr != nil {
+		dropRelayedArtifact(ctx, a, artifactErr)
 		r.recordBranchPushAlone(ctx, a, act)
 	} else if err != nil {
 		r.dropBranchPush(ctx, a, act, err)
@@ -603,6 +606,21 @@ func (r *directRuntime) dropBranchPush(ctx context.Context, a domain.Artifact, a
 	recordWriteDrop(ctx, recordDropOp(nil, act), cause)
 	agenthostLog.Warn("branch external-action recording failed (push already applied)",
 		"conversation", r.info.ConversationID, "target", a.Target, "error", cause)
+}
+
+// dropRelayedArtifact accounts for an artifact that a relayed record — a
+// sidecar's record_push — failed to write, cause being the error that lost it.
+// There the artifact is the record's loss like the ledger row beside it, as it
+// is in the recording funnel: held until the record's outcome is known, and
+// deferring the record when another attempt can land it, so the sidecar's
+// resend retries the artifact too. Every other caller of UpsertArtifact is
+// waiting on its result and gets the error back to handle, so outside a
+// relayed record this does nothing.
+func dropRelayedArtifact(ctx context.Context, a domain.Artifact, cause error) {
+	if relayedRecordFrom(ctx) == nil {
+		return
+	}
+	recordWriteDrop(ctx, recordDropOp(&a, nil), cause)
 }
 
 // githubCredential names the credential to stamp on the branch-push row for

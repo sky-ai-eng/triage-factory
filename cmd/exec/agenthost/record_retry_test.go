@@ -14,6 +14,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -416,5 +417,116 @@ func TestRelayedRecords_RetriedRecordStaysAheadOfLaterOnes(t *testing.T) {
 	}
 	if got := collectDrops(t, reader); len(got) != 0 {
 		t.Fatalf("drops = %v; want none: the outage ended and every record landed", got)
+	}
+}
+
+// pushRelayServer is a RelayServer whose git gate records a relayed push the
+// way the executor's does: through UpsertArtifact, as a branch artifact with
+// its ledger row composed in.
+func pushRelayServer(stores db.Stores, info ConversationInfo) *RelayServer {
+	host := NewLocal(stores, info)
+	git := &agentproc.GitProxyConfig{
+		RecordPush: func(ctx context.Context, push gitproxy.PushedRef) {
+			art, ok := domain.NewBranchArtifact(push.Repo, push.Ref, push.NewSHA, push.Created)
+			if !ok {
+				return
+			}
+			_, _ = host.UpsertArtifact(ctx, art)
+		},
+	}
+	return NewRelayServer(stores, info, git)
+}
+
+func pushArgs(t *testing.T) json.RawMessage {
+	t.Helper()
+	args, err := json.Marshal(agentproc.RecordPushArgs{Repo: "octo/repo", Ref: "refs/heads/feat", NewSHA: "abc123", Created: true, Status: 200})
+	if err != nil {
+		t.Fatalf("marshal push: %v", err)
+	}
+	return args
+}
+
+// TestRelayedPush_TransientArtifactFailureDefersTheRecord: a relayed push
+// whose branch artifact cannot be written past the write stage's retries is
+// deferred like any other relayed record, so the sidecar's resend retries the
+// artifact — rather than the record being acknowledged with only its ledger
+// row written. Nothing is counted lost, and the resend lands the artifact
+// beside the one ledger row.
+func TestRelayedPush_TransientArtifactFailureDefersTheRecord(t *testing.T) {
+	fastRecordRetry(t)
+	reader := installTestAuditDrops(t)
+	base, info := newCaptureStores(t, true)
+	artifactFaults := &faults{fail: -1}
+	stores := base
+	stores.Artifacts = flakyArtifacts{ArtifactStore: base.Artifacts, f: artifactFaults}
+	s := pushRelayServer(stores, info)
+
+	key := uuid.NewString()
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); !errors.Is(err, errRecordDeferred) {
+		t.Fatalf("push with an unwritable artifact = %v; want %v", err, errRecordDeferred)
+	}
+	if arts := listConversationArtifacts(t, base, info.ConversationID); len(arts) != 0 {
+		t.Fatalf("artifacts = %+v; want none during the outage", arts)
+	}
+	if got := collectDrops(t, reader); len(got) != 0 {
+		t.Fatalf("drops = %v; a deferred record is not lost, and must not be counted", got)
+	}
+
+	artifactFaults.set(0, 0)
+	if err := s.DispatchRecord(context.Background(), agentproc.RelayNamespaceCore, agentproc.OpRecordPush, key, pushArgs(t)); err != nil {
+		t.Fatalf("resend = %v", err)
+	}
+	arts := listConversationArtifacts(t, base, info.ConversationID)
+	if len(arts) != 1 || arts[0].Kind != domain.ArtifactKindBranch {
+		t.Fatalf("artifacts = %+v; want the branch artifact landed by the resend", arts)
+	}
+	if acts := listExternalActions(t, base); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
+		t.Fatalf("ledger rows = %+v; want one branch_pushed row across both applications", acts)
+	}
+	if got := collectDrops(t, reader); len(got) != 0 {
+		t.Fatalf("drops = %v; want none", got)
+	}
+}
+
+// TestRelayedPush_RefusedArtifactIsCountedOnce: an artifact refused for good
+// is not resent. The record is acknowledged with its ledger row written, and
+// the artifact is counted lost once, at the write stage, under its kind.
+func TestRelayedPush_RefusedArtifactIsCountedOnce(t *testing.T) {
+	fastRecordRetry(t)
+	reader := installTestAuditDrops(t)
+	conn, stores, info := newCaptureStoresConn(t, true)
+	refuseArtifactWrites(t, conn)
+	s := pushRelayServer(stores, info)
+
+	if err := relayRecord(t, s, agentproc.RelayNamespaceCore, agentproc.OpRecordPush, pushArgs(t)); err != nil {
+		t.Fatalf("push with a refused artifact = %v; want it acknowledged", err)
+	}
+	if acts := listExternalActions(t, stores); len(acts) != 1 || acts[0].Action != domain.ActionBranchPushed {
+		t.Fatalf("ledger rows = %+v; want the branch_pushed row despite the refused artifact", acts)
+	}
+	got := collectDrops(t, reader)
+	if len(got[dropStageRecord]) != 1 || got[dropStageRecord][domain.ArtifactKindBranch] != 1 {
+		t.Fatalf("drops = %v; want exactly one %s drop under op=%s", got, dropStageRecord, domain.ArtifactKindBranch)
+	}
+}
+
+// TestUpsertArtifact_DirectFailureIsTheCallersToHandle: outside a relayed
+// record, a failed artifact is returned to the caller waiting on it and is not
+// counted here — the caller decides what the failure means.
+func TestUpsertArtifact_DirectFailureIsTheCallersToHandle(t *testing.T) {
+	fastRecordRetry(t)
+	reader := installTestAuditDrops(t)
+	conn, stores, info := newCaptureStoresConn(t, true)
+	refuseArtifactWrites(t, conn)
+
+	branch, ok := domain.NewBranchArtifact("octo/repo", "refs/heads/feat", "abc123", true)
+	if !ok {
+		t.Fatal("NewBranchArtifact refused the fixture branch")
+	}
+	if _, err := newDirectRuntime(stores, info).UpsertArtifact(context.Background(), branch); err == nil {
+		t.Fatal("UpsertArtifact = nil error, want the refused artifact's error")
+	}
+	if got := collectDrops(t, reader); len(got) != 0 {
+		t.Fatalf("drops = %v; want none: the caller got the error", got)
 	}
 }
