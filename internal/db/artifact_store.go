@@ -81,10 +81,10 @@ type ArtifactStore interface {
 	// changing nothing). Unlike UpsertSystem it NEVER overwrites an existing
 	// row's state/details, so a discovery pass can record an object it found
 	// without clobbering a more advanced state an earlier writer set (a merged
-	// PR must not regress to open). This is the write the gh-channel reconciler
-	// backstop uses: it matches an open PR to a conversation's pushed branch and
-	// records the pull_request artifact only if the observation path (or a prior
-	// pass) didn't already. Admin pool — the backstop has no JWT-claims context.
+	// PR must not regress to open). This is the write the reconciler's PR
+	// backstop uses: it records the pull_request artifact for a PR the ledger
+	// says the create verb opened, only if the verb (or a prior pass) didn't
+	// already. Admin pool — the backstop has no JWT-claims context.
 	// Identical single-connection path in SQLite.
 	InsertArtifactIfAbsentSystem(ctx context.Context, orgID string, a domain.Artifact) (bool, error)
 

@@ -187,3 +187,28 @@ func TestRewriteRepoURL(t *testing.T) {
 		})
 	}
 }
+
+// TestGitHubURLNamesRepo pins the predicate a ledger row's link is checked
+// with against the name recorded beside it. The boundary rules are
+// RewriteRepoURL's, covered above; this pins only what the predicate answers.
+func TestGitHubURLNamesRepo(t *testing.T) {
+	const dotcom = "https://github.com"
+	tests := []struct {
+		in      string
+		want    bool
+		because string
+	}{
+		{in: "https://github.com/octo/api/pull/18", want: true, because: "a link under the recorded name"},
+		{in: "https://github.com/Octo/API/pull/18", want: true, because: "the name compares case-insensitively"},
+		{in: "https://github.com/octo/platform-api/pull/18", because: "a link a rename moved"},
+		{in: "https://ghe.acme.dev/octo/api/pull/18", because: "a link on another host"},
+		{in: "", because: "no link"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.because, func(t *testing.T) {
+			if got := GitHubURLNamesRepo(tc.in, dotcom, "octo/api"); got != tc.want {
+				t.Errorf("GitHubURLNamesRepo(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
