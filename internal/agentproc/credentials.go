@@ -154,6 +154,11 @@ const (
 //     toggle in place could route a request to the wrong provider)
 //   - Endpoint overrides: ANTHROPIC_BEDROCK_BASE_URL etc — could
 //     redirect traffic to an operator-controlled proxy
+//
+// TODO(TFAC-1089): the list lags Claude Code's provider surface.
+// ANTHROPIC_UNIX_SOCKET and CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD survive the
+// strip and override a stored key, and Vertex and Foundry configuration is
+// neither stripped nor forwarded from the operator's settings env.
 var credentialEnvKeys = []string{
 	// Anthropic direct API auth + Anthropic-side identity.
 	"ANTHROPIC_API_KEY",
