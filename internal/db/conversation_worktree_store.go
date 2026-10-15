@@ -113,11 +113,23 @@ type ConversationWorktreeStore interface {
 	// RecordForClaimSystem records w for its conversation behind claimID's
 	// fence: inserted when the conversation holds no row for (repo, ref), its
 	// path moved to w.Path when it does. A workspace restore calls it for every
-	// checkout it rebuilt, so the restoring conversation holds each one at the
-	// path it has now — which is what the push gate and the next snapshot read.
+	// checkout it is about to rebuild, before it fetches any, and a claim of a
+	// warm tree for every checkout the tree holds, so the conversation holds
+	// each one at the path it has on this host — which is what the git gate
+	// reads.
 	// Refused with db.ErrClaimReleased once claimID no longer owns the
 	// conversation. Returns the row it stored.
 	RecordForClaimSystem(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) (domain.ConversationWorktree, error)
+
+	// DeleteForClaimSystem removes the conversation's row for (repositoryID,
+	// ref) behind claimID's fence: a restore that recorded a checkout and then
+	// failed to rebuild it takes the row back out, and once claimID no longer
+	// owns the conversation the row is its successor's, under the same key.
+	// Refused with db.ErrClaimReleased then. A row that does not exist is not an
+	// error.
+	//
+	// Exempt from the returned-row rule: it is a delete.
+	DeleteForClaimSystem(ctx context.Context, orgID, claimID, conversationID, repositoryID, ref string) error
 
 	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
 	//

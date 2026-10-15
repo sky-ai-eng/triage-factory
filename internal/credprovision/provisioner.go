@@ -669,8 +669,8 @@ func (m *Manager) authorizedRepos(ctx context.Context, orgID, teamID, taskID, co
 		}
 		// The rest of the task's conversations' checkouts too: they share one
 		// run tree, so this conversation can be the one that restores them from
-		// the task's snapshot — whose rebuild runs through this bundle — before
-		// it records them as its own.
+		// the task's snapshot — whose rebuild runs through this bundle — and the
+		// bundle is sealed before it records them as its own.
 		if taskID != "" {
 			taskRows, err := m.stores.ConversationWorktrees.ListForTaskSystem(ctx, orgID, taskID)
 			if err != nil {

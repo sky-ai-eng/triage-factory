@@ -254,6 +254,18 @@ func deleteConversationWorktreeByRepoRef(ctx context.Context, q queryer, orgID, 
 	return err
 }
 
+// DeleteForClaimSystem deletes behind the claim fence. assertClaimActive reads
+// the claim FOR SHARE, so a takeover's release waits for this transaction and
+// the row cannot change hands between the check and the delete.
+func (s *conversationWorktreeStore) DeleteForClaimSystem(ctx context.Context, orgID, claimID, conversationID, repositoryID, ref string) error {
+	return inTx(ctx, s.admin, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		return deleteConversationWorktreeByRepoRef(ctx, q, orgID, conversationID, repositoryID, ref)
+	})
+}
+
 func (s *conversationWorktreeStore) DeleteByPathSystem(ctx context.Context, orgID, conversationID, path string) error {
 	_, err := s.admin.ExecContext(ctx, `
 		DELETE FROM conversation_worktrees

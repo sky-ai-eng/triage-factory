@@ -700,7 +700,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 	at := time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC)
 	withPos := stagedBlob(t, src, snapshotManifest{TranscriptPosition: &pos, ConversationID: "conv-a", CapturedAt: at})
 	t.Setenv("TMPDIR", t.TempDir())
-	man, _, err := s.rehydrateFromSnapshot(context.Background(), "key-a", "", checkoutRestorer{}, withPos)
+	man, err := s.rehydrateFromSnapshot(context.Background(), runmode.LocalDefaultOrgID, &domain.Conversation{ID: "conv-a"}, "key-a", checkoutRestorer{}, withPos)
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
@@ -714,7 +714,7 @@ func TestSnapshotManifest_TranscriptPosition(t *testing.T) {
 		t.Errorf("captured_at = %s, want %s", man.CapturedAt, at)
 	}
 
-	man, _, err = s.rehydrateFromSnapshot(context.Background(), "key-b", "", checkoutRestorer{}, stagedBlob(t, src, snapshotManifest{}))
+	man, err = s.rehydrateFromSnapshot(context.Background(), runmode.LocalDefaultOrgID, &domain.Conversation{ID: "conv-a"}, "key-b", checkoutRestorer{}, stagedBlob(t, src, snapshotManifest{}))
 	if err != nil {
 		t.Fatalf("rehydrate: %v", err)
 	}
