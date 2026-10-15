@@ -555,7 +555,7 @@ func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath
 	if err := hashMember(h, captured.state.Transcript, captured.state.TranscriptPath); err != nil {
 		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
-	omittedCILogs, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {
+	omittedCILogs, _, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {
 		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10), scratchChangeStamp(fi))
 		return nil
 	})
