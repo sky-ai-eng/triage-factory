@@ -332,6 +332,40 @@ func waitForSidecarGone(t *testing.T, uid int, timeout time.Duration) {
 	t.Fatalf("EVICTION FAILED: %d tf-sidecar process(es) still live at uid %d after teardown %v — the run's credential address space was not freed", len(remaining), uid, remaining)
 }
 
+// waitForSidecarUp polls until a tf-sidecar process is live at uid, or fails
+// after timeout. LaunchSidecar returns once the child is forked, but the stand-in
+// takes the sidecar's comm only after its own runtime starts and TestMain reaches
+// maybeRunSidecarSubcommand, so a scan made right after the launch can run ahead
+// of it. On a timeout it names every process at the uid, so a sidecar that came
+// up under another comm reads differently from one that never came up.
+func waitForSidecarUp(t *testing.T, uid int, timeout time.Duration) []int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if pids := sidecarPidsAtUID(t, uid); len(pids) > 0 {
+			return pids
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var seen []string
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if u, ok := procRealUID(pid); ok && u == uid {
+			comm, _ := os.ReadFile("/proc/" + e.Name() + "/comm")
+			seen = append(seen, fmt.Sprintf("%d:%s", pid, strings.TrimSpace(string(comm))))
+		}
+	}
+	t.Fatalf("no tf-sidecar at uid %d within %v; processes at that uid: %v", uid, timeout, seen)
+	return nil
+}
+
 // runPtraceProbeAsUID execs the probe child (this test binary, via
 // sidecarBinaryPath) dropped to uid, asking it to PTRACE_ATTACH targetPid, and
 // returns its single PTRACE=... stdout line. Root-gated by the caller (only root

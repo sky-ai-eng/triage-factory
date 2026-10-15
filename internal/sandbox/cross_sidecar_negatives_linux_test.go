@@ -125,11 +125,7 @@ func TestIntegration_CrossSidecarPtraceDenied(t *testing.T) {
 		t.Fatalf("run A and run B share sidecar uid %d — derived uids are not distinct", a.sidecarUID)
 	}
 
-	pidsA := sidecarPidsAtUID(t, a.sidecarUID)
-	if len(pidsA) == 0 {
-		t.Fatalf("no live tf-sidecar at run A's uid %d to target", a.sidecarUID)
-	}
-	targetPid := pidsA[0]
+	targetPid := waitForSidecarUp(t, a.sidecarUID, 5*time.Second)[0]
 
 	// Live half: attach must be denied. runPtraceProbeAsUID drops a probe to run
 	// B's credential uid and tries PTRACE_ATTACH on run A's sidecar pid.
