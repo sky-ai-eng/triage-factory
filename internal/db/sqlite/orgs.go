@@ -427,7 +427,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	var cur sql.NullString
 	if err := s.q.QueryRowContext(ctx, `
-		SELECT base_url FROM org_event_sources WHERE org_id = ? AND kind = ?`,
+		SELECT base_url FROM org_event_sources WHERE org_id = ?1 AND kind = ?2`,
 		orgID, kind).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.OrgSettings{}, fmt.Errorf("read %s base url: %w", kind, err)
 	}
@@ -436,7 +436,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_settings (org_id, updated_at)
-		VALUES (?, CURRENT_TIMESTAMP)
+		VALUES (?1, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id) DO UPDATE SET
 			version = org_settings.version + 1,
 			updated_at = CURRENT_TIMESTAMP
@@ -447,7 +447,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	if _, err := s.q.ExecContext(ctx, `
 		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES (?, ?, ?)
+		VALUES (?1, ?2, ?3)
 		ON CONFLICT (org_id, kind) DO UPDATE SET
 			base_url = excluded.base_url`,
 		orgID, kind, nullStringValue(baseURL)); err != nil {
@@ -505,7 +505,7 @@ func (s *orgsStore) AdoptSourceBaseURL(ctx context.Context, orgID, kind, baseURL
 		var written string
 		err = q.QueryRowContext(ctx, `
 			INSERT INTO org_event_sources (org_id, kind, base_url)
-			VALUES (?, ?, ?)
+			VALUES (?1, ?2, ?3)
 			ON CONFLICT (org_id, kind) DO UPDATE SET
 				base_url = excluded.base_url
 			WHERE COALESCE(org_event_sources.base_url, '') = ''
