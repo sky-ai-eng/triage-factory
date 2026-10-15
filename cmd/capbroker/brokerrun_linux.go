@@ -128,6 +128,20 @@ func (r *brokerRun) Start() error {
 	return nil
 }
 
+// Pause freezes the jail through the broker, which supervises it. Both halves
+// of a checkpoint's quiet point rest on it: a frozen jail runs no process, so
+// nothing in it can write the tree while the capture jail reads it.
+func (r *brokerRun) Pause(ctx context.Context) error {
+	return r.client.call(ctx, methodPauseRun, freezeRunArgs{ContainerID: r.params.ContainerID}, nil)
+}
+
+// Resume lets a paused jail run again.
+func (r *brokerRun) Resume(ctx context.Context) error {
+	return r.client.call(ctx, methodResumeRun, freezeRunArgs{ContainerID: r.params.ContainerID}, nil)
+}
+
+var _ sandbox.Freezer = (*brokerRun)(nil)
+
 func (r *brokerRun) Stdin() io.WriteCloser { return unixWriteCloser{r.conn} }
 func (r *brokerRun) Stdout() io.Reader     { return r.conn }
 

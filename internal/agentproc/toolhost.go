@@ -162,6 +162,66 @@ func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.C
 // actuals rather than holding teardown hostage.
 const toolHostWaitGrace = 10 * time.Second
 
+// Stop kills the jail and returns once its runtime has been reaped, so no
+// process of the run is alive when it does. Close alone signals the kill and
+// goes on; an ending that is about to read the run's tree stops the jail first,
+// because "the signal was sent" is not "nothing is running". Stop is safe to
+// call more than once and before Close, which still reclaims the rest.
+func (j *ToolHostJail) Stop() error {
+	if j == nil || j.run == nil || j.waitDone == nil {
+		return nil
+	}
+	_ = j.run.Close()
+	select {
+	case <-j.waitDone:
+		return nil
+	case <-time.After(toolHostWaitGrace):
+		return fmt.Errorf("agentproc: tool host jail was still running %s after it was killed", toolHostWaitGrace)
+	}
+}
+
+// exited reports whether the jail's runtime has been reaped.
+func (j *ToolHostJail) exited() bool {
+	if j.waitDone == nil {
+		return true
+	}
+	select {
+	case <-j.waitDone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Freeze stops every process in the jail where it stands, so none runs until
+// Thaw: nothing in it can write the run tree, or hold a file of it half
+// written, while a capture reads. A jail that has already exited is as still
+// as a frozen one and is left alone. A launcher that cannot freeze is an
+// error, never a quiet success — a capture that went ahead on a jail it
+// believed frozen would read a moving tree and call it quiet.
+func (j *ToolHostJail) Freeze(ctx context.Context) error {
+	if j == nil || j.exited() {
+		return nil
+	}
+	f, ok := j.run.(sandbox.Freezer)
+	if !ok {
+		return fmt.Errorf("agentproc: this tool host's launcher cannot freeze it")
+	}
+	return f.Pause(ctx)
+}
+
+// Thaw lets a frozen jail run again.
+func (j *ToolHostJail) Thaw(ctx context.Context) error {
+	if j == nil || j.exited() {
+		return nil
+	}
+	f, ok := j.run.(sandbox.Freezer)
+	if !ok {
+		return fmt.Errorf("agentproc: this tool host's launcher cannot freeze it")
+	}
+	return f.Resume(ctx)
+}
+
 // Close kills the jail, stamps the engagement's measured actuals, reclaims
 // the registry entry and cgroup, closes the listener and removes the socket.
 // The socket's directory belongs to the run's cell and goes with it: the

@@ -27,6 +27,11 @@ var runLauncher RunLauncher
 // and a LaunchSidecar reached before that is a boot-order bug.
 var sidecarLauncher SidecarLauncher
 
+// runCapturer is the capture-jail seam, installed alongside runLauncher with
+// the same boot-order contract. A capture reached before SetPrivilegedOps ran
+// fails rather than running anywhere else.
+var runCapturer RunCapturer
+
 // SetPrivilegedOps installs the cap-broker IPC client as BOTH the
 // package's privileged-op implementation and its run launcher. The
 // orchestrator's cap-broker wiring (cmd/capbroker) calls this once at boot
@@ -52,6 +57,7 @@ func SetPrivilegedOps(ops SandboxOps) {
 	defaultOps = ops
 	runLauncher = ops
 	sidecarLauncher = ops
+	runCapturer = ops
 }
 
 // NewHostOps returns the in-process PrivilegedOps implementation. The

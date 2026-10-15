@@ -158,6 +158,15 @@ func (t *stderrTap) Tail() string {
 // after the exec. ctx ties the runtime's lifetime to the broker (cancel →
 // SIGKILL of the runsc parent).
 func LaunchSupervised(ctx context.Context, bundleDir, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer) (*SupervisedRuntime, error) {
+	return launchSupervised(ctx, containerID, memoryLimitMB, stdio, stderr, func() *exec.Cmd {
+		return buildRuntimeCmd(ctx, bundleDir, containerID)
+	})
+}
+
+// launchSupervised is LaunchSupervised over whichever runsc command newCmd
+// builds, so the capture jail — a different command — shares the state
+// hygiene, the cgroup, the stdio ownership and the stderr tail.
+func launchSupervised(ctx context.Context, containerID string, memoryLimitMB int, stdio *os.File, stderr io.Writer, newCmd func() *exec.Cmd) (*SupervisedRuntime, error) {
 	// Pre-launch hygiene. runsc refuses to create a container over existing
 	// state, and a killed predecessor always leaves some — under an id the
 	// next engagement of the same run re-mints exactly, because ids are
@@ -168,7 +177,7 @@ func LaunchSupervised(ctx context.Context, bundleDir, containerID string, memory
 		sandboxLog.Warn("clearing stale runsc container state failed; the launch may collide with it", "container", containerID, "error", err)
 	}
 
-	cmd := buildRuntimeCmd(ctx, bundleDir, containerID)
+	cmd := newCmd()
 	sr := &SupervisedRuntime{cmd: cmd, containerID: containerID}
 
 	var cgroupFD *os.File

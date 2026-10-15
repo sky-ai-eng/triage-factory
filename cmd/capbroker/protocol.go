@@ -20,11 +20,9 @@ import (
 // crosses this RPC is a handful of strings/ints (run ids, subnet indices,
 // iptables rule bookkeeping, a bounded stderr tail) — far under this
 // ceiling; it exists to protect either side from a malformed peer sending a
-// bogus multi-GB length header. Until ProtocolVersion 2 this was two
-// different caps (a 512 MiB responseFrameSize existed solely for
-// CaptureRunDelta's result, which used to embed the whole delta). That
-// result now crosses as a passed-through socket stream, never as an RPC
-// frame, so nothing on this RPC needs more than one small, uniform cap.
+// bogus multi-GB length header. A capture's manifest crosses as a
+// passed-through socket stream and its members as a staging file, never as an
+// RPC frame, so nothing on this RPC needs more than one small, uniform cap.
 const maxFrameSize = 1 * 1024 * 1024 // 1 MiB
 
 // ProtocolVersion is the wire-format version. The broker rejects a
@@ -242,33 +240,35 @@ type removeRunTreeArgs struct {
 	Path string `json:"path"`
 }
 
-// captureRunDeltaArgs carries the fd-passthrough data for the streamed
-// capture: StagingDir names the parent-owned member destination and
-// StdoutSocketPath names the per-capture unix socket the
+// captureRunTreeArgs carries the fd-passthrough data for the streamed
+// capture: StagingDir names the parent-owned file the jail's members stream
+// to, and StdoutSocketPath names the per-capture unix socket the
 // orchestrator-side IPCClient is already listening on (validated with
 // sandbox.ValidateCaptureStdoutSocketPath before the broker dials it) — the
-// capture child's small JSON manifest streams straight to it over a
+// capture jail's small JSON manifest streams straight to it over a
 // passed-through fd, exactly like LaunchRun's StdioSocketPath. Large members
 // never enter either channel.
-type captureRunDeltaArgs struct {
-	Worktree string `json:"worktree"`
-	// Additive in protocol v2: the client and broker ship in one binary, and an
-	// absent value fails the staging-dir boundary check instead of being
-	// misinterpreted as another operation shape.
-	StagingDir       string `json:"staging_dir"`
-	StdoutSocketPath string `json:"stdout_socket_path"`
-	// SessionID, when set, tells the capture child to stage the run's Claude
-	// session transcript (owner-only to the sandbox uid). Empty for a run with
-	// no session.
-	SessionID string `json:"session_id,omitempty"`
+type captureRunTreeArgs struct {
+	Root             string   `json:"root"`
+	Checkouts        []string `json:"checkouts"`
+	StagingDir       string   `json:"staging_dir"`
+	StdoutSocketPath string   `json:"stdout_socket_path"`
 }
 
-// captureRunDeltaResult carries only success/error plus a bounded stderr
+// captureRunTreeResult carries only success/error plus a bounded stderr
 // tail — diagnostics, never run data. The manifest crosses over the
-// passed-through socket named in captureRunDeltaArgs, while the large members
-// land in StagingDir, so this result fits comfortably under maxFrameSize.
-type captureRunDeltaResult struct {
+// passed-through socket named in captureRunTreeArgs, while the large members
+// land in the staging stream, so this result fits comfortably under
+// maxFrameSize.
+type captureRunTreeResult struct {
 	StderrTail string `json:"stderr_tail,omitempty"`
+}
+
+// freezeRunArgs names the run to pause or resume by its container id, the key
+// the broker's run registry holds it under. The broker refuses an id it holds
+// no run for, so the call reaches only a jail this broker launched.
+type freezeRunArgs struct {
+	ContainerID string `json:"container_id"`
 }
 
 // The method* constants are the wire names shared by client and server.
@@ -287,7 +287,9 @@ const (
 	methodPrepareSockets  = "PrepareRunSockets"
 	methodReleaseSockets  = "ReleaseRunSockets"
 	methodGrantStaging    = "GrantRunStaging"
-	methodCaptureRunDelta = "CaptureRunDelta"
+	methodCaptureRunTree  = "CaptureRunTree"
+	methodPauseRun        = "PauseRun"
+	methodResumeRun       = "ResumeRun"
 	methodLaunchSidecar   = "LaunchSidecar"
 	methodWaitSidecar     = "WaitSidecar"
 	methodKillSidecar     = "KillSidecar"

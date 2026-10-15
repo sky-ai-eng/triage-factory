@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -255,6 +256,61 @@ func TestRestoreCheckout_FailureLeavesNothing(t *testing.T) {
 			bare, _ := repoDir(testRepo("acme", "repo").ID)
 			if out := gitAt(t, bare, "for-each-ref", "refs/heads/triagefactory/"); strings.TrimSpace(out) != "" {
 				t.Errorf("failed restore left run-scoped refs in the bare:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestRestoreCheckout_CorruptBundleObjectFailsTheRestore: the bundle is the
+// agent's to write, and the bare it imports into is shared by every run of
+// the repository. A commit fsck rejects fails the restore, and nothing of the
+// bundle reaches the bare.
+func TestRestoreCheckout_CorruptBundleObjectFailsTheRestore(t *testing.T) {
+	for _, mode := range restoreModes {
+		t.Run(mode.name, func(t *testing.T) {
+			setRestoreMode(t, mode.selfContained)
+			upstream := makeSkillsTrackingUpstream(t)
+			const key = "corrupt-bundle-run"
+			root := mustRunRoot(t, key)
+			t.Cleanup(func() { RemoveRunRoot(key) })
+
+			wtDir, err := CreateForPRInRoot(context.Background(), testRepo("acme", "repo"), upstream, upstream, "feature", 7, "conv-a", root)
+			if err != nil {
+				t.Fatalf("CreateForPRInRoot: %v", err)
+			}
+			dirtyCheckout(t, wtDir)
+			// A commit with no email on its author line: valid enough for git
+			// to store and bundle, rejected by fsck.
+			tree := strings.TrimSpace(gitAt(t, wtDir, "rev-parse", "HEAD^{tree}"))
+			parent := strings.TrimSpace(gitAt(t, wtDir, "rev-parse", "HEAD"))
+			body := filepath.Join(t.TempDir(), "commit")
+			writeUnder(t, filepath.Dir(body), "commit", "tree "+tree+"\nparent "+parent+
+				"\nauthor No Email 1700000000 +0000\ncommitter No Email <n@example.com> 1700000000 +0000\n\nmalformed\n")
+			bad := strings.TrimSpace(gitAt(t, wtDir, "hash-object", "-t", "commit", "-w", "--literally", body))
+			gitAt(t, wtDir, "reset", "-q", "--soft", bad)
+			delta, err := CaptureWorkspaceGit(context.Background(), wtDir)
+			if err != nil {
+				t.Fatalf("CaptureWorkspaceGit: %v", err)
+			}
+			if delta.Head != bad || len(delta.Bundle) == 0 {
+				t.Fatalf("capture = head %s with %d bundle bytes, want the malformed commit bundled", delta.Head, len(delta.Bundle))
+			}
+
+			RemoveRunRoot(key)
+			root = mustRunRoot(t, key)
+			_, err = restoreDeltaErr(t, root, key, "acme", "repo", PRRefSlug(7), upstream, CloneAuth{}, delta,
+				&PRCheckout{HeadRef: "feature", HeadCloneURL: upstream, BaseRef: "main"})
+			if err == nil || !strings.Contains(err.Error(), "missingEmail") {
+				t.Fatalf("restore of a bundle carrying a malformed commit = %v, want the fsck failure", err)
+			}
+			// A linked checkout writes into the bare's object store itself, so
+			// only a self-contained one shows what the import let through.
+			bare, _ := repoDir(testRepo("acme", "repo").ID)
+			if out, err := exec.Command("git", "-C", bare, "cat-file", "-e", bad).CombinedOutput(); mode.selfContained && err == nil {
+				t.Errorf("the malformed commit reached the shared bare (%s)", out)
+			}
+			if _, err := os.Stat(filepath.Join(root, "acme", "repo", "pr-7")); !os.IsNotExist(err) {
+				t.Errorf("failed restore left its checkout behind (err=%v)", err)
 			}
 		})
 	}

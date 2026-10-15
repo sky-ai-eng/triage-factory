@@ -1,21 +1,18 @@
 // Package snapshotcapture implements the internal
-// `triagefactory snapshot-capture <worktree-path> <staging-dir> [session-id]` subcommand: it
-// captures one parked run's non-recoverable, agent-owned state — the git delta
-// AND (when a session id is given) the Claude session transcript — into staged
-// files, then writes their small worktree.CapturedState manifest to stdout as
-// JSON. Undocumented in --help, like `hook`.
+// `triagefactory snapshot-capture <root> [<owner>/<repo>/<slug>...]`
+// subcommand: it captures a run tree's non-recoverable state — every named
+// checkout's git delta and the _tfac scratch — into a stream on descriptor
+// sandbox.CaptureStreamFD, then writes the small worktree.CaptureManifest to
+// stdout as JSON. Undocumented in --help, like `hook`.
 //
-// It exists so the delegate spawner can run the capture in a
-// dropped-privilege, network-isolated child instead of host-side as root: two
-// reasons converge on the same child. captureUncommitted's `git add -A` /
-// `git diff` honor clean/smudge/textconv/fsmonitor drivers named by the run
-// root's (agent-writable, once chowned to the sandbox uid) .git/config, so
-// running them as root is a sandbox escape; and the SDK's session transcript
-// lives at 0600 under a 0700 projects dir it locks to its owner, which the
-// orchestrator (a different uid) cannot read at all. Re-invoked as the sandbox
-// uid, a fired filter is contained to the agent's own privilege AND the
-// transcript is readable. The parent (internal/delegate) owns the uid drop +
-// netns; this package is the unprivileged body that just captures and emits.
+// It runs in exactly one place: the capture jail the cap-broker launches for
+// each snapshot (sandbox.LaunchCaptureJail), with the run tree mounted
+// read-only and no network. That is the point of it. The capture's git honors
+// the clean/smudge/textconv/diff drivers and the attributes the checkout's
+// config and .gitattributes name — both of which the agent wrote — so it has
+// to run somewhere that executing them costs nothing. The jail holds no
+// credential and no other run's tree, and the capture cannot write the tree it
+// reads. This package is the unprivileged body that just captures and emits.
 package snapshotcapture
 
 import (
@@ -26,126 +23,123 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// Handle dispatches `triagefactory snapshot-capture <worktree-path> <staging-dir> [session-id]`.
-// The session id is optional: absent (or empty) captures only the git delta,
-// matching a caller that has no session to preserve.
+// Handle dispatches `triagefactory snapshot-capture <root> [<checkout>...]`.
 func Handle(args []string) {
-	if len(args) < 2 || len(args) > 3 {
-		fmt.Fprintln(os.Stderr, "usage: triagefactory snapshot-capture <worktree-path> <staging-dir> [session-id]")
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "usage: triagefactory snapshot-capture <root> [<owner>/<repo>/<slug>...]")
 		os.Exit(2)
 	}
-	sessionID := ""
-	if len(args) == 3 {
-		sessionID = args[2]
-	}
-	outputs, err := inheritedOutputs()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "snapshot-capture:", err)
+	stream := os.NewFile(uintptr(sandbox.CaptureStreamFD), sandbox.CaptureStreamFile)
+	if stream == nil {
+		fmt.Fprintln(os.Stderr, "snapshot-capture: the capture stream descriptor is missing")
 		os.Exit(1)
 	}
-	defer outputs.Close()
-	if err := Run(context.Background(), args[0], args[1], sessionID, outputs, os.Stdout); err != nil {
+	defer func() { _ = stream.Close() }()
+	if err := Run(context.Background(), args[0], args[1:], stream, os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "snapshot-capture:", err)
 		os.Exit(1)
 	}
 }
 
-// Outputs are parent-owned staging files inherited across exec. The child can
-// write through these already-open descriptors without gaining path access to
-// their 0700 directory or 0600 files.
-type Outputs struct {
-	Bundle     *os.File
-	Patch      *os.File
-	Transcript *os.File
-}
+// Run captures root's checkouts and scratch, framing the large members onto
+// stream and writing the manifest as JSON to w. The testable core of Handle,
+// separated from argv parsing, descriptors and os.Exit so the capture body can
+// be exercised without a jail.
+func Run(ctx context.Context, root string, checkouts []string, stream io.Writer, w io.Writer) error {
+	sw := sandbox.NewCaptureStreamWriter(stream)
+	members := &memberWriters{sw: sw}
+	var man worktree.CaptureManifest
 
-func inheritedOutputs() (Outputs, error) {
-	var out Outputs
-	for _, inherited := range []struct {
-		fd   uintptr
-		name string
-		dst  **os.File
-	}{
-		{fd: 3, name: worktree.CaptureBundleFile, dst: &out.Bundle},
-		{fd: 4, name: worktree.CapturePatchFile, dst: &out.Patch},
-		{fd: 5, name: worktree.CaptureTranscriptFile, dst: &out.Transcript},
-	} {
-		f, err := inheritedOutput(inherited.fd, inherited.name)
+	for _, rel := range checkouts {
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		bundle := members.lazy(worktree.CaptureBundleMember(rel))
+		patch := members.lazy(worktree.CapturePatchMember(rel))
+		delta, hasBundle, hasPatch, err := worktree.CaptureWorkspaceGitToWriters(ctx, path, bundle, patch)
 		if err != nil {
-			out.Close()
-			return Outputs{}, err
+			return fmt.Errorf("capture %s: %w", rel, err)
 		}
-		*inherited.dst = f
-	}
-	return out, nil
-}
-
-func inheritedOutput(fd uintptr, name string) (*os.File, error) {
-	f := os.NewFile(fd, name)
-	if f == nil {
-		return nil, fmt.Errorf("capture staging descriptor %d (%s) is missing", fd, name)
-	}
-	info, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("capture staging descriptor %d (%s) is invalid: %w", fd, name, err)
-	}
-	if !info.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, fmt.Errorf("capture staging descriptor %d (%s) is not a regular file", fd, name)
-	}
-	return f, nil
-}
-
-func (o Outputs) Close() {
-	for _, f := range []*os.File{o.Bundle, o.Patch, o.Transcript} {
-		if f != nil {
-			_ = f.Close()
+		if err := members.finish(); err != nil {
+			return err
 		}
+		man.Checkouts = append(man.Checkouts, worktree.CheckoutCapture{Rel: rel, Delta: delta, HasBundle: hasBundle, HasPatch: hasPatch})
 	}
-}
 
-// Run captures wtPath's git delta and, when sessionID is non-empty, its Claude
-// session transcript, streaming large members into stagingDir and writing the
-// small worktree.CapturedState manifest as JSON to w.
-// A missing transcript is not an error — it rides as an empty field, and the
-// resume-side guard reports the unresumable run cleanly. The testable core of
-// Handle, separated from argv parsing + os.Exit so the child's actual
-// capture-then-encode body can be exercised without spawning a process.
-func Run(ctx context.Context, wtPath, stagingDir, sessionID string, outputs Outputs, w io.Writer) error {
-	if outputs.Bundle == nil || outputs.Patch == nil || outputs.Transcript == nil {
-		return fmt.Errorf("capture staging outputs are incomplete")
-	}
-	bundlePath := filepath.Join(stagingDir, worktree.CaptureBundleFile)
-	patchPath := filepath.Join(stagingDir, worktree.CapturePatchFile)
-	transcriptPath := filepath.Join(stagingDir, worktree.CaptureTranscriptFile)
-	delta, hasBundle, hasPatch, err := worktree.CaptureWorkspaceGitToWriters(ctx, wtPath, outputs.Bundle, outputs.Patch)
+	digest, omitted, unreadable, err := worktree.ScratchDigest(ctx, root, func(rel, path string, fi os.FileInfo) error {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = f.Close() }()
+		m, err := sw.Member(worktree.CaptureScratchPrefix + rel)
+		if err != nil {
+			return err
+		}
+		// Exactly the size the walk saw: a file that grew since is captured
+		// as it was at the stat, one that shrank is a short copy that fails
+		// the capture rather than a member padded with bytes it never held.
+		if n, err := io.Copy(m, io.LimitReader(f, fi.Size())); err != nil || n != fi.Size() {
+			_ = m.Close()
+			if err == nil {
+				err = io.ErrUnexpectedEOF
+			}
+			return fmt.Errorf("copy scratch %s: %w", rel, err)
+		}
+		return m.Close()
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("walk scratch: %w", err)
 	}
-	state := worktree.CapturedState{Delta: delta, SessionID: sessionID}
-	if hasBundle {
-		state.BundlePath = bundlePath
+	man.ScratchDigest, man.CILogsOmitted, man.Unreadable = digest, omitted, unreadable
+
+	if err := sw.Close(); err != nil {
+		return fmt.Errorf("flush capture stream: %w", err)
 	}
-	if hasPatch {
-		state.PatchPath = patchPath
-	}
-	// The child is spawned only for a multi-mode sandboxed run (see
-	// delegate.captureWorkspaceGit), and carries no TF_MODE, so it reads the
-	// transcript from the run-root sandbox layout directly rather than via the
-	// runmode-aware path — and confined against a symlink escape.
-	hasTranscript, err := worktree.CopySandboxSessionTranscript(wtPath, sessionID, outputs.Transcript)
-	if err != nil {
-		return err
-	}
-	if hasTranscript {
-		state.TranscriptPath = transcriptPath
-	}
-	if err := json.NewEncoder(w).Encode(state); err != nil {
-		return fmt.Errorf("encode captured state: %w", err)
+	if err := json.NewEncoder(w).Encode(man); err != nil {
+		return fmt.Errorf("encode manifest: %w", err)
 	}
 	return nil
+}
+
+// memberWriters opens a stream member on a writer's first write, so a bundle
+// or patch git has nothing to put in leaves no member behind and the manifest's
+// HasBundle and HasPatch stay the single statement of what is there. Members
+// are strictly sequential in the framing, so opening one closes the last.
+type memberWriters struct {
+	sw  *sandbox.CaptureStreamWriter
+	cur io.WriteCloser
+}
+
+func (m *memberWriters) lazy(name string) io.Writer { return &lazyMember{m: m, name: name} }
+
+func (m *memberWriters) finish() error {
+	if m.cur == nil {
+		return nil
+	}
+	err := m.cur.Close()
+	m.cur = nil
+	return err
+}
+
+type lazyMember struct {
+	m    *memberWriters
+	name string
+	open bool
+}
+
+func (l *lazyMember) Write(p []byte) (int, error) {
+	if !l.open {
+		if err := l.m.finish(); err != nil {
+			return 0, err
+		}
+		w, err := l.m.sw.Member(l.name)
+		if err != nil {
+			return 0, err
+		}
+		l.m.cur, l.open = w, true
+	}
+	return l.m.cur.Write(p)
 }

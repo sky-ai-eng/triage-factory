@@ -241,3 +241,42 @@ func reapOrphanRuntimeState(ctx context.Context) {
 		}
 	}
 }
+
+// runscFreezeTimeout bounds one pause or resume. Both are a signal to the
+// sentry and an acknowledgement, which the measured cost of is tens of
+// milliseconds; the bound only keeps a wedged runsc from holding a checkpoint
+// open.
+const runscFreezeTimeout = 30 * time.Second
+
+// PauseRuntime freezes every process of the jail runsc holds under
+// containerID, so none of them runs, in the jail or against a file it has
+// mounted, until ResumeRuntime. An unknown container is nothing to freeze and
+// is not an error: a jail that has exited is as still as a paused one.
+func PauseRuntime(ctx context.Context, containerID string) error {
+	return runscFreeze(ctx, "pause", "paused", containerID)
+}
+
+// ResumeRuntime lets a paused jail's processes run again. Resuming a jail that
+// is not paused, or is gone, succeeds.
+func ResumeRuntime(ctx context.Context, containerID string) error {
+	return runscFreeze(ctx, "resume", "running", containerID)
+}
+
+func runscFreeze(ctx context.Context, verb, want, containerID string) error {
+	if err := validateOpaqueID("container id", containerID); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, runscFreezeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "runsc", verb, containerID).CombinedOutput()
+	if err == nil || isUnknownContainerOutput(out) {
+		return nil
+	}
+	// A pause that finds the jail already paused, or a resume one already
+	// running, is the state asked for.
+	if state, serr := exec.CommandContext(ctx, "runsc", "state", containerID).Output(); serr == nil &&
+		strings.Contains(string(state), `"status": "`+want+`"`) {
+		return nil
+	}
+	return fmt.Errorf("sandbox: runsc %s %s: %w: %s", verb, containerID, err, strings.TrimSpace(string(out)))
+}

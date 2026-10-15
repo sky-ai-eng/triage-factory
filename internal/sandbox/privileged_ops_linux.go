@@ -99,19 +99,6 @@ type PrivilegedOps interface {
 	// ChownRunTree, on the tree's top level only: the contents must be
 	// removed regardless of what uids the run left inside.
 	RemoveRunTree(ctx context.Context, path string) error
-
-	// CaptureRunDelta runs the parked-run capture
-	// (`snapshot-capture <worktree> <staging-dir> [session-id]`) in a child
-	// dropped to the jail identity that owns worktree, inside an empty
-	// network namespace. The large members land in the validated,
-	// parent-owned staging directory; stdout carries only their JSON
-	// manifest. The child runs as that jail uid for two reasons that share
-	// the one drop: a hostile .git filter fires only as that run's agent,
-	// and the SDK's owner-only session transcript is readable. Both halves of that
-	// confinement — the setuid and the CLONE_NEWNET — need capabilities
-	// the orchestrator no longer holds, so the exec runs privileged-side
-	// whole. sessionID is empty when the run carries no session.
-	CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error)
 }
 
 // SidecarLaunchParams is the serializable, validated input to
@@ -189,14 +176,25 @@ type RunLauncher interface {
 	LaunchRun(ctx context.Context, p LaunchParams) (LaunchedRun, error)
 }
 
+// RunCapturer runs one capture in a jail the cap-broker builds. Like the run
+// launch it is not part of PrivilegedOps: the manifest crosses a passed-through
+// socket, and the capture's members go to a staging file, so neither passes
+// through the broker's address space. There is no in-process implementation,
+// and so no capture that runs on the host.
+type RunCapturer interface {
+	// CaptureRunTree runs the capture and returns its JSON manifest.
+	CaptureRunTree(ctx context.Context, p CaptureParams) ([]byte, error)
+}
+
 // SandboxOps is the full set the orchestrator installs at boot via
 // SetPrivilegedOps: the broker-served privileged operations plus the
-// always-brokered run launch and the always-brokered sidecar launch. The
-// cap-broker IPC client is the sole implementation.
+// always-brokered run launch, sidecar launch and capture. The cap-broker IPC
+// client is the sole implementation.
 type SandboxOps interface {
 	PrivilegedOps
 	RunLauncher
 	SidecarLauncher
+	RunCapturer
 }
 
 // NetworkState is the serializable per-run network state SetupNetwork

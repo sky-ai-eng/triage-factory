@@ -7,14 +7,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
 // captureTestJail is the jail identity the capture tests' trees are handed
-// to, and so the identity the capture child must drop to.
+// to, and so the identity the capture jail runs as.
 var captureTestJail = struct{ uid, gid int }{JailUID(9), JailGID(9)}
 
 // captureTestTree returns a directory that passes validateRunTreeRoot and is
@@ -37,14 +36,12 @@ func captureTestStaging(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(path, 0o600); err != nil {
-			t.Fatal(err)
-		}
+	path := filepath.Join(dir, CaptureStreamFile)
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -54,183 +51,6 @@ func captureTestStaging(t *testing.T) string {
 		_ = os.RemoveAll(dir)
 	})
 	return dir
-}
-
-// TestCaptureRunDelta_DropsPrivilegeAndNetns pins the containment the
-// capture relies on: the capture child runs as the jail identity that holds
-// the tree — that run's, and no other — with the parent's supplementary
-// groups shed, inside an empty network namespace.
-// That is what confines a filter a hostile .git/config could trigger to the
-// agent's own privilege instead of the privileged capture host (the
-// cap-broker — the escape this capture path closes).
-//
-// It overrides captureCommand with a shell that reports `id` and
-// /proc/net/dev to a side file (stdout stays clean — it echoes the "null"
-// delta), then asserts on that file. Needs root to setuid/setgroups/unshare,
-// so it skips otherwise — the same gate as the sandbox integration tests.
-func TestCaptureRunDelta_DropsPrivilegeAndNetns(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to setuid/setgroups/unshare a network namespace")
-	}
-
-	diag, err := os.CreateTemp("", "tf-capdrop-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	diagPath := diag.Name()
-	_ = diag.Close()
-	// The child runs as a jail uid; it must be able to write the diag file.
-	if err := os.Chmod(diagPath, 0o666); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(diagPath) })
-
-	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		script := "{ id; echo ==NET==; cat /proc/net/dev; } > " + diagPath + " 2>&1; echo null"
-		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	raw, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), "")
-	if err != nil {
-		t.Fatalf("CaptureRunDelta: %v", err)
-	}
-	if got := strings.TrimSpace(string(raw)); got != "null" {
-		t.Errorf("raw output = %q, want the child's literal %q", got, "null")
-	}
-
-	b, err := os.ReadFile(diagPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := string(b)
-	idLine, netPart := out, ""
-	if i := strings.Index(out, "==NET=="); i >= 0 {
-		idLine, netPart = out[:i], out[i:]
-	}
-
-	if !strings.Contains(idLine, fmt.Sprintf("uid=%d", captureTestJail.uid)) || !strings.Contains(idLine, fmt.Sprintf("gid=%d", captureTestJail.gid)) {
-		t.Errorf("child did not drop to the tree's jail identity %d:%d:\n%s", captureTestJail.uid, captureTestJail.gid, idLine)
-	}
-	if strings.Contains(idLine, "(root)") || strings.Contains(idLine, "groups=0") {
-		t.Errorf("child retained a root supplementary group:\n%s", idLine)
-	}
-
-	// A fresh CLONE_NEWNET namespace contains ONLY loopback. Assert exactly that
-	// — the positive property — rather than blocklisting known host interface
-	// names, so an interface with any name (enpXsY, wlan0, …) leaking in fails.
-	ifaces := parseProcNetDevIfaces(netPart)
-	if len(ifaces) == 0 {
-		t.Fatalf("could not parse any interface from /proc/net/dev:\n%s", netPart)
-	}
-	for _, name := range ifaces {
-		if name != "lo" {
-			t.Errorf("child network namespace not isolated (interface %q present, want only lo): %v", name, ifaces)
-		}
-	}
-}
-
-// TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin pins the fallback the
-// unprivileged bare-metal dev case relies on: creating a network namespace
-// needs CAP_SYS_ADMIN, so the capture must skip CLONE_NEWNET rather than
-// fail the whole capture on a privileged syscall it can never make. The
-// uid/gid drop — the primary boundary — still applies regardless. (In the
-// default deployment this method runs in the cap-broker, which always
-// holds CAP_SYS_ADMIN, so the netns applies unconditionally there.)
-//
-// Asserts via /proc/self/ns/net identity (a symlink to "net:[<inode>]",
-// unique per network namespace on the host) rather than comparing
-// interface *counts*: a fresh netns also starts with only "lo", so on a
-// host that itself has only "lo" (a minimal/isolated CI runner), a
-// count-based comparison would pass whether or not CLONE_NEWNET was
-// actually (wrongly) still applied. Namespace identity has no such
-// false-pass — it directly answers "is this the same network namespace
-// as the parent," independent of the host's own interface topology.
-func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to setuid/setgroups the child")
-	}
-
-	wantNetns, err := os.Readlink("/proc/self/ns/net")
-	if err != nil {
-		t.Fatalf("readlink /proc/self/ns/net: %v", err)
-	}
-
-	origHasSysAdmin := hasSysAdmin
-	hasSysAdmin = func() bool { return false }
-	t.Cleanup(func() { hasSysAdmin = origHasSysAdmin })
-
-	diag, err := os.CreateTemp("", "tf-capdrop-nonetns-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	diagPath := diag.Name()
-	_ = diag.Close()
-	if err := os.Chmod(diagPath, 0o666); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Remove(diagPath) })
-
-	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		script := "{ id; echo ==NETNS==; readlink /proc/self/ns/net; } > " + diagPath + " 2>&1; echo null"
-		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), ""); err != nil {
-		t.Fatalf("CaptureRunDelta: %v", err)
-	}
-
-	b, err := os.ReadFile(diagPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := string(b)
-	idLine, gotNetns := out, ""
-	if i := strings.Index(out, "==NETNS=="); i >= 0 {
-		idLine, gotNetns = out[:i], strings.TrimSpace(out[i+len("==NETNS=="):])
-	}
-
-	if !strings.Contains(idLine, fmt.Sprintf("uid=%d", captureTestJail.uid)) || !strings.Contains(idLine, fmt.Sprintf("gid=%d", captureTestJail.gid)) {
-		t.Errorf("child did not drop to the tree's jail identity %d:%d even without CAP_SYS_ADMIN:\n%s", captureTestJail.uid, captureTestJail.gid, idLine)
-	}
-
-	if gotNetns != wantNetns {
-		t.Errorf("child network namespace = %q, want %q (the parent's own — hasSysAdmin() = false should mean no new netns was created)", gotNetns, wantNetns)
-	}
-}
-
-// TestCaptureRunDelta_RefusesTreeNoJailHolds pins that the capture has no
-// identity to fall back on: a tree the orchestrator still owns, or one parked
-// after its engagement ended, is refused before any child is started — never
-// captured as some other identity that happens to be at hand.
-func TestCaptureRunDelta_RefusesTreeNoJailHolds(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("needs root to stage a parked tree")
-	}
-	orig := captureCommand
-	started := false
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		started = true
-		return exec.CommandContext(ctx, "/bin/true"), nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	orchestratorOwned := t.TempDir()
-	parked := t.TempDir()
-	if err := os.Chown(parked, ParkedRunTreeUID, os.Getgid()); err != nil {
-		t.Fatal(err)
-	}
-	for name, tree := range map[string]string{"orchestrator-owned": orchestratorOwned, "parked": parked} {
-		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), tree, captureTestStaging(t), ""); err == nil {
-			t.Errorf("%s tree: CaptureRunDelta = nil error, want a refusal", name)
-		}
-	}
-	if started {
-		t.Error("a capture child was started for a tree no jail identity holds")
-	}
 }
 
 // TestTailBuffer_SingleLargeWriteNeverExceedsMax pins that a single Write
@@ -284,74 +104,6 @@ func TestTailBuffer_KeepsOnlyLastMaxBytes(t *testing.T) {
 	}
 }
 
-// TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty pins that a
-// capture failure with no stderr output at all (the child never started)
-// surfaces a plain error, not one formatted with an always-appended,
-// now-empty ": %s" stderr suffix.
-func TestCaptureRunDelta_ErrorHasNoTrailingColonWhenStderrEmpty(t *testing.T) {
-	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		return exec.CommandContext(ctx, "/nonexistent-tf-capture-errfmt-test-binary"), nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	_, err := (hostOps{}).CaptureRunDelta(context.Background(), captureTestTree(t), captureTestStaging(t), "")
-	if err == nil {
-		t.Fatal("expected an error for a nonexistent capture binary")
-	}
-	if strings.HasSuffix(err.Error(), ": ") {
-		t.Errorf("error = %q, want no trailing empty-stderr suffix", err.Error())
-	}
-}
-
-// TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile pins the one
-// implementation trap this ticket exists to avoid: the child's stdout must
-// be the caller-supplied *os.File itself, assigned directly to cmd.Stdout —
-// never wrapped in another io.Writer. os/exec special-cases *os.File (a
-// direct dup2 into the child at exec time, no copy in this process);
-// anything else makes os/exec silently fall back to an os.Pipe() plus a
-// copy goroutine IN THIS PROCESS, reintroducing every byte of the delta
-// into the caller's (in production, the broker's) memory and defeating the
-// whole point of CaptureRunDeltaTo.
-//
-// Uses a nonexistent binary so cmd.Start() fails fast (no such file) without
-// ever needing to setuid — the point here is only what cmd.Stdout was set
-// to before Start was attempted, not whether the child actually ran.
-func TestCaptureRunDeltaTo_StdoutIsTheSocketBackedFile(t *testing.T) {
-	orig := captureCommand
-	var gotCmd *exec.Cmd
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		gotCmd = exec.CommandContext(ctx, "/nonexistent-tf-capture-pin-test-binary")
-		return gotCmd, nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = pr.Close() })
-
-	// The child can never actually start (no such binary) — irrelevant here;
-	// CaptureRunDeltaTo still closes pw regardless of outcome.
-	_, _ = CaptureRunDeltaTo(context.Background(), captureTestTree(t), captureTestStaging(t), "", pw)
-
-	if gotCmd == nil {
-		t.Fatal("captureCommand was never invoked")
-	}
-	if gotCmd.Stdout != pw {
-		t.Errorf("cmd.Stdout = %#v, want the exact *os.File %v passed to CaptureRunDeltaTo", gotCmd.Stdout, pw)
-	}
-	if len(gotCmd.ExtraFiles) != 3 {
-		t.Fatalf("cmd.ExtraFiles = %d files, want bundle/patch/transcript staging descriptors", len(gotCmd.ExtraFiles))
-	}
-	for i, f := range gotCmd.ExtraFiles {
-		if f == nil {
-			t.Errorf("cmd.ExtraFiles[%d] is nil", i)
-		}
-	}
-}
-
 // TestReadCaptureManifest_UnderCapByteIdentical pins the happy path of the
 // shared cap both capture paths enforce: data at or under CaptureManifestMaxBytes
 // round-trips byte-identical.
@@ -386,42 +138,13 @@ func TestReadCaptureManifest_OverCapErrors(t *testing.T) {
 	}
 }
 
-// TestCaptureRunDelta_RejectsInvalidWorktree pins the boundary validation:
-// the capture exec must refuse paths a compromised orchestrator could use
-// to point the privileged child (or its git invocation) somewhere
-// surprising — never spawning the child at all. captureCommand fails the
-// test loudly if reached.
-func TestCaptureRunDelta_RejectsInvalidWorktree(t *testing.T) {
-	orig := captureCommand
-	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-		t.Errorf("captureCommand invoked for invalid worktree %q", wtPath)
-		return exec.Command("false"), nil
-	}
-	t.Cleanup(func() { captureCommand = orig })
-
-	for _, path := range []string{
-		"",                               // empty
-		"relative/path",                  // not absolute
-		"/",                              // the root itself
-		"/tmp",                           // one component — never a run tree
-		"/tmp/../etc/cron.d",             // non-clean
-		"/nonexistent-tf-capture-test/x", // no such tree
-	} {
-		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), path, captureTestStaging(t), ""); err == nil {
-			t.Errorf("CaptureRunDelta(%q) = nil error, want validation rejection", path)
-		}
-	}
-}
-
 func TestOpenCaptureStaging_RejectsWritableOrReplaceableMembers(t *testing.T) {
 	valid := captureTestStaging(t)
-	files, err := openCaptureStaging(valid)
+	f, err := openCaptureStaging(valid)
 	if err != nil {
 		t.Fatalf("valid staging rejected: %v", err)
 	}
-	for _, f := range files {
-		_ = f.Close()
-	}
+	_ = f.Close()
 
 	wrongMode := captureTestStaging(t)
 	if err := os.Chmod(wrongMode, 0o701); err != nil {
@@ -436,7 +159,7 @@ func TestOpenCaptureStaging_RejectsWritableOrReplaceableMembers(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bundle := filepath.Join(symlinked, CaptureBundleFile)
+	bundle := filepath.Join(symlinked, CaptureStreamFile)
 	if err := os.Remove(bundle); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +178,7 @@ func TestOpenCaptureStaging_RejectsWritableOrReplaceableMembers(t *testing.T) {
 	if err := os.WriteFile(victim, []byte("do not truncate"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bundle = filepath.Join(hardLinkStaging, CaptureBundleFile)
+	bundle = filepath.Join(hardLinkStaging, CaptureStreamFile)
 	if err := os.Remove(bundle); err != nil {
 		t.Fatal(err)
 	}
@@ -488,23 +211,19 @@ func TestOpenCaptureStaging_AnchorsDirectoryAcrossRename(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	files, err := openCaptureStagingMembers(dirFD, wantUID)
+	member, err := openCaptureStagingMember(dirFD, CaptureStreamFile, wantUID)
 	if err != nil {
-		t.Fatalf("open members through anchored directory: %v", err)
+		t.Fatalf("open the member through the anchored directory: %v", err)
 	}
-	defer func() {
-		for _, f := range files {
-			_ = f.Close()
-		}
-	}()
-	if _, err := files[0].WriteString("anchored"); err != nil {
+	defer func() { _ = member.Close() }()
+	if _, err := member.WriteString("anchored"); err != nil {
 		t.Fatal(err)
 	}
-	gotMoved, err := os.ReadFile(filepath.Join(moved, CaptureBundleFile))
+	gotMoved, err := os.ReadFile(filepath.Join(moved, CaptureStreamFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotReplacement, err := os.ReadFile(filepath.Join(replacement, CaptureBundleFile))
+	gotReplacement, err := os.ReadFile(filepath.Join(replacement, CaptureStreamFile))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,13 +239,13 @@ func TestOpenCaptureStagingMember_AnchorsInodeAcrossReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeFd(dirFD)
-	pinnedFD, err := pinCaptureStagingMember(dirFD, CaptureBundleFile)
+	pinnedFD, err := pinCaptureStagingMember(dirFD, CaptureStreamFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeFd(pinnedFD)
 
-	bundle := filepath.Join(dir, CaptureBundleFile)
+	bundle := filepath.Join(dir, CaptureStreamFile)
 	moved := bundle + ".moved"
 	if err := os.Rename(bundle, moved); err != nil {
 		t.Fatal(err)
@@ -539,7 +258,7 @@ func TestOpenCaptureStagingMember_AnchorsInodeAcrossReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	f, err := openPinnedCaptureStagingMember(pinnedFD, CaptureBundleFile, wantUID)
+	f, err := openPinnedCaptureStagingMember(pinnedFD, CaptureStreamFile, wantUID)
 	if err != nil {
 		t.Fatalf("reopen pinned member after replacement: %v", err)
 	}
@@ -560,20 +279,60 @@ func TestOpenCaptureStagingMember_AnchorsInodeAcrossReplacement(t *testing.T) {
 	}
 }
 
-// parseProcNetDevIfaces extracts interface names from a /proc/net/dev dump.
-// Data lines are "  <name>: <counters...>"; the two header lines have no
-// pre-colon interface token, so keying on the colon-delimited first field and
-// dropping empties yields exactly the interface set.
-func parseProcNetDevIfaces(procNetDev string) []string {
-	var names []string
-	for _, line := range strings.Split(procNetDev, "\n") {
-		i := strings.IndexByte(line, ':')
-		if i < 0 {
-			continue
-		}
-		if name := strings.TrimSpace(line[:i]); name != "" && !strings.Contains(name, "|") {
-			names = append(names, name)
+// TestValidateCaptureCheckouts pins the shape of a checkout the broker will put
+// in an argv: exactly three plain segments, none an option or a traversal, none
+// repeated.
+func TestValidateCaptureCheckouts(t *testing.T) {
+	if err := ValidateCaptureCheckouts([]string{"acme/app/default", "acme/app/pr-7", "o/r/ref-feat~x"}); err != nil {
+		t.Fatalf("valid checkouts rejected: %v", err)
+	}
+	for _, bad := range []string{"", "acme/app", "acme/app/default/x", "../app/default", "acme/../default", "acme/app/..", "-acme/app/default", "acme//default", "/acme/app/default", "acme/app/de\\fault", "acme/app/.", "acme/app/de\x00fault"} {
+		if err := ValidateCaptureCheckouts([]string{bad}); err == nil {
+			t.Errorf("accepted checkout %q", bad)
 		}
 	}
-	return names
+	if err := ValidateCaptureCheckouts([]string{"a/b/c", "a/b/c"}); err == nil {
+		t.Error("accepted a checkout named twice")
+	}
+	many := make([]string, CaptureCheckoutsMax+1)
+	for i := range many {
+		many[i] = fmt.Sprintf("o/r/s%d", i)
+	}
+	if err := ValidateCaptureCheckouts(many); err == nil {
+		t.Error("accepted more checkouts than the cap")
+	}
+}
+
+// TestLaunchCaptureJail_RefusesWhatItCannotRead pins the gate in front of
+// the jail: a tree that is not a valid run tree, or that no jail identity
+// holds, never reaches a launch.
+func TestLaunchCaptureJail_RefusesWhatItCannotRead(t *testing.T) {
+	for _, path := range []string{
+		"",                               // empty
+		"relative/path",                  // not absolute
+		"/",                              // the root itself
+		"/tmp",                           // one component — never a run tree
+		"/tmp/../etc/cron.d",             // non-clean
+		"/nonexistent-tf-capture-test/x", // no such tree
+	} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = r.Close()
+		if _, err := LaunchCaptureJail(context.Background(), CaptureParams{Root: path, StagingDir: captureTestStaging(t)}, w); err == nil {
+			t.Errorf("LaunchCaptureJail(%q) = nil error, want validation rejection", path)
+		}
+	}
+
+	// A tree the orchestrator itself owns has no jail identity to be read as.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	_, err = LaunchCaptureJail(context.Background(), CaptureParams{Root: t.TempDir(), StagingDir: captureTestStaging(t)}, w)
+	if err == nil || !strings.Contains(err.Error(), "not a jail identity") {
+		t.Errorf("LaunchCaptureJail over a tree no jail holds = %v, want a refusal naming the missing identity", err)
+	}
 }

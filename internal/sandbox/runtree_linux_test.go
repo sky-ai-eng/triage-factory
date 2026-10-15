@@ -461,8 +461,13 @@ func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
 	if err := (hostOps{}).RemoveRunTree(context.Background(), rootOwned); err == nil {
 		t.Error("RemoveRunTree accepted a root-owned tree in brokered mode; same hole via the destructive op")
 	}
-	if _, err := (hostOps{}).CaptureRunDelta(context.Background(), rootOwned, captureTestStaging(t), ""); err == nil {
-		t.Error("CaptureRunDelta accepted a root-owned tree in brokered mode; same hole via the capture op")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+	if _, err := LaunchCaptureJail(context.Background(), CaptureParams{Root: rootOwned, StagingDir: captureTestStaging(t)}, w); err == nil {
+		t.Error("LaunchCaptureJail accepted a root-owned tree in brokered mode; same hole via the capture op")
 	}
 }
 

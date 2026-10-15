@@ -238,11 +238,11 @@ func captureSocketPath() (string, error) {
 	return filepath.Join(captureSocketDir, fmt.Sprintf("capture-%x.sock", raw)), nil
 }
 
-// CaptureRunDelta streams the capture child's small manifest directly from the
+// CaptureRunTree streams the capture jail's small manifest directly from the
 // broker to this process over a per-capture unix socket — the fd-passthrough
 // pattern LaunchRun uses for the run's live stdio (brokerrun_linux.go),
-// applied here so the broker still never parses child output. Large capture
-// members land in the parent-owned staging directory instead.
+// applied here so the broker still never parses jail output. The capture's
+// members land in the parent-owned staging stream instead.
 //
 // It opens the listener the broker will dial, issues the RPC carrying the
 // socket path, and concurrently accepts + reads the stream while awaiting
@@ -252,7 +252,7 @@ func captureSocketPath() (string, error) {
 // authoritative outcome, e.g. it may yet report a child failure) are each
 // insufficient alone. captureTimeout bounds the whole round trip on both
 // sides: the RPC call, the accept, and the capped read.
-func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+func (c *IPCClient) CaptureRunTree(ctx context.Context, p sandbox.CaptureParams) ([]byte, error) {
 	sockPath, err := captureSocketPath()
 	if err != nil {
 		return nil, err
@@ -298,10 +298,10 @@ func (c *IPCClient) CaptureRunDelta(ctx context.Context, worktree, stagingDir, s
 		streamDone <- streamResult{buf, err}
 	}()
 
-	var res captureRunDeltaResult
-	args := captureRunDeltaArgs{Worktree: worktree, StagingDir: stagingDir, StdoutSocketPath: sockPath, SessionID: sessionID}
-	if err := c.callWithCap(ctx, methodCaptureRunDelta, args, &res, captureTimeout); err != nil {
-		// The RPC is authoritative on failure (dial failure, child failure) —
+	var res captureRunTreeResult
+	args := captureRunTreeArgs{Root: p.Root, Checkouts: p.Checkouts, StagingDir: p.StagingDir, StdoutSocketPath: sockPath}
+	if err := c.callWithCap(ctx, methodCaptureRunTree, args, &res, captureTimeout); err != nil {
+		// The RPC is authoritative on failure (dial failure, jail failure) —
 		// discard whatever, if anything, crossed the stream, and stop it from
 		// continuing to read toward CaptureManifestMaxBytes on a result nobody will
 		// use. Closing the listener first fails a still-pending Accept

@@ -89,7 +89,19 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// user who stopped the run during bring-up asked for exactly the park the
 	// later phases give them, and retrying it would restart the work they just
 	// stopped.
+	//
+	// The tool-host jail, once launched, is stopped before any of these exits
+	// reads the tree: the snapshot a park takes must not run beside a process
+	// of the run.
+	var jail *agentproc.ToolHostJail
+	stopJail := func() {
+		if err := jail.Stop(); err != nil {
+			delegateLog.Error("the run's tool host jail did not stop; a process of the run may still be writing its tree",
+				"conversation", conversationID, "error", err)
+		}
+	}
 	launchFailed := func(err error) engagementDisposition {
+		stopJail()
 		if ctx.Err() != nil {
 			return stopped()
 		}
@@ -233,6 +245,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	// ending's snapshot; the deferred stop only covers an exit that never
 	// reaches it.
 	ckpt := s.startCheckpointer(ctx, orgID, conversationID, namespace, cfg.claimID, claudeCwd)
+	ckpt.freezeWith(jail)
 	defer ckpt.stop()
 
 	engine := &agentloop.Engine{
@@ -271,6 +284,12 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 		WorkspaceAsOf:       cfg.workspaceAsOf,
 		ExecutorChanged:     s.executorChangedSince(ctx, orgID, conversationID, cfg.claimID, cfg.workspace),
 	})
+
+	// The loop is over, and every ending below may read the run's tree. The
+	// jail is stopped first, until its runtime is gone: a process the agent
+	// backgrounded would otherwise still be writing while the snapshot is taken.
+	_ = tools.Close()
+	stopJail()
 
 	return s.recordNativeResult(ctx, orgID, conversationID, task, cfg, namespace, claudeCwd, triggerType, creatorUserID, startTime, result, mirror)
 }

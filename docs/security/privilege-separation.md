@@ -47,11 +47,10 @@ boundary validation (`internal/sandbox`'s `ValidateLaunchParams` and
 host state: the sandbox infrastructure itself (netns/veth/iptables, cgroups, the
 curated rootfs, the `runsc` launch), and the **run-tree ownership lifecycle** —
 handing a run tree to the engagement's jail identity at every claim, parking its
-root when the engagement ends, running the park-time git-delta capture in a
-dropped-privilege child, and destroying the tree at teardown. The lifecycle family
-exists because all of it is privileged once the orchestrator's capabilities are
-gone: changing a file's owner needs `CAP_CHOWN`, the capture child's setuid/netns
-need `CAP_SETUID`/`CAP_SYS_ADMIN`, and removing a tree the sandbox wrote into means
+root when the engagement ends, running the snapshot capture in its own jail, and
+destroying the tree at teardown. The lifecycle family exists because all of it
+is privileged once the orchestrator's capabilities are gone: changing a file's
+owner needs `CAP_CHOWN`, launching the capture jail needs `CAP_SYS_ADMIN`, and removing a tree the sandbox wrote into means
 unlinking through modes the orchestrator can't. The chown/remove ops additionally
 require the target tree to already be owned by the orchestrator, a jail identity or
 the parked owner — a validly-shaped path pointing at `/etc` is refused by ownership,
@@ -60,6 +59,33 @@ launch family is the per-run credential sidecar: the broker execs it at the
 validated per-run uid (re-checking the `SidecarUID` band at the RPC boundary, so
 a compromised orchestrator can't ask for uid 0), the sidecar analog of the runsc
 launch.
+
+**Snapshot capture** reads a tree the agent controls, and git honors what the agent
+wrote into it: filter drivers named in the checkout's `.git/config` or an
+`include.path`, `objects/info/alternates`, a promisor remote's transport, and the
+config of submodules. Running that git as any host identity runs the agent's
+program on the host kernel, where a jail's uid is no boundary, since the same
+number owns the run's tree and reaches its sockets. So every capture runs in a
+one-shot gVisor jail the broker builds from a fixed template: no network, no
+host sockets, no capabilities, the run tree mounted read-only, the TF binary
+mounted read-only, and one output file passed in as a descriptor. The jail runs
+as the identity that owns the tree, so it reads what the agent made private to
+itself, and nothing else of any run is in view. Git runs there with
+`GIT_NO_LAZY_FETCH=1` and writes the objects a stage produces to a temporary
+directory on the jail's `/tmp`, so the tree is only ever read. The scratch walk
+runs in the same jail, so the orchestrator never reads a file the agent wrote;
+it unpacks the jail's stream under a bounded, validated framing into a staging
+directory it owns, and archives that copy. There is no host fallback: if the jail
+cannot launch, the snapshot fails.
+
+The tree also has to stand still while it is read. A conclusion stops the run's
+tool-host jail and waits until its runtime is reaped before taking the
+snapshot. A checkpoint pauses the jail (`runsc pause`), captures, and resumes;
+processes the agent backgrounded survive and cannot run during the capture. The
+resume happens on every path out, retried once, and the next tool call waits
+only for the resume, not for the archive. A restore imports a bundle with
+`git index-pack --fsck-objects`, since the bundle is agent-authored and the bare
+it lands in is shared across runs.
 
 That sidecar launch carries one more privileged grant: the broker binds the run's
 **shared-origin listener** — port 443 on the run's own host-side veth IP — and

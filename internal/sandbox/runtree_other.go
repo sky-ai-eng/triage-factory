@@ -29,9 +29,9 @@ func mkdirRunTreeScaffold(root, rel string) error {
 	return os.MkdirAll(filepath.Join(root, rel), 0o755)
 }
 
-// captureRunDelta has no non-Linux implementation; the delegate caller
+// captureRunTree has no non-Linux implementation; the delegate caller
 // routes to the in-process capture before ever reaching this.
-func captureRunDelta(_ context.Context, _, _, _ string) ([]byte, error) {
+func captureRunTree(_ context.Context, _ CaptureParams) ([]byte, error) {
 	return nil, ErrUnsupportedPlatform
 }
 

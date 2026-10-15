@@ -54,7 +54,7 @@ func (f fakePrivilegedOps) GrantRunStaging(ctx context.Context, dir string, subn
 	return nil
 }
 func (f fakePrivilegedOps) RemoveRunTree(ctx context.Context, path string) error { return nil }
-func (f fakePrivilegedOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
+func (f fakePrivilegedOps) CaptureRunTree(ctx context.Context, p CaptureParams) ([]byte, error) {
 	return nil, nil
 }
 

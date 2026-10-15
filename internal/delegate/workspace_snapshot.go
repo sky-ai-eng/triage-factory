@@ -88,31 +88,6 @@ const (
 // treated as no snapshot at all rather than converted.
 const snapshotLayoutVersion = 2
 
-// scratchExcludes are the top-level _tfac entries that come back by a route of
-// their own and so never ride in the snapshot: entity-memory rebuilds from
-// conversation_memory (and under a jail is not even a directory — it is the
-// symlink standing in for the read-only mount, which the walk skips as
-// non-regular regardless), knowledge is re-copied from the team knowledge
-// store on every launch (carrying it would preserve a stale copy at the cost
-// of the blob's size), and ci-logs is the extracted output of `exec gh
-// actions download-logs`, which the agent re-runs to get byte-identical
-// content back from GitHub. Everything else under _tfac (skill scratch,
-// ad-hoc agent files, and the agent's own memory.md — which is not in the DB
-// until termination ingests it) is non-recoverable and IS captured.
-//
-// ci-logs is the only one of the three the agent can notice missing:
-// entity-memory and knowledge are both re-staged before it looks, while a full
-// Actions log archive — routinely hundreds of MB to GBs of text, and the largest thing a
-// park would ever compress — is re-fetched on demand rather than restored.
-// So a cold rehydrate whose snapshot dropped a populated ci-logs plants
-// ciLogsNotice where the logs were, rather than handing back a tree that
-// quietly lost them.
-var scratchExcludes = map[string]bool{
-	"entity-memory":    true,
-	knowledgeDirName:   true,
-	worktree.CILogsDir: true,
-}
-
 // ciLogsNoticeFile is the notice a cold rehydrate leaves under ci-logs in place
 // of the logs the blob did not carry, and ciLogsNotice is what it says. An
 // agent resuming into a rebuilt tree may remember reading a log at that path;
@@ -284,6 +259,10 @@ type snapshotWrite struct {
 	// still has to capture it as one (treeToCapture). Nil for every other
 	// write.
 	adoptTree func(context.Context) error
+	// freezer, when set, holds the run's jail still around the capture: a
+	// checkpoint's, since an ending has already stopped the jail. Nil for an
+	// ending and for the in-process capture.
+	freezer treeFreezer
 }
 
 // snapshotCheckout is one checkout a snapshot captures.
@@ -516,15 +495,39 @@ func (s *Spawner) startSnapshotSpan(ctx context.Context, w snapshotWrite) (conte
 }
 
 // capturedSnapshot is a tree read and not yet archived: the run root's
-// transcript, each checkout's git delta, the members staged on disk in multi
-// mode, and when the tree was read.
+// transcript (local mode), each checkout's git delta, the members staged on
+// disk in multi mode, and when the tree was read.
 type capturedSnapshot struct {
 	// state is the run root's capture: the session and its transcript. The
 	// root has no git delta of its own.
 	state     worktree.CapturedState
 	checkouts []capturedCheckout
-	at        time.Time
-	cleanups  []func()
+	// scratch is the tree's _tfac scratch as a capture jail read it, nil when
+	// the capture was in-process and the archive reads the tree itself.
+	scratch  *capturedScratch
+	at       time.Time
+	cleanups []func()
+}
+
+// capturedScratch is the scratch a capture jail read and this process holds a
+// copy of. The archive tars the copy, never the tree: the tree is the agent's,
+// and nothing of it is read outside the jail.
+type capturedScratch struct {
+	// root is a directory shaped like a run tree whose _tfac holds the copy.
+	root string
+	// digest is the jail's digest of the scratch (worktree.ScratchDigest).
+	digest        string
+	ciLogsOmitted bool
+	unreadable    []string
+}
+
+// scratchRoot is the directory whose _tfac the archive reads for a capture of
+// wtPath.
+func (c *capturedSnapshot) scratchRoot(wtPath string) string {
+	if c.scratch != nil {
+		return c.scratch.root
+	}
+	return wtPath
 }
 
 // capturedCheckout is one checkout's capture: its delta, with the members
@@ -548,19 +551,20 @@ func (c *capturedSnapshot) release() {
 	c.cleanups = nil
 }
 
-// captureSnapshot reads the tree's non-recoverable state — the session
-// transcript at the root, and the git delta of every checkout w names. In multi
-// mode each read runs inside a dropped-privilege, network-isolated child
-// running as the sandbox uid: the git capture's filter-honoring commands never
-// execute agent-planted drivers as root, and the SDK's owner-only transcript
-// is readable there when it is not to the orchestrator (see
-// captureWorkspaceGit). That child is one of the privileged operations that
-// never trace themselves, so this executor-side span IS its measurement; in
-// local mode the same span covers the in-process capture.
+// captureSnapshot reads the tree's non-recoverable state — the git delta of
+// every checkout w names, the _tfac scratch, and in local mode the session
+// transcript at the root. In multi mode the whole read runs in one capture jail
+// (captureTreeInJail), so the checkouts' filter-honoring git never executes an
+// agent-planted driver anywhere but in a jail with no network and no way to
+// write the tree. The jail is one of the privileged operations that never
+// trace themselves, so this executor-side span IS its measurement; in local
+// mode the same span covers the in-process capture.
 //
-// The capture stages into a throwaway index (captureUncommittedTo) and reads
-// status without optional locks, so it takes nothing a live agent's git
-// holds: a checkpoint can run it beside the agent.
+// The tree must not change while the capture reads it, and this function does
+// not make it stand still: the caller does — an ending has stopped the run's
+// jail, and a checkpoint has frozen it. A capture of a tree that is moving is
+// not wrong in kind, only torn, which is why the unreadable-while-writing
+// cases still skip rather than fail.
 func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot, err error) {
 	capCtx, capSpan := snapshotPhase(ctx, "workspace.snapshot.capture", w.runtime)
 	defer func() {
@@ -574,42 +578,51 @@ func captureSnapshot(ctx context.Context, w snapshotWrite) (_ *capturedSnapshot,
 		}
 	}()
 
-	state, cleanup, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
-	captured.cleanups = append(captured.cleanups, cleanup)
-	if err != nil {
-		return nil, fmt.Errorf("snapshot: capture: %w", err)
-	}
-	// Only the transcript is the root's: it is a plain folder, and a delta
-	// read off one an older binary laid out is not this layout's to carry.
-	state.Delta, state.BundlePath, state.PatchPath = nil, "", ""
-	captured.state = state
-
-	var bundleBytes, patchBytes int64
-	for _, co := range w.checkouts {
-		coState, coCleanup, err := captureWorkspaceGit(capCtx, co.path, "")
-		captured.cleanups = append(captured.cleanups, coCleanup)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: capture checkout %s: %w", co.rel, err)
+	if jailedCapture() {
+		captured.state = worktree.CapturedState{SessionID: w.sessionID}
+		if err := captureTreeInJail(capCtx, w, captured); err != nil {
+			return nil, fmt.Errorf("snapshot: capture: %w", err)
 		}
-		if coState.Delta == nil {
-			// A checkout whose .git is gone has no HEAD a restore could take
-			// it back to; the directory is all that is left of it.
+	} else {
+		state, err := captureWorkspaceGit(capCtx, w.wtPath, w.sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot: capture: %w", err)
+		}
+		// Only the transcript is the root's: it is a plain folder.
+		state.Delta, state.BundlePath, state.PatchPath = nil, "", ""
+		captured.state = state
+		for _, co := range w.checkouts {
+			coState, err := captureWorkspaceGit(capCtx, co.path, "")
+			if err != nil {
+				return nil, fmt.Errorf("snapshot: capture checkout %s: %w", co.rel, err)
+			}
+			captured.checkouts = append(captured.checkouts, capturedCheckout{snapshotCheckout: co, state: coState})
+		}
+	}
+
+	// A checkout whose .git is gone has no HEAD a restore could take it back
+	// to; the directory is all that is left of it.
+	kept := captured.checkouts[:0]
+	var bundleBytes, patchBytes int64
+	for _, co := range captured.checkouts {
+		if co.state.Delta == nil {
 			delegateLog.Warn("snapshot: checkout is no longer a git worktree; it is not carried", "checkout", co.rel, "path", co.path)
 			continue
 		}
-		b, err := capturedMemberSize(coState.Delta, coState.BundlePath, true)
+		b, err := capturedMemberSize(co.state.Delta, co.state.BundlePath, true)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot: capture %s bundle size: %w", co.rel, err)
 		}
-		p, err := capturedMemberSize(coState.Delta, coState.PatchPath, false)
+		p, err := capturedMemberSize(co.state.Delta, co.state.PatchPath, false)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot: capture %s patch size: %w", co.rel, err)
 		}
 		bundleBytes += b
 		patchBytes += p
-		captured.checkouts = append(captured.checkouts, capturedCheckout{snapshotCheckout: co, state: coState})
+		kept = append(kept, co)
 	}
-	transcriptBytes, err := capturedBytesSize(state.Transcript, state.TranscriptPath)
+	captured.checkouts = kept
+	transcriptBytes, err := capturedBytesSize(captured.state.Transcript, "")
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: capture transcript size: %w", err)
 	}
@@ -954,7 +967,11 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapsh
 	man.SessionID = captured.state.SessionID
 	// The scratch walk reports the same, and runs after the manifest is out;
 	// this is that walk's answer for the one directory it asks about.
-	man.CILogsOmitted = dirHasEntry(filepath.Join(wtPath, worktree.ScratchDir, worktree.CILogsDir))
+	if captured.scratch != nil {
+		man.CILogsOmitted = captured.scratch.ciLogsOmitted
+	} else {
+		man.CILogsOmitted = worktree.ScratchHasCILogs(wtPath)
+	}
 	type member struct {
 		name, path string
 		data       []byte
@@ -985,12 +1002,17 @@ func writeSnapshotTar(ctx context.Context, w io.Writer, captured *capturedSnapsh
 			return err
 		}
 	}
-	if _, err := tarScratch(ctx, tw, wtPath); err != nil {
+	if captured.scratch != nil && len(captured.scratch.unreadable) > 0 {
+		u := captured.scratch.unreadable
+		delegateLog.Warn("snapshot leaves out scratch entries the capture could not read",
+			"worktree", wtPath, "count", len(u), "entries", u[:min(len(u), maxLoggedUnreadable)])
+	}
+	if _, err := tarScratch(ctx, tw, captured.scratchRoot(wtPath)); err != nil {
 		return fmt.Errorf("tar scratch: %w", err)
 	}
 	if captured.state.SessionID != "" {
-		if len(captured.state.Transcript) > 0 || captured.state.TranscriptPath != "" {
-			if err := writeCapturedMember(tw, snapSession, captured.state.Transcript, captured.state.TranscriptPath); err != nil {
+		if len(captured.state.Transcript) > 0 {
+			if err := writeCapturedMember(tw, snapSession, captured.state.Transcript, ""); err != nil {
 				return err
 			}
 		} else {
@@ -1863,7 +1885,7 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 // notice. What the walk could not read is logged, since a resume from this
 // blob comes back without it.
 func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
-	omittedCILogs, unreadable, err := walkScratch(ctx, wtPath, func(rel, path string, fi os.FileInfo) error {
+	omittedCILogs, unreadable, err := worktree.WalkScratch(ctx, wtPath, func(rel, path string, fi os.FileInfo) error {
 		// Stream each file into the tar rather than reading it whole — the
 		// agent's own intermediates are unbounded even with the log archives
 		// excluded. The open comes before the header is written, so a file
@@ -1884,90 +1906,6 @@ func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILo
 // maxLoggedUnreadable caps how many unreadable scratch entries one snapshot's
 // log line names; the count is always whole.
 const maxLoggedUnreadable = 20
-
-// walkScratch visits every regular file under wtPath/_tfac that a snapshot
-// carries, in lexical order, skipping the scratchExcludes subtrees — the one
-// definition of "the scratch a snapshot carries" that both the archive and the
-// fingerprint read. A missing _tfac visits nothing.
-//
-// It reports whether a ci-logs subtree with something in it was skipped. An
-// entry that vanishes between the listing and the visit is skipped: a
-// checkpoint walks a tree a background process may still be changing, and an
-// entry removed a moment later is the same torn capture as one removed a
-// moment earlier. ctx is checked per entry.
-//
-// An entry this process may not read is skipped too, and named in unreadable
-// — a directory it cannot list, or a file a visit could not open. Under a jail
-// the agent's files belong to the jail's identity, and this process reads them
-// through the permissions the agent gave them, so a file the agent made
-// owner-only (mktemp's 0600, mktemp -d's 0700) is closed to it. A snapshot
-// short of that file still carries the rest of the work; a walk that failed on
-// it would carry none.
-func walkScratch(ctx context.Context, wtPath string, visit func(rel, path string, fi os.FileInfo) error) (omittedCILogs bool, unreadable []string, err error) {
-	root := filepath.Join(wtPath, worktree.ScratchDir)
-	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		return false, nil, nil
-	}
-	err = filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		if walkErr != nil {
-			if errors.Is(walkErr, fs.ErrNotExist) {
-				return nil
-			}
-			if errors.Is(walkErr, fs.ErrPermission) {
-				unreadable = append(unreadable, filepath.ToSlash(rel))
-				return nil
-			}
-			return walkErr
-		}
-		if rel == "." {
-			return nil
-		}
-		top := rel
-		if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
-			top = rel[:i]
-		}
-		if scratchExcludes[top] {
-			if fi.IsDir() {
-				if rel == worktree.CILogsDir && dirHasEntry(path) {
-					omittedCILogs = true
-				}
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !fi.Mode().IsRegular() {
-			return nil // directories implied by their files; skip symlinks/etc.
-		}
-		err = visit(filepath.ToSlash(rel), path, fi)
-		if errors.Is(err, fs.ErrPermission) {
-			unreadable = append(unreadable, filepath.ToSlash(rel))
-			return nil
-		}
-		return err
-	})
-	return omittedCILogs, unreadable, err
-}
-
-// dirHasEntry reports whether path holds at least one entry, reading only far
-// enough to answer rather than listing a directory the walk is about to skip.
-// A read failure answers false: this decides whether to explain an absence, and
-// a directory that cannot be read is not evidence that anything was dropped.
-func dirHasEntry(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer func() { _ = f.Close() }()
-	names, err := f.Readdirnames(1)
-	return err == nil && len(names) > 0
-}
 
 // plantCILogsNotice writes ciLogsNotice into the rehydrated tree's ci-logs
 // directory, recreating that directory since the snapshot carried none of it.

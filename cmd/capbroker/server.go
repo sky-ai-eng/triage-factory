@@ -23,8 +23,8 @@ import (
 // only so tests can shrink it to prove that opt-out without a 60s wait.
 var callTimeout = 60 * time.Second
 
-// captureTimeout bounds one CaptureRunDelta dispatch, AND (mirrored) the
-// client-side budget IPCClient.CaptureRunDelta gives the whole streamed
+// captureTimeout bounds one CaptureRunTree dispatch, AND (mirrored) the
+// client-side budget IPCClient.CaptureRunTree gives the whole streamed
 // round trip — the RPC itself, the socket accept, and the capped read all
 // share this one budget. Unlike the other host operations it shells out to
 // git (a bundle of local-only commits plus a full binary diff) against a
@@ -206,7 +206,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	// WaitRun blocks until the supervised run exits — potentially the whole
 	// agent run, many minutes, far past callTimeout — so it
 	// runs on baseCtx directly, bounded by the run itself and unwound only
-	// on broker Shutdown (which cancels baseCtx). CaptureRunDelta shells
+	// on broker Shutdown (which cancels baseCtx). CaptureRunTree shells
 	// out to git (bundle + full binary diff) against a worktree of
 	// arbitrary size, so it gets captureTimeout rather than the host-op
 	// budget. Every other method is a bounded host operation and keeps
@@ -214,7 +214,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	ctx := s.baseCtx
 	if req.Method != methodWaitRun {
 		budget := callTimeout
-		if req.Method == methodCaptureRunDelta {
+		if req.Method == methodCaptureRunTree {
 			budget = captureTimeout
 		}
 		var cancel context.CancelFunc
@@ -250,7 +250,7 @@ func (s *Server) sendError(conn net.Conn, msg string) {
 
 // dispatch routes one method to s.ops (the privileged operations) or to one
 // of the broker's own handlers (launchRun/waitRun/killRun, which own the
-// supervised runtime state, and captureRunDelta, which streams via a
+// supervised runtime state, and captureRunTree, which streams via a
 // passed-through socket) — neither delegates to s.ops.
 func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMessage) (any, error) {
 	dec := func(dst any) error {
@@ -359,12 +359,26 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		}
 		return emptyResult{}, s.ops.RemoveRunTree(ctx, a.Path)
 
-	case methodCaptureRunDelta:
-		var a captureRunDeltaArgs
+	case methodCaptureRunTree:
+		var a captureRunTreeArgs
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return s.captureRunDelta(ctx, a)
+		return s.captureRunTree(ctx, a)
+
+	case methodPauseRun:
+		var a freezeRunArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.freezeRun(ctx, a, sandbox.PauseRuntime)
+
+	case methodResumeRun:
+		var a freezeRunArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return s.freezeRun(ctx, a, sandbox.ResumeRuntime)
 
 	case methodLaunchSidecar:
 		var a launchSidecarArgs

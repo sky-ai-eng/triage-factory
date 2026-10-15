@@ -10,8 +10,7 @@ package sandbox
 // in-sandbox one. Inside gVisor the Sentry is the boundary, but on the host the
 // jail's uid owns the run tree, and its gid is the group every one of the run's
 // sockets and staging directories is granted to. A value shared across runs
-// would make any host process holding it — the capture child, which runs as
-// the uid and gid — a member of every run.
+// would make any host process holding it a member of every run.
 //
 // 40000 sits clear of the ranges hosts commonly allocate on their own: 30000
 // and up is Nix's build users (nixbld1..32), systemd's dynamic users start at

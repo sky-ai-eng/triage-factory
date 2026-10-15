@@ -23,8 +23,11 @@ func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
 
-func captureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
-	return defaultOps.CaptureRunDelta(ctx, worktree, stagingDir, sessionID)
+func captureRunTree(ctx context.Context, p CaptureParams) ([]byte, error) {
+	if runCapturer == nil {
+		return nil, fmt.Errorf("sandbox: no capture jail launcher installed (cap-broker not started)")
+	}
+	return runCapturer.CaptureRunTree(ctx, p)
 }
 
 // runTreeHandedOff stats path and reports whether a jail identity — or the
@@ -288,7 +291,7 @@ func validateRunTreeShape(op, path string) error {
 // the openat2 implementation below closes by resolving and operating
 // through one anchored fd instead. It survives only because it backs
 // chownRunTreeFallback / removeRunTreeFallback (pre-5.6-kernel path) and the
-// capture child's unprivileged worktree input. Capture staging is instead
+// capture jail's tree input. Capture staging is instead
 // opened and validated through pinned descriptors in capture_linux.go.
 func validateRunTreeRoot(op, path string) (os.FileInfo, error) {
 	if err := validateRunTreeShape(op, path); err != nil {

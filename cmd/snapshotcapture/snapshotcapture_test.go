@@ -4,172 +4,198 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
-// TestRun_EmitsStagedDelta exercises the snapshot-capture child body end to
-// end: the large patch lands in the parent-prepared file while stdout carries
-// only the small manifest.
-func TestRun_EmitsStagedDelta(t *testing.T) {
-	dir := t.TempDir()
-	git := func(args ...string) {
-		t.Helper()
-		c := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if out, err := c.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
-	git("init", "-q", "-b", "work")
-	git("config", "user.email", "t@example.com")
-	git("config", "user.name", "T")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("line1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	git("add", "-A")
-	git("commit", "-q", "-m", "seed")
-	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("line1\nline2\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	staging, outputs := captureStaging(t)
-	if err := Run(context.Background(), dir, staging, "", outputs, &buf); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	var state worktree.CapturedState
-	if err := json.Unmarshal(buf.Bytes(), &state); err != nil {
-		t.Fatalf("decode captured state: %v (out=%q)", err, buf.String())
-	}
-	if state.Delta == nil {
-		t.Fatal("delta is nil; a git worktree's delta was not captured")
-	}
-	if state.Delta.Branch != "work" {
-		t.Errorf("branch = %q, want work", state.Delta.Branch)
-	}
-	if state.Delta.Head == "" {
-		t.Error("head is empty")
-	}
-	if state.BundlePath != filepath.Join(staging, worktree.CaptureBundleFile) {
-		t.Errorf("bundle path = %q, want staged member", state.BundlePath)
-	} else if bundle, err := os.Stat(state.BundlePath); err != nil || bundle.Size() == 0 {
-		t.Errorf("staged bundle = %v, %v; want local-only commit data", bundle, err)
-	}
-	if len(state.Delta.Patch) != 0 {
-		t.Error("patch bytes rode the manifest; want a staged path only")
-	}
-	if state.PatchPath != filepath.Join(staging, worktree.CapturePatchFile) {
-		t.Errorf("patch path = %q, want staged member", state.PatchPath)
-	}
-	patch, err := os.ReadFile(state.PatchPath)
-	if err != nil || len(patch) == 0 {
-		t.Errorf("staged patch = %d bytes, %v; want the uncommitted change", len(patch), err)
-	}
-}
-
-// TestRun_NonGitRoot pins that a non-git run root emits a state whose delta is
-// nil (captureIsolated maps that to no delta), not an error.
-func TestRun_NonGitRoot(t *testing.T) {
-	var buf bytes.Buffer
-	staging, outputs := captureStaging(t)
-	if err := Run(context.Background(), t.TempDir(), staging, "", outputs, &buf); err != nil {
-		t.Fatalf("Run on a non-git dir: %v", err)
-	}
-	var state worktree.CapturedState
-	if err := json.Unmarshal(buf.Bytes(), &state); err != nil {
-		t.Fatalf("decode captured state: %v (out=%q)", err, buf.String())
-	}
-	if state.Delta != nil {
-		t.Errorf("non-git root emitted a delta %+v, want nil", state.Delta)
-	}
-}
-
-// TestRun_CapturesSessionTranscript pins the reason this child gained a session
-// id: it reads the SDK's session transcript (which the orchestrator cannot) and
-// emits it in the state. A non-git run root with only a transcript is exactly
-// the Jira/Slack lazy shape whose resume was failing.
-func TestRun_CapturesSessionTranscript(t *testing.T) {
-	dir := t.TempDir()
-	const sessionID = "sess-xyz"
-	// The child reads a sandboxed run's transcript from the run-root layout, so
-	// seed it exactly where ReadSandboxSessionTranscript looks.
-	sessPath := worktree.SandboxClaudeSessionPath(dir, sessionID)
-	if err := os.MkdirAll(filepath.Dir(sessPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(sessPath, []byte(`{"type":"summary"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	var buf bytes.Buffer
-	staging, outputs := captureStaging(t)
-	if err := Run(context.Background(), dir, staging, sessionID, outputs, &buf); err != nil {
-		t.Fatalf("Run: %v", err)
-	}
-	var state worktree.CapturedState
-	if err := json.Unmarshal(buf.Bytes(), &state); err != nil {
-		t.Fatalf("decode captured state: %v", err)
-	}
-	if len(state.Transcript) != 0 {
-		t.Error("transcript bytes rode the manifest; want a staged path only")
-	}
-	transcript, err := os.ReadFile(state.TranscriptPath)
-	if err != nil || string(transcript) != `{"type":"summary"}` {
-		t.Errorf("staged transcript = %q, %v; want the session JSONL bytes", transcript, err)
-	}
-}
-
-func TestInheritedOutput_RejectsClosedDescriptor(t *testing.T) {
-	f, err := os.CreateTemp(t.TempDir(), "closed-output-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fd := f.Fd()
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := inheritedOutput(fd, worktree.CaptureBundleFile); err == nil {
-		t.Fatal("inheritedOutput accepted a closed descriptor")
-	}
-}
-
-func TestInheritedOutput_RejectsNonRegularDescriptor(t *testing.T) {
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Close()
-	if _, err := inheritedOutput(r.Fd(), worktree.CaptureBundleFile); err == nil {
-		t.Fatal("inheritedOutput accepted a pipe descriptor")
-	}
-}
-
-func captureStaging(t *testing.T) (string, Outputs) {
+func git(t *testing.T, dir string, args ...string) {
 	t.Helper()
-	dir := t.TempDir()
-	for _, name := range []string{worktree.CaptureBundleFile, worktree.CapturePatchFile, worktree.CaptureTranscriptFile} {
-		if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
+	c := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	c.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
 	}
-	open := func(name string) *os.File {
-		t.Helper()
-		f, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_TRUNC, 0)
+}
+
+func write(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// dirtyRoot builds a run root holding one checkout with a local-only commit and
+// an uncommitted edit, plus scratch.
+func dirtyRoot(t *testing.T) (root string) {
+	t.Helper()
+	root = t.TempDir()
+	co := filepath.Join(root, "acme", "app", "default")
+	if err := os.MkdirAll(co, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, co, "init", "-q", "-b", "work")
+	git(t, co, "config", "user.email", "t@example.com")
+	git(t, co, "config", "user.name", "T")
+	write(t, filepath.Join(co, "a.txt"), "line1\n")
+	git(t, co, "add", "-A")
+	git(t, co, "commit", "-q", "-m", "seed")
+	write(t, filepath.Join(co, "a.txt"), "line1\nline2\n")
+	write(t, filepath.Join(co, "u.txt"), "untracked\n")
+	write(t, filepath.Join(root, worktree.ScratchDir, "notes.txt"), "scratch note")
+	write(t, filepath.Join(root, worktree.ScratchDir, worktree.CILogsDir, "run1", "log.txt"), "big log")
+	write(t, filepath.Join(root, worktree.ScratchDir, worktree.KnowledgeDir, "k.md"), "re-staged")
+	return root
+}
+
+// readStream returns every member of a capture stream by name.
+func readStream(t *testing.T, stream []byte) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	r := sandbox.NewCaptureStreamReader(bytes.NewReader(stream))
+	for {
+		name, body, err := r.Next()
+		if errors.Is(err, io.EOF) {
+			return got
+		}
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("read stream: %v", err)
 		}
-		return f
+		data, err := io.ReadAll(body)
+		if err != nil {
+			t.Fatalf("read member %s: %v", name, err)
+		}
+		if _, dup := got[name]; dup {
+			t.Errorf("member %q written twice", name)
+		}
+		got[name] = string(data)
 	}
-	outputs := Outputs{
-		Bundle:     open(worktree.CaptureBundleFile),
-		Patch:      open(worktree.CapturePatchFile),
-		Transcript: open(worktree.CaptureTranscriptFile),
+}
+
+func runCapture(t *testing.T, root string, checkouts ...string) (worktree.CaptureManifest, map[string]string) {
+	t.Helper()
+	var stream, out bytes.Buffer
+	if err := Run(context.Background(), root, checkouts, &stream, &out); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	t.Cleanup(outputs.Close)
-	return dir, outputs
+	var man worktree.CaptureManifest
+	if err := json.Unmarshal(out.Bytes(), &man); err != nil {
+		t.Fatalf("decode manifest: %v (out=%q)", err, out.String())
+	}
+	return man, readStream(t, stream.Bytes())
+}
+
+// TestRun_StreamsCheckoutAndScratch: the large members travel in the stream
+// under the names the orchestrator will hold them to, and the manifest carries
+// only the small git metadata and the scratch's digest.
+func TestRun_StreamsCheckoutAndScratch(t *testing.T) {
+	root := dirtyRoot(t)
+	man, members := runCapture(t, root, "acme/app/default")
+
+	if len(man.Checkouts) != 1 || man.Checkouts[0].Rel != "acme/app/default" {
+		t.Fatalf("manifest checkouts = %+v", man.Checkouts)
+	}
+	cc := man.Checkouts[0]
+	if cc.Delta == nil || cc.Delta.Branch != "work" || cc.Delta.Head == "" {
+		t.Fatalf("delta = %+v, want the branch and head", cc.Delta)
+	}
+	if len(cc.Delta.Bundle) != 0 || len(cc.Delta.Patch) != 0 {
+		t.Error("members rode the manifest; want the stream")
+	}
+	if !cc.HasPatch {
+		t.Error("the uncommitted edit was not captured")
+	}
+	if patch := members[worktree.CapturePatchMember("acme/app/default")]; !bytes.Contains([]byte(patch), []byte("+line2")) || !bytes.Contains([]byte(patch), []byte("u.txt")) {
+		t.Errorf("patch member = %q, want the edit and the untracked file", patch)
+	}
+	if got := members[worktree.CaptureScratchPrefix+"notes.txt"]; got != "scratch note" {
+		t.Errorf("scratch member = %q", got)
+	}
+	for name := range members {
+		if name == worktree.CaptureScratchPrefix+worktree.CILogsDir+"/run1/log.txt" || name == worktree.CaptureScratchPrefix+worktree.KnowledgeDir+"/k.md" {
+			t.Errorf("a scratch entry that comes back by its own route was carried: %s", name)
+		}
+	}
+	if !man.CILogsOmitted || man.ScratchDigest == "" {
+		t.Errorf("manifest = omitted %v digest %q, want ci-logs reported and a digest", man.CILogsOmitted, man.ScratchDigest)
+	}
+}
+
+// TestRun_ReadOnlyTree: the capture writes nothing under the tree it reads. It
+// runs in a jail that mounts the tree read-only, so a capture that needed to
+// write there would fail every snapshot; this holds the property where it can
+// be seen without a jail.
+func TestRun_ReadOnlyTree(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes through any mode")
+	}
+	root := dirtyRoot(t)
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		return os.Chmod(path, map[bool]os.FileMode{true: 0o555, false: 0o444}[d.IsDir()])
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+			if err == nil {
+				_ = os.Chmod(path, 0o755)
+			}
+			return nil
+		})
+	})
+	man, members := runCapture(t, root, "acme/app/default")
+	if !man.Checkouts[0].HasPatch || members[worktree.CapturePatchMember("acme/app/default")] == "" {
+		t.Error("a read-only tree captured no patch")
+	}
+}
+
+// TestRun_NonGitCheckout: a checkout whose .git is gone reports no git state
+// and writes no members, rather than failing the capture.
+func TestRun_NonGitCheckout(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "acme", "app", "default"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	man, members := runCapture(t, root, "acme/app/default")
+	if man.Checkouts[0].Delta != nil || man.Checkouts[0].HasBundle || man.Checkouts[0].HasPatch {
+		t.Errorf("non-git checkout = %+v, want no git state", man.Checkouts[0])
+	}
+	if len(members) != 0 {
+		t.Errorf("members = %v, want none", members)
+	}
+}
+
+// TestRun_CleanCheckoutHasNoPatchMember pins that a member exists only when git
+// had bytes for it, so the manifest's flags and the stream cannot disagree.
+func TestRun_CleanCheckoutHasNoPatchMember(t *testing.T) {
+	root := t.TempDir()
+	co := filepath.Join(root, "o", "r", "default")
+	if err := os.MkdirAll(co, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, co, "init", "-q", "-b", "main")
+	git(t, co, "config", "user.email", "t@example.com")
+	git(t, co, "config", "user.name", "T")
+	write(t, filepath.Join(co, "a"), "x\n")
+	git(t, co, "add", "-A")
+	git(t, co, "commit", "-q", "-m", "seed")
+	man, members := runCapture(t, root, "o/r/default")
+	if man.Checkouts[0].HasPatch {
+		t.Error("a clean tree reported a patch")
+	}
+	if _, ok := members[worktree.CapturePatchMember("o/r/default")]; ok {
+		t.Error("a clean tree wrote a patch member")
+	}
 }
