@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -317,50 +318,72 @@ func TestParkRunTree(t *testing.T) {
 
 // recordingOps is a PrivilegedOps double that records the order of the
 // grant-release calls RunNetwork.Close makes and fails its first failParks
-// parks (every park, when failParks is negative).
+// parks (every park, when failParks is negative). The log is locked: the
+// retries after a failed park run on their own goroutine.
 type recordingOps struct {
 	fakePrivilegedOps
-	calls     *[]string
+	log       *callLog
 	failParks int
-	parks     *int
+}
+
+type callLog struct {
+	mu    sync.Mutex
+	calls []string
+	parks int
+}
+
+func (l *callLog) add(call string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, call)
+}
+
+func (l *callLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.calls)
 }
 
 func (r recordingOps) PrepareRunSockets(_ context.Context, _ string, _ uint8) error {
-	*r.calls = append(*r.calls, "prepare")
+	r.log.add("prepare")
 	return nil
 }
 func (r recordingOps) ChownRunTree(_ context.Context, _, _ string, _ int) error {
-	*r.calls = append(*r.calls, "handoff")
+	r.log.add("handoff")
 	return nil
 }
 func (r recordingOps) GrantRunStaging(_ context.Context, _ string, _ uint8) error {
-	*r.calls = append(*r.calls, "grant")
+	r.log.add("grant")
 	return nil
 }
 func (r recordingOps) ReleaseRunSockets(_ context.Context, _ string, _ uint8) error {
-	*r.calls = append(*r.calls, "release-sockets")
+	r.log.add("release-sockets")
 	return nil
 }
 func (r recordingOps) ParkRunTree(_ context.Context, _ string, _ int) error {
-	*r.calls = append(*r.calls, "park")
-	*r.parks++
-	if r.failParks < 0 || *r.parks <= r.failParks {
+	r.log.mu.Lock()
+	defer r.log.mu.Unlock()
+	r.log.calls = append(r.log.calls, "park")
+	r.log.parks++
+	if r.failParks < 0 || r.log.parks <= r.failParks {
 		return errors.New("park failed")
 	}
 	return nil
 }
 func (r recordingOps) TeardownNetwork(_ context.Context, _ NetworkState) error {
-	*r.calls = append(*r.calls, "teardown")
+	r.log.add("teardown")
 	return nil
 }
 
 // TestRunNetworkClose_ReleasesGrantsBeforeTheIndex pins the release rule for a
 // jail identity: Close takes back every grant made under it before the index
-// goes back to the allocator, tries again when one does not come back, and
-// keeps the index out of the allocator when a grant cannot be taken back.
+// goes back to the allocator, tries again when one does not come back — after
+// returning, so its caller is not held for the retries — and keeps the index
+// out of the allocator when a grant cannot be taken back.
 func TestRunNetworkClose_ReleasesGrantsBeforeTheIndex(t *testing.T) {
+	const retryWait = 100 * time.Millisecond
 	origRetries := grantReleaseRetries
-	grantReleaseRetries = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	grantReleaseRetries = []time.Duration{retryWait, retryWait, retryWait}
 	t.Cleanup(func() { grantReleaseRetries = origRetries })
 
 	released := []string{"prepare", "handoff", "grant", "release-sockets", "park", "teardown"}
@@ -376,10 +399,9 @@ func TestRunNetworkClose_ReleasesGrantsBeforeTheIndex(t *testing.T) {
 		{"a park keeps failing", -1, append(append(append(append([]string{}, released...), retry...), retry...), retry...), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var calls []string
-			var parks int
+			log := &callLog{}
 			orig := defaultOps
-			defaultOps = recordingOps{calls: &calls, failParks: tc.failParks, parks: &parks}
+			defaultOps = recordingOps{log: log, failParks: tc.failParks}
 			t.Cleanup(func() { defaultOps = orig })
 
 			const idx = 200
@@ -397,13 +419,25 @@ func TestRunNetworkClose_ReleasesGrantsBeforeTheIndex(t *testing.T) {
 			if err := n.GrantStaging(ctx, filepath.Join(t.TempDir(), "gone")); err != nil {
 				t.Fatal(err)
 			}
+			started := time.Now()
 			_ = n.Close()
+			if took := time.Since(started); took >= retryWait {
+				t.Errorf("Close took %s; the retries must not hold its caller", took)
+			}
 
-			if !slices.Equal(calls, tc.want) {
-				t.Fatalf("calls = %v, want %v", calls, tc.want)
+			// The retries run after Close returns: wait for the calls they make.
+			deadline := time.Now().Add(10 * time.Second)
+			for len(log.snapshot()) < len(tc.want) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
+			}
+			if got := log.snapshot(); !slices.Equal(got, tc.want) {
+				t.Fatalf("calls = %v, want %v", got, tc.want)
+			}
+			for tc.wantReleased && !defaultAllocator().IsFree(idx) && time.Now().Before(deadline) {
+				time.Sleep(10 * time.Millisecond)
 			}
 			if got := defaultAllocator().IsFree(idx); got != tc.wantReleased {
-				t.Errorf("index free after Close = %v, want %v", got, tc.wantReleased)
+				t.Errorf("index free after the retries = %v, want %v", got, tc.wantReleased)
 			}
 
 			// Closed is closed: no grant can be made under an index that may

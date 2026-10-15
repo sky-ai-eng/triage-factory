@@ -378,11 +378,11 @@ func appendOnce(list []string, v string) []string {
 // The grants come back first, then the index: while the index is held no
 // other engagement can be given it, which is also what makes the ownership
 // guards in ReleaseRunSockets and ParkRunTree exact. A grant that does not
-// come back is tried again on grantReleaseRetries' schedule, and one that
-// still cannot be taken back keeps the index out of the allocator for the
-// life of this process rather than handing another run an identity a file
-// still carries — one slot of MaxSandboxes, logged, against a run reaching
-// another's tree.
+// come back is tried again in the background (retryGrantRelease), with the
+// index held until it does; one that still cannot be taken back keeps the
+// index out of the allocator for the life of this process rather than handing
+// another run an identity a file still carries — one slot of MaxSandboxes,
+// logged, against a run reaching another's tree.
 //
 // The index is a scarce, MaxSandboxes-wide resource that also keys the run's
 // netns name and its sidecar uid, so a teardown that stalls narrows the whole
@@ -409,20 +409,10 @@ func (n *RunNetwork) Close() error {
 	if err := defaultOps.TeardownNetwork(ctx, ns); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown run network: %v\n", err)
 	}
-	for _, wait := range grantReleaseRetries {
-		if len(held) == 0 {
-			break
-		}
-		sandboxLog.Warn("a grant made under this run's jail identity did not come back; trying again",
-			"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "retry_in", wait, "error", errors.Join(held...))
-		time.Sleep(wait)
-		held = n.releaseGrants(ctx)
-	}
-	if len(held) > 0 {
-		sandboxLog.Error("a grant made under this run's jail identity could not be taken back; its subnet index stays allocated until this process restarts",
-			"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "error", errors.Join(held...))
-	} else {
+	if len(held) == 0 {
 		defaultAllocator().Release(n.Idx)
+	} else {
+		go n.retryGrantRelease(held)
 	}
 	if elapsed := time.Since(started); elapsed > slowNetworkTeardown {
 		sandboxLog.Warn("run network teardown was slow; its subnet index stayed held for that long and the slot was unavailable to any other run",
@@ -457,14 +447,38 @@ func (n *RunNetwork) releaseGrants(ctx context.Context) []error {
 	return errs
 }
 
-// grantReleaseRetries is how long Close waits before each further attempt to
-// take back grants that did not come back. Every attempt retakes the whole
-// set, which is safe because each grant's release is guarded and idempotent:
-// a socket directory goes, a root is parked and staging is regrouped only
-// while it still carries this index's identity. The schedule outlasts a broker
-// call that
-// failed in transit, not a broker that is gone — there, the index staying
-// held until the process restarts is the answer.
+// retryGrantRelease takes back the grants Close could not, on
+// grantReleaseRetries' schedule, and releases the index once every one has
+// come back. It runs apart from Close because Close's caller is still holding
+// things — an engagement's concurrency slot, the shutdown's join on it — and a
+// release that fails at shutdown, when the broker may already be gone, would
+// otherwise hold all of them for the length of the schedule. The index is the
+// one thing that has to wait, and it does: nothing else can draw it until
+// this has released it.
+func (n *RunNetwork) retryGrantRelease(held []error) {
+	ctx := context.Background()
+	for _, wait := range grantReleaseRetries {
+		sandboxLog.Warn("a grant made under this run's jail identity did not come back; trying again",
+			"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "retry_in", wait, "error", errors.Join(held...))
+		time.Sleep(wait)
+		if held = n.releaseGrants(ctx); len(held) == 0 {
+			defaultAllocator().Release(n.Idx)
+			sandboxLog.Info("grants made under this run's jail identity came back on a retry; subnet index released",
+				"subnet_idx", n.Idx, "jail_uid", n.JailUID())
+			return
+		}
+	}
+	sandboxLog.Error("a grant made under this run's jail identity could not be taken back; its subnet index stays allocated until this process restarts",
+		"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "error", errors.Join(held...))
+}
+
+// grantReleaseRetries is how long retryGrantRelease waits before each further
+// attempt. Every attempt retakes the whole set, which is safe because each
+// grant's release is guarded and idempotent: a socket directory goes, a root
+// is parked and staging is regrouped only while it still carries this index's
+// identity. The schedule outlasts a broker call that failed in transit, not a
+// broker that is gone — there, the index staying held until the process
+// restarts is the answer.
 var grantReleaseRetries = []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second}
 
 // slowNetworkTeardown is how long a per-run network teardown may take before
