@@ -150,6 +150,41 @@ func RunOrgsReturnedRowConformance(t *testing.T, mk OrgsStoreFactory) {
 		}
 	})
 
+	// Runs after the subtest above cleared jira's host, so the first call
+	// fills an empty host.
+	t.Run("AdoptSourceBaseURL_returns_the_stored_row", func(t *testing.T) {
+		before, err := read()
+		if err != nil {
+			t.Fatalf("read before AdoptSourceBaseURL: %v", err)
+		}
+		got, ok, err := store.AdoptSourceBaseURL(ctx, orgID, "jira", "https://aret.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL: %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "AdoptSourceBaseURL", got, read)
+		if !ok || got.JiraBaseURL != "https://aret.example.com" || got.Version != before.Version+1 {
+			t.Errorf("AdoptSourceBaseURL returned (%v, host %q, version %d), want (true, the host, %d)", ok, got.JiraBaseURL, got.Version, before.Version+1)
+		}
+
+		same, ok, err := store.AdoptSourceBaseURL(ctx, orgID, "jira", "https://aret.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (same host): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "AdoptSourceBaseURL (same host)", same, read)
+		if !ok || same.Version != got.Version {
+			t.Errorf("same-host AdoptSourceBaseURL returned (%v, version %d), want (true, %d)", ok, same.Version, got.Version)
+		}
+
+		other, ok, err := store.AdoptSourceBaseURL(ctx, orgID, "jira", "https://aret-other.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (different host): %v", err)
+		}
+		AssertWriteReturnedStoredRow(t, "AdoptSourceBaseURL (different host)", other, read)
+		if ok || other.JiraBaseURL != "https://aret.example.com" || other.Version != got.Version {
+			t.Errorf("different-host AdoptSourceBaseURL returned (%v, host %q, version %d), want (false, the stored host, %d)", ok, other.JiraBaseURL, other.Version, got.Version)
+		}
+	})
+
 	for _, c := range []struct {
 		name  string
 		write func(db.OrgsStore, context.Context, string, string) (domain.OrgSettings, error)

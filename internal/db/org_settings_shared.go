@@ -50,6 +50,18 @@ func SourceHasBaseURL(kind string) bool {
 	return kind == "github" || kind == "jira"
 }
 
+// SourceBaseURLOf is set's host for kind, "" for a kind SourceHasBaseURL
+// refuses.
+func SourceBaseURLOf(set domain.OrgSettings, kind string) string {
+	switch kind {
+	case "github":
+		return set.GitHubBaseURL
+	case "jira":
+		return set.JiraBaseURL
+	}
+	return ""
+}
+
 // SourceOverridesOf is what a settings write stores on org_event_sources for
 // u. A zero or negative poll interval is no override rather than a stored
 // cadence: it is what a caller that never set the field passes, and the

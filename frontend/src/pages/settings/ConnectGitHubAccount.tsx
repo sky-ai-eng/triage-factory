@@ -7,6 +7,7 @@
 // off; the own-App card uses it to confirm and tear its App down before the
 // ceremony starts.
 import { useState } from 'react'
+import { toast } from '../../components/Toast/toastStore'
 import { startManagedGitHubConnectAccount } from '../../lib/githubApp'
 
 export default function ConnectGitHubAccount({
@@ -21,7 +22,8 @@ export default function ConnectGitHubAccount({
   primary?: boolean
   disabled?: boolean
   // Runs after the account is entered and before the ceremony starts. A
-  // false return cancels quietly; a throw is shown inline.
+  // false return cancels quietly; a throw is shown inline. A start that fails
+  // after it returned true is shown inline and as a toast.
   beforeStart?: (account: string) => Promise<boolean>
 }) {
   const [open, setOpen] = useState(false)
@@ -51,15 +53,24 @@ export default function ConnectGitHubAccount({
     if (!login || busy) return
     setBusy(true)
     setError(null)
+    // beforeStart can change what the page renders and unmount this form, so
+    // a start that fails after it ran is also reported as a toast, which
+    // outlives the form.
+    let ranBeforeStart = false
     try {
-      if (beforeStart && !(await beforeStart(login))) {
-        setBusy(false)
-        return
+      if (beforeStart) {
+        if (!(await beforeStart(login))) {
+          setBusy(false)
+          return
+        }
+        ranBeforeStart = true
       }
       // Navigates away on success; control never comes back here.
       await startManagedGitHubConnectAccount(orgId, login)
     } catch (e) {
-      setError((e as Error).message)
+      const message = (e as Error).message
+      if (ranBeforeStart) toast.error(message)
+      setError(message)
       setBusy(false)
     }
   }
