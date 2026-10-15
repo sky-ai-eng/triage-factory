@@ -105,15 +105,14 @@ run holds it:
   engagement ends its root is given to a parked owner (`ParkedRunTreeUID`) no
   process runs as, so a later run drawing the same index cannot reach it.
 - **The sockets** live in two per-run directories the broker creates for each
-  engagement under `/run/tf`: the sidecar's (owned by its uid, group the jail's
-  gid, `0750`), where it creates and serves the agenthost socket and writes the
-  gh-injector cert, and the tool host's (owned by the orchestrator, setgid to the
-  jail's gid, `0750`), where the orchestrator binds the tool-host socket. Each
-  socket is *chgrp'd* (not chowned) to the run's jail gid and opened `0660`. The
-  sidecar can make that grant without a capability because the broker launches
-  it carrying the run's jail gid as its one supplementary group; the tool host's
-  socket takes the gid from its setgid directory, since the orchestrator carries
-  no jail gid and no supplementary group at all. `/run/tf` itself is the
+  engagement under `/run/tf`: the sidecar's (owned by its uid), where it creates
+  and serves the agenthost socket and writes the gh-injector cert, and the tool
+  host's (owned by the orchestrator), where the orchestrator binds the tool-host
+  socket. Both are setgid to the jail's gid at `0750`, so each socket is born in
+  the run's jail gid and is then opened `0660`. Neither creator carries that
+  gid: the orchestrator has no supplementary group at all, and the sidecar runs
+  with none either, so it cannot reach the tool-host socket, the run tree or the
+  staging that the gid opens to the jail. `/run/tf` itself is the
   orchestrator's at `0711`: no group or other write, so no sidecar or jail
   identity on the host can create, unlink or rename anything in it.
 - **Staging** a launch mounts read-only (a step's skill, its prior memory and
@@ -122,9 +121,13 @@ run holds it:
 
 Before the index goes back to the allocator, the cell takes every one of those
 grants back — sockets removed, tree root parked, staging regrouped — after the
-jail and the sidecar are gone. A grant that cannot be taken back keeps the index
-out of the allocator rather than handing another run an identity a file still
-carries.
+jail and the sidecar are gone. Each is taken back only while it still carries
+this engagement's identity: a stop that queues a message re-claims the
+conversation while the old cell is still tearing down, and the successor may
+already hold the task's tree and the conversation's socket directories at
+another index. A grant that does not come back is tried again a few times, and
+one that still cannot be taken back keeps the index out of the allocator rather
+than handing another run an identity a file still carries.
 
 **Broker lifetime.** After the entrypoint's `exec`, the broker is a child of the
 orchestrator, but the orchestrator neither supervises nor restarts it (post-drop it
@@ -156,11 +159,11 @@ tini's `-g` signal fan-out reaches both processes directly.
   `CapEff` of all zeroes at a distinct uid in the `20000+` band — and each run's
   sidecar sits at a *different* uid in that band, which is exactly what stops one
   run's compromised credential process from `ptrace`-ing another's.
-- `grep ^Groups /proc/<pid>/status`: empty for the orchestrator, and for a live
-  `tf-sidecar` exactly one gid — its own run's jail gid (`40000+`, the same index
-  as its uid's). `stat -c '%u:%g %a %n' /run/tf /run/tf/*` shows the socket root as
-  the orchestrator's at `711`, and each run's two directories at `750` (the
-  tool-host one setgid) with that run's jail gid as their group.
+- `grep ^Groups /proc/<pid>/status`: empty for the orchestrator and for a live
+  `tf-sidecar` alike. `stat -c '%u:%g %a %n' /run/tf /run/tf/*` shows the socket
+  root as the orchestrator's at `711`, and each run's two directories at `2750`
+  (setgid) with that run's jail gid (`40000+`, the same index as its sidecar
+  uid's) as their group.
 
 All three are identifiable in the logs: every line carries a `proc=cap-broker`,
 `proc=orchestrator`, or `proc=sidecar` attribute (distinct from `component`,

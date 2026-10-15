@@ -13,36 +13,50 @@ import (
 )
 
 // TestGrantToJail pins step 3 of StartWithServer's fs-permissions invariant:
-// the socket keeps its owner and becomes group jailGID, mode 0660 — the
-// owner-legal group grant a sidecar carrying that gid makes. A process that
-// neither is root nor carries the gid gets a clear error naming the
-// group-membership requirement, rather than a silently unreachable socket.
+// a socket created in a directory setgid to the jail gid comes out in that
+// group, and the grant opens it 0660 without touching its owner. A socket that
+// came out in any other group — a directory missing its setgid bit — is
+// refused with an error naming the directory, rather than served unreachable.
 func TestGrantToJail(t *testing.T) {
 	jailGID := sandbox.JailGID(4)
-	sockPath := filepath.Join(t.TempDir(), "grant-test.sock")
-	l, err := net.Listen("unix", sockPath)
+
+	// Not in the jail's group: refused, mode untouched.
+	stray := filepath.Join(t.TempDir(), "stray.sock")
+	l, err := net.Listen("unix", stray)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
 	defer l.Close()
-
-	member := os.Getgid() == jailGID
-	if groups, err := os.Getgroups(); err == nil {
-		for _, g := range groups {
-			if g == jailGID {
-				member = true
-			}
-		}
+	if err := os.Chmod(stray, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := grantToJail(stray, jailGID, 0o660); err == nil {
+		t.Error("grantToJail accepted a socket outside the jail's group")
+	}
+	if fi, err := os.Stat(stray); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("a refused grant changed the socket's mode")
 	}
 
-	err = grantToJail(sockPath, jailGID, 0o660)
-	if os.Getuid() != 0 && !member {
-		if err == nil {
-			t.Fatal("grantToJail succeeded for a process that neither is root nor carries the jail gid; the chgrp should have been refused")
-		}
-		return
+	if os.Geteuid() != 0 {
+		t.Skip("the setgid case needs root to give a directory the jail's group")
 	}
+	dir := filepath.Join(t.TempDir(), "run")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(dir, -1, jailGID); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o750|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+	sockPath := filepath.Join(dir, "grant-test.sock")
+	l2, err := net.Listen("unix", sockPath)
 	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l2.Close()
+	if err := grantToJail(sockPath, jailGID, 0o660); err != nil {
 		t.Fatalf("grantToJail: %v", err)
 	}
 

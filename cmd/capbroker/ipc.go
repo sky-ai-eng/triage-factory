@@ -200,8 +200,8 @@ func (c *IPCClient) ChownRunTree(ctx context.Context, root, subpath string, jail
 	return c.call(ctx, methodChownRunTree, chownRunTreeArgs{Root: root, Subpath: subpath, JailUID: jailUID}, nil)
 }
 
-func (c *IPCClient) ParkRunTree(ctx context.Context, root string) error {
-	return c.call(ctx, methodParkRunTree, parkRunTreeArgs{Root: root}, nil)
+func (c *IPCClient) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return c.call(ctx, methodParkRunTree, parkRunTreeArgs{Root: root, JailUID: jailUID}, nil)
 }
 
 func (c *IPCClient) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {

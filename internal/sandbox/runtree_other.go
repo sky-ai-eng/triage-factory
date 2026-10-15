@@ -13,9 +13,6 @@ import (
 // the previous in-caller chown had.
 func chownRunTree(_ context.Context, _, _ string, _ int) error { return nil }
 
-// parkRunTree off Linux is a no-op: no jail identity ever held the tree.
-func parkRunTree(_ context.Context, _ string) error { return nil }
-
 // runTreeJailUID is always false off Linux: no jail identity holds a tree there.
 func runTreeJailUID(_ string) (int, bool) { return 0, false }
 

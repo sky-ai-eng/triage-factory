@@ -19,10 +19,6 @@ func chownRunTree(ctx context.Context, root, subpath string, jailUID int) error 
 	return defaultOps.ChownRunTree(ctx, root, subpath, jailUID)
 }
 
-func parkRunTree(ctx context.Context, root string) error {
-	return defaultOps.ParkRunTree(ctx, root)
-}
-
 func removeRunTree(ctx context.Context, path string) error {
 	return defaultOps.RemoveRunTree(ctx, path)
 }
@@ -497,6 +493,7 @@ func (hostOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID i
 	if !IsJailUID(jailUID) {
 		return fmt.Errorf("sandbox: chown run tree: uid %d outside the jail band [%d, %d)", jailUID, JailUIDBase, JailUIDBase+MaxSandboxes)
 	}
+	defer runTreeOwnership.lock(root)()
 	if !runTreeOpenat2Unsupported.Load() {
 		err := chownRunTreeOpenat2(ctx, root, subpath, jailUID)
 		switch {
@@ -774,18 +771,31 @@ func lchownRunTreeEntry(path string, jailUID int) error {
 // identity the engagement is about to give back. Same openat2 latch as
 // ChownRunTree.
 //
+// Only while jailUID still holds the root. A task's tree outlives an
+// engagement, and a stop that queues a message re-claims the conversation
+// while the ending engagement is still tearing down, so the root may already
+// belong to its successor, handed off at another index; parking it then would
+// take the successor's live tree away. The check and the chown hold the tree's
+// ownership lock (runTreeOwnership) against that hand-off, and the caller holds
+// jailUID's index until this returns, so no other engagement can come to hold
+// the tree under jailUID in between.
+//
 // The mode is re-asserted rather than kept, because the root was the agent's
 // to chmod while it owned it: a root the agent left 0777 and only re-owned
 // here would still admit everyone to everything beneath it.
-func (hostOps) ParkRunTree(ctx context.Context, root string) error {
+func (hostOps) ParkRunTree(ctx context.Context, root string, jailUID int) error {
 	if err := validateRunTreeShape("park run tree", root); err != nil {
 		return err
+	}
+	if !IsJailUID(jailUID) {
+		return fmt.Errorf("sandbox: park run tree: uid %d outside the jail band [%d, %d)", jailUID, JailUIDBase, JailUIDBase+MaxSandboxes)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	defer runTreeOwnership.lock(root)()
 	if !runTreeOpenat2Unsupported.Load() {
-		err := parkRunTreeOpenat2(root)
+		err := parkRunTreeOpenat2(root, jailUID)
 		switch {
 		case err == nil:
 			return nil
@@ -795,13 +805,13 @@ func (hostOps) ParkRunTree(ctx context.Context, root string) error {
 			return fmt.Errorf("sandbox: park run tree: %w", err)
 		}
 	}
-	return parkRunTreeFallback(root)
+	return parkRunTreeFallback(root, jailUID)
 }
 
 // parkRunTreeOpenat2 pins root through the same openat2 anchor the hand-off
 // uses and parks the pinned inode. A missing root is the no-op success: the
 // tree was removed before its engagement ended.
-func parkRunTreeOpenat2(root string) error {
+func parkRunTreeOpenat2(root string, jailUID int) error {
 	parentFd, base, err := openRunTreeAnchor(root)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) {
@@ -818,12 +828,12 @@ func parkRunTreeOpenat2(root string) error {
 		return fmt.Errorf("openat %s: %w", root, err)
 	}
 	defer closeFd(rootFd)
-	return parkPinnedRoot(rootFd, root)
+	return parkPinnedRoot(rootFd, root, jailUID)
 }
 
 // parkRunTreeFallback is the pre-5.6-kernel path: the EvalSymlinks-based
 // validation, then the same pinned park on an O_NOFOLLOW open of the root.
-func parkRunTreeFallback(root string) error {
+func parkRunTreeFallback(root string, jailUID int) error {
 	if _, err := os.Lstat(root); os.IsNotExist(err) {
 		return nil
 	}
@@ -835,22 +845,22 @@ func parkRunTreeFallback(root string) error {
 		return fmt.Errorf("sandbox: park run tree: open %s: %w", root, err)
 	}
 	defer closeFd(fd)
-	if err := parkPinnedRoot(fd, root); err != nil {
+	if err := parkPinnedRoot(fd, root, jailUID); err != nil {
 		return fmt.Errorf("sandbox: park run tree: %w", err)
 	}
 	return nil
 }
 
-// parkPinnedRoot parks the root fd refers to, when a jail identity holds it.
-// Any other owner is left alone: a parked root is already parked, an
-// orchestrator-owned one was never handed off, and an owner outside every run
-// tree identity is not this boundary's to touch.
-func parkPinnedRoot(fd int, root string) error {
+// parkPinnedRoot parks the root fd refers to, when jailUID holds it. Any other
+// owner is left alone: a parked root is already parked, an orchestrator-owned
+// one was never handed off, another jail uid is a successor engagement's, and
+// an owner outside every run tree identity is not this boundary's to touch.
+func parkPinnedRoot(fd int, root string, jailUID int) error {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return fmt.Errorf("fstat %s: %w", root, err)
 	}
-	if !IsJailUID(int(st.Uid)) {
+	if int(st.Uid) != jailUID {
 		return nil
 	}
 	if err := unix.Fchown(fd, ParkedRunTreeUID, runTreeGroup()); err != nil {

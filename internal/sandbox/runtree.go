@@ -69,16 +69,6 @@ func ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error 
 	return chownRunTree(ctx, root, subpath, jailUID)
 }
 
-// ParkRunTree gives a run tree's root to ParkedRunTreeUID when the engagement
-// that held it ends, so the jail identity can be released with no file still
-// carrying it. Shallow — the root alone — because the root's mode is what
-// admits anyone below it; see ParkedRunTreeUID. A root no jail identity owns
-// (already parked, never handed off, or a local-mode tree) and a missing one
-// are left as they are, so this is safe to call on any run tree.
-func ParkRunTree(ctx context.Context, root string) error {
-	return parkRunTree(ctx, root)
-}
-
 // RunTreeJailUID returns the jail uid that holds the run tree at path, if one
 // does: the identity a checkout added mid-run must be handed to. False when
 // the tree is not held by an engagement, and always off Linux.

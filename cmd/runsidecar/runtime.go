@@ -361,7 +361,7 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 // sidecar just bound (holding only per-run placeholders). It creates the
 // agenthost socket in the run's own socket directory (/run/tf/<conversationID>/),
 // which the broker bind-mounts into the jail, and grants it to the run's jail
-// gid — this process carries that gid as its one supplementary group, by launch.
+// gid — which the directory, setgid to that gid, gives the socket at birth.
 // Identity comes from the
 // orchestrator's AgentHostInfo but is never trusted for org-scoping: every
 // relayed op is re-bound to the orchestrator's own ConversationInfo.
@@ -431,10 +431,9 @@ var (
 )
 
 // ownJailGID is the jail gid of the run this sidecar serves, derived from the
-// sidecar's own uid: the broker launches it at SidecarUID(idx) carrying
-// JailGID(idx) as its one supplementary group, so the uid names the group the
-// run's files are granted to. A process outside the sidecar band is not a
-// run's sidecar and has no jail to grant anything to.
+// sidecar's own uid: the broker launches it at SidecarUID(idx), so the uid
+// names the group the run's files are granted to. A process outside the
+// sidecar band is not a run's sidecar and has no jail to grant anything to.
 func ownJailGID() (int, error) {
 	gid, ok := sandbox.SidecarJailGID(os.Getuid())
 	if !ok {

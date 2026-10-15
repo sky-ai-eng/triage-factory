@@ -329,7 +329,7 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, s.ops.ParkRunTree(ctx, a.Root)
+		return emptyResult{}, s.ops.ParkRunTree(ctx, a.Root, a.JailUID)
 
 	case methodPrepareSockets:
 		var a runSocketsArgs

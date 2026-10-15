@@ -221,7 +221,8 @@ type chownRunTreeArgs struct {
 }
 
 type parkRunTreeArgs struct {
-	Root string `json:"root"`
+	Root    string `json:"root"`
+	JailUID int    `json:"jail_uid"`
 }
 
 // runSocketsArgs carries PrepareRunSockets and ReleaseRunSockets alike: the

@@ -64,11 +64,12 @@ type PrivilegedOps interface {
 	ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error
 
 	// ParkRunTree gives a run tree's root to ParkedRunTreeUID at the end of
-	// the engagement that held it, so the engagement's jail identity can be
-	// released with no file still carrying it (see ParkedRunTreeUID). The
-	// root only, with its mode re-asserted; a root no jail identity owns
-	// and a missing one are left alone.
-	ParkRunTree(ctx context.Context, root string) error
+	// the engagement that held it under jailUID, so the engagement's jail
+	// identity can be released with no file still carrying it (see
+	// ParkedRunTreeUID). The root only, with its mode re-asserted, and only
+	// while jailUID owns it: a root another engagement now holds, one no jail
+	// identity owns and a missing one are left alone.
+	ParkRunTree(ctx context.Context, root string, jailUID int) error
 
 	// PrepareRunSockets creates conversationID's per-run socket directories
 	// for the engagement at subnetIdx — the sidecar's (RunSocketDir) and the

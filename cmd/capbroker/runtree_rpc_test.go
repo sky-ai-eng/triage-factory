@@ -72,10 +72,14 @@ func TestIPCRoundTrip_RunCellGrants(t *testing.T) {
 		idx  uint8
 	}
 	var parked, staged string
+	var parkedUID int
 	var stagedIdx uint8
 	var prepared, released sockCall
 	client := serveTestBroker(t, &fakeOps{
-		parkRunTreeFn: func(ctx context.Context, root string) error { parked = root; return nil },
+		parkRunTreeFn: func(ctx context.Context, root string, jailUID int) error {
+			parked, parkedUID = root, jailUID
+			return nil
+		},
 		prepareSocketsFn: func(ctx context.Context, conv string, idx uint8) error {
 			prepared = sockCall{conv, idx}
 			return nil
@@ -90,7 +94,7 @@ func TestIPCRoundTrip_RunCellGrants(t *testing.T) {
 		},
 	})
 	ctx := context.Background()
-	if err := client.ParkRunTree(ctx, "/tmp/tf-runs/run-3"); err != nil {
+	if err := client.ParkRunTree(ctx, "/tmp/tf-runs/run-3", sandbox.JailUID(3)); err != nil {
 		t.Fatalf("ParkRunTree: %v", err)
 	}
 	if err := client.PrepareRunSockets(ctx, "conv-a", 4); err != nil {
@@ -102,8 +106,8 @@ func TestIPCRoundTrip_RunCellGrants(t *testing.T) {
 	if err := client.GrantRunStaging(ctx, "/tmp/triagefactory-memory/conv-a", 4); err != nil {
 		t.Fatalf("GrantRunStaging: %v", err)
 	}
-	if parked != "/tmp/tf-runs/run-3" {
-		t.Errorf("broker parked %q", parked)
+	if parked != "/tmp/tf-runs/run-3" || parkedUID != sandbox.JailUID(3) {
+		t.Errorf("broker parked %q as held by uid %d", parked, parkedUID)
 	}
 	if prepared != (sockCall{"conv-a", 4}) || released != (sockCall{"conv-a", 4}) {
 		t.Errorf("broker saw prepare=%+v release=%+v", prepared, released)

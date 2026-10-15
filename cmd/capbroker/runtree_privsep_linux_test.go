@@ -74,7 +74,7 @@ func TestBrokeredRunTreeOps_AcrossPrivilegeBoundary(t *testing.T) {
 
 	// The engagement ends: its root is parked, so its jail identity holds
 	// nothing a later engagement drawing the same index could reach.
-	if err := client.ParkRunTree(ctx, tree); err != nil {
+	if err := client.ParkRunTree(ctx, tree, first); err != nil {
 		t.Fatalf("brokered ParkRunTree: %v", err)
 	}
 	if uid, _ := ownerOf(tree); int(uid) != sandbox.ParkedRunTreeUID {

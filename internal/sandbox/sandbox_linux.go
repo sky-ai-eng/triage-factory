@@ -353,6 +353,7 @@ func (n *RunNetwork) GrantStaging(ctx context.Context, dir string) error {
 		return fmt.Errorf("sandbox: grant staging on a closed run network")
 	}
 	n.grantedStaging = appendOnce(n.grantedStaging, dir)
+	defer stagingGrants.lock(dir)()
 	return defaultOps.GrantRunStaging(ctx, dir, n.Idx)
 }
 
@@ -376,10 +377,12 @@ func appendOnce(list []string, v string) []string {
 // by the time the grants are taken back no process holds the jail identity.
 // The grants come back first, then the index: while the index is held no
 // other engagement can be given it, which is also what makes the ownership
-// guards in ReleaseRunSockets exact. A grant that cannot be taken back keeps
-// the index out of the allocator for the life of this process rather than
-// handing another run an identity a file still carries — one slot of
-// MaxSandboxes, logged, against a run reaching another's tree.
+// guards in ReleaseRunSockets and ParkRunTree exact. A grant that does not
+// come back is tried again on grantReleaseRetries' schedule, and one that
+// still cannot be taken back keeps the index out of the allocator for the
+// life of this process rather than handing another run an identity a file
+// still carries — one slot of MaxSandboxes, logged, against a run reaching
+// another's tree.
 //
 // The index is a scarce, MaxSandboxes-wide resource that also keys the run's
 // netns name and its sidecar uid, so a teardown that stalls narrows the whole
@@ -405,6 +408,15 @@ func (n *RunNetwork) Close() error {
 	held := n.releaseGrants(ctx)
 	if err := defaultOps.TeardownNetwork(ctx, ns); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown run network: %v\n", err)
+	}
+	for _, wait := range grantReleaseRetries {
+		if len(held) == 0 {
+			break
+		}
+		sandboxLog.Warn("a grant made under this run's jail identity did not come back; trying again",
+			"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "retry_in", wait, "error", errors.Join(held...))
+		time.Sleep(wait)
+		held = n.releaseGrants(ctx)
 	}
 	if len(held) > 0 {
 		sandboxLog.Error("a grant made under this run's jail identity could not be taken back; its subnet index stays allocated until this process restarts",
@@ -433,17 +445,27 @@ func (n *RunNetwork) releaseGrants(ctx context.Context) []error {
 		}
 	}
 	for _, root := range trees {
-		if err := defaultOps.ParkRunTree(ctx, root); err != nil {
+		if err := defaultOps.ParkRunTree(ctx, root, n.JailUID()); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	for _, dir := range staging {
-		if err := revokeRunStaging(dir); err != nil {
+		if err := revokeRunStaging(dir, JailGID(n.Idx)); err != nil {
 			errs = append(errs, fmt.Errorf("sandbox: revoke staging grant on %s: %w", dir, err))
 		}
 	}
 	return errs
 }
+
+// grantReleaseRetries is how long Close waits before each further attempt to
+// take back grants that did not come back. Every attempt retakes the whole
+// set, which is safe because each grant's release is guarded and idempotent:
+// a socket directory goes, a root is parked and staging is regrouped only
+// while it still carries this index's identity. The schedule outlasts a broker
+// call that
+// failed in transit, not a broker that is gone — there, the index staying
+// held until the process restarts is the answer.
+var grantReleaseRetries = []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second}
 
 // slowNetworkTeardown is how long a per-run network teardown may take before
 // it is worth a log line. The work is a handful of brokered `ip`/`iptables`

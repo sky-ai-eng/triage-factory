@@ -24,7 +24,12 @@ import (
 // run's jail gid may traverse it, and nobody else may do anything. The socket
 // root above it is root-owned and not group-writable, so this directory is the
 // only place a sidecar can create an entry at all.
-const runSocketDirMode = 0o750
+//
+// The setgid bit gives what the sidecar creates here the jail gid at birth.
+// The sidecar carries no supplementary group, so it could not chgrp anything
+// to that gid itself — and a sidecar holding the jail gid would also reach
+// the tool-host socket, which is granted to the same gid.
+const runSocketDirMode = 0o2750
 
 // toolHostSocketDirMode is a run's tool-host socket directory: the
 // orchestrator (owner) binds the socket, the jail gid may traverse it, and the
@@ -59,9 +64,10 @@ func orchestratorUID() int {
 // teardown come up, and what gives every file inside the new directories an
 // owner and group of this engagement's.
 func (hostOps) PrepareRunSockets(_ context.Context, conversationID string, subnetIdx uint8) error {
-	if err := validateOpaqueID("run id", conversationID); err != nil {
+	if err := validateRunSocketsID(conversationID); err != nil {
 		return err
 	}
+	defer runSocketDirs.lock(conversationID)()
 	if err := os.MkdirAll(trustedAgentHostSocketRoot, 0o711); err != nil {
 		return fmt.Errorf("sandbox: create socket root: %w", err)
 	}
@@ -84,6 +90,22 @@ func (hostOps) PrepareRunSockets(_ context.Context, conversationID string, subne
 		if err := makeOwnedDir(d.path, d.uid, d.gid, d.mode); err != nil {
 			return fmt.Errorf("sandbox: create the %s's socket directory: %w", d.ownerRole, err)
 		}
+	}
+	return nil
+}
+
+// validateRunSocketsID refuses a run id that does not name its socket
+// directories one to one. The directory name is the id with every character
+// outside [A-Za-z0-9_-] folded to a dash and cut at 64 (sanitizeSocketName),
+// so two ids that differ only there would share one run's directories — and
+// the release guard, which tells engagements apart by owner and not by id,
+// could not keep them apart. Conversation ids are UUIDs, which pass unchanged.
+func validateRunSocketsID(conversationID string) error {
+	if err := validateOpaqueID("run id", conversationID); err != nil {
+		return err
+	}
+	if sanitizeSocketName(conversationID) != conversationID {
+		return fmt.Errorf("sandbox: run id %q is not a socket directory name of its own", conversationID)
 	}
 	return nil
 }
@@ -118,9 +140,10 @@ func makeOwnedDir(path string, uid, gid int, mode uint32) error {
 // RunNetwork.Close states: no other engagement can hold this index until this
 // call has returned. A missing directory is success.
 func (hostOps) ReleaseRunSockets(_ context.Context, conversationID string, subnetIdx uint8) error {
-	if err := validateOpaqueID("run id", conversationID); err != nil {
+	if err := validateRunSocketsID(conversationID); err != nil {
 		return err
 	}
+	defer runSocketDirs.lock(conversationID)()
 	var errs []error
 	for _, d := range []struct {
 		path string
@@ -222,13 +245,36 @@ func (hostOps) GrantRunStaging(_ context.Context, dir string, subnetIdx uint8) e
 	return nil
 }
 
-// revokeRunStaging takes a staging grant back: the directory's group returns
-// to this process's own, which the owner may set without any privilege. A
-// directory that is already gone has nothing left to revoke.
-func revokeRunStaging(dir string) error {
-	err := os.Chown(dir, -1, os.Getgid())
-	if err == nil || errors.Is(err, os.ErrNotExist) {
+// revokeRunStaging takes the grant of dir to jailGID back: the directory's
+// group returns to this process's own, which the owner may set without any
+// privilege. A directory that is already gone has nothing left to revoke.
+//
+// Only while jailGID still holds it. Staging is keyed by conversation, and a
+// stop that queues a message re-claims the conversation while the ending
+// engagement is still tearing down, so the directory may already be granted
+// to its successor's jail; regrouping it then would close the successor's own
+// staging to it. The grant and the revoke both run in the orchestrator, and
+// both hold the directory's lock (stagingGrants), so the group this reads is
+// still the group when it changes it.
+func revokeRunStaging(dir string, jailGID int) error {
+	defer stagingGrants.lock(dir)()
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return fmt.Errorf("open %s: %w", dir, err)
+	}
+	defer closeFd(fd)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("fstat %s: %w", dir, err)
+	}
+	if int(st.Gid) != jailGID {
+		return nil
+	}
+	if err := unix.Fchown(fd, -1, os.Getgid()); err != nil {
+		return fmt.Errorf("chgrp %s: %w", dir, err)
+	}
+	return nil
 }

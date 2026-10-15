@@ -30,6 +30,7 @@ const accessProbeEnv = "TF_TEST_ACCESS_PROBE"
 //	read    — read the file at path
 //	list    — read the directory at path
 //	create  — create (and remove again) a new file inside the directory at path
+//	bind    — bind a unix socket at path and leave it there, as a sidecar does
 func runAccessProbeIfRequested() {
 	spec := os.Getenv(accessProbeEnv)
 	if spec == "" {
@@ -47,6 +48,12 @@ func runAccessProbeIfRequested() {
 		_, err = os.ReadFile(path)
 	case "list":
 		_, err = os.ReadDir(path)
+	case "bind":
+		var ln *net.UnixListener
+		if ln, err = net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"}); err == nil {
+			ln.SetUnlinkOnClose(false)
+			_ = ln.Close()
+		}
 	case "create":
 		name := filepath.Join(path, "probe-"+strconv.Itoa(os.Getpid()))
 		var f *os.File
@@ -78,16 +85,10 @@ func jailIdentity(idx uint8) identity {
 	return identity{name: fmt.Sprintf("jail[%d]", idx), uid: JailUID(idx), gid: JailGID(idx)}
 }
 
+// sidecarIdentity is the credential LaunchSidecarProcess gives a sidecar: its
+// own uid and gid, and no supplementary group.
 func sidecarIdentity(idx uint8) identity {
-	return identity{name: fmt.Sprintf("sidecar[%d]", idx), uid: SidecarUID(idx), gid: SidecarUID(idx), groups: sidecarGroupsInts(SidecarUID(idx))}
-}
-
-func sidecarGroupsInts(uid int) []int {
-	var out []int
-	for _, g := range sidecarGroups(uid) {
-		out = append(out, int(g))
-	}
-	return out
+	return identity{name: fmt.Sprintf("sidecar[%d]", idx), uid: SidecarUID(idx), gid: SidecarUID(idx)}
 }
 
 // prober runs access probes from a copy of this test binary placed where any
@@ -268,8 +269,10 @@ func withJailHost(t *testing.T) string {
 // TestJailIdentity_HostProcessesCannotReachAnotherRun is the host-side half of
 // per-run jail identity, with two live cells built the way production builds
 // them. A host process holding run A's jail identity — the capture child's —
-// or run A's sidecar identity reaches run A's sockets, tree and staging and
-// none of run B's, and neither can create anything in the socket root.
+// reaches run A's sockets, tree and staging and none of run B's. Run A's
+// sidecar reaches its own socket directory and nothing else of either run: it
+// carries no jail gid, so not even its own run's tool-host socket, tree or
+// staging. Neither can create anything in the socket root.
 //
 // Every denial is paired with the same probe allowed against the run's own
 // cell, so a denial is the boundary and not a broken probe.
@@ -303,6 +306,17 @@ func TestJailIdentity_HostProcessesCannotReachAnotherRun(t *testing.T) {
 
 	// Run A's sidecar: its own socket, none of run B's, nothing in the root.
 	p.mustAllow(sidecarA, "connect", a.agentSock)
+	// A socket it binds in its own directory is born in the jail's group,
+	// which is how the jail reaches it with no chgrp the sidecar could make.
+	bound := filepath.Join(RunSocketDir(a.conv), "s.sock")
+	p.mustAllow(sidecarA, "bind", bound)
+	if _, gid, _ := statOwnerMode(t, bound); int(gid) != JailGID(a.idx) {
+		t.Errorf("a socket the sidecar bound in its own directory has gid %d, want the jail gid %d", gid, JailGID(a.idx))
+	}
+	// Nothing else of its own run: the tool-host socket is the jail's alone.
+	p.mustDeny(sidecarA, "connect", a.toolSock)
+	p.mustDeny(sidecarA, "read", a.treeFile)
+	p.mustDeny(sidecarA, "read", a.stagingFile)
 	p.mustDeny(sidecarA, "connect", b.agentSock)
 	p.mustDeny(sidecarA, "connect", b.toolSock)
 	p.mustDeny(sidecarA, "read", b.treeFile)
@@ -326,10 +340,10 @@ func TestJailIdentity_SecondClaimWithAnotherIndex(t *testing.T) {
 	ctx := context.Background()
 
 	// The first engagement ends.
-	if err := (hostOps{}).ParkRunTree(ctx, first.tree); err != nil {
+	if err := (hostOps{}).ParkRunTree(ctx, first.tree, JailUID(first.idx)); err != nil {
 		t.Fatalf("ParkRunTree: %v", err)
 	}
-	if err := revokeRunStaging(first.staging); err != nil {
+	if err := revokeRunStaging(first.staging, JailGID(first.idx)); err != nil {
 		t.Fatalf("revoke staging: %v", err)
 	}
 	if err := (hostOps{}).ReleaseRunSockets(ctx, first.conv, first.idx); err != nil {

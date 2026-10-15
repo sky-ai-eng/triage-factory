@@ -76,6 +76,26 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 		_ = sidecarEnd.Close()
 	})
 
+	// The run's socket directory as the broker prepares it for the
+	// engagement: setgid to the jail gid, so the socket is born in that group.
+	sockDir := runSocketDir(info.ConversationID)
+	if err := os.MkdirAll(hostSocketRoot, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(sockDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(sockDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	if err := os.Chown(sockDir, -1, sandbox.JailGID(0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sockDir, 0o750|os.ModeSetgid); err != nil {
+		t.Fatal(err)
+	}
+
 	// Host the exec-verb socket server the way the sidecar does: a relay-backed
 	// Server on the real /run/tf socket, granted to a jail gid.
 	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil), nil)

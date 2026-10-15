@@ -10,9 +10,8 @@ package sandbox
 // in-sandbox one. Inside gVisor the Sentry is the boundary, but on the host the
 // jail's uid owns the run tree, and its gid is the group every one of the run's
 // sockets and staging directories is granted to. A value shared across runs
-// would make any host process holding it — a sidecar, which carries the gid as
-// a supplementary group, or the capture child, which runs as the uid — a
-// member of every run.
+// would make any host process holding it — the capture child, which runs as
+// the uid and gid — a member of every run.
 //
 // 40000 sits clear of the ranges hosts commonly allocate on their own: 30000
 // and up is Nix's build users (nixbld1..32), systemd's dynamic users start at
@@ -53,8 +52,8 @@ func JailUID(subnetIdx uint8) int {
 
 // JailGID returns the jail's gid at this subnet index: the same numeric value
 // as its uid. It is the group the run's sockets, its socket directories and its
-// staging directories are granted to, and the one supplementary group the run's
-// sidecar carries.
+// staging directories are granted to. No other host process carries it: the
+// run's sidecar creates its socket and cert in a directory setgid to it.
 func JailGID(subnetIdx uint8) int {
 	return JailUID(subnetIdx)
 }
@@ -75,9 +74,9 @@ func jailSubnetIdx(uid int) (uint8, bool) {
 }
 
 // SidecarJailGID returns the jail gid of the run whose sidecar runs as
-// sidecarUID — the group that sidecar grants the run's sockets and files to.
-// False for a uid outside the sidecar band, which is every process that is not
-// a run's sidecar.
+// sidecarUID — the group the run's socket and cert must carry when that
+// sidecar opens them to the jail. False for a uid outside the sidecar band,
+// which is every process that is not a run's sidecar.
 func SidecarJailGID(sidecarUID int) (int, bool) {
 	if !IsSidecarUID(sidecarUID) {
 		return 0, false

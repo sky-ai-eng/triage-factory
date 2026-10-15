@@ -41,7 +41,9 @@ func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
 func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
 	return nil
 }
-func (f fakePrivilegedOps) ParkRunTree(ctx context.Context, root string) error { return nil }
+func (f fakePrivilegedOps) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return nil
+}
 func (f fakePrivilegedOps) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
 	return nil
 }

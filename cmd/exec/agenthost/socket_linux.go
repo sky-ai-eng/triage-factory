@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/db"
@@ -58,23 +59,24 @@ type HostDaemon struct {
 // hostile-input verb parser runs inside the capless per-run process rather than
 // the orchestrator.
 //
-// jailGID is the run's jail gid — the one supplementary group the sidecar
-// carries (sandbox.SidecarJailGID of its own uid) and the gid the run's jail
-// runs with. The socket is granted to it and to nothing else.
+// jailGID is the run's jail gid — the gid the run's jail runs with, which the
+// sidecar derives from its own uid (sandbox.SidecarJailGID) without carrying
+// it. The socket is granted to it and to nothing else.
 //
 // Property B / fs-permissions invariant (load-bearing):
 //
 //  1. The run's socket directory exists before this runs and admits only the
 //     sidecar and the run's jail gid, so the window between net.Listen and the
-//     grant is unreachable from any other run or host process.
+//     grant is unreachable from any other run or host process. It is setgid
+//     to the jail gid, so the socket is created in that group.
 //
 //  2. net.Listen("unix", ...) — creates the socket file with the process
 //     umask applied (typically 0755); too permissive on its own, but step 1
 //     covers the gap.
 //
-//  3. chgrp to jailGID + chmod 0660 — an owner-legal group grant (the sidecar
-//     owns the socket and belongs to the group). The jail's connect passes on
-//     the group bits; no other uid on the host has a way in.
+//  3. chmod 0660, once the socket is confirmed to be in jailGID's group. The
+//     jail's connect passes on the group bits; no other uid on the host has a
+//     way in.
 //
 // Caller MUST invoke .Close() exactly once (typically via defer) regardless of
 // how the surrounding sandbox terminates — the listener close drains the
@@ -175,7 +177,7 @@ func ensureOwnerOnlyDir(dir string) error {
 //
 //     For a jail's socket the directory is the run's own, created by the
 //     cap-broker for the engagement: the sidecar's uid, the run's jail gid,
-//     mode 0750. For the local root StartLocal owns it, at 0700 — one uid,
+//     mode 02750. For the local root StartLocal owns it, at 0700 — one uid,
 //     nothing to share — enforced by ensureOwnerOnlyDir rather than by this
 //     MkdirAll.
 //
@@ -240,17 +242,23 @@ func grantSocketToOwnerOnly(sockPath string) error {
 	return nil
 }
 
-// grantToJail opens a file the run's sidecar created to the run's jail: group
-// jailGID, mode as given (0660 for the socket — connect(2) needs write — and
-// 0640 for the cert the jail only reads). An owner-legal chgrp, valid only
-// because the sidecar carries jailGID as its one supplementary group; the
-// error names that requirement when the chgrp is refused.
+// grantToJail opens a file the run's sidecar created to the run's jail: mode as
+// given (0660 for the socket — connect(2) needs write — and 0640 for the cert
+// the jail only reads), on a file that must already be in jailGID's group. The
+// run's socket directory is setgid to that gid, so everything the sidecar
+// creates there is born in it; the sidecar is not a member and could not chgrp
+// a file into it, so one that came out in another group is refused here
+// rather than served unreachable.
 func grantToJail(path string, jailGID int, mode os.FileMode) error {
 	if !sandbox.IsJailUID(jailGID) {
 		return fmt.Errorf("agenthost: %d is not a jail gid; refusing to grant %s to it", jailGID, path)
 	}
-	if err := os.Chown(path, -1, jailGID); err != nil {
-		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (the run's sidecar must carry its jail gid as a supplementary group for this owner-legal group grant)", path, jailGID, err)
+	var st syscall.Stat_t
+	if err := syscall.Lstat(path, &st); err != nil {
+		return fmt.Errorf("agenthost: stat %s: %w", path, err)
+	}
+	if int(st.Gid) != jailGID {
+		return fmt.Errorf("agenthost: %s was created in group %d, not the run's jail gid %d (the run's socket directory must be setgid to it)", path, st.Gid, jailGID)
 	}
 	if err := os.Chmod(path, mode); err != nil {
 		return fmt.Errorf("agenthost: chmod %s: %w", path, err)
@@ -331,8 +339,8 @@ func CertPathFor(conversationID string) string {
 
 // WriteInjectorCert writes conversationID's per-run gh-injector certificate
 // (PEM, the PUBLIC half only — the private key never leaves the sidecar) to
-// CertPathFor(conversationID) and grants the run's jail gid read access,
-// mirroring the socket's owner-legal group grant. Called by the sidecar during
+// CertPathFor(conversationID) and grants the run's jail gid read access, the
+// same grant the socket gets. Called by the sidecar during
 // bring-up when the gh channel is enabled, before the sandbox launches (the OCI
 // spec references the source path, which must exist).
 func WriteInjectorCert(conversationID string, certPEM []byte, jailGID int) error {

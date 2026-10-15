@@ -23,7 +23,7 @@ type fakeOps struct {
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
 	reapOrphansFn     func(ctx context.Context) error
 	chownRunTreeFn    func(ctx context.Context, root, subpath string, jailUID int) error
-	parkRunTreeFn     func(ctx context.Context, root string) error
+	parkRunTreeFn     func(ctx context.Context, root string, jailUID int) error
 	prepareSocketsFn  func(ctx context.Context, conversationID string, subnetIdx uint8) error
 	releaseSocketsFn  func(ctx context.Context, conversationID string, subnetIdx uint8) error
 	grantStagingFn    func(ctx context.Context, dir string, subnetIdx uint8) error
@@ -46,8 +46,8 @@ func (f *fakeOps) ReapOrphans(ctx context.Context) error {
 func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
 	return f.chownRunTreeFn(ctx, root, subpath, jailUID)
 }
-func (f *fakeOps) ParkRunTree(ctx context.Context, root string) error {
-	return f.parkRunTreeFn(ctx, root)
+func (f *fakeOps) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return f.parkRunTreeFn(ctx, root, jailUID)
 }
 func (f *fakeOps) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
 	return f.prepareSocketsFn(ctx, conversationID, subnetIdx)
