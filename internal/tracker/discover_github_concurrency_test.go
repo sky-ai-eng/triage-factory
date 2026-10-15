@@ -13,6 +13,7 @@ import (
 	"time"
 
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
+	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
@@ -65,7 +66,7 @@ func TestDiscoverGitHub_BoundedConcurrency_MaxInFlight(t *testing.T) {
 	client := ghclient.NewClient(srv.URL, "tok")
 
 	start := time.Now()
-	if _, _, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
+	if _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 	elapsed := time.Since(start)
@@ -126,7 +127,7 @@ func TestDiscoverGitHub_ConcurrencyOne_IsFullySerial(t *testing.T) {
 	tr := &Tracker{repos: stores.Repos, orgID: org}
 	client := ghclient.NewClient(srv.URL, "tok")
 
-	if _, _, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
+	if _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos); err != nil {
 		t.Fatalf("discoverGitHub: %v", err)
 	}
 
@@ -172,10 +173,10 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 	defer cancel()
 
 	done := make(chan struct{})
-	var discovered []ghclient.DiscoveredPR
+	var discovery githubDiscovery
 	var discoverErr error
 	go func() {
-		discovered, _, _, _, discoverErr = tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
+		discovery, discoverErr = tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
 		close(done)
 	}()
 
@@ -188,10 +189,10 @@ func TestDiscoverGitHub_HangingRepoDoesNotBlockOthers(t *testing.T) {
 	if discoverErr != nil {
 		t.Fatalf("discoverGitHub: %v", discoverErr)
 	}
-	if len(discovered) != 3 {
-		t.Fatalf("discovered %d PRs; want 3 (the hanging repo's PR must not appear, the other 3 must)", len(discovered))
+	if len(discovery.prs) != 3 {
+		t.Fatalf("discovered %d PRs; want 3 (the hanging repo's PR must not appear, the other 3 must)", len(discovery.prs))
 	}
-	for _, d := range discovered {
+	for _, d := range discovery.prs {
 		if d.Snapshot.Repo == "octo/hangs" {
 			t.Errorf("hanging repo's PR was discovered despite its request never completing")
 		}
@@ -240,12 +241,12 @@ func TestDiscoverGitHub_DeterministicOrderAcrossConcurrency(t *testing.T) {
 		tr := &Tracker{repos: stores.Repos, orgID: org}
 		client := ghclient.NewClient(srv.URL, "tok")
 
-		discovered, _, _, _, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
+		discovery, err := tr.discoverGitHub(ctx, "https://github.com", client, "", repos)
 		if err != nil {
 			t.Fatalf("discoverGitHub: %v", err)
 		}
-		order := make([]string, len(discovered))
-		for i, d := range discovered {
+		order := make([]string, len(discovery.prs))
+		for i, d := range discovery.prs {
 			order[i] = d.Snapshot.Repo
 		}
 		return order
@@ -334,15 +335,13 @@ func TestRefreshGitHub_RateLimitStopsFanOutAndPropagatesDistinctly(t *testing.T)
 	}
 }
 
-// TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping guards
-// against a real regression found in review: RefreshGitHub must not discard
-// the repos that already succeeded before a sibling hit ErrRateLimited.
-// Those repos' pulls-etag was already persisted (recordPullsPoll runs inline
-// per-repo, on success, inside discoverGitHub) — if RefreshGitHub bailed out
-// before running the entity-seeding loop over them, their PRs would never
-// become entities, yet the next cycle would see an unchanged (304) listing
-// and never get a second chance to discover them. So: repos before the
-// rate-limited one must still be seeded; repos at or after it must not be.
+// TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping:
+// RefreshGitHub must not discard the repos that already succeeded before a
+// sibling hit ErrRateLimited. Their listings already spent the budget, so
+// their PRs are seeded and their cursors written this cycle, and the next
+// cycle gets a 304 for each instead of listing it again. Repos at or after
+// the rate-limited one are neither seeded nor given a cursor: they were not
+// listed, so the next cycle lists them from where they stand.
 func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *testing.T) {
 	// Concurrency=1 makes discovery fully serial and this test's outcome
 	// deterministic: ok1/ok2 are guaranteed to complete before "limited" is
@@ -363,6 +362,7 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("ETag", `"etag-1"`)
 		_, _ = w.Write([]byte(openPRBody))
 	}))
 	t.Cleanup(srv.Close)
@@ -400,6 +400,19 @@ func TestRefreshGitHub_RateLimitSeedsAlreadyDiscoveredReposBeforeStopping(t *tes
 	for _, notWant := range []string{"octo/ok3#42", "octo/ok4#42"} {
 		if seeded[notWant] {
 			t.Errorf("entity %q was seeded; repos at/after the rate-limited one must not be reached", notWant)
+		}
+	}
+	for _, repo := range repos {
+		etag, _, err := stores.Repos.GetPullsPollStateByRefSystem(ctx, org, domain.RepoRefFromSlug("https://github.com", repo))
+		if err != nil {
+			t.Fatalf("GetPullsPollStateByRefSystem(%s): %v", repo, err)
+		}
+		want := ""
+		if repo == "octo/ok1" || repo == "octo/ok2" {
+			want = `"etag-1"`
+		}
+		if etag != want {
+			t.Errorf("%s: stored etag = %q; want %q", repo, etag, want)
 		}
 	}
 }

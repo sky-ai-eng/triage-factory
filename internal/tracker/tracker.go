@@ -322,23 +322,20 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, lastListed, resumeFrom, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
+	discovery, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
+	discovered, quietRepos, lastListed := discovery.prs, discovery.quiet, discovery.lastListed
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
 			// The repo fan-out already stopped queuing new repos the moment
 			// this surfaced (see discoverGitHub). Deliberately do NOT return
 			// here, though: `discovered` still holds every repo that DID
-			// complete before the budget ran out, and their pulls-etag was
-			// already persisted (recordPullsPoll, inline per-repo) as part of
-			// that success. Bailing out before the entity-seeding loop below
-			// runs would leave those repos' entities/snapshots un-seeded while
-			// their etag has already moved past the very PRs that needed
-			// seeding — a silent, hard-to-notice loss (they'd 304 on the next
-			// cycle and never get a second chance). So: let this loop process
-			// `discovered` as normal, and only skip Phase 2/3 (which share
-			// the same client and would just hit the same exhausted budget)
-			// afterward. See the check below the entity-seeding loop.
+			// complete before the budget ran out. The loop below stores
+			// their PRs and then writes their cursors, so the next cycle
+			// spends a free 304 on each of them rather than listing them
+			// again. Only Phase 2/3, which share the same client and would
+			// just hit the same exhausted budget, are skipped. See the check
+			// below the cursor writes.
 			trackerLog.Warn("github discovery: rate limit budget exhausted, stopping repo fan-out", "resume_at", rateLimited.ResumeAt)
 		} else {
 			trackerLog.Log(ctx, upstream.LogLevel(discoveryErr, slog.LevelError), "github discovery error", "error", discoveryErr)
@@ -354,6 +351,12 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		discoveredBySourceID[ghSourceID(d.Snapshot.Repo, d.Snapshot.Number)] = d.Snapshot
 	}
 
+	// unstored is the set of "owner/repo" with a discovered PR this loop
+	// failed to store: its entity could not be created, or its closed entity
+	// could not be reactivated. Such a repo keeps the cursor it had (see the
+	// writes below the loop). A failed seed CAS for a new entity is not
+	// counted: the entity row exists, and Phase 2's stub path seeds it.
+	unstored := map[string]bool{}
 	for _, d := range discovered {
 		// Ensure the NodeID is stored in the snapshot so entity-based refresh
 		// can extract it without a separate column.
@@ -364,6 +367,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		entity, created, err := t.entities.FindOrCreateSystem(context.Background(), orgID, "github", scope, sid, "", "pr", snap.Title, snap.URL)
 		if err != nil {
 			trackerLog.Error("create entity failed", "source_id", sid, "error", err)
+			unstored[snap.Repo] = true
 			continue
 		}
 
@@ -463,12 +467,25 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 				snapJSON, _ := json.Marshal(snap)
 				if reactivated, err := t.entities.ReactivateWithSnapshotCASSystem(context.Background(), orgID, entity.ID, string(snapJSON), entity.PollSeq); err != nil {
 					trackerLog.Error("reactivate entity failed", "source_id", sid, "error", err)
+					unstored[snap.Repo] = true
 				} else if !reactivated {
 					trackerLog.Warn("reactivate entity CAS lost race, skipping", "source_id", sid)
+					unstored[snap.Repo] = true
 				} else {
 					trackerLog.Info("reactivated entity (reopened)", "source_id", sid)
 				}
 			}
+		}
+	}
+
+	// Each listing's cursor is written only now that the PRs it returned are
+	// stored. A repo in unstored keeps its stored ETag and polled-at: its next
+	// listing is then a 200 that returns the PR this loop failed to store,
+	// which a 304 against the new ETag never would. A 304 listing returned no
+	// PRs, so its cursor is always written.
+	for _, c := range discovery.cursors {
+		if !unstored[c.repo] {
+			t.recordPullsPoll(scope, c)
 		}
 	}
 
@@ -485,7 +502,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		// TFAC-571's decision to only announce "poll complete" on a full wrap
 		// so downstream scoring/profiler triggers don't churn on
 		// a cold-start cycle that's still partway through the repo list.
-		return 0, resumeFrom, rateLimited
+		return 0, discovery.resumeFrom, rateLimited
 	}
 	if discoveryErr != nil {
 		// Every listing failed and the connection is why: the cycle fetched
@@ -902,14 +919,11 @@ const maxSearchQueryLen = 256
 // the token can reach — and moves discovery onto the roomier core REST budget
 // (conditional 304s are free on the primary rate limit).
 //
-// Returns the discovered PRs and the set of "owner/repo" that returned 304
-// (unchanged open set this cycle). A 304 repo's tracked entities can keep
-// their stored snapshot through the Phase-2 gate.
-//
-// The third return, lastListed, maps each "owner/repo" listed this cycle to
-// the time of its previous successful listing, and has no entry for a repo
-// listed for the first time. It is what tells a pull request opened since TF
-// last looked from one that was already open (openedSince).
+// Discovery writes no cursor. Each successful listing's ETag and start time
+// come back in githubDiscovery.cursors, and RefreshGitHub writes a repo's
+// cursor only once the pull requests its listing returned are stored: a
+// cursor that moved past a pull request TF failed to store would have the next
+// listing answer 304 and never return it again.
 //
 // When username is non-empty (the local/PAT perspective — App tokens have no
 // "me"), it additionally runs the merged/closed 30-day dashboard backfill via
@@ -917,29 +931,25 @@ const maxSearchQueryLen = 256
 // backfill is inherently user-perspective and stays local/PAT-only;
 // multi-mode dashboard history is out of scope.
 //
-// The fourth return, resumeFrom, is TFAC-571's round-robin resume point: ""
-// when the fan-out covered every entry in repos (a full wrap — the poller
-// resets its cursor), or the name of the first repo that still needs a
-// refresh (never dispatched once the fan-out stopped queuing, or dispatched
-// but itself rate-limited) when ErrRateLimited cut the cycle short. It's only
-// ever non-empty alongside a non-nil error.
-//
-// Otherwise the error is non-nil only when every listing sent failed and at
-// least one failed because the connection did (see discoveryUnreached): a
-// cycle that reached no repo at all reports that rather than an empty
-// success. A repo GitHub answers 404 for is skipped and is never such a
-// failure. A repo it refuses with a JSON 403 is skipped too, but the refusal
-// is an Auth failure, so a cycle whose every repo was refused that way reports
-// it: the credential reaches none of what the org tracks (an organization's
-// SAML enforcement, say), which is the auth-down state the poller records.
+// The error is the ErrRateLimited that cut the fan-out short, with
+// githubDiscovery.resumeFrom naming where to resume. Otherwise it is non-nil
+// only when every listing sent failed and at least one failed because the
+// connection did (see discoveryUnreached): a cycle that reached no repo at
+// all reports that rather than an empty success. A repo GitHub answers 404
+// for is skipped and is never such a failure. A repo it refuses with a JSON
+// 403 is skipped too, but the refusal is an Auth failure, so a cycle whose
+// every repo was refused that way reports it: the credential reaches none of
+// what the org tracks (an organization's SAML enforcement, say), which is the
+// auth-down state the poller records.
 //
 // scope is the GitHub host repos are on, which keys each repo's stored
 // conditional-request cursor.
-func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, map[string]time.Time, string, error) {
+func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) (githubDiscovery, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
 	lastListed := map[string]time.Time{}
+	var cursors []pullsCursor
 
 	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
 	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
@@ -950,14 +960,13 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 	// reproduces the pre-TFAC-570 fully serial sweep exactly.
 	//
 	// Parallelism is across repos only: each goroutine below does nothing but
-	// the REST list + etag lookup/persist for its own repo (recordPullsPoll
-	// writes a distinct repo-keyed row — no cross-repo shared state, so it
-	// runs inline rather than waiting on the whole fan-out; deferring it to
-	// after g.Wait() would let one slow/hanging repo expire a ctx deadline
-	// out from under every OTHER repo's already-finished persist). The one
-	// piece each goroutine can't touch directly is the shared seen/all/quiet
-	// result — that's written to a private, index-owned slot in results (no
-	// mutex needed) and merged sequentially, in original repo order, below.
+	// read its own repo's stored cursor and send the REST list. Its outcome,
+	// the listing together with the cursor that listing leaves, is written to
+	// a private, index-owned slot in results (no mutex needed) and merged
+	// sequentially, in original repo order, below. No goroutine writes a
+	// cursor: RefreshGitHub writes them after storing the listed PRs, on
+	// context.Background(), so a slow/hanging repo that lets the ctx deadline
+	// expire costs no other repo the cursor of a listing that finished.
 	// Every entity/snapshot mutation — that merge, and all of Phase 2/3 in
 	// RefreshGitHub — stays strictly sequential, so per-repo event ordering
 	// and the snapshot-diff re-emit invariant are untouched regardless of
@@ -1017,6 +1026,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 				}
 			}
 
+			listedAt := time.Now().UTC()
 			prs, newEtag, notModified, err := client.ListOpenPRs(ctx, owner, name, etag)
 			if err != nil {
 				// A rate-limit budget exhaustion is distinct from an ordinary
@@ -1060,13 +1070,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 
 			if notModified {
 				span.SetAttributes(telemetry.Outcome("not_modified"))
-				t.recordPullsPoll(ctx, scope, repoFull, etag) // advance polled_at, keep etag
+				newEtag = etag // a 304 keeps the stored etag
 			} else {
 				span.SetAttributes(telemetry.Outcome("listed"), telemetry.Count(len(prs)))
-				t.recordPullsPoll(ctx, scope, repoFull, newEtag)
 			}
 
-			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified, lastListed: polledAt}
+			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified, lastListed: polledAt, etag: newEtag, listedAt: listedAt}
 			return nil
 		})
 	}
@@ -1077,6 +1086,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		if !r.ok {
 			continue
 		}
+		cursors = append(cursors, pullsCursor{repo: repoFull, etag: r.etag, listedAt: r.listedAt})
 		if r.notModified {
 			quiet[repoFull] = true
 			continue
@@ -1156,7 +1166,45 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		span.SetStatus(codes.Error, "every listing failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
 	}
-	return all, quiet, lastListed, resumeFrom, discoveryErr
+	return githubDiscovery{prs: all, quiet: quiet, lastListed: lastListed, cursors: cursors, resumeFrom: resumeFrom}, discoveryErr
+}
+
+// githubDiscovery is what discoverGitHub found.
+type githubDiscovery struct {
+	// prs is every pull request discovered, in repo order.
+	prs []ghclient.DiscoveredPR
+	// quiet is the set of "owner/repo" whose open-PR listing returned 304
+	// (unchanged open set this cycle). A quiet repo's tracked entities can
+	// keep their stored snapshot through the Phase-2 gate.
+	quiet map[string]bool
+	// lastListed maps each "owner/repo" listed with a 200 this cycle to the
+	// time TF sent the last listing of it whose pull requests it stored, and
+	// has no entry for a repo with no such listing. It is what tells a pull
+	// request opened since TF last looked from one that was already open
+	// (openedSince).
+	lastListed map[string]time.Time
+	// cursors holds the conditional-request state of every listing that
+	// succeeded (200 or 304), in repo order, for RefreshGitHub to write.
+	cursors []pullsCursor
+	// resumeFrom is the round-robin resume point: "" when the fan-out
+	// covered every entry in repos (a full wrap — the poller resets its
+	// cursor), or the name of the first repo that still needs a refresh
+	// (never dispatched once the fan-out stopped queuing, or dispatched but
+	// itself rate-limited) when ErrRateLimited cut the cycle short. It's only
+	// ever non-empty alongside a non-nil error.
+	resumeFrom string
+}
+
+// pullsCursor is the conditional-request state one successful open-PR
+// listing leaves for the repo's next listing.
+type pullsCursor struct {
+	repo string // "owner/repo", the name the listing was sent under
+	// etag is the response's on a 200 and the stored one on a 304.
+	etag string
+	// listedAt is when the listing was sent. A pull request created after
+	// it is missing from the listing because it did not exist yet, which is
+	// what openedSince relies on when it reads this time back.
+	listedAt time.Time
 }
 
 // discoveryUnreached reports a discovery pass that reached nothing because of
@@ -1213,45 +1261,50 @@ func discoveryRateLimited(source string, errs []error) error {
 }
 
 // repoListResult is one goroutine's outcome from Phase 1a's per-repo
-// open-PR listing — everything needed to merge into the shared seen/all/quiet
-// result, deferred to the sequential merge so that merge can run in original
-// repo order regardless of completion order. Per-repo side effects that
-// don't need that ordering (recordPullsPoll's etag persist) happen inline in
-// the goroutine instead — see the comment above the fan-out loop. Each index
-// in the results slice is owned by exactly one goroutine (index i writes
-// only results[i]), so concurrent writers never touch shared memory. ok is
-// false for a repo that was skipped (malformed slug, 403/404-unreachable,
-// rate-limited, or any other per-repo failure) and whose zero value should
-// be ignored by the merge. rateLimited (TFAC-571) narrows that further for
-// the resume-cursor computation: true only when THIS repo's own fetch is
-// what returned ErrRateLimited — as opposed to a 403/404 (permanently
-// unreachable, no retry needed) or a generic per-repo error (retried
-// naturally on this repo's next turn in the rotation) — so the cursor
-// resumes exactly at the repo that still needs a refresh, not the one after.
+// open-PR listing — everything needed to merge into githubDiscovery,
+// deferred to the sequential merge so that merge can run in original repo
+// order regardless of completion order. Each index in the results slice is
+// owned by exactly one goroutine (index i writes only results[i]), so
+// concurrent writers never touch shared memory. ok is false for a repo that
+// was skipped (malformed slug, 403/404-unreachable, rate-limited, or any
+// other per-repo failure) and whose zero value should be ignored by the
+// merge. rateLimited narrows that further for the resume-cursor
+// computation: true only when THIS repo's own fetch is what returned
+// ErrRateLimited — as opposed to a 403/404 (permanently unreachable, no
+// retry needed) or a generic per-repo error (retried naturally on this
+// repo's next turn in the rotation) — so the cursor resumes exactly at the
+// repo that still needs a refresh, not the one after.
 type repoListResult struct {
 	ok          bool
 	prs         []ghclient.DiscoveredPR
 	notModified bool
 	rateLimited bool
-	// lastListed is when a cycle before this one last listed the repo, nil
-	// when none has.
+	// lastListed is the stored cursor's listing time, nil when there is none.
 	lastListed *time.Time
+	// etag and listedAt are the cursor this listing leaves (pullsCursor).
+	etag     string
+	listedAt time.Time
 	// err is the listing's failure; nil for a listing that succeeded and for
 	// a repo that was never sent (a malformed slug).
 	err error
 }
 
-// recordPullsPoll persists the conditional-request state for a repo after a
-// successful list (200 or 304). Best-effort — a write failure just means the
-// next cycle re-lists unconditionally, costing one primary-limit request.
-func (t *Tracker) recordPullsPoll(ctx context.Context, scope, repoFull, etag string) {
+// recordPullsPoll persists the conditional-request state a successful list
+// (200 or 304) leaves, once the pull requests it listed are stored.
+// Best-effort — a write failure just means the next cycle re-lists
+// unconditionally, costing one primary-limit request.
+//
+// It writes on context.Background(), as the discovery seed's entity writes
+// do: a cycle context that a slow sibling repo's listing let expire must not
+// cost this repo the cursor of a listing that finished.
+func (t *Tracker) recordPullsPoll(scope string, c pullsCursor) {
 	if t.repos == nil {
 		return
 	}
-	// Ref-keyed: repoFull is one of the names ListTrackedNamesSystem handed
-	// this cycle for scope, the same one that just went into the request path.
-	if err := t.repos.SetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRefFromSlug(scope, repoFull), etag, time.Now().UTC()); err != nil {
-		trackerLog.Error("write pulls poll state failed", "repo", repoFull, "error", err)
+	// Ref-keyed: c.repo is one of the names ListTrackedNamesSystem handed
+	// this cycle for scope, the same one that went into the request path.
+	if err := t.repos.SetPullsPollStateByRefSystem(context.Background(), t.orgID, domain.RepoRefFromSlug(scope, c.repo), c.etag, c.listedAt); err != nil {
+		trackerLog.Error("write pulls poll state failed", "repo", c.repo, "error", err)
 	}
 }
 

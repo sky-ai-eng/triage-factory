@@ -92,21 +92,21 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 	return out
 }
 
-// openedSlack widens "created since the last listing" by the time a listing
-// takes and by clock skew between GitHub and TF. A listing's time is TF's
-// clock once its response is in, so a pull request GitHub created while the
-// listing was being served, and so missing from it, would otherwise read as
-// older than the listing. A pull request this window admits wrongly was
-// created minutes before TF looked, so its body's mentions are new anyway.
+// openedSlack widens "created since the last listing" by clock skew between
+// GitHub and TF. A listing's time is TF's clock as it sent the request, while
+// a pull request's creation time is GitHub's, so one GitHub created after the
+// listing was sent, and so missing from it, could otherwise read as older
+// than the listing. A pull request this window admits wrongly was created
+// minutes before TF looked, so its body's mentions are new anyway.
 const openedSlack = 5 * time.Minute
 
 // openedSince reports whether the pull request was opened since its
-// repository's previous listing, lastListed: created after it, less
-// openedSlack. Every other pull request was open when TF last looked, so its
-// body is a baseline. That includes one TF had not seeded by then (a listing
-// cut short, a repository with more open pull requests than a listing
-// returns) and a reopened one. A repository with no previous listing (the
-// zero time), or a creation time that does not parse, gives false.
+// repository's previous listing, lastListed (githubDiscovery.lastListed):
+// created after it, less openedSlack. Every other pull request was open when
+// TF last looked, so its body is a baseline. That includes one past the open
+// pull requests a listing returns and a reopened one. A repository with no
+// previous listing (the zero time), or a creation time that does not parse,
+// gives false.
 func openedSince(snap domain.PRSnapshot, lastListed time.Time) bool {
 	if lastListed.IsZero() {
 		return false

@@ -170,14 +170,16 @@ body mention takes the PR's `updatedAt`.
 
 A PR TF finds for the first time, created after TF's previous listing of its
 repository, was opened while TF followed the repository. Its body's mentions
-emit with the seed that stores it, timed at its `updatedAt`. The comparison
-allows five minutes before that listing, for the time a listing takes and for
-clock skew. Any other PR found for the first time was already open when TF last
-looked, so its body is a baseline and emits nothing, as for every other change
-in tracking. That covers every PR in a repository's first listing (TF's first
-poll, or a repository just added to a team's tracked set), a PR an earlier
-cycle listed but did not get to store, one past the 1,000 open PRs a listing
-returns, and a reopened PR. A PR TF's agent opens is recorded as an entity when
+emit with the seed that stores it, timed at its `updatedAt`. A listing's time is
+when TF sent it, and a listing counts only once TF has stored every PR it
+returned: when one fails to store, the next poll lists the repository again in
+full and compares against the listing before. The comparison allows five
+minutes before that listing, for clock skew between GitHub and TF. Any other PR
+found for the first time was already open when TF last looked, so its body is a
+baseline and emits nothing, as for every other change in tracking. That covers
+every PR in a repository's first listing (TF's first poll, or a repository just
+added to a team's tracked set), one past the 1,000 open PRs a listing returns,
+and a reopened PR. A PR TF's agent opens is recorded as an entity when
 the agent records it, before a poll finds it, and that entity is seeded
 without events, so its body is a baseline too. A snapshot stored before
 `body_mentions` existed is likewise a baseline. A PR seeded from the REST
