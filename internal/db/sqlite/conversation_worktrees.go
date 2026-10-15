@@ -228,3 +228,19 @@ func (s *conversationWorktreeStore) GetByRepoRefSystem(ctx context.Context, orgI
 func (s *conversationWorktreeStore) DeleteByRepoRefSystem(ctx context.Context, orgID, conversationID, repositoryID, ref string) error {
 	return s.DeleteByRepoRef(ctx, orgID, conversationID, repositoryID, ref)
 }
+
+func (s *conversationWorktreeStore) DeleteForClaimSystem(ctx context.Context, orgID, claimID, conversationID, repositoryID, ref string) error {
+	if err := assertLocalOrg(orgID); err != nil {
+		return err
+	}
+	return inTx(ctx, s.q, func(q queryer) error {
+		if err := assertClaimActive(ctx, q, orgID, conversationID, claimID); err != nil {
+			return err
+		}
+		_, err := q.ExecContext(ctx, `
+			DELETE FROM conversation_worktrees
+			 WHERE conversation_id = ? AND ref = ? AND repository_id = ?
+		`, conversationID, ref, repositoryID)
+		return err
+	})
+}

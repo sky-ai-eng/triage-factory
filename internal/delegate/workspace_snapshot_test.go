@@ -234,6 +234,40 @@ func TestEnsureWorkspace_FailedRestoreKeepsTheRowsTheConversationHeld(t *testing
 	}
 }
 
+// TestEnsureWorkspace_FailedRestoreAfterATakeoverLeavesTheRows: a restore
+// that fails because its claim was lost does not take back the rows it added.
+// The successor holding the conversation by then records the same rows, under
+// the same keys, for its own restore, and its agent's git access runs through
+// them.
+func TestEnsureWorkspace_FailedRestoreAfterATakeoverLeavesTheRows(t *testing.T) {
+	f := newSnapshotFixture(t, "task-fail-takeover")
+	f.addCheckout(t, "acme/lib", "default")
+	f.addCheckout(t, "acme/docs", "ref-main")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restore := restoreCheckout
+	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		if r.Repo == "docs" {
+			f.ledger.release()
+			return worktree.RestoredCheckout{}, context.Canceled
+		}
+		return restore(ctx, r)
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	conv := f.convAs("conv-2")
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), failingFreshBuilder(t)); err == nil {
+		t.Fatal("ensureWorkspace succeeded with a checkout whose restore was cancelled")
+	}
+	if rows := f.ledger.deletedRows(); len(rows) != 0 {
+		t.Errorf("a restore that had lost its claim deleted %v", rows)
+	}
+	if rows := f.ledger.rowsOf(conv.ID); len(rows) != 2 {
+		t.Errorf("%s holds %d rows, want the 2 its successor reads: %v", conv.ID, len(rows), rows)
+	}
+}
+
 // TestEnsureWorkspace_ColdRehydrate_RecordsEveryCheckoutBeforeItsFetch: a
 // conversation that restores checkouts another conversation on the task built
 // holds a row for each one, at its path under the rebuilt root, before the
@@ -297,7 +331,7 @@ func TestEnsureWorkspace_ColdRehydrate_AFenceRefusalStopsTheRecord(t *testing.T)
 	f.addCheckout(t, "acme/web", "default")
 	f.snapshot(t, "", domain.ConversationRuntimeNative)
 	f.loseRoot(t)
-	f.ledger.refuse, f.ledger.allow = db.ErrClaimReleased, 1
+	f.ledger.releaseAfter = 1
 
 	restore := restoreCheckout
 	restoreCheckout = func(context.Context, worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
@@ -1416,11 +1450,20 @@ type checkoutLedger struct {
 	// recorded and deleted log the writes a restore makes, in order.
 	recorded []domain.ConversationWorktree
 	deleted  []domain.ConversationWorktree
-	// refuse, when set, fails every RecordForClaimSystem past the first allow
-	// with it; attempts counts every call.
-	refuse   error
-	allow    int
-	attempts int
+	// released is the claim the fenced writes name having lost the
+	// conversation: every fenced write is refused with db.ErrClaimReleased once
+	// it is set. releaseAfter, when above zero, sets it once that many records
+	// have been written. attempts counts every record.
+	released     bool
+	releaseAfter int
+	attempts     int
+}
+
+// release loses the claim.
+func (l *checkoutLedger) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.released = true
 }
 
 func (l *checkoutLedger) add(w domain.ConversationWorktree) {
@@ -1471,8 +1514,11 @@ func (l *checkoutLedger) RecordForClaimSystem(_ context.Context, _, _ string, w 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.attempts++
-	if l.refuse != nil && l.attempts > l.allow {
-		return domain.ConversationWorktree{}, l.refuse
+	if l.releaseAfter > 0 && l.attempts > l.releaseAfter {
+		l.released = true
+	}
+	if l.released {
+		return domain.ConversationWorktree{}, db.ErrClaimReleased
 	}
 	for _, r := range l.rows {
 		if r.RepositoryID == w.RepositoryID && r.RepoID != "" {
@@ -1491,9 +1537,24 @@ func (l *checkoutLedger) RecordForClaimSystem(_ context.Context, _, _ string, w 
 	return w, nil
 }
 
+func (l *checkoutLedger) DeleteForClaimSystem(_ context.Context, _, _, conversationID, repositoryID, ref string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.released {
+		return db.ErrClaimReleased
+	}
+	l.deleteLocked(conversationID, repositoryID, ref)
+	return nil
+}
+
 func (l *checkoutLedger) DeleteByRepoRefSystem(_ context.Context, _, conversationID, repositoryID, ref string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.deleteLocked(conversationID, repositoryID, ref)
+	return nil
+}
+
+func (l *checkoutLedger) deleteLocked(conversationID, repositoryID, ref string) {
 	kept := l.rows[:0]
 	for _, r := range l.rows {
 		if r.ConversationID == conversationID && r.RepositoryID == repositoryID && r.Ref == ref {
@@ -1503,7 +1564,6 @@ func (l *checkoutLedger) DeleteByRepoRefSystem(_ context.Context, _, conversatio
 		kept = append(kept, r)
 	}
 	l.rows = kept
-	return nil
 }
 
 // --- helpers ---------------------------------------------------------------

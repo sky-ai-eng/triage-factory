@@ -1581,11 +1581,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv 
 	}
 	added, err := s.recordRestoringCheckouts(ctx, orgID, conv, root, checkouts)
 	// Every failure from here takes back out the rows this attempt added, so
-	// none names a checkout that is not on disk. Not on a fence refusal: the
-	// conversation's rows are its successor's to write by then, under the same
-	// keys.
+	// none names a checkout that is not on disk — while this engagement still
+	// holds the conversation, which forgetCheckouts' fence decides.
 	defer func() {
-		if err != nil && !errors.Is(err, db.ErrClaimReleased) {
+		if err != nil {
 			s.forgetCheckouts(ctx, orgID, conv, added)
 		}
 	}()
@@ -1784,8 +1783,15 @@ func (s *Spawner) recordRestoringCheckouts(ctx context.Context, orgID string, co
 
 // forgetCheckouts deletes conv's rows for checkouts a restore recorded and
 // then did not rebuild. Detached from ctx, which a failed restore may have
-// cancelled, and bounded. Best-effort: a row left behind names a path that is
-// not on disk, which the next restore records again.
+// cancelled, and bounded.
+//
+// Behind conv's claim fence, because one way a restore fails is the claim
+// being lost: the fence cancels its context. By then a successor may hold
+// the conversation and have recorded the same rows, under the same keys, for
+// a restore that succeeded; an unfenced delete would take them from its
+// running agent. A refusal ends the loop. Any other failure is logged: a row
+// left behind names a path that is not on disk, which the next restore records
+// again.
 func (s *Spawner) forgetCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, checkouts []snapshotCheckout) {
 	if s.conversationWorktrees == nil || len(checkouts) == 0 {
 		return
@@ -1793,7 +1799,11 @@ func (s *Spawner) forgetCheckouts(ctx context.Context, orgID string, conv *domai
 	ledgerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
 	defer cancel()
 	for _, c := range checkouts {
-		if err := s.conversationWorktrees.DeleteByRepoRefSystem(ledgerCtx, orgID, conv.ID, c.repositoryID, c.slug); err != nil {
+		err := s.forgetCheckout(ledgerCtx, orgID, conv.ClaimID, conv.ID, c.repositoryID, c.slug)
+		if errors.Is(err, db.ErrClaimReleased) {
+			return
+		}
+		if err != nil {
 			delegateLog.Warn("remove the row of a checkout a failed restore did not rebuild failed; it names a path that is not on disk",
 				"conversation", conv.ID, "checkout", c.rel, "error", err)
 		}

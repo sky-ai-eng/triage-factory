@@ -439,6 +439,56 @@ func RunConversationWorktreeStoreConformance(t *testing.T, mk ConversationWorktr
 		}
 	})
 
+	t.Run("DeleteForClaimSystem_removes_the_row_under_a_live_claim", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		if seed.Claim == nil {
+			t.Skip("backend seeds no claims")
+		}
+		conversationID := seed.Conversation(t, "forget")
+		claimID := seed.Claim(t, conversationID)
+		repositoryID := seed.Repo(t, TestGitHubHost, "owner/repo")
+		for _, ref := range []string{"ref-main", "default"} {
+			if _, err := store.RecordForClaimSystem(ctx, orgID, claimID, domain.ConversationWorktree{
+				ConversationID: conversationID, RepositoryID: repositoryID, Path: "/root/owner/repo/" + ref, Ref: ref,
+			}); err != nil {
+				t.Fatalf("RecordForClaimSystem %s: %v", ref, err)
+			}
+		}
+		if err := store.DeleteForClaimSystem(ctx, orgID, claimID, conversationID, repositoryID, "ref-main"); err != nil {
+			t.Fatalf("DeleteForClaimSystem: %v", err)
+		}
+		rows, err := store.List(ctx, orgID, conversationID)
+		if err != nil || len(rows) != 1 || rows[0].Ref != "default" {
+			t.Errorf("List after the delete = %+v (err=%v), want only the default row", rows, err)
+		}
+		if err := store.DeleteForClaimSystem(ctx, orgID, claimID, conversationID, repositoryID, "ref-main"); err != nil {
+			t.Errorf("DeleteForClaimSystem of a row that is gone = %v, want nil", err)
+		}
+	})
+
+	t.Run("DeleteForClaimSystem_refused_once_the_claim_is_released", func(t *testing.T) {
+		store, orgID, seed := mk(t)
+		if seed.Claim == nil || seed.Release == nil {
+			t.Skip("backend seeds no claims")
+		}
+		conversationID := seed.Conversation(t, "forget-fenced")
+		claimID := seed.Claim(t, conversationID)
+		repositoryID := seed.Repo(t, TestGitHubHost, "owner/repo")
+		if _, err := store.RecordForClaimSystem(ctx, orgID, claimID, domain.ConversationWorktree{
+			ConversationID: conversationID, RepositoryID: repositoryID, Path: "/p", Ref: "default",
+		}); err != nil {
+			t.Fatalf("RecordForClaimSystem: %v", err)
+		}
+		seed.Release(t, claimID)
+		err := store.DeleteForClaimSystem(ctx, orgID, claimID, conversationID, repositoryID, "default")
+		if !errors.Is(err, db.ErrClaimReleased) {
+			t.Fatalf("DeleteForClaimSystem on a released claim = %v, want ErrClaimReleased", err)
+		}
+		if rows, _ := store.List(ctx, orgID, conversationID); len(rows) != 1 {
+			t.Errorf("a refused delete left %+v, want the row intact", rows)
+		}
+	})
+
 	t.Run("Cascade_on_conversation_delete_removes_rows", func(t *testing.T) {
 		store, orgID, seed := mk(t)
 		conversationID := seed.Conversation(t, "cascade")

@@ -1347,6 +1347,15 @@ func (s *Spawner) recordCheckout(ctx context.Context, orgID, claimID string, w d
 	return err
 }
 
+// forgetCheckout removes a checkout's conversation_worktrees row for an
+// engagement, through the door recordCheckout wrote it through.
+func (s *Spawner) forgetCheckout(ctx context.Context, orgID, claimID, conversationID, repositoryID, ref string) error {
+	if claimID != "" {
+		return s.conversationWorktrees.DeleteForClaimSystem(ctx, orgID, claimID, conversationID, repositoryID, ref)
+	}
+	return s.conversationWorktrees.DeleteByRepoRefSystem(ctx, orgID, conversationID, repositoryID, ref)
+}
+
 // recordCheckoutAs records c as conv's own checkout, at c's path, for conv's
 // engagement (recordCheckout).
 func (s *Spawner) recordCheckoutAs(ctx context.Context, orgID string, conv *domain.Conversation, c snapshotCheckout) error {

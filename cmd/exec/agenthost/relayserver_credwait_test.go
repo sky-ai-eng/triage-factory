@@ -64,6 +64,10 @@ func (s *stubWorktrees) RecordForClaimSystem(context.Context, string, string, do
 	panic("unexpected RecordForClaimSystem")
 }
 
+func (s *stubWorktrees) DeleteForClaimSystem(context.Context, string, string, string, string, string) error {
+	panic("unexpected DeleteForClaimSystem")
+}
+
 // credWaitHost is the org's GitHub host in these tests.
 const credWaitHost = "https://github.com"
 

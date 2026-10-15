@@ -121,6 +121,16 @@ type ConversationWorktreeStore interface {
 	// conversation. Returns the row it stored.
 	RecordForClaimSystem(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) (domain.ConversationWorktree, error)
 
+	// DeleteForClaimSystem removes the conversation's row for (repositoryID,
+	// ref) behind claimID's fence: a restore that recorded a checkout and then
+	// failed to rebuild it takes the row back out, and once claimID no longer
+	// owns the conversation the row is its successor's, under the same key.
+	// Refused with db.ErrClaimReleased then. A row that does not exist is not an
+	// error.
+	//
+	// Exempt from the returned-row rule: it is a delete.
+	DeleteForClaimSystem(ctx context.Context, orgID, claimID, conversationID, repositoryID, ref string) error
+
 	// --- Admin-pool variants for the cmd/exec event-triggered branch ---
 	//
 	// `triagefactory exec workspace add` invoked by an event-triggered
