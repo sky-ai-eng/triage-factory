@@ -936,10 +936,11 @@ const maxSearchQueryLen = 256
 // only when every listing sent failed and at least one failed because the
 // connection did (see discoveryUnreached): a cycle that reached no repo at
 // all reports that rather than an empty success. A repo GitHub answers 404
-// for is skipped and is never such a failure. A repo it refuses with a JSON 403 is skipped too, but the refusal
-// is an Auth failure, so a cycle whose every repo was refused that way reports
-// it: the credential reaches none of what the org tracks (an organization's
-// SAML enforcement, say), which is the auth-down state the poller records.
+// for is skipped and is never such a failure. A repo it refuses with a JSON
+// 403 is skipped too, but the refusal is an Auth failure, so a cycle whose
+// every repo was refused that way reports it: the credential reaches none of
+// what the org tracks (an organization's SAML enforcement, say), which is the
+// auth-down state the poller records.
 //
 // scope is the GitHub host repos are on, which keys each repo's stored
 // conditional-request cursor.
