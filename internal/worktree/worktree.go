@@ -437,11 +437,20 @@ func MakeRunRoot(rootKey string) (string, error) {
 const runsBaseMode = 0o711
 
 // EnsureRunsBase creates the directory every run tree lives under, if it is
-// not there, and pins its mode — on every call, so the mode is runsBaseMode
-// whichever path happens to create the base first after boot, and whatever
-// umask it ran under. Every path that makes a run root goes through it.
+// not there. Every path that makes a run root goes through it.
+//
+// In multi it also pins the base's mode — on every call, so the mode is
+// runsBaseMode whichever path happens to create the base first after boot, and
+// whatever umask it ran under. Locally no other identity reaches a run tree,
+// so the base is created owner-only and an existing one keeps the mode it has.
 func EnsureRunsBase() (string, error) {
 	base := filepath.Join(os.TempDir(), runsDir)
+	if runmode.Current() != runmode.ModeMulti {
+		if err := os.MkdirAll(base, 0o700); err != nil {
+			return "", fmt.Errorf("mkdir runs base: %w", err)
+		}
+		return base, nil
+	}
 	if err := os.MkdirAll(base, runsBaseMode); err != nil {
 		return "", fmt.Errorf("mkdir runs base: %w", err)
 	}
