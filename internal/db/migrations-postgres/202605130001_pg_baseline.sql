@@ -6167,7 +6167,9 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.messages TO tf_system;
 GRANT USAGE, SELECT ON SEQUENCE public.messages_id_seq TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.artifacts TO tf_system;
-GRANT SELECT, INSERT, DELETE ON TABLE public.conversation_worktrees TO tf_system;
+-- UPDATE backs the claim-time record's upsert: its ON CONFLICT DO UPDATE
+-- needs the privilege even when the row is new.
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.conversation_worktrees TO tf_system;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory TO tf_system;
 -- UPDATE backs the role-precedence upgrade (touched -> produced -> primary).
 GRANT SELECT, INSERT, UPDATE ON TABLE public.conversation_memory_entities TO tf_system;
