@@ -438,8 +438,8 @@ const runsBaseMode = 0o711
 
 // EnsureRunsBase creates the directory every run tree lives under, if it is
 // not there, and pins its mode — on every call, so the mode is runsBaseMode
-// whichever path happens to create the base first after boot, and whatever an
-// earlier binary left it at. Every path that makes a run root goes through it.
+// whichever path happens to create the base first after boot, and whatever
+// umask it ran under. Every path that makes a run root goes through it.
 func EnsureRunsBase() (string, error) {
 	base := filepath.Join(os.TempDir(), runsDir)
 	if err := os.MkdirAll(base, runsBaseMode); err != nil {

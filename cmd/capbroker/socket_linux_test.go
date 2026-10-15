@@ -5,7 +5,6 @@ package capbroker
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -33,9 +32,6 @@ func TestListen_Permissions(t *testing.T) {
 	}
 	if got := dirInfo.Mode() & (os.ModePerm | os.ModeSticky | os.ModeSetgid | os.ModeSetuid); got != 0o711 {
 		t.Errorf("socket dir mode = %v, want 0711", dirInfo.Mode())
-	}
-	if st, ok := dirInfo.Sys().(*syscall.Stat_t); ok && int(st.Gid) != os.Getgid() {
-		t.Errorf("socket dir gid = %d, want this process's own %d (no group a sandboxed principal carries)", st.Gid, os.Getgid())
 	}
 
 	fileInfo, err := os.Stat(sockPath)

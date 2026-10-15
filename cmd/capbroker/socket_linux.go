@@ -3,7 +3,6 @@
 package capbroker
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -12,9 +11,9 @@ import (
 
 // socketDir is the shared parent directory for TF's local unix sockets —
 // the same directory cmd/exec/agenthost's per-run socket directories live
-// under. listen's explicit chown+chmod (see below) pin the directory's final
-// owner/mode regardless of which process's MkdirAll happens to create it
-// first.
+// under. listen's explicit chmod (see below) pins the directory's final mode
+// regardless of which process's MkdirAll happens to create it first, or the
+// umask it ran under.
 const socketDir = "/run/tf"
 
 // DefaultSocketPath is the broker's fixed socket path. Unlike agenthost's
@@ -30,8 +29,8 @@ const socketDirMode = 0o711
 // listen creates the broker's socket following the same anti-race
 // ordering as agenthost/socket_linux.go's Start:
 //
-//  1. MkdirAll + chgrp + Chmod 0711 on the socket's parent directory — see
-//     the chown/chmod calls below for why. Takes the parent of socketPath
+//  1. MkdirAll + Chmod 0711 on the socket's parent directory — see the
+//     chmod call below for why. Takes the parent of socketPath
 //     (not the socketDir constant directly) so tests can point listen at an
 //     isolated temp directory; production always passes DefaultSocketPath,
 //     whose parent is exactly socketDir.
@@ -60,17 +59,8 @@ func listen(socketPath string) (net.Listener, error) {
 	// 0711: its owner writes, and everyone else may only traverse to an entry
 	// they already know the name of. No read for others keeps live runs' names
 	// unlistable; no group write is what stops a sidecar or a jail identity on
-	// the host from creating, unlinking or renaming anything here.
-	//
-	// The group is reset to this process's own explicitly, not left to the
-	// create: MkdirAll is a no-op on an existing directory, and one that
-	// survived from an earlier deployment carries whatever group it had then.
-	// An unprivileged caller — a test, or a broker misconfigured without root,
-	// which then can't hold CAP_SYS_ADMIN and can't function anyway — chgrps
-	// to its own gid, which is always permitted.
-	if err := os.Chown(dir, -1, os.Getgid()); err != nil && !errors.Is(err, os.ErrPermission) {
-		return nil, fmt.Errorf("capbroker: chgrp %s to gid=%d: %w", dir, os.Getgid(), err)
-	}
+	// the host from creating, unlinking or renaming anything here. The group
+	// is whatever the creator's was: at 0711 it grants nothing others lack.
 	if err := os.Chmod(dir, socketDirMode); err != nil {
 		return nil, fmt.Errorf("capbroker: chmod %s: %w", dir, err)
 	}
