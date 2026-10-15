@@ -91,6 +91,10 @@ type fakeGitHub struct {
 	membershipRole   string
 	membershipState  string
 
+	// onServe, when set, runs before each request is answered, for a test
+	// that changes TF's state at a chosen point in the ceremony.
+	onServe func(path string)
+
 	// calls records the paths served, so a test can prove a step was (or was
 	// not) reached.
 	mu    sync.Mutex
@@ -145,7 +149,11 @@ func (f *fakeGitHub) served(path string) bool {
 func (f *fakeGitHub) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.calls = append(f.calls, r.URL.Path)
+	onServe := f.onServe
 	f.mu.Unlock()
+	if onServe != nil {
+		onServe(r.URL.Path)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	path := r.URL.Path
@@ -341,7 +349,14 @@ func (r *bindRig) sibling(t *testing.T, slug string) *bindRig {
 // connectAccount drives the named-account start and returns the response.
 func (r *bindRig) connectAccount(t *testing.T, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+"/github/managed/connect-account", strings.NewReader(body))
+	return r.postOrg(t, "/github/managed/connect-account", body)
+}
+
+// postOrg sends a POST to one of the workspace's own routes from the admin's
+// signed-in browser.
+func (r *bindRig) postOrg(t *testing.T, route, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", "/api/orgs/"+r.orgID.String()+route, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", r.srv.deployCfg.publicURL)
 	req.AddCookie(&http.Cookie{Name: r.srv.sidCookieName(), Value: r.sid})
@@ -509,6 +524,54 @@ func (r *bindRig) assertNothingBound(t *testing.T) {
 	}
 }
 
+// setGitHubHost stores the workspace's GitHub host; "" leaves it with none,
+// the state a disconnect leaves it in.
+func (r *bindRig) setGitHubHost(t *testing.T, host string) {
+	t.Helper()
+	var v any
+	if host != "" {
+		v = host
+	}
+	if _, err := r.h.AdminDB.Exec(`
+		UPDATE org_event_sources SET base_url = $2 WHERE org_id = $1 AND kind = 'github'
+	`, r.orgID.String(), v); err != nil {
+		t.Fatalf("set github host: %v", err)
+	}
+}
+
+// githubHost reads the workspace's stored GitHub host, "" for none.
+func (r *bindRig) githubHost(t *testing.T) string {
+	t.Helper()
+	var host sql.NullString
+	err := r.h.AdminDB.QueryRow(`
+		SELECT base_url FROM org_event_sources WHERE org_id = $1 AND kind = 'github'
+	`, r.orgID.String()).Scan(&host)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("read github host: %v", err)
+	}
+	return host.String
+}
+
+// watchGitHubChanged wires the server's GitHub-changed hook to a channel
+// that receives each org it is kicked for.
+func (r *bindRig) watchGitHubChanged() <-chan string {
+	kicked := make(chan string, 4)
+	r.srv.SetOnGitHubChanged(func(orgID string) { kicked <- orgID })
+	return kicked
+}
+
+// accessChangeCount counts the workspace's change-log rows.
+func (r *bindRig) accessChangeCount(t *testing.T) int {
+	t.Helper()
+	var n int
+	if err := r.h.AdminDB.QueryRow(`
+		SELECT count(*) FROM access_change_log WHERE org_id = $1
+	`, r.orgID.String()).Scan(&n); err != nil {
+		t.Fatalf("count access changes: %v", err)
+	}
+	return n
+}
+
 // assertOutcome checks the refusal code the page carries.
 func assertOutcome(t *testing.T, rec *httptest.ResponseRecorder, want string) {
 	t.Helper()
@@ -585,6 +648,9 @@ func TestManagedBind_OrganizationTarget(t *testing.T) {
 	}
 	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassManagedApp) {
 		t.Errorf("credential class = %q, want managed_app", class)
+	}
+	if host := rig.githubHost(t); host != rig.ghBase {
+		t.Errorf("workspace github host = %q after the bind, want it unchanged at %q", host, rig.ghBase)
 	}
 }
 
@@ -802,6 +868,157 @@ func TestManagedBind_WorkspaceOnAnotherGitHubIsRefused(t *testing.T) {
 		t.Errorf("GitHub served %d requests for a workspace on another host; want 0 — no preflight may be issued", n)
 	}
 	rig.assertNothingBound(t)
+	if host := rig.githubHost(t); host != "https://ghe.example.com/" {
+		t.Errorf("github host = %q after a refused start, want it unchanged", host)
+	}
+}
+
+// TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost: a workspace with no
+// GitHub URL starts the ceremony on the deployment App's host. The start
+// writes no host; only a completed bind does.
+func TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	rig.setGitHubHost(t, "")
+
+	rec := rig.start(t)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connect-account status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		AuthorizeURL string `json:"authorize_url"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode connect-account body: %v", err)
+	}
+	if want := ghbase.DefaultBaseURL() + "/login/oauth/authorize?"; !strings.HasPrefix(body.AuthorizeURL, want) {
+		t.Errorf("authorize_url = %q, want it under %q", body.AuthorizeURL, want)
+	}
+	if host := rig.githubHost(t); host != "" {
+		t.Errorf("github host = %q after the start, want none until the bind", host)
+	}
+}
+
+// TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost: the bind writes the
+// App's host as the workspace's, beside the installation and the class, and
+// kicks the GitHub-changed hook so the org is polled under it now.
+func TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	rig.setGitHubHost(t, "")
+	kicked := rig.watchGitHubChanged()
+
+	out := rig.callback(t, rig.ceremony(t), defaultCallbackQuery(4242))
+	if out.Code != http.StatusFound {
+		t.Fatalf("callback status=%d outcome=%q body=%s, want 302",
+			out.Code, out.Header().Get("X-TF-Bind-Outcome"), out.Body.String())
+	}
+	select {
+	case got := <-kicked:
+		if got != rig.orgID.String() {
+			t.Errorf("github-changed kicked for org %q, want %q", got, rig.orgID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a completed bind did not kick the github-changed hook; the org's first poll waits out its interval")
+	}
+	if host := rig.githubHost(t); host != ghbase.DefaultBaseURL() {
+		t.Errorf("github host = %q after the bind, want the App's %q", host, ghbase.DefaultBaseURL())
+	}
+	if n := rig.installationCount(t); n != 1 {
+		t.Errorf("%d installation rows, want 1", n)
+	}
+	if class := rig.credentialClass(t); class != string(domain.GitHubCredentialClassManagedApp) {
+		t.Errorf("credential class = %q, want managed_app", class)
+	}
+}
+
+// TestManagedBind_HostMovedAfterTheStartIsRefused: an admin who points the
+// workspace at another GitHub after the start gets the start's refusal at the
+// callback, and nothing is written — no installation, no class, no host, no
+// change-log row. The callback checks the host before it asks GitHub
+// anything, and the bind checks it again in its own transaction.
+func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
+	const other = "https://ghe.example.com"
+	for _, c := range []struct {
+		name string
+		move func(t *testing.T, rig *bindRig)
+	}{
+		{"before_the_callback", func(t *testing.T, rig *bindRig) { rig.setGitHubHost(t, other) }},
+		// Moved while the callback is at GitHub's authority gate, after the
+		// callback's own host check and before the bind's transaction. The
+		// hook runs on the fake's goroutine, so it reports with Errorf.
+		{"during_the_callback", func(t *testing.T, rig *bindRig) {
+			rig.gh.mu.Lock()
+			defer rig.gh.mu.Unlock()
+			rig.gh.onServe = func(path string) {
+				if path != "/api/v3/orgs/acme/memberships/octocat" {
+					return
+				}
+				if _, err := rig.h.AdminDB.Exec(`
+					UPDATE org_event_sources SET base_url = $2 WHERE org_id = $1 AND kind = 'github'
+				`, rig.orgID.String(), other); err != nil {
+					t.Errorf("move the github host: %v", err)
+				}
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rig := newBindRig(t, newFakeGitHub())
+			rig.setGitHubHost(t, "")
+			cookie := rig.ceremony(t)
+			changes := rig.accessChangeCount(t)
+			kicked := rig.watchGitHubChanged()
+			c.move(t, rig)
+
+			out := rig.callback(t, cookie, defaultCallbackQuery(4242))
+			assertOutcome(t, out, "wrong_github_host")
+			if out.Code != http.StatusConflict {
+				t.Errorf("status = %d, want 409", out.Code)
+			}
+			for _, want := range []string{other, ghbase.DefaultBaseURL()} {
+				if !strings.Contains(out.Body.String(), want) {
+					t.Errorf("refusal does not name %q:\n%s", want, out.Body.String())
+				}
+			}
+			rig.assertNothingBound(t)
+			if host := rig.githubHost(t); host != other {
+				t.Errorf("github host = %q after a refused bind, want the admin's %q", host, other)
+			}
+			if n := rig.accessChangeCount(t); n != changes {
+				t.Errorf("%d change-log rows after a refused bind, want %d", n, changes)
+			}
+			select {
+			case <-kicked:
+				t.Error("a refused bind kicked the github-changed hook")
+			case <-time.After(200 * time.Millisecond):
+			}
+		})
+	}
+}
+
+// TestManagedBind_SwitchFromOwnAppToTheDeploymentApp is the switch the
+// settings page makes: disconnect the workspace's own App, which clears its
+// host, then start the deployment App's ceremony on the workspace that is
+// left.
+func TestManagedBind_SwitchFromOwnAppToTheDeploymentApp(t *testing.T) {
+	rig := newBindRig(t, newFakeGitHub())
+	if _, err := rig.h.AdminDB.Exec(`
+		INSERT INTO org_github_apps
+			(org_id, app_id, slug, client_id, client_secret_ref, pem_ref, webhook_secret_ref, active)
+		VALUES ($1, '999', 'byo-app', 'Iv1.byo', 'ref-secret', 'ref-pem', '', true)
+	`, rig.orgID.String()); err != nil {
+		t.Fatalf("seed byo app: %v", err)
+	}
+
+	if rec := rig.postOrg(t, "/github/app/disconnect", ""); rec.Code != http.StatusOK {
+		t.Fatalf("disconnect status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if host := rig.githubHost(t); host != "" {
+		t.Fatalf("github host = %q after the disconnect, want it cleared", host)
+	}
+
+	if rec := rig.start(t); rec.Code != http.StatusOK {
+		t.Fatalf("connect-account after the disconnect: status=%d outcome=%q body=%s, want 200",
+			rec.Code, rec.Header().Get("X-TF-Bind-Outcome"), rec.Body.String())
+	}
 }
 
 func TestManagedBind_NoCookieIsTheUnboundInstall(t *testing.T) {

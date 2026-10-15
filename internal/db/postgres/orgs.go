@@ -487,6 +487,84 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	return stored, nil
 }
 
+// AdoptSourceBaseURL writes baseURL as kind's host only when none is stored.
+// See the OrgsStore interface doc for its three outcomes; the pool, the write
+// order and the partial INSERTs follow SetSourceBaseURL above.
+//
+// Both statements carry the condition. The org_settings statement bumps the
+// version only while no host is stored, and it reads org_event_sources under
+// its own snapshot: a host that a concurrent writer commits while this
+// statement waits on the org_settings row is not visible to it, so the version
+// can move in that case. The org_event_sources statement is the one that
+// decides. ON CONFLICT … WHERE is evaluated against the row it has locked, so
+// it never replaces a host; when it finds one it writes nothing, and the call
+// returns the current row and whether that host is baseURL.
+func (s *orgsStore) AdoptSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, bool, error) {
+	if !db.SourceHasBaseURL(kind) {
+		return domain.OrgSettings{}, false, fmt.Errorf("adopt source base url: %q has no host to set", kind)
+	}
+	if baseURL == "" {
+		return domain.OrgSettings{}, false, errors.New("adopt source base url: no host to adopt")
+	}
+	var (
+		out     domain.OrgSettings
+		adopted bool
+	)
+	err := inTx(ctx, s.app, func(q queryer) error {
+		current := func() error {
+			cur, err := getOrgSettings(ctx, q, orgID)
+			if err != nil {
+				return err
+			}
+			out, adopted = cur, db.SourceBaseURLOf(cur, kind) == baseURL
+			return nil
+		}
+		stored, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
+			INSERT INTO org_settings (org_id, updated_at)
+			SELECT $1, now()
+			WHERE NOT EXISTS (
+				SELECT 1 FROM org_event_sources
+				WHERE org_id = $1 AND kind = $2 AND COALESCE(base_url, '') <> '')
+			ON CONFLICT (org_id) DO UPDATE SET
+				version = org_settings.version + 1,
+				updated_at = now()
+			RETURNING `+orgSettingsColumns,
+			orgID, kind).Scan)
+		if errors.Is(err, sql.ErrNoRows) {
+			return current()
+		}
+		if err != nil {
+			return fmt.Errorf("bump org_settings version: %w", err)
+		}
+		var written string
+		err = q.QueryRowContext(ctx, `
+			INSERT INTO org_event_sources (org_id, kind, base_url)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (org_id, kind) DO UPDATE SET
+				base_url = EXCLUDED.base_url
+			WHERE COALESCE(org_event_sources.base_url, '') = ''
+			RETURNING base_url`,
+			orgID, kind, baseURL).Scan(&written)
+		if errors.Is(err, sql.ErrNoRows) {
+			return current()
+		}
+		if err != nil {
+			return fmt.Errorf("adopt %s base url: %w", kind, err)
+		}
+		overrides, err := readSourceOverrides(ctx, q, orgID)
+		if err != nil {
+			return fmt.Errorf("read org_event_sources overrides: %w", err)
+		}
+		db.ApplyOrgSourceOverrides(&stored, overrides)
+		out, adopted = stored, true
+		return nil
+	})
+	if err != nil {
+		return domain.OrgSettings{}, false, err
+	}
+	return out, adopted, nil
+}
+
 // SetAnthropicKeyRef writes ONLY org_settings.anthropic_api_key_ref, and
 // llm_auth_method when binding. See the OrgsStore interface doc.
 func (s *orgsStore) SetAnthropicKeyRef(ctx context.Context, orgID, ref string) (domain.OrgSettings, error) {

@@ -386,6 +386,91 @@ func RunSettingsStoresConformance(t *testing.T, factory SettingsStoresFactory) {
 		}
 	})
 
+	// AdoptSourceBaseURL is the bind's writer for a host the credential
+	// decides: it fills an empty host and never replaces one.
+	t.Run("OrgSettings_AdoptSourceBaseURL_FillsOnlyAnEmptyHost", func(t *testing.T) {
+		stores, ids := factory(t)
+		if stores.OrgEventSources == nil {
+			t.Skip("factory did not wire OrgEventSources")
+		}
+
+		// No settings row yet: adopting materializes one at version 1.
+		adopted, ok, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "github", "https://github.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (materializes org_settings): %v", err)
+		}
+		if !ok || adopted.Version != 1 || adopted.GitHubBaseURL != "https://github.example.com" {
+			t.Errorf("AdoptSourceBaseURL on a missing row returned (%v, version %d, host %q), want (true, 1, the host)", ok, adopted.Version, adopted.GitHubBaseURL)
+		}
+
+		saved, err := stores.Orgs.UpdateSettingsVersioned(ctx, ids.OrgID, domain.OrgSettings{
+			GitHubBaseURL:       "https://github.example.com",
+			JiraPollInterval:    3 * time.Minute,
+			GitHubCloneProtocol: "ssh",
+			MaxConcurrentRuns:   4,
+		}, adopted.Version)
+		if err != nil {
+			t.Fatalf("UpdateSettingsVersioned: %v", err)
+		}
+		if _, err := stores.OrgEventSources.SetDisabled(ctx, ids.OrgID, "jira", true, ids.UserID); err != nil {
+			t.Fatalf("SetDisabled: %v", err)
+		}
+
+		// An empty host on an existing row: written, version moved, nothing
+		// else touched.
+		set, ok, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "jira", "https://jira.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (empty host): %v", err)
+		}
+		if !ok || set.JiraBaseURL != "https://jira.example.com" || set.Version != saved.Version+1 {
+			t.Errorf("AdoptSourceBaseURL (empty host) returned (%v, host %q, version %d), want (true, the host, %d)", ok, set.JiraBaseURL, set.Version, saved.Version+1)
+		}
+		if set.JiraPollInterval != 3*time.Minute || set.GitHubBaseURL != "https://github.example.com" ||
+			set.MaxConcurrentRuns != 4 || set.GitHubCloneProtocol != "ssh" {
+			t.Errorf("AdoptSourceBaseURL moved something besides the jira host: %+v", set)
+		}
+		row, err := stores.OrgEventSources.Get(ctx, ids.OrgID, "jira")
+		if err != nil {
+			t.Fatalf("OrgEventSources.Get: %v", err)
+		}
+		if row == nil || !row.Disabled {
+			t.Errorf("AdoptSourceBaseURL cleared jira's disabled flag: %+v", row)
+		}
+
+		// The same host: true, nothing written, the version stays.
+		same, ok, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "jira", "https://jira.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (same host): %v", err)
+		}
+		if !ok || same.Version != set.Version || same.JiraBaseURL != "https://jira.example.com" {
+			t.Errorf("AdoptSourceBaseURL (same host) returned (%v, version %d, host %q), want (true, %d, the host)", ok, same.Version, same.JiraBaseURL, set.Version)
+		}
+
+		// A different host: false, nothing written, the stored host returned.
+		other, ok, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "jira", "https://jira-other.example.com")
+		if err != nil {
+			t.Fatalf("AdoptSourceBaseURL (different host): %v", err)
+		}
+		if ok || other.Version != set.Version || other.JiraBaseURL != "https://jira.example.com" {
+			t.Errorf("AdoptSourceBaseURL (different host) returned (%v, version %d, host %q), want (false, %d, the stored host)", ok, other.Version, other.JiraBaseURL, set.Version)
+		}
+		after, err := stores.Orgs.GetSettingsSystem(ctx, ids.OrgID)
+		if err != nil {
+			t.Fatalf("GetSettingsSystem: %v", err)
+		}
+		if after.JiraBaseURL != "https://jira.example.com" || after.Version != set.Version {
+			t.Errorf("a refused adopt changed the row: host %q, version %d", after.JiraBaseURL, after.Version)
+		}
+
+		// No host, and a source with no host to set, are refused.
+		if _, _, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "jira", ""); err == nil {
+			t.Error("AdoptSourceBaseURL accepted an empty host")
+		}
+		if _, _, err := stores.Orgs.AdoptSourceBaseURL(ctx, ids.OrgID, "linear", "https://linear.example.com"); err == nil {
+			t.Error("AdoptSourceBaseURL accepted a host for linear")
+		}
+	})
+
 	// anthropic_api_key_ref / bedrock_credentials_ref name the LLM material
 	// the org has bound. Like the Linear workspace they belong to the
 	// credential routes, so no settings save moves them. Unlike

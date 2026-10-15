@@ -209,6 +209,28 @@ type OrgsStore interface {
 	// SetGitHubCredentialClass.
 	SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, error)
 
+	// AdoptSourceBaseURL writes baseURL as kind's host only when the org has
+	// no host stored for kind — the write a credential bind makes when the
+	// credential decides the host and the workspace has not named one. It
+	// never replaces a host:
+	//
+	//   - no host stored: writes baseURL, bumps the version as
+	//     SetSourceBaseURL does, and returns the stored row and true;
+	//   - baseURL already stored: writes nothing, moves nothing, and returns
+	//     the current row and true;
+	//   - a different host stored: writes nothing, moves nothing, and returns
+	//     the current row and false.
+	//
+	// baseURL must be non-empty, and kind must be a source with a host to set,
+	// as for SetSourceBaseURL.
+	//
+	// Each row is written by one statement whose condition is the stored
+	// host, never by a read and a write after it, so a concurrent host
+	// writer cannot land between the check and the write without any lock
+	// held by the caller. org_settings is written before org_event_sources,
+	// as SetSourceBaseURL does, and the pool and return contract are its too.
+	AdoptSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, bool, error)
+
 	// SetAnthropicKeyRef writes ONLY org_settings.anthropic_api_key_ref — the
 	// secret key the org's Anthropic API key is stored under — from inside the
 	// Anthropic credential bind and unbind. A non-empty ref also sets

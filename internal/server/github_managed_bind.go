@@ -17,6 +17,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/auth"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/eventsource"
 	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 	"github.com/sky-ai-eng/triage-factory/internal/github/ghbase"
 	"github.com/sky-ai-eng/triage-factory/internal/githubapp"
@@ -186,16 +187,6 @@ var (
 		status: http.StatusConflict,
 		message: "This workspace is pointed at %s; the deployment's GitHub App is on %s. " +
 			"Bring your own App for this GitHub.",
-	}
-
-	// The workspace has no GitHub URL. The deployment App is on one GitHub,
-	// and a workspace binds it only once it has said that is its GitHub: the
-	// URL is set first, never assumed.
-	refuseNoGitHubURL = bindRefusal{
-		code:   "github_url_not_set",
-		status: http.StatusConflict,
-		message: "This workspace has no GitHub URL yet. Set it to %s, where the deployment's GitHub App is, " +
-			"and connect again.",
 	}
 
 	// The operator's App is missing "Request user authorization (OAuth) during
@@ -393,12 +384,6 @@ func (b bindRefusal) withAccounts(connected, named string) bindRefusal {
 
 // withHosts fills the one refusal whose message names two GitHub hosts: the
 // workspace's and the deployment's.
-// withHost fills a refusal that names one host.
-func (b bindRefusal) withHost(host string) bindRefusal {
-	b.message = fmt.Sprintf(b.message, host)
-	return b
-}
-
 func (b bindRefusal) withHosts(workspaceHost, deploymentHost string) bindRefusal {
 	b.message = fmt.Sprintf(b.message, workspaceHost, deploymentHost)
 	return b
@@ -737,6 +722,12 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The bind changed the org's GitHub credential, and on a workspace that had
+	// no GitHub URL its host too. The poller set the org's next poll when it
+	// last skipped it as unconfigured, and the reachable-repo mirror is empty,
+	// so without this kick the first poll and the repository picker would both
+	// wait for the next scheduled pass.
+	s.kickGitHubChanged(r, orgID)
 	http.Redirect(w, r, settingsRedirectPath(orgID)+"#github-app", http.StatusFound)
 }
 
@@ -1041,8 +1032,14 @@ func bindGateRefusal(err error, definitive bindRefusal, accountLogin string) *bi
 	return &refuseGatesUndetermined
 }
 
-// writeManagedBinding is the ceremony's only write: the installation row, and
-// the org's credential class set to managed_app.
+// errBindHostMoved rolls back writeManagedBinding's transaction when the
+// workspace's GitHub host is no longer the App's; it never leaves that
+// function.
+var errBindHostMoved = errors.New("workspace github host is not the deployment app's")
+
+// writeManagedBinding is the ceremony's only write: the installation row, the
+// org's credential class set to managed_app, and — for a workspace with no
+// GitHub URL — the App's host as the workspace's.
 //
 // It runs under the App-registration advisory lock, keyed by org — the same
 // lock the PAT bind/unbind, the manifest callback, the import and the two
@@ -1122,7 +1119,23 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 		return slotRefusal, nil
 	}
 
+	// The App's host becomes the workspace's in the same transaction as the
+	// installation and the class, the way the disconnect clears the host and
+	// the credential together. A workspace an admin pointed at another GitHub
+	// since the start is refused, as the start refuses it, and nothing is
+	// written. The store compares stored strings; the canonical comparison
+	// here is the one deploymentAppIdentity made.
+	deploymentHost := ghbase.DefaultBaseURL()
+	var movedTo string
 	if err := s.tx.WithTx(ctx, orgID, userID, func(tx db.TxStores) error {
+		set, adopted, lerr := tx.Orgs.AdoptSourceBaseURL(ctx, orgID, eventsource.KindGitHub, deploymentHost)
+		if lerr != nil {
+			return fmt.Errorf("adopt github host: %w", lerr)
+		}
+		if !adopted && ghbase.CanonicalBaseURL(set.GitHubBaseURL) != deploymentHost {
+			movedTo = set.GitHubBaseURL
+			return errBindHostMoved
+		}
 		if _, lerr := tx.GitHubApps.UpsertInstallation(ctx, domain.OrgGitHubAppInstallation{
 			InstallationID:      installationID,
 			OrgID:               orgID,
@@ -1152,18 +1165,16 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 			Action:      domain.AccessActionCredentialSet,
 			DetailJSON:  accessDetailCredentialNamed(domain.CredentialKindGitHubApp, ghWeb, inst.AccountLogin),
 		})
-	}); err != nil {
+	}); errors.Is(err, errBindHostMoved) {
+		out := refuseWrongGitHub.withHosts(movedTo, deploymentHost)
+		return &out, nil
+	} else if err != nil {
 		return nil, err
 	}
 
 	githubAppLog.Info("bound managed installation",
 		"org", orgID, "installation", installationID, "account", inst.AccountLogin,
 		"account_type", inst.AccountType, "host", host)
-
-	// The org's reachable-repo mirror is now answerable and empty. Kick the
-	// refresh so the repository picker has something to show rather than
-	// waiting for the next poll cycle.
-	s.kickReachRefresh(orgID, true)
 	return nil, nil
 }
 
@@ -1207,9 +1218,11 @@ func (s *Server) credentialSlotRefusal(ctx context.Context, orgID, userID string
 	return nil, nil
 }
 
-// deploymentAppIdentity resolves the org's GitHub host and the deployment App's
-// preflight-established identity — its slug and client id, which the operator
-// never configures because GET /app reports them.
+// deploymentAppIdentity resolves the host the ceremony runs on and the
+// deployment App's preflight-established identity — its slug and client id,
+// which the operator never configures because GET /app reports them. The host
+// is the workspace's when it has one, which has to be the App's; a workspace
+// with none gets the App's.
 //
 // The preflight is also the members-permission gate, and running it here rather
 // than trusting a cached verdict is deliberate: `members: read` is what the
@@ -1224,10 +1237,14 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 	if !s.deploymentApp.Configured() {
 		return "", identity, &refuseNoDeploymentApp, nil
 	}
+	deploymentHost := ghbase.DefaultBaseURL()
 	ghWeb, err = s.ghResolver.BaseURLFor(ctx, orgID)
 	if errors.Is(err, ghclient.ErrNoGitHubCredentials) {
-		refusal := refuseNoGitHubURL.withHost(ghbase.DefaultBaseURL())
-		return "", identity, &refusal, nil
+		// A workspace with no GitHub URL binds on the App's host, and the bind
+		// writes it as the workspace's host (writeManagedBinding). Nothing
+		// reads this as a default: until the bind commits, the workspace still
+		// has no host.
+		ghWeb, err = deploymentHost, nil
 	}
 	if err != nil {
 		return "", identity, nil, fmt.Errorf("resolve github base for org %s: %w", orgID, err)
@@ -1237,7 +1254,7 @@ func (s *Server) deploymentAppIdentity(ctx context.Context, orgID string) (ghWeb
 	// before anything is asked of GitHub: a preflight against the workspace's
 	// host would be the deployment's key presented to a server that has never
 	// seen it, and the 401 that earns reads like a bad key.
-	if deploymentHost := ghbase.DefaultBaseURL(); ghWeb != deploymentHost {
+	if ghWeb != deploymentHost {
 		refusal := refuseWrongGitHub.withHosts(ghWeb, deploymentHost)
 		return "", identity, &refusal, nil
 	}

@@ -427,7 +427,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	var cur sql.NullString
 	if err := s.q.QueryRowContext(ctx, `
-		SELECT base_url FROM org_event_sources WHERE org_id = ? AND kind = ?`,
+		SELECT base_url FROM org_event_sources WHERE org_id = ?1 AND kind = ?2`,
 		orgID, kind).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return domain.OrgSettings{}, fmt.Errorf("read %s base url: %w", kind, err)
 	}
@@ -436,7 +436,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	stored, err := db.ScanOrgSettingsCore(s.q.QueryRowContext(ctx, `
 		INSERT INTO org_settings (org_id, updated_at)
-		VALUES (?, CURRENT_TIMESTAMP)
+		VALUES (?1, CURRENT_TIMESTAMP)
 		ON CONFLICT(org_id) DO UPDATE SET
 			version = org_settings.version + 1,
 			updated_at = CURRENT_TIMESTAMP
@@ -447,7 +447,7 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	if _, err := s.q.ExecContext(ctx, `
 		INSERT INTO org_event_sources (org_id, kind, base_url)
-		VALUES (?, ?, ?)
+		VALUES (?1, ?2, ?3)
 		ON CONFLICT (org_id, kind) DO UPDATE SET
 			base_url = excluded.base_url`,
 		orgID, kind, nullStringValue(baseURL)); err != nil {
@@ -459,6 +459,76 @@ func (s *orgsStore) SetSourceBaseURL(ctx context.Context, orgID, kind, baseURL s
 	}
 	db.ApplyOrgSourceOverrides(&stored, overrides)
 	return stored, nil
+}
+
+// AdoptSourceBaseURL writes baseURL as kind's host only when none is stored.
+// See the OrgsStore interface doc for its three outcomes. Both statements
+// carry the condition, as in the Postgres twin; the org_event_sources one is
+// the one that decides whether a host is written.
+func (s *orgsStore) AdoptSourceBaseURL(ctx context.Context, orgID, kind, baseURL string) (domain.OrgSettings, bool, error) {
+	if !db.SourceHasBaseURL(kind) {
+		return domain.OrgSettings{}, false, fmt.Errorf("adopt source base url: %q has no host to set", kind)
+	}
+	if baseURL == "" {
+		return domain.OrgSettings{}, false, errors.New("adopt source base url: no host to adopt")
+	}
+	var (
+		out     domain.OrgSettings
+		adopted bool
+	)
+	err := inTx(ctx, s.q, func(q queryer) error {
+		current := func() error {
+			cur, err := getOrgSettings(ctx, q, orgID)
+			if err != nil {
+				return err
+			}
+			out, adopted = cur, db.SourceBaseURLOf(cur, kind) == baseURL
+			return nil
+		}
+		stored, err := db.ScanOrgSettingsCore(q.QueryRowContext(ctx, `
+			INSERT INTO org_settings (org_id, updated_at)
+			SELECT ?1, CURRENT_TIMESTAMP
+			WHERE NOT EXISTS (
+				SELECT 1 FROM org_event_sources
+				WHERE org_id = ?1 AND kind = ?2 AND COALESCE(base_url, '') <> '')
+			ON CONFLICT(org_id) DO UPDATE SET
+				version = org_settings.version + 1,
+				updated_at = CURRENT_TIMESTAMP
+			RETURNING `+orgSettingsColumns,
+			orgID, kind).Scan)
+		if errors.Is(err, sql.ErrNoRows) {
+			return current()
+		}
+		if err != nil {
+			return fmt.Errorf("bump org_settings version: %w", err)
+		}
+		var written string
+		err = q.QueryRowContext(ctx, `
+			INSERT INTO org_event_sources (org_id, kind, base_url)
+			VALUES (?1, ?2, ?3)
+			ON CONFLICT (org_id, kind) DO UPDATE SET
+				base_url = excluded.base_url
+			WHERE COALESCE(org_event_sources.base_url, '') = ''
+			RETURNING base_url`,
+			orgID, kind, baseURL).Scan(&written)
+		if errors.Is(err, sql.ErrNoRows) {
+			return current()
+		}
+		if err != nil {
+			return fmt.Errorf("adopt %s base url: %w", kind, err)
+		}
+		overrides, err := readSourceOverrides(ctx, q, orgID)
+		if err != nil {
+			return fmt.Errorf("read org_event_sources overrides: %w", err)
+		}
+		db.ApplyOrgSourceOverrides(&stored, overrides)
+		out, adopted = stored, true
+		return nil
+	})
+	if err != nil {
+		return domain.OrgSettings{}, false, err
+	}
+	return out, adopted, nil
 }
 
 // SetAnthropicKeyRef writes ONLY org_settings.anthropic_api_key_ref, and
