@@ -45,20 +45,75 @@ func withTempCaptureSocketDir(t *testing.T) {
 }
 
 // TestIPCRoundTrip_ChownRunTree pins the wire shape of the run-tree
-// hand-off: root and subpath arrive broker-side verbatim.
+// hand-off: root, subpath and the jail uid arrive broker-side verbatim.
 func TestIPCRoundTrip_ChownRunTree(t *testing.T) {
 	var gotRoot, gotSubpath string
+	var gotUID int
 	client := serveTestBroker(t, &fakeOps{
-		chownRunTreeFn: func(ctx context.Context, root, subpath string) error {
-			gotRoot, gotSubpath = root, subpath
+		chownRunTreeFn: func(ctx context.Context, root, subpath string, jailUID int) error {
+			gotRoot, gotSubpath, gotUID = root, subpath, jailUID
 			return nil
 		},
 	})
-	if err := client.ChownRunTree(context.Background(), "/tmp/tf-runs/run-1", "owner/repo"); err != nil {
+	if err := client.ChownRunTree(context.Background(), "/tmp/tf-runs/run-1", "owner/repo", sandbox.JailUID(7)); err != nil {
 		t.Fatalf("ChownRunTree: %v", err)
 	}
-	if gotRoot != "/tmp/tf-runs/run-1" || gotSubpath != "owner/repo" {
-		t.Errorf("broker saw root=%q subpath=%q", gotRoot, gotSubpath)
+	if gotRoot != "/tmp/tf-runs/run-1" || gotSubpath != "owner/repo" || gotUID != sandbox.JailUID(7) {
+		t.Errorf("broker saw root=%q subpath=%q jail uid=%d", gotRoot, gotSubpath, gotUID)
+	}
+}
+
+// TestIPCRoundTrip_RunCellGrants pins the wire shape of the per-engagement
+// grants: each arrives broker-side with the run and the subnet index the
+// broker derives every owner and group from.
+func TestIPCRoundTrip_RunCellGrants(t *testing.T) {
+	type sockCall struct {
+		conv string
+		idx  uint8
+	}
+	var parked, staged string
+	var parkedUID int
+	var stagedIdx uint8
+	var prepared, released sockCall
+	client := serveTestBroker(t, &fakeOps{
+		parkRunTreeFn: func(ctx context.Context, root string, jailUID int) error {
+			parked, parkedUID = root, jailUID
+			return nil
+		},
+		prepareSocketsFn: func(ctx context.Context, conv string, idx uint8) error {
+			prepared = sockCall{conv, idx}
+			return nil
+		},
+		releaseSocketsFn: func(ctx context.Context, conv string, idx uint8) error {
+			released = sockCall{conv, idx}
+			return nil
+		},
+		grantStagingFn: func(ctx context.Context, dir string, idx uint8) error {
+			staged, stagedIdx = dir, idx
+			return nil
+		},
+	})
+	ctx := context.Background()
+	if err := client.ParkRunTree(ctx, "/tmp/tf-runs/run-3", sandbox.JailUID(3)); err != nil {
+		t.Fatalf("ParkRunTree: %v", err)
+	}
+	if err := client.PrepareRunSockets(ctx, "conv-a", 4); err != nil {
+		t.Fatalf("PrepareRunSockets: %v", err)
+	}
+	if err := client.ReleaseRunSockets(ctx, "conv-a", 4); err != nil {
+		t.Fatalf("ReleaseRunSockets: %v", err)
+	}
+	if err := client.GrantRunStaging(ctx, "/tmp/triagefactory-memory/conv-a", 4); err != nil {
+		t.Fatalf("GrantRunStaging: %v", err)
+	}
+	if parked != "/tmp/tf-runs/run-3" || parkedUID != sandbox.JailUID(3) {
+		t.Errorf("broker parked %q as held by uid %d", parked, parkedUID)
+	}
+	if prepared != (sockCall{"conv-a", 4}) || released != (sockCall{"conv-a", 4}) {
+		t.Errorf("broker saw prepare=%+v release=%+v", prepared, released)
+	}
+	if staged != "/tmp/triagefactory-memory/conv-a" || stagedIdx != 4 {
+		t.Errorf("broker saw staging grant of %q at index %d", staged, stagedIdx)
 	}
 }
 

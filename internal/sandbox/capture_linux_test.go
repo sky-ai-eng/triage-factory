@@ -5,6 +5,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,12 +13,22 @@ import (
 	"testing"
 )
 
-// captureTestTree returns a directory that passes validateRunTreeRoot:
-// t.TempDir() is absolute, clean, ≥2 components deep, symlink-free on
-// Linux, and owned by the test process's own uid.
+// captureTestJail is the jail identity the capture tests' trees are handed
+// to, and so the identity the capture child must drop to.
+var captureTestJail = struct{ uid, gid int }{JailUID(9), JailGID(9)}
+
+// captureTestTree returns a directory that passes validateRunTreeRoot and is
+// held by a jail identity, as every tree a capture is asked for is: t.TempDir()
+// is absolute, clean, ≥2 components deep and symlink-free on Linux, and it is
+// chowned to captureTestJail. Handing it over needs root, so a test that needs
+// one skips without it.
 func captureTestTree(t *testing.T) string {
 	t.Helper()
-	return t.TempDir()
+	dir := t.TempDir()
+	if err := os.Chown(dir, captureTestJail.uid, captureTestJail.gid); err != nil {
+		t.Skipf("a capture needs a tree held by a jail identity, and handing one over needs root: %v", err)
+	}
+	return dir
 }
 
 func captureTestStaging(t *testing.T) string {
@@ -46,8 +57,9 @@ func captureTestStaging(t *testing.T) string {
 }
 
 // TestCaptureRunDelta_DropsPrivilegeAndNetns pins the containment the
-// capture relies on: the capture child runs as the sandbox uid/gid with the
-// parent's supplementary groups shed, inside an empty network namespace.
+// capture relies on: the capture child runs as the jail identity that holds
+// the tree — that run's, and no other — with the parent's supplementary
+// groups shed, inside an empty network namespace.
 // That is what confines a filter a hostile .git/config could trigger to the
 // agent's own privilege instead of the privileged capture host (the
 // cap-broker — the escape this capture path closes).
@@ -67,7 +79,7 @@ func TestCaptureRunDelta_DropsPrivilegeAndNetns(t *testing.T) {
 	}
 	diagPath := diag.Name()
 	_ = diag.Close()
-	// The child runs as uid 10000; it must be able to write the diag file.
+	// The child runs as a jail uid; it must be able to write the diag file.
 	if err := os.Chmod(diagPath, 0o666); err != nil {
 		t.Fatal(err)
 	}
@@ -98,8 +110,8 @@ func TestCaptureRunDelta_DropsPrivilegeAndNetns(t *testing.T) {
 		idLine, netPart = out[:i], out[i:]
 	}
 
-	if !strings.Contains(idLine, "uid=10000") || !strings.Contains(idLine, "gid=10000") {
-		t.Errorf("child did not drop to uid/gid 10000:\n%s", idLine)
+	if !strings.Contains(idLine, fmt.Sprintf("uid=%d", captureTestJail.uid)) || !strings.Contains(idLine, fmt.Sprintf("gid=%d", captureTestJail.gid)) {
+		t.Errorf("child did not drop to the tree's jail identity %d:%d:\n%s", captureTestJail.uid, captureTestJail.gid, idLine)
 	}
 	if strings.Contains(idLine, "(root)") || strings.Contains(idLine, "groups=0") {
 		t.Errorf("child retained a root supplementary group:\n%s", idLine)
@@ -181,12 +193,43 @@ func TestCaptureRunDelta_SkipsNetnsWithoutSysAdmin(t *testing.T) {
 		idLine, gotNetns = out[:i], strings.TrimSpace(out[i+len("==NETNS=="):])
 	}
 
-	if !strings.Contains(idLine, "uid=10000") || !strings.Contains(idLine, "gid=10000") {
-		t.Errorf("child did not drop to uid/gid 10000 even without CAP_SYS_ADMIN:\n%s", idLine)
+	if !strings.Contains(idLine, fmt.Sprintf("uid=%d", captureTestJail.uid)) || !strings.Contains(idLine, fmt.Sprintf("gid=%d", captureTestJail.gid)) {
+		t.Errorf("child did not drop to the tree's jail identity %d:%d even without CAP_SYS_ADMIN:\n%s", captureTestJail.uid, captureTestJail.gid, idLine)
 	}
 
 	if gotNetns != wantNetns {
 		t.Errorf("child network namespace = %q, want %q (the parent's own — hasSysAdmin() = false should mean no new netns was created)", gotNetns, wantNetns)
+	}
+}
+
+// TestCaptureRunDelta_RefusesTreeNoJailHolds pins that the capture has no
+// identity to fall back on: a tree the orchestrator still owns, or one parked
+// after its engagement ended, is refused before any child is started — never
+// captured as some other identity that happens to be at hand.
+func TestCaptureRunDelta_RefusesTreeNoJailHolds(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to stage a parked tree")
+	}
+	orig := captureCommand
+	started := false
+	captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
+		started = true
+		return exec.CommandContext(ctx, "/bin/true"), nil
+	}
+	t.Cleanup(func() { captureCommand = orig })
+
+	orchestratorOwned := t.TempDir()
+	parked := t.TempDir()
+	if err := os.Chown(parked, ParkedRunTreeUID, os.Getgid()); err != nil {
+		t.Fatal(err)
+	}
+	for name, tree := range map[string]string{"orchestrator-owned": orchestratorOwned, "parked": parked} {
+		if _, err := (hostOps{}).CaptureRunDelta(context.Background(), tree, captureTestStaging(t), ""); err == nil {
+			t.Errorf("%s tree: CaptureRunDelta = nil error, want a refusal", name)
+		}
+	}
+	if started {
+		t.Error("a capture child was started for a tree no jail identity holds")
 	}
 }
 

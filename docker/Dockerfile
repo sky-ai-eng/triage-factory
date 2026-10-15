@@ -205,9 +205,9 @@ RUN apk add --no-cache \
 
 # The unprivileged orchestrator identity the entrypoint drops into for
 # multi mode. A fixed, dedicated,
-# non-root uid/gid — distinct from internal/sandbox.WorktreeUID (10000,
-# the uid *inside* the gVisor sandbox the agent runs as) and from the
-# cap-broker (which stays root) — so the two host-level privsep
+# non-root uid/gid — distinct from every per-run identity
+# (internal/sandbox's jail band, 40000+, and sidecar band, 20000+) and from
+# the cap-broker (which stays root) — so the two host-level privsep
 # processes are never the same uid: the orchestrator, holding zero
 # capabilities after the drop, cannot ptrace a same-uid broker if it
 # were ever the same identity. `-D` skips a password.
@@ -229,20 +229,10 @@ RUN apk add --no-cache \
 # inherited from the container's default environment, which this uid
 # cannot reach post-drop.
 #
-# tf-sandbox (gid 10000 — internal/sandbox.WorktreeGID) exists so the
-# orchestrator can grant the sandbox identity access to per-run agenthost
-# sockets WITHOUT CAP_CHOWN: giving a file away to another uid always
-# needs that capability, but an owner may chgrp its own file to any group
-# it is a member of. Making tf-orchestrator a member (and having the
-# entrypoint's setpriv carry exactly this one supplementary group through
-# the drop) turns the socket hand-off into an owner-legal chgrp + 0660 —
-# see cmd/exec/agenthost/socket_linux.go's grantSocketToSandbox. No host
-# process runs AS this gid; it exists purely as the grant target matching
-# the in-sandbox agent's gid.
-RUN addgroup -g 10000 tf-sandbox \
-    && addgroup -g 10001 tf-orchestrator \
-    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator \
-    && adduser tf-orchestrator tf-sandbox
+# No group is baked for the jails: each run's jail runs at its own uid/gid,
+# derived from its subnet index, and nothing outside that run may carry it.
+RUN addgroup -g 10001 tf-orchestrator \
+    && adduser -D -u 10001 -G tf-orchestrator -h /home/tf-orchestrator -s /sbin/nologin tf-orchestrator
 
 # Pull the per-arch runsc binary from a pinned gVisor release.
 #

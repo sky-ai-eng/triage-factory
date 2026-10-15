@@ -67,18 +67,19 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 	const treeRootKey = "itest-skills-tree"
 	wtDir := sandboxingRunRoot(t, treeRootKey)
 
-	// Step 0's launch hands the whole tree to the sandbox uid. From here on the
-	// orchestrator is a genuinely unprivileged, capability-less user with respect
-	// to this tree — the state that made the old in-worktree materialize fail.
-	if err := sandbox.ChownRunTree(ctx, wtDir, ""); err != nil {
-		t.Fatalf("ChownRunTree (step 0 launch): %v", err)
-	}
-
 	net, err := sandbox.SetupRunNetwork(ctx, treeRootKey)
 	if err != nil {
 		t.Fatalf("SetupRunNetwork: %v", err)
 	}
 	t.Cleanup(func() { _ = net.Close() })
+
+	// Step 0's launch hands the whole tree to the jail's identity. From here on
+	// the orchestrator is a genuinely unprivileged, capability-less user with
+	// respect to this tree — the state that made the old in-worktree
+	// materialize fail.
+	if err := net.HandOffRunTree(ctx, wtDir); err != nil {
+		t.Fatalf("HandOffRunTree (step 0 launch): %v", err)
+	}
 
 	// Each step is its own conversation, so each stages into its own dir; that is
 	// what makes "step N sees only its own skill" structural rather than a wipe.
@@ -92,10 +93,10 @@ func TestIntegration_StepSkillsMount_TwoStepBoundary(t *testing.T) {
 			t.Fatalf("StageStepSkill (step %d): %v", stepIdx, err)
 		}
 		t.Cleanup(func() { _ = skills.RemoveStagedSkills(staging) })
-		// The staging dir is the orchestrator's own — never chowned, so it stays
-		// unreadable-as-a-write-target from inside and needs no ownership dance.
-		if err := os.Chmod(staging, 0o755); err != nil {
-			t.Fatalf("chmod staging: %v", err)
+		// The staging dir is the orchestrator's own and closed to everyone
+		// else; the launch grants its group to this jail, as LaunchToolHost does.
+		if err := net.GrantStaging(ctx, staging); err != nil {
+			t.Fatalf("grant staging: %v", err)
 		}
 
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{

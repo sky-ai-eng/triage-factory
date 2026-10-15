@@ -332,6 +332,40 @@ func waitForSidecarGone(t *testing.T, uid int, timeout time.Duration) {
 	t.Fatalf("EVICTION FAILED: %d tf-sidecar process(es) still live at uid %d after teardown %v — the run's credential address space was not freed", len(remaining), uid, remaining)
 }
 
+// waitForSidecarUp polls until a tf-sidecar process is live at uid, or fails
+// after timeout. LaunchSidecar returns once the child is forked, but the stand-in
+// takes the sidecar's comm only after its own runtime starts and TestMain reaches
+// maybeRunSidecarSubcommand, so a scan made right after the launch can run ahead
+// of it. On a timeout it names every process at the uid, so a sidecar that came
+// up under another comm reads differently from one that never came up.
+func waitForSidecarUp(t *testing.T, uid int, timeout time.Duration) []int {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if pids := sidecarPidsAtUID(t, uid); len(pids) > 0 {
+			return pids
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var seen []string
+	entries, _ := os.ReadDir("/proc")
+	for _, e := range entries {
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		if u, ok := procRealUID(pid); ok && u == uid {
+			comm, _ := os.ReadFile("/proc/" + e.Name() + "/comm")
+			seen = append(seen, fmt.Sprintf("%d:%s", pid, strings.TrimSpace(string(comm))))
+		}
+	}
+	t.Fatalf("no tf-sidecar at uid %d within %v; processes at that uid: %v", uid, timeout, seen)
+	return nil
+}
+
 // runPtraceProbeAsUID execs the probe child (this test binary, via
 // sidecarBinaryPath) dropped to uid, asking it to PTRACE_ATTACH targetPid, and
 // returns its single PTRACE=... stdout line. Root-gated by the caller (only root
@@ -356,16 +390,18 @@ func runPtraceProbeAsUID(t *testing.T, uid, targetPid int) string {
 
 // newAgentHostSocketListener stands up a real host-side agenthost unix socket at
 // TrustedAgentHostSocketPath(conversationID) and serves the same one-byte accept the
-// cross-tenant probe uses, so a dial that reaches it succeeds. It grants the
-// socket to the sandbox identity exactly as the production root path does
-// (grantSocketToSandbox: chown WorktreeUID + 0600), so the run's OWN sandbox can
-// connect to it through the bind mount. Returns the host path; registers
-// cleanup.
+// cross-tenant probe uses, so a dial that reaches it succeeds. The socket is
+// opened to everyone (0666) rather than granted to the run's jail gid: the
+// listener has to exist before startLiveRun allocates the run's index, so the
+// jail identity is not known yet. What these tests probe is the mount topology
+// — which socket a jail can see at all — and the per-run grant is covered on
+// the host side (jail_isolation_linux_test.go). Returns the host path;
+// registers cleanup.
 func newAgentHostSocketListener(t *testing.T, conversationID string) string {
 	t.Helper()
-	root := trustedAgentHostSocketRoot
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("mkdir agenthost socket root %s: %v", root, err)
+	dir := RunSocketDir(conversationID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir agenthost socket dir %s: %v", dir, err)
 	}
 	sockPath := TrustedAgentHostSocketPath(conversationID)
 	_ = os.Remove(sockPath) // clear any stale file
@@ -373,11 +409,7 @@ func newAgentHostSocketListener(t *testing.T, conversationID string) string {
 	if err != nil {
 		t.Fatalf("listen agenthost socket %s: %v", sockPath, err)
 	}
-	if err := os.Chown(sockPath, WorktreeUID, WorktreeGID); err != nil {
-		_ = ln.Close()
-		t.Skipf("chown agenthost socket to WorktreeUID (need root): %v", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
+	if err := os.Chmod(sockPath, 0o666); err != nil {
 		_ = ln.Close()
 		t.Fatalf("chmod agenthost socket: %v", err)
 	}

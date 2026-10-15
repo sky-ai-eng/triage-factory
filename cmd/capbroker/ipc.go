@@ -196,8 +196,24 @@ func (c *IPCClient) ReapOrphans(ctx context.Context) error {
 	return c.call(ctx, methodReapOrphans, emptyArgs{}, nil)
 }
 
-func (c *IPCClient) ChownRunTree(ctx context.Context, root, subpath string) error {
-	return c.call(ctx, methodChownRunTree, chownRunTreeArgs{Root: root, Subpath: subpath}, nil)
+func (c *IPCClient) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
+	return c.call(ctx, methodChownRunTree, chownRunTreeArgs{Root: root, Subpath: subpath, JailUID: jailUID}, nil)
+}
+
+func (c *IPCClient) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return c.call(ctx, methodParkRunTree, parkRunTreeArgs{Root: root, JailUID: jailUID}, nil)
+}
+
+func (c *IPCClient) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return c.call(ctx, methodPrepareSockets, runSocketsArgs{ConversationID: conversationID, SubnetIdx: subnetIdx}, nil)
+}
+
+func (c *IPCClient) ReleaseRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return c.call(ctx, methodReleaseSockets, runSocketsArgs{ConversationID: conversationID, SubnetIdx: subnetIdx}, nil)
+}
+
+func (c *IPCClient) GrantRunStaging(ctx context.Context, dir string, subnetIdx uint8) error {
+	return c.call(ctx, methodGrantStaging, grantRunStagingArgs{Dir: dir, SubnetIdx: subnetIdx}, nil)
 }
 
 func (c *IPCClient) RemoveRunTree(ctx context.Context, path string) error {

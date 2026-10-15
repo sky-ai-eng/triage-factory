@@ -30,7 +30,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -49,11 +51,13 @@ func TestMain(m *testing.M) {
 	// Re-exec'd test-child branches must intercept before any suite setup runs,
 	// exactly as they do in the default binary: the sidecar-reap comm helper,
 	// the live-sidecar stand-in (LaunchSidecarProcess execs this binary with the
-	// run-sidecar argv), and the cross-sidecar ptrace probe. Each sets itself up
-	// and blocks or exits, never reaching the pre-warm or m.Run below.
+	// run-sidecar argv), the cross-sidecar ptrace probe, and the jail-identity
+	// access probe. Each sets itself up and blocks or exits, never reaching the
+	// pre-warm or m.Run below.
 	reExecAsSidecarHelperIfRequested()
 	maybeRunSidecarSubcommand()
 	maybeRunPtraceProbe()
+	runAccessProbeIfRequested()
 
 	// Production launches every run through the cap-broker; this package
 	// can't spin one up (import cycle), so the suite installs in-process
@@ -152,9 +156,15 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 // a unique ConversationID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
 	t.Helper()
+	// Opened to everyone rather than handed to a jail identity: Wrap's
+	// self-contained path allocates the run's index itself, so the identity
+	// the jail will run as is not known until it returns. The hand-off to
+	// that identity is tested on its own (runtree_linux_test.go), and through
+	// a real jail by TestIntegration_AgentHostIPC_RoundTrip, which builds its
+	// network first.
 	worktree := t.TempDir()
-	if err := os.Chown(worktree, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown worktree to UID %d (probably not root): %v", WorktreeUID, err)
+	if err := os.Chmod(worktree, 0o777); err != nil {
+		t.Fatalf("chmod worktree: %v", err)
 	}
 	return Config{
 		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
@@ -232,8 +242,9 @@ func TestIntegration_PropertyB_NoCredentialsInEnv(t *testing.T) {
 	}
 }
 
-// TestIntegration_NonRootUID confirms the agent runs as UID 10000,
-// not root. T3 hardening requires this.
+// TestIntegration_NonRootUID confirms the agent runs as its run's own jail
+// uid — the one its subnet index derives — not root. T3 hardening requires
+// the non-root half; the per-run identity requires the rest.
 func TestIntegration_NonRootUID(t *testing.T) {
 	requireRunsc(t)
 	cfg := minimalConfig(t)
@@ -254,7 +265,7 @@ func TestIntegration_NonRootUID(t *testing.T) {
 		t.Fatalf("run: %v (output: %s)", err, out)
 	}
 	got := strings.TrimSpace(string(out))
-	want := "10000"
+	want := strconv.Itoa(JailUID(sb.SubnetIdx))
 	if got != want {
 		t.Errorf("sandbox UID = %q, want %q (non-root for T3 hardening)", got, want)
 	}
@@ -517,11 +528,18 @@ func (e *configureProxyError) Error() string { return e.msg }
 //
 // Builds cmd/exec-test-stub as a pure-Go static binary, bind-mounts
 // it into the sandbox at /usr/local/bin/triagefactory, starts a
-// listener on a temp socket the sandbox can reach via bind mount at
-// /run/tf.sock, and exec's the stub. The stub dials /run/tf.sock,
+// listener on the run's agenthost socket, bind-mounted at /run/tf.sock,
+// and exec's the stub. The stub dials /run/tf.sock,
 // sends a LookupConversation probe RPC, and prints the result on stdout. The
 // test asserts the round-trip succeeded and the response carries the
 // run id the host registered.
+//
+// The cell is laid out the way production lays it out, so the jail reaches
+// its socket and its tree through the grants it is given and not through
+// world access: the network first, whose index is the jail's identity, then
+// the broker's socket directories, a socket owned by the run's sidecar uid with
+// the jail's gid, and a run tree handed to the jail's uid. The payload proves
+// the identity, writes the tree, and dials the socket.
 //
 // Why not the real `triagefactory` binary: the host TF binary is
 // glibc-linked on most dev/CI systems, and the sandbox rootfs is
@@ -532,6 +550,7 @@ func (e *configureProxyError) Error() string { return e.msg }
 func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	requireRunsc(t)
 	requireApk(t)
+	withJailHost(t)
 
 	// Build the test stub as a pure-Go static binary so it can exec
 	// inside alpine. CGO_ENABLED=0 skips the glibc/musl linker entirely.
@@ -548,28 +567,40 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		t.Fatalf("chmod stub: %v", err)
 	}
 
-	// Per-run socket on the host. Mode 0700 on the parent dir; the
-	// listener inherits from umask, then we chown + chmod to the
-	// sandbox UID exactly as the production agenthost.StartWithServer does.
-	sockDir := t.TempDir()
-	if err := os.Chmod(sockDir, 0o700); err != nil {
-		t.Fatalf("chmod sock dir: %v", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cfg := minimalConfig(t)
+	network, err := SetupRunNetwork(ctx, cfg.ConversationID)
+	if err != nil {
+		t.Fatalf("SetupRunNetwork: %v", err)
 	}
-	sockPath := filepath.Join(sockDir, "test.sock")
+	// Registered before the deferred run and sandbox closes, so it runs after
+	// them: the network outlives the jail launched into it, as in production.
+	t.Cleanup(func() { _ = network.Close() })
+	if err := network.PrepareSockets(ctx, cfg.ConversationID); err != nil {
+		t.Fatalf("PrepareSockets: %v", err)
+	}
+
+	// What the sidecar's grant leaves: its own socket, group the jail's gid.
+	sockPath := TrustedAgentHostSocketPath(cfg.ConversationID)
 	listener, err := net.Listen("unix", sockPath)
 	if err != nil {
 		t.Fatalf("listen on %s: %v", sockPath, err)
 	}
-	if err := os.Chown(sockPath, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown socket to UID %d (probably not root): %v", WorktreeUID, err)
+	if err := os.Chown(sockPath, SidecarUID(network.Idx), JailGID(network.Idx)); err != nil {
+		t.Fatalf("chown sock: %v", err)
 	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
+	if err := os.Chmod(sockPath, 0o660); err != nil {
 		t.Fatalf("chmod sock: %v", err)
 	}
-	// Parent dir must be reachable by the sandbox UID too — chown the
-	// parent so the runsc bind-mount can traverse to the socket.
-	if err := os.Chown(sockDir, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown sock dir to UID %d: %v", WorktreeUID, err)
+
+	tree := RunTreeRoot(cfg.ConversationID)
+	if err := os.MkdirAll(tree, 0o700); err != nil {
+		t.Fatalf("make run tree: %v", err)
+	}
+	if err := network.HandOffRunTree(ctx, tree); err != nil {
+		t.Fatalf("HandOffRunTree: %v", err)
 	}
 
 	// Minimal echo daemon: accept one connection, read one frame,
@@ -616,15 +647,13 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	}()
 	t.Cleanup(func() { _ = listener.Close() })
 
-	cfg := minimalConfig(t)
-	cfg.Argv = []string{"/usr/local/bin/triagefactory"}
+	cfg.Network = network
+	cfg.Worktree = tree
+	cfg.Argv = []string{"/bin/sh", "-c", "id -u && touch /work/written-by-jail && exec /usr/local/bin/triagefactory"}
 	cfg.ExtraMounts = []Mount{
 		{Source: stubBin, Destination: "/usr/local/bin/triagefactory", Options: []string{"ro"}},
 		{Source: sockPath, Destination: "/run/tf.sock"},
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 
 	run, sb, err := Wrap(ctx, cfg)
 	if err != nil {
@@ -637,8 +666,19 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stub exec: %v (output: %s)", err, out)
 	}
+	jailUID := strconv.Itoa(network.JailUID())
+	if first, _, _ := strings.Cut(string(out), "\n"); first != jailUID {
+		t.Errorf("jail ran as uid %q, want its own jail uid %s (output: %s)", first, jailUID, out)
+	}
 	if !strings.Contains(string(out), sentinelConversationID) {
 		t.Errorf("expected stub stdout to echo run id %q, got: %s", sentinelConversationID, out)
+	}
+	info, err := os.Lstat(filepath.Join(tree, "written-by-jail"))
+	if err != nil {
+		t.Fatalf("the jail's write to its run tree is not on the host: %v", err)
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != network.JailUID() {
+		t.Errorf("the jail's file is owned by %v, want its jail uid %d", info.Sys(), network.JailUID())
 	}
 }
 

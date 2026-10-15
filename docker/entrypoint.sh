@@ -190,13 +190,6 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     TF_ORCHESTRATOR_GID="${TF_ORCHESTRATOR_GID:-10001}"
     TF_ORCHESTRATOR_HOME="${TF_ORCHESTRATOR_HOME:-/home/tf-orchestrator}"
     TF_CAPBROKER_SOCKET="${TF_CAPBROKER_SOCKET:-/run/tf/cap-broker.sock}"
-    # The sandbox group (internal/sandbox.WorktreeGID). Carried through
-    # the drop as the orchestrator's ONE supplementary group so it can
-    # chgrp per-run agenthost sockets to the sandbox identity without
-    # CAP_CHOWN — an owner-legal group grant; see grantSocketToSandbox in
-    # cmd/exec/agenthost/socket_linux.go and the tf-sandbox group in
-    # docker/Dockerfile.
-    TF_SANDBOX_GID="${TF_SANDBOX_GID:-10000}"
 
     # Own the persistent state mount points so the (now non-root)
     # orchestrator can read/write its own data. Top-level only, not
@@ -274,12 +267,13 @@ if [ "$(uname -s)" = "Linux" ] && multi_mode; then
     # lookups (git defaults, toolchain caches, libraries).
     export HOME="$TF_ORCHESTRATOR_HOME"
 
-    # --groups (not --clear-groups): sets the supplementary groups to
-    # EXACTLY the sandbox group — still shedding root's group set like
-    # --clear-groups did, while keeping the one membership the
-    # orchestrator's owner-legal socket chgrp depends on.
+    # --clear-groups: the orchestrator carries no supplementary group at
+    # all. Every per-run grant names that run's own jail gid
+    # (internal/sandbox.JailGID), and the orchestrator holds none of them —
+    # a membership here would make it a member of whichever run held that
+    # index. The grants it cannot make as owner, the cap-broker makes.
     exec setpriv \
-        --reuid="$TF_ORCHESTRATOR_UID" --regid="$TF_ORCHESTRATOR_GID" --groups="$TF_SANDBOX_GID" \
+        --reuid="$TF_ORCHESTRATOR_UID" --regid="$TF_ORCHESTRATOR_GID" --clear-groups \
         --inh-caps=-all --bounding-set=-all --no-new-privs \
         -- triagefactory "$@"
 fi

@@ -78,6 +78,7 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
+			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
 		}
 		if shutdownCancelled(ctx) {
 			return engagementDisposition{fenced: s.handBackOnShutdown(ctx, park, ""), handedBack: true}
@@ -757,6 +758,7 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkStopped(stopParkReason(ctx), ""),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
+			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
 		}
 		// Nor is a shutdown a stop. The loop's transcript is already whole
 		// up to the turn it was on — the next claim's repair pass answers a
@@ -814,6 +816,7 @@ func (s *Spawner) recordNativeResult(
 			claimID:        cfg.claimID,
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
+			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
 		}, "", cfg.upstreamHandBacks, lastErr, creatorUserID)
 
 	case agentloop.ResultParked:
@@ -833,6 +836,7 @@ func (s *Spawner) recordNativeResult(
 			reason:         db.ParkIdle(),
 			runtime:        domain.ConversationRuntimeNative,
 			mirror:         mirror,
+			network:        runTreeHandOff(cfg.sidecar.runNetwork()),
 		}, "")}
 	}
 

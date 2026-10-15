@@ -11,7 +11,8 @@
 //   - IPCClient: dials a per-run unix socket bind-mounted by the
 //     spawner in the sandbox branch (see internal/agentproc.Run). The
 //     socket file's fs permissions ARE the credential — one socket per
-//     run, owned by the sandbox UID, mode 0600. The agent inside the
+//     run, in a directory only that run's sidecar and jail may enter,
+//     group the run's own jail gid, mode 0660. The agent inside the
 //     sandbox cannot reach a host DB or the keychain; routing every
 //     state mutation back through this socket is how it acts on behalf
 //     of its own run identity without ever holding tokens itself.

@@ -105,8 +105,8 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
-	if err := os.Chown(certPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-		t.Fatalf("chown cert to sandbox uid: %v", err)
+	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
+		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(certPath) })
 
@@ -156,8 +156,8 @@ func TestIntegration_GHInjector_JailedGHThroughInjector(t *testing.T) {
 
 	run := func(t *testing.T, args ...string) (string, error) {
 		worktree := t.TempDir()
-		if err := os.Chown(worktree, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-			t.Skipf("can't chown worktree to UID %d: %v", sandbox.WorktreeUID, err)
+		if err := os.Chown(worktree, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
+			t.Skipf("can't chown worktree to UID %d: %v", net.JailUID(), err)
 		}
 		lr, _, werr := sandbox.Wrap(ctx, sandbox.Config{
 			ConversationID: conversationID,
@@ -242,8 +242,8 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 	if err := os.WriteFile(certPath, ghinjector.TrustBundlePEM(certPEM), 0o640); err != nil {
 		t.Fatalf("write cert: %v", err)
 	}
-	if err := os.Chown(certPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-		t.Fatalf("chown cert to sandbox uid: %v", err)
+	if err := os.Chown(certPath, net.JailUID(), sandbox.JailGID(net.Idx)); err != nil {
+		t.Fatalf("chown cert to the jail identity: %v", err)
 	}
 	t.Cleanup(func() { _ = os.Remove(certPath) })
 
@@ -303,9 +303,9 @@ func TestIntegration_GHInjector_SharedOriginRepoInference(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		return os.Lchown(p, sandbox.WorktreeUID, sandbox.WorktreeGID)
+		return os.Lchown(p, net.JailUID(), sandbox.JailGID(net.Idx))
 	}); err != nil {
-		t.Skipf("can't chown worktree to UID %d: %v", sandbox.WorktreeUID, err)
+		t.Skipf("can't chown worktree to UID %d: %v", net.JailUID(), err)
 	}
 
 	env := []string{

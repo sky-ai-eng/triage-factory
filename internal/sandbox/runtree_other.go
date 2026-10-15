@@ -11,7 +11,10 @@ import (
 // chownRunTree off Linux is a no-op — the sandbox path isn't reachable
 // there (shouldSandbox gates on Linux), matching the runtime.GOOS check
 // the previous in-caller chown had.
-func chownRunTree(_ context.Context, _, _ string) error { return nil }
+func chownRunTree(_ context.Context, _, _ string, _ int) error { return nil }
+
+// runTreeJailUID is always false off Linux: no jail identity holds a tree there.
+func runTreeJailUID(_ string) (int, bool) { return 0, false }
 
 // removeRunTree off Linux is the plain removal the callers used before
 // this seam existed — no sandbox identity ever owns these trees there.

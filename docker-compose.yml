@@ -594,7 +594,6 @@ services:
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
-      TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
     # No x-tf-hardening here, deliberately: a control pod launches no
     # sandbox, so it carries no SYS_ADMIN/NET_ADMIN, no custom seccomp, and
     # runs like any ordinary web service. Only the executor service below
@@ -716,7 +715,6 @@ services:
       TF_ORCHESTRATOR_GID: ${TF_ORCHESTRATOR_GID:-}
       TF_ORCHESTRATOR_HOME: ${TF_ORCHESTRATOR_HOME:-}
       TF_CAPBROKER_SOCKET: ${TF_CAPBROKER_SOCKET:-}
-      TF_SANDBOX_GID: ${TF_SANDBOX_GID:-}
       # Same destination as the control pod: a delegated run's spans are
       # produced here — setup, dispatch, and the client-side spans around
       # every broker/sidecar IPC call. The sandbox and the credential sidecar

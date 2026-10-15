@@ -262,14 +262,14 @@ esac
 # 6. Privilege-separation posture, per role. The failure class this catches
 #    is invisible to the health probes: a container boots green while the
 #    split is silently degraded (a broker on the capless control pod, an
-#    orchestrator that kept its capabilities, or a /run/tf the unprivileged
-#    executor orchestrator can't create per-run agenthost sockets in). Multi
-#    mode is always the control+executor split, so BOTH postures are
-#    unconditionally expected:
+#    orchestrator that kept its capabilities or a supplementary group, or a
+#    /run/tf a run's sidecar could write in). Multi mode is always the
+#    control+executor split, so BOTH postures are unconditionally expected:
 #      control  — NO cap-broker (it never launches a sandbox and its service
 #                 carries no caps), orchestrator capless + non-root.
 #      executor — cap-broker present (the only sandbox launch path),
-#                 orchestrator capless + non-root, /run/tf orchestrator-owned.
+#                 orchestrator capless + non-root with no supplementary
+#                 group, /run/tf orchestrator-owned at 0711.
 
 # 6a. Control: capless, broker-free.
 posture=$(dc exec -T triagefactory sh -c '
@@ -313,9 +313,13 @@ posture=$(dc exec -T executor sh -c '
   [ "$bnd" = "0000000000000000" ] || { echo "executor orchestrator CapBnd=$bnd, want all-zero (bounding set must be cleared)"; exit 1; }
   ouid=$(awk "/^Uid/{print \$2}" "/proc/$orch/status")
   [ "$ouid" != "0" ] || { echo "executor orchestrator runs as root; the uid switch did not apply"; exit 1; }
+  ogroups=$(awk "/^Groups:/{sub(/^Groups:[[:space:]]*/, \"\"); print}" "/proc/$orch/status")
+  [ -z "$ogroups" ] || { echo "executor orchestrator carries supplementary groups \"$ogroups\"; it must carry none (a jail gid would make it a member of that run)"; exit 1; }
   duid=$(stat -c %u /run/tf)
-  [ "$duid" = "$ouid" ] || { echo "/run/tf owned by uid $duid, want the orchestrator uid $ouid (agenthost sockets are created there unprivileged)"; exit 1; }
-  echo "broker pid $broker (root, caps); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero); /run/tf owned by $ouid"
+  [ "$duid" = "$ouid" ] || { echo "/run/tf owned by uid $duid, want the orchestrator uid $ouid (its per-launch stdio sockets are created there unprivileged)"; exit 1; }
+  dmode=$(stat -c %a /run/tf)
+  [ "$dmode" = "711" ] || { echo "/run/tf mode $dmode, want 711 (no group or other write: a sidecar creates only inside its own run directory)"; exit 1; }
+  echo "broker pid $broker (root, caps); orchestrator pid $orch (uid $ouid, CapEff/CapBnd zero, no groups); /run/tf $duid 0711"
 ' 2>&1) || fail "executor privsep posture: $posture"
 pass "executor privsep posture: $posture"
 

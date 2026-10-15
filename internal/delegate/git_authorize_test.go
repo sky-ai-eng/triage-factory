@@ -314,9 +314,10 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping(t *testing.T) {
 // push-gate starvation regression: identical setup to
 // TestGitAuthorizeDecision_PRWorktreeRefspecMapping, except the worktree is
 // chowned to a different uid before the decision is computed — reproducing
-// what agentproc.chownWorktreeForSandbox leaves behind for every multi-mode
-// run. Before the fix, the host-side (root) read of PushTargetBranch hit
-// git's "detected dubious ownership" refusal, silently came back "", and the
+// what the launch's run-tree hand-off (sandbox.RunNetwork.HandOffRunTree)
+// leaves behind for every multi-mode run. Before the fix, the host-side (root)
+// read of PushTargetBranch hit git's "detected dubious ownership" refusal,
+// silently came back "", and the
 // row was skipped — Allowed stayed true (fetch/advertise still fine) but
 // AllowedRefs came back empty, which is exactly the observed symptom: the
 // receive-pack ref gate then denies every pushed ref with "ref-not-allowed"
@@ -364,7 +365,7 @@ func TestGitAuthorizeDecision_PRWorktreeRefspecMapping_DubiousOwnership(t *testi
 		t.Fatalf("materialize: %v", err)
 	}
 
-	// Reproduce chownWorktreeForSandbox's effect: the worktree ends up owned
+	// Reproduce the hand-off's effect: the worktree ends up owned
 	// by a uid other than this (root) process's. Git's dubious-ownership
 	// check only compares the top-level directory's owner, so chowning wt
 	// itself (rather than walking the whole tree like the real chown does)

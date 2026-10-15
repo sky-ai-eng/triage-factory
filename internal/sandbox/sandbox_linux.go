@@ -4,6 +4,7 @@ package sandbox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -206,6 +207,8 @@ func wrap(ctx context.Context, cfg Config) (LaunchedRun, *Sandbox, error) {
 		Rlimits:         cfg.Rlimits,
 		MemoryLimitMB:   cfg.MemoryLimitMB,
 		NetnsPath:       netSt.NetnsPath,
+		JailUID:         JailUID(idx),
+		JailGID:         JailGID(idx),
 		ExtraEgressCIDR: cfg.ExtraEgressCIDR,
 	})
 	if err != nil {
@@ -309,11 +312,77 @@ func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, e
 	}, nil
 }
 
-// Close reverses SetupRunNetwork: tears the veth/netns/iptables down and
-// releases the subnet idx. Idempotent. Teardown before release mirrors
-// Sandbox.Close's ordering (a freed idx a concurrent Allocate could reclaim
-// mid-teardown would collide with the still-lingering veth). Uses a detached
-// context so a cancelled run still drains — teardown must run regardless.
+// JailUID is the uid of the jail launched into this network, and the owner a
+// run tree is handed to for it.
+func (n *RunNetwork) JailUID() int { return JailUID(n.Idx) }
+
+// PrepareSockets has the broker create conversationID's per-run socket
+// directories for this engagement (see PrepareRunSockets) and records them so
+// Close removes them. Call it before the sidecar is launched: the sidecar can
+// create nothing anywhere else.
+func (n *RunNetwork) PrepareSockets(ctx context.Context, conversationID string) error {
+	n.grantsMu.Lock()
+	defer n.grantsMu.Unlock()
+	if n.closed {
+		return fmt.Errorf("sandbox: prepare sockets on a closed run network")
+	}
+	// Recorded before the call: a prepare that fails partway may have made one
+	// of the two directories, and Close's guarded removal handles either.
+	n.socketsFor = conversationID
+	return defaultOps.PrepareRunSockets(ctx, conversationID, n.Idx)
+}
+
+// HandOffRunTree hands root, recursively, to this network's jail identity and
+// records it so Close parks it (ParkRunTree) before the index is released.
+func (n *RunNetwork) HandOffRunTree(ctx context.Context, root string) error {
+	n.grantsMu.Lock()
+	defer n.grantsMu.Unlock()
+	if n.closed {
+		return fmt.Errorf("sandbox: hand off a run tree on a closed run network")
+	}
+	n.handedOffTrees = appendOnce(n.handedOffTrees, root)
+	return defaultOps.ChownRunTree(ctx, root, "", n.JailUID())
+}
+
+// GrantStaging grants a launch's staging directory to this network's jail
+// identity (GrantRunStaging) and records it so Close revokes the grant.
+func (n *RunNetwork) GrantStaging(ctx context.Context, dir string) error {
+	n.grantsMu.Lock()
+	defer n.grantsMu.Unlock()
+	if n.closed {
+		return fmt.Errorf("sandbox: grant staging on a closed run network")
+	}
+	n.grantedStaging = appendOnce(n.grantedStaging, dir)
+	defer stagingGrants.lock(dir)()
+	return defaultOps.GrantRunStaging(ctx, dir, n.Idx)
+}
+
+func appendOnce(list []string, v string) []string {
+	for _, have := range list {
+		if have == v {
+			return list
+		}
+	}
+	return append(list, v)
+}
+
+// Close takes back every grant made under this index's jail identity, tears
+// the veth/netns/iptables down and releases the subnet idx. Idempotent.
+// Teardown before release mirrors Sandbox.Close's ordering (a freed idx a
+// concurrent Allocate could reclaim mid-teardown would collide with the
+// still-lingering veth). Uses a detached context so a cancelled run still
+// drains — teardown must run regardless.
+//
+// Callers close this last, after the run's jail and its sidecar are gone, so
+// by the time the grants are taken back no process holds the jail identity.
+// The grants come back first, then the index: while the index is held no
+// other engagement can be given it, which is also what makes the ownership
+// guards in ReleaseRunSockets and ParkRunTree exact. A grant that does not
+// come back is tried again in the background (retryGrantRelease), with the
+// index held until it does; one that still cannot be taken back keeps the
+// index out of the allocator for the life of this process rather than handing
+// another run an identity a file still carries — one slot of MaxSandboxes,
+// logged, against a run reaching another's tree.
 //
 // The index is a scarce, MaxSandboxes-wide resource that also keys the run's
 // netns name and its sidecar uid, so a teardown that stalls narrows the whole
@@ -322,22 +391,95 @@ func setupRunNetwork(ctx context.Context, conversationID string) (*RunNetwork, e
 // is timed here and reported when it exceeds the budget below, rather than
 // being inferred later from a run that could not get a slot.
 func (n *RunNetwork) Close() error {
-	if n == nil || n.closed {
+	if n == nil {
+		return nil
+	}
+	n.grantsMu.Lock()
+	if n.closed {
+		n.grantsMu.Unlock()
 		return nil
 	}
 	n.closed = true
+	n.grantsMu.Unlock()
+
 	ns, _ := n.netSt.(NetworkState)
 	started := time.Now()
-	if err := defaultOps.TeardownNetwork(context.Background(), ns); err != nil {
+	ctx := context.Background()
+	held := n.releaseGrants(ctx)
+	if err := defaultOps.TeardownNetwork(ctx, ns); err != nil {
 		fmt.Fprintf(os.Stderr, "sandbox: teardown run network: %v\n", err)
 	}
-	defaultAllocator().Release(n.Idx)
+	if len(held) == 0 {
+		defaultAllocator().Release(n.Idx)
+	} else {
+		go n.retryGrantRelease(held)
+	}
 	if elapsed := time.Since(started); elapsed > slowNetworkTeardown {
 		sandboxLog.Warn("run network teardown was slow; its subnet index stayed held for that long and the slot was unavailable to any other run",
 			"subnet_idx", n.Idx, "netns", ns.NetnsName, "took", elapsed)
 	}
 	return nil
 }
+
+// releaseGrants takes back every grant recorded on n and returns the failures.
+// Each grant is attempted whatever happened to the others.
+func (n *RunNetwork) releaseGrants(ctx context.Context) []error {
+	n.grantsMu.Lock()
+	sockets, trees, staging := n.socketsFor, n.handedOffTrees, n.grantedStaging
+	n.grantsMu.Unlock()
+
+	var errs []error
+	if sockets != "" {
+		if err := defaultOps.ReleaseRunSockets(ctx, sockets, n.Idx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, root := range trees {
+		if err := defaultOps.ParkRunTree(ctx, root, n.JailUID()); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, dir := range staging {
+		if err := revokeRunStaging(dir, JailGID(n.Idx)); err != nil {
+			errs = append(errs, fmt.Errorf("sandbox: revoke staging grant on %s: %w", dir, err))
+		}
+	}
+	return errs
+}
+
+// retryGrantRelease takes back the grants Close could not, on
+// grantReleaseRetries' schedule, and releases the index once every one has
+// come back. It runs apart from Close because Close's caller is still holding
+// things — an engagement's concurrency slot, the shutdown's join on it — and a
+// release that fails at shutdown, when the broker may already be gone, would
+// otherwise hold all of them for the length of the schedule. The index is the
+// one thing that has to wait, and it does: nothing else can draw it until
+// this has released it.
+func (n *RunNetwork) retryGrantRelease(held []error) {
+	ctx := context.Background()
+	for _, wait := range grantReleaseRetries {
+		sandboxLog.Warn("a grant made under this run's jail identity did not come back; trying again",
+			"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "retry_in", wait, "error", errors.Join(held...))
+		time.Sleep(wait)
+		if held = n.releaseGrants(ctx); len(held) == 0 {
+			defaultAllocator().Release(n.Idx)
+			sandboxLog.Info("grants made under this run's jail identity came back on a retry; subnet index released",
+				"subnet_idx", n.Idx, "jail_uid", n.JailUID())
+			return
+		}
+	}
+	sandboxLog.Error("a grant made under this run's jail identity could not be taken back; its subnet index stays allocated until this process restarts",
+		"subnet_idx", n.Idx, "jail_uid", n.JailUID(), "error", errors.Join(held...))
+}
+
+// grantReleaseRetries is how long retryGrantRelease waits before each further
+// attempt. Every attempt retakes the whole set, which is safe because each
+// grant's release is guarded and idempotent: a socket directory goes, a root
+// is parked and staging is regrouped only while it still carries this index's
+// identity. The schedule outlasts a broker call that failed in transit, not a
+// broker that is gone — there, the index staying held until the process
+// restarts is the answer.
+var grantReleaseRetries = []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second}
 
 // slowNetworkTeardown is how long a per-run network teardown may take before
 // it is worth a log line. The work is a handful of brokered `ip`/`iptables`

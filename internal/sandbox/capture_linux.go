@@ -118,13 +118,16 @@ func (t *tailBuffer) String() string {
 // payload-blind posture even though stdout now carries only the small manifest;
 // the large members go to stagingDir.
 //
-// The child drops to the sandbox uid/gid (matching the run tree's ownership
-// hand-off) and runs in a fresh, empty network namespace. So: any
-// clean/smudge/textconv/diff filter a hostile .git/config could trigger
-// executes only as the agent's own uid with no network — not as this
-// (privileged) process — which is the whole point; and the reader's uid
-// matching the tree owner means git's own capture commands
-// (rev-parse/bundle/diff) no longer fail dubious-ownership.
+// The child drops to the jail identity that holds worktree — the uid the
+// ownership hand-off gave it to, which is the uid of the engagement that wrote
+// it, with that engagement's jail gid — and runs in a fresh, empty network
+// namespace. So: any clean/smudge/textconv/diff filter a hostile .git/config
+// could trigger executes only as that run's own identity with no network — not
+// as this (privileged) process, and not as any other run — and the reader's
+// uid matching the tree owner means git's own capture commands
+// (rev-parse/bundle/diff) no longer fail dubious-ownership. A worktree no jail
+// identity holds (never handed off, or parked after its engagement ended) is
+// refused: there is no identity to capture it as.
 //
 // The network namespace is defense in depth on top of the uid drop, not the
 // primary boundary — that's the uid drop itself (see below) — so it is
@@ -140,7 +143,7 @@ func (t *tailBuffer) String() string {
 // tree's ownership hand-off covers config, objects, and refs together. A
 // linked `git worktree` (the local-mode layout) keeps its objects
 // + config in a separate bare cache that is never re-owned — dropping to
-// uid 10000 there would trade dubious-ownership for EACCES on the bare.
+// a jail uid there would trade dubious-ownership for EACCES on the bare.
 // Multi mode never uses that layout (the sandbox can't see the shared
 // bare), a property pinned by worktree.TestCreateForPR_SelfContainedClone_MultiMode;
 // if that ever changes, this capture must resolve the commondir's ownership
@@ -159,7 +162,12 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID stri
 	// drop regardless so a reader blocked on EOF is not held open by us.
 	defer func() { _ = stdout.Close() }()
 
-	if _, err := validateRunTreeRoot("capture run delta", worktree); err != nil {
+	info, err := validateRunTreeRoot("capture run delta", worktree)
+	if err != nil {
+		return "", err
+	}
+	uid, gid, err := captureIdentity(worktree, info)
+	if err != nil {
 		return "", err
 	}
 	outputs, err := openCaptureStaging(stagingDir)
@@ -181,8 +189,8 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID stri
 	cmd.ExtraFiles = outputs
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Credential: &syscall.Credential{
-			Uid: uint32(WorktreeUID),
-			Gid: uint32(WorktreeGID),
+			Uid: uint32(uid),
+			Gid: uint32(gid),
 			// Empty Groups (NoSetGroups stays false) forces setgroups(0), shedding
 			// the parent process's supplementary groups — otherwise the child
 			// keeps group 0 (root) et al. and retains group-readable/writable host
@@ -206,6 +214,23 @@ func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID stri
 		return stderr.String(), fmt.Errorf("isolated capture: %w", err)
 	}
 	return stderr.String(), nil
+}
+
+// captureIdentity is the uid/gid the capture child runs as: the jail identity
+// that owns worktree, read from the stat validateRunTreeRoot already took.
+// Read from the tree rather than named by the caller because only this side
+// can make a jail uid own anything, so the owner is a statement of which
+// engagement wrote the tree that no caller can forge.
+func captureIdentity(worktree string, info os.FileInfo) (uid, gid int, err error) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, fmt.Errorf("sandbox: capture run delta: no stat for %s", worktree)
+	}
+	idx, ok := jailSubnetIdx(int(st.Uid))
+	if !ok {
+		return 0, 0, fmt.Errorf("sandbox: capture run delta: %s is owned by uid %d, which is not a jail identity", worktree, st.Uid)
+	}
+	return JailUID(idx), JailGID(idx), nil
 }
 
 func openCaptureStaging(dir string) ([]*os.File, error) {

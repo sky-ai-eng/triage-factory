@@ -322,7 +322,35 @@ func (s *Server) dispatch(ctx context.Context, method string, rawArgs json.RawMe
 		if err := dec(&a); err != nil {
 			return nil, err
 		}
-		return emptyResult{}, s.ops.ChownRunTree(ctx, a.Root, a.Subpath)
+		return emptyResult{}, s.ops.ChownRunTree(ctx, a.Root, a.Subpath, a.JailUID)
+
+	case methodParkRunTree:
+		var a parkRunTreeArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.ParkRunTree(ctx, a.Root, a.JailUID)
+
+	case methodPrepareSockets:
+		var a runSocketsArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.PrepareRunSockets(ctx, a.ConversationID, a.SubnetIdx)
+
+	case methodReleaseSockets:
+		var a runSocketsArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.ReleaseRunSockets(ctx, a.ConversationID, a.SubnetIdx)
+
+	case methodGrantStaging:
+		var a grantRunStagingArgs
+		if err := dec(&a); err != nil {
+			return nil, err
+		}
+		return emptyResult{}, s.ops.GrantRunStaging(ctx, a.Dir, a.SubnetIdx)
 
 	case methodRemoveRunTree:
 		var a removeRunTreeArgs

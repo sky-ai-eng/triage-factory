@@ -30,6 +30,23 @@ func TestValidateOrchestratorUIDFlag_RejectsSidecarBand(t *testing.T) {
 	}
 }
 
+// TestValidateOrchestratorUIDFlag_RejectsJailRange pins the same guard for
+// the jail identities: an orchestrator at a jail uid would own the run trees
+// handed to that index, and one at the parked owner would own every parked
+// tree.
+func TestValidateOrchestratorUIDFlag_RejectsJailRange(t *testing.T) {
+	for _, uid := range []int{sandbox.ParkedRunTreeUID, sandbox.JailUIDBase, sandbox.JailUID(255)} {
+		err := validateOrchestratorUIDFlag(uid)
+		if err == nil {
+			t.Errorf("uid %d: expected rejection, got nil", uid)
+			continue
+		}
+		if !strings.Contains(err.Error(), "jail uid range") {
+			t.Errorf("uid %d: err = %v, want it to name the jail uid range", uid, err)
+		}
+	}
+}
+
 // TestValidateOrchestratorUIDFlag_AllowsOutsideBand pins that the guard
 // doesn't false-positive on the documented default (10001), the flag's
 // "unset" sentinel (-1), or a value just past the band's top edge.
@@ -43,16 +60,18 @@ func TestValidateOrchestratorUIDFlag_AllowsOutsideBand(t *testing.T) {
 
 // TestValidateOrchestratorGIDFlag_RejectsLeakyGroups pins the boot-time refusal
 // of a run-tree group that would defeat its own purpose. The group is chosen so
-// that no sandboxed principal carries it; the two ways to break that — reusing
-// WorktreeGID (every agent AND every sidecar is in it) or a value in the sidecar
-// band — must be rejected with an error that names the hazard, so a misconfigured
+// that no sandboxed principal carries it; the two ways to break that — a jail
+// gid (a run's jail and its sidecar carry it) or a value in the sidecar band —
+// must be rejected with an error that names the hazard, so a misconfigured
 // TF_ORCHESTRATOR_GID fails closed at boot instead of silently opening every run
-// tree to the sidecar.
+// tree to a run's sidecar.
 func TestValidateOrchestratorGIDFlag_RejectsLeakyGroups(t *testing.T) {
-	if err := validateOrchestratorGIDFlag(sandbox.WorktreeGID); err == nil {
-		t.Errorf("gid %d (WorktreeGID): expected rejection, got nil", sandbox.WorktreeGID)
-	} else if !strings.Contains(err.Error(), "WorktreeGID") {
-		t.Errorf("gid %d: err = %v, want it to name WorktreeGID", sandbox.WorktreeGID, err)
+	for _, gid := range []int{sandbox.JailGID(0), sandbox.JailGID(255)} {
+		if err := validateOrchestratorGIDFlag(gid); err == nil {
+			t.Errorf("gid %d: expected jail-band rejection, got nil", gid)
+		} else if !strings.Contains(err.Error(), "jail gid band") {
+			t.Errorf("gid %d: err = %v, want it to name the jail gid band", gid, err)
+		}
 	}
 	for _, gid := range []int{sandbox.SidecarUIDBase, sandbox.SidecarUIDBase + sandbox.MaxSandboxes - 1} {
 		if err := validateOrchestratorGIDFlag(gid); err == nil {
@@ -68,7 +87,7 @@ func TestValidateOrchestratorGIDFlag_RejectsLeakyGroups(t *testing.T) {
 // nothing sandboxed), the "unset" sentinel (-1), and a value just past the
 // sidecar band's top edge.
 func TestValidateOrchestratorGIDFlag_AllowsExclusiveGroups(t *testing.T) {
-	for _, gid := range []int{-1, 10001, sandbox.SidecarUIDBase + sandbox.MaxSandboxes} {
+	for _, gid := range []int{-1, 10000, 10001, sandbox.SidecarUIDBase + sandbox.MaxSandboxes, sandbox.JailUIDBase + sandbox.MaxSandboxes} {
 		if err := validateOrchestratorGIDFlag(gid); err != nil {
 			t.Errorf("gid %d: unexpected rejection: %v", gid, err)
 		}

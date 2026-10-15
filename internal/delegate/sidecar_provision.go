@@ -38,9 +38,10 @@ type runSidecar struct {
 	conn *sidecarproto.Conn
 	res  *sidecarproto.StartProxiesResult
 
-	// conversationID is the key every per-run file under the socket root is named
-	// after — the conversation id. Held so teardown can clear this cell's files
-	// by the same derivation bring-up cleared them by.
+	// conversationID is the conversation this cell serves, for teardown's log
+	// lines. The per-run files under the socket root are the network's to
+	// release (sandbox.RunNetwork.PrepareSockets), with the rest of the jail
+	// identity's grants.
 	conversationID string
 
 	// stopRelay stops the credential-refresh relay goroutine; closed once by
@@ -59,9 +60,10 @@ type runSidecar struct {
 // Close tears the run sidecar down in the order that keeps the veth alive
 // under anything still using it: stop the refresh relay, drain the sidecar's
 // audit records, stop the supervision reader, SIGKILL the sidecar (freeing its
-// proxies + unsealed bundle), remove the per-run files that sidecar left under
-// the socket root, then tear down the network the proxies were bound on and
-// release its subnet index. Safe on nil.
+// proxies + unsealed bundle), then close the network — which takes back every
+// grant made under the run's jail identity (its socket directories, its run
+// tree, its staging), tears down the veth the proxies were bound on, and only
+// then releases the subnet index. Safe on nil.
 //
 // The drain comes before anything that would cut the sidecar off: it is the
 // last chance for records the sidecar still holds — ones the orchestrator
@@ -71,12 +73,10 @@ type runSidecar struct {
 // sidecar that has stopped answering, hold the teardown for the drain's bound
 // (agentproc.DrainRecords: the sidecar's 10s wait plus a little slack).
 //
-// The file removal sits exactly there — after the sidecar is dead so nothing
-// can re-create them behind it, and before the index is released so the
-// ownership guard ReleaseRunCellFiles applies still holds (see its doc). It is
-// hygiene: the run's next engagement clears whatever is left regardless, and
-// this is what keeps a long-lived executor's tmpfs socket root from carrying
-// one orphaned pair per run id it ever ran.
+// The network goes last because the release it ends with is what lets another
+// engagement have this index — its sidecar uid and its jail identity — and by
+// then nothing of this engagement may still hold either: the jail was closed
+// before this ran, and the sidecar is killed just above.
 func (rs *runSidecar) Close() {
 	if rs == nil {
 		return
@@ -93,9 +93,6 @@ func (rs *runSidecar) Close() {
 		_ = rs.proc.Close()
 	}
 	if rs.net != nil {
-		if rs.conversationID != "" {
-			sandbox.ReleaseRunCellFiles(rs.conversationID, rs.net.Idx)
-		}
 		_ = rs.net.Close()
 	}
 	// A stop that queues a message re-claims the conversation within a scan
@@ -128,9 +125,9 @@ func (rs *runSidecar) drainAuditRecords() {
 // slowCellTeardown is how long a cell teardown may take before it is logged.
 // The work is an audit-record drain (immediate unless records are still
 // waiting on the orchestrator or the sidecar has stopped answering), a
-// supervision-socket close, a SIGKILL, two
-// unlinks and a brokered network teardown — none of which waits on the agent —
-// so a teardown past this is holding a scarce slot for a reason worth naming.
+// supervision-socket close, a SIGKILL, and the brokered release of the run's
+// grants and its network — none of which waits on the agent — so a teardown
+// past this is holding a scarce slot for a reason worth naming.
 const slowCellTeardown = 2 * time.Second
 
 // credRelayNudge is a one-shot request to the credential-refresh relay: re-read
@@ -258,16 +255,6 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 		return nil, nil
 	}
 
-	// Clear whatever an earlier engagement of this conversation left under the
-	// socket root before anything in the new cell is created. The per-run
-	// socket and injector cert are keyed by run id, so sequential engagements
-	// share those paths, and the sidecar about to be launched can neither
-	// truncate nor unlink a file owned by its predecessor's uid — the socket
-	// root is sticky. This process can (it owns that directory), and doing it
-	// here, ahead of the launch, is what makes an immediate re-claim that
-	// races the previous cell's teardown come up instead of failing.
-	sandbox.ClearRunCellFiles(conv.ID)
-
 	// The four-process choreography, from the executor's viewpoint. Every leg
 	// below is a round trip into a process that exports nothing itself — the
 	// cap-broker for the network, the sidecar for the credentials — so this
@@ -288,6 +275,22 @@ func (s *Spawner) bringUpRunSidecar(ctx context.Context, orgID string, conv *dom
 	if err != nil {
 		recordSpanError(bringUpSpan, err)
 		return nil, fmt.Errorf("set up run network: %w", err)
+	}
+	// The run's socket directories, made for this engagement's index before
+	// its sidecar exists: the sidecar can create its socket and cert nowhere
+	// else. Making them replaces whatever an earlier engagement of this
+	// conversation left at the same paths, which is what lets a re-claim that
+	// races the previous cell's teardown come up instead of failing.
+	sockCtx, sockSpan := tracer.Start(ctx, "sandbox.sockets.prepare")
+	endSockets := activity.begin("sidecar_sockets", sidecarOpDeadline)
+	err = net.PrepareSockets(sockCtx, conv.ID)
+	endSockets()
+	recordSpanError(sockSpan, err)
+	sockSpan.End()
+	if err != nil {
+		recordSpanError(bringUpSpan, err)
+		_ = net.Close()
+		return nil, fmt.Errorf("prepare run socket directories: %w", err)
 	}
 	scCtx, scSpan := tracer.Start(ctx, "sandbox.sidecar.launch")
 	endLaunch := activity.begin("sidecar_launch", sidecarOpDeadline)

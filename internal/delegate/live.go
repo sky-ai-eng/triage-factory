@@ -29,12 +29,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
@@ -89,6 +91,26 @@ type liveParkContext struct {
 	// Nil for a caller with no tree — a cancel during bring-up, a fixture —
 	// where there is nothing to file.
 	mirror *memoryMirror
+	// network is the engagement's run network, which can hand the tree to the
+	// engagement's jail identity when the ending has to capture a tree no jail
+	// holds (treeToCapture). Nil unjailed, and for a caller with no cell.
+	network treeHandOff
+}
+
+// treeHandOff is what an ending needs of its run network: handing the run tree
+// to the engagement's jail identity, to be taken back with the network's other
+// grants. *sandbox.RunNetwork in production.
+type treeHandOff interface {
+	HandOffRunTree(ctx context.Context, root string) error
+}
+
+// runTreeHandOff is n as a treeHandOff, nil when n is: a nil pointer stored in
+// the interface would read as a network that is there.
+func runTreeHandOff(n *sandbox.RunNetwork) treeHandOff {
+	if n == nil {
+		return nil
+	}
+	return n
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -536,12 +558,17 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// before the process's grace period can run out, or the conversation waits
 	// out its lease and is counted as lost. Best-effort as ever, and skipped
 	// entirely with no workspace to capture (a cancel during setup), which the
-	// persist would reject anyway. A record that could not be opened does not
-	// hold up the release either: the persist below retries the open on its
+	// persist would reject anyway, or with a tree that holds nothing the last
+	// snapshot lacks (treeToCapture). A record that could not be opened does
+	// not hold up the release either: the persist below retries the open on its
 	// own way through. A key a newer engagement already holds is left to it,
 	// and nothing is captured.
 	snapCtx := context.WithoutCancel(ctx)
 	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
+	var adoptTree func(context.Context) error
+	if willSnapshot {
+		willSnapshot, adoptTree = s.treeToCapture(snapCtx, park)
+	}
 	leaseHeld := false
 	if willSnapshot {
 		record := s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
@@ -566,6 +593,7 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 		err := s.persistWorkspaceSnapshot(persistCtx, snapshotWrite{
 			orgID: park.orgID, conversationID: park.conversationID, keyID: park.namespace, claimID: park.claimID,
 			wtPath: park.claudeCwd, sessionID: sessionID, runtime: park.runtime, reason: reason,
+			adoptTree: adoptTree,
 		}, leaseHeld)
 		cancel()
 		if err != nil {
@@ -573,6 +601,41 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 		}
 	}
 	return fenced
+}
+
+// treeToCapture decides whether an ending captures its tree, and returns the
+// hand-off the capture needs first when it does.
+//
+// Where the agent is jailed, the capture runs as the jail identity holding the
+// tree, which is this engagement's once its jail has run in it. A tree no jail
+// holds — parked by the engagement before this one, or built by this one and
+// never launched into — has nothing in it that the key's last snapshot lacks,
+// unless that snapshot never landed: then this ending is the only thing left
+// that can put the work in a blob, and it hands the tree to its own jail
+// identity to capture it, through the network that takes the tree back with
+// the rest of its grants. A record that cannot be read counts as one that did
+// not land. Unjailed, the capture runs in-process and needs no identity.
+func (s *Spawner) treeToCapture(ctx context.Context, park liveParkContext) (capture bool, adoptTree func(context.Context) error) {
+	if !agentproc.WillSandbox() {
+		return true, nil
+	}
+	if _, held := sandbox.RunTreeJailUID(park.claudeCwd); held {
+		return true, nil
+	}
+	if _, err := os.Lstat(park.claudeCwd); err != nil {
+		return false, nil
+	}
+	if st, err := s.snapshotStateFor(ctx, park.orgID, park.namespace); err == nil && st != nil && st.State == domain.WorkspaceSnapshotWritten {
+		return false, nil
+	}
+	if park.network == nil {
+		delegateLog.Warn("the run tree holds work its last snapshot does not, and this ending has no jail identity to capture it as",
+			"conversation", park.conversationID, "key_id", park.namespace)
+		return false, nil
+	}
+	return true, func(ctx context.Context) error {
+		return park.network.HandOffRunTree(ctx, park.claudeCwd)
+	}
 }
 
 // releaseClaimOnShutdown hands the engagement's claim back as a clean

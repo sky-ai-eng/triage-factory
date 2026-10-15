@@ -22,7 +22,11 @@ type fakeOps struct {
 	teardownNetworkFn func(ctx context.Context, state sandbox.NetworkState) error
 	ensureRootfsFn    func(ctx context.Context, selector sandbox.RootfsSelector) (string, error)
 	reapOrphansFn     func(ctx context.Context) error
-	chownRunTreeFn    func(ctx context.Context, root, subpath string) error
+	chownRunTreeFn    func(ctx context.Context, root, subpath string, jailUID int) error
+	parkRunTreeFn     func(ctx context.Context, root string, jailUID int) error
+	prepareSocketsFn  func(ctx context.Context, conversationID string, subnetIdx uint8) error
+	releaseSocketsFn  func(ctx context.Context, conversationID string, subnetIdx uint8) error
+	grantStagingFn    func(ctx context.Context, dir string, subnetIdx uint8) error
 	removeRunTreeFn   func(ctx context.Context, path string) error
 	captureRunDeltaFn func(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error)
 }
@@ -39,8 +43,20 @@ func (f *fakeOps) EnsureRootfs(ctx context.Context, selector sandbox.RootfsSelec
 func (f *fakeOps) ReapOrphans(ctx context.Context) error {
 	return f.reapOrphansFn(ctx)
 }
-func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string) error {
-	return f.chownRunTreeFn(ctx, root, subpath)
+func (f *fakeOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
+	return f.chownRunTreeFn(ctx, root, subpath, jailUID)
+}
+func (f *fakeOps) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return f.parkRunTreeFn(ctx, root, jailUID)
+}
+func (f *fakeOps) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return f.prepareSocketsFn(ctx, conversationID, subnetIdx)
+}
+func (f *fakeOps) ReleaseRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return f.releaseSocketsFn(ctx, conversationID, subnetIdx)
+}
+func (f *fakeOps) GrantRunStaging(ctx context.Context, dir string, subnetIdx uint8) error {
+	return f.grantStagingFn(ctx, dir, subnetIdx)
 }
 func (f *fakeOps) RemoveRunTree(ctx context.Context, path string) error {
 	return f.removeRunTreeFn(ctx, path)

@@ -14,14 +14,15 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// TestStartWithServer_KeepsTheJailSocketPath is the drift guard for the
-// socket-root parameterization. The multi-mode path is validated broker-side
-// against a path the broker re-derives independently, so a refactor that
-// relocated it — even by a directory — would be rejected at every launch. The
-// relocation is additive: only StartLocal's socket moved.
+// TestStartWithServer_KeepsTheJailSocketPath pins the jail socket's literal
+// path: inside the run's own directory under /run/tf, which the cap-broker
+// creates for each engagement. The broker re-derives this path independently
+// to validate the launch's mount, so a refactor that relocated it — even by a
+// directory — would be rejected at every launch; StartLocal's socket lives
+// elsewhere and must not drag this one with it.
 func TestStartWithServer_KeepsTheJailSocketPath(t *testing.T) {
 	for _, id := range []string{"conv-1", "00000000-0000-0000-0000-0000000000aa"} {
-		if got, want := SocketPathFor(id), filepath.Join("/run/tf", id+".sock"); got != want {
+		if got, want := SocketPathFor(id), filepath.Join("/run/tf", id, "agenthost.sock"); got != want {
 			t.Errorf("SocketPathFor(%q) = %q, want %q", id, got, want)
 		}
 	}

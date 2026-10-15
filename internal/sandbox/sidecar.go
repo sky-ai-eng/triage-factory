@@ -9,30 +9,19 @@ import (
 // SidecarUID derives each run's sidecar uid from its subnet index, giving a
 // contiguous [SidecarUIDBase, SidecarUIDBase+MaxSandboxes) range — one slot
 // per concurrent run, matching the subnet allocator's own ceiling. Distinct
-// from WorktreeUID (10000, the fixed uid every gVisor-jailed agent runs as
-// *inside* its own sandbox namespace — safe to share because gVisor's Sentry
-// boundary isolates them, not a host uid) and the orchestrator's uid (10001
-// by default, operator-configurable via TF_ORCHESTRATOR_UID). The sidecar is
-// a plain host process with no jail, so distinct real uids ARE the isolation
-// boundary here: two sidecars at different uids cannot ptrace or read one
-// another even though they share the host's process table. 20000 leaves a
-// wide, unambiguous gap above 10000-10001 for an operator who repoints
-// TF_ORCHESTRATOR_UID within its own small documented range.
+// from the jail band (JailUIDBase, the per-run identity the run's jail and its
+// files carry) and the orchestrator's uid (10001 by default,
+// operator-configurable via TF_ORCHESTRATOR_UID). The sidecar is a plain host
+// process with no jail, so distinct real uids ARE the isolation boundary here:
+// two sidecars at different uids cannot ptrace or read one another even though
+// they share the host's process table. 20000 leaves a wide, unambiguous gap
+// above 10001 for an operator who repoints TF_ORCHESTRATOR_UID within its own
+// small documented range.
 const SidecarUIDBase = 20000
 
-func init() {
-	// Assert the reserved band never overlaps the agent uid's own range at
-	// compile-checkable constant math — a silent collision here would let a
-	// run's sidecar and another run's jailed agent share a uid, defeating
-	// the ptrace boundary this whole scheme exists to provide.
-	if SidecarUIDBase < WorktreeUID+MaxSandboxes {
-		panic("sandbox: SidecarUIDBase collides with the WorktreeUID band")
-	}
-}
-
 // SidecarUID returns the uid (and gid — the sidecar uses the same numeric
-// value for both, like WorktreeUID/WorktreeGID) the run at this subnet
-// index's credential sidecar runs as.
+// value for both, like JailUID/JailGID) the run at this subnet index's
+// credential sidecar runs as.
 func SidecarUID(subnetIdx uint8) int {
 	return SidecarUIDBase + int(subnetIdx)
 }

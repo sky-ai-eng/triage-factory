@@ -11,16 +11,9 @@ import (
 
 // HostDaemon is the non-Linux stub. The sandbox path is gated to
 // Linux upstream (shouldSandbox in agentproc), so production code
-// never calls Start off Linux; this exists to keep the package
+// never starts one off Linux; this exists to keep the package
 // compileable on Darwin dev boxes.
 type HostDaemon struct{}
-
-// Start always returns an "unsupported platform" error off Linux.
-// Callers wire it under the same Linux build tag the sandbox runner
-// requires.
-func Start(_ db.Stores, _ ConversationInfo, _ *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
-	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
-}
 
 // StartLocal always returns an "unsupported platform" error off Linux. The
 // local sandbox is a Linux mount namespace, so nothing off Linux ever asks
@@ -30,7 +23,7 @@ func StartLocal(_ db.Stores, _ ConversationInfo, _ string) (*HostDaemon, error) 
 }
 
 // StartWithServer always returns an "unsupported platform" error off Linux.
-func StartWithServer(_ *Server, _ string) (*HostDaemon, sandbox.Mount, error) {
+func StartWithServer(_ *Server, _ string, _ int) (*HostDaemon, sandbox.Mount, error) {
 	return nil, sandbox.Mount{}, errors.New("agenthost: HostDaemon not supported on this platform")
 }
 
@@ -50,6 +43,6 @@ func SocketMountFor(_ string) sandbox.Mount { return sandbox.Mount{} }
 func CertPathFor(_ string) string { return "" }
 
 // WriteInjectorCert is unsupported off Linux.
-func WriteInjectorCert(_ string, _ []byte) error {
+func WriteInjectorCert(_ string, _ []byte, _ int) error {
 	return errors.New("agenthost: gh-injector cert not supported on this platform")
 }

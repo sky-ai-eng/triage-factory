@@ -38,7 +38,19 @@ func (f fakePrivilegedOps) LaunchSidecar(ctx context.Context, p SidecarLaunchPar
 	return nil, errors.New("fakePrivilegedOps.LaunchSidecar: not implemented for this test double")
 }
 func (f fakePrivilegedOps) ReapOrphans(ctx context.Context) error { return nil }
-func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string) error {
+func (f fakePrivilegedOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
+	return nil
+}
+func (f fakePrivilegedOps) ParkRunTree(ctx context.Context, root string, jailUID int) error {
+	return nil
+}
+func (f fakePrivilegedOps) PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return nil
+}
+func (f fakePrivilegedOps) ReleaseRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error {
+	return nil
+}
+func (f fakePrivilegedOps) GrantRunStaging(ctx context.Context, dir string, subnetIdx uint8) error {
 	return nil
 }
 func (f fakePrivilegedOps) RemoveRunTree(ctx context.Context, path string) error { return nil }

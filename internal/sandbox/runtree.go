@@ -56,14 +56,24 @@ func RunTreeRoot(rootKey string) string {
 // equivalents the previous in-caller code used (no-op chown, plain
 // os.RemoveAll), keeping local-mode/dev behavior byte-identical.
 
-// ChownRunTree hands ownership of a run tree to the sandbox identity
-// (WorktreeUID/GID) so the jailed agent can write its own worktree.
-// subpath == "" chowns the whole root recursively (run start); a
-// non-empty subpath is the mid-run `workspace add` case — intermediate
-// directories shallowly, the subpath tree recursively. No-op off Linux
-// (the sandbox path isn't reachable there).
-func ChownRunTree(ctx context.Context, root, subpath string) error {
-	return chownRunTree(ctx, root, subpath)
+// ChownRunTree hands ownership of a run tree to a jail identity — jailUID,
+// the uid of the engagement that is about to run in it (JailUID of its subnet
+// index) — so the jailed agent can write its own worktree. subpath == ""
+// chowns the whole root recursively (every claim: a task's tree outlives an
+// engagement, and the next claim may hold a different index); a non-empty
+// subpath is the mid-run `workspace add` case — intermediate directories
+// shallowly, the subpath tree recursively — and joins the checkout to the
+// engagement already holding the root, so jailUID must be the root's owner.
+// No-op off Linux (the sandbox path isn't reachable there).
+func ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
+	return chownRunTree(ctx, root, subpath, jailUID)
+}
+
+// RunTreeJailUID returns the jail uid that holds the run tree at path, if one
+// does: the identity a checkout added mid-run must be handed to. False when
+// the tree is not held by an engagement, and always off Linux.
+func RunTreeJailUID(path string) (int, bool) {
+	return runTreeJailUID(path)
 }
 
 // MkdirRunTreeScaffold creates the directories rel names under root — the
@@ -98,9 +108,10 @@ func RemoveRunTree(ctx context.Context, path string) error {
 	return removeRunTree(ctx, path)
 }
 
-// RunTreeHandedOff reports whether path has already been handed to the sandbox
-// identity — i.e. a launch chowned it and the calling (orchestrator) process no
-// longer owns it. That hand-off is one-way for the life of the run tree, so this
+// RunTreeHandedOff reports whether path has already been handed to a jail
+// identity — i.e. a launch chowned it (to a jail uid, or to ParkedRunTreeUID
+// once that engagement ended) and the calling (orchestrator) process no longer
+// owns it. That hand-off is one-way for the life of the run tree, so this
 // is the predicate for "a write in here would fail": after the chown only the
 // run root's own scaffold directories are group-writable by the orchestrator, and
 // everything inside belongs to the sandbox uid with the modes it was created
@@ -116,8 +127,8 @@ func RunTreeHandedOff(path string) bool {
 	return runTreeHandedOff(path)
 }
 
-// CaptureRunDelta runs the parked-run capture in a child dropped to the
-// sandbox uid inside an empty network namespace. Large members stream into
+// CaptureRunDelta runs the parked-run capture in a child dropped to the jail
+// identity that holds worktree, inside an empty network namespace. Large members stream into
 // parent-owned stagingDir; the returned stdout is only their JSON manifest.
 // Linux-only by construction; the non-Linux stub errors, and the delegate
 // caller never routes here off Linux.

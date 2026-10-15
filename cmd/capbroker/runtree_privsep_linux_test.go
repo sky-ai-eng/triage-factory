@@ -13,20 +13,21 @@ import (
 )
 
 // orchestratorStandInUID plays the dropped orchestrator's uid (10001 in
-// the shipped image) for the cross-privilege test below — any non-root,
-// non-WorktreeUID value demonstrates the property.
+// the shipped image) for the cross-privilege test below — any non-root
+// value outside the per-run bands demonstrates the property.
 const orchestratorStandInUID = 10001
 
 // TestBrokeredRunTreeOps_AcrossPrivilegeBoundary is the end-to-end shape
 // of the production run-tree lifecycle under privsep: a ROOT broker
 // serving the REAL hostOps (not a fake) is asked — over the actual RPC —
 // to hand a tree owned by the (different, unprivileged) orchestrator uid
-// to the sandbox identity, and later to remove it. This is exactly the
+// to a jail identity, to park it when that engagement ends, to hand it to
+// the next engagement's identity, and later to remove it. This is exactly the
 // sequence a delegated run drives via agentproc/worktree once the
 // exec-time capability drop leaves the orchestrator unable to perform
 // either operation itself.
 //
-// Needs root: the hand-off is a real chown to WorktreeUID.
+// Needs root: the hand-off is a real chown to a jail uid.
 func TestBrokeredRunTreeOps_AcrossPrivilegeBoundary(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root to chown across uids")
@@ -54,19 +55,49 @@ func TestBrokeredRunTreeOps_AcrossPrivilegeBoundary(t *testing.T) {
 		}
 	}
 
-	if err := client.ChownRunTree(context.Background(), tree, ""); err != nil {
+	ownerOf := func(p string) (uint32, uint32) {
+		t.Helper()
+		var st syscall.Stat_t
+		if err := syscall.Lstat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Uid, st.Gid
+	}
+	ctx := context.Background()
+	first, second := sandbox.JailUID(3), sandbox.JailUID(9)
+	if err := client.ChownRunTree(ctx, tree, "", first); err != nil {
 		t.Fatalf("brokered ChownRunTree: %v", err)
 	}
-	var st syscall.Stat_t
-	if err := syscall.Lstat(filepath.Join(tree, "src", "main.go"), &st); err != nil {
-		t.Fatal(err)
-	}
-	if st.Uid != sandbox.WorktreeUID || st.Gid != sandbox.WorktreeGID {
-		t.Errorf("tree entry owned by %d:%d after brokered hand-off, want %d:%d", st.Uid, st.Gid, sandbox.WorktreeUID, sandbox.WorktreeGID)
+	if uid, gid := ownerOf(filepath.Join(tree, "src", "main.go")); int(uid) != first || int(gid) != os.Getgid() {
+		t.Errorf("tree entry owned by %d:%d after brokered hand-off, want %d:%d", uid, gid, first, os.Getgid())
 	}
 
-	// Teardown of the now sandbox-owned tree — the half an unprivileged
-	// orchestrator can't do in-process (no write through 10000-owned dirs).
+	// The engagement ends: its root is parked, so its jail identity holds
+	// nothing a later engagement drawing the same index could reach.
+	if err := client.ParkRunTree(ctx, tree, first); err != nil {
+		t.Fatalf("brokered ParkRunTree: %v", err)
+	}
+	if uid, _ := ownerOf(tree); int(uid) != sandbox.ParkedRunTreeUID {
+		t.Errorf("root owned by %d after park, want the parked owner %d", uid, sandbox.ParkedRunTreeUID)
+	}
+
+	// The next claim holds another index, and the whole tree follows it.
+	if err := client.ChownRunTree(ctx, tree, "", second); err != nil {
+		t.Fatalf("brokered ChownRunTree to the next engagement: %v", err)
+	}
+	for _, p := range []string{tree, filepath.Join(tree, "src", "main.go")} {
+		if uid, _ := ownerOf(p); int(uid) != second {
+			t.Errorf("%s owned by %d after the second hand-off, want %d", p, uid, second)
+		}
+	}
+
+	// An identity outside the jail band is refused before anything is touched.
+	if err := client.ChownRunTree(ctx, tree, "", 0); err == nil {
+		t.Error("brokered ChownRunTree accepted uid 0 as a jail identity")
+	}
+
+	// Teardown of the now jail-owned tree — the half an unprivileged
+	// orchestrator can't do in-process (no write through jail-owned dirs).
 	if err := client.RemoveRunTree(context.Background(), tree); err != nil {
 		t.Fatalf("brokered RemoveRunTree: %v", err)
 	}
@@ -80,7 +111,7 @@ func TestBrokeredRunTreeOps_AcrossPrivilegeBoundary(t *testing.T) {
 	if err := os.Chown(foreign, 4321, 4321); err != nil {
 		t.Fatal(err)
 	}
-	if err := client.ChownRunTree(context.Background(), foreign, ""); err == nil {
+	if err := client.ChownRunTree(context.Background(), foreign, "", first); err == nil {
 		t.Error("brokered ChownRunTree accepted a foreign-owned tree; the ownership precondition must hold at the RPC boundary")
 	}
 	_ = os.Chown(foreign, os.Getuid(), os.Getgid())

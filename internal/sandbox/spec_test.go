@@ -38,12 +38,12 @@ func TestBuildSpec_RequiredFields(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			cfg := canonicalConfig()
 			c.mutate(&cfg)
-			if _, err := buildSpec(cfg, "/var/run/netns/tf-test"); err == nil {
+			if _, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7)); err == nil {
 				t.Errorf("buildSpec accepted %s; want validation error", c.name)
 			}
 		})
 	}
-	if _, err := buildSpec(canonicalConfig(), ""); err == nil {
+	if _, err := buildSpec(canonicalConfig(), "", JailUID(7), JailGID(7)); err == nil {
 		t.Errorf("buildSpec accepted empty netnsPath; want validation error")
 	}
 }
@@ -65,7 +65,7 @@ func TestBuildSpec_PropertyB_NoEnvLeakage(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "ghp_SENTINEL_from_host_env_must_not_leak")
 	t.Setenv("ANTHROPIC_FROM_HOST_PROBE", "PROBE-from-host-env-must-not-leak")
 
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBuildSpec_ProcessEnvVerbatim(t *testing.T) {
 		"HOME=/work",
 		"CUSTOM_CALLER_VAR=value-from-caller",
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -108,21 +108,33 @@ func TestBuildSpec_ProcessEnvVerbatim(t *testing.T) {
 }
 
 func TestBuildSpec_NonRootUID(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
-	if spec.Process.User.UID != WorktreeUID {
-		t.Errorf("spec.Process.User.UID = %d, want %d (non-root for T3 hardening)",
-			spec.Process.User.UID, WorktreeUID)
+	if int(spec.Process.User.UID) != JailUID(7) || int(spec.Process.User.GID) != JailGID(7) {
+		t.Errorf("spec.Process.User = %d:%d, want the run's own jail identity %d:%d",
+			spec.Process.User.UID, spec.Process.User.GID, JailUID(7), JailGID(7))
 	}
 	if spec.Process.User.UID == 0 {
 		t.Errorf("spec.Process.User.UID = 0 (root) — gVisor's user-mode kernel needs in-sandbox UID hardening; running root inside sandbox defeats T3 mitigation")
 	}
 }
 
+// TestBuildSpec_RefusesNonJailIdentity pins the spec template's own guard on
+// the identity it is handed: anything outside the jail band — root, the
+// orchestrator, a sidecar — or a uid/gid pair that disagrees is refused before
+// a spec exists.
+func TestBuildSpec_RefusesNonJailIdentity(t *testing.T) {
+	for _, id := range [][2]int{{0, 0}, {10001, 10001}, {SidecarUID(7), SidecarUID(7)}, {JailUID(7), JailGID(8)}} {
+		if _, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", id[0], id[1]); err == nil {
+			t.Errorf("buildSpec accepted jail identity %d:%d", id[0], id[1])
+		}
+	}
+}
+
 func TestBuildSpec_NoNewPrivileges(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -132,7 +144,7 @@ func TestBuildSpec_NoNewPrivileges(t *testing.T) {
 }
 
 func TestBuildSpec_CapabilitiesEmpty(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -155,7 +167,7 @@ func TestBuildSpec_CapabilitiesEmpty(t *testing.T) {
 
 func TestBuildSpec_NamespacesIncludeNetnsPath(t *testing.T) {
 	const want = "/var/run/netns/tf-test"
-	spec, err := buildSpec(canonicalConfig(), want)
+	spec, err := buildSpec(canonicalConfig(), want, JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -175,7 +187,7 @@ func TestBuildSpec_NamespacesIncludeNetnsPath(t *testing.T) {
 
 func TestBuildSpec_MountsIncludeWorktree(t *testing.T) {
 	cfg := canonicalConfig()
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -204,7 +216,7 @@ func TestBuildSpec_ExtraMountsAppended(t *testing.T) {
 	cfg.ExtraMounts = []Mount{
 		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock", Options: []string{"rw"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -232,7 +244,7 @@ func TestBuildSpec_ReadOnlyRepoMountIsRO(t *testing.T) {
 	cfg.ExtraMounts = []Mount{
 		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -270,7 +282,7 @@ func TestBuildSpec_NoHostMountOutsideDeclaredSet(t *testing.T) {
 		{Source: "/run/tf/abc.sock", Destination: "/run/tf.sock"},
 		{Source: "/data/orgs/acme/shared-repos/o/r", Destination: "/work/repos/o/r", Options: []string{"ro"}},
 	}
-	spec, err := buildSpec(cfg, "/var/run/netns/tf-test")
+	spec, err := buildSpec(cfg, "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}
@@ -301,7 +313,7 @@ func hasOption(opts []string, want string) bool {
 }
 
 func TestBuildSpec_SeccompSet(t *testing.T) {
-	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test")
+	spec, err := buildSpec(canonicalConfig(), "/var/run/netns/tf-test", JailUID(7), JailGID(7))
 	if err != nil {
 		t.Fatalf("buildSpec: %v", err)
 	}

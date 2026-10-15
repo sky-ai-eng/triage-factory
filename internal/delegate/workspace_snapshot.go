@@ -279,6 +279,11 @@ type snapshotWrite struct {
 	// from the task's conversation_worktrees rows right before the capture
 	// (snapshotCheckouts).
 	checkouts []snapshotCheckout
+	// adoptTree, when set, hands wtPath to the writing engagement's jail
+	// identity before anything is captured: an ending whose tree no jail holds
+	// still has to capture it as one (treeToCapture). Nil for every other
+	// write.
+	adoptTree func(context.Context) error
 }
 
 // snapshotCheckout is one checkout a snapshot captures.
@@ -451,6 +456,12 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 			s.finishSnapshotState(stateCtx, w.orgID, w.keyID, w.claimID, false)
 		}
 	}()
+
+	if w.adoptTree != nil {
+		if err = w.adoptTree(ctx); err != nil {
+			return fmt.Errorf("snapshot: hand the tree to this engagement's jail identity: %w", err)
+		}
+	}
 
 	// The persist's own ctx, not stateCtx: this read is part of the capture and
 	// takes the capture's bound, where stateCtx would let a stalled database
@@ -1429,8 +1440,8 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	sawManifest := false
 	root := worktree.RunRoot(keyID)
 
-	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
+	if _, err := worktree.EnsureRunsBase(); err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: %w", err)
 	}
 	// Siblings of the root → the scratch move is an intra-filesystem rename.
 	scratchStaging, err := os.MkdirTemp(filepath.Dir(root), ".scratch-rehydrate-*")
@@ -1849,19 +1860,30 @@ func (s *Spawner) discardWorkspaceSnapshot(ctx context.Context, orgID, keyID str
 // tarScratch writes every scratch file a snapshot carries (walkScratch) under
 // the snapScratchPrefix, reporting whether a populated ci-logs subtree was
 // left out — the manifest's CILogsOmitted and the gate on the rehydrate's
-// notice.
+// notice. What the walk could not read is logged, since a resume from this
+// blob comes back without it.
 func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILogs bool, err error) {
-	return walkScratch(ctx, wtPath, func(rel, path string, fi os.FileInfo) error {
+	omittedCILogs, unreadable, err := walkScratch(ctx, wtPath, func(rel, path string, fi os.FileInfo) error {
 		// Stream each file into the tar rather than reading it whole — the
 		// agent's own intermediates are unbounded even with the log archives
-		// excluded.
+		// excluded. The open comes before the header is written, so a file
+		// that cannot be opened leaves nothing of itself in the tar.
 		err := writeTarFile(tw, snapScratchPrefix+rel, path, fi.Size())
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err
 	})
+	if len(unreadable) > 0 {
+		delegateLog.Warn("snapshot leaves out scratch entries this process cannot read",
+			"worktree", wtPath, "count", len(unreadable), "entries", unreadable[:min(len(unreadable), maxLoggedUnreadable)])
+	}
+	return omittedCILogs, err
 }
+
+// maxLoggedUnreadable caps how many unreadable scratch entries one snapshot's
+// log line names; the count is always whole.
+const maxLoggedUnreadable = 20
 
 // walkScratch visits every regular file under wtPath/_tfac that a snapshot
 // carries, in lexical order, skipping the scratchExcludes subtrees — the one
@@ -1873,24 +1895,36 @@ func tarScratch(ctx context.Context, tw *tar.Writer, wtPath string) (omittedCILo
 // checkpoint walks a tree a background process may still be changing, and an
 // entry removed a moment later is the same torn capture as one removed a
 // moment earlier. ctx is checked per entry.
-func walkScratch(ctx context.Context, wtPath string, visit func(rel, path string, fi os.FileInfo) error) (omittedCILogs bool, err error) {
+//
+// An entry this process may not read is skipped too, and named in unreadable
+// — a directory it cannot list, or a file a visit could not open. Under a jail
+// the agent's files belong to the jail's identity, and this process reads them
+// through the permissions the agent gave them, so a file the agent made
+// owner-only (mktemp's 0600, mktemp -d's 0700) is closed to it. A snapshot
+// short of that file still carries the rest of the work; a walk that failed on
+// it would carry none.
+func walkScratch(ctx context.Context, wtPath string, visit func(rel, path string, fi os.FileInfo) error) (omittedCILogs bool, unreadable []string, err error) {
 	root := filepath.Join(wtPath, worktree.ScratchDir)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
-		return false, nil
+		return false, nil, nil
 	}
 	err = filepath.Walk(root, func(path string, fi os.FileInfo, walkErr error) error {
 		if err := ctx.Err(); err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
 			return err
 		}
 		if walkErr != nil {
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return nil
 			}
+			if errors.Is(walkErr, fs.ErrPermission) {
+				unreadable = append(unreadable, filepath.ToSlash(rel))
+				return nil
+			}
 			return walkErr
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
 		}
 		if rel == "." {
 			return nil
@@ -1911,9 +1945,14 @@ func walkScratch(ctx context.Context, wtPath string, visit func(rel, path string
 		if !fi.Mode().IsRegular() {
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
-		return visit(filepath.ToSlash(rel), path, fi)
+		err = visit(filepath.ToSlash(rel), path, fi)
+		if errors.Is(err, fs.ErrPermission) {
+			unreadable = append(unreadable, filepath.ToSlash(rel))
+			return nil
+		}
+		return err
 	})
-	return omittedCILogs, err
+	return omittedCILogs, unreadable, err
 }
 
 // dirHasEntry reports whether path holds at least one entry, reading only far

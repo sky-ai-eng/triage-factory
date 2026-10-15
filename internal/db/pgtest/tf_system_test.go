@@ -360,6 +360,24 @@ func TestTfSystem_ExecutorSurfaceConformance(t *testing.T) {
 		if err := stores.ConversationWorktrees.DeleteByRepoRefSystem(ctx, orgID, conversationID, repositoryID, "main"); err != nil {
 			t.Errorf("ConversationWorktrees.DeleteByRepoRefSystem: %v", err)
 		}
+
+		// The claim-time record is an upsert whose conflict arm updates the
+		// path, and Postgres checks UPDATE for it even when the row is new.
+		// Recorded twice so the second call takes that arm.
+		var claimID string
+		if err := h.AdminDB.QueryRowContext(ctx, `
+			INSERT INTO claims (org_id, conversation_id, executor_id, boot_epoch, lease_expires_at)
+			VALUES ($1, $2, $3, 1, now() + interval '300 seconds') RETURNING id
+		`, orgID, conversationID, executorID).Scan(&claimID); err != nil {
+			t.Fatalf("seed claim: %v", err)
+		}
+		for _, path := range []string{"/tmp/conformance-wt", "/tmp/conformance-wt-moved"} {
+			if _, err := stores.ConversationWorktrees.RecordForClaimSystem(ctx, orgID, claimID, domain.ConversationWorktree{
+				ConversationID: conversationID, RepositoryID: repositoryID, Path: path, Ref: "main",
+			}); err != nil {
+				t.Errorf("ConversationWorktrees.RecordForClaimSystem(%s): %v", path, err)
+			}
+		}
 	})
 
 	t.Run("artifacts", func(t *testing.T) {

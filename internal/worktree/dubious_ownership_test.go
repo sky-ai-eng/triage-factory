@@ -9,8 +9,8 @@ import (
 // foreignUID is a uid that (almost certainly) differs from the test process's
 // euid, used to reproduce the sandbox-chowned run root without depending on any
 // real system user existing. Production hits this when the host process (root,
-// uid 0) reads a run root that agentproc.chownWorktreeForSandbox has recursively
-// chowned to sandbox.WorktreeUID (10000) for the jailed agent.
+// uid 0) reads a run root the launch's hand-off has recursively chowned to the
+// run's jail uid (sandbox.JailUID) for the jailed agent.
 const foreignUID = 65534
 
 // chownToForeignOwner chowns dir to a uid other than this process's, the shape

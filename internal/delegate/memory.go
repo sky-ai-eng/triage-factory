@@ -525,11 +525,22 @@ func writeTaskContextFile(root, taskContext string) {
 // after its first launch — and every blueprint step but the first launches into a
 // tree that was already handed off. An un-jailed run keeps writing the real
 // directory inside the run root it owns.
+//
+// The staging dir is made owner-only here, before anything is written into it:
+// it holds prior memory and the task context, which only this conversation's
+// jail may read, and the launch that mounts it grants it to that jail's gid
+// alone (sandbox.RunNetwork.GrantStaging). The mode is reset on an existing
+// dir too, since a parked step's dir keeps the mode of its last grant.
 func entityMemoryTarget(cfg *runConfig, conversationID, root string) string {
 	if !agentproc.WillSandbox() {
 		return filepath.Join(root, scratchDirName, entityMemoryDirName)
 	}
 	dir := sandbox.TrustedMemorySourcePath(conversationID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		delegateLog.Warn("create entity-memory staging dir failed", "path", dir, "error", err)
+	} else if err := os.Chmod(dir, 0o700); err != nil {
+		delegateLog.Warn("narrow entity-memory staging dir failed", "path", dir, "error", err)
+	}
 	cfg.memorySourcePath = dir
 	return dir
 }
@@ -554,8 +565,8 @@ func stagedEntityMemorySource(conversationID string) string {
 
 // removeStagedMemory drops a launch's memory staging dir. A missing directory is
 // success. Safe for the capability-less orchestrator: the staging dir is its own
-// and is never chowned to a sandbox identity — that is the point of staging
-// outside the run tree.
+// — a launch grants a jail its group, never its ownership — which is the point
+// of staging outside the run tree.
 func removeStagedMemory(dir string) {
 	if dir == "" {
 		return
