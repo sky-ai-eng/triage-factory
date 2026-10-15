@@ -53,8 +53,9 @@ A PR is first stored from the REST listing of open PRs, which carries its
 review requests and body but no check runs, reviews or comments. Its review
 requests emit then, and the GraphQL refresh that follows in the same cycle
 reports the check runs, reviews and merge conflicts already on it. The comments
-already on it, and the mentions in its body, are its baseline and emit
-nothing.
+already on it are its baseline and emit nothing, and so are the mentions in its
+body unless it was opened since TF last listed its repository (see
+[Mentions](#mentions)).
 
 #### Reviews
 
@@ -147,7 +148,8 @@ by a letter, digit or underscore. It does not count when it is:
 - in a comment or review TF posted, told apart as for `commented` and the
   review events: by its `comment` or `review` artifact. A reply TF posted that
   joined a person's pending review is TF's on its own;
-- a commenter's mention of themselves.
+- a commenter's mention of themselves, and the PR author's mention of
+  themselves in the body, which is taken as theirs.
 
 A bot's comment counts like anyone's. Several mentions of one identity in a
 cycle emit one event, attributed to the newest comment or review that made one,
@@ -166,11 +168,18 @@ so no `commenter_in` list matches it. The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
 
-A PR seen for the first time records its body's mentions and emits nothing for
-them, and so does a snapshot stored before `body_mentions` existed. A PR seeded
-from the REST listing takes its comments as its baseline, and one stored
-without `review_marker` reads no reviews, so neither reports mentions in them
-on that refresh.
+A PR TF finds for the first time in a listing of a repository it had listed
+before was opened since that listing, and its body's mentions emit with the
+seed that stores it, timed at its `updatedAt`. A PR in a repository's first
+listing (TF's first poll, or a repository just added to a team's tracked set)
+was open before TF followed it, so its body is a baseline and emits nothing, as
+for every other change in tracking. A PR TF's agent opens is recorded as an
+entity when the agent records it, before a poll finds it, and that entity is
+seeded without events, so its body is a baseline too. A snapshot stored before
+`body_mentions` existed is likewise a baseline. A PR seeded from the REST
+listing takes its comments as its baseline, and one stored without
+`review_marker` reads no reviews, so neither reports mentions in them on that
+refresh.
 
 Some limits:
 
@@ -179,6 +188,8 @@ Some limits:
   block, and inline code that spans a line break reads as text.
 - Only a review's first 100 inline comments are read.
 - An edit TF makes to the PR body counts like anyone's: no artifact records it.
+  So does the body of a PR TF opened when a poll lists the PR before the
+  agent's record of it lands.
 
 #### PR Unreachable
 
@@ -762,7 +773,7 @@ stay on the belt through a pause, because a Jira key's prefix is its project.
 
 ## Event lifecycle
 
-1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests). The mentions already in a PR's body are recorded and emit nothing; `mentioned` reports mentions made after
+1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, and `mentioned` for the mentions in the body of a PR opened since TF last listed its repository)
 2. **Transitions** — subsequent cycles compare snapshots and emit events for any field changes
 3. **Terminal** — when an item reaches a terminal state (merged, closed, done), it's marked with `terminal_at` and excluded from future refresh cycles. Terminal items are retained indefinitely for dashboard statistics.
 4. **Reactivation** — if a terminal item reappears in discovery (e.g. a closed PR is reopened), `terminal_at` is cleared and tracking resumes

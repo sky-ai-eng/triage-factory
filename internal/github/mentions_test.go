@@ -16,6 +16,8 @@ func TestMentions(t *testing.T) {
 		{name: "in lower case, once each, in order", body: "cc @Bob, @alice and @BOB", want: []string{"bob", "alice"}},
 		{name: "a team", body: "ping @Acme/Back_end-team", want: []string{"acme/back_end-team"}},
 		{name: "a slug's trailing hyphens", body: "@acme/infra-- now", want: []string{"acme/infra"}},
+		{name: "a login's trailing hyphens", body: "@hank- thoughts? @erin--, @bob-.", want: []string{"hank", "erin", "bob"}},
+		{name: "a hyphen inside a login", body: "@hank-hill", want: []string{"hank-hill"}},
 		{name: "a slash with no slug", body: "@acme/ and @acme/-x", want: []string{}},
 		{name: "punctuation after a login", body: "(@alice), @bob's, @carol.", want: []string{"alice", "bob", "carol"}},
 		{name: "dots then a space", body: "thanks @alice... really", want: []string{"alice"}},

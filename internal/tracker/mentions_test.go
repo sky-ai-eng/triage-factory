@@ -2,13 +2,17 @@ package tracker
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sky-ai-eng/triage-factory/internal/db"
 	sqlitestore "github.com/sky-ai-eng/triage-factory/internal/db/sqlite"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -16,9 +20,10 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/runmode"
 )
 
-// mentionResolver knows bob, erin, gina and hank, and the team acme/backend.
+// mentionResolver knows bob, erin, gina, hank and the PR author, and the team
+// acme/backend.
 var mentionResolver = fakeReviewerResolver{
-	users: map[string]bool{"bob": true, "erin": true, "gina": true, "hank": true},
+	users: map[string]bool{"bob": true, "erin": true, "gina": true, "hank": true, testUser: true},
 	teams: map[string]bool{"acme/backend": true},
 }
 
@@ -157,6 +162,8 @@ func TestDiffPRSnapshots_MentionedInBody(t *testing.T) {
 		{name: "the first mention", prev: []string{}, curr: []string{"bob"},
 			want: map[string]wantMention{"user:bob": {login: "bob", source: "body", at: updatedAt}}},
 		{name: "an edit that adds no mention", prev: []string{"bob"}, curr: []string{"bob"}},
+		{name: "the author mentions themselves", prev: []string{}, curr: []string{testUser, "bob"},
+			want: map[string]wantMention{"user:bob": {login: "bob", source: "body", at: updatedAt}}},
 		{name: "a mention removed", prev: []string{"bob", "erin"}, curr: []string{"erin"}},
 		{name: "an unknown identity added", prev: []string{}, curr: []string{"stranger"}},
 		{name: "a snapshot stored without the mentions", prev: nil, curr: []string{"bob"}},
@@ -396,4 +403,103 @@ func TestRefreshGitHub_KeepsBodyMentionsWithoutTheBody(t *testing.T) {
 	if snap := storedPRSnapshot(t, stores, entityID); len(snap.BodyMentions) != 1 || snap.BodyMentions[0] != "bob" || snap.BodyHash != "h" {
 		t.Errorf("stored body = (%q, %q), want the previous fingerprint and mentions kept", snap.BodyHash, snap.BodyMentions)
 	}
+}
+
+// openedPRServer answers each open-PR listing of octo/repo with the pull
+// requests listings[n] names on its nth request, the last one from then on,
+// and the batch refresh with no nodes, so the discovery seed is the only
+// thing that writes.
+func openedPRServer(t *testing.T, listings ...[]string) *httptest.Server {
+	t.Helper()
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/graphql"):
+			_, _ = w.Write([]byte(`{"data":{"nodes":[]}}`))
+		case strings.HasSuffix(r.URL.Path, "/repos/octo/repo/pulls"):
+			_, _ = w.Write([]byte("[" + strings.Join(listings[min(n, len(listings)-1)], ",") + "]"))
+			n++
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected", http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// openPRJSON is pull request number of octo/repo in the REST listing's shape.
+func openPRJSON(number int, author, body string) string {
+	n := strconv.Itoa(number)
+	return `{"number": ` + n + `, "node_id": "PR_` + n + `", "title": "PR ` + n + `", "state": "open", "body": ` + jsonString(body) + `,
+		"html_url": "https://github.com/octo/repo/pull/` + n + `", "user": {"login": "` + author + `"},
+		"head": {"sha": "sha` + n + `", "ref": "feat"}, "base": {"ref": "main"},
+		"created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T11:00:00Z"}`
+}
+
+// storedMentions reads the mentioned events recorded for the pull request
+// octo/repo#number, keyed by dedup_key.
+func storedMentions(t *testing.T, tr *Tracker, stores db.Stores, number int) []domain.Event {
+	t.Helper()
+	ent, err := stores.Entities.GetBySource(context.Background(), runmode.LocalDefaultOrgID, "github", reviewTestHost, "octo/repo#"+strconv.Itoa(number))
+	if err != nil || ent == nil {
+		t.Fatalf("read entity #%d: ent=%v err=%v", number, ent, err)
+	}
+	rows, err := tr.database.Query(`SELECT dedup_key, metadata_json, occurred_at FROM events WHERE entity_id = ? AND event_type = ? ORDER BY dedup_key`,
+		ent.ID, domain.EventGitHubPRMentioned)
+	if err != nil {
+		t.Fatalf("read events: %v", err)
+	}
+	defer rows.Close()
+	var out []domain.Event
+	for rows.Next() {
+		evt := domain.Event{EntityID: &ent.ID}
+		var occurred sql.NullTime
+		if err := rows.Scan(&evt.DedupKey, &evt.MetadataJSON, &occurred); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		evt.EventType, evt.OccurredAt = domain.EventGitHubPRMentioned, occurred.Time
+		out = append(out, evt)
+	}
+	return out
+}
+
+// TestRefreshGitHub_OpenedPRBodyMentions: the pull requests in a repository's
+// first listing were open before TF followed it, so their bodies are a
+// baseline. One that appears in a later listing was opened since, and its
+// body's mentions of identities TF knows emit with its seed, except the
+// author's own.
+func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	trackRepos(t, stores, org, []string{"octo/repo"})
+
+	first := []string{openPRJSON(1, "carol", "cc @bob")}
+	second := append(slices.Clone(first), openPRJSON(2, "carol", "@Bob please review. cc @carol and @stranger\n\n> @erin"))
+	client := ghclient.NewClient(openedPRServer(t, first, second).URL, "tok")
+	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
+
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", []string{"octo/repo"}, resolver); err != nil {
+		t.Fatalf("first RefreshGitHub: %v", err)
+	}
+	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {
+		t.Fatalf("a pull request from the repository's first listing emitted %v", mentionKeys(got))
+	}
+
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", []string{"octo/repo"}, resolver); err != nil {
+		t.Fatalf("second RefreshGitHub: %v", err)
+	}
+	if got := storedMentions(t, tr, stores, 1); len(got) != 0 {
+		t.Errorf("the pull request already tracked emitted %v", mentionKeys(got))
+	}
+	ent, err := stores.Entities.GetBySource(ctx, org, "github", reviewTestHost, "octo/repo#2")
+	if err != nil || ent == nil {
+		t.Fatalf("read entity #2: ent=%v err=%v", ent, err)
+	}
+	assertMentions(t, storedMentions(t, tr, stores, 2), ent.ID,
+		domain.PRSnapshot{Author: "carol", Repo: "octo/repo", Number: 2, HeadSHA: "sha2"},
+		map[string]wantMention{"user:bob": {login: "bob", source: "body", at: "2026-10-01T11:00:00Z"}})
 }

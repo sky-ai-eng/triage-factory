@@ -144,7 +144,9 @@ func (s *mentionScanner) mentions(text string) {
 			continue
 		}
 		if endsUserMention(text[end:]) {
-			s.add(login)
+			// A login cannot end in a hyphen, so trailing ones are
+			// punctuation: "@hank- thoughts?" mentions hank.
+			s.add(strings.TrimRight(login, "-"))
 		}
 	}
 }

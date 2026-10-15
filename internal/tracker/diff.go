@@ -376,16 +376,7 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 	// is and timed at the mention's comment or review. A body mention has no
 	// time of its own and takes the PR's updatedAt.
 	for _, m := range prMentions(prev, curr, reviews, comments) {
-		login, team, known := resolveReviewer(resolver, m.handle)
-		if !known {
-			continue
-		}
-		emitAt(domain.EventGitHubPRMentioned, reviewerDedupKey(m.handle), m.at, events.GitHubPRMentionedMetadata{
-			Author: curr.Author, Commenter: m.commenter, CommentID: m.commentID,
-			MentionedLogin: login, MentionedTeam: team, MentionSource: m.source,
-			Repo: curr.Repo, PRNumber: curr.Number,
-			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
-		})
+		appendMentioned(&evts, eid, now, curr, m, resolver)
 	}
 
 	// --- Label diff --------------------------------------------------------

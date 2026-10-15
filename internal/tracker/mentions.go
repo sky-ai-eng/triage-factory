@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -29,10 +30,11 @@ type prMention struct {
 // snapshots hold its mentions: a snapshot without them is a baseline.
 //
 // Skipped are mentions in a comment or review TF posted, and a user's mention
-// of themselves; a bot's comment counts like anyone's. A handle mentioned
-// several times is attributed to its newest comment or review, or to the body
-// when nothing else mentioned it, since the body has no author or time of its
-// own.
+// of themselves; a bot's comment counts like anyone's. The body is taken as
+// the PR author's, so the author's own handle there is skipped too. A handle
+// mentioned several times is attributed to its newest comment or review, or
+// to the body when nothing else mentioned it, since the body has no author or
+// time of its own.
 func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []NewComment) []prMention {
 	var order []string
 	best := map[string]prMention{}
@@ -77,7 +79,7 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 	}
 	if prev.BodyMentions != nil && curr.BodyMentions != nil {
 		for _, h := range curr.BodyMentions {
-			if !slices.Contains(prev.BodyMentions, h) {
+			if !slices.Contains(prev.BodyMentions, h) && !isSelfMention(h, curr.Author) {
 				consider(prMention{handle: h, source: events.MentionSourceBody, at: curr.UpdatedAt})
 			}
 		}
@@ -88,6 +90,41 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 		out[i] = best[h]
 	}
 	return out
+}
+
+// openedPRMentions returns a mentioned event for each identity TF knows that
+// the body of a newly opened pull request mentions. The caller decides what is
+// newly opened: a pull request first found by a listing of a repository TF had
+// listed before. One first found by a repository's first listing predates TF
+// following the repository, and its body is a baseline like the rest of its
+// state.
+func openedPRMentions(entityID string, snap domain.PRSnapshot, resolver ReviewerResolver) []domain.Event {
+	var evts []domain.Event
+	now := time.Now()
+	for _, m := range prMentions(domain.PRSnapshot{BodyMentions: []string{}}, snap, nil, nil) {
+		appendMentioned(&evts, &entityID, now, snap, m, resolver)
+	}
+	return evts
+}
+
+// appendMentioned appends the mentioned event for m on the pull request curr,
+// when resolver knows the identity m names. Its time is m's, or curr's
+// updatedAt when m's does not parse.
+func appendMentioned(evts *[]domain.Event, entityID *string, now time.Time, curr domain.PRSnapshot, m prMention, resolver ReviewerResolver) {
+	login, team, known := resolveReviewer(resolver, m.handle)
+	if !known {
+		return
+	}
+	at := m.at
+	if _, ok := domain.ParseExternalTime(at); !ok {
+		at = curr.UpdatedAt
+	}
+	emitWithFallback(domain.EventGitHubPRMentioned, reviewerDedupKey(m.handle), at, events.GitHubPRMentionedMetadata{
+		Author: curr.Author, Commenter: m.commenter, CommentID: m.commentID,
+		MentionedLogin: login, MentionedTeam: team, MentionSource: m.source,
+		Repo: curr.Repo, PRNumber: curr.Number,
+		IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+	}, entityID, now, evts)
 }
 
 // isSelfMention reports whether a user handle names its commenter. A bot's
