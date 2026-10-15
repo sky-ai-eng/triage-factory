@@ -1347,6 +1347,39 @@ func (s *Spawner) recordCheckout(ctx context.Context, orgID, claimID string, w d
 	return err
 }
 
+// recordCheckoutAs records c as conv's own checkout, at c's path, for conv's
+// engagement (recordCheckout).
+func (s *Spawner) recordCheckoutAs(ctx context.Context, orgID string, conv *domain.Conversation, c snapshotCheckout) error {
+	err := s.recordCheckout(ctx, orgID, conv.ClaimID, domain.ConversationWorktree{
+		ConversationID: conv.ID, RepositoryID: c.repositoryID, Path: c.path, Ref: c.slug,
+	})
+	if err != nil {
+		return fmt.Errorf("record checkout %s: %w", c.rel, err)
+	}
+	return nil
+}
+
+// recordTaskCheckouts records every checkout of conv's task that is on disk
+// under root as conv's own, at its path there. A conversation that opens in a
+// tree another conversation on the task built holds no rows for the checkouts
+// that conversation added, and the git gate admits a conversation only to the
+// checkouts it holds rows for; without these, it could neither fetch nor push
+// in them. The checkouts are the ones a snapshot of root would carry
+// (snapshotCheckouts). The first write that fails stops the rest and is
+// returned; db.ErrClaimReleased once conv's claim has lost the conversation.
+func (s *Spawner) recordTaskCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, root string) error {
+	checkouts, err := s.snapshotCheckouts(ctx, orgID, conv.TaskID, root)
+	if err != nil {
+		return err
+	}
+	for _, c := range checkouts {
+		if err := s.recordCheckoutAs(ctx, orgID, conv, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // announceTaskPlacement publishes the placement the delegation's own claim
 // stamp already made. Stamping the bot claim IS the board move — the claim
 // doors land a queued task in_progress in the same UPDATE — so what is left

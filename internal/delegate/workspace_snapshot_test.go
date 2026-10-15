@@ -165,19 +165,23 @@ func TestEnsureWorkspace_ColdRoundTrip(t *testing.T) {
 // rebuilt — here because GitHub could not be reached to read its PR — fails the
 // whole restore with that outage as the error, so the hand-back spends the
 // upstream budget, and nothing of the attempt is left behind — no root, no
-// checkout, no recorded row — for a later claim to take for a warm tree.
+// checkout, and no row the restoring conversation recorded for one — for a
+// later claim to take for a warm tree. The rows of the conversation that built
+// the checkouts are not the attempt's, and stay.
 func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
 	f := newSnapshotFixture(t, "task-fail")
 	f.addCheckout(t, "acme/lib", "default")
 	f.addCheckout(t, "acme/app", "pr-7")
 	f.snapshot(t, "", domain.ConversationRuntimeNative)
 	f.loseRoot(t)
+	built := f.ledger.rowsOf(fixtureConversation)
 
 	restorer := f.restorer()
 	restorer.pr = func(context.Context, string, string, int) (*ghclient.PRView, error) {
 		return nil, &upstream.TransportError{Err: errors.New("dial tcp: connection refused")}
 	}
-	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), restorer, failingFreshBuilder(t))
+	conv := f.convAs("conv-2")
+	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, restorer, failingFreshBuilder(t))
 	if err == nil {
 		t.Fatal("ensureWorkspace succeeded with a checkout that could not be rebuilt")
 	}
@@ -187,8 +191,134 @@ func TestEnsureWorkspace_FailedCheckoutLeavesNothing(t *testing.T) {
 	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
 		t.Errorf("the run root survived a failed restore (stat err %v)", err)
 	}
-	if rows := f.ledger.recordedRows(); len(rows) != 0 {
-		t.Errorf("a failed restore recorded %v", rows)
+	if n := len(f.ledger.recordedRows()); n != 2 {
+		t.Errorf("the restore recorded %d rows before it fetched, want both checkouts'", n)
+	}
+	if rows := f.ledger.rowsOf(conv.ID); len(rows) != 0 {
+		t.Errorf("a failed restore left %s holding rows for checkouts that are not on disk: %v", conv.ID, rows)
+	}
+	if rows := f.ledger.rowsOf(fixtureConversation); !slices.Equal(rows, built) {
+		t.Errorf("rows of the conversation that built the checkouts = %v, want them untouched: %v", rows, built)
+	}
+}
+
+// TestEnsureWorkspace_FailedRestoreKeepsTheRowsTheConversationHeld: a restore
+// takes back out only the rows it added. A row the restoring conversation
+// already held names a checkout it built, and the next engagement's
+// credentials are sealed from the task's rows: removing it would leave the
+// retry nothing to fetch that repository with.
+func TestEnsureWorkspace_FailedRestoreKeepsTheRowsTheConversationHeld(t *testing.T) {
+	f := newSnapshotFixture(t, "task-fail-held")
+	f.addCheckout(t, "acme/lib", "default")
+	f.addCheckout(t, "acme/docs", "ref-main")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+
+	restore := restoreCheckout
+	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		if r.Repo == "docs" {
+			return worktree.RestoredCheckout{}, errors.New("fetch main: exit status 128")
+		}
+		return restore(ctx, r)
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, f.conv(""), f.restorer(), failingFreshBuilder(t)); err == nil {
+		t.Fatal("ensureWorkspace succeeded with a checkout whose fetch failed")
+	}
+	if rows := f.ledger.deletedRows(); len(rows) != 0 {
+		t.Errorf("a failed restore deleted rows the conversation held before it: %v", rows)
+	}
+	if rows := f.ledger.rowsOf(fixtureConversation); len(rows) != 2 {
+		t.Errorf("the restoring conversation holds %d rows after a failed restore, want its 2: %v", len(rows), rows)
+	}
+}
+
+// TestEnsureWorkspace_ColdRehydrate_RecordsEveryCheckoutBeforeItsFetch: a
+// conversation that restores checkouts another conversation on the task built
+// holds a row for each one, at its path under the rebuilt root, before the
+// fetch that opens its restore. The run's git gate admits a conversation only
+// to the checkouts it holds rows for, so a fetch ahead of the row is refused.
+func TestEnsureWorkspace_ColdRehydrate_RecordsEveryCheckoutBeforeItsFetch(t *testing.T) {
+	f := newSnapshotFixture(t, "task-record-first")
+	lib := f.addCheckout(t, "acme/lib", "default")
+	docs := f.addCheckout(t, "acme/docs", "ref-main")
+	dirtyCheckout(t, lib)
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+	built := f.ledger.rowsOf(fixtureConversation)
+
+	conv := f.convAs("conv-2")
+	var fetched atomic.Int32
+	restore := restoreCheckout
+	restoreCheckout = func(ctx context.Context, r worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		fetched.Add(1)
+		path := filepath.Join(r.Root, r.Owner, r.Repo, r.Slug)
+		held := false
+		for _, w := range f.ledger.rowsOf(conv.ID) {
+			held = held || (w.RepositoryID == r.RepositoryID && w.Ref == r.Slug && w.Path == path)
+		}
+		if !held {
+			t.Errorf("%s was fetched before %s held a row for it (rows: %v)", path, conv.ID, f.ledger.rowsOf(conv.ID))
+		}
+		return restore(ctx, r)
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	if _, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), failingFreshBuilder(t)); err != nil {
+		t.Fatalf("ensureWorkspace: %v", err)
+	}
+	if n := fetched.Load(); n != 2 {
+		t.Fatalf("restore rebuilt %d checkouts, want 2", n)
+	}
+	assertFileContains(t, filepath.Join(lib, "committed.txt"), "unpushed commit")
+	got := map[string]domain.ConversationWorktree{}
+	for _, w := range f.ledger.rowsOf(conv.ID) {
+		got[w.Path] = w
+	}
+	for path, repo := range map[string]string{lib: "lib", docs: "docs"} {
+		if w, ok := got[path]; !ok || w.RepositoryID != testRepositoryID("acme", repo) {
+			t.Errorf("%s holds no row for %s naming acme/%s (rows: %v)", conv.ID, path, repo, f.ledger.rowsOf(conv.ID))
+		}
+	}
+	if rows := f.ledger.rowsOf(fixtureConversation); !slices.Equal(rows, built) {
+		t.Errorf("rows of the conversation that built the checkouts = %v, want them untouched: %v", rows, built)
+	}
+}
+
+// TestEnsureWorkspace_ColdRehydrate_AFenceRefusalStopsTheRecord: once the
+// claim has lost the conversation, the restore writes no further row, fetches
+// nothing, and removes nothing it wrote: the conversation's rows are its
+// successor's by then, under the same keys.
+func TestEnsureWorkspace_ColdRehydrate_AFenceRefusalStopsTheRecord(t *testing.T) {
+	f := newSnapshotFixture(t, "task-record-fenced")
+	f.addCheckout(t, "acme/docs", "ref-main")
+	f.addCheckout(t, "acme/lib", "default")
+	f.addCheckout(t, "acme/web", "default")
+	f.snapshot(t, "", domain.ConversationRuntimeNative)
+	f.loseRoot(t)
+	f.ledger.refuse, f.ledger.allow = db.ErrClaimReleased, 1
+
+	restore := restoreCheckout
+	restoreCheckout = func(context.Context, worktree.CheckoutRestore) (worktree.RestoredCheckout, error) {
+		t.Error("a checkout was fetched after the claim lost the conversation")
+		return worktree.RestoredCheckout{}, errors.New("unreachable")
+	}
+	t.Cleanup(func() { restoreCheckout = restore })
+
+	conv := f.convAs("conv-2")
+	_, _, _, err := f.s.ensureWorkspace(context.Background(), runmode.LocalDefaultOrgID, conv, f.restorer(), failingFreshBuilder(t))
+	if !errors.Is(err, db.ErrClaimReleased) {
+		t.Fatalf("ensureWorkspace = %v, want the fence refusal", err)
+	}
+	if n := f.ledger.attempts; n != 2 {
+		t.Errorf("the restore made %d record attempts, want 2 — one written, one refused, none after", n)
+	}
+	if rows := f.ledger.deletedRows(); len(rows) != 0 {
+		t.Errorf("a fenced-out restore deleted %v", rows)
+	}
+	if _, err := os.Stat(f.root); !os.IsNotExist(err) {
+		t.Errorf("the run root survived a refused restore (stat err %v)", err)
 	}
 }
 
@@ -1226,6 +1356,16 @@ func (f *snapshotFixture) conv(sessionID string) *domain.Conversation {
 	}
 }
 
+// convAs is a claimed conversation on the fixture's task other than the one
+// that built its checkouts, as a later blueprint step or a follow-up after the
+// task moved to a new conversation is.
+func (f *snapshotFixture) convAs(id string) *domain.Conversation {
+	return &domain.Conversation{
+		ID: id, ClaimID: "claim-" + id, TaskID: f.key, WorktreePath: f.root,
+		Runtime: domain.ConversationRuntimeNative,
+	}
+}
+
 // dirtyCheckout leaves a checkout the three kinds of work a restore has to
 // bring back: an unpushed commit, an uncommitted edit and an untracked file.
 func dirtyCheckout(t *testing.T, dir string) {
@@ -1266,12 +1406,21 @@ func putTarBlob(t *testing.T, f *snapshotFixture, zstdBlob bool, members func(*t
 }
 
 // checkoutLedger is conversation_worktrees in memory: the rows a snapshot reads
-// for the task, and the rows a restore records through the claim fence.
+// for the task, the rows a restore records through the claim fence, and the
+// rows a failed restore deletes.
 type checkoutLedger struct {
 	db.ConversationWorktreeStore
-	mu       sync.Mutex
-	rows     []domain.ConversationWorktree
+	mu sync.Mutex
+	// rows is the table.
+	rows []domain.ConversationWorktree
+	// recorded and deleted log the writes a restore makes, in order.
 	recorded []domain.ConversationWorktree
+	deleted  []domain.ConversationWorktree
+	// refuse, when set, fails every RecordForClaimSystem past the first allow
+	// with it; attempts counts every call.
+	refuse   error
+	allow    int
+	attempts int
 }
 
 func (l *checkoutLedger) add(w domain.ConversationWorktree) {
@@ -1286,17 +1435,75 @@ func (l *checkoutLedger) recordedRows() []domain.ConversationWorktree {
 	return append([]domain.ConversationWorktree(nil), l.recorded...)
 }
 
+func (l *checkoutLedger) deletedRows() []domain.ConversationWorktree {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]domain.ConversationWorktree(nil), l.deleted...)
+}
+
+// rowsOf is the table's rows for one conversation.
+func (l *checkoutLedger) rowsOf(conversationID string) []domain.ConversationWorktree {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []domain.ConversationWorktree
+	for _, r := range l.rows {
+		if r.ConversationID == conversationID {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func (l *checkoutLedger) ListSystem(_ context.Context, _, conversationID string) ([]domain.ConversationWorktree, error) {
+	return l.rowsOf(conversationID), nil
+}
+
 func (l *checkoutLedger) ListForTaskSystem(context.Context, string, string) ([]domain.ConversationWorktree, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]domain.ConversationWorktree(nil), l.rows...), nil
 }
 
+// RecordForClaimSystem upserts on (conversation, repository, ref), moving an
+// existing row's path, the way the store does. RepoID is read off any row of
+// the same repository, as the store's join reads it.
 func (l *checkoutLedger) RecordForClaimSystem(_ context.Context, _, _ string, w domain.ConversationWorktree) (domain.ConversationWorktree, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.attempts++
+	if l.refuse != nil && l.attempts > l.allow {
+		return domain.ConversationWorktree{}, l.refuse
+	}
+	for _, r := range l.rows {
+		if r.RepositoryID == w.RepositoryID && r.RepoID != "" {
+			w.RepoID = r.RepoID
+			break
+		}
+	}
 	l.recorded = append(l.recorded, w)
+	for i, r := range l.rows {
+		if r.ConversationID == w.ConversationID && r.RepositoryID == w.RepositoryID && r.Ref == w.Ref {
+			l.rows[i].Path = w.Path
+			return l.rows[i], nil
+		}
+	}
+	l.rows = append(l.rows, w)
 	return w, nil
+}
+
+func (l *checkoutLedger) DeleteByRepoRefSystem(_ context.Context, _, conversationID, repositoryID, ref string) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := l.rows[:0]
+	for _, r := range l.rows {
+		if r.ConversationID == conversationID && r.RepositoryID == repositoryID && r.Ref == ref {
+			l.deleted = append(l.deleted, r)
+			continue
+		}
+		kept = append(kept, r)
+	}
+	l.rows = kept
+	return nil
 }
 
 // --- helpers ---------------------------------------------------------------

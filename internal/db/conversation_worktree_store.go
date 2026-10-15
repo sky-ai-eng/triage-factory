@@ -113,8 +113,10 @@ type ConversationWorktreeStore interface {
 	// RecordForClaimSystem records w for its conversation behind claimID's
 	// fence: inserted when the conversation holds no row for (repo, ref), its
 	// path moved to w.Path when it does. A workspace restore calls it for every
-	// checkout it rebuilt, so the restoring conversation holds each one at the
-	// path it has now — which is what the push gate and the next snapshot read.
+	// checkout it is about to rebuild, before it fetches any, and a claim of a
+	// warm tree for every checkout the tree holds, so the conversation holds
+	// each one at the path it has on this host — which is what the git gate
+	// reads.
 	// Refused with db.ErrClaimReleased once claimID no longer owns the
 	// conversation. Returns the row it stored.
 	RecordForClaimSystem(ctx context.Context, orgID, claimID string, w domain.ConversationWorktree) (domain.ConversationWorktree, error)

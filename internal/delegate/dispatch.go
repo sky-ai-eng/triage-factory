@@ -2035,6 +2035,23 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		return runConfig{}, err
 	}
 	cfg.runRoot, cfg.workspace, cfg.workspaceAsOf = root, prov, asOf
+	if prov == domain.WorkspaceProvenanceWarm {
+		// A warm tree holds every checkout the task's earlier conversations
+		// built in it, and this conversation holds rows for none of the ones
+		// they added, so the git gate would refuse it every fetch and push in
+		// them. A rehydrate records its checkouts itself, before it fetches;
+		// a warm tree's are recorded here. Detached and bounded like the PR
+		// checkout's record below, for the same reasons, and best-effort the
+		// same way: a failure costs this conversation git access to those
+		// checkouts, never the step's start.
+		ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
+		err := s.recordTaskCheckouts(ledgerCtx, orgID, convForWS, root)
+		cancelLedger()
+		if err != nil && !errors.Is(err, db.ErrClaimReleased) {
+			dispatchLog.Warn("record the task's checkouts in conversation_worktrees failed; fetches and pushes to their repos will be denied for this conversation",
+				"root", root, "conversation", conv.ID, "error", err)
+		}
+	}
 	if cfg.prNumber > 0 && cfg.owner != "" && cfg.repo != "" {
 		cfg.prCheckout = filepath.Join(root, cfg.owner, cfg.repo, worktree.PRRefSlug(cfg.prNumber))
 		// This conversation gets its own conversation_worktrees row for the
@@ -2049,8 +2066,9 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// lost the conversation writes nothing. Log-and-continue: both gates
 		// fall back to their task's-own-repo arm, which authorizes the repo but
 		// derives no pushable branch, so a failure costs this conversation its
-		// push and nothing else — the snapshot already finds the checkout
-		// through the row of the conversation that built it.
+		// push and nothing else. A snapshot still carries the checkout, since it
+		// reads the rows of every conversation on the task; the gates read only
+		// this conversation's.
 		//
 		// Detached from the step's cancellation so a shutdown mid-claim still
 		// leaves the row a resumed engagement's pushes resolve through, and

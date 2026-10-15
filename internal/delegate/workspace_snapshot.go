@@ -1226,11 +1226,11 @@ type freshWorkspaceBuilder func(ctx context.Context) (string, error)
 // A warm tree an older binary laid out — its root a git checkout — is not
 // warm: it is removed and the ladder continues as though it were gone.
 //
-// conv.ClaimID is read, not just carried: a rebuild re-stamps worktree_path and
-// records the rebuilt checkouts' rows, and those writes are this engagement's
-// to make only while it still holds the conversation. Every caller is a claimed
-// dispatch, so it is populated at both — including the config the step builder
-// synthesizes, which copies it across for exactly this reason.
+// conv.ClaimID is read, not just carried: a rebuild records the checkouts' rows
+// before it fetches them and re-stamps worktree_path, and those writes are this
+// engagement's to make only while it still holds the conversation. Every caller
+// is a claimed dispatch, so it is populated at both — including the config the
+// step builder synthesizes, which copies it across for exactly this reason.
 func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domain.Conversation, restorer checkoutRestorer, fresh freshWorkspaceBuilder) (_ string, prov domain.WorkspaceProvenance, asOf *float64, err error) {
 	// The provenance IS the interesting part of this span — nothing downstream
 	// can tell the three rungs apart, since past here they are the same
@@ -1338,7 +1338,7 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 
 	// Rebuild at the deterministic, host-local run-root for this key (equal to
 	// conv.WorktreePath on the same host; a fresh path after landing elsewhere).
-	man, restored, rErr := s.rehydrateFromSnapshot(opCtx, keyID, conv.ClaimID, restorer, rc)
+	man, rErr := s.rehydrateFromSnapshot(opCtx, orgID, conv, keyID, restorer, rc)
 	if errors.Is(rErr, errSnapshotLayout) {
 		delegateLog.Warn("rehydrate: the snapshot was written for an older run-tree layout; treating it as no snapshot",
 			"conversation", conv.ID, "key_id", keyID)
@@ -1351,7 +1351,6 @@ func (s *Spawner) ensureWorkspace(ctx context.Context, orgID string, conv *domai
 	}
 	wtDir := worktree.RunRoot(keyID)
 	s.restampWorktreePath(ctx, orgID, conv, wtDir)
-	s.recordRestoredCheckouts(ctx, orgID, conv, restored)
 	asOf = man.positionFor(conv.ID, s.coveredStateFor(ctx, orgID, keyID, conv.ID, man))
 	delegateLog.Info("workspace rehydrated from snapshot", "conversation", conv.ID, "key_id", keyID,
 		"captured_at", man.CapturedAt, "checkpoint", asOf != nil)
@@ -1406,18 +1405,17 @@ func (s *Spawner) restampWorktreePath(ctx context.Context, orgID string, conv *d
 // not restore. Never converted: the ladder treats it as no snapshot.
 var errSnapshotLayout = errors.New("rehydrate: snapshot is of an older run-tree layout")
 
-// restoredCheckout is a checkout a rehydrate rebuilt, with the row the
-// restoring conversation records for it.
-type restoredCheckout struct {
-	worktree.RestoredCheckout
-	repositoryID, repoID, slug string
-}
-
 // rehydrateFromSnapshot unpacks a snapshot blob and reconstructs the run tree
 // at keyID's run root: a fresh root, every checkout the manifest names rebuilt
 // beneath it the way `workspace add` builds one (worktree.RestoreCheckout), the
 // ephemeral _tfac tree restored, and the Claude session transcript dropped at
 // the root's encoding so `claude --resume` reconnects.
+//
+// Like `workspace add`, it records each checkout as conv's own before it
+// fetches any of them (recordRestoringCheckouts): every fetch goes through the
+// run's git gate, which admits a conversation only to the checkouts it holds
+// rows for, and the snapshot carries checkouts other conversations on the task
+// built.
 //
 // The bounded members (manifest, session) are read into memory; the _tfac tree
 // and the checkouts' bundles and patches — any of which can run large — are
@@ -1428,30 +1426,31 @@ type restoredCheckout struct {
 // All or nothing: checkouts of different repos rebuild in parallel (the
 // per-repo lock serializes two of one repo), and if any fails every checkout
 // already rebuilt is removed along with the root, so nothing is left for a
-// later claim to mistake for a warm tree. The error returned is the one that
-// says why — an unreachable upstream in preference to the rest, so the
-// hand-back spends the budget the cause belongs to.
+// later claim to mistake for a warm tree, and no row conv did not hold before
+// the attempt is left naming one. The error returned is the one that says why
+// — an unreachable upstream in preference to the rest, so the hand-back spends
+// the budget the cause belongs to.
 //
 // It returns the blob's manifest, which is what says how much of the
-// transcript the rebuilt tree reflects, and the checkouts it rebuilt.
-func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID string, restorer checkoutRestorer, r io.Reader) (_ snapshotManifest, _ []restoredCheckout, err error) {
+// transcript the rebuilt tree reflects.
+func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, orgID string, conv *domain.Conversation, keyID string, restorer checkoutRestorer, r io.Reader) (_ snapshotManifest, err error) {
 	var man snapshotManifest
 	var session []byte
 	sawManifest := false
 	root := worktree.RunRoot(keyID)
 
 	if _, err := worktree.EnsureRunsBase(); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: %w", err)
 	}
 	// Siblings of the root → the scratch move is an intra-filesystem rename.
 	scratchStaging, err := os.MkdirTemp(filepath.Dir(root), ".scratch-rehydrate-*")
 	if err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: scratch staging: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: scratch staging: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(scratchStaging) }() // no-op once renamed into place
 	memberStaging, err := os.MkdirTemp(filepath.Dir(root), ".checkouts-rehydrate-*")
 	if err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: checkout staging: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: checkout staging: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(memberStaging) }()
 	staged := map[string]string{}
@@ -1459,10 +1458,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 
 	cr, codec, err := snapshotReader(r)
 	if errors.Is(err, errSnapshotLayout) {
-		return snapshotManifest{}, nil, err
+		return snapshotManifest{}, err
 	}
 	if err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: open compressed snapshot: %w", err)
 	}
 	defer func() { _ = cr.Close() }()
 	tr := tar.NewReader(cr)
@@ -1472,33 +1471,33 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 			break
 		}
 		if err != nil {
-			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read tar: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: read tar: %w", err)
 		}
 		switch {
 		case hdr.Name == snapManifest:
 			data, err := io.ReadAll(tr)
 			if err != nil {
-				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read manifest: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read manifest: %w", err)
 			}
 			if err := json.Unmarshal(data, &man); err != nil {
-				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: manifest: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: manifest: %w", err)
 			}
 			sawManifest = true
 		case hdr.Name == snapSession:
 			if session, err = io.ReadAll(tr); err != nil {
-				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: read session: %w", err)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: read session: %w", err)
 			}
 		case strings.HasPrefix(hdr.Name, snapCheckoutsPrefix):
 			// Staged under a name of our own choosing, never the member's: the
 			// manifest is what says which members belong to which checkout.
 			dest := filepath.Join(memberStaging, strconv.Itoa(len(staged)))
 			if err := stageScratchMember(memberStaging, filepath.Base(dest), tr); err != nil {
-				return snapshotManifest{}, nil, err
+				return snapshotManifest{}, err
 			}
 			staged[hdr.Name] = dest
 		case strings.HasPrefix(hdr.Name, snapScratchPrefix):
 			if err := stageScratchMember(scratchStaging, strings.TrimPrefix(hdr.Name, snapScratchPrefix), tr); err != nil {
-				return snapshotManifest{}, nil, err
+				return snapshotManifest{}, err
 			}
 			sawScratch = true
 		}
@@ -1512,18 +1511,18 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	// means the snapshot is corrupt, so fail the rehydrate rather than rebuild
 	// onto untrustworthy state.
 	if _, err := io.Copy(io.Discard, cr); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: %s integrity: %w", codec, err)
 	}
 	if !sawManifest || man.LayoutVersion != snapshotLayoutVersion {
-		return snapshotManifest{}, nil, errSnapshotLayout
+		return snapshotManifest{}, errSnapshotLayout
 	}
 	for _, mc := range man.Checkouts {
 		if !validCheckoutRel(mc.Path, mc.RepoID, mc.Slug) {
-			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: manifest names checkout %q of %s at %q, which this layout never writes", mc.Slug, mc.RepoID, mc.Path)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: manifest names checkout %q of %s at %q, which this layout never writes", mc.Slug, mc.RepoID, mc.Path)
 		}
 		for _, name := range []string{mc.Bundle, mc.Patch} {
 			if name != "" && staged[name] == "" {
-				return snapshotManifest{}, nil, fmt.Errorf("rehydrate: checkout %s names member %q, which the blob does not carry", mc.Path, name)
+				return snapshotManifest{}, fmt.Errorf("rehydrate: checkout %s names member %q, which the blob does not carry", mc.Path, name)
 			}
 		}
 	}
@@ -1531,10 +1530,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	// A fresh root. Whatever is at the path is a tree this engagement is about
 	// to replace — a stale copy, or one an older binary laid out.
 	if err := worktree.RemoveAt(root, keyID); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: clear the run root: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: clear the run root: %w", err)
 	}
 	if _, err := worktree.MakeRunRoot(keyID); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: make run root: %w", err)
+		return snapshotManifest{}, fmt.Errorf("rehydrate: make run root: %w", err)
 	}
 	defer func() {
 		if err == nil {
@@ -1553,7 +1552,7 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	if sawScratch {
 		// The fresh root has no _tfac, so move the staged tree in wholesale.
 		if err := os.Rename(scratchStaging, filepath.Join(root, worktree.ScratchDir)); err != nil {
-			return snapshotManifest{}, nil, fmt.Errorf("rehydrate: install scratch: %w", err)
+			return snapshotManifest{}, fmt.Errorf("rehydrate: install scratch: %w", err)
 		}
 	}
 	if man.CILogsOmitted {
@@ -1576,9 +1575,26 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 		delegateLog.Warn("plant sandbox memory symlink on rehydrated tree failed", "dir", root, "error", err)
 	}
 
-	restored, err := s.restoreCheckouts(ctx, root, keyID, claimID, restorer, man.Checkouts, staged)
+	checkouts, err := checkoutRepositories(ctx, restorer, man.Checkouts)
 	if err != nil {
-		return snapshotManifest{}, nil, err
+		return snapshotManifest{}, err
+	}
+	added, err := s.recordRestoringCheckouts(ctx, orgID, conv, root, checkouts)
+	// Every failure from here takes back out the rows this attempt added, so
+	// none names a checkout that is not on disk. Not on a fence refusal: the
+	// conversation's rows are its successor's to write by then, under the same
+	// keys.
+	defer func() {
+		if err != nil && !errors.Is(err, db.ErrClaimReleased) {
+			s.forgetCheckouts(ctx, orgID, conv, added)
+		}
+	}()
+	if err != nil {
+		return snapshotManifest{}, fmt.Errorf("rehydrate: %w", err)
+	}
+	restored, err := s.restoreCheckouts(ctx, root, keyID, conv.ClaimID, restorer, checkouts, staged)
+	if err != nil {
+		return snapshotManifest{}, err
 	}
 	// Every failure from here takes the rebuilt checkouts back out of the
 	// shared bares too, which removing the root alone does not.
@@ -1592,10 +1608,10 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 
 	if len(session) > 0 && man.SessionID != "" {
 		if err := restoreSessionTranscript(root, man.SessionID, session); err != nil {
-			return snapshotManifest{}, nil, err
+			return snapshotManifest{}, err
 		}
 	}
-	return man, restored, nil
+	return man, nil
 }
 
 // restoreParallelism caps how many checkouts one rehydrate rebuilds at once.
@@ -1607,9 +1623,9 @@ const restoreParallelism = 4
 // inside worktree.RestoreCheckout. The first failure cancels the rest, since
 // the set is all or nothing, and every checkout that did come back is
 // discarded.
-func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, checkouts []manifestCheckout, staged map[string]string) ([]restoredCheckout, error) {
+func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, checkouts []manifestCheckout, staged map[string]string) ([]worktree.RestoredCheckout, error) {
 	type result struct {
-		restored restoredCheckout
+		restored worktree.RestoredCheckout
 		err      error
 	}
 	results := make([]result, len(checkouts))
@@ -1627,7 +1643,7 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 	}
 	firstErr := g.Wait()
 
-	var restored []restoredCheckout
+	var restored []worktree.RestoredCheckout
 	var upstreamErr error
 	for _, r := range results {
 		if r.err != nil {
@@ -1652,35 +1668,46 @@ func (s *Spawner) restoreCheckouts(ctx context.Context, root, keyID, claimID str
 	return nil, fmt.Errorf("rehydrate: %w", firstErr)
 }
 
-// restoreOneCheckout rebuilds one manifest checkout through restoreCheckout,
-// resolving its repository's row id when the manifest predates recording it,
-// its seed and, for a pr-<N> checkout, its pull request.
-func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, mc manifestCheckout, staged map[string]string) (restoredCheckout, error) {
-	owner, repo := parseOwnerRepo(mc.RepoID)
-	repositoryID := mc.RepositoryID
-	if repositoryID == "" {
-		if restorer.repository == nil {
-			return restoredCheckout{}, fmt.Errorf("restore %s: the manifest names no repository row and nothing resolves one", mc.Path)
+// checkoutRepositories returns checkouts with every repository row id filled
+// in: the manifest's own, or, for a manifest that predates recording it, the
+// row restorer resolves for the checkout's owner/repo.
+func checkoutRepositories(ctx context.Context, restorer checkoutRestorer, checkouts []manifestCheckout) ([]manifestCheckout, error) {
+	out := make([]manifestCheckout, 0, len(checkouts))
+	for _, mc := range checkouts {
+		if mc.RepositoryID == "" {
+			if restorer.repository == nil {
+				return nil, fmt.Errorf("restore %s: the manifest names no repository row and nothing resolves one", mc.Path)
+			}
+			owner, repo := parseOwnerRepo(mc.RepoID)
+			id, err := restorer.repository(ctx, owner, repo)
+			if err != nil {
+				return nil, fmt.Errorf("restore %s: %w", mc.Path, err)
+			}
+			mc.RepositoryID = id
 		}
-		id, err := restorer.repository(ctx, owner, repo)
-		if err != nil {
-			return restoredCheckout{}, fmt.Errorf("restore %s: %w", mc.Path, err)
-		}
-		repositoryID = id
+		out = append(out, mc)
 	}
+	return out, nil
+}
+
+// restoreOneCheckout rebuilds one manifest checkout through restoreCheckout,
+// resolving its seed and, for a pr-<N> checkout, its pull request. mc names
+// its repository row (checkoutRepositories).
+func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID string, restorer checkoutRestorer, mc manifestCheckout, staged map[string]string) (worktree.RestoredCheckout, error) {
+	owner, repo := parseOwnerRepo(mc.RepoID)
 	var seed gitSeed
 	if restorer.seed != nil {
-		seed = restorer.seed(ctx, repositoryID, owner, repo)
+		seed = restorer.seed(ctx, mc.RepositoryID, owner, repo)
 	}
 	r := worktree.CheckoutRestore{
-		RepositoryID: repositoryID, Owner: owner, Repo: repo, CloneURL: seed.cloneURL, Auth: seed.auth,
+		RepositoryID: mc.RepositoryID, Owner: owner, Repo: repo, CloneURL: seed.cloneURL, Auth: seed.auth,
 		Root: root, Slug: mc.Slug, RootKey: keyID,
 		Head: mc.Head, Branch: mc.Branch,
 		BundlePath: staged[mc.Bundle], PatchPath: staged[mc.Patch],
 	}
 	if _, prNumber, _ := worktree.ParseCheckoutSlug(mc.Slug); prNumber > 0 {
 		if restorer.pr == nil {
-			return restoredCheckout{}, fmt.Errorf("restore %s: no GitHub client to read PR #%d with", mc.Path, prNumber)
+			return worktree.RestoredCheckout{}, fmt.Errorf("restore %s: no GitHub client to read PR #%d with", mc.Path, prNumber)
 		}
 		pr, err := restorer.pr(ctx, owner, repo, prNumber)
 		switch {
@@ -1696,14 +1723,10 @@ func (s *Spawner) restoreOneCheckout(ctx context.Context, root, keyID, claimID s
 				"checkout", mc.Path, "number", prNumber, "error", err)
 			r.PR = &worktree.PRCheckout{}
 		default:
-			return restoredCheckout{}, fmt.Errorf("restore %s: read PR #%d: %w", mc.Path, prNumber, err)
+			return worktree.RestoredCheckout{}, fmt.Errorf("restore %s: read PR #%d: %w", mc.Path, prNumber, err)
 		}
 	}
-	c, err := restoreCheckout(ctx, r)
-	if err != nil {
-		return restoredCheckout{}, err
-	}
-	return restoredCheckout{RestoredCheckout: c, repositoryID: repositoryID, repoID: mc.RepoID, slug: mc.Slug}, nil
+	return restoreCheckout(ctx, r)
 }
 
 // prReadRefused reports whether err is GitHub answering a PR read with a 403
@@ -1717,32 +1740,62 @@ func prReadRefused(err error) bool {
 	return he.StatusCode == http.StatusForbidden || he.StatusCode == http.StatusNotFound
 }
 
-// recordRestoredCheckouts records every rebuilt checkout as the restoring
-// conversation's, at the path it has now, through the claim fence: the push
-// gate reads these rows, and a conversation restoring a tree it did not build
-// — a later step, or a run whose rows a terminal left pointing at a root that
-// is gone — holds no row for them otherwise.
+// recordRestoringCheckouts records every checkout a restore is about to
+// rebuild under root as conv's own, before any of them is fetched: the git gate
+// reads conv's rows alone, and the checkouts a snapshot carries are the task's,
+// including those another conversation built. The first write that fails stops
+// the rest and is returned; db.ErrClaimReleased once conv's claim has lost the
+// conversation.
 //
-// Best-effort per row: a missing row costs this conversation its push to that
-// repo, never its start, and never the checkout's place in the next snapshot,
-// which the rows it was restored from already give it. A fence refusal is the
-// ownership loss setWorktreePath already reports.
-func (s *Spawner) recordRestoredCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, restored []restoredCheckout) {
-	if s.conversationWorktrees == nil || conv.ClaimID == "" {
+// It returns the checkouts conv held no row for before this call — the rows a
+// failed restore takes back out (forgetCheckouts). A row conv already held is
+// left in place, its path moved to root: the next engagement's credentials are
+// sealed for the repositories the task's rows name, so removing the only row
+// that names one would leave the retry no credential to fetch it with.
+func (s *Spawner) recordRestoringCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, root string, checkouts []manifestCheckout) ([]snapshotCheckout, error) {
+	if s.conversationWorktrees == nil || len(checkouts) == 0 {
+		return nil, nil
+	}
+	ledgerCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+	defer cancel()
+	held, err := s.conversationWorktrees.ListSystem(ledgerCtx, orgID, conv.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list the conversation's checkouts: %w", err)
+	}
+	had := map[[2]string]bool{}
+	for _, w := range held {
+		had[[2]string{w.RepositoryID, w.Ref}] = true
+	}
+	var added []snapshotCheckout
+	for _, mc := range checkouts {
+		c := snapshotCheckout{
+			repositoryID: mc.RepositoryID, repoID: mc.RepoID, slug: mc.Slug,
+			rel: mc.Path, path: filepath.Join(root, filepath.FromSlash(mc.Path)),
+		}
+		if err := s.recordCheckoutAs(ledgerCtx, orgID, conv, c); err != nil {
+			return added, err
+		}
+		if !had[[2]string{c.repositoryID, c.slug}] {
+			added = append(added, c)
+		}
+	}
+	return added, nil
+}
+
+// forgetCheckouts deletes conv's rows for checkouts a restore recorded and
+// then did not rebuild. Detached from ctx, which a failed restore may have
+// cancelled, and bounded. Best-effort: a row left behind names a path that is
+// not on disk, which the next restore records again.
+func (s *Spawner) forgetCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, checkouts []snapshotCheckout) {
+	if s.conversationWorktrees == nil || len(checkouts) == 0 {
 		return
 	}
-	for _, c := range restored {
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-		_, err := s.conversationWorktrees.RecordForClaimSystem(recordCtx, orgID, conv.ClaimID, domain.ConversationWorktree{
-			ConversationID: conv.ID, RepositoryID: c.repositoryID, Path: c.Path, Ref: c.slug,
-		})
-		cancel()
-		if errors.Is(err, db.ErrClaimReleased) {
-			return
-		}
-		if err != nil {
-			delegateLog.Warn("record a restored checkout in conversation_worktrees failed; pushes to this repo will be denied for this conversation",
-				"conversation", conv.ID, "repo", c.repoID, "path", c.Path, "error", err)
+	ledgerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
+	defer cancel()
+	for _, c := range checkouts {
+		if err := s.conversationWorktrees.DeleteByRepoRefSystem(ledgerCtx, orgID, conv.ID, c.repositoryID, c.slug); err != nil {
+			delegateLog.Warn("remove the row of a checkout a failed restore did not rebuild failed; it names a path that is not on disk",
+				"conversation", conv.ID, "checkout", c.rel, "error", err)
 		}
 	}
 }

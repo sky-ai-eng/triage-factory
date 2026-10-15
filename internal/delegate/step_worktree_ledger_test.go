@@ -2,6 +2,7 @@ package delegate
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -135,6 +136,75 @@ func TestGitAuthorizeDecision_LaterStepMayPushTheSharedTreesBranch(t *testing.T)
 	}
 	if slices.Contains(after.AllowedRefs, "refs/heads/somewhere-else") {
 		t.Errorf("AllowedRefs = %v, want a ref the tree is not on to stay out of it", after.AllowedRefs)
+	}
+}
+
+// TestBuildStepConfig_WarmStepRecordsTheCheckoutsAnEarlierStepAdded: step 0
+// ran `workspace add` for a second repository, so the warm tree step 1 opens
+// in holds a checkout only step 0 has a row for. The git gate reads the rows of
+// the conversation asking, so step 1 is refused that repository until its claim
+// records the checkout as its own, at the same path, before the agent starts.
+func TestBuildStepConfig_WarmStepRecordsTheCheckoutsAnEarlierStepAdded(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	ctx := context.Background()
+	wt := t.TempDir()
+	f := seedStepFixture(t, "github", "ledger-added", 2, wt)
+	seedTaskRepoRegistry(t, f)
+	stores := sqlitestore.New(f.database)
+	if err := stores.TeamGitHubRepos.ReplaceForTeam(ctx, runmode.LocalDefaultOrgID, runmode.LocalDefaultTeamID, dbtest.TestGitHubHost, []domain.TeamGitHubRepo{
+		{Owner: "owner", Repo: "repo"}, {Owner: "owner", Repo: "orrery"},
+	}); err != nil {
+		t.Fatalf("track the second repo: %v", err)
+	}
+	orrery, err := stores.Repos.Upsert(ctx, runmode.LocalDefaultOrgID, domain.Repository{
+		Host: dbtest.TestGitHubHost, Owner: "owner", Repo: "orrery", DefaultBranch: "main", CloneURL: "https://x", ProfileText: "t",
+	})
+	if err != nil {
+		t.Fatalf("seed the second repository: %v", err)
+	}
+	checkout := filepath.Join(wt, "owner", "orrery", "ref-main")
+	if err := os.MkdirAll(checkout, 0o755); err != nil {
+		t.Fatalf("make the checkout: %v", err)
+	}
+	if _, _, err := stores.ConversationWorktrees.InsertSystem(ctx, runmode.LocalDefaultOrgID, domain.ConversationWorktree{
+		ConversationID: f.conversationIDs[0], RepositoryID: orrery.ID, Path: checkout, Ref: "ref-main",
+	}); err != nil {
+		t.Fatalf("record step 0's checkout: %v", err)
+	}
+	stubLiveBranch(t, map[string]string{checkout: "agent-work"})
+	info := agenthost.ConversationInfo{
+		OrgID:          runmode.LocalDefaultOrgID,
+		TeamID:         runmode.LocalDefaultTeamID,
+		ConversationID: f.conversationIDs[1],
+	}
+
+	before, err := gitAuthorizeDecision(ctx, stores, info, "owner", "orrery")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision before the claim: %v", err)
+	}
+	if before.Allowed {
+		t.Fatalf("pre-claim decision = %+v, want step 1 refused a checkout it holds no row for", before)
+	}
+
+	if cfg := f.claimStep(t, f.blueprintRun(t), 1); cfg.workspace != domain.WorkspaceProvenanceWarm {
+		t.Fatalf("workspace provenance = %q, want warm", cfg.workspace)
+	}
+
+	var got *domain.ConversationWorktree
+	for _, w := range ledgerRows(t, f, f.conversationIDs[1]) {
+		if w.RepositoryID == orrery.ID {
+			got = &w
+		}
+	}
+	if got == nil || got.Path != checkout || got.Ref != "ref-main" {
+		t.Fatalf("step 1's row for owner/orrery = %+v, want one at %s with ref ref-main", got, checkout)
+	}
+	after, err := gitAuthorizeDecision(ctx, stores, info, "owner", "orrery")
+	if err != nil {
+		t.Fatalf("gitAuthorizeDecision after the claim: %v", err)
+	}
+	if !after.Allowed || !equalRefs(after.AllowedRefs, []string{"refs/heads/agent-work"}) {
+		t.Fatalf("post-claim decision = %+v, want owner/orrery admitted with refs/heads/agent-work pushable", after)
 	}
 }
 
