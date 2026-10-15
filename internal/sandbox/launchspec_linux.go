@@ -79,7 +79,7 @@ const TrustedGHInjectorCertDestination = "/run/tf-gh-injector.crt"
 // VALIDATES a launch's mount source against this derivation. A drift test
 // cross-checks it agrees with agenthost.CertPathFor.
 func TrustedGHInjectorCertPath(conversationID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+"-gh-injector.crt")
+	return filepath.Join(RunSocketDir(conversationID), ghInjectorCertName)
 }
 
 // TrustedToolHostBinaryDestination is the fixed in-sandbox path the
@@ -119,12 +119,12 @@ const TrustedAgentHostSocketDestination = "/run/tf.sock"
 // so the broker VALIDATES a launch's mount source against this derivation
 // rather than resolving/overriding it.
 func TrustedAgentHostSocketPath(conversationID string) string {
-	return filepath.Join(trustedAgentHostSocketRoot, sanitizeSocketName(conversationID)+".sock")
+	return filepath.Join(RunSocketDir(conversationID), agentHostSocketName)
 }
 
 // This file is the load-bearing narrowing of the broker's attack surface:
 // the broker OWNS the OCI spec (built from a fixed template — empty
-// capabilities, uid/gid 10000, seccomp, the namespace set, a
+// capabilities, the run's own jail uid/gid, seccomp, the namespace set, a
 // content-addressed read-only rootfs) and accepts over its RPC only the
 // narrow, validated DATA in LaunchParams. The broker is the only launch
 // path, so ValidateLaunchParams is unconditional: it is the gate every
@@ -446,20 +446,46 @@ func validateOpaqueID(kind, id string) error {
 // network state" evolution the launch params anticipate); it is bounded even
 // so, because such an orchestrator already holds every host-side credential a
 // reachable sibling gateway's proxy would mediate.
-func validateNetnsPath(conversationID, p string) error {
+//
+// Returns the subnet index the namespace was created for, which the jail
+// identity check below ties the launch's uid to.
+func validateNetnsPath(conversationID, p string) (uint8, error) {
 	if p == "" {
-		return fmt.Errorf("sandbox: netns path is required")
+		return 0, fmt.Errorf("sandbox: netns path is required")
 	}
 	dir, name := filepath.Split(p)
 	if filepath.Clean(dir) != "/var/run/netns" && filepath.Clean(dir) != "/run/netns" {
-		return fmt.Errorf("sandbox: netns path %q is not under /var/run/netns (or /run/netns)", p)
+		return 0, fmt.Errorf("sandbox: netns path %q is not under /var/run/netns (or /run/netns)", p)
 	}
 	idx, ok := subnetIdxFromNetnsName(name)
 	if !ok {
-		return fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
+		return 0, fmt.Errorf("sandbox: netns name %q is not a broker-created sandbox namespace", name)
 	}
 	if name != NetnsNameForRun(conversationID, idx) {
-		return fmt.Errorf("sandbox: netns %q is not the namespace created for this run", name)
+		return 0, fmt.Errorf("sandbox: netns %q is not the namespace created for this run", name)
+	}
+	return idx, nil
+}
+
+// validateJailIdentity requires the launch's jail uid/gid to be the identity
+// derived from the run's own subnet index. The band check alone keeps the
+// broker from setting a jail's process to root or to the orchestrator; the
+// index tie is what keeps it from setting it to a sibling run's identity —
+// which owns that sibling's run tree and is the group its sockets and staging
+// are granted to.
+//
+// Residual, the same one validateNetnsPath documents: a fully compromised
+// orchestrator drives the network setup too, so it can make the index and the
+// run id agree by lying about both. Bounded the same way.
+func validateJailIdentity(uid, gid int, subnetIdx uint8) error {
+	if uid != gid {
+		return fmt.Errorf("sandbox: jail uid %d and gid %d must match", uid, gid)
+	}
+	if !IsJailUID(uid) {
+		return fmt.Errorf("sandbox: jail uid %d outside the reserved band [%d, %d)", uid, JailUIDBase, JailUIDBase+MaxSandboxes)
+	}
+	if uid != JailUID(subnetIdx) {
+		return fmt.Errorf("sandbox: jail uid %d is not this run's (subnet index %d, want uid %d)", uid, subnetIdx, JailUID(subnetIdx))
 	}
 	return nil
 }
@@ -486,8 +512,8 @@ func validateArgv(argv []string) error {
 // the privileged broker with hostile data. Each check maps to a documented
 // rejection: path-shaped ids, an unknown/path-shaped rootfs name, a
 // non-allowlisted env key, a non-pinned command, an unknown rlimit, a
-// worktree/mount source outside this run's own scope, a forged netns, or a
-// denylisted egress CIDR.
+// worktree/mount source outside this run's own scope, a forged netns, a jail
+// identity that is not the run's own, or a denylisted egress CIDR.
 func ValidateLaunchParams(p LaunchParams) error {
 	if err := validateOpaqueID("container id", p.ContainerID); err != nil {
 		return err
@@ -535,7 +561,11 @@ func ValidateLaunchParams(p LaunchParams) error {
 	if err := validateWorktreeAndMounts(p.ConversationID, p.WorkspaceKey, p.Worktree, p.Mounts); err != nil {
 		return err
 	}
-	if err := validateNetnsPath(p.ConversationID, p.NetnsPath); err != nil {
+	idx, err := validateNetnsPath(p.ConversationID, p.NetnsPath)
+	if err != nil {
+		return err
+	}
+	if err := validateJailIdentity(p.JailUID, p.JailGID, idx); err != nil {
 		return err
 	}
 	if err := validateEgressCIDR(p.ExtraEgressCIDR); err != nil {
@@ -1082,7 +1112,7 @@ func PrepareBundle(ctx context.Context, p LaunchParams) (string, error) {
 		MemoryLimitMB:  p.MemoryLimitMB,
 		Rlimits:        p.Rlimits,
 	}
-	spec, err := buildSpec(cfg, p.NetnsPath)
+	spec, err := buildSpec(cfg, p.NetnsPath, p.JailUID, p.JailGID)
 	if err != nil {
 		return "", err
 	}

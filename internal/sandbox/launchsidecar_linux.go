@@ -81,18 +81,14 @@ func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int,
 	cmd := exec.CommandContext(ctx, binPath, sidecarSubcommand, "--container-id", containerID)
 	cmd.ExtraFiles = extra
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// The per-run uid/gid, PLUS the sandbox group as a supplementary group:
-		// the relocated exec-verb socket server the sidecar hosts must chgrp its
-		// /run/tf/<conversationID>.sock to WorktreeGID so the sandbox uid (which runs with
-		// that gid) can connect. chgrp is owner-legal only for a group the caller
-		// belongs to, so the sidecar must carry WorktreeGID — the same owner-legal
-		// grant the orchestrator used before the relocation. The broker is root
-		// here, so setting the supplementary group succeeds; the setuid transition
-		// still clears the child's effective/permitted caps (capless).
+		// The per-run uid/gid, plus exactly one supplementary group: this
+		// run's jail gid (sidecarGroups). The broker is root here, so setting
+		// the group succeeds; the setuid transition still clears the child's
+		// effective/permitted caps (capless).
 		Credential: &syscall.Credential{
 			Uid:    uint32(uid),
 			Gid:    uint32(gid),
-			Groups: []uint32{uint32(WorktreeGID)},
+			Groups: sidecarGroups(uid),
 		},
 	}
 	cmd.Stdin = stdio
@@ -116,6 +112,26 @@ func LaunchSidecarProcess(ctx context.Context, containerID string, uid, gid int,
 		return nil, fmt.Errorf("sandbox: start sidecar: %w", startErr)
 	}
 	return &SidecarRuntime{cmd: cmd}, nil
+}
+
+// sidecarGroups is the supplementary group set a sidecar at uid runs with: the
+// jail gid of the same run, and nothing else.
+//
+// The sidecar creates and serves the run's agenthost socket and writes its
+// gh-injector cert, and both have to reach the jail, which runs at another uid.
+// An owner may chgrp its own file only to a group it belongs to, so the sidecar
+// carries the jail's gid — this run's, derived from the same subnet index as
+// its uid (ValidateSidecarLaunchParams ties the uid to that index), so the
+// membership opens this run's files to this run's jail and to no other run.
+//
+// A uid outside the sidecar band gets an empty set, which still sheds the
+// broker's own groups: only a test reaches here with one, since the broker
+// refuses such a launch before it gets this far.
+func sidecarGroups(uid int) []uint32 {
+	if gid, ok := SidecarJailGID(uid); ok {
+		return []uint32{uint32(gid)}
+	}
+	return []uint32{}
 }
 
 // Wait blocks until the sidecar exits. oomKilled is always false — Phase 1

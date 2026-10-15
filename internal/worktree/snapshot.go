@@ -118,10 +118,9 @@ func ReadClaudeSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
 //     the transcript is always at <runRoot>/.claude/projects/<encode(workRoot)>/
 //     <session>.jsonl. Compute that directly.
 //   - It reads CONFINED to runRoot. The child runs on the HOST filesystem as the
-//     shared agent uid (sandbox.WorktreeUID — identical for every run), so a
-//     plain read would follow a symlink the hostile agent planted at the
-//     transcript path out of its own run root into another run's tree, or any
-//     host file that uid can read, and land it in this run's persisted snapshot.
+//     run's jail uid, so a plain read would follow a symlink the hostile agent
+//     planted at the transcript path out of its own run root to any host file
+//     that uid can read, and land it in this run's persisted snapshot.
 //     readFileConfined rejects any resolution that escapes runRoot.
 func ReadSandboxSessionTranscript(runRoot, sessionID string) ([]byte, bool) {
 	if sessionID == "" {
@@ -554,11 +553,11 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // In multi mode this no longer runs as host root: captureWorkspaceGit's
 // dispatcher (internal/delegate/capture_isolated.go) routes every multi-mode
 // capture through sandbox.CaptureRunDelta, which runs the whole
-// CaptureWorkspaceGit — this included — inside a child dropped to the sandbox
-// uid/gid (WorktreeUID/WorktreeGID) in an empty network namespace
+// CaptureWorkspaceGit — this included — inside a child dropped to the jail
+// identity that holds the tree, in an empty network namespace
 // (internal/sandbox/capture_linux.go). So a clean/smudge/diff filter a hostile
-// `.gitattributes` + `.git/config` pair could trigger executes only at the
-// agent's own privilege, with no network — not as the privileged capture host.
+// `.gitattributes` + `.git/config` pair could trigger executes only at that
+// run's own identity, with no network — not as the privileged capture host.
 //
 // Precisely BECAUSE that containment lives in the caller, this path must still
 // NOT be made ownership-tolerant against a chowned checkout in-process: doing

@@ -210,6 +210,11 @@ func (hostOps) ReapOrphans(ctx context.Context) error {
 	// before any run exists.
 	reapOrphanSidecars()
 
+	// Leftover per-run socket directories from a crashed process. They carry
+	// sidecar uids and jail gids this boot will hand out again from index
+	// zero, so they go before any of them is.
+	reapOrphanRunSockets()
+
 	// Leftover runsc container state from a crashed broker. Unlike the
 	// sweeps above, this one has no natural collision to rely on: the ids
 	// are keyed to subnet indices a fresh boot allocates from zero in a

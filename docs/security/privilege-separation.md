@@ -46,15 +46,16 @@ boundary validation (`internal/sandbox`'s `ValidateLaunchParams` and
 `validateRunTreeRoot`) so a compromised orchestrator cannot steer them at arbitrary
 host state: the sandbox infrastructure itself (netns/veth/iptables, cgroups, the
 curated rootfs, the `runsc` launch), and the **run-tree ownership lifecycle** —
-handing a freshly-cloned run tree to the sandbox identity (uid 10000) at run start,
-running the park-time git-delta capture in a dropped-privilege child, and
-destroying the tree at teardown. The lifecycle family exists because all three are
-privileged once the orchestrator's capabilities are gone: changing a file's owner
-needs `CAP_CHOWN`, the capture child's setuid/netns need `CAP_SETUID`/`CAP_SYS_ADMIN`,
-and removing a tree the sandbox wrote into means unlinking through modes the
-orchestrator can't. The chown/remove ops additionally require the target tree to
-already be owned by the orchestrator or the sandbox identity — a validly-shaped
-path pointing at `/etc` is refused by ownership, not just by shape. A third
+handing a run tree to the engagement's jail identity at every claim, parking its
+root when the engagement ends, running the park-time git-delta capture in a
+dropped-privilege child, and destroying the tree at teardown. The lifecycle family
+exists because all of it is privileged once the orchestrator's capabilities are
+gone: changing a file's owner needs `CAP_CHOWN`, the capture child's setuid/netns
+need `CAP_SETUID`/`CAP_SYS_ADMIN`, and removing a tree the sandbox wrote into means
+unlinking through modes the orchestrator can't. The chown/remove ops additionally
+require the target tree to already be owned by the orchestrator, a jail identity or
+the parked owner — a validly-shaped path pointing at `/etc` is refused by ownership,
+not just by shape — and the uid a hand-off names must be inside the jail band. A third
 launch family is the per-run credential sidecar: the broker execs it at the
 validated per-run uid (re-checking the `SidecarUID` band at the RPC boundary, so
 a compromised orchestrator can't ask for uid 0), the sidecar analog of the runsc
@@ -91,14 +92,39 @@ channels ever enter the threat model, the lever is a `0750` per-run group
 directory with a group grant at creation — noted so the option is
 discoverable, deliberately not built.
 
-The per-run agenthost socket is granted to the sandbox with no capability at all:
-it is *chgrp'd* (not chowned) to the sandbox group — an owner-legal group grant,
-possible because the granting process is a member of `tf-sandbox` (gid 10000).
-That process is now the run's **sidecar**, which the broker launches carrying
-that one supplementary group and which creates and serves the socket itself; on
-the self-contained all/local path, where there is no sidecar, the orchestrator
-does the same chgrp in-process (the entrypoint's `setpriv` carries the group
-through its drop).
+**Every run has its own jail identity.** A run's jail runs as a uid/gid derived
+from its subnet index (the `JailUID` band, `40000+`), exactly as its sidecar's
+uid is (`SidecarUID`, `20000+`): one allocator hands out both, and the broker
+refuses a launch whose jail uid is not the one its own netns's index derives.
+That identity is what everything per-run is granted to, and nothing outside the
+run holds it:
+
+- **The run tree** is handed to the jail's uid at every claim (a task's tree
+  outlives an engagement, and the next claim may hold another index), with the
+  orchestrator's gid as its group so it can still add checkouts. When the
+  engagement ends its root is given to a parked owner (`ParkedRunTreeUID`) no
+  process runs as, so a later run drawing the same index cannot reach it.
+- **The sockets** live in two per-run directories the broker creates for each
+  engagement under `/run/tf`: the sidecar's (owned by its uid, group the jail's
+  gid, `0750`), where it creates and serves the agenthost socket and writes the
+  gh-injector cert, and the tool host's (owned by the orchestrator, setgid to the
+  jail's gid, `0750`), where the orchestrator binds the tool-host socket. Each
+  socket is *chgrp'd* (not chowned) to the run's jail gid and opened `0660`. The
+  sidecar can make that grant without a capability because the broker launches
+  it carrying the run's jail gid as its one supplementary group; the tool host's
+  socket takes the gid from its setgid directory, since the orchestrator carries
+  no jail gid and no supplementary group at all. `/run/tf` itself is the
+  orchestrator's at `0711`: no group or other write, so no sidecar or jail
+  identity on the host can create, unlink or rename anything in it.
+- **Staging** a launch mounts read-only (a step's skill, its prior memory and
+  task context) is created owner-only by the orchestrator and granted to the
+  jail's gid (`0750`) by the broker at launch.
+
+Before the index goes back to the allocator, the cell takes every one of those
+grants back — sockets removed, tree root parked, staging regrouped — after the
+jail and the sidecar are gone. A grant that cannot be taken back keeps the index
+out of the allocator rather than handing another run an identity a file still
+carries.
 
 **Broker lifetime.** After the entrypoint's `exec`, the broker is a child of the
 orchestrator, but the orchestrator neither supervises nor restarts it (post-drop it
@@ -130,6 +156,11 @@ tini's `-g` signal fan-out reaches both processes directly.
   `CapEff` of all zeroes at a distinct uid in the `20000+` band — and each run's
   sidecar sits at a *different* uid in that band, which is exactly what stops one
   run's compromised credential process from `ptrace`-ing another's.
+- `grep ^Groups /proc/<pid>/status`: empty for the orchestrator, and for a live
+  `tf-sidecar` exactly one gid — its own run's jail gid (`40000+`, the same index
+  as its uid's). `stat -c '%u:%g %a %n' /run/tf /run/tf/*` shows the socket root as
+  the orchestrator's at `711`, and each run's two directories at `750` (the
+  tool-host one setgid) with that run's jail gid as their group.
 
 All three are identifiable in the logs: every line carries a `proc=cap-broker`,
 `proc=orchestrator`, or `proc=sidecar` attribute (distinct from `component`,

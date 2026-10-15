@@ -32,14 +32,19 @@ import (
 // connects (pure client) and must never be able to *bind* a host socket.
 //
 // Security scope: host-uds is sandbox-wide, so the reachable set is exactly
-// the host sockets in the jail's mount tree — today the single per-run
-// daemon socket (a single-file bind of /run/tf/<conversationID>.sock; the /run/tf
-// dir is not mounted, so runs can't reach each other), and nothing else
-// mounted is a socket. The flag is permissive-but-inert without a mount, so
-// it grants nothing a run wasn't already handed a socket for. Standing
-// invariant it relies on: never bind-mount a sensitive host socket (or a
-// broad host dir containing one) into the jail, and never widen to
-// create/all. This is orthogonal to network egress (the forward proxy +
+// the host sockets in the jail's mount tree — the run's own agenthost socket
+// (a single-file bind of /run/tf/<conversationID>/agenthost.sock) and the
+// run's own tool-host socket directory (/run/tf/<conversationID>.tools); the
+// /run/tf dir itself is not mounted, so runs can't reach each other, and
+// nothing else mounted is a socket. Both sockets are granted to this run's
+// jail gid (0660, in directories closed to everyone else), and the jail runs
+// at its own per-run uid/gid (JailUID), so the permission check gVisor applies
+// to a connect admits this run's jail and no other run's — and the same
+// holds for a host process carrying another run's jail or sidecar identity.
+// The flag is permissive-but-inert without a mount, so it grants nothing a run
+// wasn't already handed a socket for. Standing invariant it relies on: never
+// bind-mount a sensitive host socket (or a broad host dir containing one) into
+// the jail, and never widen to create/all. This is orthogonal to network egress (the forward proxy +
 // applyEgressPolicy L3 policy on sb.HostIP) — host-uds opens no network
 // path. See internal/sandbox/doc.go (Property B) and the socket lifecycle
 // in cmd/exec/agenthost/socket_linux.go.

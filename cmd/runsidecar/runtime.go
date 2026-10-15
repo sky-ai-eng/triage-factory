@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/gitproxy"
 	"github.com/sky-ai-eng/triage-factory/internal/jira"
 	"github.com/sky-ai-eng/triage-factory/internal/linear"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
@@ -357,9 +359,10 @@ func (r *credRuntime) startProxies(ctx context.Context, body json.RawMessage) (a
 // per-request LocalClient runs over a relay runtime (every DB effect relays to
 // the orchestrator) and whose gh/jira/linear verbs route through the proxies this
 // sidecar just bound (holding only per-run placeholders). It creates the
-// /run/tf/<conversationID>.sock the broker bind-mounts into the jail and grants it to the
-// sandbox group — the same grant the orchestrator used to do, now owned by this
-// process (a member of that group by launch). Identity comes from the
+// agenthost socket in the run's own socket directory (/run/tf/<conversationID>/),
+// which the broker bind-mounts into the jail, and grants it to the run's jail
+// gid — this process carries that gid as its one supplementary group, by launch.
+// Identity comes from the
 // orchestrator's AgentHostInfo but is never trusted for org-scoping: every
 // relayed op is re-bound to the orchestrator's own ConversationInfo.
 func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sidecarproto.StartProxiesResult) error {
@@ -406,10 +409,39 @@ func (r *credRuntime) startAgentHost(ai *sidecarproto.AgentHostInfo, proxies sid
 // those paths as constants and is the privileged side of this boundary. Making
 // its path resolution mutable so another package's test can retarget it would
 // trade a real invariant for test convenience.
+//
+// Both grant what they create to the run's jail gid, which this process derives
+// from its own uid (ownJailGID) — so a test standing in for them stands in for
+// that derivation too, and never needs to run at a sidecar uid.
 var (
-	writeInjectorCert    = agenthost.WriteInjectorCert
-	startAgentHostSocket = agenthost.StartWithServer
+	writeInjectorCert = func(conversationID string, certPEM []byte) error {
+		gid, err := ownJailGID()
+		if err != nil {
+			return err
+		}
+		return agenthost.WriteInjectorCert(conversationID, certPEM, gid)
+	}
+	startAgentHostSocket = func(srv *agenthost.Server, conversationID string) (*agenthost.HostDaemon, sandbox.Mount, error) {
+		gid, err := ownJailGID()
+		if err != nil {
+			return nil, sandbox.Mount{}, err
+		}
+		return agenthost.StartWithServer(srv, conversationID, gid)
+	}
 )
+
+// ownJailGID is the jail gid of the run this sidecar serves, derived from the
+// sidecar's own uid: the broker launches it at SidecarUID(idx) carrying
+// JailGID(idx) as its one supplementary group, so the uid names the group the
+// run's files are granted to. A process outside the sidecar band is not a
+// run's sidecar and has no jail to grant anything to.
+func ownJailGID() (int, error) {
+	gid, ok := sandbox.SidecarJailGID(os.Getuid())
+	if !ok {
+		return 0, fmt.Errorf("runsidecar: uid %d is not a sidecar uid; no jail to grant the run's files to", os.Getuid())
+	}
+	return gid, nil
+}
 
 // ghChannelWanted reports whether this request gets a gh injector. It needs the
 // run's identity for the per-run cert path (the orchestrator mounts the same
@@ -990,10 +1022,10 @@ func (r *credRuntime) shutdown(ctx context.Context) {
 	r.mu.Unlock()
 	// Drain the socket server first (unblocks its accept loop + removes the
 	// socket file) so a graceful teardown leaves no stale /run/tf socket. A
-	// SIGKILL teardown skips this; the file is then reclaimed on the
-	// orchestrator side — by this cell's teardown, or failing that by the next
-	// engagement's bring-up clear — because a successor sidecar at a different
-	// per-run uid could not unlink it under the sticky socket root.
+	// SIGKILL teardown skips this; the run's socket directory, file and all, is
+	// then removed by the cell's teardown, or failing that replaced by the next
+	// engagement's bring-up — both the cap-broker's, since this process can
+	// write nowhere in the socket root but its own run's directory.
 	if agentHost != nil {
 		_ = agentHost.Close()
 	}

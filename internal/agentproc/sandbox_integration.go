@@ -273,40 +273,26 @@ func ghChannelEnv(gc *GHChannelParams) []string {
 	}
 }
 
-// chownWorktreeForSandbox hands the worktree's ownership to the uid/gid
-// the sandboxed agent runs as. Without this, the agent can't write to
-// its own worktree (EACCES). Idempotent — chowning already-correctly-
-// owned files is a no-op at the kernel level.
-//
-// Routed through sandbox.ChownRunTree rather than chowning in-process:
-// changing a file's owner needs CAP_CHOWN, which the orchestrator no
-// longer holds after its exec-time capability drop — the op executes in
-// the cap-broker (byte-identical to the recursive Lchown that used to live
-// here, including the symlink-safety and ownership-precondition properties
-// — see that implementation's doc). No-op off Linux; the sandbox path
-// isn't reachable there per shouldSandbox.
-func chownWorktreeForSandbox(ctx context.Context, worktree string) error {
-	if worktree == "" {
-		return nil
-	}
-	return sandbox.ChownRunTree(ctx, worktree, "")
-}
-
 // ChownWorkspaceCheckoutForSandbox chowns a checkout materialized into the run
 // root MID-RUN (the agenthost daemon's host-side `workspace add` create,
-// TFAC-546) to the sandbox UID. The run-start chown above already covered the
-// run root, but a later create runs as the host process and would otherwise
-// leave the new subtree unwritable to the jailed agent (EACCES on its own
-// checkout). Covers the checkout recursively plus the owner/repo intermediate
-// directories the create minted between runRoot and it — those must at least
-// be traversable-and-ours so the agent can later add sibling checkouts' mount
-// paths, remove its tree, etc.
+// TFAC-546) to the jail identity that holds the run root. The launch's
+// hand-off already covered the run root, but a later create runs as the host
+// process and would otherwise leave the new subtree unwritable to the jailed
+// agent (EACCES on its own checkout). Covers the checkout recursively plus the
+// owner/repo intermediate directories the create minted between runRoot and
+// it — those must at least be traversable-and-ours so the agent can later add
+// sibling checkouts' mount paths, remove its tree, etc.
 //
-// Same privileged routing as chownWorktreeForSandbox (the subpath form of
-// sandbox.ChownRunTree — shallow intermediates, recursive final tree).
-// The escape check here is a fast caller-bug guard; the privileged side
-// re-validates independently, since this boundary is exactly what a
-// compromised orchestrator would try to steer.
+// The identity is read off the run root rather than threaded here: the root
+// is held by exactly the engagement this checkout is being added for, and the
+// broker refuses the chown unless the uid named is that holder. A root no jail
+// identity holds — its engagement already ended — has nobody to hand the
+// checkout to, and is refused here.
+//
+// Routed through sandbox.ChownRunTree's subpath form (shallow intermediates,
+// recursive final tree). The escape check here is a fast caller-bug guard;
+// the privileged side re-validates independently, since this boundary is
+// exactly what a compromised orchestrator would try to steer.
 func ChownWorkspaceCheckoutForSandbox(ctx context.Context, runRoot, wtDir string) error {
 	if runtime.GOOS != "linux" {
 		return nil
@@ -315,7 +301,11 @@ func ChownWorkspaceCheckoutForSandbox(ctx context.Context, runRoot, wtDir string
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("checkout %q is not inside run root %q", wtDir, runRoot)
 	}
-	return sandbox.ChownRunTree(ctx, runRoot, rel)
+	jailUID, ok := sandbox.RunTreeJailUID(runRoot)
+	if !ok {
+		return fmt.Errorf("run root %q is not held by a jail identity", runRoot)
+	}
+	return sandbox.ChownRunTree(ctx, runRoot, rel, jailUID)
 }
 
 // translateEnvForSandbox rewrites absolute host paths embedded in env

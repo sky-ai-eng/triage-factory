@@ -34,11 +34,13 @@ const maxFrameSize = 1 * 1024 * 1024 // 1 MiB
 // the broker is a long-lived process that can outlive a binary upgrade
 // until the next restart.
 //
-// Bumped to 2 for CaptureRunDelta's wire-shape change: the args gained
-// StdoutSocketPath and the result dropped Delta (see below) — an old
-// client/broker pairing across that change must surface the version
-// mismatch rather than silently misinterpreting the new shape.
-const ProtocolVersion = 2
+// Bumped to 3 for the per-run jail identity: ChownRunTree's args gained the
+// jail uid, LaunchRun's params gained the jail uid/gid, and the cell grew
+// ParkRunTree, PrepareRunSockets, ReleaseRunSockets and GrantRunStaging. An
+// old orchestrator against a new broker would send launches with no jail
+// identity and hand-offs with no target; the mismatch has to surface as a
+// version error, not as a run that cannot write its own tree.
+const ProtocolVersion = 3
 
 // request is the envelope for every RPC. Method identifies the operation;
 // Args is the method-specific payload (JSON-encoded).
@@ -215,6 +217,24 @@ type killSidecarArgs struct {
 type chownRunTreeArgs struct {
 	Root    string `json:"root"`
 	Subpath string `json:"subpath,omitempty"`
+	JailUID int    `json:"jail_uid"`
+}
+
+type parkRunTreeArgs struct {
+	Root string `json:"root"`
+}
+
+// runSocketsArgs carries PrepareRunSockets and ReleaseRunSockets alike: the
+// run whose socket directories they name and the engagement's subnet index,
+// from which the broker derives every owner and group itself.
+type runSocketsArgs struct {
+	ConversationID string `json:"conversation_id"`
+	SubnetIdx      uint8  `json:"subnet_idx"`
+}
+
+type grantRunStagingArgs struct {
+	Dir       string `json:"dir"`
+	SubnetIdx uint8  `json:"subnet_idx"`
 }
 
 type removeRunTreeArgs struct {
@@ -261,7 +281,11 @@ const (
 	methodWaitRun         = "WaitRun"
 	methodKillRun         = "KillRun"
 	methodChownRunTree    = "ChownRunTree"
+	methodParkRunTree     = "ParkRunTree"
 	methodRemoveRunTree   = "RemoveRunTree"
+	methodPrepareSockets  = "PrepareRunSockets"
+	methodReleaseSockets  = "ReleaseRunSockets"
+	methodGrantStaging    = "GrantRunStaging"
 	methodCaptureRunDelta = "CaptureRunDelta"
 	methodLaunchSidecar   = "LaunchSidecar"
 	methodWaitSidecar     = "WaitSidecar"

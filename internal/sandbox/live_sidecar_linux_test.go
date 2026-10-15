@@ -356,16 +356,18 @@ func runPtraceProbeAsUID(t *testing.T, uid, targetPid int) string {
 
 // newAgentHostSocketListener stands up a real host-side agenthost unix socket at
 // TrustedAgentHostSocketPath(conversationID) and serves the same one-byte accept the
-// cross-tenant probe uses, so a dial that reaches it succeeds. It grants the
-// socket to the sandbox identity exactly as the production root path does
-// (grantSocketToSandbox: chown WorktreeUID + 0600), so the run's OWN sandbox can
-// connect to it through the bind mount. Returns the host path; registers
-// cleanup.
+// cross-tenant probe uses, so a dial that reaches it succeeds. The socket is
+// opened to everyone (0666) rather than granted to the run's jail gid: the
+// listener has to exist before startLiveRun allocates the run's index, so the
+// jail identity is not known yet. What these tests probe is the mount topology
+// — which socket a jail can see at all — and the per-run grant is covered on
+// the host side (jail_isolation_linux_test.go). Returns the host path;
+// registers cleanup.
 func newAgentHostSocketListener(t *testing.T, conversationID string) string {
 	t.Helper()
-	root := trustedAgentHostSocketRoot
-	if err := os.MkdirAll(root, 0o700); err != nil {
-		t.Fatalf("mkdir agenthost socket root %s: %v", root, err)
+	dir := RunSocketDir(conversationID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir agenthost socket dir %s: %v", dir, err)
 	}
 	sockPath := TrustedAgentHostSocketPath(conversationID)
 	_ = os.Remove(sockPath) // clear any stale file
@@ -373,11 +375,7 @@ func newAgentHostSocketListener(t *testing.T, conversationID string) string {
 	if err != nil {
 		t.Fatalf("listen agenthost socket %s: %v", sockPath, err)
 	}
-	if err := os.Chown(sockPath, WorktreeUID, WorktreeGID); err != nil {
-		_ = ln.Close()
-		t.Skipf("chown agenthost socket to WorktreeUID (need root): %v", err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
+	if err := os.Chmod(sockPath, 0o666); err != nil {
 		_ = ln.Close()
 		t.Fatalf("chmod agenthost socket: %v", err)
 	}

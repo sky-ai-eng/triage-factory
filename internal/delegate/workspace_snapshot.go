@@ -1429,8 +1429,8 @@ func (s *Spawner) rehydrateFromSnapshot(ctx context.Context, keyID, claimID stri
 	sawManifest := false
 	root := worktree.RunRoot(keyID)
 
-	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
-		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: mkdir runs parent: %w", err)
+	if _, err := worktree.EnsureRunsBase(); err != nil {
+		return snapshotManifest{}, nil, fmt.Errorf("rehydrate: %w", err)
 	}
 	// Siblings of the root → the scratch move is an intra-filesystem rename.
 	scratchStaging, err := os.MkdirTemp(filepath.Dir(root), ".scratch-rehydrate-*")

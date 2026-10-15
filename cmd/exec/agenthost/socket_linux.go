@@ -15,36 +15,35 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// hostSocketRoot is the per-host directory that holds the per-run
-// unix sockets. Created with mode 0700 the first time a run needs it
-// — owner-only access defends against a hostile second tenant
-// scanning /run for sockets to dial while a sandbox is mid-construction
-// (between net.Listen and chown/chmod).
-//
-// `/run/` requires root to create on most distros. When this daemon's
-// process runs as root (the dev/bare-metal case where the binary is run
-// directly, no exec-time drop) it creates it itself; in the container
-// deployment the cap-broker (root) creates this same shared directory for
-// its own control socket and hands its ownership to the orchestrator's uid
-// at boot (cmd/capbroker's runBroker), so this process — unprivileged
-// after the exec-time capability drop — finds it already writable-by-owner.
-// The two arrangements are why the MkdirAll below tolerates the directory
-// already existing with either owner.
+// hostSocketRoot is the per-host directory that holds every run's socket
+// directory. The cap-broker creates it at boot and keeps it writable by its
+// owner alone (cmd/capbroker's listen), and creates each run's directory
+// inside it for each engagement (sandbox.PrepareRunSockets): owned by the
+// run's sidecar uid, with the run's jail gid as its group and no access for
+// anyone else. A sidecar therefore creates its socket and cert in the one
+// directory that is its own, and in nothing shared.
 const hostSocketRoot = "/run/tf"
 
-// HostDaemon is the per-run socket + server lifecycle the spawner
-// owns. Start() creates the socket, chowns it to the sandbox UID,
-// spawns the daemon goroutine, and returns. Close() unblocks the
-// accept loop, drains in-flight handlers, and removes the socket
-// file.
+// agentHostSocketName and ghInjectorCertName are the files a run's sidecar
+// creates in its socket directory. internal/sandbox derives the same paths
+// (TrustedAgentHostSocketPath, TrustedGHInjectorCertPath) to validate the
+// launch's mounts; a drift test cross-checks the two derivations.
+const (
+	agentHostSocketName = "agenthost.sock"
+	ghInjectorCertName  = "gh-injector.crt"
+)
+
+// HostDaemon is the per-run socket + server lifecycle. StartWithServer
+// creates the socket, grants it to the run's jail gid, spawns the daemon
+// goroutine, and returns. Close() unblocks the accept loop, drains in-flight
+// handlers, and removes the socket file.
 //
-// One HostDaemon per delegated run. The spawner's deferred-cleanup
-// chain looks like:
+// One HostDaemon per delegated run, served from the run's credential sidecar:
 //
-//	hd, mount, err := Start(stores, info, proxyCreds)
+//	hd, mount, err := StartWithServer(srv, conversationID, jailGID)
 //	if err != nil { ... }
 //	defer hd.Close()
-//	// add `mount` to sandbox.Config.ExtraMounts; sb.Wrap; cmd.Wait
+//	// the orchestrator adds `mount` (SocketMountFor) to the jail's mounts
 type HostDaemon struct {
 	listener net.Listener
 	sockPath string
@@ -52,73 +51,41 @@ type HostDaemon struct {
 	doneCh   chan struct{}
 }
 
-// Start creates the per-run unix socket, grants the sandbox identity
-// access to it, and spawns the daemon goroutine. The agent in the
-// sandbox sees the socket at /run/tf.sock by way of the returned bind
-// mount.
+// StartWithServer creates the per-run socket for an already-built Server,
+// grants it to the run's jail, spawns the accept loop, and returns the bind
+// mount the agent reaches it through. The executor's credential sidecar builds
+// a relay-backed Server (NewServerWithRuntime) and calls this, so the
+// hostile-input verb parser runs inside the capless per-run process rather than
+// the orchestrator.
+//
+// jailGID is the run's jail gid — the one supplementary group the sidecar
+// carries (sandbox.SidecarJailGID of its own uid) and the gid the run's jail
+// runs with. The socket is granted to it and to nothing else.
 //
 // Property B / fs-permissions invariant (load-bearing):
 //
-//  1. Parent dir mkdir 0700 — any race window between socket-create
-//     and the grant is unreachable from a second tenant (the dir is
-//     owner-only). Without this, an attacker on the host could
-//     enumerate /run for sockets that haven't been chmod'd yet.
+//  1. The run's socket directory exists before this runs and admits only the
+//     sidecar and the run's jail gid, so the window between net.Listen and the
+//     grant is unreachable from any other run or host process.
 //
-//  2. net.Listen("unix", ...) — creates the socket file with the
-//     process umask applied (typically 0666 or 0755); either is too
-//     permissive on its own, but step 1 locks the parent so nobody
-//     can reach it yet.
+//  2. net.Listen("unix", ...) — creates the socket file with the process
+//     umask applied (typically 0755); too permissive on its own, but step 1
+//     covers the gap.
 //
-//  3. The sandbox-identity grant, shaped by what this process may do:
-//     running as root (dev/bare-metal, no exec-time drop), chown the
-//     socket to sandbox.WorktreeUID and chmod 0600 — owner-only RW,
-//     exactly the original arrangement. Running unprivileged (the
-//     container default: the orchestrator post-exec-drop holds no
-//     CAP_CHOWN and can never give a file away to another uid), keep
-//     ownership and instead
-//     chgrp the socket to sandbox.WorktreeGID + chmod 0660 — an
-//     owner-legal group grant, possible because the container image
-//     makes the orchestrator user a member of the sandbox group
-//     (tf-sandbox, gid 10000) and the entrypoint's setpriv carries
-//     exactly that supplementary group through the drop. The connect
-//     check passes for the sandbox process the same way (uid 10000
-//     runs with gid 10000); every other unprivileged host uid is
-//     still excluded by the missing other-bits and the 0700/0-search
-//     parent directory.
+//  3. chgrp to jailGID + chmod 0660 — an owner-legal group grant (the sidecar
+//     owns the socket and belongs to the group). The jail's connect passes on
+//     the group bits; no other uid on the host has a way in.
 //
-// Caller MUST invoke .Close() exactly once (typically via defer)
-// regardless of how the surrounding sandbox terminates — the listener
-// close drains the daemon goroutine, the os.Remove cleans up the
-// socket file.
-//
-// proxyCreds points the daemon's gh/jira verbs at the run's credential-sidecar
-// REST proxies (non-nil only on TF_ROLE=executor — the spawner passes nil on
-// TF_ROLE=all and local mode); threaded straight into NewServer so the verbs
-// hold only per-run placeholders and the sidecar injects the real credential
-// upstream, instead of reading the (disabled, on an executor) secret store.
-// See Server.proxyCreds.
-func Start(stores db.Stores, info ConversationInfo, proxyCreds *ProxyCredentials) (*HostDaemon, sandbox.Mount, error) {
-	if info.ConversationID == "" {
-		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: ConversationInfo.ConversationID required")
-	}
-	return StartWithServer(NewServer(stores, info, proxyCreds), info.ConversationID)
-}
-
-// StartWithServer creates the per-run socket for an already-built Server, grants
-// it to the sandbox identity, spawns the accept loop, and returns the bind mount
-// the agent reaches it through. This is the seam the relocation turns on: the
-// executor's credential sidecar builds a relay-backed Server (NewServerWithRuntime)
-// and calls this so the hostile-input verb parser runs INSIDE the capless per-run
-// jail rather than the orchestrator; Start (above) calls it with a stores-backed
-// Server for all/local and the orchestrator's own runs. The socket path + the
-// chgrp+0660 grant are identical either way — only the process that owns them
-// moves. On the sidecar the grant works because the sidecar is launched as a
-// member of the sandbox group (see internal/sandbox's sidecar launch).
-func StartWithServer(server *Server, conversationID string) (*HostDaemon, sandbox.Mount, error) {
+// Caller MUST invoke .Close() exactly once (typically via defer) regardless of
+// how the surrounding sandbox terminates — the listener close drains the
+// daemon goroutine, the os.Remove cleans up the socket file.
+func StartWithServer(server *Server, conversationID string, jailGID int) (*HostDaemon, sandbox.Mount, error) {
 	if conversationID == "" {
 		return nil, sandbox.Mount{}, fmt.Errorf("agenthost: ConversationID required")
 	}
-	hd, err := listenAndServe(server, SocketPathFor(conversationID), grantSocketToSandbox)
+	hd, err := listenAndServe(server, SocketPathFor(conversationID), func(sockPath string) error {
+		return grantToJail(sockPath, jailGID, 0o660)
+	})
 	if err != nil {
 		return nil, sandbox.Mount{}, err
 	}
@@ -179,9 +146,9 @@ func StartLocal(stores db.Stores, info ConversationInfo, sockPath string) (*Host
 // operator with a permissive umask would get a socket root other accounts on
 // the machine could list.
 //
-// Local-only, deliberately. The jail's root is root-owned and shared with
-// every run's sidecar (01731, see listenAndServe); a chmod there would strip
-// the group bits the sidecar needs, and would fail with EPERM first anyway.
+// Local-only, deliberately. The jail's root and each run's directory in it
+// belong to the cap-broker's layout (see listenAndServe); a chmod there would
+// fail with EPERM, and is not this process's to make.
 func ensureOwnerOnlyDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("agenthost: mkdir %s: %w", dir, err)
@@ -206,12 +173,11 @@ func ensureOwnerOnlyDir(dir string) error {
 //     pins neither: it is a no-op on an existing directory, and every
 //     directory here exists before this runs.
 //
-//     For the jail's root the cap-broker owns it, at root:WorktreeGID mode
-//     01731 (cmd/capbroker's listen): group wx with no r, so a sidecar can
-//     create its own socket but no non-owner can readdir to enumerate live
-//     runs, and sticky so no run's sidecar can unlink another's entry. For
-//     the local root StartLocal owns it, at 0700 — one uid, nothing to share
-//     — enforced by ensureOwnerOnlyDir rather than by this MkdirAll.
+//     For a jail's socket the directory is the run's own, created by the
+//     cap-broker for the engagement: the sidecar's uid, the run's jail gid,
+//     mode 0750. For the local root StartLocal owns it, at 0700 — one uid,
+//     nothing to share — enforced by ensureOwnerOnlyDir rather than by this
+//     MkdirAll.
 //
 //  2. net.Listen("unix", ...) — creates the socket file with the
 //     process umask applied (typically 0666 or 0755); either is too
@@ -221,27 +187,17 @@ func ensureOwnerOnlyDir(dir string) error {
 //  3. The grant callback narrows it to exactly the identity that must
 //     connect.
 func listenAndServe(server *Server, sockPath string, grant func(string) error) (*HostDaemon, error) {
-	// Creates the root only when nothing has yet — the dev/bare-metal jail
-	// path where this process runs as root and no broker ran first. Where a
-	// root already exists this is a no-op by design, leaving its owner and
-	// mode to whoever pinned them (step 1 above).
+	// A no-op wherever the directory was made for this process — the jail's
+	// by the cap-broker, the local one by ensureOwnerOnlyDir — leaving its
+	// owner and mode to whoever pinned them (step 1 above).
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(sockPath), err)
 	}
 
 	// Remove any stale socket file from a previous crash. net.Listen
-	// would otherwise EADDRINUSE on a path that's actually unused.
-	// Stale files in the socket root are by definition from a previous TF
-	// process — the only writer is this codepath — so removal is safe.
-	//
-	// Safe, but not always PERMITTED, and the difference decides nothing
-	// here only because someone else has already handled it: the jail's
-	// socket root is sticky, so a stale file owned by a previous engagement's
-	// sidecar uid is refused to this one with EPERM. The orchestrator clears a
-	// predecessor's per-run files at cell bring-up, before this process is
-	// launched (sandbox.ClearRunCellFiles) — that, not this line, is what
-	// makes a successor engagement of the same conversation come up. The
-	// local root has one owner, so there the removal always succeeds.
+	// would otherwise EADDRINUSE on a path that's actually unused. A jail's
+	// directory is made fresh for each engagement, so there this finds
+	// nothing; the local root is reused across runs, and has one owner.
 	_ = os.Remove(sockPath)
 
 	listener, err := net.Listen("unix", sockPath)
@@ -284,35 +240,20 @@ func grantSocketToOwnerOnly(sockPath string) error {
 	return nil
 }
 
-// grantSocketToSandbox makes the freshly-listened socket connectable by
-// the sandbox identity (uid/gid 10000) — step 3 of Start's invariant.
-// Two shapes, by what this process is allowed to do:
-//
-//   - root (dev/bare-metal, no exec-time drop): chown to WorktreeUID +
-//     chmod 0600. Byte-identical to the original arrangement.
-//   - unprivileged (the container-default post-exec-drop orchestrator,
-//     which holds no CAP_CHOWN and cannot give a file away to another
-//     uid): chgrp to WorktreeGID + chmod 0660. An owner-legal group
-//     change — valid only
-//     because this process is a member of the sandbox group (the image's
-//     tf-sandbox, gid 10000, carried through the drop by the
-//     entrypoint's setpriv --groups) — so a clear, actionable error
-//     names that requirement when the chgrp is refused.
-func grantSocketToSandbox(sockPath string) error {
-	if os.Getuid() == 0 {
-		if err := os.Chown(sockPath, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-			return fmt.Errorf("agenthost: chown %s to uid=%d: %w", sockPath, sandbox.WorktreeUID, err)
-		}
-		if err := os.Chmod(sockPath, 0o600); err != nil {
-			return fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
-		}
-		return nil
+// grantToJail opens a file the run's sidecar created to the run's jail: group
+// jailGID, mode as given (0660 for the socket — connect(2) needs write — and
+// 0640 for the cert the jail only reads). An owner-legal chgrp, valid only
+// because the sidecar carries jailGID as its one supplementary group; the
+// error names that requirement when the chgrp is refused.
+func grantToJail(path string, jailGID int, mode os.FileMode) error {
+	if !sandbox.IsJailUID(jailGID) {
+		return fmt.Errorf("agenthost: %d is not a jail gid; refusing to grant %s to it", jailGID, path)
 	}
-	if err := os.Chown(sockPath, -1, sandbox.WorktreeGID); err != nil {
-		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (an unprivileged orchestrator must be a member of the sandbox group — the provided image's tf-sandbox — for this owner-legal group grant)", sockPath, sandbox.WorktreeGID, err)
+	if err := os.Chown(path, -1, jailGID); err != nil {
+		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (the run's sidecar must carry its jail gid as a supplementary group for this owner-legal group grant)", path, jailGID, err)
 	}
-	if err := os.Chmod(sockPath, 0o660); err != nil {
-		return fmt.Errorf("agenthost: chmod %s: %w", sockPath, err)
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("agenthost: chmod %s: %w", path, err)
 	}
 	return nil
 }
@@ -353,12 +294,19 @@ func (h *HostDaemon) Close() error {
 // going through the bind-mount-into-sandbox shape.
 func (h *HostDaemon) SocketPath() string { return h.sockPath }
 
-// SocketPathFor returns the host-side path of conversationID's agenthost socket.
-// Deterministic so the sidecar (which creates + serves it on the executor
-// path) and the orchestrator (which bind-mounts it into the jail) agree on the
-// path without a round trip.
+// SocketPathFor returns the host-side path of conversationID's agenthost socket,
+// inside the run's socket directory. Deterministic so the sidecar (which
+// creates + serves it on the executor path) and the orchestrator (which
+// bind-mounts it into the jail) agree on the path without a round trip.
 func SocketPathFor(conversationID string) string {
-	return filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+".sock")
+	return filepath.Join(runSocketDir(conversationID), agentHostSocketName)
+}
+
+// runSocketDir is conversationID's socket directory under hostSocketRoot —
+// sandbox.RunSocketDir's derivation, mirrored because the broker side keeps its
+// root redirectable for its own tests and this side keeps its root a constant.
+func runSocketDir(conversationID string) string {
+	return filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID))
 }
 
 // SocketMountFor returns the bind mount exposing conversationID's socket to the agent at
@@ -371,76 +319,45 @@ func SocketMountFor(conversationID string) sandbox.Mount {
 }
 
 // CertPathFor returns the host-side path of conversationID's gh-injector TLS
-// certificate, alongside the run's socket under hostSocketRoot. Deterministic
+// certificate, beside the run's socket in its socket directory. Deterministic
 // so the sidecar (which writes + serves the injector) and the orchestrator
 // (which bind-mounts the cert into the jail) agree without a round trip — the
 // same contract as SocketPathFor. The cap-broker independently re-derives this
 // as TrustedGHInjectorCertPath and validates a launch's mount source against it;
 // a drift test cross-checks the two derivations agree.
 func CertPathFor(conversationID string) string {
-	return filepath.Join(hostSocketRoot, sanitizeSocketName(conversationID)+"-gh-injector.crt")
+	return filepath.Join(runSocketDir(conversationID), ghInjectorCertName)
 }
 
-// WriteInjectorCert writes conversationID's per-run gh-injector certificate (PEM, the
-// PUBLIC half only — the private key never leaves the sidecar) to
-// CertPathFor(conversationID) and grants the sandbox group read access, mirroring the
-// socket's owner-legal group grant. Called by the sidecar during bring-up when
-// the gh channel is enabled, before the sandbox launches (the OCI spec
-// references the source path, which must exist).
-func WriteInjectorCert(conversationID string, certPEM []byte) error {
-	if err := os.MkdirAll(hostSocketRoot, 0o700); err != nil {
-		return fmt.Errorf("agenthost: mkdir %s: %w", hostSocketRoot, err)
-	}
+// WriteInjectorCert writes conversationID's per-run gh-injector certificate
+// (PEM, the PUBLIC half only — the private key never leaves the sidecar) to
+// CertPathFor(conversationID) and grants the run's jail gid read access,
+// mirroring the socket's owner-legal group grant. Called by the sidecar during
+// bring-up when the gh channel is enabled, before the sandbox launches (the OCI
+// spec references the source path, which must exist).
+func WriteInjectorCert(conversationID string, certPEM []byte, jailGID int) error {
 	path := CertPathFor(conversationID)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("agenthost: mkdir %s: %w", filepath.Dir(path), err)
+	}
 	if err := writeFreshInjectorCert(path, certPEM); err != nil {
 		return err
 	}
-	return grantReadOnlyToSandbox(path)
+	return grantToJail(path, jailGID, 0o640)
 }
 
 // writeFreshInjectorCert creates the cert as a NEW file, removing whatever is
 // already at the path first — the same remove-before-create rule
-// StartWithServer applies to the socket, for the same reason and one more.
-//
-// The path is keyed by conversation id, so sequential engagements of one
-// conversation share it, and a truncate-in-place would hand the new injector
-// the previous engagement's file: wrong mode, wrong owner, and — under a
-// mid-teardown overlap — a window where the cert the jail mounts is not the
-// one the serving injector holds. Creating it fresh makes the file belong to
-// whoever is serving it, whatever uid that is.
-//
-// It is NOT the mechanism that makes a stale predecessor survivable, and must
-// not be mistaken for one. The socket root is sticky (cmd/capbroker's listen /
-// runBroker pin it 0173x, root-or-orchestrator owned), so unlink authority
-// there belongs to the file's own owner and to the directory's — and a
-// successor sidecar drawing a different subnet index runs at a different uid
-// than the file's owner, so this removal is refused with EPERM and the write
-// that follows fails EACCES exactly as it did before. Clearing a predecessor's
-// files is therefore the orchestrator's job, done at cell bring-up before this
-// process is launched (sandbox.ClearRunCellFiles). What this covers is the
-// same-owner case: the reused subnet index, and the root/dev path.
+// listenAndServe applies to the socket. The run's socket directory is made
+// fresh for each engagement, so in a jail's cell this normally finds nothing;
+// creating the file new rather than truncating in place makes it belong to
+// whoever is serving it either way.
 func writeFreshInjectorCert(path string, certPEM []byte) error {
 	_ = os.Remove(path)
 	if err := os.WriteFile(path, certPEM, 0o640); err != nil {
 		return fmt.Errorf("agenthost: write injector cert %s: %w", path, err)
 	}
 	return nil
-}
-
-// grantReadOnlyToSandbox grants the sandbox uid/gid read access to a per-run
-// file the agent only reads (the injector cert). Same owner-legal chgrp the
-// socket grant uses; 0640 (owner rw, group r) since the agent never writes it.
-func grantReadOnlyToSandbox(path string) error {
-	if os.Getuid() == 0 {
-		if err := os.Chown(path, sandbox.WorktreeUID, sandbox.WorktreeGID); err != nil {
-			return fmt.Errorf("agenthost: chown %s to uid=%d: %w", path, sandbox.WorktreeUID, err)
-		}
-		return os.Chmod(path, 0o640)
-	}
-	if err := os.Chown(path, -1, sandbox.WorktreeGID); err != nil {
-		return fmt.Errorf("agenthost: chgrp %s to gid=%d: %w (an unprivileged sidecar must be a member of the sandbox group for this owner-legal group grant)", path, sandbox.WorktreeGID, err)
-	}
-	return os.Chmod(path, 0o640)
 }
 
 // sanitizeSocketName trims a conversation id to a fs-safe form. ConversationIDs are

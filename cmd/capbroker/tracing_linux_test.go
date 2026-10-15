@@ -60,11 +60,11 @@ func opAttr(t *testing.T, s sdktrace.ReadOnlySpan) string {
 func TestIPCCallIsTracedClientSide(t *testing.T) {
 	read := recordSpans(t)
 	client := serveTestBroker(t, &fakeOps{
-		chownRunTreeFn: func(ctx context.Context, root, subpath string) error { return nil },
+		chownRunTreeFn: func(ctx context.Context, root, subpath string, jailUID int) error { return nil },
 	})
 
 	parentCtx, parent := otel.Tracer("test").Start(context.Background(), "engagement.setup")
-	if err := client.ChownRunTree(parentCtx, "/tmp/tf-runs/run-1", "owner/repo"); err != nil {
+	if err := client.ChownRunTree(parentCtx, "/tmp/tf-runs/run-1", "owner/repo", sandbox.JailUID(1)); err != nil {
 		t.Fatalf("ChownRunTree: %v", err)
 	}
 	parent.End()

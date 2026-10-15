@@ -20,6 +20,10 @@ import (
 // must refuse to touch trees (or entries) owned by it.
 const foreignUID = 12345
 
+// testJailUID is the jail identity these tests hand trees to: any index will
+// do, and a fixed one keeps the assertions readable.
+var testJailUID = JailUID(5)
+
 func statUIDGID(t *testing.T, path string) (uint32, uint32) {
 	t.Helper()
 	var st syscall.Stat_t
@@ -45,7 +49,7 @@ func TestChownRunTree_RejectsInvalidRoots(t *testing.T) {
 		{"missing", "/nonexistent-tf-runtree-test/x"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := (hostOps{}).ChownRunTree(context.Background(), tc.path, ""); err == nil {
+			if err := (hostOps{}).ChownRunTree(context.Background(), tc.path, "", testJailUID); err == nil {
 				t.Errorf("ChownRunTree(%q) = nil error, want validation rejection", tc.path)
 			}
 		})
@@ -56,7 +60,7 @@ func TestChownRunTree_RejectsInvalidRoots(t *testing.T) {
 		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := (hostOps{}).ChownRunTree(context.Background(), f, ""); err == nil {
+		if err := (hostOps{}).ChownRunTree(context.Background(), f, "", testJailUID); err == nil {
 			t.Error("ChownRunTree on a plain file = nil error, want rejection")
 		}
 	})
@@ -71,15 +75,24 @@ func TestChownRunTree_RejectsInvalidRoots(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		if err := (hostOps{}).ChownRunTree(context.Background(), link, ""); err == nil {
+		if err := (hostOps{}).ChownRunTree(context.Background(), link, "", testJailUID); err == nil {
 			t.Error("ChownRunTree through a symlinked root = nil error, want rejection")
+		}
+	})
+
+	t.Run("identity outside the jail band", func(t *testing.T) {
+		root := t.TempDir()
+		for _, uid := range []int{0, 10001, SidecarUID(5), ParkedRunTreeUID, JailUIDBase + MaxSandboxes} {
+			if err := (hostOps{}).ChownRunTree(context.Background(), root, "", uid); err == nil {
+				t.Errorf("ChownRunTree to uid %d = nil error, want a jail-band rejection", uid)
+			}
 		}
 	})
 
 	t.Run("subpath escape", func(t *testing.T) {
 		root := t.TempDir()
 		for _, sub := range []string{"..", "../x", "/abs", "."} {
-			if err := (hostOps{}).ChownRunTree(context.Background(), root, sub); err == nil {
+			if err := (hostOps{}).ChownRunTree(context.Background(), root, sub, testJailUID); err == nil {
 				t.Errorf("ChownRunTree(subpath=%q) = nil error, want escape rejection", sub)
 			}
 		}
@@ -97,16 +110,16 @@ func TestChownRunTree_RefusesForeignOwnedRoot(t *testing.T) {
 	if err := os.Chown(dir, foreignUID, foreignUID); err != nil {
 		t.Fatal(err)
 	}
-	if err := (hostOps{}).ChownRunTree(context.Background(), dir, ""); err == nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), dir, "", testJailUID); err == nil {
 		t.Error("ChownRunTree on a foreign-owned root = nil error, want ownership rejection")
 	}
 }
 
-// TestChownRunTree_HandsTreeToSandbox exercises the real recursive
+// TestChownRunTree_HandsTreeToJail exercises the real recursive
 // hand-off, including the symlink-safety property inherited from the
 // original in-caller implementation: the link's own owner changes, its
 // out-of-tree target's does not.
-func TestChownRunTree_HandsTreeToSandbox(t *testing.T) {
+func TestChownRunTree_HandsTreeToJail(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (CAP_CHOWN) to change file owners")
 	}
@@ -127,23 +140,36 @@ func TestChownRunTree_HandsTreeToSandbox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree: %v", err)
 	}
 
+	// Unregistered, the run-tree group is this process's own gid.
 	for _, p := range []string{root, filepath.Join(root, "sub"), filepath.Join(root, "sub", "f.txt"), filepath.Join(root, "link")} {
-		if uid, gid := statUIDGID(t, p); uid != WorktreeUID || gid != WorktreeGID {
-			t.Errorf("%s owned by %d:%d, want %d:%d", p, uid, gid, WorktreeUID, WorktreeGID)
+		if uid, gid := statUIDGID(t, p); int(uid) != testJailUID || int(gid) != os.Getgid() {
+			t.Errorf("%s owned by %d:%d, want %d:%d", p, uid, gid, testJailUID, os.Getgid())
 		}
 	}
-	if uid, _ := statUIDGID(t, outside); uid == WorktreeUID {
+	if uid, _ := statUIDGID(t, outside); int(uid) == testJailUID {
 		t.Errorf("symlink target OUTSIDE the tree was chowned — the Lchown symlink-safety property regressed")
 	}
 
-	// Idempotent: a second pass over the now sandbox-owned tree succeeds
+	// Idempotent: a second pass over the now jail-owned tree succeeds
 	// (resume re-chowns an already-handed-over tree).
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
-		t.Errorf("second ChownRunTree over a sandbox-owned tree: %v", err)
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", testJailUID); err != nil {
+		t.Errorf("second ChownRunTree over a jail-owned tree: %v", err)
+	}
+
+	// The next claim may hold another index: the whole tree follows it, from
+	// the previous engagement's identity as much as from the orchestrator's.
+	next := JailUID(6)
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", next); err != nil {
+		t.Fatalf("ChownRunTree to the next engagement's identity: %v", err)
+	}
+	for _, p := range []string{root, filepath.Join(root, "sub", "f.txt")} {
+		if uid, _ := statUIDGID(t, p); int(uid) != next {
+			t.Errorf("%s owned by %d after the next claim's hand-off, want %d", p, uid, next)
+		}
 	}
 }
 
@@ -168,20 +194,32 @@ func TestChownRunTree_SubpathChownsIntermediatesShallow(t *testing.T) {
 	if err := os.WriteFile(sibling, []byte("s"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The root is already held by the engagement the checkout joins. Its
+	// group is one the hand-off never sets, so a chown of the root itself
+	// would show.
+	const untouchedGID = 4242
+	if err := os.Chown(root, testJailUID, untouchedGID); err != nil {
+		t.Fatal(err)
+	}
 
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, filepath.Join("owner", "repo")); err != nil {
+	// A checkout cannot join a tree another engagement holds.
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, filepath.Join("owner", "repo"), JailUID(6)); err == nil {
+		t.Error("ChownRunTree(subpath) to a jail uid that does not hold the root = nil error, want rejection")
+	}
+
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, filepath.Join("owner", "repo"), testJailUID); err != nil {
 		t.Fatalf("ChownRunTree(subpath): %v", err)
 	}
 
 	for _, p := range []string{filepath.Join(root, "owner"), checkout, filepath.Join(checkout, "f.txt")} {
-		if uid, _ := statUIDGID(t, p); uid != WorktreeUID {
-			t.Errorf("%s owned by uid %d, want %d", p, uid, WorktreeUID)
+		if uid, _ := statUIDGID(t, p); int(uid) != testJailUID {
+			t.Errorf("%s owned by uid %d, want %d", p, uid, testJailUID)
 		}
 	}
-	if uid, _ := statUIDGID(t, sibling); uid == WorktreeUID {
+	if uid, _ := statUIDGID(t, sibling); int(uid) == testJailUID {
 		t.Errorf("sibling file inside an intermediate dir was chowned; the intermediate hand-off must be shallow")
 	}
-	if uid, _ := statUIDGID(t, root); uid == WorktreeUID {
+	if _, gid := statUIDGID(t, root); gid != untouchedGID {
 		t.Errorf("run root itself was chowned by the subpath form; only intermediates below it should be")
 	}
 }
@@ -199,18 +237,18 @@ func statMode(t *testing.T, path string) os.FileMode {
 // that lets the orchestrator materialize checkouts into a run root it has handed
 // to the agent WITHOUT opening that tree to the per-run sidecar. With the
 // orchestrator's gid registered, the run root and the owner/repo scaffold
-// intermediates become owner=agent, group=orchestrator, mode 0770 (agent-owner
+// intermediates become owner=jail, group=orchestrator, mode 0770 (jail-owner
 // and orchestrator-group writable, no access for anyone else — critically not
-// WorktreeGID, which every sidecar carries). A checkout's OWN tree keeps the
+// a jail gid, which the run's sidecar carries). A checkout's OWN tree keeps the
 // modes git wrote (only its group moves), since the orchestrator only needs to
 // reach it through the scaffold, not re-mode it.
 func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("needs root (CAP_CHOWN) to change file owners")
 	}
-	const orchGID = 10001 // distinct from WorktreeGID; carried by nothing sandboxed
+	const orchGID = 10001 // outside every per-run band; carried by nothing sandboxed
 	SetRunTreeGroupGID(orchGID)
-	t.Cleanup(func() { SetRunTreeGroupGID(WorktreeGID) })
+	t.Cleanup(func() { SetRunTreeGroupGID(-1) })
 
 	// Run-start form (subpath==""): a lazy run root with a _tfac child.
 	root := t.TempDir()
@@ -221,12 +259,12 @@ func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 	if err := os.Chmod(scratch, 0o700); err != nil { // defeat umask so the "preserved" assertion is exact
 		t.Fatal(err)
 	}
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree(root): %v", err)
 	}
 	// The root is scaffold: agent-owner, orchestrator-group, 0770.
-	if uid, gid := statUIDGID(t, root); uid != WorktreeUID || gid != orchGID {
-		t.Errorf("root owned %d:%d, want %d:%d (agent owner, orchestrator group)", uid, gid, WorktreeUID, orchGID)
+	if uid, gid := statUIDGID(t, root); int(uid) != testJailUID || gid != orchGID {
+		t.Errorf("root owned %d:%d, want %d:%d (jail owner, orchestrator group)", uid, gid, testJailUID, orchGID)
 	}
 	if m := statMode(t, root); m != 0o770 {
 		t.Errorf("root mode = %o, want 0770 (agent+orchestrator writable, no other access)", m)
@@ -242,7 +280,7 @@ func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 	// Mid-run form (subpath!=""): owner/repo intermediates become scaffold-mode;
 	// the checkout leaf keeps its own dir mode.
 	root2 := t.TempDir()
-	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree(root2): %v", err)
 	}
 	leaf := filepath.Join(root2, "sky-ai-eng", "triage-factory", "main")
@@ -253,23 +291,23 @@ func TestChownRunTree_GroupTargetAndScaffoldMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	rel := filepath.Join("sky-ai-eng", "triage-factory", "main")
-	if err := (hostOps{}).ChownRunTree(context.Background(), root2, rel); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, rel, testJailUID); err != nil {
 		t.Fatalf("ChownRunTree(subpath): %v", err)
 	}
 	for _, d := range []string{filepath.Join(root2, "sky-ai-eng"), filepath.Join(root2, "sky-ai-eng", "triage-factory")} {
 		if m := statMode(t, d); m != 0o770 {
 			t.Errorf("intermediate %s mode = %o, want 0770", d, m)
 		}
-		if uid, gid := statUIDGID(t, d); uid != WorktreeUID || gid != orchGID {
-			t.Errorf("intermediate %s owned %d:%d, want %d:%d", d, uid, gid, WorktreeUID, orchGID)
+		if uid, gid := statUIDGID(t, d); int(uid) != testJailUID || gid != orchGID {
+			t.Errorf("intermediate %s owned %d:%d, want %d:%d", d, uid, gid, testJailUID, orchGID)
 		}
 	}
 	// The checkout leaf keeps the mode it was created with (not forced to 0770).
 	if m := statMode(t, leaf); m != 0o755 {
 		t.Errorf("checkout leaf mode = %o, want its 0755 preserved (checkouts are not scaffold)", m)
 	}
-	if uid, gid := statUIDGID(t, leaf); uid != WorktreeUID || gid != orchGID {
-		t.Errorf("checkout leaf owned %d:%d, want %d:%d", uid, gid, WorktreeUID, orchGID)
+	if uid, gid := statUIDGID(t, leaf); int(uid) != testJailUID || gid != orchGID {
+		t.Errorf("checkout leaf owned %d:%d, want %d:%d", uid, gid, testJailUID, orchGID)
 	}
 }
 
@@ -289,7 +327,7 @@ func TestChownRunTree_FailsClosedOnForeignEntryInside(t *testing.T) {
 	if err := os.Chown(planted, foreignUID, foreignUID); err != nil {
 		t.Fatal(err)
 	}
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err == nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", testJailUID); err == nil {
 		t.Error("ChownRunTree over a tree containing a foreign-owned entry = nil error, want fail-closed rejection")
 	}
 }
@@ -313,7 +351,7 @@ func TestRemoveRunTree_Behavior(t *testing.T) {
 	}
 	if os.Geteuid() == 0 {
 		// The realistic post-run state: the whole tree sandbox-owned.
-		if err := (hostOps{}).ChownRunTree(context.Background(), tree, ""); err != nil {
+		if err := (hostOps{}).ChownRunTree(context.Background(), tree, "", testJailUID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -376,11 +414,11 @@ func TestSetRunTreeOwnerUID_WidensValidation(t *testing.T) {
 	orig := runTreeOwnerExtraUID
 	t.Cleanup(func() { runTreeOwnerExtraUID = orig })
 
-	if err := (hostOps{}).ChownRunTree(context.Background(), dir, ""); err == nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), dir, "", testJailUID); err == nil {
 		t.Fatal("pre-registration: foreign-owned tree accepted; the registration test can't prove anything")
 	}
 	SetRunTreeOwnerUID(foreignUID)
-	if err := (hostOps{}).ChownRunTree(context.Background(), dir, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), dir, "", testJailUID); err != nil {
 		t.Errorf("post-registration ChownRunTree: %v — the registered orchestrator uid should be an accepted owner", err)
 	}
 }
@@ -417,7 +455,7 @@ func TestBrokeredMode_RejectsRootOwnedTree(t *testing.T) {
 		t.Fatalf("fixture: tree owned by uid %d, want 0 — this test is only meaningful run as root", uid)
 	}
 
-	if err := (hostOps{}).ChownRunTree(context.Background(), rootOwned, ""); err == nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), rootOwned, "", testJailUID); err == nil {
 		t.Error("ChownRunTree accepted a root-owned tree in brokered mode; the broker's own root uid must not be a legitimate run-tree owner")
 	}
 	if err := (hostOps{}).RemoveRunTree(context.Background(), rootOwned); err == nil {
@@ -473,7 +511,7 @@ func TestChownRunTree_RejectsSymlinkedParentComponent(t *testing.T) {
 	}
 	rootViaSymlink := filepath.Join(linkedGrandparent, "mid", "run-root")
 
-	if err := (hostOps{}).ChownRunTree(context.Background(), rootViaSymlink, ""); err == nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), rootViaSymlink, "", testJailUID); err == nil {
 		t.Error("ChownRunTree through a symlinked ancestor component = nil error, want kernel refusal")
 	}
 	if err := (hostOps{}).RemoveRunTree(context.Background(), rootViaSymlink); err == nil {
@@ -482,7 +520,7 @@ func TestChownRunTree_RejectsSymlinkedParentComponent(t *testing.T) {
 }
 
 // TestRemoveRunTree_SymlinkInsideTree_UnlinksLinkNotTarget mirrors
-// TestChownRunTree_HandsTreeToSandbox's symlink-safety property for the
+// TestChownRunTree_HandsTreeToJail's symlink-safety property for the
 // destructive op: a symlink planted inside the tree pointing outside it is
 // unlinked as itself — its out-of-tree target is left untouched — rather
 // than being followed. Needs no root: removal never chowns.
@@ -562,11 +600,11 @@ func TestRunTreeOps_FallBackWhenOpenat2Unsupported(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := (hostOps{}).ChownRunTree(context.Background(), root, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree with openat2 unsupported: %v", err)
 	}
-	if uid, _ := statUIDGID(t, filepath.Join(root, "sub")); uid != WorktreeUID {
-		t.Errorf("fallback did not chown %s to the sandbox identity", filepath.Join(root, "sub"))
+	if uid, _ := statUIDGID(t, filepath.Join(root, "sub")); int(uid) != testJailUID {
+		t.Errorf("fallback did not chown %s to the jail identity", filepath.Join(root, "sub"))
 	}
 	if !runTreeOpenat2Unsupported.Load() {
 		t.Fatal("fallback latch not set after an ENOSYS openat2 response")
@@ -581,7 +619,7 @@ func TestRunTreeOps_FallBackWhenOpenat2Unsupported(t *testing.T) {
 
 	callsAfterLatch := *calls
 	root2 := t.TempDir()
-	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree after latch: %v", err)
 	}
 	if *calls != callsAfterLatch {
@@ -604,10 +642,10 @@ func TestRunTreeOps_WarnsOnceWhenOpenat2Unsupported(t *testing.T) {
 
 	root1 := t.TempDir()
 	root2 := t.TempDir()
-	if err := (hostOps{}).ChownRunTree(context.Background(), root1, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root1, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree: %v", err)
 	}
-	if err := (hostOps{}).ChownRunTree(context.Background(), root2, ""); err != nil {
+	if err := (hostOps{}).ChownRunTree(context.Background(), root2, "", testJailUID); err != nil {
 		t.Fatalf("ChownRunTree: %v", err)
 	}
 
@@ -669,7 +707,7 @@ func TestOpenEntryPinned_ImmuneToNameSwapAfterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := chownPinnedEntry(fd); err != nil {
+	if err := chownPinnedEntry(fd, testJailUID); err != nil {
 		t.Fatalf("chownPinnedEntry: %v", err)
 	}
 
@@ -677,8 +715,8 @@ func TestOpenEntryPinned_ImmuneToNameSwapAfterOpen(t *testing.T) {
 	if err := unix.Fstat(fd, &afterStat); err != nil {
 		t.Fatal(err)
 	}
-	if afterStat.Uid != WorktreeUID {
-		t.Errorf("originally pinned inode owned by %d after chown, want %d — chown followed the renamed name instead of the pinned fd", afterStat.Uid, WorktreeUID)
+	if int(afterStat.Uid) != testJailUID {
+		t.Errorf("originally pinned inode owned by %d after chown, want %d — chown followed the renamed name instead of the pinned fd", afterStat.Uid, testJailUID)
 	}
 	if swappedUID, _ := statUIDGID(t, victim); swappedUID != foreignUID {
 		t.Errorf("the swapped-in foreign-owned file's owner changed to %d — the chown followed the name instead of staying pinned to the original inode", swappedUID)

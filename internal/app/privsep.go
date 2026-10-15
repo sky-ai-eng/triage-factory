@@ -30,6 +30,15 @@ func orchestratorUIDCollidesWithSidecarBand() bool {
 	return sandbox.IsSidecarUID(currentUID())
 }
 
+// orchestratorUIDCollidesWithJailRange is the same backstop for the jail
+// identities: the jail band and the parked run-tree owner. An orchestrator at
+// one of them would own the run trees handed to it, and with them the trees of
+// whichever run holds that index.
+func orchestratorUIDCollidesWithJailRange() bool {
+	uid := currentUID()
+	return sandbox.IsJailUID(uid) || uid == sandbox.ParkedRunTreeUID
+}
+
 // capBrokerHandle is the cross-platform seam for the spawned broker
 // process's lifecycle. The real value is *capbroker.Process on Linux; nil
 // everywhere else, since startCapBrokerIfSandboxing's WillSandbox gate
@@ -89,6 +98,10 @@ func (a *App) startCapBrokerIfSandboxing(ctx context.Context) error {
 	if orchestratorUIDCollidesWithSidecarBand() {
 		return fmt.Errorf("orchestrator uid %d falls inside the reserved sidecar uid band [%d, %d) — repoint TF_ORCHESTRATOR_UID outside that range",
 			currentUID(), sandbox.SidecarUIDBase, sandbox.SidecarUIDBase+sandbox.MaxSandboxes)
+	}
+	if orchestratorUIDCollidesWithJailRange() {
+		return fmt.Errorf("orchestrator uid %d falls inside the reserved jail uid range [%d, %d) — repoint TF_ORCHESTRATOR_UID outside that range",
+			currentUID(), sandbox.ParkedRunTreeUID, sandbox.JailUIDBase+sandbox.MaxSandboxes)
 	}
 	handle, ping, err := startCapBrokerFn(ctx)
 	if err != nil {

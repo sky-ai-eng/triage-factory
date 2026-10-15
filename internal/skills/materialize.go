@@ -90,6 +90,10 @@ func MaterializeStepSkill(worktree, slug string, prompt *domain.Prompt, brief st
 // that mounts it cannot expose a sibling step's SKILL.md even if a prior
 // attempt left one behind. Content is byte-identical to the in-worktree form —
 // same synthesis, different root.
+//
+// The directory is created owner-only. Only one run reads it, and the launch
+// that mounts it grants it to that run's jail gid alone
+// (sandbox.RunNetwork.GrantStaging); until then nobody else may read it.
 func StageStepSkill(stagingDir, slug string, prompt *domain.Prompt, brief string) error {
 	if prompt == nil {
 		return fmt.Errorf("nil prompt")
@@ -97,12 +101,16 @@ func StageStepSkill(stagingDir, slug string, prompt *domain.Prompt, brief string
 	if err := RemoveStagedSkills(stagingDir); err != nil {
 		return fmt.Errorf("wipe staging dir: %w", err)
 	}
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return fmt.Errorf("create staging dir: %w", err)
+	}
 	return MaterializeStepSkillInDir(stagingDir, slug, prompt, brief)
 }
 
 // RemoveStagedSkills removes a staging directory created by StageStepSkill.
 // A missing directory is success. Safe for the capability-less orchestrator:
-// the staging dir is its own, never chowned to a sandbox identity.
+// the staging dir is its own — a launch grants a jail its group, never its
+// ownership.
 func RemoveStagedSkills(stagingDir string) error {
 	if stagingDir == "" {
 		return nil

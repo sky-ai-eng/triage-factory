@@ -6,18 +6,20 @@
 //
 //   - socket: from inside run B's gVisor jail, a dial of run A's agenthost
 //     socket fails — B's mount namespace holds only its own run's socket. The
-//     boundary is the per-run bind mount + the 0700 socket root, NOT the socket
-//     file's mode (which is deliberately group-open to the shared WorktreeGID so
-//     the SAME run's sandbox can connect — see socket_linux.go's Property-B
-//     block). The mount-topology half (the broker rejecting a spec that names
-//     another run's socket as this run's source) is already covered by
-//     validate_fuzz_linux_test.go; this is the live in-sandbox dial-fails half.
+//     boundary here is the per-run bind mount, NOT the socket file's mode
+//     (opened wide in this test; see newAgentHostSocketListener). The
+//     host-side half — a process holding run B's jail or sidecar identity
+//     cannot dial run A's socket — is jail_isolation_linux_test.go's, and the
+//     mount-topology half (the broker rejecting a spec that names another
+//     run's socket as this run's source) is validate_fuzz_linux_test.go's;
+//     this is the live in-sandbox dial-fails half.
 //
 //   - ptrace: a process at run B's credential uid cannot PTRACE_ATTACH run A's
 //     sidecar. uid distinctness is derived (SidecarUID(idxA) != SidecarUID(idxB),
 //     a unit assertion); the live half is the attach being denied between the two
-//     running sidecars. The shared WorktreeGID supplementary group does not grant
-//     this — ptrace is uid/CAP_SYS_PTRACE-gated, not group-gated.
+//     running sidecars. A sidecar's supplementary group (its own run's jail
+//     gid) does not bear on this — ptrace is uid/CAP_SYS_PTRACE-gated, not
+//     group-gated.
 
 package sandbox
 

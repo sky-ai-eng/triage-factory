@@ -222,9 +222,10 @@ is to abuse that RPC to regain capabilities. Therefore the broker's
 protective value equals the narrowness and validation of that RPC.
 
 > The broker **owns the OCI spec** from a fixed template (rootfs = the
-> content-addressed rootfs it resolved, capabilities = empty, uid = 10000,
-> seccomp, namespaces) and accepts over RPC only narrow, validated parameters —
-> a run id, the netns/cgroup it created, an environment allowlist, numeric
+> content-addressed rootfs it resolved, capabilities = empty, uid/gid = the
+> run's own jail identity, seccomp, namespaces) and accepts over RPC only
+> narrow, validated parameters — a run id, the netns/cgroup it created, the
+> jail identity that netns's subnet index derives, an environment allowlist, numeric
 > resource limits, and (self-host only) an additional permitted egress CIDR
 > validated against the immutable internal denylist (cloud metadata endpoint
 > `169.254.169.254`, the control-plane subnet, private/link-local ranges — see

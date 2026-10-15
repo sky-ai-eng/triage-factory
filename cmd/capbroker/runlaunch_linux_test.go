@@ -114,6 +114,9 @@ func validLaunchParams(containerID string) sandbox.LaunchParams {
 		// The netns name must be the one ConversationID derives — the ownership check
 		// binds it to the run, not just the tf-<hex>-<idx> shape.
 		NetnsPath: "/var/run/netns/" + sandbox.NetnsNameForRun("run", 1),
+		// The jail identity that same index derives.
+		JailUID: sandbox.JailUID(1),
+		JailGID: sandbox.JailGID(1),
 	}
 }
 

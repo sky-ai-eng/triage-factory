@@ -234,6 +234,9 @@ func FuzzValidateLaunchParams(f *testing.F) {
 	// test redirection for the same reason.
 	trustedAgentHostSocketRoot = f.TempDir()
 	seedSocket := TrustedAgentHostSocketPath("run-1")
+	if err := os.MkdirAll(filepath.Dir(seedSocket), 0o700); err != nil {
+		f.Fatalf("create seed socket dir fixture: %v", err)
+	}
 	if err := os.WriteFile(seedSocket, nil, 0o600); err != nil {
 		f.Fatalf("create seed socket fixture: %v", err)
 	}
@@ -251,6 +254,8 @@ func FuzzValidateLaunchParams(f *testing.F) {
 		Mounts:    []Mount{{Source: seedSocket, Destination: TrustedAgentHostSocketDestination, Options: []string{"ro"}}},
 		Rlimits:   []Rlimit{{Type: "RLIMIT_NOFILE", Soft: 1024, Hard: 4096}},
 		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-1", 3),
+		JailUID:   JailUID(3),
+		JailGID:   JailGID(3),
 	}
 	// The accepted-path seed has to actually be accepted, or every invariant
 	// below it is checked against nothing: the fuzz body returns early on a

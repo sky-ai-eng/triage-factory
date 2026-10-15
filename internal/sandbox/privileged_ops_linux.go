@@ -48,23 +48,49 @@ type PrivilegedOps interface {
 	// once at TF startup.
 	ReapOrphans(ctx context.Context) error
 
-	// ChownRunTree hands a run tree's ownership to the sandbox identity
-	// (WorktreeUID/GID) so the jailed agent can write its own worktree —
-	// the op that used to be agentproc's in-process recursive Lchown,
-	// which requires CAP_CHOWN and so must live on the privileged side
-	// once the orchestrator's capabilities are dropped at exec. With
-	// subpath == "" the whole root is chowned recursively (run start);
-	// a non-empty subpath is the mid-run `workspace add` case — the
-	// intermediate directories between root and subpath are chowned
-	// shallowly and the subpath tree recursively, exactly
-	// ChownWorkspaceCheckoutForSandbox's contract. Validated at this
-	// boundary (see validateRunTreeRoot): a compromised orchestrator
-	// must not be able to point a CAP_CHOWN-holding broker at /etc.
-	ChownRunTree(ctx context.Context, root, subpath string) error
+	// ChownRunTree hands a run tree's ownership to a jail identity
+	// (jailUID, with the run-tree group) so the jailed agent can write its
+	// own worktree — a recursive chown, which requires CAP_CHOWN and so
+	// lives on the privileged side once the orchestrator's capabilities are
+	// dropped at exec. With subpath == "" the whole root is chowned
+	// recursively (every claim); a non-empty subpath is the mid-run
+	// `workspace add` case — the intermediate directories between root and
+	// subpath are chowned shallowly and the subpath tree recursively,
+	// exactly ChownWorkspaceCheckoutForSandbox's contract, and root must
+	// already be held by jailUID. Validated at this boundary (jailUID inside
+	// the jail band; see validateRunTreeRoot for the tree): a compromised
+	// orchestrator must not be able to point a CAP_CHOWN-holding broker at
+	// /etc, or at an identity of its choosing.
+	ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error
+
+	// ParkRunTree gives a run tree's root to ParkedRunTreeUID at the end of
+	// the engagement that held it, so the engagement's jail identity can be
+	// released with no file still carrying it (see ParkedRunTreeUID). The
+	// root only, with its mode re-asserted; a root no jail identity owns
+	// and a missing one are left alone.
+	ParkRunTree(ctx context.Context, root string) error
+
+	// PrepareRunSockets creates conversationID's per-run socket directories
+	// for the engagement at subnetIdx — the sidecar's (RunSocketDir) and the
+	// tool host's (TrustedToolHostSocketDir) — replacing whatever an earlier
+	// engagement left there. The socket root is writable by root alone, so
+	// this is the only way either directory comes to exist.
+	PrepareRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error
+
+	// ReleaseRunSockets removes the directories PrepareRunSockets made for
+	// the engagement at subnetIdx, each only while it still carries that
+	// engagement's identity.
+	ReleaseRunSockets(ctx context.Context, conversationID string, subnetIdx uint8) error
+
+	// GrantRunStaging gives an orchestrator-owned staging directory (a step
+	// skill or an entity-memory tree a launch mounts read-only) to the jail
+	// at subnetIdx: group JailGID(subnetIdx), no access for others. The
+	// orchestrator carries no jail gid, so the chgrp is privileged.
+	GrantRunStaging(ctx context.Context, dir string, subnetIdx uint8) error
 
 	// RemoveRunTree removes a run tree (run root, scratch cwd, parked
 	// worktree) and everything under it. After a sandboxed run the tree
-	// is owned by WorktreeUID — files the agent created arrive via the
+	// is owned by a jail uid — files the agent created arrive via the
 	// (privileged) gofer with modes the unprivileged orchestrator cannot
 	// unlink through — so removal, like the chown above, is a privileged
 	// op. Missing path is a no-op success (idempotent, matching the
@@ -75,12 +101,12 @@ type PrivilegedOps interface {
 
 	// CaptureRunDelta runs the parked-run capture
 	// (`snapshot-capture <worktree> <staging-dir> [session-id]`) in a child
-	// dropped to the sandbox uid/gid inside an empty network namespace. The
-	// large members land in the validated, parent-owned staging directory;
-	// stdout carries only their JSON manifest. The
-	// child runs as the sandbox uid for two reasons that share the one
-	// drop: a hostile .git filter fires only as the agent, and the SDK's
-	// owner-only session transcript is readable. Both halves of that
+	// dropped to the jail identity that owns worktree, inside an empty
+	// network namespace. The large members land in the validated,
+	// parent-owned staging directory; stdout carries only their JSON
+	// manifest. The child runs as that jail uid for two reasons that share
+	// the one drop: a hostile .git filter fires only as that run's agent,
+	// and the SDK's owner-only session transcript is readable. Both halves of that
 	// confinement — the setuid and the CLONE_NEWNET — need capabilities
 	// the orchestrator no longer holds, so the exec runs privileged-side
 	// whole. sessionID is empty when the run carries no session.
@@ -297,6 +323,15 @@ type LaunchParams struct {
 	// point the sandbox at the host netns (which would bypass the egress
 	// allowlist).
 	NetnsPath string
+
+	// JailUID and JailGID are the identity the jail's process runs as —
+	// JailUID/JailGID of the run's subnet index, computed orchestrator-side
+	// like SidecarLaunchParams.UID and, like it, not trusted for arriving:
+	// ValidateLaunchParams requires both inside the jail band, equal, and
+	// derived from the index NetnsPath names. That tie is what refuses a
+	// launch naming another run's jail identity, which would hand this run's
+	// agent the owner of another run's tree and the group of its sockets.
+	JailUID, JailGID int
 
 	// StdioSocketPath is the per-run unix socket the orchestrator listens
 	// on and the broker dials to hand the runtime its stdio. Populated by

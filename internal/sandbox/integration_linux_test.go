@@ -30,6 +30,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,11 +50,13 @@ func TestMain(m *testing.M) {
 	// Re-exec'd test-child branches must intercept before any suite setup runs,
 	// exactly as they do in the default binary: the sidecar-reap comm helper,
 	// the live-sidecar stand-in (LaunchSidecarProcess execs this binary with the
-	// run-sidecar argv), and the cross-sidecar ptrace probe. Each sets itself up
-	// and blocks or exits, never reaching the pre-warm or m.Run below.
+	// run-sidecar argv), the cross-sidecar ptrace probe, and the jail-identity
+	// access probe. Each sets itself up and blocks or exits, never reaching the
+	// pre-warm or m.Run below.
 	reExecAsSidecarHelperIfRequested()
 	maybeRunSidecarSubcommand()
 	maybeRunPtraceProbe()
+	runAccessProbeIfRequested()
 
 	// Production launches every run through the cap-broker; this package
 	// can't spin one up (import cycle), so the suite installs in-process
@@ -152,9 +155,13 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 // a unique ConversationID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
 	t.Helper()
+	// Opened to everyone rather than handed to a jail identity: Wrap's
+	// self-contained path allocates the run's index itself, so the identity
+	// the jail will run as is not known until it returns. The hand-off to
+	// that identity is tested on its own (runtree_linux_test.go).
 	worktree := t.TempDir()
-	if err := os.Chown(worktree, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown worktree to UID %d (probably not root): %v", WorktreeUID, err)
+	if err := os.Chmod(worktree, 0o777); err != nil {
+		t.Fatalf("chmod worktree: %v", err)
 	}
 	return Config{
 		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
@@ -232,8 +239,9 @@ func TestIntegration_PropertyB_NoCredentialsInEnv(t *testing.T) {
 	}
 }
 
-// TestIntegration_NonRootUID confirms the agent runs as UID 10000,
-// not root. T3 hardening requires this.
+// TestIntegration_NonRootUID confirms the agent runs as its run's own jail
+// uid — the one its subnet index derives — not root. T3 hardening requires
+// the non-root half; the per-run identity requires the rest.
 func TestIntegration_NonRootUID(t *testing.T) {
 	requireRunsc(t)
 	cfg := minimalConfig(t)
@@ -254,7 +262,7 @@ func TestIntegration_NonRootUID(t *testing.T) {
 		t.Fatalf("run: %v (output: %s)", err, out)
 	}
 	got := strings.TrimSpace(string(out))
-	want := "10000"
+	want := strconv.Itoa(JailUID(sb.SubnetIdx))
 	if got != want {
 		t.Errorf("sandbox UID = %q, want %q (non-root for T3 hardening)", got, want)
 	}
@@ -548,11 +556,11 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 		t.Fatalf("chmod stub: %v", err)
 	}
 
-	// Per-run socket on the host. Mode 0700 on the parent dir; the
-	// listener inherits from umask, then we chown + chmod to the
-	// sandbox UID exactly as the production agenthost.StartWithServer does.
+	// Per-run socket on the host, opened to everyone: the jail's identity
+	// is allocated inside Wrap, after this socket has to exist. The grant to
+	// that identity is the agenthost package's to test.
 	sockDir := t.TempDir()
-	if err := os.Chmod(sockDir, 0o700); err != nil {
+	if err := os.Chmod(sockDir, 0o755); err != nil {
 		t.Fatalf("chmod sock dir: %v", err)
 	}
 	sockPath := filepath.Join(sockDir, "test.sock")
@@ -560,16 +568,8 @@ func TestIntegration_AgentHostIPC_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen on %s: %v", sockPath, err)
 	}
-	if err := os.Chown(sockPath, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown socket to UID %d (probably not root): %v", WorktreeUID, err)
-	}
-	if err := os.Chmod(sockPath, 0o600); err != nil {
+	if err := os.Chmod(sockPath, 0o666); err != nil {
 		t.Fatalf("chmod sock: %v", err)
-	}
-	// Parent dir must be reachable by the sandbox UID too — chown the
-	// parent so the runsc bind-mount can traverse to the socket.
-	if err := os.Chown(sockDir, WorktreeUID, WorktreeGID); err != nil {
-		t.Skipf("can't chown sock dir to UID %d: %v", WorktreeUID, err)
 	}
 
 	// Minimal echo daemon: accept one connection, read one frame,

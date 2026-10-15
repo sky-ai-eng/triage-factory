@@ -99,6 +99,34 @@ func validParams() LaunchParams {
 		// The netns name must be the one this run's id derives — the ownership
 		// check binds it, not just the tf-<hex>-<idx> shape.
 		NetnsPath: "/var/run/netns/" + NetnsNameForRun("run-abc123", 1),
+		// The jail identity derived from that same index.
+		JailUID: JailUID(1),
+		JailGID: JailGID(1),
+	}
+}
+
+// TestValidateLaunchParams_RejectsAnotherRunsJailIdentity is the launch half of
+// the per-run jail identity: the broker refuses a launch whose jail uid is not
+// the one its own netns's subnet index derives — the uid that owns another
+// run's tree and is the group of its sockets — as it refuses root, the
+// orchestrator, a sidecar uid, or a uid/gid pair that disagrees.
+func TestValidateLaunchParams_RejectsAnotherRunsJailIdentity(t *testing.T) {
+	for _, id := range []struct {
+		name     string
+		uid, gid int
+	}{
+		{"another run's jail", JailUID(2), JailGID(2)},
+		{"root", 0, 0},
+		{"the orchestrator", 10001, 10001},
+		{"this run's sidecar", SidecarUID(1), SidecarUID(1)},
+		{"the parked owner", ParkedRunTreeUID, ParkedRunTreeUID},
+		{"mismatched gid", JailUID(1), JailGID(2)},
+	} {
+		p := validParams()
+		p.JailUID, p.JailGID = id.uid, id.gid
+		if err := ValidateLaunchParams(p); err == nil {
+			t.Errorf("%s: ValidateLaunchParams accepted jail identity %d:%d for a run at subnet index 1", id.name, id.uid, id.gid)
+		}
 	}
 }
 
@@ -648,7 +676,7 @@ func TestValidateSidecarLaunchParams_RejectsUIDSubnetMismatch(t *testing.T) {
 // the sidecar to root, to the orchestrator's own uid, or to anything else
 // outside the reserved range must be refused before any exec happens.
 func TestValidateSidecarLaunchParams_RejectsUIDOutsideBand(t *testing.T) {
-	for _, uid := range []int{0, 1, WorktreeUID, 10001, SidecarUIDBase - 1, SidecarUIDBase + MaxSandboxes} {
+	for _, uid := range []int{0, 1, JailUID(3), 10001, SidecarUIDBase - 1, SidecarUIDBase + MaxSandboxes} {
 		p := validSidecarParams()
 		p.UID, p.GID = uid, uid
 		if err := ValidateSidecarLaunchParams(p); err == nil {

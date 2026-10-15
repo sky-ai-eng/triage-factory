@@ -34,3 +34,21 @@ func setupRunNetwork(_ context.Context, _ string) (*RunNetwork, error) {
 func (n *RunNetwork) Close() error {
 	return nil
 }
+
+// JailUID mirrors the Linux accessor; unreachable off Linux.
+func (n *RunNetwork) JailUID() int { return JailUID(n.Idx) }
+
+// PrepareSockets is unreachable off Linux, like the network it belongs to.
+func (n *RunNetwork) PrepareSockets(_ context.Context, _ string) error {
+	return ErrUnsupportedPlatform
+}
+
+// HandOffRunTree is unreachable off Linux, like the network it belongs to.
+func (n *RunNetwork) HandOffRunTree(_ context.Context, _ string) error {
+	return ErrUnsupportedPlatform
+}
+
+// GrantStaging is unreachable off Linux, like the network it belongs to.
+func (n *RunNetwork) GrantStaging(_ context.Context, _ string) error {
+	return ErrUnsupportedPlatform
+}

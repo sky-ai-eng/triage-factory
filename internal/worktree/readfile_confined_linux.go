@@ -17,10 +17,9 @@ import (
 // readFileConfined reads root/rel, refusing to traverse any symlink or ".." that
 // would resolve OUTSIDE root. It is the isolation boundary for reading an
 // agent-written file (the Claude session transcript) inside the snapshot-capture
-// child: that child runs on the host filesystem as the shared agent uid
-// (sandbox.WorktreeUID, the same for every run), so a plain read would follow an
-// agent-planted symlink out of the run root into another run's tree — owned by
-// that same uid — or any host file it can read. RESOLVE_BENEATH makes the kernel
+// child: that child runs on the host filesystem as the run's jail uid, so a
+// plain read would follow an agent-planted symlink out of the run root to any
+// host file that uid can read. RESOLVE_BENEATH makes the kernel
 // fail the open (EXDEV) the instant resolution would leave root, atomically —
 // with none of the TOCTOU window a stat-then-read would leave a hostile agent.
 func readFileConfined(root, rel string) ([]byte, error) {

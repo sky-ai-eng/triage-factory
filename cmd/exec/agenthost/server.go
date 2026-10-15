@@ -49,7 +49,7 @@ const sandboxAgentRoot = "/work"
 // "one socket per run" is the security boundary.
 //
 // The agent inside the sandbox can only see this socket. The socket
-// is owned by the sandbox UID (chmod 0600 — see internal/agentproc).
+// is granted to the run's own jail gid (chmod 0660 — see StartWithServer).
 // Any RPC that arrives here is, by construction, acting AS this run;
 // the server does not accept identity from the wire and uses its
 // constructor-supplied ConversationInfo for every method's routing.

@@ -9,16 +9,6 @@ import (
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// WorktreeUID is the UID Wrap configures process.user to run as
-// inside the sandbox. The caller MUST chown the worktree to this
-// UID before invoking Wrap, or the agent's writes will fail with
-// EACCES. Exported as a const so callers (delegate spawner, etc.)
-// chown deterministically.
-const (
-	WorktreeUID = 10000
-	WorktreeGID = 10000
-)
-
 // defaultRlimits is the fixed resource shape applied when a launch names
 // none. Kept here (not inlined in buildSpec) so both the default path and
 // the validation of a caller-supplied set reference one source of truth.
@@ -43,7 +33,11 @@ func defaultRlimits() []specs.POSIXRlimit {
 // linux.namespaces[].path so runsc joins the namespace instead of
 // creating its own (which would isolate from the host-side veth
 // we just set up).
-func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
+//
+// jailUID/jailGID are the run's own jail identity (JailUID/JailGID of its
+// subnet index), already validated at the broker's RPC boundary against the
+// index the netns was created for.
+func buildSpec(cfg Config, netnsPath string, jailUID, jailGID int) (*specs.Spec, error) {
 	if cfg.ConversationID == "" {
 		return nil, fmt.Errorf("spec: Config.ConversationID is required")
 	}
@@ -55,6 +49,9 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 	}
 	if netnsPath == "" {
 		return nil, fmt.Errorf("spec: netnsPath is required")
+	}
+	if !IsJailUID(jailUID) || jailGID != jailUID {
+		return nil, fmt.Errorf("spec: jail identity %d:%d is not a per-run jail identity", jailUID, jailGID)
 	}
 
 	noNewPrivs := true
@@ -73,8 +70,8 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 		Process: &specs.Process{
 			Terminal: false,
 			User: specs.User{
-				UID: WorktreeUID,
-				GID: WorktreeGID,
+				UID: uint32(jailUID),
+				GID: uint32(jailGID),
 			},
 			Args: cfg.Argv,
 			// PROPERTY B INVARIANT: Env is cfg.Env verbatim. No
@@ -116,8 +113,8 @@ func buildSpec(cfg Config, netnsPath string) (*specs.Spec, error) {
 				Options: []string{"nosuid", "nodev", "mode=1777"}},
 
 			// Agent's worktree — bind-mount RW so the agent can edit
-			// files. Caller must have chowned this to WorktreeUID
-			// before Wrap was called.
+			// files. Caller must have handed it to this run's jail uid
+			// (ChownRunTree) before Wrap was called.
 			{Destination: "/work", Type: "bind", Source: cfg.Worktree,
 				Options: []string{"rbind", "rw"}},
 

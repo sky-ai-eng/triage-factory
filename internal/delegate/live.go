@@ -35,6 +35,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 )
 
@@ -536,12 +537,13 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 	// before the process's grace period can run out, or the conversation waits
 	// out its lease and is counted as lost. Best-effort as ever, and skipped
 	// entirely with no workspace to capture (a cancel during setup), which the
-	// persist would reject anyway. A record that could not be opened does not
-	// hold up the release either: the persist below retries the open on its
-	// own way through. A key a newer engagement already holds is left to it,
-	// and nothing is captured.
+	// persist would reject anyway, or with a workspace no jail has run in this
+	// engagement (treeRanThisEngagement). A record that could not be opened
+	// does not hold up the release either: the persist below retries the open
+	// on its own way through. A key a newer engagement already holds is left to
+	// it, and nothing is captured.
 	snapCtx := context.WithoutCancel(ctx)
-	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil
+	willSnapshot := park.claudeCwd != "" && park.namespace != "" && s.Storage() != nil && treeRanThisEngagement(park.claudeCwd)
 	leaseHeld := false
 	if willSnapshot {
 		record := s.beginSnapshotState(snapCtx, park.orgID, park.namespace, park.claimID)
@@ -573,6 +575,22 @@ func (s *Spawner) leaveConversation(ctx context.Context, park liveParkContext, s
 		}
 	}
 	return fenced
+}
+
+// treeRanThisEngagement reports whether an ending has anything to capture in
+// root that the last snapshot does not already hold. Where the agent is jailed,
+// the capture runs as the jail identity holding the tree, and a tree holds one
+// only while an engagement's jail has been launched into it: one left parked by
+// the previous engagement, or built by this one and never launched into, has no
+// identity to capture as — and nothing has run in it since the snapshot its
+// last engagement took, or ever. Unjailed, the capture runs in-process and
+// there is no such distinction to draw.
+func treeRanThisEngagement(root string) bool {
+	if !agentproc.WillSandbox() {
+		return true
+	}
+	_, held := sandbox.RunTreeJailUID(root)
+	return held
 }
 
 // releaseClaimOnShutdown hands the engagement's claim back as a clean

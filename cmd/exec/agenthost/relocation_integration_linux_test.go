@@ -11,14 +11,15 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
+	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/sidecarproto"
 )
 
 // TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip is the real-infra E2E for
 // the relocation: it stands up the exec-verb socket server EXACTLY the way the
 // capless credential sidecar does — NewServerWithRuntime over a relay runtime,
-// hosted via StartWithServer on the fixed /run/tf/<conversationID>.sock with the sandbox
-// grant — backed by a RelayServer on the other end of a live supervision
+// hosted via StartWithServer on the fixed /run/tf/<conversationID>/agenthost.sock
+// with the jail-gid grant — backed by a RelayServer on the other end of a live supervision
 // channel. A real IPCClient (the same client the jailed agent's `exec` verbs
 // use) then dials that socket and drives:
 //
@@ -33,14 +34,14 @@ import (
 // This exercises the full relocated data path — IPCClient → sidecar-hosted
 // Server → relay runtime → supervision channel → RelayServer → stores → back —
 // over the real /run/tf socket + grant. It is root-gated (the socket lives
-// under /run/tf and is chowned to the sandbox uid), run by
+// under /run/tf and is granted to a jail gid), run by
 // scripts/test-sandbox-linux.sh. The gVisor CONNECT mechanism (bind-mount +
 // --host-uds + a jailed agent dialing /run/tf.sock) is validated separately by
 // internal/sandbox's TestIntegration_AgentHostIPC_RoundTrip; together they
 // cover socket relocation end to end.
 func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 	if os.Geteuid() != 0 {
-		t.Skip("relocation E2E needs root: it creates the socket under /run/tf and chowns it to the sandbox uid")
+		t.Skip("relocation E2E needs root: it creates the socket under /run/tf and grants it to a jail gid")
 	}
 
 	stores, info := newCaptureStores(t, true)
@@ -76,9 +77,9 @@ func TestIntegration_RelocatedAgentHost_ExecVerbRoundTrip(t *testing.T) {
 	})
 
 	// Host the exec-verb socket server the way the sidecar does: a relay-backed
-	// Server on the real /run/tf socket with the sandbox grant.
+	// Server on the real /run/tf socket, granted to a jail gid.
 	agentSrv := NewServerWithRuntime(NewRelayRuntime(sidecarConn, agentproc.NewRecordSender(sidecarConn), info, nil), nil)
-	hd, mount, err := StartWithServer(agentSrv, info.ConversationID)
+	hd, mount, err := StartWithServer(agentSrv, info.ConversationID, sandbox.JailGID(0))
 	if err != nil {
 		t.Fatalf("StartWithServer (relocated host): %v", err)
 	}

@@ -147,7 +147,7 @@ func recordActuals(_ context.Context, _, _ string, a sandbox.RunActuals) error {
 
 func run(cfg benchConfig) error {
 	if os.Geteuid() != 0 {
-		return fmt.Errorf("must run as root (netns + iptables + chown to sandbox UID)")
+		return fmt.Errorf("must run as root (netns + iptables + chown to a jail uid)")
 	}
 	for _, bin := range []string{"runsc", "ip", "iptables"} {
 		if _, err := exec.LookPath(bin); err != nil {
@@ -646,6 +646,12 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	}
 	h.net = rn
 
+	// The run's socket directories, as the dispatcher makes them before the
+	// sidecar launches: the tool host binds its socket in one of them.
+	if err := rn.PrepareSockets(ctx, conversationID); err != nil {
+		return fail(fmt.Errorf("prepare run socket directories: %w", err))
+	}
+
 	// The broker validates the agenthost mount source against its own
 	// per-run derivation and requires it to exist; in production the run's
 	// credential sidecar binds it during bring-up. The bench has no sidecar
@@ -653,9 +659,6 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	// the trusted path satisfies the launch without changing what the jail
 	// sees on disk.
 	agentMount := agenthost.SocketMountFor(conversationID)
-	if err := os.MkdirAll(filepath.Dir(agentMount.Source), 0o700); err != nil {
-		return fail(fmt.Errorf("create agenthost socket dir: %w", err))
-	}
 	_ = os.Remove(agentMount.Source)
 	ln, err := net.Listen("unix", agentMount.Source)
 	if err != nil {
@@ -936,7 +939,7 @@ console.log('held to completion chunks=' + chunks.length);
 // seedWorktree materializes the tree the workload reads: text files carrying
 // a known token, sized so grep and ls do real work without dominating the
 // memory picture, plus the heavy profile's burst scripts. The jail's launch
-// chowns the tree to the sandbox identity.
+// chowns the tree to the run's jail identity.
 func seedWorktree(root string, files int) error {
 	if files < 16 {
 		files = 16

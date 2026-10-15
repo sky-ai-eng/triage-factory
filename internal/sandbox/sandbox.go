@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"io"
+	"sync"
 )
 
 // Config is the per-run sandbox spec. Caller owns all field values;
@@ -27,9 +28,9 @@ type Config struct {
 	WorkspaceKey string
 
 	// Worktree is the host path bind-mounted at /work inside the
-	// sandbox. Caller MUST have created and chowned it to UID
-	// WorktreeUID before invoking Wrap, or the agent's writes will
-	// EACCES.
+	// sandbox. Caller MUST have created it and handed it to the run's
+	// jail identity (ChownRunTree with JailUID of the run's subnet
+	// index) before invoking Wrap, or the agent's writes will EACCES.
 	Worktree string
 
 	// Argv is the command exec'd inside the sandbox. Config itself does not
@@ -142,6 +143,14 @@ type Config struct {
 // own clone) and from inside the sandbox (the jailed agent). Idx is the
 // allocated subnet index, which also derives the run's sidecar uid
 // (SidecarUID), so one index ties the network and the sidecar together.
+//
+// The index is also the run's jail identity (JailUID/JailGID), and every file
+// grant made under that identity is made through the RunNetwork —
+// PrepareSockets, HandOffRunTree, GrantStaging — so Close can take each one
+// back before it releases the index. That is the release rule for the jail
+// identity, the file-side counterpart of the sidecar being killed before the
+// index goes: an index's uids are handed to another run only once no process
+// and no file still carries them.
 type RunNetwork struct {
 	Idx       uint8
 	Subnet    string
@@ -155,6 +164,14 @@ type RunNetwork struct {
 	// convention Sandbox.teardown uses.
 	netSt  any
 	closed bool
+
+	// The grants made under this index's jail identity, recorded as they are
+	// made and taken back by Close. grantsMu guards them: a mid-run grant and
+	// Close can run on different goroutines.
+	grantsMu       sync.Mutex
+	socketsFor     string
+	handedOffTrees []string
+	grantedStaging []string
 }
 
 // Mount declares an additional bind mount in the sandbox. Source is

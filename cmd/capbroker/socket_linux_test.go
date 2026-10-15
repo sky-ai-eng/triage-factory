@@ -5,20 +5,19 @@ package capbroker
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// TestListen_Permissions pins the socket hygiene invariant: 01731 dir
-// (traversable by any uid via a known path, group-writable so a run's
-// credential sidecar can create its own socket here, but not listable, and
-// STICKY so no sidecar can delete/replace another entry — see listen's doc),
-// 0600 socket file. The dir's group chgrp to WorktreeGID only lands under a
-// real root broker; this test runs unprivileged (so the chgrp EPERMs and is
-// tolerated), which is why it asserts the mode, not the group. Uses an isolated
-// temp directory rather than the production socketDir (/run/tf, root-only on
-// most distros) so this runs on an unprivileged CI runner too.
+// TestListen_Permissions pins the socket hygiene invariant: a 0711 dir
+// (traversable by any uid via a known path, but listable by nobody else and
+// writable by nobody but its owner — so no sidecar or jail identity on the
+// host can create, unlink or rename an entry here; see listen's doc) and a
+// 0600 socket file. Uses an isolated temp directory rather than the
+// production socketDir (/run/tf, root-only on most distros) so this runs on an
+// unprivileged CI runner too.
 func TestListen_Permissions(t *testing.T) {
 	sockPath := filepath.Join(t.TempDir(), "tf-sock-dir", "test-hygiene.sock")
 
@@ -32,14 +31,11 @@ func TestListen_Permissions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat socket dir: %v", err)
 	}
-	if got := dirInfo.Mode().Perm(); got != 0o731 {
-		t.Errorf("socket dir mode = %o, want 0731", got)
+	if got := dirInfo.Mode() & (os.ModePerm | os.ModeSticky | os.ModeSetgid | os.ModeSetuid); got != 0o711 {
+		t.Errorf("socket dir mode = %v, want 0711", dirInfo.Mode())
 	}
-	// Mode().Perm() masks the sticky bit, so assert it separately: without it,
-	// group-write + the shared WorktreeGID would let one run's sidecar unlink or
-	// replace the broker's or a sibling run's socket.
-	if dirInfo.Mode()&os.ModeSticky == 0 {
-		t.Errorf("socket dir mode = %v, want the sticky bit set (cross-run unlink protection)", dirInfo.Mode())
+	if st, ok := dirInfo.Sys().(*syscall.Stat_t); ok && int(st.Gid) != os.Getgid() {
+		t.Errorf("socket dir gid = %d, want this process's own %d (no group a sandboxed principal carries)", st.Gid, os.Getgid())
 	}
 
 	fileInfo, err := os.Stat(sockPath)
@@ -93,25 +89,26 @@ func TestListen_RefusesNonSocketFile(t *testing.T) {
 }
 
 // TestBrokerSocket_IsReservedAgainstPerRunSweeps is the drift guard on the one
-// literal that keeps a per-run cleanup from unlinking this broker's control
-// socket. Both live in the same directory, and the per-run paths are derived
-// from a run id by a sanitizer that maps any input onto a flat name there — so
-// internal/sandbox's sweeps refuse a derived path whose basename is this
-// socket's. That refusal is spelled as a duplicated literal, because this
+// literal that keeps a per-run removal from taking this broker's control
+// socket. Both live in the same directory, and internal/sandbox's per-run
+// prepare, release and boot sweep refuse to remove an entry whose basename is
+// this socket's. That refusal is spelled as a duplicated literal, because this
 // package imports internal/sandbox and the dependency cannot run the other
 // way; nothing but this test keeps the two spellings together.
 //
 // The failure it catches is quiet and total: rename the broker socket without
-// updating the reserved set, and the sweeps go back to being permitted to
-// delete it — with no compile error, and no symptom until a run id happens to
-// derive onto the new name and takes every subsequent run on the host down.
+// updating the reserved set, and the boot sweep goes back to being permitted
+// to delete it — with no compile error, and no symptom until the next boot
+// takes every subsequent run on the host down.
 func TestBrokerSocket_IsReservedAgainstPerRunSweeps(t *testing.T) {
 	if !sandbox.IsReservedSocketRootPath(DefaultSocketPath) {
-		t.Errorf("sandbox's per-run sweeps do not treat %q as reserved; a run id deriving onto it would be permitted to unlink the broker's control socket", DefaultSocketPath)
+		t.Errorf("sandbox's per-run sweeps do not treat %q as reserved; they would be permitted to remove the broker's control socket", DefaultSocketPath)
 	}
-	// The reservation must be narrow: an ordinary per-run socket in the same
-	// directory is exactly what those sweeps exist to remove.
-	if perRun := sandbox.TrustedAgentHostSocketPath("some-run-id"); sandbox.IsReservedSocketRootPath(perRun) {
-		t.Errorf("%q is reserved, but it is per-run state the cell teardown has to be able to clear", perRun)
+	// The reservation must be narrow: a run's socket directories in the same
+	// directory are exactly what those sweeps exist to remove.
+	for _, perRun := range []string{sandbox.RunSocketDir("some-run-id"), sandbox.TrustedToolHostSocketDir("some-run-id")} {
+		if sandbox.IsReservedSocketRootPath(perRun) {
+			t.Errorf("%q is reserved, but it is per-run state the cell teardown has to be able to clear", perRun)
+		}
 	}
 }

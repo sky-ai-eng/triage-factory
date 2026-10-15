@@ -11,7 +11,8 @@
 // agent output. In a multi-mode executor that process is the run's own
 // capless credential sidecar (one per run); on the self-contained
 // all/local path it is the orchestrator itself. This package builds the
-// OCI spec from a fixed template (empty caps, uid 10000, seccomp) and
+// OCI spec from a fixed template (empty caps, the run's own jail uid,
+// seccomp) and
 // validates the narrow, numeric parameters
 // the broker accepts over its RPC, so a compromised orchestrator cannot
 // steer sandbox construction. The deployment threat model and that split

@@ -65,21 +65,21 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 	netnsPath := probeNetns(t, "tfprobe-"+suffix)
 
 	worktree := t.TempDir()
-	if err := os.Chown(worktree, WorktreeUID, WorktreeGID); err != nil {
+	if err := os.Chown(worktree, JailUID(0), JailGID(0)); err != nil {
 		t.Fatalf("chown worktree: %v", err)
 	}
 	existing := filepath.Join(worktree, "existing.txt")
 	if err := os.WriteFile(existing, []byte("before\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chown(existing, WorktreeUID, WorktreeGID); err != nil {
+	if err := os.Chown(existing, JailUID(0), JailGID(0)); err != nil {
 		t.Fatal(err)
 	}
 
 	// The socket directory the jail dials out to, granted to the sandbox
 	// identity the way the tool host launch grants it.
 	sockDir := t.TempDir()
-	if err := os.Chown(sockDir, WorktreeUID, WorktreeGID); err != nil {
+	if err := os.Chown(sockDir, JailUID(0), JailGID(0)); err != nil {
 		t.Fatal(err)
 	}
 	sockPath := filepath.Join(sockDir, "tools.sock")
@@ -88,7 +88,7 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 		t.Fatalf("bind tool host socket: %v", err)
 	}
 	defer func() { _ = listener.Close() }()
-	if err := os.Chown(sockPath, WorktreeUID, WorktreeGID); err != nil {
+	if err := os.Chown(sockPath, JailUID(0), JailGID(0)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -99,7 +99,7 @@ func TestLiveJail_WritesReachHostWhileRunning(t *testing.T) {
 		Env:            []string{"PATH=/bin", "HOME=/work"},
 		ExtraMounts:    []Mount{{Source: sockDir, Destination: "/run/tf-tools", Options: []string{"rw"}}},
 	}
-	spec, err := buildSpec(cfg, netnsPath)
+	spec, err := buildSpec(cfg, netnsPath, JailUID(0), JailGID(0))
 	if err != nil {
 		t.Fatalf("build spec: %v", err)
 	}

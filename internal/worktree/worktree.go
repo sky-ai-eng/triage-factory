@@ -418,12 +418,37 @@ func RunRoot(rootKey string) string {
 // resolves through it; locally the step skill is written into the same path,
 // which is the SDK's working directory.
 func MakeRunRoot(rootKey string) (string, error) {
+	if _, err := EnsureRunsBase(); err != nil {
+		return "", err
+	}
 	dir := runDir(rootKey)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("mkdir run root: %w", err)
 	}
 	plantSandboxSkillsLink(dir)
 	return dir, nil
+}
+
+// runsBaseMode is the runs base's mode: its owner (the process that makes run
+// trees) writes it, anyone may traverse it, and nobody else may list it. The
+// traverse is for a jail identity on the host, which reaches its own tree by
+// name and has no business enumerating anyone else's; each tree's own 0770 root
+// is what keeps it out of the others.
+const runsBaseMode = 0o711
+
+// EnsureRunsBase creates the directory every run tree lives under, if it is
+// not there, and pins its mode — on every call, so the mode is runsBaseMode
+// whichever path happens to create the base first after boot, and whatever an
+// earlier binary left it at. Every path that makes a run root goes through it.
+func EnsureRunsBase() (string, error) {
+	base := filepath.Join(os.TempDir(), runsDir)
+	if err := os.MkdirAll(base, runsBaseMode); err != nil {
+		return "", fmt.Errorf("mkdir runs base: %w", err)
+	}
+	if err := os.Chmod(base, runsBaseMode); err != nil {
+		return "", fmt.Errorf("pin runs base mode: %w", err)
+	}
+	return base, nil
 }
 
 // RemoveRunRoot removes the run-root directory and everything under it

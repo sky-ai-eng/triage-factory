@@ -15,8 +15,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func chownRunTree(ctx context.Context, root, subpath string) error {
-	return defaultOps.ChownRunTree(ctx, root, subpath)
+func chownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
+	return defaultOps.ChownRunTree(ctx, root, subpath, jailUID)
+}
+
+func parkRunTree(ctx context.Context, root string) error {
+	return defaultOps.ParkRunTree(ctx, root)
 }
 
 func removeRunTree(ctx context.Context, path string) error {
@@ -27,23 +31,43 @@ func captureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string
 	return defaultOps.CaptureRunDelta(ctx, worktree, stagingDir, sessionID)
 }
 
-// runTreeHandedOff stats path and reports whether the sandbox identity owns it
-// while this process does not — the post-chown state. Deliberately a plain
-// Lstat, not a privileged op: reading a mode/owner needs no capability, and the
-// answer only ever suppresses a doomed write.
+// runTreeHandedOff stats path and reports whether a jail identity — or the
+// parked owner one leaves behind — owns it while this process does not: the
+// post-chown state. Deliberately a plain Lstat, not a privileged op: reading a
+// mode/owner needs no capability, and the answer only ever suppresses a doomed
+// write.
 func runTreeHandedOff(path string) bool {
-	if path == "" {
-		return false
-	}
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	uid, ok := lstatOwner(path)
 	if !ok {
 		return false
 	}
-	return int(st.Uid) == WorktreeUID && os.Geteuid() != WorktreeUID
+	return (IsJailUID(uid) || uid == ParkedRunTreeUID) && os.Geteuid() != uid
+}
+
+// runTreeJailUID is RunTreeJailUID's Linux body: the owner of path, when that
+// owner is a jail identity.
+func runTreeJailUID(path string) (int, bool) {
+	uid, ok := lstatOwner(path)
+	if !ok || !IsJailUID(uid) {
+		return 0, false
+	}
+	return uid, true
+}
+
+// lstatOwner returns path's own owner, without following a final symlink.
+func lstatOwner(path string) (int, bool) {
+	if path == "" {
+		return 0, false
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return 0, false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return int(st.Uid), true
 }
 
 // runTreeOwnerExtraUID is the orchestrator's uid when this code runs
@@ -66,24 +90,28 @@ func SetRunTreeOwnerUID(uid int) { runTreeOwnerExtraUID = uid }
 // runTreeGroupGID is the GROUP a run tree is chowned to at the ownership
 // hand-off, and the write-access channel that lets the orchestrator
 // materialize checkouts into a run root it has otherwise handed to the
-// sandbox agent. It defaults to WorktreeGID — the agent's own gid, the
-// historical target, correct for the in-process/dev case where the tree
-// creator and the agent are one identity. In the brokered split the broker
-// sets it to the ORCHESTRATOR's gid via SetRunTreeGroupGID. That choice is
-// load-bearing: the run root becomes group-writable by the orchestrator
-// WITHOUT granting WorktreeGID, the group the per-run credential sidecar
-// also carries — granting WorktreeGID would let any run's sidecar reach
-// every other run's tree over the shared executor filesystem. The
-// orchestrator's gid is carried by no sandboxed principal (not the agent,
-// not any sidecar), so a run tree stays reachable by exactly the owning
-// agent and the trusted orchestrator, and by nothing else.
-var runTreeGroupGID = WorktreeGID
+// jailed agent. In the brokered split the broker sets it to the
+// ORCHESTRATOR's gid via SetRunTreeGroupGID; unset (-1) it is this process's
+// own gid — the in-process/dev case, where this process is the tree's
+// creator. That choice is load-bearing: the run root becomes group-writable by
+// the orchestrator WITHOUT granting any jail gid, the group a run's sidecar
+// carries. The orchestrator's gid is carried by no sandboxed principal (not a
+// jail, not any sidecar), so a run tree stays reachable by exactly the owning
+// jail and the trusted orchestrator, and by nothing else.
+var runTreeGroupGID = -1
 
 // SetRunTreeGroupGID registers the orchestrator's gid as the run-tree group
 // target. Called once by the cap-broker subcommand from --orchestrator-gid
-// at boot, before serving; never in-process (dev/same-uid keeps the
-// WorktreeGID default, where owner and agent coincide anyway).
+// at boot, before serving; never in-process.
 func SetRunTreeGroupGID(gid int) { runTreeGroupGID = gid }
+
+// runTreeGroup resolves runTreeGroupGID's unset default.
+func runTreeGroup() int {
+	if runTreeGroupGID >= 0 {
+		return runTreeGroupGID
+	}
+	return os.Getgid()
+}
 
 // runTreeDirMode is the mode the run-tree directory scaffold — the run root
 // and the owner/repo intermediates a mid-run `workspace add` mints — carries:
@@ -196,8 +224,9 @@ func ensureScaffoldMode(fd int) error {
 // allowedRunTreeOwner is the ownership precondition on every run-tree
 // operation at this privileged boundary: the tree (and, for chown, every
 // entry in it) must already belong to an identity that legitimately
-// produces run trees, or the sandbox identity itself (idempotent re-chown
-// after a resume; teardown of a tree a run wrote into). Anything else —
+// produces run trees, a jail identity (the re-chown at a later claim, which
+// may hold a different index; teardown of a tree a run wrote into), or the
+// parked owner a finished engagement leaves on the root. Anything else —
 // /etc/ssl, another service's state — fails closed. This, not path shape,
 // is the real teeth: even a validly-shaped path can't make the privileged
 // side touch a tree the orchestrator doesn't already own.
@@ -222,7 +251,7 @@ func ensureScaffoldMode(fd int) error {
 //     that creates run trees — "owned by me" is the correct legitimacy
 //     check, and no separate orchestrator uid exists to register.
 func allowedRunTreeOwner(uid uint32) bool {
-	if uid == WorktreeUID {
+	if IsJailUID(int(uid)) || int(uid) == ParkedRunTreeUID {
 		return true
 	}
 	if runTreeOwnerExtraUID >= 0 {
@@ -423,8 +452,8 @@ func openEntryPinned(dirFd int, name string) (fd int, st unix.Stat_t, isPathFd b
 // works whether fd is a plain or an O_PATH descriptor. Because it never
 // re-resolves `name`, it always chowns the exact inode openEntryPinned
 // pinned — whatever `name` has since been renamed to, or replaced with.
-func chownPinnedEntry(fd int) error {
-	return unix.Fchownat(fd, "", WorktreeUID, runTreeGroupGID, unix.AT_EMPTY_PATH)
+func chownPinnedEntry(fd, uid int) error {
+	return unix.Fchownat(fd, "", uid, runTreeGroup(), unix.AT_EMPTY_PATH)
 }
 
 // listableDirFd returns an fd usable with getdents for the directory
@@ -453,12 +482,23 @@ func listableDirFd(fd int, isPathFd bool) (listFd int, distinct bool, err error)
 // in which case chownRunTreeFallback (the original EvalSymlinks-based
 // implementation) takes over — permanently, once latched, so a kernel
 // that can't do RESOLVE_NO_SYMLINKS isn't re-probed on every run.
-func (hostOps) ChownRunTree(ctx context.Context, root, subpath string) error {
+//
+// jailUID is checked here, at the boundary, before anything is touched: a
+// value outside the jail band would make this a root-privileged recursive
+// chown to an identity of the caller's choosing (root, the orchestrator, a
+// sidecar). The band check is the whole of it for the full hand-off — a run
+// tree is keyed by its task, and the broker has no record of which index the
+// task's current engagement holds. The subpath form is tied tighter, to the
+// root's own owner (see chownRunTreeOpenat2).
+func (hostOps) ChownRunTree(ctx context.Context, root, subpath string, jailUID int) error {
 	if err := validateRunTreeShape("chown run tree", root); err != nil {
 		return err
 	}
+	if !IsJailUID(jailUID) {
+		return fmt.Errorf("sandbox: chown run tree: uid %d outside the jail band [%d, %d)", jailUID, JailUIDBase, JailUIDBase+MaxSandboxes)
+	}
 	if !runTreeOpenat2Unsupported.Load() {
-		err := chownRunTreeOpenat2(ctx, root, subpath)
+		err := chownRunTreeOpenat2(ctx, root, subpath, jailUID)
 		switch {
 		case err == nil:
 			return nil
@@ -468,7 +508,7 @@ func (hostOps) ChownRunTree(ctx context.Context, root, subpath string) error {
 			return fmt.Errorf("sandbox: chown run tree: %w", err)
 		}
 	}
-	return chownRunTreeFallback(ctx, root, subpath)
+	return chownRunTreeFallback(ctx, root, subpath, jailUID)
 }
 
 // chownRunTreeOpenat2 is the kernel-enforced implementation.
@@ -483,7 +523,11 @@ func (hostOps) ChownRunTree(ctx context.Context, root, subpath string) error {
 // followed) and chowned as itself. An entry planted with a foreign owner
 // fails the whole operation closed, exactly like the fallback's
 // lchownRunTreeEntry.
-func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
+//
+// The subpath form requires root to be held by jailUID already: a checkout
+// added mid-run joins the engagement that holds the tree, and a tree whose
+// entries belong to two jail identities would be a tree two runs could reach.
+func chownRunTreeOpenat2(ctx context.Context, root, subpath string, jailUID int) error {
 	parentFd, base, err := openRunTreeAnchor(root)
 	if err != nil {
 		return err
@@ -503,12 +547,15 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 	if !allowedRunTreeOwner(st.Uid) {
 		return fmt.Errorf("%s is owned by uid %d, not a run-tree owner", root, st.Uid)
 	}
+	if subpath != "" && int(st.Uid) != jailUID {
+		return fmt.Errorf("%s is held by uid %d, not jail uid %d: a checkout joins the engagement holding its tree", root, st.Uid, jailUID)
+	}
 
 	if subpath == "" {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := chownPinnedEntry(rootFd); err != nil {
+		if err := chownPinnedEntry(rootFd, jailUID); err != nil {
 			return fmt.Errorf("fchownat %s: %w", root, err)
 		}
 		// The root is the run root's scaffold directory — set it group-writable
@@ -519,7 +566,7 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 		if err := chmodRunTreeDir(rootFd, false); err != nil {
 			return fmt.Errorf("fchmod %s: %w", root, err)
 		}
-		return chownDirChildren(ctx, rootFd, root)
+		return chownDirChildren(ctx, rootFd, root, jailUID)
 	}
 
 	// The mid-run `workspace add` case: the intermediate directories the
@@ -545,7 +592,7 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 			break
 		}
 		if i == len(segs)-1 {
-			opErr = chownEntryRecursive(ctx, dirFd, seg, display)
+			opErr = chownEntryRecursive(ctx, dirFd, seg, display, jailUID)
 			break
 		}
 
@@ -559,7 +606,7 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 			opErr = fmt.Errorf("%s is owned by uid %d, not a run-tree owner", display, st.Uid)
 			break
 		}
-		if err := chownPinnedEntry(fd); err != nil {
+		if err := chownPinnedEntry(fd, jailUID); err != nil {
 			closeFd(fd)
 			opErr = fmt.Errorf("fchownat %s: %w", display, err)
 			break
@@ -602,7 +649,7 @@ func chownRunTreeOpenat2(ctx context.Context, root, subpath string) error {
 // chowns it via that one pinned fd, and — if it is itself a directory —
 // obtains a listable fd for it (listableDirFd) and recurses over
 // everything inside.
-func chownEntryRecursive(ctx context.Context, dirFd int, name, displayPath string) error {
+func chownEntryRecursive(ctx context.Context, dirFd int, name, displayPath string, jailUID int) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -614,7 +661,7 @@ func chownEntryRecursive(ctx context.Context, dirFd int, name, displayPath strin
 		closeFd(fd)
 		return fmt.Errorf("%s is owned by uid %d, not a run-tree owner", displayPath, st.Uid)
 	}
-	if err := chownPinnedEntry(fd); err != nil {
+	if err := chownPinnedEntry(fd, jailUID); err != nil {
 		closeFd(fd)
 		return fmt.Errorf("fchownat %s: %w", displayPath, err)
 	}
@@ -631,27 +678,25 @@ func chownEntryRecursive(ctx context.Context, dirFd int, name, displayPath strin
 		closeFd(fd)
 	}
 	defer closeFd(listFd)
-	return chownDirChildren(ctx, listFd, displayPath)
+	return chownDirChildren(ctx, listFd, displayPath, jailUID)
 }
 
 // chownDirChildren lists dirFd's entries and recursively chowns each one.
-func chownDirChildren(ctx context.Context, dirFd int, displayPath string) error {
+func chownDirChildren(ctx context.Context, dirFd int, displayPath string, jailUID int) error {
 	names, err := readDirNames(dirFd)
 	if err != nil {
 		return fmt.Errorf("readdir %s: %w", displayPath, err)
 	}
 	for _, name := range names {
-		if err := chownEntryRecursive(ctx, dirFd, name, filepath.Join(displayPath, name)); err != nil {
+		if err := chownEntryRecursive(ctx, dirFd, name, filepath.Join(displayPath, name), jailUID); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// chownRunTreeFallback is the original recursive Lchown implementation —
-// the same one that lived in agentproc.chownWorktreeForSandbox before the
-// broker split, kept verbatim as the pre-5.6-kernel fallback path (see
-// runTreeOpenat2Unsupported).
+// chownRunTreeFallback is the recursive Lchown implementation, kept as the
+// pre-5.6-kernel fallback path (see runTreeOpenat2Unsupported).
 //
 // SECURITY: uses os.Lchown (not os.Chown) so a symlink inside the tree
 // can't redirect the chown to a host file outside it. filepath.Walk does
@@ -661,9 +706,13 @@ func chownDirChildren(ctx context.Context, dirFd int, displayPath string) error 
 // is checked against allowedRunTreeOwner before it's touched — an entry
 // planted with a foreign owner fails the whole operation closed rather
 // than being silently re-owned.
-func chownRunTreeFallback(ctx context.Context, root, subpath string) error {
-	if _, err := validateRunTreeRoot("chown run tree", root); err != nil {
+func chownRunTreeFallback(ctx context.Context, root, subpath string, jailUID int) error {
+	info, err := validateRunTreeRoot("chown run tree", root)
+	if err != nil {
 		return err
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); subpath != "" && (!ok || int(st.Uid) != jailUID) {
+		return fmt.Errorf("sandbox: chown run tree: %s is not held by jail uid %d: a checkout joins the engagement holding its tree", root, jailUID)
 	}
 
 	target := root
@@ -681,21 +730,21 @@ func chownRunTreeFallback(ctx context.Context, root, subpath string) error {
 		segs := strings.Split(rel, string(filepath.Separator))
 		for _, seg := range segs[:len(segs)-1] {
 			dir = filepath.Join(dir, seg)
-			if err := lchownRunTreeEntry(dir); err != nil {
+			if err := lchownRunTreeEntry(dir, jailUID); err != nil {
 				return fmt.Errorf("sandbox: chown run tree: %w", err)
 			}
 		}
 		target = filepath.Join(root, rel)
 	}
 
-	err := filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(target, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return lchownRunTreeEntry(path)
+		return lchownRunTreeEntry(path, jailUID)
 	})
 	if err != nil {
 		return fmt.Errorf("sandbox: chown run tree: %w", err)
@@ -703,9 +752,9 @@ func chownRunTreeFallback(ctx context.Context, root, subpath string) error {
 	return nil
 }
 
-// lchownRunTreeEntry re-owns one entry to the sandbox identity, after
+// lchownRunTreeEntry re-owns one entry to the jail identity, after
 // checking its current owner is one this boundary hands over at all.
-func lchownRunTreeEntry(path string) error {
+func lchownRunTreeEntry(path string, jailUID int) error {
 	var st syscall.Stat_t
 	if err := syscall.Lstat(path, &st); err != nil {
 		return fmt.Errorf("lstat %s: %w", path, err)
@@ -713,8 +762,102 @@ func lchownRunTreeEntry(path string) error {
 	if !allowedRunTreeOwner(st.Uid) {
 		return fmt.Errorf("%s is owned by uid %d, not a run-tree owner", path, st.Uid)
 	}
-	if err := os.Lchown(path, WorktreeUID, WorktreeGID); err != nil {
+	if err := os.Lchown(path, jailUID, runTreeGroup()); err != nil {
 		return fmt.Errorf("lchown %s: %w", path, err)
+	}
+	return nil
+}
+
+// ParkRunTree implements the end-of-engagement half of the hand-off: the
+// root, and only the root, goes to ParkedRunTreeUID with the run-tree group
+// and runTreeDirMode, so nothing below it is reachable through the jail
+// identity the engagement is about to give back. Same openat2 latch as
+// ChownRunTree.
+//
+// The mode is re-asserted rather than kept, because the root was the agent's
+// to chmod while it owned it: a root the agent left 0777 and only re-owned
+// here would still admit everyone to everything beneath it.
+func (hostOps) ParkRunTree(ctx context.Context, root string) error {
+	if err := validateRunTreeShape("park run tree", root); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !runTreeOpenat2Unsupported.Load() {
+		err := parkRunTreeOpenat2(root)
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, errOpenat2Unsupported):
+			noteOpenat2Unsupported(err)
+		default:
+			return fmt.Errorf("sandbox: park run tree: %w", err)
+		}
+	}
+	return parkRunTreeFallback(root)
+}
+
+// parkRunTreeOpenat2 pins root through the same openat2 anchor the hand-off
+// uses and parks the pinned inode. A missing root is the no-op success: the
+// tree was removed before its engagement ended.
+func parkRunTreeOpenat2(root string) error {
+	parentFd, base, err := openRunTreeAnchor(root)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return err
+	}
+	defer closeFd(parentFd)
+	rootFd, err := openat2AnchoredChildDir(parentFd, base)
+	if err != nil {
+		if errors.Is(err, unix.ENOENT) {
+			return nil
+		}
+		return fmt.Errorf("openat %s: %w", root, err)
+	}
+	defer closeFd(rootFd)
+	return parkPinnedRoot(rootFd, root)
+}
+
+// parkRunTreeFallback is the pre-5.6-kernel path: the EvalSymlinks-based
+// validation, then the same pinned park on an O_NOFOLLOW open of the root.
+func parkRunTreeFallback(root string) error {
+	if _, err := os.Lstat(root); os.IsNotExist(err) {
+		return nil
+	}
+	if _, err := validateRunTreeRoot("park run tree", root); err != nil {
+		return err
+	}
+	fd, err := unix.Open(root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("sandbox: park run tree: open %s: %w", root, err)
+	}
+	defer closeFd(fd)
+	if err := parkPinnedRoot(fd, root); err != nil {
+		return fmt.Errorf("sandbox: park run tree: %w", err)
+	}
+	return nil
+}
+
+// parkPinnedRoot parks the root fd refers to, when a jail identity holds it.
+// Any other owner is left alone: a parked root is already parked, an
+// orchestrator-owned one was never handed off, and an owner outside every run
+// tree identity is not this boundary's to touch.
+func parkPinnedRoot(fd int, root string) error {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return fmt.Errorf("fstat %s: %w", root, err)
+	}
+	if !IsJailUID(int(st.Uid)) {
+		return nil
+	}
+	if err := unix.Fchown(fd, ParkedRunTreeUID, runTreeGroup()); err != nil {
+		return fmt.Errorf("fchown %s: %w", root, err)
+	}
+	if err := unix.Fchmod(fd, uint32(runTreeDirMode)); err != nil {
+		return fmt.Errorf("fchmod %s: %w", root, err)
 	}
 	return nil
 }
