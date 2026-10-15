@@ -83,7 +83,8 @@ tool-host jail and waits until its runtime is reaped before taking the
 snapshot. A checkpoint pauses the jail (`runsc pause`), captures, and resumes;
 processes the agent backgrounded survive and cannot run during the capture. The
 resume happens on every path out, retried once, and the next tool call waits
-only for the resume, not for the archive. A restore imports a bundle with
+only for the resume, not for the archive. What that costs, and what a run
+observes while it is paused, is in `docs/benchmarks/checkpoint-freeze.md`. A restore imports a bundle with
 `git index-pack --fsck-objects`, since the bundle is agent-authored and the bare
 it lands in is shared across runs.
 
