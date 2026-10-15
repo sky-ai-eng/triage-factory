@@ -1357,8 +1357,10 @@ func (s *Spawner) forgetCheckout(ctx context.Context, orgID, claimID, conversati
 }
 
 // recordCheckoutAs records c as conv's own checkout, at c's path, for conv's
-// engagement (recordCheckout).
+// engagement (recordCheckout), bounded by ledgerWriteTimeout.
 func (s *Spawner) recordCheckoutAs(ctx context.Context, orgID string, conv *domain.Conversation, c snapshotCheckout) error {
+	ctx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+	defer cancel()
 	err := s.recordCheckout(ctx, orgID, conv.ClaimID, domain.ConversationWorktree{
 		ConversationID: conv.ID, RepositoryID: c.repositoryID, Path: c.path, Ref: c.slug,
 	})
@@ -1376,8 +1378,11 @@ func (s *Spawner) recordCheckoutAs(ctx context.Context, orgID string, conv *doma
 // in them. The checkouts are the ones a snapshot of root would carry
 // (snapshotCheckouts). The first write that fails stops the rest and is
 // returned; db.ErrClaimReleased once conv's claim has lost the conversation.
+// The read and each write are bounded by ledgerWriteTimeout on their own.
 func (s *Spawner) recordTaskCheckouts(ctx context.Context, orgID string, conv *domain.Conversation, root string) error {
-	checkouts, err := s.snapshotCheckouts(ctx, orgID, conv.TaskID, root)
+	listCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+	checkouts, err := s.snapshotCheckouts(listCtx, orgID, conv.TaskID, root)
+	cancel()
 	if err != nil {
 		return err
 	}

@@ -2040,13 +2040,14 @@ func (s *Spawner) buildStepConfig(ctx context.Context, orgID string, br *domain.
 		// built in it, and this conversation holds rows for none of the ones
 		// they added, so the git gate would refuse it every fetch and push in
 		// them. A rehydrate records its checkouts itself, before it fetches;
-		// a warm tree's are recorded here. Detached and bounded like the PR
-		// checkout's record below, for the same reasons, and best-effort the
-		// same way: a failure costs this conversation git access to those
-		// checkouts, never the step's start.
-		ledgerCtx, cancelLedger := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-		err := s.recordTaskCheckouts(ledgerCtx, orgID, convForWS, root)
-		cancelLedger()
+		// a warm tree's are recorded here. Detached like the PR checkout's
+		// record below, for the same reasons, with each read and write bounded
+		// inside, and best-effort the same way: a failure costs this
+		// conversation git access to those checkouts, never the step's start.
+		// A fence refusal is not this warning's case: the engagement has lost
+		// the conversation, and setWorktreePath below meets the same fence and
+		// reports that.
+		err := s.recordTaskCheckouts(context.WithoutCancel(ctx), orgID, convForWS, root)
 		if err != nil && !errors.Is(err, db.ErrClaimReleased) {
 			dispatchLog.Warn("record the task's checkouts in conversation_worktrees failed; fetches and pushes to their repos will be denied for this conversation",
 				"root", root, "conversation", conv.ID, "error", err)

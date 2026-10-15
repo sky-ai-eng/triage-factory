@@ -1755,9 +1755,9 @@ func (s *Spawner) recordRestoringCheckouts(ctx context.Context, orgID string, co
 	if s.conversationWorktrees == nil || len(checkouts) == 0 {
 		return nil, nil
 	}
-	ledgerCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
-	defer cancel()
-	held, err := s.conversationWorktrees.ListSystem(ledgerCtx, orgID, conv.ID)
+	listCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+	held, err := s.conversationWorktrees.ListSystem(listCtx, orgID, conv.ID)
+	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("list the conversation's checkouts: %w", err)
 	}
@@ -1771,7 +1771,7 @@ func (s *Spawner) recordRestoringCheckouts(ctx context.Context, orgID string, co
 			repositoryID: mc.RepositoryID, repoID: mc.RepoID, slug: mc.Slug,
 			rel: mc.Path, path: filepath.Join(root, filepath.FromSlash(mc.Path)),
 		}
-		if err := s.recordCheckoutAs(ledgerCtx, orgID, conv, c); err != nil {
+		if err := s.recordCheckoutAs(ctx, orgID, conv, c); err != nil {
 			return added, err
 		}
 		if !had[[2]string{c.repositoryID, c.slug}] {
@@ -1783,7 +1783,7 @@ func (s *Spawner) recordRestoringCheckouts(ctx context.Context, orgID string, co
 
 // forgetCheckouts deletes conv's rows for checkouts a restore recorded and
 // then did not rebuild. Detached from ctx, which a failed restore may have
-// cancelled, and bounded.
+// cancelled, and each delete bounded by ledgerWriteTimeout.
 //
 // Behind conv's claim fence, because one way a restore fails is the claim
 // being lost: the fence cancels its context. By then a successor may hold
@@ -1796,10 +1796,11 @@ func (s *Spawner) forgetCheckouts(ctx context.Context, orgID string, conv *domai
 	if s.conversationWorktrees == nil || len(checkouts) == 0 {
 		return
 	}
-	ledgerCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), ledgerWriteTimeout)
-	defer cancel()
+	ctx = context.WithoutCancel(ctx)
 	for _, c := range checkouts {
-		err := s.forgetCheckout(ledgerCtx, orgID, conv.ClaimID, conv.ID, c.repositoryID, c.slug)
+		deleteCtx, cancel := context.WithTimeout(ctx, ledgerWriteTimeout)
+		err := s.forgetCheckout(deleteCtx, orgID, conv.ClaimID, conv.ID, c.repositoryID, c.slug)
+		cancel()
 		if errors.Is(err, db.ErrClaimReleased) {
 			return
 		}
