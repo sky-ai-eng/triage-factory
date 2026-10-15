@@ -677,15 +677,35 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// off the network. A pull request whose newest review, review count and
 	// newest comment did not move is not read; a quiet seed diffs nothing, so
 	// it is not read either.
+	//
+	// The first rate limit ends the reads for the cycle: every read after it
+	// gets the same error without a request. A secondary limit leaves the
+	// client's budget check open, so each further read would otherwise go to
+	// GitHub, be limited again and wait out its retries. A pull request not
+	// read keeps its stored markers and is read next cycle, and Phase 3 still
+	// diffs every pull request the batch returned.
 	newReviews := make(map[string][]NewReview)
 	newComments := make(map[string][]NewComment)
+	var reader prActivityReader = client
+	stopOnRateLimit := func(err error) {
+		if err == nil {
+			return
+		}
+		if _, stopped := reader.(rateLimitedReader); !stopped {
+			trackerLog.WarnContext(ctx, "github rate limit reached; the remaining pull requests' new reviews and comments are read next cycle", "error", err)
+		}
+		reader = rateLimitedReader{err: err}
+	}
 	for _, item := range allItems {
 		snap, ok := refreshed[item.nodeID]
 		if !ok || item.seed {
 			continue
 		}
-		newReviews[item.nodeID] = t.githubNewReviews(ctx, client, scope, item.nodeID, item.snap, &snap)
-		newComments[item.nodeID] = t.githubNewComments(ctx, client, scope, item.nodeID, item.snap, &snap)
+		reviews, err := t.githubNewReviews(ctx, reader, scope, item.nodeID, item.snap, &snap)
+		stopOnRateLimit(err)
+		comments, err := t.githubNewComments(ctx, reader, scope, item.nodeID, item.snap, &snap)
+		stopOnRateLimit(err)
+		newReviews[item.nodeID], newComments[item.nodeID] = reviews, comments
 		refreshed[item.nodeID] = snap
 	}
 

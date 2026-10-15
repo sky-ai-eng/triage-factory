@@ -76,7 +76,7 @@ func TestGitHubNewReviews_NoMarkerReadsNothing(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 7}
 	curr := currWithMarker(3, 300, "2026-10-01T10:00:00Z")
 
-	if got := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
+	if got, _ := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
 		t.Errorf("reviews = %+v, want none", got)
 	}
 	if len(reader.asked) != 0 {
@@ -96,7 +96,7 @@ func TestGitHubNewReviews_UnchangedReadsNothing(t *testing.T) {
 	prev := prevWithMarker(2)
 	curr := currWithMarker(2, 90, "2026-10-01T08:00:00Z")
 
-	if got := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil || len(reader.asked) != 0 {
+	if got, _ := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil || len(reader.asked) != 0 {
 		t.Errorf("reviews = %+v after %d reads, want none and no read", got, len(reader.asked))
 	}
 	if *curr.ReviewMarker != *prev.ReviewMarker {
@@ -119,7 +119,7 @@ func TestGitHubNewReviews_NewReviewsAtTheEnd(t *testing.T) {
 	prev := prevWithMarker(2)
 	curr := currWithMarker(3, 101, "2026-10-01T10:00:00Z")
 
-	got := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
+	got, _ := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
 	if ids := reviewIDs(got); !slices.Equal(ids, []int64{101, 102}) {
 		t.Fatalf("new reviews = %v, want [101 102]", ids)
 	}
@@ -155,7 +155,7 @@ func TestGitHubNewReviews_LateSubmittedPendingReview(t *testing.T) {
 	prev := prevWithMarker(2)
 	curr := currWithMarker(3, 95, "2026-10-01T11:00:00Z")
 
-	got := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
+	got, _ := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
 	if ids := reviewIDs(got); !slices.Equal(ids, []int64{95}) {
 		t.Fatalf("new reviews = %v, want [95]", ids)
 	}
@@ -202,7 +202,7 @@ func TestGitHubNewReviews_MarksTFReviewsAndReplies(t *testing.T) {
 	prev := prevWithMarker(2)
 	curr := currWithMarker(6, 104, "2026-10-01T10:03:00Z")
 
-	got := tr.githubNewReviews(ctx, reader, reviewTestHost, "PR_7", prev, &curr)
+	got, _ := tr.githubNewReviews(ctx, reader, reviewTestHost, "PR_7", prev, &curr)
 	byTF := map[int64]bool{}
 	for _, r := range got {
 		byTF[r.ID] = r.ByTF
@@ -239,8 +239,8 @@ func TestGitHubNewReviews_FailedReadKeepsPrevMarker(t *testing.T) {
 			prev := prevWithMarker(2)
 			curr := currWithMarker(3, 101, "2026-10-01T10:00:00Z")
 
-			if got := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
-				t.Errorf("reviews = %+v, want none", got)
+			if got, err := tr.githubNewReviews(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil || err != nil {
+				t.Errorf("reviews = %+v, err = %v; want none, and no error for a failure other than a rate limit", got, err)
 			}
 			if curr.ReviewCount != 2 || *curr.ReviewMarker != *prev.ReviewMarker {
 				t.Errorf("curr = count %d marker %+v, want prev's 2 and %+v", curr.ReviewCount, curr.ReviewMarker, prev.ReviewMarker)

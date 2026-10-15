@@ -59,24 +59,27 @@ type ReviewReader interface {
 //
 // A failed read, of the reviews or of which are TF's, puts prev's marker and
 // count back on curr and returns none, so the next poll reads the same reviews
-// again.
-func (t *Tracker) githubNewReviews(ctx context.Context, client ReviewReader, scope, prNodeID string, prev domain.PRSnapshot, curr *domain.PRSnapshot) []NewReview {
+// again. A rate limit is also returned, for the caller to stop reading.
+func (t *Tracker) githubNewReviews(ctx context.Context, client ReviewReader, scope, prNodeID string, prev domain.PRSnapshot, curr *domain.PRSnapshot) ([]NewReview, error) {
 	if prev.ReviewMarker == nil || curr.ReviewMarker == nil {
-		return nil
+		return nil, nil
 	}
 	since := *prev.ReviewMarker
 	newest := since.Newer(*curr.ReviewMarker)
 	if curr.ReviewCount == prev.ReviewCount && newest == since {
 		curr.ReviewMarker = &newest
-		return nil
+		return nil, nil
 	}
 
 	read, total, err := t.readNewReviews(ctx, client, prNodeID, since, prev.ReviewCount)
 	if err != nil {
+		keepGitHubReviews(prev, curr)
+		if isGitHubRateLimit(err) {
+			return nil, err
+		}
 		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "github review read failed; the pull request's new reviews are read again next cycle",
 			"repo", curr.Repo, "number", curr.Number, "error", err)
-		keepGitHubReviews(prev, curr)
-		return nil
+		return nil, nil
 	}
 	fresh := make([]NewReview, 0, len(read))
 	for _, r := range read {
@@ -87,10 +90,10 @@ func (t *Tracker) githubNewReviews(ctx context.Context, client ReviewReader, sco
 		trackerLog.WarnContext(ctx, "reading which github reviews TF submitted failed; the pull request's new reviews are read again next cycle",
 			"repo", curr.Repo, "number", curr.Number, "error", err)
 		keepGitHubReviews(prev, curr)
-		return nil
+		return nil, nil
 	}
 	curr.ReviewMarker, curr.ReviewCount = &newest, total
-	return fresh
+	return fresh, nil
 }
 
 // readNewReviews reads the reviews submitted after since, oldest first, and

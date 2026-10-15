@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,7 +164,7 @@ func TestGitHubNewComments_RESTSeedReadsNothing(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 7}
 	curr := currWithCommentMarker(5, 300, "2026-10-01T10:00:00Z")
 
-	if got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
+	if got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
 		t.Errorf("comments = %+v, want none", got)
 	}
 	if len(reader.asked) != 0 {
@@ -185,7 +187,7 @@ func TestGitHubNewComments_UnchangedOrDeletedReadsNothing(t *testing.T) {
 			tr, _ := newReviewTestTracker(t)
 			reader := &fakeCommentReader{}
 			want := *curr.CommentMarker
-			if got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr); got != nil || len(reader.asked) != 0 {
+			if got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr); got != nil || len(reader.asked) != 0 {
 				t.Errorf("comments = %+v after %d reads, want none and no read", got, len(reader.asked))
 			}
 			if *curr.CommentMarker != want {
@@ -209,7 +211,7 @@ func TestGitHubNewComments_NewCommentsAtTheEnd(t *testing.T) {
 	}}
 	curr := currWithCommentMarker(3, 101, "2026-10-01T10:00:00Z")
 
-	got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr)
+	got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr)
 	if ids := commentIDs(got); !slices.Equal(ids, []string{"101", "102"}) {
 		t.Fatalf("new comments = %v, want [101 102]", ids)
 	}
@@ -241,7 +243,7 @@ func TestGitHubNewComments_PagesBackToTheMarker(t *testing.T) {
 	}}
 	curr := currWithCommentMarker(6, 104, "2026-10-01T10:04:00Z")
 
-	got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr)
+	got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr)
 	if ids := commentIDs(got); !slices.Equal(ids, []string{"101", "102", "103", "104"}) {
 		t.Fatalf("new comments = %v, want [101 102 103 104]", ids)
 	}
@@ -267,7 +269,7 @@ func TestGitHubNewComments_StoredWithoutMarker(t *testing.T) {
 	prev := domain.PRSnapshot{Number: 7, CommentCount: 3}
 	curr := currWithCommentMarker(5, 205, "2026-10-01T10:05:00Z")
 
-	got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
+	got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr)
 	if ids := commentIDs(got); !slices.Equal(ids, []string{"204", "205"}) {
 		t.Fatalf("new comments = %v, want the last two, [204 205]", ids)
 	}
@@ -280,7 +282,7 @@ func TestGitHubNewComments_StoredWithoutMarker(t *testing.T) {
 
 	reader.asked = nil
 	unchanged := currWithCommentMarker(3, 203, "2026-10-01T10:03:00Z")
-	if got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &unchanged); got != nil || len(reader.asked) != 0 {
+	if got, _ := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &unchanged); got != nil || len(reader.asked) != 0 {
 		t.Errorf("count did not rise: comments = %+v after %d reads, want none and no read", got, len(reader.asked))
 	}
 }
@@ -318,7 +320,7 @@ func TestGitHubNewComments_MarksTFComments(t *testing.T) {
 	}}
 	curr := currWithCommentMarker(4, 103, "2026-10-01T10:03:00Z")
 
-	got := tr.githubNewComments(ctx, reader, reviewTestHost, "PR_7", prevWithCommentMarker(1), &curr)
+	got, _ := tr.githubNewComments(ctx, reader, reviewTestHost, "PR_7", prevWithCommentMarker(1), &curr)
 	byTF := map[string]bool{}
 	for _, c := range got {
 		byTF[c.ID] = c.ByTF
@@ -362,8 +364,8 @@ func TestGitHubNewComments_FailedReadKeepsPrev(t *testing.T) {
 				setup(tr, reader)
 				curr := currWithCommentMarker(3, 101, "2026-10-01T10:00:00Z")
 
-				if got := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil {
-					t.Errorf("comments = %+v, want none", got)
+				if got, err := tr.githubNewComments(context.Background(), reader, reviewTestHost, "PR_7", prev, &curr); got != nil || err != nil {
+					t.Errorf("comments = %+v, err = %v; want none, and no error for a failure other than a rate limit", got, err)
 				}
 				if curr.CommentCount != 2 {
 					t.Errorf("count = %d, want prev's 2", curr.CommentCount)
@@ -518,5 +520,142 @@ func TestRefreshGitHub_CommentedEndToEnd(t *testing.T) {
 				t.Errorf("quiet poll emitted %v", eventTypes(after[before:]))
 			}
 		})
+	}
+}
+
+// A rate limit on either read is returned, for the cycle to stop reading, and
+// the pull request keeps its stored marker and count.
+func TestGitHubReads_RateLimitReturned(t *testing.T) {
+	limit := &ghclient.ErrRateLimited{ResumeAt: time.Now().Add(time.Hour)}
+	t.Run("comments", func(t *testing.T) {
+		tr, _ := newReviewTestTracker(t)
+		curr := currWithCommentMarker(3, 101, "2026-10-01T10:00:00Z")
+		got, err := tr.githubNewComments(context.Background(), rateLimitedReader{err: limit}, reviewTestHost, "PR_7", prevWithCommentMarker(2), &curr)
+		if got != nil || !errors.Is(err, limit) {
+			t.Errorf("comments = %+v, err = %v; want none and the rate limit", got, err)
+		}
+		if curr.CommentCount != 2 || curr.CommentMarker.ID != 100 {
+			t.Errorf("curr = count %d marker %+v, want prev's", curr.CommentCount, curr.CommentMarker)
+		}
+	})
+	t.Run("reviews", func(t *testing.T) {
+		tr, _ := newReviewTestTracker(t)
+		curr := currWithMarker(3, 101, "2026-10-01T10:00:00Z")
+		got, err := tr.githubNewReviews(context.Background(), rateLimitedReader{err: limit}, reviewTestHost, "PR_7", prevWithMarker(2), &curr)
+		if got != nil || !errors.Is(err, limit) {
+			t.Errorf("reviews = %+v, err = %v; want none and the rate limit", got, err)
+		}
+		if curr.ReviewCount != 2 || curr.ReviewMarker.ID != 100 {
+			t.Errorf("curr = count %d marker %+v, want prev's", curr.ReviewCount, curr.ReviewMarker)
+		}
+	})
+}
+
+// TestRefreshGitHub_RateLimitStopsTheReads runs a cycle over two pull requests
+// with a new comment each, where GitHub rate-limits the first comment read: the
+// other pull request's read is never sent, both still diff (their new label
+// emits), the cycle reports no error, and both keep their stored markers. The
+// next cycle reads both and reports both comments.
+func TestRefreshGitHub_RateLimitStopsTheReads(t *testing.T) {
+	var limited atomic.Bool
+	limited.Store(true)
+	var reads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query     string `json:"query"`
+			Variables struct {
+				IDs []string `json:"ids"`
+				ID  string   `json:"id"`
+			} `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		switch {
+		case strings.Contains(req.Query, "nodes(ids:"):
+			nodes := make([]string, 0, len(req.Variables.IDs))
+			for _, id := range req.Variables.IDs {
+				n, _ := strconv.Atoi(strings.TrimPrefix(id, "PR_node"))
+				nodes = append(nodes, fmt.Sprintf(`{"id":%q,"number":%d,"title":"PR %d","author":{"__typename":"User","login":"aidan"},
+					"state":"OPEN","url":"https://github.com/octo/repo/pull/%d","repository":{"nameWithOwner":"octo/repo"},
+					"commits":{"nodes":[{"commit":{"oid":"sha%d","statusCheckRollup":null}}]},
+					"labels":{"nodes":[{"name":"needs-reply"}]},
+					"createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T12:00:00Z",
+					"comments":{"totalCount":2,"nodes":[{"fullDatabaseId":"%d","createdAt":"2026-10-01T10:00:00Z"}]}}`,
+					id, n, n, n, n, n*100+1))
+			}
+			_, _ = w.Write([]byte(`{"data":{"nodes":[` + strings.Join(nodes, ",") + `]}}`))
+		case strings.Contains(req.Query, "comments(last: 50"):
+			reads.Add(1)
+			if limited.Load() {
+				w.Header().Set("Retry-After", "600")
+				http.Error(w, `{"message":"You have exceeded a secondary rate limit"}`, http.StatusTooManyRequests)
+				return
+			}
+			n, _ := strconv.Atoi(strings.TrimPrefix(req.Variables.ID, "PR_node"))
+			_, _ = w.Write([]byte(`{"data":{"node":{"comments":{"totalCount":2,"pageInfo":{"hasPreviousPage":false,"startCursor":"CUR"},"nodes":[` +
+				commentNodeJSON(int64(n*100), "User", "bob", "2026-10-01T09:00:00Z") + `,` +
+				commentNodeJSON(int64(n*100+1), "User", "alice", "2026-10-01T10:00:00Z") + `]}}}}`))
+		default:
+			t.Errorf("unexpected query: %s", req.Query)
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx := context.Background()
+	database := newMigratedSQLite(t)
+	stores := sqlitestore.New(database)
+	org := runmode.LocalDefaultOrgID
+	entityIDs := map[int]string{}
+	for _, n := range []int{7, 8} {
+		e, _, err := stores.Entities.FindOrCreateSystem(ctx, org, "github", reviewTestHost, fmt.Sprintf("octo/repo#%d", n), "", "pr", fmt.Sprintf("PR %d", n), fmt.Sprintf("https://github.com/octo/repo/pull/%d", n))
+		if err != nil {
+			t.Fatalf("seed entity: %v", err)
+		}
+		prev := domain.PRSnapshot{NodeID: fmt.Sprintf("PR_node%d", n), Number: n, Repo: "octo/repo", State: "OPEN", Author: "aidan",
+			HeadSHA: fmt.Sprintf("sha%d", n), Title: fmt.Sprintf("PR %d", n), UpdatedAt: "2026-10-01T08:00:00Z", CheckRuns: []domain.CheckRun{},
+			CommentCount: 1, CommentMarker: &domain.CommentMarker{ID: int64(n * 100), CreatedAt: "2026-10-01T09:00:00Z"}}
+		snapJSON, _ := json.Marshal(prev)
+		if ok, err := stores.Entities.UpdateSnapshotCASSystem(ctx, org, e.ID, string(snapJSON), e.PollSeq); err != nil || !ok {
+			t.Fatalf("seed snapshot: ok=%v err=%v", ok, err)
+		}
+		entityIDs[n] = e.ID
+	}
+
+	pub := &recordingPublisher{}
+	tr := New(database, pub, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
+	client := ghclient.NewClient(srv.URL, "tok")
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+		t.Fatalf("RefreshGitHub under a rate limit: %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("comment reads sent = %d, want 1: none after the rate limit", got)
+	}
+	evts := pub.nonSystemEvents()
+	if got := findEvents(evts, domain.EventGitHubPRCommented); len(got) != 0 {
+		t.Errorf("commented events = %d under a rate limit, want none", len(got))
+	}
+	if got := findEvents(evts, domain.EventGitHubPRLabelAdded); len(got) != 2 {
+		t.Errorf("label_added events = %d, want one per pull request: the diff still runs", len(got))
+	}
+	for n, id := range entityIDs {
+		if snap := storedPRSnapshot(t, stores, id); snap.CommentMarker == nil || snap.CommentMarker.ID != int64(n*100) || snap.CommentCount != 1 {
+			t.Errorf("PR %d stored: count %d marker %+v, want its previous marker kept", n, snap.CommentCount, snap.CommentMarker)
+		}
+	}
+
+	limited.Store(false)
+	if _, _, err := tr.RefreshGitHub(ctx, reviewTestHost, client, "", nil, nil); err != nil {
+		t.Fatalf("RefreshGitHub after the limit: %v", err)
+	}
+	got := findEvents(pub.nonSystemEvents(), domain.EventGitHubPRCommented)
+	if len(got) != 2 {
+		t.Fatalf("commented events after the limit = %d, want one per pull request", len(got))
+	}
+	for _, evt := range got {
+		if meta := decodeMetadata[events.GitHubPRCommentedMetadata](t, evt); meta.Commenter != "alice" || meta.CommentID != int64(meta.PRNumber*100+1) {
+			t.Errorf("metadata = %+v, want alice's comment on PR %d", meta, meta.PRNumber)
+		}
 	}
 }

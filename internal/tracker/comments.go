@@ -358,6 +358,32 @@ type CommentReader interface {
 	PRCommentsBefore(ctx context.Context, prNodeID, before string) (ghclient.PRCommentPage, error)
 }
 
+// prActivityReader reads the reviews and comments a refresh cycle reads past
+// its batch.
+type prActivityReader interface {
+	ReviewReader
+	CommentReader
+}
+
+// rateLimitedReader answers every read with the rate limit a read earlier in
+// the cycle hit, and sends nothing.
+type rateLimitedReader struct{ err error }
+
+func (r rateLimitedReader) PRReviewsBefore(context.Context, string, string) (ghclient.PRReviewPage, error) {
+	return ghclient.PRReviewPage{}, r.err
+}
+
+func (r rateLimitedReader) PRCommentsBefore(context.Context, string, string) (ghclient.PRCommentPage, error) {
+	return ghclient.PRCommentPage{}, r.err
+}
+
+// isGitHubRateLimit reports whether err is GitHub refusing for its rate
+// limit.
+func isGitHubRateLimit(err error) bool {
+	var rl *ghclient.ErrRateLimited
+	return errors.As(err, &rl)
+}
+
 // githubNewComments returns the conversation comments made on the pull request
 // since prev, oldest first with TF's marked, and settles curr's comment marker
 // and count.
@@ -379,25 +405,28 @@ type CommentReader interface {
 //
 // A failed read, of the comments or of which are TF's, puts prev's marker and
 // count back on curr and returns none, so the next poll reads the same comments
-// again.
-func (t *Tracker) githubNewComments(ctx context.Context, client CommentReader, scope, prNodeID string, prev domain.PRSnapshot, curr *domain.PRSnapshot) []NewComment {
+// again. A rate limit is also returned, for the caller to stop reading.
+func (t *Tracker) githubNewComments(ctx context.Context, client CommentReader, scope, prNodeID string, prev domain.PRSnapshot, curr *domain.PRSnapshot) ([]NewComment, error) {
 	if curr.CommentMarker == nil {
-		return nil
+		return nil, nil
 	}
 	if prev.CommentMarker != nil {
 		if !prev.CommentMarker.After(curr.CommentMarker.CreatedAt, curr.CommentMarker.ID) {
-			return nil
+			return nil, nil
 		}
 	} else if prev.CommentCount == 0 || curr.CommentCount <= prev.CommentCount {
-		return nil
+		return nil, nil
 	}
 
 	read, total, err := t.readGitHubComments(ctx, client, prNodeID, prev)
 	if err != nil {
+		keepGitHubComments(prev, curr)
+		if isGitHubRateLimit(err) {
+			return nil, err
+		}
 		trackerLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "github comment read failed; the pull request's new comments are read again next cycle",
 			"repo", curr.Repo, "number", curr.Number, "error", err)
-		keepGitHubComments(prev, curr)
-		return nil
+		return nil, nil
 	}
 	newest := *curr.CommentMarker
 	for _, c := range read {
@@ -408,10 +437,10 @@ func (t *Tracker) githubNewComments(ctx context.Context, client CommentReader, s
 		trackerLog.WarnContext(ctx, "reading which github comments TF posted failed; the pull request's new comments are read again next cycle",
 			"repo", curr.Repo, "number", curr.Number, "error", err)
 		keepGitHubComments(prev, curr)
-		return nil
+		return nil, nil
 	}
 	curr.CommentMarker, curr.CommentCount = &newest, total
-	return fresh
+	return fresh, nil
 }
 
 // readGitHubComments reads the pull request's conversation comments a page at a

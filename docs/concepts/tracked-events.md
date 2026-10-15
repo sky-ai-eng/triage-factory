@@ -96,6 +96,10 @@ How the new reviews are found:
 - When the follow-up read fails, or reading which reviews are TF's does, the
   snapshot keeps its previous `review_count` and `review_marker` and the next
   cycle reports the same reviews.
+- A rate limit on this read or on the comment read (see [Comments](#comments))
+  ends both reads for the rest of the cycle, with no further request. Every
+  PR not read keeps its markers and is read next cycle; the cycle still diffs
+  every PR the batch read returned.
 - A snapshot stored without `review_marker`, from before it existed or seeded
   from the REST listing of open PRs, compares each reviewer's latest review
   instead, as earlier versions did: one event per reviewer whose latest review
@@ -248,7 +252,10 @@ How the new comments are found:
 
 When a comment read fails, or reading which comments are TF's does, the
 snapshot keeps its previous comment fields and the next cycle reports the same
-comments.
+comments. A rate limit ends the cycle's reads where it lands. On Linear the
+whole cycle stops there. On GitHub the comment and review reads stop, with no
+further request, and every PR not read is read next cycle, while the cycle
+still diffs every PR the batch read returned.
 
 #### Labels
 
