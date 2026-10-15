@@ -722,6 +722,12 @@ func (s *Server) completeManagedBindCallback(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The bind changed the org's GitHub credential, and on a workspace that had
+	// no GitHub URL its host too. The poller set the org's next poll when it
+	// last skipped it as unconfigured, and the reachable-repo mirror is empty,
+	// so without this kick the first poll and the repository picker would both
+	// wait for the next scheduled pass.
+	s.kickGitHubChanged(r, orgID)
 	http.Redirect(w, r, settingsRedirectPath(orgID)+"#github-app", http.StatusFound)
 }
 
@@ -1169,11 +1175,6 @@ func (s *Server) writeManagedBinding(ctx context.Context, orgID, userID, ghWeb s
 	githubAppLog.Info("bound managed installation",
 		"org", orgID, "installation", installationID, "account", inst.AccountLogin,
 		"account_type", inst.AccountType, "host", host)
-
-	// The org's reachable-repo mirror is now answerable and empty. Kick the
-	// refresh so the repository picker has something to show rather than
-	// waiting for the next poll cycle.
-	s.kickReachRefresh(orgID, true)
 	return nil, nil
 }
 

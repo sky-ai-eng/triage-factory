@@ -552,6 +552,14 @@ func (r *bindRig) githubHost(t *testing.T) string {
 	return host.String
 }
 
+// watchGitHubChanged wires the server's GitHub-changed hook to a channel
+// that receives each org it is kicked for.
+func (r *bindRig) watchGitHubChanged() <-chan string {
+	kicked := make(chan string, 4)
+	r.srv.SetOnGitHubChanged(func(orgID string) { kicked <- orgID })
+	return kicked
+}
+
 // accessChangeCount counts the workspace's change-log rows.
 func (r *bindRig) accessChangeCount(t *testing.T) int {
 	t.Helper()
@@ -891,15 +899,25 @@ func TestManagedBind_WorkspaceWithNoHostStartsOnTheAppsHost(t *testing.T) {
 }
 
 // TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost: the bind writes the
-// App's host as the workspace's, beside the installation and the class.
+// App's host as the workspace's, beside the installation and the class, and
+// kicks the GitHub-changed hook so the org is polled under it now.
 func TestManagedBind_WorkspaceWithNoHostAdoptsTheAppsHost(t *testing.T) {
 	rig := newBindRig(t, newFakeGitHub())
 	rig.setGitHubHost(t, "")
+	kicked := rig.watchGitHubChanged()
 
 	out := rig.callback(t, rig.ceremony(t), defaultCallbackQuery(4242))
 	if out.Code != http.StatusFound {
 		t.Fatalf("callback status=%d outcome=%q body=%s, want 302",
 			out.Code, out.Header().Get("X-TF-Bind-Outcome"), out.Body.String())
+	}
+	select {
+	case got := <-kicked:
+		if got != rig.orgID.String() {
+			t.Errorf("github-changed kicked for org %q, want %q", got, rig.orgID)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("a completed bind did not kick the github-changed hook; the org's first poll waits out its interval")
 	}
 	if host := rig.githubHost(t); host != ghbase.DefaultBaseURL() {
 		t.Errorf("github host = %q after the bind, want the App's %q", host, ghbase.DefaultBaseURL())
@@ -947,6 +965,7 @@ func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
 			rig.setGitHubHost(t, "")
 			cookie := rig.ceremony(t)
 			changes := rig.accessChangeCount(t)
+			kicked := rig.watchGitHubChanged()
 			c.move(t, rig)
 
 			out := rig.callback(t, cookie, defaultCallbackQuery(4242))
@@ -965,6 +984,11 @@ func TestManagedBind_HostMovedAfterTheStartIsRefused(t *testing.T) {
 			}
 			if n := rig.accessChangeCount(t); n != changes {
 				t.Errorf("%d change-log rows after a refused bind, want %d", n, changes)
+			}
+			select {
+			case <-kicked:
+				t.Error("a refused bind kicked the github-changed hook")
+			case <-time.After(200 * time.Millisecond):
 			}
 		})
 	}
