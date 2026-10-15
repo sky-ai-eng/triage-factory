@@ -29,8 +29,12 @@ import (
 // comments is every conversation comment made since prev, oldest first, with
 // TF's marked (githubNewComments): the snapshot holds only the newest.
 //
-// Not a pure function for the review-request branch: the resolver may consult
-// stores (multi-mode). Every other branch is pure.
+// The mentions in reviews and comments, and the ones curr's body has that
+// prev's did not, emit github:pr:mentioned for each identity the resolver
+// knows (prMentions).
+//
+// Not a pure function for the review-request and mention branches: the
+// resolver may consult stores (multi-mode). Every other branch is pure.
 func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
 	now := time.Now()
 	eid := &entityID
@@ -364,6 +368,15 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			Repo: curr.Repo, PRNumber: curr.Number,
 			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
 		}, eid, now, &evts)
+	}
+
+	// --- Mentions ----------------------------------------------------------
+	// One event per user or team TF knows that was newly mentioned in a
+	// comment, a review or the body, keyed and resolved as a review request
+	// is and timed at the mention's comment or review. A body mention has no
+	// time of its own and takes the PR's updatedAt.
+	for _, m := range prMentions(prev, curr, reviews, comments) {
+		appendMentioned(&evts, eid, now, curr, m, resolver)
 	}
 
 	// --- Label diff --------------------------------------------------------

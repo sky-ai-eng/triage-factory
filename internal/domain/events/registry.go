@@ -63,8 +63,8 @@ var (
 // on duplicate registration — schemas are compile-time config. Also panics if
 // s declares OwnershipRequestedParty for a non-github: event type: the
 // requested-party resolver (internal/routing's resolveRequestedPartyRouting)
-// is github-specific, so a source other than github's native review-request
-// handling that tries to claim this model is a wiring bug — better to fail
+// is github-specific, so a source other than github's review requests and
+// mentions that tries to claim this model is a wiring bug — better to fail
 // loudly at boot than silently downgrade at dispatch time.
 func Register(s EventSchema) {
 	mu.Lock()
@@ -76,7 +76,7 @@ func Register(s EventSchema) {
 		panic(fmt.Sprintf("events.Register: duplicate registration for %q", s.EventType))
 	}
 	if s.Ownership == OwnershipRequestedParty && !strings.HasPrefix(s.EventType, "github:") {
-		panic(fmt.Sprintf("events.Register: %q declares OwnershipRequestedParty, which only github's native review-request resolver supports", s.EventType))
+		panic(fmt.Sprintf("events.Register: %q declares OwnershipRequestedParty, which only github's native requested-party resolver supports", s.EventType))
 	}
 	registry[s.EventType] = s
 }

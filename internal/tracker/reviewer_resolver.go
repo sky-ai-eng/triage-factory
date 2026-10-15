@@ -32,7 +32,9 @@ type ReviewerResolver interface {
 // identity is the lone user (their captured login) plus the teams they belong
 // to on GitHub ("org/slug" form, from ListMyTeams). This preserves today's
 // user-perspective behavior — the general per-reviewer mechanism degenerates
-// to one event for the one user.
+// to one event for the one user. Both compare without regard to case, as
+// GitHub does and the store lookups behind the multi-mode resolver do: a
+// mention is spelled however its writer typed it.
 type localReviewerResolver struct {
 	username  string
 	userTeams map[string]struct{}
@@ -44,18 +46,18 @@ func NewLocalReviewerResolver(username string, userTeams []string) ReviewerResol
 	set := make(map[string]struct{}, len(userTeams))
 	for _, t := range userTeams {
 		if t != "" {
-			set[t] = struct{}{}
+			set[strings.ToLower(t)] = struct{}{}
 		}
 	}
 	return &localReviewerResolver{username: username, userTeams: set}
 }
 
 func (r *localReviewerResolver) KnownUser(login string) bool {
-	return login != "" && login == r.username
+	return login != "" && strings.EqualFold(login, r.username)
 }
 
 func (r *localReviewerResolver) KnownTeam(orgLogin, slug string) bool {
-	_, ok := r.userTeams[orgLogin+"/"+slug]
+	_, ok := r.userTeams[strings.ToLower(orgLogin+"/"+slug)]
 	return ok
 }
 

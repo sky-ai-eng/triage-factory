@@ -32,7 +32,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Label Added** | `github:pr:label_added` | A label is added | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
 | **New Comment** | `github:pr:commented` | Someone other than TF commented in the PR's conversation since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments). Comments in review threads arrive as reviews | — |
-| **Mentioned** | `github:pr:mentioned` | In the catalog; the tracker does not emit it yet | — |
+| **Mentioned** | `github:pr:mentioned` | A user or team TF knows is @-mentioned in a new comment or review, or by an edit that adds the mention to the PR body. One event per identity, routed to that identity's team(s) as `review_requested` is — see [Mentions](#mentions) | `user:<login>` / `team:<org>/<slug>` |
 
 ### Informational
 
@@ -50,10 +50,12 @@ most one active task exists per entity, event type and `dedup_key`.
 | **PR Unreachable** | `github:pr:unreachable` | TF will no longer follow a tracked PR — see below | — |
 
 A PR is first stored from the REST listing of open PRs, which carries its
-review requests but no check runs, reviews or comments. Its review requests
-emit then, and the GraphQL refresh that follows in the same cycle reports the
-check runs, reviews and merge conflicts already on it. The comments already on
-it are its baseline and emit nothing.
+review requests and body but no check runs, reviews or comments. Its review
+requests emit then, and the GraphQL refresh that follows in the same cycle
+reports the check runs, reviews and merge conflicts already on it. The comments
+already on it are its baseline and emit nothing, and so are the mentions in its
+body unless it was created since TF last listed its repository (see
+[Mentions](#mentions)).
 
 #### Reviews
 
@@ -87,10 +89,12 @@ How the new reviews are found:
   newest review did not move is not read again.
 - Otherwise a follow-up query pages through the PR's submitted reviews from the
   end of GitHub's list backwards, with each review's state, author, submission
-  time and its comments' ids and files. A review submitted after the stored
-  marker is new. GitHub does not document the order of that list: a review
-  started as pending sits where it was started if the list is by creation, so
-  the read goes on until the reviews it found make up the rise in the count.
+  time and its comments' ids and files. The bodies of the reviews and their
+  comments are read for their mentions (see [Mentions](#mentions)) and nothing
+  else is kept from them. A review submitted after the stored marker is new.
+  GitHub does not document the order of that list: a review started as pending
+  sits where it was started if the list is by creation, so the read goes on
+  until the reviews it found make up the rise in the count.
 - Pending reviews are never read. The list would otherwise return the
   credential's own unsubmitted review.
 - When the follow-up read fails, or reading which reviews are TF's does, the
@@ -109,6 +113,87 @@ How the new reviews are found:
 - The refresh gate skips an open PR whose `updatedAt` and head commit did not
   move for up to ten minutes. A review that did not advance `updatedAt` waits
   for that floor.
+
+#### Mentions
+
+`github:pr:mentioned` reports a user or team TF knows being @-mentioned on a
+tracked PR, one event per identity. TF knows a user whose login maps to a TF
+user on the org's GitHub host, and a team (`@org/slug`) that maps to a TF team;
+in local mode, the local user and the teams they are on. This is the test
+`review_requested` applies to a requested reviewer, and the event is keyed and
+routed the same way: its `dedup_key` is `user:<login>` or `team:<org>/<slug>`,
+and its task is visible to that identity's team(s) rather than the PR author's.
+A later mention of an identity whose task is still open bumps that task. The
+only event that closes it is the PR's end — merged, closed or unreachable —
+which closes it with the PR's other tasks.
+
+Mentions are read from three places:
+
+- conversation comments made since the last cycle, from the comment read (see
+  [Comments](#comments));
+- reviews submitted since the last cycle, from their bodies and their inline
+  comments, from the review read (see [Reviews](#reviews));
+- the PR body. The snapshot stores the set of users and teams the body
+  mentions (`body_mentions`), not the body, and an edit that adds one to the
+  set emits for it. An edit that adds none emits nothing.
+
+Only new comments and reviews are read, so editing an older comment or review
+to add a mention emits nothing.
+
+A mention follows GitHub's pattern: `@login` or `@org/team-slug`, not preceded
+by a letter, digit or underscore. It does not count when it is:
+
+- in a fenced or indented code block, in inline code, on a quoted (`>`) line,
+  in an HTML comment, or inside an `http(s)` URL;
+- in a comment or review TF posted, told apart as for `commented` and the
+  review events: by its `comment` or `review` artifact. A reply TF posted that
+  joined a person's pending review is TF's on its own;
+- a commenter's mention of themselves, and the PR author's mention of
+  themselves in the body, which is taken as theirs.
+
+A bot's comment counts like anyone's. Several mentions of one identity in a
+cycle emit one event, attributed to the newest comment or review that made one,
+or to the body when only the body did.
+
+The metadata names the identity as `mentioned_login` or `mentioned_team`, in
+lower case, since GitHub matches logins and team slugs without regard to case.
+`mention_source` is `comment`, `review` (a review's body), `review_comment` (an
+inline comment in a review) or `body`. `commenter` and `comment_id` name the
+comment or review: a review's id for `review`, and both empty for `body`. The
+event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
+`head_sha` and `labels`. Predicates can filter on `mentioned_login`,
+`mentioned_team`, `mention_source`, `commenter_in`, `commenter`, `author_in`,
+`author`, `repo`, `is_draft` and `has_label`; a body mention has no commenter,
+so no `commenter_in` list matches it. The event's time is the comment's
+creation or the review's submission. The body records no time for an edit, so a
+body mention takes the PR's `updatedAt`.
+
+A PR TF finds for the first time, created after TF's previous listing of its
+repository, was opened while TF followed the repository. Its body's mentions
+emit with the seed that stores it, timed at its `updatedAt`. The comparison
+allows five minutes before that listing, for the time a listing takes and for
+clock skew. Any other PR found for the first time was already open when TF last
+looked, so its body is a baseline and emits nothing, as for every other change
+in tracking. That covers every PR in a repository's first listing (TF's first
+poll, or a repository just added to a team's tracked set), a PR an earlier
+cycle listed but did not get to store, one past the 1,000 open PRs a listing
+returns, and a reopened PR. A PR TF's agent opens is recorded as an entity when
+the agent records it, before a poll finds it, and that entity is seeded
+without events, so its body is a baseline too. A snapshot stored before
+`body_mentions` existed is likewise a baseline. A PR seeded from the REST
+listing takes its comments as its baseline, and one stored without
+`review_marker` reads no reviews, so neither reports mentions in them on that
+refresh.
+
+Some limits:
+
+- The body is read line by line rather than as full CommonMark. A paragraph
+  indented four spaces under a list item after a blank line reads as a code
+  block, and inline code that spans a line break reads as text.
+- Only a review's first 100 inline comments are read.
+- An edit TF makes to the PR body counts like anyone's: no artifact records it.
+  So does the body of a PR TF opened when a poll lists the PR before the
+  agent's record of it lands.
 
 #### PR Unreachable
 
@@ -241,8 +326,9 @@ How the new comments are found:
   comments in the order they were made, so a new comment is always the newest.
   When the newest comment is newer than the marker, a follow-up query pages
   back from the end of the list to the marker, reading each comment's id,
-  author and creation time. A newest comment older than the marker means the
-  newest was deleted, and emits nothing. A snapshot without the marker that
+  author and creation time, and its body for its mentions (see
+  [Mentions](#mentions)) and nothing else. A newest comment older than the
+  marker means the newest was deleted, and emits nothing. A snapshot without the marker that
   counted comments was stored before the marker existed, and counts the last N
   comments as new, N being the rise in the count. One that counted none may
   have been seeded from the REST listing, which carries no comments, so its
@@ -637,6 +723,8 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `review_count` — the number of submitted reviews
 - `review_marker` — the newest submitted review TF has read, `{id, submitted_at}`; see [Reviews](#reviews)
 - `labels[]`, `updated_at`
+- `body_hash` — fingerprint of the complete body; the body itself is mirrored onto the entity, capped at 2,000 codepoints
+- `body_mentions[]` — the users (`login`) and teams (`org/slug`) the body @-mentions, in lower case; see [Mentions](#mentions). `null` on a snapshot stored before it existed
 - `comment_count` — the number of conversation comments
 - `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
 
@@ -689,7 +777,7 @@ stay on the belt through a pause, because a Jira key's prefix is its project.
 
 ## Event lifecycle
 
-1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, `opened` if it's an authored PR, `mentioned` if discovered via mentions query)
+1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, and `mentioned` for the mentions in the body of a PR created since TF last listed its repository)
 2. **Transitions** — subsequent cycles compare snapshots and emit events for any field changes
 3. **Terminal** — when an item reaches a terminal state (merged, closed, done), it's marked with `terminal_at` and excluded from future refresh cycles. Terminal items are retained indefinitely for dashboard statistics.
 4. **Reactivation** — if a terminal item reappears in discovery (e.g. a closed PR is reopened), `terminal_at` is cleared and tracking resumes

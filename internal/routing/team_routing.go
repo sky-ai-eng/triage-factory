@@ -306,9 +306,10 @@ func handlerTeamID(h domain.EventHandler) string {
 
 // maxRuleDefaultPriority returns the highest default_priority across the
 // matched rules, defaulting to the 0.5 trigger-fallback when none carry one.
-// Used for review_requested, whose owner/visibility teams come from the
-// requested identity rather than the rule's team — so the per-owner-team
-// teamRulePriorityScores can't supply the priority; the matched rule(s) do.
+// Used for the requested-party events (review_requested, mentioned), whose
+// owner/visibility teams come from the identity the event names rather than
+// the rule's team — so the per-owner-team teamRulePriorityScores can't supply
+// the priority; the matched rule(s) do.
 func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 	s := 0.5
 	for _, rule := range rules {
@@ -319,19 +320,38 @@ func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 	return s
 }
 
-// reviewRequestVisibilityTeams resolves the team(s) a review_requested task is
-// visible to from the *requested identity* on the event metadata — not from
-// which teams' rules matched. A requested user routes to the union of teams
-// over every TF user the login resolves to (the set-valued reverse lookup, the
-// regression guard for a login bound to two users); a requested github team
+// requestedParty reads the identity a requested-party event names: the
+// requested reviewer of a review_requested, the mentioned user or team of a
+// mentioned. At most one of login and team is set, team in "org/slug" form.
+// Metadata that does not decode names nobody.
+func requestedParty(evt domain.Event) (login, team string) {
+	if evt.EventType == domain.EventGitHubPRMentioned {
+		var meta events.GitHubPRMentionedMetadata
+		if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
+			return "", ""
+		}
+		return meta.MentionedLogin, meta.MentionedTeam
+	}
+	var meta events.GitHubPRReviewRequestedMetadata
+	if json.Unmarshal([]byte(evt.MetadataJSON), &meta) != nil {
+		return "", ""
+	}
+	return meta.RequestedLogin, meta.RequestedTeam
+}
+
+// requestedPartyTeams resolves the team(s) a requested-party task
+// (review_requested, mentioned) is visible to from the identity on the event
+// metadata — not from which teams' rules matched. A user routes to the union
+// of teams over every TF user the login resolves to (the set-valued reverse
+// lookup, the regression guard for a login bound to two users); a github team
 // routes to the TF team(s) the github-team→TF-team mapping returns.
 //
 // scoped=true means "route via the requested-identity path"; the caller uses
-// the returned teams (an empty set → drop the task: a TF-known reviewer that
+// the returned teams (an empty set → drop the task: a TF-known identity that
 // maps to no team is a config gap, not a reason to over-fan to handler teams).
 // scoped=false means "fall back to handler-team visibility" — returned for
-// legacy events that carry no requested identity, or when the required stores
-// are unwired (test / pre-ticket wiring). Claims-free ...System lookups
+// legacy events that carry no identity, or when the required stores are
+// unwired (test / pre-ticket wiring). Claims-free ...System lookups
 // throughout: the router runs on the eventbus subscriber goroutine with no
 // JWT context.
 //
@@ -340,26 +360,23 @@ func maxRuleDefaultPriority(rules []domain.EventHandler) float64 {
 // a failed identity read are indistinguishable in the returned set, so a
 // degraded read would silently spend the event on a task that was never
 // created. The caller propagates so the queue row is retried instead.
-func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string, evt domain.Event) (teams []string, scoped bool, err error) {
-	var meta events.GitHubPRReviewRequestedMetadata
-	if err := json.Unmarshal([]byte(evt.MetadataJSON), &meta); err != nil {
-		return nil, false, nil
-	}
-	if meta.RequestedLogin == "" && meta.RequestedTeam == "" {
-		return nil, false, nil // legacy event, no requested identity captured
+func (r *Router) requestedPartyTeams(ctx context.Context, orgID string, evt domain.Event) (teams []string, scoped bool, err error) {
+	login, team := requestedParty(evt)
+	if login == "" && team == "" {
+		return nil, false, nil // legacy event, no identity captured
 	}
 
 	// Unwired mapping store is test / pre-ticket wiring only — fall back to
 	// handler-team visibility (scoped=false) rather than dropping the task, so
-	// pre-existing review_requested fixtures that don't thread these stores
-	// keep working. Production always wires them, so a wired-but-unresolvable
-	// identity below takes the scoped=true path (drop, no mis-attributed task).
+	// pre-existing fixtures that don't thread these stores keep working.
+	// Production always wires them, so a wired-but-unresolvable identity below
+	// takes the scoped=true path (drop, no mis-attributed task).
 	set := map[string]struct{}{}
-	if meta.RequestedTeam != "" {
+	if team != "" {
 		if r.githubGroups == nil {
 			return nil, false, nil
 		}
-		orgLogin, slug, ok := strings.Cut(meta.RequestedTeam, "/")
+		orgLogin, slug, ok := strings.Cut(team, "/")
 		if !ok || orgLogin == "" || slug == "" {
 			return nil, true, nil // malformed handle → no team
 		}
@@ -367,13 +384,13 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 		// for the same org login on another host names another organization.
 		host, err := r.githubEventHost(ctx, evt)
 		if err != nil {
-			routerLog.Error("review_requested: resolve github host failed", "requested_team", meta.RequestedTeam, "error", err)
-			return nil, false, fmt.Errorf("github host for %s: %w", meta.RequestedTeam, err)
+			routerLog.Error("requested party: resolve github host failed", "event_type", evt.EventType, "team", team, "error", err)
+			return nil, false, fmt.Errorf("github host for %s: %w", team, err)
 		}
 		tids, err := r.githubGroups.TeamsForGroupSystem(ctx, orgID, host, orgLogin, slug)
 		if err != nil {
-			routerLog.Error("review_requested: github-team mapping lookup failed", "requested_team", meta.RequestedTeam, "error", err)
-			return nil, false, fmt.Errorf("github-team mapping for %s: %w", meta.RequestedTeam, err)
+			routerLog.Error("requested party: github-team mapping lookup failed", "event_type", evt.EventType, "team", team, "error", err)
+			return nil, false, fmt.Errorf("github-team mapping for %s: %w", team, err)
 		}
 		for _, t := range tids {
 			set[t] = struct{}{}
@@ -384,16 +401,16 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 		}
 		orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 		if err != nil {
-			routerLog.Error("review_requested: read org settings for host failed", "error", err)
+			routerLog.Error("requested party: read org settings for host failed", "event_type", evt.EventType, "error", err)
 			return nil, false, fmt.Errorf("read org settings for github host: %w", err)
 		}
 		// The canonical host, the one identities are captured under. An org
 		// with no GitHub URL has no host and resolves nobody.
 		host := dbpkg.EffectiveGitHubHost(orgSet.GitHubBaseURL)
-		userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, meta.RequestedLogin)
+		userIDs, err := r.users.UserIDsForGitHubLoginSystem(ctx, host, login)
 		if err != nil {
-			routerLog.Error("review_requested: reverse login lookup failed", "requested_login", meta.RequestedLogin, "error", err)
-			return nil, false, fmt.Errorf("reverse login lookup for %s: %w", meta.RequestedLogin, err)
+			routerLog.Error("requested party: reverse login lookup failed", "event_type", evt.EventType, "login", login, "error", err)
+			return nil, false, fmt.Errorf("reverse login lookup for %s: %w", login, err)
 		}
 		// Collect rather than bail on the first failure, the fireMatchedTriggers
 		// pattern: one unreadable user must not decide the shape of the answer,
@@ -402,7 +419,7 @@ func (r *Router) reviewRequestVisibilityTeams(ctx context.Context, orgID string,
 		for _, uid := range userIDs {
 			tids, terr := r.teams.TeamIDsForUserInOrgSystem(ctx, orgID, uid)
 			if terr != nil {
-				routerLog.Error("review_requested: teams for user lookup failed", "user_id", uid, "error", terr)
+				routerLog.Error("requested party: teams for user lookup failed", "event_type", evt.EventType, "user_id", uid, "error", terr)
 				errs = append(errs, fmt.Errorf("teams for user %s: %w", uid, terr))
 				continue
 			}
@@ -470,7 +487,8 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 	}
 
 	// Tier 2 — the most recent prior owned author-centric task on the entity.
-	// review_requested is excluded by construction (not in the type set) and
+	// review_requested and mentioned are excluded by construction (not in the
+	// type set) and
 	// NULL-owned priors are excluded by the store's team_id filter, so this
 	// can't fall into the review-first trap or be anchored by an unowned task.
 	if r.tasks != nil {
@@ -509,7 +527,7 @@ func (r *Router) authorCentricOwner(ctx context.Context, orgID string, evt domai
 
 // authorTeams resolves a github event's PR author login to the union of teams
 // over every TF user the login maps to, on the org's effective github host.
-// Mirrors reviewRequestVisibilityTeams' user-identity branch (the set-valued
+// Mirrors requestedPartyTeams' user-identity branch (the set-valued
 // reverse lookup is the regression guard for a login bound to two users).
 // Returns an empty slice when the author isn't a TF user (dependabot /
 // external) or the identity stores are unwired — both resolved data states,

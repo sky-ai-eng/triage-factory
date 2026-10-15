@@ -25,10 +25,11 @@ const (
 	// github / assignee-centric jira). Non-owner teams reach it only via an
 	// applies_to_unowned watch handler. The reach flag is meaningful ONLY here.
 	OwnershipOwned
-	// OwnershipRequestedParty — review_requested: routes to the requested reviewer's
-	// team(s), scoped at emit time, with a handler-team fallback for legacy
-	// events. Only github's native resolver supports this model — Register
-	// panics if a non-github: event type declares it.
+	// OwnershipRequestedParty — review_requested and mentioned: routes to the
+	// team(s) of the requested reviewer or mentioned identity, scoped at emit
+	// time, with a handler-team fallback for legacy events. Only github's
+	// native resolver supports this model — Register panics if a non-github:
+	// event type declares it.
 	OwnershipRequestedParty
 	// OwnershipUnrouted — for a cataloged event type that never reaches
 	// resolveTeamRouting at all. Most system:* sentinels carry no EntityID,

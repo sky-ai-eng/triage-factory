@@ -245,9 +245,10 @@ var EntityTerminatingEvents = func() map[string]bool {
 
 // githubPRTerminalCloseTypes is the set of github:pr:* event types whose active
 // tasks a terminating PR event (merged/closed) cleans up: every author-centric
-// in-flight type plus the requested-reviewer task, EXCLUDING the terminating
-// events themselves (their riding lifecycle task is minted after the close
-// phase and must survive). Sourced from authorCentricGitHubEventTypes so a new
+// in-flight type plus the requested-party tasks (review_requested, mentioned),
+// EXCLUDING the terminating events themselves (their riding lifecycle task is
+// minted after the close phase and must survive). Sourced from
+// authorCentricGitHubEventTypes and requestedPartyGitHubEventTypes so a new
 // in-flight type is covered for free; TestTerminalCloseSet_CoversTaskTypes
 // asserts coverage so drift fails loudly instead of leaking tasks on merge.
 func githubPRTerminalCloseTypes() []string {
@@ -255,17 +256,17 @@ func githubPRTerminalCloseTypes() []string {
 }
 
 // githubPRCloseTypesExcept builds an entity-wide GitHub close set: every
-// author-centric type plus the requested-reviewer task, minus the terminating
+// author-centric type plus the requested-party types, minus the terminating
 // events' own types — the jiraCloseTypesExcept shape for pull requests.
 func githubPRCloseTypesExcept(terminators ...string) []string {
-	out := make([]string, 0, len(authorCentricGitHubEventTypes)+1)
+	out := make([]string, 0, len(authorCentricGitHubEventTypes)+len(requestedPartyGitHubEventTypes))
 	for _, et := range authorCentricGitHubEventTypes {
 		if slices.Contains(terminators, et) {
 			continue
 		}
 		out = append(out, et)
 	}
-	return append(out, domain.EventGitHubPRReviewRequested)
+	return append(out, requestedPartyGitHubEventTypes...)
 }
 
 // jiraIssueTerminalCloseTypes is the Jira analog: every assignee-centric type

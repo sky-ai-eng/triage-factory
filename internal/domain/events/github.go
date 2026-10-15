@@ -660,28 +660,54 @@ func (p GitHubPRCommentedPredicate) Matches(m GitHubPRCommentedMetadata) bool {
 }
 
 // -----------------------------------------------------------------------------
-// mentioned — you were @mentioned in a PR comment.
+// mentioned — a user or team TF knows was @mentioned on a PR.
+//
+// The open-set discriminator is the mentioned identity, as review_requested's
+// is the requested reviewer: one event per newly mentioned TF-known identity,
+// with the same dedup_key namespacing ("user:<login>" / "team:<org>/<slug>")
+// and the same routing, to that identity's team(s). Exactly one of
+// MentionedLogin / MentionedTeam is set, lower-cased, since GitHub matches
+// logins and slugs without regard to case.
+//
+// MentionSource says where the mention was: a conversation comment, a
+// review's body, an inline comment in a review, or the PR body. Commenter and
+// CommentID name that comment or review (CommentID is the review's id for
+// "review"), and are empty for "body", which has no author or id of its own.
 // -----------------------------------------------------------------------------
 
+// The values of GitHubPRMentionedMetadata.MentionSource.
+const (
+	MentionSourceComment       = "comment"
+	MentionSourceReview        = "review"
+	MentionSourceReviewComment = "review_comment"
+	MentionSourceBody          = "body"
+)
+
 type GitHubPRMentionedMetadata struct {
-	Author    string   `json:"author"`
-	Commenter string   `json:"commenter"`
-	CommentID int64    `json:"comment_id"`
-	Repo      string   `json:"repo"`
-	PRNumber  int      `json:"pr_number"`
-	IsDraft   bool     `json:"is_draft"`
-	HeadSHA   string   `json:"head_sha"`
-	Labels    []string `json:"labels"`
+	Author         string   `json:"author"`
+	Commenter      string   `json:"commenter"`
+	CommentID      int64    `json:"comment_id"`
+	MentionedLogin string   `json:"mentioned_login,omitempty"`
+	MentionedTeam  string   `json:"mentioned_team,omitempty"`
+	MentionSource  string   `json:"mention_source"`
+	Repo           string   `json:"repo"`
+	PRNumber       int      `json:"pr_number"`
+	IsDraft        bool     `json:"is_draft"`
+	HeadSHA        string   `json:"head_sha"`
+	Labels         []string `json:"labels"`
 }
 
 type GitHubPRMentionedPredicate struct {
-	AuthorIn    []string `json:"author_in,omitempty"`
-	Author      *string  `json:"author,omitempty"`
-	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match @mentions left by anyone in this list."`
-	Commenter   *string  `json:"commenter,omitempty"`
-	Repo        *string  `json:"repo,omitempty"`
-	IsDraft     *bool    `json:"is_draft,omitempty"`
-	HasLabel    *string  `json:"has_label,omitempty"`
+	AuthorIn       []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
+	Author         *string  `json:"author,omitempty" doc:"Exact-match on PR author login."`
+	CommenterIn    []string `json:"commenter_in,omitempty" doc:"Match @mentions left by anyone in this list (GitHub logins, case-insensitive; a bot as '<slug>[bot]'). A mention in the PR body has no commenter."`
+	Commenter      *string  `json:"commenter,omitempty" doc:"Exact-match on the login that left the mention."`
+	MentionedLogin *string  `json:"mentioned_login,omitempty" doc:"Match only when this user login was mentioned."`
+	MentionedTeam  *string  `json:"mentioned_team,omitempty" doc:"Match only when this github team ('org/slug') was mentioned."`
+	MentionSource  *string  `json:"mention_source,omitempty" enum:"comment,review,review_comment,body" doc:"Match only mentions from this source."`
+	Repo           *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
+	IsDraft        *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel       *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
 }
 
 func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
@@ -689,6 +715,9 @@ func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
 		strEq(p.Author, m.Author) &&
 		stringInSliceFold(p.CommenterIn, m.Commenter) &&
 		strEq(p.Commenter, m.Commenter) &&
+		strEqFold(p.MentionedLogin, m.MentionedLogin) &&
+		strEqFold(p.MentionedTeam, m.MentionedTeam) &&
+		strEq(p.MentionSource, m.MentionSource) &&
 		strEq(p.Repo, m.Repo) &&
 		boolEq(p.IsDraft, m.IsDraft) &&
 		hasLabel(p.HasLabel, m.Labels)
@@ -700,8 +729,9 @@ func (p GitHubPRMentionedPredicate) Matches(m GitHubPRMentionedMetadata) bool {
 
 // Ownership declarations: every github:pr:* type is OwnershipOwned — routed
 // via the owning-team ladder to whoever authored the PR — EXCEPT
-// review_requested, which is OwnershipRequestedParty (routed to the
-// requested reviewer's team(s) instead; see its metadata doc above).
+// review_requested and mentioned, which are OwnershipRequestedParty (routed
+// to the requested reviewer's or mentioned identity's team(s) instead; see
+// their metadata docs above).
 // internal/routing derives its author-centric anchor set from exactly this
 // declaration (events.TypesWithOwnership(OwnershipOwned, "github:")) rather
 // than a parallel hand-maintained list.
@@ -727,6 +757,6 @@ func init() {
 	Register(NewSchema[GitHubPRMergedMetadata, GitHubPRMergedPredicate](domain.EventGitHubPRMerged, OwnershipOwned))
 	Register(NewSchema[GitHubPRClosedMetadata, GitHubPRClosedPredicate](domain.EventGitHubPRClosed, OwnershipOwned))
 	Register(NewSchema[GitHubPRUnreachableMetadata, GitHubPRUnreachablePredicate](domain.EventGitHubPRUnreachable, OwnershipOwned))
-	Register(NewSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipOwned))
+	Register(NewSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipRequestedParty))
 	Register(NewSchema[GitHubPRCommentedMetadata, GitHubPRCommentedPredicate](domain.EventGitHubPRCommented, OwnershipOwned))
 }

@@ -21,6 +21,7 @@ var prCommentsQuery = fmt.Sprintf(`
 						fullDatabaseId
 						createdAt
 						author { __typename login }
+						body
 					}
 				}
 			}
@@ -29,12 +30,15 @@ var prCommentsQuery = fmt.Sprintf(`
 `, commentPageSize)
 
 // PRComment is a comment in a pull request's conversation: its numeric id, in
-// the numbering /issues/comments/{id} addresses, its author and when it was
-// made.
+// the numbering /issues/comments/{id} addresses, its author, when it was made
+// and whom it mentions. The body is read for its mentions and not kept: anyone
+// who can comment wrote it.
 type PRComment struct {
 	ID        int64
 	Author    string // REST-spelled login; empty when GitHub names no author
 	CreatedAt string
+	// Mentions are the users and teams the body @-mentions (Mentions).
+	Mentions []string
 }
 
 // PRCommentPage is one page of a pull request's conversation comments, oldest
@@ -76,6 +80,7 @@ func (c *Client) PRCommentsBefore(ctx context.Context, prNodeID, before string) 
 						DatabaseID gqlBigInt `json:"fullDatabaseId"`
 						CreatedAt  string    `json:"createdAt"`
 						Author     gqlAuthor `json:"author"`
+						Body       string    `json:"body"`
 					} `json:"nodes"`
 				} `json:"comments"`
 			} `json:"node"`
@@ -99,6 +104,7 @@ func (c *Client) PRCommentsBefore(ctx context.Context, prNodeID, before string) 
 			ID:        int64(n.DatabaseID),
 			Author:    n.Author.restLogin(),
 			CreatedAt: n.CreatedAt,
+			Mentions:  Mentions(n.Body),
 		})
 	}
 	return page, nil

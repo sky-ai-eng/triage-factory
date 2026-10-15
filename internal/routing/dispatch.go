@@ -472,9 +472,9 @@ type eventRouting struct {
 
 // resolveTeamRouting computes the owner team, visibility set, firing order, and
 // seed priority for an event from its matched handlers. ok=false means the
-// event resolves to no team and should create no task (review_requested with no
-// mapped reviewer team; an owner-ladder event from an external identity with no
-// team watching).
+// event resolves to no team and should create no task (review_requested or
+// mentioned naming an identity with no mapped team; an owner-ladder event from
+// an external identity with no team watching).
 //
 // (ok=false, err=nil) is a RESOLVED answer and consumes the event; err != nil
 // means the resolution could not be completed and the caller must replay. The
@@ -495,8 +495,9 @@ type eventRouting struct {
 //   - OwnershipOwned (author-centric github, assignee-centric jira) → the entity's
 //     owning team via the owning-team ladder; non-owner teams reach it only via
 //     an applies_to_unowned watch handler.
-//   - OwnershipRequestedParty (review_requested) → the requested reviewer's team(s),
-//     scoped at emit time, with a handler-team fallback for legacy events.
+//   - OwnershipRequestedParty (review_requested, mentioned) → the team(s) of the
+//     requested reviewer or mentioned identity, scoped at emit time, with a
+//     handler-team fallback for legacy events.
 //   - OwnershipPool (jira:issue:available, everything else) → handler-team grouping.
 //   - OwnershipUnrouted (system:* sentinels) → never reached here at all; a
 //     system event carries no EntityID, so routableEntity drops it before
@@ -620,22 +621,23 @@ func (r *Router) resolveOwnedRouting(ctx context.Context, orgID string, evt doma
 	}, ok, nil
 }
 
-// resolveRequestedPartyRouting routes review_requested to the requested
-// reviewer's team(s), resolved from the event's requested identity. scoped=false
-// (legacy event with no requested identity, or unwired mapping stores) falls back
-// to the handler-team grouping. scoped=true with no mapped team → no task (a
-// TF-known reviewer that maps to no team is a config gap, not a reason to
-// over-fan). On the scoped path the task is created NULL-owned and visible to
-// every reviewer team (already id-sorted by the helper); fireMatchedTriggers
-// walks them and the first whose pr-review trigger wins the exclusive claim
-// consolidates ownership onto itself, else the first human claim does.
+// resolveRequestedPartyRouting routes review_requested and mentioned to the
+// team(s) of the identity the event names: the requested reviewer, or the
+// mentioned user or team. scoped=false (legacy event with no identity, or
+// unwired mapping stores) falls back to the handler-team grouping. scoped=true
+// with no mapped team → no task (a TF-known identity that maps to no team is a
+// config gap, not a reason to over-fan). On the scoped path the task is created
+// NULL-owned and visible to every one of those teams (already id-sorted by the
+// helper); fireMatchedTriggers walks them and the first whose trigger wins the
+// exclusive claim consolidates ownership onto itself, else the first human
+// claim does.
 //
 // An unresolvable identity read errors instead of falling into either arm: the
-// scoped-and-empty drop is the answer for a reviewer who really maps to no
+// scoped-and-empty drop is the answer for an identity that really maps to no
 // team, and letting a failed lookup borrow it would consume the event with no
 // task at all.
 func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string, evt domain.Event, entityID string, matchedRules, matchedTriggers []domain.EventHandler) (eventRouting, bool, error) {
-	reqTeams, scoped, err := r.reviewRequestVisibilityTeams(ctx, orgID, evt)
+	reqTeams, scoped, err := r.requestedPartyTeams(ctx, orgID, evt)
 	if err != nil {
 		return eventRouting{}, false, err
 	}
@@ -643,7 +645,7 @@ func (r *Router) resolveRequestedPartyRouting(ctx context.Context, orgID string,
 		return resolvePoolRouting(matchedRules, matchedTriggers), true, nil
 	}
 	if len(reqTeams) == 0 {
-		routerLog.Warn("review_requested: requested identity maps to no tf team, recording event but no task", "entity_id", entityID)
+		routerLog.Warn("requested party maps to no tf team, recording event but no task", "event_type", evt.EventType, "entity_id", entityID)
 		return eventRouting{}, false, nil
 	}
 	return eventRouting{

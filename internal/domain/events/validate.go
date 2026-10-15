@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -35,6 +36,9 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 	if err := dec.Decode(predPtr); err != nil {
 		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
 	}
+	if err := checkEnums(reflect.ValueOf(predPtr).Elem()); err != nil {
+		return "", fmt.Errorf("invalid predicate for %s: %w", eventType, err)
+	}
 
 	canonical, err := json.Marshal(predPtr)
 	if err != nil {
@@ -47,4 +51,27 @@ func ValidatePredicateJSON(eventType, rawJSON string) (string, error) {
 		return "", nil
 	}
 	return string(canonical), nil
+}
+
+// checkEnums refuses a string field set to a value outside its `enum` tag's
+// list, the closed set the predicate editor offers for it.
+func checkEnums(pred reflect.Value) error {
+	t := pred.Type()
+	for i := 0; i < t.NumField(); i++ {
+		sf := t.Field(i)
+		enumTag := sf.Tag.Get("enum")
+		if enumTag == "" {
+			continue
+		}
+		f := pred.Field(i)
+		if f.Kind() != reflect.Pointer || f.IsNil() || f.Elem().Kind() != reflect.String {
+			continue
+		}
+		allowed := strings.Split(enumTag, ",")
+		if v := f.Elem().String(); !slices.Contains(allowed, v) {
+			name, _, _ := strings.Cut(sf.Tag.Get("json"), ",")
+			return fmt.Errorf("%s must be one of %s, not %q", name, strings.Join(allowed, ", "), v)
+		}
+	}
+	return nil
 }

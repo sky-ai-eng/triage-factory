@@ -96,8 +96,14 @@ type PRSnapshot struct {
 	// BodyHash fingerprints the complete body, before preview truncation.
 	// Empty means no body has been observed, including pre-field snapshots.
 	BodyHash string `json:"body_hash,omitempty"`
-	// Body is mirrored into entities.description. Only its fingerprint is
-	// persisted in the snapshot so each diff reads fixed-size body state.
+	// BodyMentions are the users and teams the body @-mentions, in the
+	// handle form github.Mentions returns, so a body edit that adds one is
+	// found without storing the body. nil means unknown: a snapshot stored
+	// before the field existed, or a response without the body. An empty
+	// slice is a body that mentions nobody.
+	BodyMentions []string `json:"body_mentions"`
+	// Body is mirrored into entities.description. Only its fingerprint and
+	// mentions are persisted in the snapshot, so a diff never reads the body.
 	Body string `json:"-"`
 }
 
