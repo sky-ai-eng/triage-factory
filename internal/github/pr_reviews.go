@@ -26,9 +26,10 @@ var prReviewsQuery = fmt.Sprintf(`
 						state
 						submittedAt
 						author { __typename login }
+						body
 						comments(first: %d) {
 							totalCount
-							nodes { fullDatabaseId path }
+							nodes { fullDatabaseId path body }
 						}
 					}
 				}
@@ -37,12 +38,17 @@ var prReviewsQuery = fmt.Sprintf(`
 	}
 `, reviewPageSize, submittedReviewStates, reviewCommentCap)
 
-// PRReview is a submitted review on a pull request.
+// PRReview is a submitted review on a pull request. Its body and its
+// comments' bodies are read for their mentions and not kept: anyone who can
+// review wrote them.
 type PRReview struct {
 	ID          int64
 	State       string // APPROVED, CHANGES_REQUESTED, COMMENTED or DISMISSED
 	Author      string // REST-spelled login; empty when GitHub names no author
 	SubmittedAt string
+	// Mentions are the users and teams the review's body @-mentions
+	// (Mentions).
+	Mentions []string
 	// CommentCount is how many inline comments the review holds. A reply in a
 	// review thread posted outside a pending review is a review of its own,
 	// holding the reply.
@@ -52,10 +58,12 @@ type PRReview struct {
 }
 
 // PRReviewComment is an inline comment in a review: its numeric id, in the
-// numbering /pulls/comments/{id} addresses, and the file it is on.
+// numbering /pulls/comments/{id} addresses, the file it is on and whom it
+// mentions.
 type PRReviewComment struct {
-	ID   int64
-	Path string
+	ID       int64
+	Path     string
+	Mentions []string
 }
 
 // PRReviewPage is one page of a pull request's submitted reviews, in the order
@@ -97,11 +105,13 @@ func (c *Client) PRReviewsBefore(ctx context.Context, prNodeID, before string) (
 						State       string    `json:"state"`
 						SubmittedAt string    `json:"submittedAt"`
 						Author      gqlAuthor `json:"author"`
+						Body        string    `json:"body"`
 						Comments    struct {
 							TotalCount int `json:"totalCount"`
 							Nodes      []struct {
 								DatabaseID gqlBigInt `json:"fullDatabaseId"`
 								Path       string    `json:"path"`
+								Body       string    `json:"body"`
 							} `json:"nodes"`
 						} `json:"comments"`
 					} `json:"nodes"`
@@ -131,10 +141,11 @@ func (c *Client) PRReviewsBefore(ctx context.Context, prNodeID, before string) (
 			State:        n.State,
 			Author:       n.Author.restLogin(),
 			SubmittedAt:  n.SubmittedAt,
+			Mentions:     Mentions(n.Body),
 			CommentCount: n.Comments.TotalCount,
 		}
 		for _, cm := range n.Comments.Nodes {
-			r.Comments = append(r.Comments, PRReviewComment{ID: int64(cm.DatabaseID), Path: cm.Path})
+			r.Comments = append(r.Comments, PRReviewComment{ID: int64(cm.DatabaseID), Path: cm.Path, Mentions: Mentions(cm.Body)})
 		}
 		page.Reviews = append(page.Reviews, r)
 	}

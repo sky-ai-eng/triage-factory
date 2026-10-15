@@ -31,6 +31,20 @@ type NewReview struct {
 	// keyed on the comment's id, so both are matched on ids rather than on the
 	// author, who under a personal credential is the person who owns it.
 	ByTF bool
+	// Mentions are the users and teams the review's body @-mentions.
+	Mentions []string
+	// Comments are the review's inline comments that were read.
+	Comments []NewReviewComment
+}
+
+// NewReviewComment is an inline comment in a NewReview.
+type NewReviewComment struct {
+	ID       int64
+	Mentions []string
+	// ByTF is set when TF recorded the comment as a `comment` artifact. A
+	// reply TF posted while the credential's owner had a review pending joins
+	// that review, so it can be TF's in a review that is not.
+	ByTF bool
 }
 
 // ReviewReader reads a page of a pull request's submitted reviews.
@@ -169,6 +183,9 @@ func (t *Tracker) markTFReviews(ctx context.Context, scope string, read []ghclie
 	}
 	for i, r := range read {
 		fresh[i].ByTF = submitted[ids[i]] || isTFReply(r, posted)
+		for j, c := range r.Comments {
+			fresh[i].Comments[j].ByTF = posted[domain.GitHubCommentDedupKey(domain.GitHubReviewComment, c.ID)]
+		}
 	}
 	return nil
 }
@@ -189,17 +206,20 @@ func isTFReply(r ghclient.PRReview, posted map[string]bool) bool {
 }
 
 // newReview converts a review GitHub returned, collecting the files its
-// comments are on.
+// comments are on. Its comments keep GitHub's order, which markTFReviews
+// relies on.
 func newReview(r ghclient.PRReview) NewReview {
 	paths := []string{}
+	comments := make([]NewReviewComment, 0, len(r.Comments))
 	for _, c := range r.Comments {
 		if c.Path != "" && !slices.Contains(paths, c.Path) {
 			paths = append(paths, c.Path)
 		}
+		comments = append(comments, NewReviewComment{ID: c.ID, Mentions: c.Mentions})
 	}
 	return NewReview{
 		ID: r.ID, Author: r.Author, State: r.State, SubmittedAt: r.SubmittedAt,
-		CommentCount: r.CommentCount, Paths: paths,
+		CommentCount: r.CommentCount, Paths: paths, Mentions: r.Mentions, Comments: comments,
 	}
 }
 

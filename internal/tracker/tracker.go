@@ -728,7 +728,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		newSnap.NodeID = item.nodeID
 		bodyFetched := newSnap.BodyHash != ""
 		if !bodyFetched {
-			newSnap.BodyHash = item.snap.BodyHash
+			newSnap.BodyHash, newSnap.BodyMentions = item.snap.BodyHash, item.snap.BodyMentions
 		}
 
 		if item.seed {

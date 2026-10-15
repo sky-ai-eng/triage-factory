@@ -19,9 +19,9 @@ import (
 // prior-task ladder tier sees the just-closed tasks (no status filter) and
 // the merged/closed metadata carries the author for the identity fallback.
 //
-// Only review_requested is EXCLUDED: the requested reviewer's personal
-// obligation, routed to their team(s) and scoped at emit time
-// (OwnershipRequestedParty), not the owning-team ladder.
+// review_requested and mentioned are EXCLUDED: an obligation of the reviewer
+// or mentioned identity they name, routed to its team(s) and scoped at emit
+// time (OwnershipRequestedParty), not the owning-team ladder.
 //
 // Derived from the events registry's per-type OwnershipModel declarations
 // instead of hand-enumerated — the set is exactly "every github:pr:* type
@@ -42,11 +42,19 @@ var authorCentricGitHubEventSet = func() map[string]bool {
 }()
 
 // isAuthorCentricGitHubEvent reports whether an event routes via the
-// owning-team ladder (true) rather than the requested-reviewer path
-// (review_requested) or the default handler-team grouping (Jira, etc.).
+// owning-team ladder (true) rather than the requested-party path
+// (review_requested, mentioned) or the default handler-team grouping (Jira,
+// etc.).
 func isAuthorCentricGitHubEvent(eventType string) bool {
 	return authorCentricGitHubEventSet[eventType]
 }
+
+// requestedPartyGitHubEventTypes is every github:pr:* event type routed to the
+// identity it names rather than to the PR's owner (OwnershipRequestedParty):
+// review_requested and mentioned. Derived from the registry like the
+// author-centric set, so the two together cover every github:pr:* type that
+// mints a task.
+var requestedPartyGitHubEventTypes = events.TypesWithOwnership(events.OwnershipRequestedParty, "github:pr:")
 
 // assigneeCentricJiraEventTypes is every jira:issue:* event that concerns
 // whoever IS ASSIGNED the issue — assignment, atomic-discovery, status,

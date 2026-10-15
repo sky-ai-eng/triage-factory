@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -63,8 +64,8 @@ func TestPRFragments_ReadNewestComment(t *testing.T) {
 
 // TestPRCommentsBefore pages a pull request's conversation comments from the
 // end backwards: the first read sends no cursor and the second the page's
-// start cursor; each comment carries its id, REST-spelled author and creation
-// time.
+// start cursor; each comment carries its id, REST-spelled author, creation
+// time and the handles its body mentions.
 func TestPRCommentsBefore(t *testing.T) {
 	var befores []any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,8 +76,9 @@ func TestPRCommentsBefore(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Errorf("decode request: %v", err)
 		}
-		if !strings.Contains(req.Query, "author { __typename login }") || !strings.Contains(req.Query, "fullDatabaseId") {
-			t.Errorf("query does not read the author's type or the 64-bit id:\n%s", req.Query)
+		if !strings.Contains(req.Query, "author { __typename login }") || !strings.Contains(req.Query, "fullDatabaseId") ||
+			!strings.Contains(req.Query, "body") {
+			t.Errorf("query does not read the author's type, the 64-bit id or the body:\n%s", req.Query)
 		}
 		if req.Variables["id"] != "PR_node" {
 			t.Errorf("id = %v, want PR_node", req.Variables["id"])
@@ -88,7 +90,8 @@ func TestPRCommentsBefore(t *testing.T) {
 			  "pageInfo": {"hasPreviousPage": true, "startCursor": "CUR_2"},
 			  "nodes": [
 			    {"fullDatabaseId": "3300000002", "createdAt": "2026-10-02T10:00:00Z", "author": {"__typename": "Bot", "login": "dependabot"}},
-			    {"fullDatabaseId": "3300000003", "createdAt": "2026-10-02T11:00:00Z", "author": {"__typename": "User", "login": "alice"}}
+			    {"fullDatabaseId": "3300000003", "createdAt": "2026-10-02T11:00:00Z", "author": {"__typename": "User", "login": "alice"},
+			     "body": "cc @Bob and @acme/Backend, not ` + "`@carol`" + `"}
 			  ]}}}}`))
 			return
 		}
@@ -108,18 +111,20 @@ func TestPRCommentsBefore(t *testing.T) {
 	if last.TotalCount != 3 || !last.HasPrevious || last.Before != "CUR_2" || len(last.Comments) != 2 {
 		t.Fatalf("last page = %+v", last)
 	}
-	if got := last.Comments[0]; got != (PRComment{ID: 3300000002, Author: "dependabot[bot]", CreatedAt: "2026-10-02T10:00:00Z"}) {
-		t.Errorf("bot comment = %+v", got)
+	if got, want := last.Comments[0], (PRComment{ID: 3300000002, Author: "dependabot[bot]", CreatedAt: "2026-10-02T10:00:00Z", Mentions: []string{}}); !reflect.DeepEqual(got, want) {
+		t.Errorf("bot comment = %+v, want %+v", got, want)
 	}
-	if got := last.Comments[1]; got != (PRComment{ID: 3300000003, Author: "alice", CreatedAt: "2026-10-02T11:00:00Z"}) {
-		t.Errorf("alice's comment = %+v", got)
+	want := PRComment{ID: 3300000003, Author: "alice", CreatedAt: "2026-10-02T11:00:00Z", Mentions: []string{"bob", "acme/backend"}}
+	if got := last.Comments[1]; !reflect.DeepEqual(got, want) {
+		t.Errorf("alice's comment = %+v, want %+v", got, want)
 	}
 
 	first, err := client.PRCommentsBefore(ctx, "PR_node", last.Before)
 	if err != nil {
 		t.Fatalf("PRCommentsBefore(CUR_2): %v", err)
 	}
-	if first.HasPrevious || len(first.Comments) != 1 || first.Comments[0] != (PRComment{ID: 3300000001, CreatedAt: "2026-10-01T10:00:00Z"}) {
+	if first.HasPrevious || len(first.Comments) != 1 ||
+		!reflect.DeepEqual(first.Comments[0], PRComment{ID: 3300000001, CreatedAt: "2026-10-01T10:00:00Z", Mentions: []string{}}) {
 		t.Errorf("first page = %+v, want the authorless comment alone", first)
 	}
 	if len(befores) != 2 || befores[0] != nil || befores[1] != "CUR_2" {

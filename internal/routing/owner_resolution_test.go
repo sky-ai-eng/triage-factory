@@ -641,18 +641,18 @@ func TestAuthorTeams_MalformedMetadata_ResolvesEmpty(t *testing.T) {
 	}
 }
 
-// TestReviewRequestVisibilityTeams_MalformedTeamHandle_ScopedEmpty pins the
+// TestRequestedPartyTeams_MalformedTeamHandle_ScopedEmpty pins the
 // last unchanged row: a requested github team whose handle isn't "org/slug"
 // resolves scoped-and-empty (drop the task), because no store was ever asked.
 // This is the outcome a failed mapping read used to borrow.
-func TestReviewRequestVisibilityTeams_MalformedTeamHandle_ScopedEmpty(t *testing.T) {
+func TestRequestedPartyTeams_MalformedTeamHandle_ScopedEmpty(t *testing.T) {
 	database := newTestDB(t)
 	r := identityQueueRouter(database, nil)
 
 	meta, _ := json.Marshal(events.GitHubPRReviewRequestedMetadata{
 		Author: "carol", Repo: "owner/repo", PRNumber: 1, RequestedTeam: "no-slash",
 	})
-	teams, scoped, err := r.reviewRequestVisibilityTeams(t.Context(), runmode.LocalDefaultOrgID, domain.Event{
+	teams, scoped, err := r.requestedPartyTeams(t.Context(), runmode.LocalDefaultOrgID, domain.Event{
 		EventType: domain.EventGitHubPRReviewRequested, MetadataJSON: string(meta), OrgID: runmode.LocalDefaultOrgID,
 	})
 	if err != nil {

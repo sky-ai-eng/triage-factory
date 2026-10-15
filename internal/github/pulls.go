@@ -1028,23 +1028,24 @@ func parseOpenPRs(owner, repo string, data []byte) ([]DiscoveredPR, error) {
 // org login, matching the "org/slug" form GraphQL discovery and
 // GET /user/teams produce.
 func (pr restPR) toDiscoverySnapshot(owner, repo string) domain.PRSnapshot {
-	body, bodyHash := snapshotBody(pr.Body)
+	body, bodyHash, bodyMentions := snapshotBody(pr.Body)
 	snap := domain.PRSnapshot{
-		NodeID:    pr.NodeID,
-		Number:    pr.Number,
-		Title:     pr.Title,
-		Body:      body,
-		BodyHash:  bodyHash,
-		Author:    pr.User.Login,
-		Repo:      owner + "/" + repo,
-		URL:       pr.HTMLURL,
-		State:     strings.ToUpper(pr.State), // REST "open" → "OPEN" (GraphQL form)
-		IsDraft:   pr.Draft,
-		HeadRef:   pr.Head.Ref,
-		BaseRef:   pr.Base.Ref,
-		HeadSHA:   pr.Head.SHA,
-		CreatedAt: pr.CreatedAt,
-		UpdatedAt: pr.UpdatedAt,
+		NodeID:       pr.NodeID,
+		Number:       pr.Number,
+		Title:        pr.Title,
+		Body:         body,
+		BodyHash:     bodyHash,
+		BodyMentions: bodyMentions,
+		Author:       pr.User.Login,
+		Repo:         owner + "/" + repo,
+		URL:          pr.HTMLURL,
+		State:        strings.ToUpper(pr.State), // REST "open" → "OPEN" (GraphQL form)
+		IsDraft:      pr.Draft,
+		HeadRef:      pr.Head.Ref,
+		BaseRef:      pr.Base.Ref,
+		HeadSHA:      pr.Head.SHA,
+		CreatedAt:    pr.CreatedAt,
+		UpdatedAt:    pr.UpdatedAt,
 	}
 	if pr.Head.Repo != nil {
 		snap.HeadRepo = pr.Head.Repo.FullName

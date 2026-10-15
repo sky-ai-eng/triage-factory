@@ -38,6 +38,9 @@ type NewComment struct {
 	// that artifact exists. It is matched on the id rather than the author
 	// because a personal credential comments as the person who owns it.
 	ByTF bool
+	// Mentions are the users and teams a GitHub comment @-mentions
+	// (ghclient.Mentions). Empty on Jira and Linear.
+	Mentions []string
 }
 
 // commentedBy reads a poll's new comments, oldest first, for the commented
@@ -509,7 +512,7 @@ func githubCommentsSince(prev domain.PRSnapshot, total int, read []ghclient.PRCo
 	fresh := []NewComment{}
 	for _, c := range read {
 		if prev.CommentMarker == nil || prev.CommentMarker.After(c.CreatedAt, c.ID) {
-			fresh = append(fresh, NewComment{ID: strconv.FormatInt(c.ID, 10), Author: c.Author, AuthorID: c.Author, CreatedAt: c.CreatedAt})
+			fresh = append(fresh, NewComment{ID: strconv.FormatInt(c.ID, 10), Author: c.Author, AuthorID: c.Author, CreatedAt: c.CreatedAt, Mentions: c.Mentions})
 		}
 	}
 	return fresh

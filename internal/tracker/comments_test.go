@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -818,7 +819,7 @@ func TestIssueToState_Comments(t *testing.T) {
 		{ID: "20001", Author: "Bob", AuthorID: "557058:bob", CreatedAt: "2026-10-01T09:00:00.000+0000"},
 		{ID: "20002", Author: "Ada", AuthorID: "JIRAUSER10200", CreatedAt: "2026-10-01T09:05:00.000+0000"},
 	}
-	if !slices.Equal(state.Comments, want) {
+	if !reflect.DeepEqual(state.Comments, want) {
 		t.Errorf("comments = %+v, want oldest first %+v", state.Comments, want)
 	}
 	if s := state.Snap; s.CommentCount != 2 || s.LastCommentID != "20002" || s.LastCommentAt != "2026-10-01T09:05:00.000+0000" {

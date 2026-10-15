@@ -626,12 +626,13 @@ func (pr gqlPR) toDiscoverySnapshot() domain.PRSnapshot { return pr.buildSnapsho
 //     section, preventing spurious events on first startup or for
 //     terminal PRs that don't need CI tracking.
 func (pr gqlPR) buildSnapshot(includeCheckRuns bool) domain.PRSnapshot {
-	body, bodyHash := snapshotBody(pr.Body)
+	body, bodyHash, bodyMentions := snapshotBody(pr.Body)
 	snap := domain.PRSnapshot{
 		Number:       pr.Number,
 		Title:        pr.Title,
 		Body:         body,
 		BodyHash:     bodyHash,
+		BodyMentions: bodyMentions,
 		Author:       pr.Author.restLogin(),
 		Repo:         pr.Repository.NameWithOwner,
 		URL:          pr.URL,

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -79,7 +81,8 @@ func TestPRBaseFields_ReadsSubmittedReviewsOnly(t *testing.T) {
 // TestPRReviewsBefore pages a pull request's submitted reviews from the end
 // backwards: the first read sends no cursor and the second the page's start
 // cursor; each review carries its id, state, REST-spelled author, submission
-// time, comment count and the comments' ids and files.
+// time, comment count, the handles its body mentions, and the comments' ids,
+// files and mentions.
 func TestPRReviewsBefore(t *testing.T) {
 	var befores []any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -93,6 +96,9 @@ func TestPRReviewsBefore(t *testing.T) {
 		if !strings.Contains(req.Query, "author { __typename login }") {
 			t.Errorf("query reads an author without __typename:\n%s", req.Query)
 		}
+		if !strings.Contains(req.Query, "body\n") || !strings.Contains(req.Query, "nodes { fullDatabaseId path body }") {
+			t.Errorf("query does not read the review's and its comments' bodies:\n%s", req.Query)
+		}
 		if req.Variables["id"] != "PR_node" {
 			t.Errorf("id = %v, want PR_node", req.Variables["id"])
 		}
@@ -104,7 +110,8 @@ func TestPRReviewsBefore(t *testing.T) {
 			  "nodes": [
 			    {"fullDatabaseId": "6000000002", "state": "COMMENTED", "submittedAt": "2026-10-02T10:00:00Z",
 			     "author": {"__typename": "Bot", "login": "copilot-pull-request-reviewer"},
-			     "comments": {"totalCount": 2, "nodes": [{"fullDatabaseId": "4300000001", "path": "a.go"}, {"fullDatabaseId": "4300000002", "path": "b.go"}]}},
+			     "body": "Summary for @Alice",
+			     "comments": {"totalCount": 2, "nodes": [{"fullDatabaseId": "4300000001", "path": "a.go"}, {"fullDatabaseId": "4300000002", "path": "b.go", "body": "> @bob said\n@acme/infra please look"}]}},
 			    {"fullDatabaseId": "6000000003", "state": "COMMENTED", "submittedAt": "2026-10-02T11:00:00Z",
 			     "author": {"__typename": "User", "login": "alice"},
 			     "comments": {"totalCount": 1, "nodes": [{"fullDatabaseId": "4300000003", "path": "a.go"}]}}
@@ -132,11 +139,15 @@ func TestPRReviewsBefore(t *testing.T) {
 	}
 	bot := last.Reviews[0]
 	if bot.ID != 6000000002 || bot.State != "COMMENTED" || bot.Author != "copilot-pull-request-reviewer[bot]" ||
-		bot.SubmittedAt != "2026-10-02T10:00:00Z" || bot.CommentCount != 2 {
+		bot.SubmittedAt != "2026-10-02T10:00:00Z" || bot.CommentCount != 2 || !slices.Equal(bot.Mentions, []string{"alice"}) {
 		t.Errorf("bot review = %+v", bot)
 	}
-	if len(bot.Comments) != 2 || bot.Comments[1] != (PRReviewComment{ID: 4300000002, Path: "b.go"}) {
-		t.Errorf("bot review comments = %+v", bot.Comments)
+	wantComments := []PRReviewComment{
+		{ID: 4300000001, Path: "a.go", Mentions: []string{}},
+		{ID: 4300000002, Path: "b.go", Mentions: []string{"acme/infra"}},
+	}
+	if !reflect.DeepEqual(bot.Comments, wantComments) {
+		t.Errorf("bot review comments = %+v, want %+v", bot.Comments, wantComments)
 	}
 
 	first, err := client.PRReviewsBefore(ctx, "PR_node", last.Before)
