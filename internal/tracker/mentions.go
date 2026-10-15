@@ -92,12 +92,31 @@ func prMentions(prev, curr domain.PRSnapshot, reviews []NewReview, comments []Ne
 	return out
 }
 
+// openedSlack widens "created since the last listing" by the time a listing
+// takes and by clock skew between GitHub and TF. A listing's time is TF's
+// clock once its response is in, so a pull request GitHub created while the
+// listing was being served, and so missing from it, would otherwise read as
+// older than the listing. A pull request this window admits wrongly was
+// created minutes before TF looked, so its body's mentions are new anyway.
+const openedSlack = 5 * time.Minute
+
+// openedSince reports whether the pull request was opened since its
+// repository's previous listing, lastListed: created after it, less
+// openedSlack. Every other pull request was open when TF last looked, so its
+// body is a baseline. That includes one TF had not seeded by then (a listing
+// cut short, a repository with more open pull requests than a listing
+// returns) and a reopened one. A repository with no previous listing (the
+// zero time), or a creation time that does not parse, gives false.
+func openedSince(snap domain.PRSnapshot, lastListed time.Time) bool {
+	if lastListed.IsZero() {
+		return false
+	}
+	created, ok := domain.ParseExternalTime(snap.CreatedAt)
+	return ok && created.After(lastListed.Add(-openedSlack))
+}
+
 // openedPRMentions returns a mentioned event for each identity TF knows that
-// the body of a newly opened pull request mentions. The caller decides what is
-// newly opened: a pull request first found by a listing of a repository TF had
-// listed before. One first found by a repository's first listing predates TF
-// following the repository, and its body is a baseline like the rest of its
-// state.
+// the body of a newly opened pull request (openedSince) mentions.
 func openedPRMentions(entityID string, snap domain.PRSnapshot, resolver ReviewerResolver) []domain.Event {
 	var evts []domain.Event
 	now := time.Now()

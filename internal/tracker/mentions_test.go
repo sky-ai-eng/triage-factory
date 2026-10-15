@@ -428,13 +428,14 @@ func openedPRServer(t *testing.T, listings ...[]string) *httptest.Server {
 	return srv
 }
 
-// openPRJSON is pull request number of octo/repo in the REST listing's shape.
-func openPRJSON(number int, author, body string) string {
+// openPRJSON is pull request number of octo/repo, created at createdAt, in
+// the REST listing's shape.
+func openPRJSON(number int, author, body string, createdAt time.Time) string {
 	n := strconv.Itoa(number)
 	return `{"number": ` + n + `, "node_id": "PR_` + n + `", "title": "PR ` + n + `", "state": "open", "body": ` + jsonString(body) + `,
 		"html_url": "https://github.com/octo/repo/pull/` + n + `", "user": {"login": "` + author + `"},
 		"head": {"sha": "sha` + n + `", "ref": "feat"}, "base": {"ref": "main"},
-		"created_at": "2026-10-01T00:00:00Z", "updated_at": "2026-10-01T11:00:00Z"}`
+		"created_at": "` + createdAt.UTC().Format(time.RFC3339) + `", "updated_at": "2026-10-01T11:00:00Z"}`
 }
 
 // storedMentions reads the mentioned events recorded for the pull request
@@ -466,9 +467,12 @@ func storedMentions(t *testing.T, tr *Tracker, stores db.Stores, number int) []d
 
 // TestRefreshGitHub_OpenedPRBodyMentions: the pull requests in a repository's
 // first listing were open before TF followed it, so their bodies are a
-// baseline. One that appears in a later listing was opened since, and its
-// body's mentions of identities TF knows emit with its seed, except the
-// author's own.
+// baseline. One created since that listing was opened while TF followed the
+// repository, and its body's mentions of identities TF knows emit with its
+// seed, except the author's own. One that first appears in the later listing
+// but was created well before the first, which the first cycle left
+// unseeded, is a baseline; one created a minute before the first listing,
+// and so missing from it as it was served, is within the slack and emits.
 func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 	ctx := context.Background()
 	database := newMigratedSQLite(t)
@@ -476,8 +480,12 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 	org := runmode.LocalDefaultOrgID
 	trackRepos(t, stores, org, []string{"octo/repo"})
 
-	first := []string{openPRJSON(1, "carol", "cc @bob")}
-	second := append(slices.Clone(first), openPRJSON(2, "carol", "@Bob please review. cc @carol and @stranger\n\n> @erin"))
+	start := time.Now()
+	first := []string{openPRJSON(1, "carol", "cc @bob", start.Add(-24*time.Hour))}
+	second := append(slices.Clone(first),
+		openPRJSON(2, "carol", "@Bob please review. cc @carol and @stranger\n\n> @erin", start.Add(time.Hour)),
+		openPRJSON(3, "carol", "cc @bob", start.Add(-time.Hour)),
+		openPRJSON(4, "carol", "cc @erin", start.Add(-time.Minute)))
 	client := ghclient.NewClient(openedPRServer(t, first, second).URL, "tok")
 	tr := New(database, &recordingPreEnqueuedPublisher{}, stores.Tasks, stores.Entities, stores.Repos, stores.Artifacts, stores.EventQueue, org)
 	resolver := knownLogins{"bob": true, "carol": true, "erin": true}
@@ -502,4 +510,33 @@ func TestRefreshGitHub_OpenedPRBodyMentions(t *testing.T) {
 	assertMentions(t, storedMentions(t, tr, stores, 2), ent.ID,
 		domain.PRSnapshot{Author: "carol", Repo: "octo/repo", Number: 2, HeadSHA: "sha2"},
 		map[string]wantMention{"user:bob": {login: "bob", source: "body", at: "2026-10-01T11:00:00Z"}})
+	if got := storedMentions(t, tr, stores, 3); len(got) != 0 {
+		t.Errorf("a pull request created before the previous listing emitted %v", mentionKeys(got))
+	}
+	if got := mentionKeys(storedMentions(t, tr, stores, 4)); !slices.Equal(got, []string{"user:erin"}) {
+		t.Errorf("a pull request created a minute before the previous listing emitted %v, want [user:erin]", got)
+	}
+}
+
+func TestOpenedSince(t *testing.T) {
+	listed := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	at := func(d time.Duration) domain.PRSnapshot {
+		return domain.PRSnapshot{CreatedAt: listed.Add(d).Format(time.RFC3339)}
+	}
+	for _, tc := range []struct {
+		name   string
+		snap   domain.PRSnapshot
+		listed time.Time
+		want   bool
+	}{
+		{"created after the listing", at(time.Minute), listed, true},
+		{"created inside the slack", at(-openedSlack + time.Second), listed, true},
+		{"created before the slack", at(-openedSlack - time.Second), listed, false},
+		{"no previous listing", at(time.Minute), time.Time{}, false},
+		{"no creation time", domain.PRSnapshot{}, listed, false},
+	} {
+		if got := openedSince(tc.snap, tc.listed); got != tc.want {
+			t.Errorf("%s: openedSince = %v, want %v", tc.name, got, tc.want)
+		}
+	}
 }

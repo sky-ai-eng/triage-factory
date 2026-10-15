@@ -54,7 +54,7 @@ review requests and body but no check runs, reviews or comments. Its review
 requests emit then, and the GraphQL refresh that follows in the same cycle
 reports the check runs, reviews and merge conflicts already on it. The comments
 already on it are its baseline and emit nothing, and so are the mentions in its
-body unless it was opened since TF last listed its repository (see
+body unless it was created since TF last listed its repository (see
 [Mentions](#mentions)).
 
 #### Reviews
@@ -168,14 +168,18 @@ so no `commenter_in` list matches it. The event's time is the comment's
 creation or the review's submission. The body records no time for an edit, so a
 body mention takes the PR's `updatedAt`.
 
-A PR TF finds for the first time in a listing of a repository it had listed
-before was opened since that listing, and its body's mentions emit with the
-seed that stores it, timed at its `updatedAt`. A PR in a repository's first
-listing (TF's first poll, or a repository just added to a team's tracked set)
-was open before TF followed it, so its body is a baseline and emits nothing, as
-for every other change in tracking. A PR TF's agent opens is recorded as an
-entity when the agent records it, before a poll finds it, and that entity is
-seeded without events, so its body is a baseline too. A snapshot stored before
+A PR TF finds for the first time, created after TF's previous listing of its
+repository, was opened while TF followed the repository. Its body's mentions
+emit with the seed that stores it, timed at its `updatedAt`. The comparison
+allows five minutes before that listing, for the time a listing takes and for
+clock skew. Any other PR found for the first time was already open when TF last
+looked, so its body is a baseline and emits nothing, as for every other change
+in tracking. That covers every PR in a repository's first listing (TF's first
+poll, or a repository just added to a team's tracked set), a PR an earlier
+cycle listed but did not get to store, one past the 1,000 open PRs a listing
+returns, and a reopened PR. A PR TF's agent opens is recorded as an entity when
+the agent records it, before a poll finds it, and that entity is seeded
+without events, so its body is a baseline too. A snapshot stored before
 `body_mentions` existed is likewise a baseline. A PR seeded from the REST
 listing takes its comments as its baseline, and one stored without
 `review_marker` reads no reviews, so neither reports mentions in them on that
@@ -773,7 +777,7 @@ stay on the belt through a pause, because a Jira key's prefix is its project.
 
 ## Event lifecycle
 
-1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, and `mentioned` for the mentions in the body of a PR opened since TF last listed its repository)
+1. **First seen** — when an item is first discovered, an initial event is emitted based on its current state (e.g. `review_requested` if the PR has pending review requests, and `mentioned` for the mentions in the body of a PR created since TF last listed its repository)
 2. **Transitions** — subsequent cycles compare snapshots and emit events for any field changes
 3. **Terminal** — when an item reaches a terminal state (merged, closed, done), it's marked with `terminal_at` and excluded from future refresh cycles. Terminal items are retained indefinitely for dashboard statistics.
 4. **Reactivation** — if a terminal item reappears in discovery (e.g. a closed PR is reopened), `terminal_at` is cleared and tracking resumes

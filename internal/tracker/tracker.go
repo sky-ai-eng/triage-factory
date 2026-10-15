@@ -322,7 +322,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 	// quietRepos is the set of "owner/repo" whose open-PR listing returned
 	// 304 (unchanged) this cycle; their tracked entities can keep their
 	// stored snapshot through the Phase-2 gate without a refresh.
-	discovered, quietRepos, listedBefore, resumeFrom, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
+	discovered, quietRepos, lastListed, resumeFrom, discoveryErr := t.discoverGitHub(ctx, scope, client, username, repos)
 	var rateLimited *ghclient.ErrRateLimited
 	if discoveryErr != nil {
 		if errors.As(discoveryErr, &rateLimited) {
@@ -385,8 +385,8 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 			var backfilled []domain.Event
 			// A pull request opened since TF last listed its repository: the
 			// identities its body mentions were mentioned just now, so they
-			// emit. In a repository's first listing the body is a baseline.
-			if !terminal && listedBefore[snap.Repo] {
+			// emit. Any other pull request's body is a baseline.
+			if !terminal && openedSince(snap, lastListed[snap.Repo]) {
 				backfilled = append(backfilled, openedPRMentions(entity.ID, snap, resolver)...)
 			}
 			if !terminal && snap.Author != username {
@@ -906,10 +906,10 @@ const maxSearchQueryLen = 256
 // (unchanged open set this cycle). A 304 repo's tracked entities can keep
 // their stored snapshot through the Phase-2 gate.
 //
-// The third return, listedBefore, is the set of "owner/repo" listed this
-// cycle that a cycle before it had already listed. A pull request seen for the
-// first time in one of them was opened since that listing; one seen in a
-// repo's first listing was open before TF followed the repo.
+// The third return, lastListed, maps each "owner/repo" listed this cycle to
+// the time of its previous successful listing, and has no entry for a repo
+// listed for the first time. It is what tells a pull request opened since TF
+// last looked from one that was already open (openedSince).
 //
 // When username is non-empty (the local/PAT perspective — App tokens have no
 // "me"), it additionally runs the merged/closed 30-day dashboard backfill via
@@ -935,11 +935,11 @@ const maxSearchQueryLen = 256
 //
 // scope is the GitHub host repos are on, which keys each repo's stored
 // conditional-request cursor.
-func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, map[string]bool, string, error) {
+func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghclient.Client, username string, repos []string) ([]ghclient.DiscoveredPR, map[string]bool, map[string]time.Time, string, error) {
 	seen := map[string]bool{}
 	var all []ghclient.DiscoveredPR
 	quiet := map[string]bool{}
-	listedBefore := map[string]bool{}
+	lastListed := map[string]time.Time{}
 
 	// Phase 1a: per-repo conditional open-PR enumeration, fanned out across a
 	// bounded worker pool (TFAC-570) sized by repoConcurrency() — default 4,
@@ -1008,12 +1008,12 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 			// the first time: its new pull requests' body mentions are then a
 			// baseline, where the other answer could report every open pull
 			// request's as new.
-			polledBefore := false
+			var polledAt *time.Time
 			if t.repos != nil {
-				if stored, polledAt, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Host: scope, Owner: owner, Repo: name}); err != nil {
+				if stored, at, err := t.repos.GetPullsPollStateByRefSystem(ctx, t.orgID, domain.RepoRef{Host: scope, Owner: owner, Repo: name}); err != nil {
 					trackerLog.ErrorContext(ctx, "read pulls poll state failed", "repo", repoFull, "error", err)
 				} else {
-					etag, polledBefore = stored, polledAt != nil
+					etag, polledAt = stored, at
 				}
 			}
 
@@ -1066,7 +1066,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 				t.recordPullsPoll(ctx, scope, repoFull, newEtag)
 			}
 
-			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified, listedBefore: polledBefore}
+			results[i] = repoListResult{ok: true, prs: prs, notModified: notModified, lastListed: polledAt}
 			return nil
 		})
 	}
@@ -1081,8 +1081,8 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 			quiet[repoFull] = true
 			continue
 		}
-		if r.listedBefore {
-			listedBefore[repoFull] = true
+		if r.lastListed != nil {
+			lastListed[repoFull] = *r.lastListed
 		}
 
 		for _, pr := range r.prs {
@@ -1156,7 +1156,7 @@ func (t *Tracker) discoverGitHub(ctx context.Context, scope string, client *ghcl
 		span.SetStatus(codes.Error, "every listing failed")
 		span.SetAttributes(telemetry.Outcome("failed"))
 	}
-	return all, quiet, listedBefore, resumeFrom, discoveryErr
+	return all, quiet, lastListed, resumeFrom, discoveryErr
 }
 
 // discoveryUnreached reports a discovery pass that reached nothing because of
@@ -1233,8 +1233,9 @@ type repoListResult struct {
 	prs         []ghclient.DiscoveredPR
 	notModified bool
 	rateLimited bool
-	// listedBefore is set when a cycle before this one had listed the repo.
-	listedBefore bool
+	// lastListed is when a cycle before this one last listed the repo, nil
+	// when none has.
+	lastListed *time.Time
 	// err is the listing's failure; nil for a listing that succeeded and for
 	// a repo that was never sent (a malformed slug).
 	err error
