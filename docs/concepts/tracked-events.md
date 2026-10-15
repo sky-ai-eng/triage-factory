@@ -31,6 +31,7 @@ most one active task exists per entity, event type and `dedup_key`.
 | **Ready for Review** | `github:pr:ready_for_review` | `isDraft` changes from `true` to `false` | — |
 | **Label Added** | `github:pr:label_added` | A label is added | label name |
 | **Label Removed** | `github:pr:label_removed` | A label is removed | label name |
+| **New Comment** | `github:pr:commented` | Someone other than TF commented in the PR's conversation since the last cycle. One event per cycle however many comments landed, naming every commenter — see [Comments](#comments). Comments in review threads arrive as reviews | — |
 | **Mentioned** | `github:pr:mentioned` | In the catalog; the tracker does not emit it yet | — |
 
 ### Informational
@@ -49,9 +50,10 @@ most one active task exists per entity, event type and `dedup_key`.
 | **PR Unreachable** | `github:pr:unreachable` | TF will no longer follow a tracked PR — see below | — |
 
 A PR is first stored from the REST listing of open PRs, which carries its
-review requests but no check runs or reviews. Its review requests emit then,
-and the GraphQL refresh that follows in the same cycle reports the check runs,
-reviews and merge conflicts already on it.
+review requests but no check runs, reviews or comments. Its review requests
+emit then, and the GraphQL refresh that follows in the same cycle reports the
+check runs, reviews and merge conflicts already on it. The comments already on
+it are its baseline and emit nothing.
 
 #### Reviews
 
@@ -94,6 +96,10 @@ How the new reviews are found:
 - When the follow-up read fails, or reading which reviews are TF's does, the
   snapshot keeps its previous `review_count` and `review_marker` and the next
   cycle reports the same reviews.
+- A rate limit on this read or on the comment read (see [Comments](#comments))
+  ends both reads for the rest of the cycle, with no further request. Every
+  PR not read keeps its markers and is read next cycle; the cycle still diffs
+  every PR the batch read returned.
 - A snapshot stored without `review_marker`, from before it existed or seeded
   from the REST listing of open PRs, compares each reviewer's latest review
   instead, as earlier versions did: one event per reviewer whose latest review
@@ -184,21 +190,30 @@ check its fingerprint rather than treat the preview as a complete document.
 
 #### Comments
 
-`jira:issue:commented` and `linear:issue:commented` report the comments made
-since the previous cycle that TF did not post, in one event however many there
-are. The metadata names the newest of them (`comment_id`, `commenter`, and
-`commenter_account_id` on Jira or `commenter_user_id` on Linear) and the author
-of each (`commenter_account_ids` / `commenter_user_ids`). `commenter_in` matches
-when anyone it lists wrote one of them. A Jira author's id follows the
-assignee's rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
+`jira:issue:commented`, `linear:issue:commented` and `github:pr:commented`
+report the comments made since the previous cycle that TF did not post, in one
+event however many there are. The metadata names the newest of them
+(`comment_id`, `commenter`, and `commenter_account_id` on Jira or
+`commenter_user_id` on Linear) and the author of each (`commenter_account_ids`
+/ `commenter_user_ids` / `commenter_logins`). `commenter_in` matches when
+anyone it lists wrote one of them. A Jira author's id follows the assignee's
+rule (Cloud `accountId`, else Data Center `key`, else `name`), so a
 `commenter_in` list holds the same values as an `assignee_in` list. A Linear
 comment an integration posted names the integration as `commenter` and has no
-user id, so no `commenter_in` list matches it. The event's time is the newest
-comment's.
+user id, so no `commenter_in` list matches it. On GitHub the commenter is a
+login, `<slug>[bot]` for a bot, whose comments emit like anyone's; the GitHub
+event also carries the PR's `author`, `repo`, `pr_number`, `is_draft`,
+`head_sha` and `labels`, and predicates can filter it on `author_in`, `repo`,
+`is_draft` and `has_label`. The event's time is the newest comment's.
+
+GitHub's event covers the PR's conversation only. A comment in a review thread
+belongs to a review and emits as one (see [Reviews](#reviews)). Edits to a
+comment emit nothing.
 
 A comment an agent posts with `jira ticket comment` or `linear issue comment`
 is recorded as a `comment` artifact keyed on the comment's id, and a comment
-with that artifact is TF's. A cycle that finds only TF's comments emits
+with that artifact is TF's. So is a PR comment an agent posts through the exec
+verbs or with `gh pr comment`, which records the same artifact. A cycle that finds only TF's comments emits
 nothing, so a trigger whose agent replies to comments does not fire again on
 its own reply. The match is on the comment's id, not its author: under a
 personal credential the agent comments as the person who owns it, and
@@ -221,10 +236,26 @@ How the new comments are found:
   changes, a follow-up query reads the comments created after the previous
   newest. A newest comment older than the previous one means the newest was
   deleted, and emits nothing.
+- **GitHub.** The batch read returns each PR's comment count and newest
+  comment, stored as `comment_count` and `comment_marker`. GitHub lists a PR's
+  comments in the order they were made, so a new comment is always the newest.
+  When the newest comment is newer than the marker, a follow-up query pages
+  back from the end of the list to the marker, reading each comment's id,
+  author and creation time. A newest comment older than the marker means the
+  newest was deleted, and emits nothing. A snapshot without the marker that
+  counted comments was stored before the marker existed, and counts the last N
+  comments as new, N being the rise in the count. One that counted none may
+  have been seeded from the REST listing, which carries no comments, so its
+  first refresh stores the marker and emits nothing. The refresh gate skips an
+  open PR whose `updatedAt` and head commit did not move for up to ten
+  minutes, so a comment that did not advance `updatedAt` waits for that floor.
 
 When a comment read fails, or reading which comments are TF's does, the
 snapshot keeps its previous comment fields and the next cycle reports the same
-comments.
+comments. A rate limit ends the cycle's reads where it lands. On Linear the
+whole cycle stops there. On GitHub the comment and review reads stop, with no
+further request, and every PR not read is read next cycle, while the cycle
+still diffs every PR the batch read returned.
 
 #### Labels
 
@@ -605,7 +636,9 @@ The tracker stores these fields for each PR and diffs them between cycles:
 - `reviews[]` — latest review per reviewer: `id` (node id), `database_id`, `author`, `state`, `submitted_at`, `comment_count`
 - `review_count` — the number of submitted reviews
 - `review_marker` — the newest submitted review TF has read, `{id, submitted_at}`; see [Reviews](#reviews)
-- `labels[]`, `comment_count`, `updated_at`
+- `labels[]`, `updated_at`
+- `comment_count` — the number of conversation comments
+- `comment_marker` — the newest conversation comment TF has read, `{id, created_at}`; see [Comments](#comments)
 
 `author` and each review's `author` are logins as GitHub's REST API spells them: a bot is `<slug>[bot]` (`dependabot[bot]`), the form event metadata carries as `author` and `reviewer` and the form a handler predicate such as `author_in` must use. GraphQL returns a bot's login without the suffix; the snapshot builder adds it.
 

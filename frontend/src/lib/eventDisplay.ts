@@ -99,6 +99,11 @@ const EVENT_DISPLAY: Record<string, EventInfo> = {
     description: 'You were @mentioned in a PR',
     color: 'bg-indigo-500/10 text-indigo-600',
   },
+  'github:pr:commented': {
+    label: 'New Comment',
+    description: "Someone other than Triage Factory commented in a PR's conversation",
+    color: 'bg-blue-500/10 text-blue-600',
+  },
   'github:pr:opened': {
     label: 'PR Opened',
     description: 'A pull request was opened',

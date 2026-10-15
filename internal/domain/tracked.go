@@ -65,12 +65,20 @@ type PRSnapshot struct {
 	ReviewMarker *ReviewMarker `json:"review_marker,omitempty"`
 
 	// Metadata
-	Labels       []string `json:"labels"`
-	CommentCount int      `json:"comment_count"`
-	CreatedAt    string   `json:"created_at"`
-	UpdatedAt    string   `json:"updated_at"`
-	MergedAt     string   `json:"merged_at,omitempty"`
-	ClosedAt     string   `json:"closed_at,omitempty"`
+	Labels []string `json:"labels"`
+	// CommentCount is how many conversation comments the pull request has.
+	// Zero on a snapshot seeded from the REST listing of open pull requests,
+	// which carries no comment count.
+	CommentCount int `json:"comment_count"`
+	// CommentMarker is the newest conversation comment, the point the next
+	// poll reads new comments from. nil on a snapshot seeded from the REST
+	// listing and on one stored before the marker existed; the first refresh
+	// against such a snapshot stores it.
+	CommentMarker *CommentMarker `json:"comment_marker,omitempty"`
+	CreatedAt     string         `json:"created_at"`
+	UpdatedAt     string         `json:"updated_at"`
+	MergedAt      string         `json:"merged_at,omitempty"`
+	ClosedAt      string         `json:"closed_at,omitempty"`
 
 	// Timeline carries a tail of PR-side events (label add/remove, review
 	// request, ready-for-review) with their per-action createdAt
@@ -140,15 +148,7 @@ type ReviewMarker struct {
 // newer than m: by submission time, or by id when the times are equal or
 // either does not parse.
 func (m ReviewMarker) After(submittedAt string, id int64) bool {
-	t, okT := ParseExternalTime(submittedAt)
-	mt, okM := ParseExternalTime(m.SubmittedAt)
-	if okT && okM && !t.Equal(mt) {
-		return t.After(mt)
-	}
-	if okT != okM {
-		return okT
-	}
-	return id > m.ID
+	return markedAfter(submittedAt, id, m.SubmittedAt, m.ID)
 }
 
 // Newer returns whichever of m and o names the newer review.
@@ -157,6 +157,45 @@ func (m ReviewMarker) Newer(o ReviewMarker) ReviewMarker {
 		return o
 	}
 	return m
+}
+
+// CommentMarker names a pull request's newest conversation comment by its
+// numeric id and creation time. A zero marker means the pull request has no
+// conversation comment.
+type CommentMarker struct {
+	ID        int64  `json:"id,omitempty"`
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// After reports whether the comment created at createdAt with id id is newer
+// than m: by creation time, or by id when the times are equal or either does
+// not parse.
+func (m CommentMarker) After(createdAt string, id int64) bool {
+	return markedAfter(createdAt, id, m.CreatedAt, m.ID)
+}
+
+// Newer returns whichever of m and o names the newer comment.
+func (m CommentMarker) Newer(o CommentMarker) CommentMarker {
+	if m.After(o.CreatedAt, o.ID) {
+		return o
+	}
+	return m
+}
+
+// markedAfter reports whether the object at at with id id is newer than the
+// one at markAt with id markID: by time, or by id when the times are equal or
+// neither parses. A time that parses is newer than one that does not. GitHub
+// hands out review and comment ids in increasing order.
+func markedAfter(at string, id int64, markAt string, markID int64) bool {
+	t, okT := ParseExternalTime(at)
+	mt, okM := ParseExternalTime(markAt)
+	if okT && okM && !t.Equal(mt) {
+		return t.After(mt)
+	}
+	if okT != okM {
+		return okT
+	}
+	return id > markID
 }
 
 // CheckRun is a single execution of a CI check on a commit.

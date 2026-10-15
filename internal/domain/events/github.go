@@ -621,6 +621,45 @@ func (p GitHubPRUnreachablePredicate) Matches(m GitHubPRUnreachableMetadata) boo
 }
 
 // -----------------------------------------------------------------------------
+// commented — someone other than TF commented in the PR's conversation, the
+// sibling of the Jira and Linear commented events. One event per poll however
+// many comments landed: CommentID and Commenter are the newest of them, and
+// CommenterLogins holds the author of each, so commenter_in matches when any
+// of them wrote one. Logins are spelled as REST spells them, a bot's as
+// "<slug>[bot]". A comment TF posted is not one of them, and a poll that found
+// only TF's comments emits nothing. Comments in review threads arrive as
+// reviews (review_commented), not here.
+// -----------------------------------------------------------------------------
+
+type GitHubPRCommentedMetadata struct {
+	Author          string   `json:"author"`
+	Commenter       string   `json:"commenter"`
+	CommenterLogins []string `json:"commenter_logins"`
+	CommentID       int64    `json:"comment_id"`
+	Repo            string   `json:"repo"`
+	PRNumber        int      `json:"pr_number"`
+	IsDraft         bool     `json:"is_draft"`
+	HeadSHA         string   `json:"head_sha"`
+	Labels          []string `json:"labels"`
+}
+
+type GitHubPRCommentedPredicate struct {
+	AuthorIn    []string `json:"author_in,omitempty" doc:"Match PRs authored by anyone in this list (GitHub logins, case-insensitive)."`
+	CommenterIn []string `json:"commenter_in,omitempty" doc:"Match when anyone in this list wrote one of the new comments (GitHub logins, case-insensitive; a bot as '<slug>[bot]')."`
+	Repo        *string  `json:"repo,omitempty" doc:"Scope to a specific repo (owner/name)."`
+	IsDraft     *bool    `json:"is_draft,omitempty" doc:"Match draft vs. ready-for-review PRs."`
+	HasLabel    *string  `json:"has_label,omitempty" doc:"Require the PR to currently bear this label."`
+}
+
+func (p GitHubPRCommentedPredicate) Matches(m GitHubPRCommentedMetadata) bool {
+	return stringInSliceFold(p.AuthorIn, m.Author) &&
+		anyInSliceFold(p.CommenterIn, m.CommenterLogins) &&
+		strEq(p.Repo, m.Repo) &&
+		boolEq(p.IsDraft, m.IsDraft) &&
+		hasLabel(p.HasLabel, m.Labels)
+}
+
+// -----------------------------------------------------------------------------
 // mentioned — you were @mentioned in a PR comment.
 // -----------------------------------------------------------------------------
 
@@ -689,4 +728,5 @@ func init() {
 	Register(NewSchema[GitHubPRClosedMetadata, GitHubPRClosedPredicate](domain.EventGitHubPRClosed, OwnershipOwned))
 	Register(NewSchema[GitHubPRUnreachableMetadata, GitHubPRUnreachablePredicate](domain.EventGitHubPRUnreachable, OwnershipOwned))
 	Register(NewSchema[GitHubPRMentionedMetadata, GitHubPRMentionedPredicate](domain.EventGitHubPRMentioned, OwnershipOwned))
+	Register(NewSchema[GitHubPRCommentedMetadata, GitHubPRCommentedPredicate](domain.EventGitHubPRCommented, OwnershipOwned))
 }

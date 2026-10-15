@@ -672,17 +672,40 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 
 	allItems := append(openItems, terminalItems...)
 
-	// The reviews submitted since each pull request's stored marker, read
-	// before Phase 3 so that phase stays off the network. A pull request whose
-	// review count and newest review did not move is not read; a quiet seed
-	// diffs nothing, so it is not read either.
+	// The reviews submitted and the conversation comments made since each
+	// pull request's stored markers, read before Phase 3 so that phase stays
+	// off the network. A pull request whose newest review, review count and
+	// newest comment did not move is not read; a quiet seed diffs nothing, so
+	// it is not read either.
+	//
+	// The first rate limit ends the reads for the cycle: every read after it
+	// gets the same error without a request. A secondary limit leaves the
+	// client's budget check open, so each further read would otherwise go to
+	// GitHub, be limited again and wait out its retries. A pull request not
+	// read keeps its stored markers and is read next cycle, and Phase 3 still
+	// diffs every pull request the batch returned.
 	newReviews := make(map[string][]NewReview)
+	newComments := make(map[string][]NewComment)
+	var reader prActivityReader = client
+	stopOnRateLimit := func(err error) {
+		if err == nil {
+			return
+		}
+		if _, stopped := reader.(rateLimitedReader); !stopped {
+			trackerLog.WarnContext(ctx, "github rate limit reached; the remaining pull requests' new reviews and comments are read next cycle", "error", err)
+		}
+		reader = rateLimitedReader{err: err}
+	}
 	for _, item := range allItems {
 		snap, ok := refreshed[item.nodeID]
 		if !ok || item.seed {
 			continue
 		}
-		newReviews[item.nodeID] = t.githubNewReviews(ctx, client, scope, item.nodeID, item.snap, &snap)
+		reviews, err := t.githubNewReviews(ctx, reader, scope, item.nodeID, item.snap, &snap)
+		stopOnRateLimit(err)
+		comments, err := t.githubNewComments(ctx, reader, scope, item.nodeID, item.snap, &snap)
+		stopOnRateLimit(err)
+		newReviews[item.nodeID], newComments[item.nodeID] = reviews, comments
 		refreshed[item.nodeID] = snap
 	}
 
@@ -743,7 +766,7 @@ func (t *Tracker) RefreshGitHub(ctx context.Context, scope string, client *ghcli
 		}
 
 		// Diff against previous snapshot.
-		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID])
+		events := DiffPRSnapshots(item.snap, newSnap, item.entity.ID, username, resolver, newReviews[item.nodeID], newComments[item.nodeID])
 
 		// The close obligation: this entity is active (Phase 2 lists only
 		// active rows) and its snapshot was ALREADY terminal last cycle, so

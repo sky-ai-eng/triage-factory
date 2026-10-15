@@ -788,7 +788,7 @@ func TestMarkTFComments_ReadsOnlyItsScope(t *testing.T) {
 	fx.postedByTF(t, 1, "c-1")
 
 	comments := []NewComment{{ID: "c-1"}}
-	if err := tr.markTFComments(context.Background(), domain.ArtifactProviderLinear, linWorkspace, linIssue(1).ID, comments); err != nil {
+	if err := tr.markTFComments(context.Background(), linWorkspace, comments, issueCommentKey(domain.ArtifactProviderLinear, linIssue(1).ID)); err != nil {
 		t.Fatal(err)
 	}
 	if comments[0].ByTF {

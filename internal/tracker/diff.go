@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,9 +26,12 @@ import (
 // them. A prev without the review marker has none read, and the diff compares
 // each reviewer's latest review instead.
 //
+// comments is every conversation comment made since prev, oldest first, with
+// TF's marked (githubNewComments): the snapshot holds only the newest.
+//
 // Not a pure function for the review-request branch: the resolver may consult
 // stores (multi-mode). Every other branch is pure.
-func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver, reviews []NewReview) []domain.Event {
+func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, resolver ReviewerResolver, reviews []NewReview, comments []NewComment) []domain.Event {
 	now := time.Now()
 	eid := &entityID
 	authorIsSelf := curr.Author == username
@@ -348,6 +352,18 @@ func DiffPRSnapshots(prev, curr domain.PRSnapshot, entityID, username string, re
 			}
 			emitReview(currState.State, currState.Author, currState.DatabaseID, currState.CommentCount, nil, currState.SubmittedAt)
 		}
+	}
+
+	// --- Conversation comments ---------------------------------------------
+	// One event for the comments TF did not post, however many, attributed to
+	// the newest of them and timed at its creation. A bot's comment counts.
+	if newest, logins, ok := commentedBy(comments); ok {
+		commentID, _ := strconv.ParseInt(newest.ID, 10, 64)
+		emitWithFallback(domain.EventGitHubPRCommented, "", commentedAt(newest, curr.UpdatedAt), events.GitHubPRCommentedMetadata{
+			Author: curr.Author, Commenter: newest.Author, CommenterLogins: logins, CommentID: commentID,
+			Repo: curr.Repo, PRNumber: curr.Number,
+			IsDraft: curr.IsDraft, HeadSHA: curr.HeadSHA, Labels: curr.Labels,
+		}, eid, now, &evts)
 	}
 
 	// --- Label diff --------------------------------------------------------
