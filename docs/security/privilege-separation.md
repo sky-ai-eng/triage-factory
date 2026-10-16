@@ -73,20 +73,27 @@ as the identity that owns the tree, so it reads what the agent made private to
 itself, and nothing else of any run is in view. Git runs there with
 `GIT_NO_LAZY_FETCH=1` and writes the objects a stage produces to a temporary
 directory on the jail's `/tmp`, so the tree is only ever read. The scratch walk
-runs in the same jail, so the orchestrator never reads a file the agent wrote;
-the output file is a host file, so the jail's memory limits do not bound it, and
-gVisor does not apply a file-size limit inside the jail to a host descriptor; the
-broker starts runsc under a file-size limit set to the stream's cap, and the unpacker returns
-the blocks of what it has read as it goes, so the stream and its unpacked copy
-are not on disk together. The orchestrator unpacks the stream under a bounded,
-validated framing into a staging directory it owns, and archives that copy. There is no host fallback: if the jail
-cannot launch, the snapshot fails.
+runs in the same jail, so in multi mode no git, and no walk of the scratch, runs
+outside a jail during a snapshot, and the only thing the orchestrator reads from
+a capture is the stream. That claim is about snapshot capture alone: the
+orchestrator's other reads of the tree, such as the memory file mirror and the
+hand-off before an ending's capture, are separate paths this section does not
+cover, and local mode captures in-process, since its isolation is courtesy and
+not a boundary.
+
+The output file is a host file, so the jail's memory limits do not bound it, and
+gVisor does not apply a file-size limit inside the jail to a host descriptor. The
+broker starts runsc under a file-size limit set to the stream's cap, and the
+unpacker returns the blocks of what it has read as it goes, so the stream and its
+unpacked copy are not on disk together. The orchestrator unpacks the stream under
+a bounded, validated framing into a staging directory it owns, and archives that
+copy. There is no host fallback: if the jail cannot launch, the snapshot fails.
 
 The tree also has to stand still while it is read. A conclusion stops the run's
 tool-host jail and waits until its runtime is reaped before taking the
 snapshot; a jail that does not stop within a bound leaves its tree uncaptured
-until it has exited, and the ending proceeds on the last checkpoint. A checkpoint pauses the jail (`runsc pause`), captures, and resumes;
-processes the agent backgrounded survive and cannot run during the capture. The
+until it has exited, and the ending proceeds on the last checkpoint. A
+checkpoint pauses the jail (`runsc pause`), captures, and resumes; processes the agent backgrounded survive and cannot run during the capture. The
 resume happens on every path out, retried once, and the next tool call waits
 only for the resume, not for the archive. What that costs, and what a run
 observes while it is paused, is in `docs/benchmarks/checkpoint-freeze.md`. A restore imports a bundle with
