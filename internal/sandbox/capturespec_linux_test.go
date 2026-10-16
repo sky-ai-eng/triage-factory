@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -83,10 +84,7 @@ func TestBuildCaptureSpec_RefusesNonJailIdentity(t *testing.T) {
 }
 
 func TestNewCaptureContainerID_MatchesTheBootSweep(t *testing.T) {
-	id, err := newCaptureContainerID()
-	if err != nil {
-		t.Fatal(err)
-	}
+	id := newCaptureContainerID()
 	if !tfContainerIDRE.MatchString(id) {
 		t.Errorf("capture container id %q would not be reaped by the boot sweep", id)
 	}
@@ -112,5 +110,35 @@ func TestNewRunscCaptureCommand_LimitsHostFileWrites(t *testing.T) {
 func TestCaptureStreamMaxBytes_LeavesRoomForTheSandbox(t *testing.T) {
 	if CaptureStreamMaxBytes < 2*int64(captureJailMemoryMB)<<20 {
 		t.Errorf("stream cap %d is under twice the jail's memory ceiling (%d MB)", CaptureStreamMaxBytes, captureJailMemoryMB)
+	}
+}
+
+// TestNewCaptureContainerID_NeverRepeatsWithinTheProcess: concurrent captures
+// each get an id of their own. A repeat would have the second launch's
+// force-delete kill the first capture's live jail.
+func TestNewCaptureContainerID_NeverRepeatsWithinTheProcess(t *testing.T) {
+	const workers, each = 16, 5000
+	ids := make(chan string, workers*each)
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < each; i++ {
+				ids <- newCaptureContainerID()
+			}
+		}()
+	}
+	wg.Wait()
+	close(ids)
+	seen := map[string]bool{}
+	for id := range ids {
+		if seen[id] {
+			t.Fatalf("container id %q minted twice", id)
+		}
+		seen[id] = true
+		if !tfContainerIDRE.MatchString(id) {
+			t.Fatalf("container id %q would not be reaped by the boot sweep", id)
+		}
 	}
 }

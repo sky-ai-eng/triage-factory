@@ -5,10 +5,12 @@ package sandbox
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -115,15 +117,27 @@ func newRunscCaptureCommand(ctx context.Context, bundleDir, containerID string, 
 	return cmd
 }
 
+// captureIDSeq numbers the capture jails this process launches. It starts at a
+// random point, so a jail a previous process left behind is unlikely to share an
+// id with one launched now, and counts up, so no two jails of this process share
+// one however many run at once. Randomness alone cannot give that: the id has
+// room for 32 bits, and launching a jail first force-deletes any container of
+// the same id, which for a live twin is the other capture's jail.
+var captureIDSeq atomic.Uint32
+
+func init() {
+	var raw [4]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		panic(fmt.Sprintf("sandbox: seed capture container ids: %v", err))
+	}
+	captureIDSeq.Store(binary.BigEndian.Uint32(raw[:]))
+}
+
 // newCaptureContainerID mints a container id the boot sweep's matcher
 // (tfContainerIDRE) recognizes, so a capture jail a crash left behind is
 // reaped like any other.
-func newCaptureContainerID() (string, error) {
-	var raw [3]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("sandbox: mint capture container id: %w", err)
-	}
-	return fmt.Sprintf("tf-cap%x-0", raw), nil
+func newCaptureContainerID() string {
+	return fmt.Sprintf("tf-cap%08x-0", captureIDSeq.Add(1))
 }
 
 // LaunchCaptureJail runs one capture in a fresh, one-shot gVisor jail and
@@ -187,10 +201,7 @@ func LaunchCaptureJail(ctx context.Context, p CaptureParams, stdout *os.File) (s
 	}
 	defer func() { _ = cleanupBundle(bundleDir) }()
 
-	id, err := newCaptureContainerID()
-	if err != nil {
-		return "", err
-	}
+	id := newCaptureContainerID()
 	rt, err := launchSupervised(ctx, id, captureJailMemoryMB, stdout, io.Discard, func() *exec.Cmd {
 		return newRunscCaptureCommand(ctx, bundleDir, id, stream)
 	})
