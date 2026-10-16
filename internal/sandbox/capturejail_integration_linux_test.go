@@ -171,6 +171,16 @@ func hostCapture(t *testing.T, stub string, uid int, lazyFetch bool, root string
 	return res, nil
 }
 
+// requireJailRan fails the test when a capture jail never started. A canary's
+// "nothing reached the host" is only evidence if the planted config was given a
+// jail to run in; a launch failure also leaves no marker.
+func requireJailRan(t *testing.T, err error) {
+	t.Helper()
+	if err != nil && (strings.Contains(err.Error(), "creating container") || strings.Contains(err.Error(), "launch capture jail") || strings.Contains(err.Error(), "bind the pinned tree")) {
+		t.Fatalf("the capture jail did not start, so the check proves nothing: %v", err)
+	}
+}
+
 func requireMarker(t *testing.T, dir, name string, want bool, what string) {
 	t.Helper()
 	_, err := os.Stat(filepath.Join(dir, name))
@@ -279,6 +289,7 @@ func TestIntegration_CaptureJail_AgentControlledGitCannotReachTheHost(t *testing
 				chownTree(t, root, uid)
 				_, err := jailCapture(t, root, "acme/app/default")
 				t.Logf("capture jail ended with: %v", err)
+				requireJailRan(t, err)
 				requireMarker(t, marks, sc.marker, false, sc.what)
 			})
 		})
@@ -329,6 +340,7 @@ func TestIntegration_CaptureJail_AlternatesCannotReadAnotherRun(t *testing.T) {
 		root, secret := build(t)
 		res, err := jailCapture(t, root, "acme/app/default")
 		t.Logf("capture jail ended with: %v", err)
+		requireJailRan(t, err)
 		if bytes.Contains(res.stream, []byte(secret)) {
 			t.Error("the capture jail carried a commit from another run's object store")
 		}
@@ -530,5 +542,45 @@ func TestIntegration_CaptureJail_StreamWriteIsCapped(t *testing.T) {
 	}
 	if info.Size() == 0 {
 		t.Error("the flood wrote nothing; the test would pass whatever the limit does")
+	}
+}
+
+// TestIntegration_BindPinnedRoot_NamesThePinnedTreeAndLeavesNothing: the
+// directory a capture jail mounts shows the pinned tree, keeps showing it after
+// the path is swapped, and is gone after cleanup.
+func TestIntegration_BindPinnedRoot_NamesThePinnedTreeAndLeavesNothing(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("mounting needs root")
+	}
+	base := worldTempDir(t, "tf-pin-")
+	tree := filepath.Join(base, "tree")
+	if err := os.Mkdir(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFileT(t, filepath.Join(tree, "original"), "x")
+	fd, _, err := pinCaptureRoot(tree)
+	if err != nil {
+		t.Skipf("tree owner not accepted here: %v", err)
+	}
+	defer closeFd(fd)
+	target, cleanup, err := bindPinnedRoot(fd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tree, filepath.Join(base, "moved")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(tree, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "original")); err != nil {
+		t.Errorf("the mountpoint does not show the pinned tree: %v", err)
+	}
+	cleanup()
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Errorf("the mountpoint is still there after cleanup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "moved", "original")); err != nil {
+		t.Errorf("cleanup reached into the tree: %v", err)
 	}
 }

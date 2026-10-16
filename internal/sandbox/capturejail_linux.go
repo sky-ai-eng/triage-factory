@@ -35,7 +35,7 @@ const captureSubcommand = "snapshot-capture"
 // namespace of its own that nothing is ever attached to. The tree is mounted
 // read-only, so the capture cannot change the thing it reads, and the only
 // writable places are the memory-backed /tmp and /dev.
-func buildCaptureSpec(p CaptureParams, uid, gid int, tfBinary string) (*specs.Spec, error) {
+func buildCaptureSpec(p CaptureParams, rootSource string, uid, gid int, tfBinary string) (*specs.Spec, error) {
 	if !IsJailUID(uid) || gid != uid {
 		return nil, fmt.Errorf("spec: capture identity %d:%d is not a per-run jail identity", uid, gid)
 	}
@@ -64,7 +64,7 @@ func buildCaptureSpec(p CaptureParams, uid, gid int, tfBinary string) (*specs.Sp
 				Options: []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
 			{Destination: "/tmp", Type: "tmpfs", Source: "tmpfs",
 				Options: []string{"nosuid", "nodev", "mode=1777", fmt.Sprintf("size=%dm", captureJailTmpMB)}},
-			{Destination: "/work", Type: "bind", Source: p.Root, Options: []string{"rbind", "ro"}},
+			{Destination: "/work", Type: "bind", Source: rootSource, Options: []string{"rbind", "ro"}},
 			{Destination: TrustedTFBinaryDestination, Type: "bind", Source: tfBinary, Options: []string{"rbind", "ro"}},
 		},
 		Linux: &specs.Linux{
@@ -149,11 +149,17 @@ func LaunchCaptureJail(ctx context.Context, p CaptureParams, stdout *os.File) (s
 	if err := ValidateCaptureCheckouts(p.Checkouts); err != nil {
 		return "", err
 	}
-	info, err := validateRunTreeRoot("capture run tree", p.Root)
+	rootFD, rootStat, err := pinCaptureRoot(p.Root)
 	if err != nil {
 		return "", err
 	}
-	uid, gid, err := captureIdentity(p.Root, info)
+	defer closeFd(rootFD)
+	rootMount, unbind, err := bindPinnedRoot(rootFD)
+	if err != nil {
+		return "", err
+	}
+	defer unbind()
+	uid, gid, err := captureIdentity(p.Root, rootStat)
 	if err != nil {
 		return "", err
 	}
@@ -171,7 +177,7 @@ func LaunchCaptureJail(ctx context.Context, p CaptureParams, stdout *os.File) (s
 	if err != nil {
 		return "", err
 	}
-	spec, err := buildCaptureSpec(p, uid, gid, tfBinary)
+	spec, err := buildCaptureSpec(p, rootMount, uid, gid, tfBinary)
 	if err != nil {
 		return "", err
 	}

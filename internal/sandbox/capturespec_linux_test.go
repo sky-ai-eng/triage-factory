@@ -17,7 +17,7 @@ import (
 // pinned subcommand over exactly the checkouts named.
 func TestBuildCaptureSpec(t *testing.T) {
 	uid := JailUID(7)
-	spec, err := buildCaptureSpec(CaptureParams{Root: "/tmp/tf-run", Checkouts: []string{"acme/app/default", "acme/app/pr-7"}}, uid, uid, "/usr/local/bin/tf")
+	spec, err := buildCaptureSpec(CaptureParams{Root: "/tmp/tf-run", Checkouts: []string{"acme/app/default", "acme/app/pr-7"}}, "/proc/1/fd/9", uid, uid, "/usr/local/bin/tf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestBuildCaptureSpec(t *testing.T) {
 	for _, m := range spec.Mounts {
 		mounts[m.Destination] = m
 	}
-	for dest, src := range map[string]string{"/work": "/tmp/tf-run", TrustedTFBinaryDestination: "/usr/local/bin/tf"} {
+	for dest, src := range map[string]string{"/work": "/proc/1/fd/9", TrustedTFBinaryDestination: "/usr/local/bin/tf"} {
 		m, ok := mounts[dest]
 		if !ok || m.Source != src {
 			t.Errorf("mount %s = %+v, want source %s", dest, m, src)
@@ -76,7 +76,7 @@ func TestBuildCaptureSpec(t *testing.T) {
 
 func TestBuildCaptureSpec_RefusesNonJailIdentity(t *testing.T) {
 	for _, uid := range []int{0, 1000, ParkedRunTreeUID, SidecarUID(3)} {
-		if _, err := buildCaptureSpec(CaptureParams{Root: "/tmp/x"}, uid, uid, "/bin/tf"); err == nil {
+		if _, err := buildCaptureSpec(CaptureParams{Root: "/tmp/x"}, "/proc/1/fd/9", uid, uid, "/bin/tf"); err == nil {
 			t.Errorf("built a capture spec for uid %d", uid)
 		}
 	}

@@ -336,3 +336,37 @@ func TestLaunchCaptureJail_RefusesWhatItCannotRead(t *testing.T) {
 		t.Errorf("LaunchCaptureJail over a tree no jail holds = %v, want a refusal naming the missing identity", err)
 	}
 }
+
+// TestPinCaptureRoot_HoldsTheTreeCheckedWhateverHappensToThePath: the tree the
+// capture jail mounts is the one pinCaptureRoot checked. The orchestrator can
+// rename the tree away and put something else at its path while the broker is
+// serving the request, and the pinned path still names the original.
+func TestPinCaptureRoot_HoldsTheTreeCheckedWhateverHappensToThePath(t *testing.T) {
+	base := t.TempDir()
+	tree := filepath.Join(base, "tree")
+	if err := os.Mkdir(tree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "original"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fd, _, err := pinCaptureRoot(tree)
+	if err != nil {
+		t.Fatalf("pinCaptureRoot: %v", err)
+	}
+	defer closeFd(fd)
+
+	moved := filepath.Join(base, "moved")
+	if err := os.Rename(tree, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc", tree); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(fmt.Sprintf("/proc/self/fd/%d", fd), "original")); err != nil {
+		t.Errorf("the pinned path no longer names the tree that was checked: %v", err)
+	}
+	if _, _, err := pinCaptureRoot(tree); err == nil {
+		t.Error("a symlink at the tree's path was accepted")
+	}
+}

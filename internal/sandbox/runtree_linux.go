@@ -290,9 +290,9 @@ func validateRunTreeShape(op, path string) error {
 // This is a path-then-separate-syscall check — exactly the TOCTOU window
 // the openat2 implementation below closes by resolving and operating
 // through one anchored fd instead. It survives only because it backs
-// chownRunTreeFallback / removeRunTreeFallback (pre-5.6-kernel path) and the
-// capture jail's tree input. Capture staging is instead
-// opened and validated through pinned descriptors in capture_linux.go.
+// chownRunTreeFallback / removeRunTreeFallback (pre-5.6-kernel path). The
+// capture's tree and staging are instead opened and validated through pinned
+// descriptors in capture_linux.go.
 func validateRunTreeRoot(op, path string) (os.FileInfo, error) {
 	if err := validateRunTreeShape(op, path); err != nil {
 		return nil, err

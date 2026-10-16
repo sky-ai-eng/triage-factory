@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -80,15 +79,11 @@ func (t *tailBuffer) String() string {
 }
 
 // captureIdentity is the uid/gid the capture jail runs as: the jail identity
-// that owns worktree, read from the stat validateRunTreeRoot already took.
-// Read from the tree rather than named by the caller because only this side
-// can make a jail uid own anything, so the owner is a statement of which
-// engagement wrote the tree that no caller can forge.
-func captureIdentity(worktree string, info os.FileInfo) (uid, gid int, err error) {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, fmt.Errorf("sandbox: capture run delta: no stat for %s", worktree)
-	}
+// that owns the tree, read from the stat of the pinned descriptor. Read from the
+// tree rather than named by the caller because only this side can make a jail
+// uid own anything, so the owner is a statement of which engagement wrote the
+// tree that no caller can forge.
+func captureIdentity(worktree string, st unix.Stat_t) (uid, gid int, err error) {
 	idx, ok := jailSubnetIdx(int(st.Uid))
 	if !ok {
 		return 0, 0, fmt.Errorf("sandbox: capture run delta: %s is owned by uid %d, which is not a jail identity", worktree, st.Uid)
@@ -116,17 +111,9 @@ func openCaptureStaging(dir string) (*os.File, error) {
 // owns while the broker is serving the request; once this returns, later
 // member opens stay on the exact directory inode resolved here.
 func openCaptureStagingDir(path string) (fd, wantUID int, err error) {
-	fd, err = unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err = openAnchoredDir("capture staging", path)
 	if err != nil {
-		return -1, 0, fmt.Errorf("sandbox: capture staging: open root anchor: %w", err)
-	}
-	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
-		next, openErr := unix.Openat(fd, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		closeFd(fd)
-		if openErr != nil {
-			return -1, 0, fmt.Errorf("sandbox: capture staging: open anchored directory %s: %w", path, openErr)
-		}
-		fd = next
+		return -1, 0, err
 	}
 
 	var st unix.Stat_t
@@ -147,6 +134,80 @@ func openCaptureStagingDir(path string) (fd, wantUID int, err error) {
 		return -1, 0, fmt.Errorf("sandbox: capture staging: %s is not owned by orchestrator uid %d", path, wantUID)
 	}
 	return fd, wantUID, nil
+}
+
+// openAnchoredDir resolves every component of path through pinned directory
+// descriptors, refusing a symlink at any step, and returns an O_PATH descriptor
+// of the final directory. Nothing the caller can rename or replace afterwards
+// changes which inode the descriptor names.
+func openAnchoredDir(op, path string) (int, error) {
+	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("sandbox: %s: open root anchor: %w", op, err)
+	}
+	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		next, openErr := unix.Openat(fd, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		closeFd(fd)
+		if openErr != nil {
+			return -1, fmt.Errorf("sandbox: %s: open anchored directory %s: %w", op, path, openErr)
+		}
+		fd = next
+	}
+	return fd, nil
+}
+
+// pinCaptureRoot resolves the run tree a capture reads to a descriptor and
+// checks that descriptor, not the path: a directory owned by an identity that
+// legitimately holds run trees. The jail is then given the tree through the
+// descriptor, so the tree it mounts is the tree checked here whatever the
+// orchestrator does to the path in between. The caller closes the descriptor
+// after the jail has exited.
+func pinCaptureRoot(path string) (fd int, st unix.Stat_t, err error) {
+	if err := validateRunTreeShape("capture run tree", path); err != nil {
+		return -1, st, err
+	}
+	fd, err = openAnchoredDir("capture run tree", path)
+	if err != nil {
+		return -1, st, err
+	}
+	if err := unix.Fstat(fd, &st); err != nil {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: fstat %s: %w", path, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: %s is not a directory", path)
+	}
+	if !allowedRunTreeOwner(st.Uid) {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: %s is owned by uid %d, not a run-tree owner", path, st.Uid)
+	}
+	return fd, st, nil
+}
+
+// bindPinnedRoot bind-mounts the directory rootFD names onto a fresh directory
+// only this process can reach, and returns that directory. The runtime mounts
+// its sources by path, and a /proc/<pid>/fd path is not one it can resolve from
+// inside its sandbox, so the descriptor's directory is given a path the
+// orchestrator cannot rename or replace. cleanup unmounts it and removes the
+// directory; it removes with rmdir, which refuses a mounted directory, so a
+// failed unmount leaves the mountpoint behind and never deletes through it.
+func bindPinnedRoot(rootFD int) (target string, cleanup func(), err error) {
+	target, err = os.MkdirTemp("", "tf-capture-root-")
+	if err != nil {
+		return "", nil, fmt.Errorf("sandbox: capture run tree: make mountpoint: %w", err)
+	}
+	if err := unix.Mount(fmt.Sprintf("/proc/self/fd/%d", rootFD), target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+		_ = os.Remove(target)
+		return "", nil, fmt.Errorf("sandbox: capture run tree: bind the pinned tree: %w", err)
+	}
+	cleanup = func() {
+		if err := unix.Unmount(target, unix.MNT_DETACH); err != nil {
+			return
+		}
+		_ = os.Remove(target)
+	}
+	return target, cleanup, nil
 }
 
 // openCaptureStagingMember validates a harmless O_PATH handle before gaining
