@@ -32,8 +32,12 @@ var prReviewCorrectness string
 //go:embed prompts/pr-review-aggregate.txt
 var prReviewAggregate string
 
-//go:embed prompts/jira-implement.txt
-var jiraImplement string
+// One implementation body ships as two prompts, one per tracker. Each is
+// wrapped by its own blueprint because a blueprint is fired by exactly one
+// trigger, and each tracker's assignment event needs a trigger of its own.
+//
+//go:embed prompts/issue-implement.txt
+var issueImplement string
 
 //go:embed prompts/conflict-resolution.txt
 var conflictResolution string
@@ -90,9 +94,11 @@ func Prompts() []domain.Prompt {
 		// CI fix prompt — auto-fired on CI failures via prompt_trigger.
 		{SystemSlug: "system-ci-fix", Name: "CI Fix", Body: ciFix, Source: "system"},
 
-		// Jira implementation prompt — auto-fired on issues assigned
-		// to the user via the matching trigger.
-		{SystemSlug: "system-jira-implement", Name: "Jira Issue Implementation", Body: jiraImplement, Source: "system"},
+		// Issue implementation, one copy per tracker under one name — each
+		// auto-fired on issues assigned to the user via its tracker's
+		// matching trigger.
+		{SystemSlug: "system-jira-implement", Name: "Implement Atomic Ticket", Body: issueImplement, Source: "system"},
+		{SystemSlug: "system-linear-implement", Name: "Implement Atomic Ticket", Body: issueImplement, Source: "system"},
 
 		// Fix review feedback — fires on reviews landed on the user's
 		// PRs. Same action regardless of whether the reviewer is the
@@ -107,8 +113,8 @@ func Prompts() []domain.Prompt {
 // wrapping a single prompt: the blueprint reuses the wrapped prompt's
 // system_slug (distinct table, no collision) and its single step points at that
 // prompt's slug. Each such prompt is fired by a trigger (CI-fix,
-// conflict-resolution, jira-implement, fix-review-feedback), so wrapping it
-// keeps the trigger→blueprint reference resolvable.
+// conflict-resolution, jira-implement, linear-implement, fix-review-feedback),
+// so wrapping it keeps the trigger→blueprint reference resolvable.
 //
 // The exception is PR review (system-pr-review), the one multi-step shipped
 // blueprint: security → correctness → aggregate. Its step prompts

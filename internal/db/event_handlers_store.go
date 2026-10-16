@@ -384,6 +384,27 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		DefaultPriority: 0.60,
 		SortOrder:       5,
 	},
+	{
+		ID:              "system-rule-linear-assigned",
+		Kind:            domain.EventHandlerKindRule,
+		EventType:       domain.EventLinearIssueAssigned,
+		Predicate:       `{"assignee_in":[]}`,
+		Name:            "Linear issue assigned to me",
+		DefaultPriority: 0.60,
+		SortOrder:       6,
+	},
+	{
+		// Companion to linear-assigned, for the same reason as Jira's: an
+		// issue with open sub-issues emits no assigned event, then emits
+		// became_atomic when the last one closes.
+		ID:              "system-rule-linear-became-atomic",
+		Kind:            domain.EventHandlerKindRule,
+		EventType:       domain.EventLinearIssueBecameAtomic,
+		Predicate:       `{"assignee_in":[]}`,
+		Name:            "Linear issue decomposition resolved (now actionable)",
+		DefaultPriority: 0.60,
+		SortOrder:       7,
+	},
 
 	// ----- triggers ---------------------------------------------------------
 	{
@@ -413,12 +434,22 @@ var ShippedEventHandlers = []ShippedEventHandler{
 		BreakerThreshold:       2,
 		MinAutonomySuitability: 0.0,
 	},
-	// No became_atomic trigger ships: a blueprint is fired by exactly one event
-	// (the partial-unique event_handlers_one_trigger_per_blueprint index), and
-	// system-jira-implement is already claimed by system-trigger-jira-implement
-	// on jira_issue_assigned. A decomposition-resolved ticket still surfaces as
-	// a task via system-rule-jira-became-atomic; auto-delegating it is a
-	// user-authored trigger on its own blueprint (or a blueprint copy).
+	{
+		ID:                     "system-trigger-linear-implement",
+		Kind:                   domain.EventHandlerKindTrigger,
+		BlueprintID:            "system-linear-implement",
+		EventType:              domain.EventLinearIssueAssigned,
+		Predicate:              `{"assignee_in":[]}`,
+		BreakerThreshold:       2,
+		MinAutonomySuitability: 0.0,
+	},
+	// No became_atomic trigger ships for either tracker: a blueprint is fired
+	// by exactly one event (the partial-unique
+	// event_handlers_one_trigger_per_blueprint index), and each implementation
+	// blueprint is already claimed by its tracker's assigned trigger. A
+	// decomposition-resolved issue still surfaces as a task via its
+	// became-atomic rule; auto-delegating it is a user-authored trigger on its
+	// own blueprint (or a blueprint copy).
 	{
 		// review_requested only fires when the session user is added
 		// to the PR's review-request list, so the event is already

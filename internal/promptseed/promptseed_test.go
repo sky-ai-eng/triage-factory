@@ -72,6 +72,7 @@ func TestShippedPromptSlugsStable(t *testing.T) {
 		"system-conflict-resolution":   true,
 		"system-ci-fix":                true,
 		"system-jira-implement":        true,
+		"system-linear-implement":      true,
 		"system-fix-review-feedback":   true,
 	}
 	for _, p := range Prompts() {
