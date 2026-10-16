@@ -156,18 +156,18 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 
 // minimalConfig builds a Config for tests with sensible defaults +
 // a unique ConversationID. Caller can mutate Argv to choose the payload.
-// uniqueConversationID is distinct per call where the container id keeps it.
-// The id carries only the first containerIDRunFragmentMax characters, so a
-// name-derived prefix gives every test the same container id, and with it the
-// same cgroup and runsc state.
+// uniqueConversationID is distinct per call. The container id keeps up to
+// containerIDRunFragmentMax characters of it, so a name-derived id shared by
+// every test would share a container id, a cgroup and runsc state. It is kept
+// short because the run's socket directory is named for it and a test's
+// temporary root is already most of a unix socket address.
 func uniqueConversationID(t *testing.T) string {
 	t.Helper()
-	const prefix = "it"
-	raw := make([]byte, containerIDRunFragmentMax)
+	raw := make([]byte, 6)
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatalf("conversation id: %v", err)
 	}
-	return prefix + hex.EncodeToString(raw)[:containerIDRunFragmentMax-len(prefix)]
+	return "it" + hex.EncodeToString(raw)
 }
 
 func minimalConfig(t *testing.T) Config {
