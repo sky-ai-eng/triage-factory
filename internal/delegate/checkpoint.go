@@ -423,10 +423,10 @@ func checkpointHooks(c *checkpointer, hooks agentloop.Hooks) agentloop.Hooks {
 // what waits for it and what does not.
 var checkpointCapture = captureSnapshot
 
-// thawTimeout bounds the resume after a checkpoint's capture. It is detached
+// thawTimeout bounds each attempt at the resume after a checkpoint's capture. It is detached
 // from the checkpoint's own context: a capture that timed out or was cancelled
 // is exactly the one that must still let the run go.
-const thawTimeout = 30 * time.Second
+var thawTimeout = 30 * time.Second
 
 // captureFrozen runs the capture with w's jail frozen, when it has one: pause,
 // capture, resume, and the resume happens on every path out, because a jail
@@ -443,16 +443,19 @@ func captureFrozen(ctx context.Context, w snapshotWrite, treeReleased func()) (*
 		return checkpointCapture(ctx, w)
 	}
 	thaw := func() {
-		tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), thawTimeout)
-		defer cancel()
-		err := w.freezer.Thaw(tctx)
-		if err != nil {
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			// Each attempt has its own deadline: one that ran out the first
+			// attempt's would leave the retry nothing to run in.
+			tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), thawTimeout)
 			err = w.freezer.Thaw(tctx)
+			cancel()
+			if err == nil {
+				return
+			}
 		}
-		if err != nil {
-			delegateLog.Error("could not resume the run's jail after a checkpoint; the run stays frozen until it is stopped",
-				"conversation", w.conversationID, "error", err)
-		}
+		delegateLog.Error("could not resume the run's jail after a checkpoint; the run stays frozen until it is stopped",
+			"conversation", w.conversationID, "error", err)
 	}
 	if err := w.freezer.Freeze(ctx); err != nil {
 		thaw()

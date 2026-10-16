@@ -1101,6 +1101,10 @@ type fakeFreezer struct {
 	events    []string
 	freezeErr error
 	thawErrs  int
+	// thawHangs makes the first Thaw wait out its context before failing.
+	thawHangs bool
+	// lastThawErr is what the most recent Thaw returned.
+	lastThawErr error
 }
 
 func (f *fakeFreezer) note(e string) {
@@ -1110,15 +1114,31 @@ func (f *fakeFreezer) note(e string) {
 }
 
 func (f *fakeFreezer) Freeze(context.Context) error { f.note("freeze"); return f.freezeErr }
-func (f *fakeFreezer) Thaw(context.Context) error {
+func (f *fakeFreezer) Thaw(ctx context.Context) error {
 	f.note("thaw")
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.thawErrs > 0 {
-		f.thawErrs--
-		return errors.New("resume refused")
+	hang := f.thawHangs
+	f.thawHangs = false
+	f.mu.Unlock()
+	var err error
+	switch {
+	case hang:
+		<-ctx.Done()
+		err = ctx.Err()
+	case ctx.Err() != nil:
+		err = ctx.Err()
+	default:
+		f.mu.Lock()
+		if f.thawErrs > 0 {
+			f.thawErrs--
+			err = errors.New("resume refused")
+		}
+		f.mu.Unlock()
 	}
-	return nil
+	f.mu.Lock()
+	f.lastThawErr = err
+	f.mu.Unlock()
+	return err
 }
 func (f *fakeFreezer) log() []string {
 	f.mu.Lock()
@@ -1212,5 +1232,30 @@ func TestCheckpoint_ThawIsRetriedOnce(t *testing.T) {
 	c.wg.Wait()
 	if got := strings.Join(fr.log(), ","); got != "freeze,thaw,thaw" {
 		t.Errorf("order = %s, want the thaw retried once", got)
+	}
+}
+
+// TestCheckpoint_ThawRetryHasItsOwnDeadline: a first resume that runs out its
+// whole timeout does not take the retry's time with it.
+func TestCheckpoint_ThawRetryHasItsOwnDeadline(t *testing.T) {
+	old := thawTimeout
+	thawTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { thawTimeout = old })
+
+	f := newCheckpointFixture(t, "r-ckpt-thaw-deadline")
+	fr := &fakeFreezer{thawHangs: true}
+	c := f.start()
+	defer c.stop()
+	c.freezeWith(fr)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+	if got := strings.Join(fr.log(), ","); got != "freeze,thaw,thaw" {
+		t.Fatalf("order = %s, want the thaw retried", got)
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.lastThawErr != nil {
+		t.Errorf("the retry failed: %v", fr.lastThawErr)
 	}
 }
