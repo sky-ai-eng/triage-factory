@@ -69,6 +69,7 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 		man.Checkouts = append(man.Checkouts, worktree.CheckoutCapture{Rel: rel, Delta: delta, HasBundle: hasBundle, HasPatch: hasPatch})
 	}
 
+	scratchFiles := 0
 	digest, omitted, unreadable, err := worktree.ScratchDigest(ctx, root, func(rel, path string, fi os.FileInfo) error {
 		name := worktree.CaptureScratchPrefix + rel
 		if len(name) > sandbox.CaptureMemberNameMax || strings.ContainsRune(name, 0) {
@@ -91,12 +92,16 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 			_ = m.Close()
 			return fmt.Errorf("copy scratch %s: %w", rel, err)
 		}
-		return m.Close()
+		if err := m.Close(); err != nil {
+			return err
+		}
+		scratchFiles++
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("walk scratch: %w", err)
 	}
-	man.ScratchDigest, man.CILogsOmitted, man.Unreadable = digest, omitted, unreadable
+	man.ScratchDigest, man.ScratchFiles, man.CILogsOmitted, man.Unreadable = digest, scratchFiles, omitted, unreadable
 
 	if err := sw.Close(); err != nil {
 		return fmt.Errorf("flush capture stream: %w", err)

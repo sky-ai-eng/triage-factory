@@ -523,7 +523,12 @@ type capturedSnapshot struct {
 type capturedScratch struct {
 	// root is a directory shaped like a run tree whose _tfac holds the copy.
 	root string
-	// digest is the jail's digest of the scratch (worktree.ScratchDigest).
+	// digest is the jail's digest of the scratch (worktree.ScratchDigest). It is
+	// taken as the jail gave it and used only to tell whether the scratch moved
+	// between checkpoints. A capture that reported a constant would make every
+	// checkpoint look unchanged and skip, which costs the agent its own
+	// durability and nothing else: what a checkpoint stores is the copy this
+	// process holds, never the digest.
 	digest        string
 	ciLogsOmitted bool
 	unreadable    []string

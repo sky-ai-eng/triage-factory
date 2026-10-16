@@ -92,7 +92,7 @@ func captureTreeInJail(ctx context.Context, w snapshotWrite, captured *capturedS
 	if err := json.Unmarshal(raw, &man); err != nil {
 		return fmt.Errorf("decode capture manifest: %w", err)
 	}
-	if err := checkCaptureManifest(man, rels); err != nil {
+	if err := checkCaptureManifest(ctx, man, rels); err != nil {
 		return err
 	}
 
@@ -116,7 +116,7 @@ func captureTreeInJail(ctx context.Context, w snapshotWrite, captured *capturedS
 // checkCaptureManifest requires the manifest to answer exactly the question
 // asked: one entry per requested checkout, in order, each saying only what the
 // stream can then be held to.
-func checkCaptureManifest(man worktree.CaptureManifest, rels []string) error {
+func checkCaptureManifest(ctx context.Context, man worktree.CaptureManifest, rels []string) error {
 	if len(man.Checkouts) != len(rels) {
 		return fmt.Errorf("capture manifest names %d checkouts, asked for %d", len(man.Checkouts), len(rels))
 	}
@@ -129,6 +129,15 @@ func checkCaptureManifest(man worktree.CaptureManifest, rels []string) error {
 		}
 		if cc.Delta != nil && (len(cc.Delta.Bundle) != 0 || len(cc.Delta.Patch) != 0) {
 			return fmt.Errorf("capture manifest carries buffered members for %s", cc.Rel)
+		}
+		// The delta is stored and restored later, possibly on another executor,
+		// where a malformed HEAD or branch name fails the restore of work the
+		// snapshot had already replaced the last good one with. It is held to
+		// the rule the restore applies, here.
+		if cc.Delta != nil {
+			if err := worktree.ValidateCapturedDelta(ctx, cc.Delta); err != nil {
+				return fmt.Errorf("capture manifest for %s: %w", cc.Rel, err)
+			}
 		}
 	}
 	return nil
@@ -210,6 +219,9 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 			}
 			target[want.i] = dest
 		}
+	}
+	if scratchFiles != man.ScratchFiles {
+		return unpackedCapture{}, fmt.Errorf("capture stream carries %d scratch files, the manifest announced %d", scratchFiles, man.ScratchFiles)
 	}
 	for i, cc := range man.Checkouts {
 		if cc.HasBundle && out.bundles[i] == "" || cc.HasPatch && out.patches[i] == "" {

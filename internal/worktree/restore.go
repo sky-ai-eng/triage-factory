@@ -442,6 +442,20 @@ func validateBranchName(ctx context.Context, branch string) error {
 	return nil
 }
 
+// ValidateCapturedDelta holds a captured delta's HEAD and branch to the rules a
+// restore applies to them, for a reader that cannot trust the capture that
+// produced it. An empty HEAD or branch is a state a checkout can be in (nothing
+// committed, a detached HEAD) and is not an error here.
+func ValidateCapturedDelta(ctx context.Context, d *GitDelta) error {
+	if d.Head != "" && !commitSHAPattern.MatchString(d.Head) {
+		return fmt.Errorf("captured HEAD %q is not an object id", d.Head)
+	}
+	if d.Branch != "" {
+		return validateBranchName(ctx, d.Branch)
+	}
+	return nil
+}
+
 // PRBranchKey returns the key a run-namespaced PR branch
 // (triagefactory/<key>/pr-<N>) is namespaced by, when branch is one for
 // prNumber. It names the per-run push config a linked checkout on that branch

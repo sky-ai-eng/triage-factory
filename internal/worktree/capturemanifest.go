@@ -18,6 +18,10 @@ type CaptureManifest struct {
 	// ScratchDigest is a digest of what the scratch walk saw (ScratchDigest),
 	// which is all a checkpoint needs of the scratch to tell whether it moved.
 	ScratchDigest string `json:"scratch_digest"`
+	// ScratchFiles is how many scratch members the stream carries. The stream
+	// ends where the file ends, so a stream cut at a member boundary reads as a
+	// complete one; the count is what the reader holds it to.
+	ScratchFiles int `json:"scratch_files"`
 	// CILogsOmitted is the walk's answer to whether a populated ci-logs
 	// subtree was left out.
 	CILogsOmitted bool `json:"ci_logs_omitted,omitempty"`

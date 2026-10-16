@@ -126,6 +126,15 @@ func TestRun_StreamsCheckoutAndScratch(t *testing.T) {
 			t.Errorf("a scratch entry that comes back by its own route was carried: %s", name)
 		}
 	}
+	carried := 0
+	for name := range members {
+		if strings.HasPrefix(name, worktree.CaptureScratchPrefix) {
+			carried++
+		}
+	}
+	if man.ScratchFiles != carried || carried == 0 {
+		t.Errorf("manifest announces %d scratch files, the stream carries %d", man.ScratchFiles, carried)
+	}
 	if !man.CILogsOmitted || man.ScratchDigest == "" {
 		t.Errorf("manifest = omitted %v digest %q, want ci-logs reported and a digest", man.CILogsOmitted, man.ScratchDigest)
 	}

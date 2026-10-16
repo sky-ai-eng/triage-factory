@@ -54,12 +54,15 @@ func jailWrite() snapshotWrite {
 	}
 }
 
+// goodHead is a well-formed commit id.
+const goodHead = "0123456789abcdef0123456789abcdef01234567"
+
 func goodManifest() worktree.CaptureManifest {
 	return worktree.CaptureManifest{
 		Checkouts: []worktree.CheckoutCapture{{
-			Rel: "acme/app/default", Delta: &worktree.GitDelta{Branch: "work", Head: "abc"}, HasBundle: true, HasPatch: true,
+			Rel: "acme/app/default", Delta: &worktree.GitDelta{Branch: "work", Head: goodHead}, HasBundle: true, HasPatch: true,
 		}},
-		ScratchDigest: "digest", CILogsOmitted: true,
+		ScratchDigest: "digest", ScratchFiles: 2, CILogsOmitted: true,
 	}
 }
 
@@ -88,7 +91,7 @@ func TestCaptureTreeInJail_UnpacksWhatTheJailStreamed(t *testing.T) {
 			t.Errorf("%s = %q, %v; want %q", path, got, err, want)
 		}
 	}
-	if st.Delta == nil || st.Delta.Head != "abc" {
+	if st.Delta == nil || st.Delta.Head != goodHead {
 		t.Errorf("delta = %+v", st.Delta)
 	}
 	sc := captured.scratch
@@ -137,6 +140,13 @@ func TestCaptureTreeInJail_RefusesWhatTheJailMayNotSay(t *testing.T) {
 		{"members announced for no git state", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta = nil }, nil, 0},
 		{"buffered members on the manifest", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta.Patch = []byte("x") }, nil, 0},
 		{"stream cut short", nil, nil, 3},
+		{"stream cut at a scratch member boundary", nil, func(m []streamMember) []streamMember { return m[:len(m)-1] }, 0},
+		{"manifest announces more scratch files", func(m *worktree.CaptureManifest) { m.ScratchFiles = 3 }, nil, 0},
+		{"manifest announces fewer scratch files", func(m *worktree.CaptureManifest) { m.ScratchFiles = 1 }, nil, 0},
+		{"HEAD that is not an object id", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta.Head = "abc" }, nil, 0},
+		{"HEAD that is an option", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta.Head = "--upload-pack=x" }, nil, 0},
+		{"branch that is an option", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta.Branch = "-fx" }, nil, 0},
+		{"branch git would not accept", func(m *worktree.CaptureManifest) { m.Checkouts[0].Delta.Branch = "a..b" }, nil, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
