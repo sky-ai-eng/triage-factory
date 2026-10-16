@@ -89,7 +89,7 @@ We never ask for a blanket `--privileged`:
 | Requirement | Why |
 | --- | --- |
 | `CAP_NET_ADMIN` | Per-run network namespace, veth pair, NAT (MASQUERADE), and the fail-closed egress allowlist (`internal/sandbox/netns_linux.go`, `iptables_linux.go`). |
-| `CAP_SYS_ADMIN` | Namespace/mount setup for the gVisor OCI container and the netns; memory-cgroup setup. |
+| `CAP_SYS_ADMIN` | Namespace/mount setup for the gVisor OCI container and the netns; memory-cgroup setup. Per-run memory ceilings need a private cgroup namespace (compose `cgroup: private`, which is also Docker's default on cgroup v2 hosts); outside one they are off, with a warning, and runs proceed without a ceiling. |
 | `seccomp=unconfined` | Docker's default syscall filter blocks operations gVisor needs to build the far stricter sandbox, so we use a tailored profile (§6). |
 | Private cgroup-v2 namespace | The per-run memory ceiling. |
 
@@ -411,7 +411,10 @@ to remain out of Kubernetes clusters entirely:
 
 - **Executors as dedicated VMs (or bare metal), outside the cluster.** They
   accept no inbound traffic and dial out to Postgres to claim work — exactly the
-  pattern used for GitHub Actions / GitLab / Buildkite runners.
+  pattern used for GitHub Actions / GitLab / Buildkite runners. Run the executor
+  in a container with a private cgroup namespace: an executor that runs directly
+  on the host has no private namespace, so it runs without per-run memory
+  ceilings and logs a warning.
 - **Control plane as ordinary, fully-unprivileged pods.** The API/websocket/polling
   tier is a normal web service that holds **no** sandbox capabilities: every
   sandboxed workload — delegated runs — runs on executors. The control

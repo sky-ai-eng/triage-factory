@@ -32,6 +32,7 @@ const sampleLimitMB = 512
 // non-decreasing, and it actually advances across the window.
 func TestIntegration_SampleRunCgroup_SeriesFromLiveJail(t *testing.T) {
 	requireRunsc(t)
+	requireRunCgroups(t)
 
 	cfg := minimalConfig(t)
 	cfg.MemoryLimitMB = sampleLimitMB
@@ -127,6 +128,7 @@ func TestIntegration_SampleRunCgroup_SeriesFromLiveJail(t *testing.T) {
 // finished run as an idle one.
 func TestIntegration_SampleRunCgroup_TornDownJailIsUnobserved(t *testing.T) {
 	requireRunsc(t)
+	requireRunCgroups(t)
 
 	cfg := minimalConfig(t)
 	cfg.MemoryLimitMB = sampleLimitMB

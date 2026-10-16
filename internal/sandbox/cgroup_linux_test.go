@@ -5,6 +5,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -141,4 +142,37 @@ func deref[T any](p *T) any {
 		return "absent"
 	}
 	return *p
+}
+
+func TestCheckPrivateCgroupNamespace(t *testing.T) {
+	const pid = 4242
+	tests := []struct {
+		name    string
+		nsIno   uint64
+		cgroup  string
+		procs   string
+		wantErr string
+	}{
+		{"initial namespace is refused", initialCgroupNamespaceIno, "0::/user.slice/x.scope\n", "4242\n", "host's cgroup namespace"},
+		{"private namespace, mount lists the pid", 4026532600, "0::/\n", "1\n4242\n", ""},
+		{"private namespace, process moved to init", 4026532600, "0::/init\n", "4242\n", ""},
+		{"private namespace, mount shows the host's view", 4026532600, "0::/\n", "1\n2\n3\n", "does not show"},
+		{"private namespace, empty procs", 4026532600, "0::/\n", "", "does not show"},
+		{"pid is matched whole", 4026532600, "0::/\n", "14242\n424\n", "does not show"},
+		{"cgroup v1 only", 4026532600, "12:memory:/x\n", "4242\n", "no cgroup v2 entry"},
+		{"group outside the namespace root", 4026532600, "0::/../../x\n", "4242\n", "outside the namespace root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkPrivateCgroupNamespace(tt.nsIno, []byte(tt.cgroup), []byte(tt.procs), pid)
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("refused: %v", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("allowed; want an error containing %q", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Fatalf("error %q does not contain %q", err, tt.wantErr)
+			}
+		})
+	}
 }

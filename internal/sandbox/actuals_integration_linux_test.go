@@ -31,6 +31,7 @@ const actualsLimitMB = 512
 // run's own ceiling.
 func TestIntegration_RunActuals_MeasuredFromCgroup(t *testing.T) {
 	requireRunsc(t)
+	requireRunCgroups(t)
 
 	cfg := minimalConfig(t)
 	cfg.MemoryLimitMB = actualsLimitMB
@@ -88,6 +89,7 @@ func TestIntegration_RunActuals_MeasuredFromCgroup(t *testing.T) {
 // cost is attributable rather than lost.
 func TestIntegration_RunActuals_CapturedOnKill(t *testing.T) {
 	requireRunsc(t)
+	requireRunCgroups(t)
 
 	cfg := minimalConfig(t)
 	cfg.MemoryLimitMB = actualsLimitMB

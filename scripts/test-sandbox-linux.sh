@@ -79,6 +79,19 @@ check_bin iptables "apt-get install -y iptables"
 check_bin go       "https://go.dev/dl/"
 check_bin curl     "apt-get install -y curl   # used by alpine rootfs cache download"
 check_bin chroot   "apt-get install -y coreutils   # rootfs toolchain build uses chroot+apk"
+check_bin unshare  "apt-get install -y util-linux   # private cgroup + mount namespace for the test stages"
+
+# systemd-run is a soft prereq: it supplies the delegated scope the private
+# cgroup namespace is made in. Without it the stages run in the host's cgroup
+# namespace, where the sandbox refuses to set up per-run memory cgroups, so
+# the tests that read one skip.
+cgroup_wrap=0
+if command -v systemd-run >/dev/null 2>&1; then
+  green "  ok    systemd-run  ($(command -v systemd-run))"
+  cgroup_wrap=1
+else
+  yellow "  MISS  systemd-run  — the stages run unwrapped; the cgroup tests will skip"
+fi
 
 if (( missing != 0 )); then
   red "Aborting — install the missing tools above and re-run."
@@ -98,6 +111,24 @@ if [[ "${EUID}" -ne 0 ]]; then
   yellow "Re-execing under sudo (need CAP_NET_ADMIN + CAP_SYS_ADMIN)"
   exec sudo -E "$0" "$@"
 fi
+
+# ---------- Private cgroup namespace ----------------------------------------
+# The sandbox sets up per-run memory cgroups only at the root of a cgroup
+# namespace it owns: setup moves every process in the root cgroup into an
+# init/ leaf and enables the memory controller there, which on the host's own
+# root would reorganize the host. So every stage that can start a jail runs in
+# its own delegated scope with a private cgroup and mount namespace, and a
+# fresh cgroup2 mount over /sys/fs/cgroup showing that namespace. The umount
+# is required: mount refuses to stack a second cgroup2 mount on the first.
+in_private_cgroupns() {
+  if (( cgroup_wrap )); then
+    systemd-run --scope --quiet --collect -p Delegate=yes -- \
+      unshare --cgroup --mount --propagation private -- \
+      sh -c 'umount -l /sys/fs/cgroup && mount -t cgroup2 cgroup2 /sys/fs/cgroup && exec "$@"' _ "$@"
+  else
+    "$@"
+  fi
+}
 
 # ---------- Sysctl ----------------------------------------------------------
 blue "Sysctl prep"
@@ -131,7 +162,7 @@ fi
 # ---------- Stage 1: unit tests (always-runnable) --------------------------
 blue "Stage 1: unit tests (./internal/sandbox)"
 unit_log="$LOG_DIR/unit.log"
-if go test -count=1 ./internal/sandbox/... > "$unit_log" 2>&1; then
+if in_private_cgroupns go test -count=1 ./internal/sandbox/... > "$unit_log" 2>&1; then
   green "  unit tests PASS"
 else
   red   "  unit tests FAIL — full log: $unit_log"
@@ -159,7 +190,7 @@ fi
 # ---------- Stage 3: agentproc tests (the sandbox-integration helpers) -----
 blue "Stage 3: agentproc package tests"
 ap_log="$LOG_DIR/agentproc.log"
-if go test -count=1 ./internal/agentproc/... > "$ap_log" 2>&1; then
+if in_private_cgroupns go test -count=1 ./internal/agentproc/... > "$ap_log" 2>&1; then
   green "  agentproc tests PASS"
 else
   red   "  agentproc tests FAIL — full log: $ap_log"
@@ -171,7 +202,7 @@ fi
 # ---------- Stage 4: integration suite (the meat) --------------------------
 blue "Stage 4: sandbox integration suite (busybox payloads, build tag 'integration')"
 integ_log="$LOG_DIR/integration.log"
-if go test -count=1 -v -tags integration ./internal/sandbox/... > "$integ_log" 2>&1; then
+if in_private_cgroupns go test -count=1 -v -tags integration ./internal/sandbox/... > "$integ_log" 2>&1; then
   green "  integration tests PASS"
 else
   red   "  integration tests FAIL — full log: $integ_log"
@@ -191,7 +222,7 @@ fi
 # TestIntegration_AgentHostIPC_RoundTrip.
 blue "Stage 4b: agenthost relocation integration (relocated exec-verb socket + relay)"
 reloc_log="$LOG_DIR/relocation.log"
-if go test -count=1 -v -tags integration -run TestIntegration_RelocatedAgentHost ./cmd/exec/agenthost/... > "$reloc_log" 2>&1; then
+if in_private_cgroupns go test -count=1 -v -tags integration -run TestIntegration_RelocatedAgentHost ./cmd/exec/agenthost/... > "$reloc_log" 2>&1; then
   green "  relocation integration PASS"
 else
   red   "  relocation integration FAIL — full log: $reloc_log"
@@ -216,7 +247,11 @@ for test in \
   TestIntegration_RootfsHasGit \
   TestIntegration_RootfsHasRipgrep \
   TestIntegration_RootfsHasPython \
-  TestIntegration_RootfsHasGo; do
+  TestIntegration_RootfsHasGo \
+  TestIntegration_RunActuals_MeasuredFromCgroup \
+  TestIntegration_RunActuals_CapturedOnKill \
+  TestIntegration_SampleRunCgroup_SeriesFromLiveJail \
+  TestIntegration_SampleRunCgroup_TornDownJailIsUnobserved; do
   if   grep -q -- "--- PASS: $test" "$integ_log" 2>/dev/null; then green  "  PASS  $test"
   elif grep -q -- "--- SKIP: $test" "$integ_log" 2>/dev/null; then yellow "  SKIP  $test"
   elif grep -q -- "--- FAIL: $test" "$integ_log" 2>/dev/null; then red    "  FAIL  $test"

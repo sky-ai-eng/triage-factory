@@ -117,6 +117,17 @@ func requireRunsc(t *testing.T) {
 	}
 }
 
+// requireRunCgroups skips a test whose assertions read a per-run cgroup when
+// this process cannot create them. Setup refuses outside a private cgroup
+// namespace, and a test that went on would fail on a ceiling that was never
+// applied.
+func requireRunCgroups(t *testing.T) {
+	t.Helper()
+	if err := setupRunCgroups(); err != nil {
+		t.Skipf("per-run cgroups need a private cgroup namespace (%v); run via scripts/test-sandbox-linux.sh", err)
+	}
+}
+
 // requireApk gates the rootfs-toolchain integration tests on a host
 // that can actually populate the cache (chroot + apk-add). Same
 // skip pattern as requireRunsc — the suite runs end-to-end on the
