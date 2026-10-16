@@ -436,6 +436,14 @@ func (s *Spawner) persistWorkspaceSnapshot(ctx context.Context, w snapshotWrite,
 		}
 	}()
 
+	// A tree whose jail could not be stopped is not read: a process of the run
+	// may still be writing it, and a capture of a moving tree is worse than
+	// the last checkpoint's. The record closes as failed, so a resume falls
+	// back to that checkpoint.
+	if !s.treeQuiet(w.wtPath) {
+		return fmt.Errorf("snapshot: the run's jail is still running; its tree is not read")
+	}
+
 	if w.adoptTree != nil {
 		if err = w.adoptTree(ctx); err != nil {
 			return fmt.Errorf("snapshot: hand the tree to this engagement's jail identity: %w", err)
@@ -2003,4 +2011,25 @@ func writeTarFile(tw *tar.Writer, name, path string, size int64) error {
 		return fmt.Errorf("tar copy %s: %w", name, err)
 	}
 	return nil
+}
+
+// treeNotQuiet records that the jail running in the tree at root could not be
+// stopped, with gone reporting whether it has since exited. The tree is not
+// captured while it has not.
+func (s *Spawner) treeNotQuiet(root string, gone func() bool) {
+	s.unquietTrees.Store(root, gone)
+}
+
+// treeQuiet reports whether nothing of the run can still be writing the tree at
+// root: true unless a jail that failed to stop there is still running.
+func (s *Spawner) treeQuiet(root string) bool {
+	v, ok := s.unquietTrees.Load(root)
+	if !ok {
+		return true
+	}
+	if v.(func() bool)() {
+		s.unquietTrees.Delete(root)
+		return true
+	}
+	return false
 }

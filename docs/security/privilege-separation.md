@@ -84,7 +84,8 @@ cannot launch, the snapshot fails.
 
 The tree also has to stand still while it is read. A conclusion stops the run's
 tool-host jail and waits until its runtime is reaped before taking the
-snapshot. A checkpoint pauses the jail (`runsc pause`), captures, and resumes;
+snapshot; a jail that does not stop within a bound leaves its tree uncaptured
+until it has exited, and the ending proceeds on the last checkpoint. A checkpoint pauses the jail (`runsc pause`), captures, and resumes;
 processes the agent backgrounded survive and cannot run during the capture. The
 resume happens on every path out, retried once, and the next tool call waits
 only for the resume, not for the archive. What that costs, and what a run

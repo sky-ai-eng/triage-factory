@@ -180,8 +180,8 @@ func (j *ToolHostJail) Stop() error {
 	}
 }
 
-// exited reports whether the jail's runtime has been reaped.
-func (j *ToolHostJail) exited() bool {
+// Exited reports whether the jail's runtime has been reaped.
+func (j *ToolHostJail) Exited() bool {
 	if j.waitDone == nil {
 		return true
 	}
@@ -200,7 +200,7 @@ func (j *ToolHostJail) exited() bool {
 // error, never a quiet success — a capture that went ahead on a jail it
 // believed frozen would read a moving tree and call it quiet.
 func (j *ToolHostJail) Freeze(ctx context.Context) error {
-	if j == nil || j.exited() {
+	if j == nil || j.Exited() {
 		return nil
 	}
 	f, ok := j.run.(sandbox.Freezer)
@@ -212,7 +212,7 @@ func (j *ToolHostJail) Freeze(ctx context.Context) error {
 
 // Thaw lets a frozen jail run again.
 func (j *ToolHostJail) Thaw(ctx context.Context) error {
-	if j == nil || j.exited() {
+	if j == nil || j.Exited() {
 		return nil
 	}
 	f, ok := j.run.(sandbox.Freezer)

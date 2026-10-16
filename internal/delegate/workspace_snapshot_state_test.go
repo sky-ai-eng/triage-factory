@@ -259,3 +259,33 @@ func readSnapshotBlob(t *testing.T, s *Spawner, keyID string) string {
 	}
 	return string(body)
 }
+
+// TestSnapshotWorkspace_UnstoppedJailTreeIsNotRead: an ending whose run's jail
+// would not stop does not capture the tree while that jail is running, and the
+// failure is durable. Once the jail has exited the same tree is captured.
+func TestSnapshotWorkspace_UnstoppedJailTreeIsNotRead(t *testing.T) {
+	paths.SetForTest(t, t.TempDir())
+	setupGitTestEnv(t)
+	s, database, conversationID, _ := setupAdvanceFixture(t, "snapstate-unquiet")
+	wireBlobStore(t, s)
+	wsKey := taskIDForConversation(t, database, conversationID)
+
+	wt := t.TempDir()
+	writeFile(t, filepath.Join(wt, "_tfac", "notes.txt"), "work in progress")
+
+	exited := false
+	s.treeNotQuiet(wt, func() bool { return exited })
+
+	const claimID = "claim-unquiet"
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, claimID, wt, "", domain.ConversationRuntimeNative); err == nil {
+		t.Fatal("a tree a running jail may be writing was captured")
+	}
+	assertSnapshotPresent(t, s, wsKey, false)
+	assertSnapshotState(t, s, wsKey, domain.WorkspaceSnapshotFailed, claimID)
+
+	exited = true
+	if err := s.snapshotWorkspace(context.Background(), runmode.LocalDefaultOrgID, conversationID, wsKey, "claim-after", wt, "", domain.ConversationRuntimeNative); err != nil {
+		t.Fatalf("snapshotWorkspace after the jail exited: %v", err)
+	}
+	assertSnapshotPresent(t, s, wsKey, true)
+}

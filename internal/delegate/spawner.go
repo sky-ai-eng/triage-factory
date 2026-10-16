@@ -438,6 +438,10 @@ type Spawner struct {
 	// DefaultSnapshotInterval; SetSnapshotInterval (TF_SNAPSHOT_INTERVAL_SEC)
 	// overrides it once at startup.
 	snapshotInterval time.Duration
+
+	// unquietTrees holds, by run-tree root, the jails that did not stop when an
+	// ending asked: a func reporting whether each has exited. See treeQuiet.
+	unquietTrees sync.Map
 	// checkpointSlots is the host-wide bound on checkpoints capturing at
 	// once, made on first use.
 	checkpointSlots chan struct{}

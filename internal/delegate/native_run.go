@@ -96,8 +96,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 	var jail *agentproc.ToolHostJail
 	stopJail := func() {
 		if err := jail.Stop(); err != nil {
-			delegateLog.Error("the run's tool host jail did not stop; a process of the run may still be writing its tree",
+			delegateLog.Error("the run's tool host jail did not stop; its tree is not captured while it runs",
 				"conversation", conversationID, "error", err)
+			s.treeNotQuiet(claudeCwd, jail.Exited)
 		}
 	}
 	launchFailed := func(err error) engagementDisposition {
@@ -287,7 +288,9 @@ func (s *Spawner) runNativeAgent(ctx context.Context, conversationID string, tas
 
 	// The loop is over, and every ending below may read the run's tree. The
 	// jail is stopped first, until its runtime is gone: a process the agent
-	// backgrounded would otherwise still be writing while the snapshot is taken.
+	// backgrounded would otherwise still be writing while the snapshot is taken. A
+	// jail that will not stop leaves its tree uncaptured until it has exited, and
+	// the ending proceeds on the last checkpoint.
 	_ = tools.Close()
 	stopJail()
 
