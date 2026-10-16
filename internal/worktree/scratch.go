@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // KnowledgeDir is the _tfac subdirectory a run's team knowledge is staged
@@ -51,9 +52,17 @@ var scratchExcludes = map[string]bool{
 // moment earlier. ctx is checked per entry.
 //
 // An entry this process may not read is skipped too, and named in unreadable
-// — a directory it cannot list, or a file a visit could not open. A snapshot
+// — a directory it cannot list, a file a visit could not open, or one the visit
+// declined with ErrScratchSkipped. A file removed after the walk saw it is
+// skipped without a mention: it is not in the tree any more. A snapshot
 // short of that file still carries the rest of the work; a walk that failed on
 // it would carry none.
+// ErrScratchSkipped is what a visit returns, wrapped, for an entry it cannot
+// carry (a path too long to name in the capture stream). The walk skips the
+// entry and lists it among the unreadable, so one such entry costs the
+// snapshot that file and nothing else.
+var ErrScratchSkipped = errors.New("scratch entry cannot be captured")
+
 func WalkScratch(ctx context.Context, wtPath string, visit func(rel, path string, fi os.FileInfo) error) (omittedCILogs bool, unreadable []string, err error) {
 	root := filepath.Join(wtPath, ScratchDir)
 	if info, err := os.Stat(root); err != nil || !info.IsDir() {
@@ -71,7 +80,7 @@ func WalkScratch(ctx context.Context, wtPath string, visit func(rel, path string
 			if errors.Is(walkErr, fs.ErrNotExist) {
 				return nil
 			}
-			if errors.Is(walkErr, fs.ErrPermission) {
+			if errors.Is(walkErr, fs.ErrPermission) || errors.Is(walkErr, syscall.ENAMETOOLONG) {
 				unreadable = append(unreadable, filepath.ToSlash(rel))
 				return nil
 			}
@@ -97,7 +106,10 @@ func WalkScratch(ctx context.Context, wtPath string, visit func(rel, path string
 			return nil // directories implied by their files; skip symlinks/etc.
 		}
 		err = visit(filepath.ToSlash(rel), path, fi)
-		if errors.Is(err, fs.ErrPermission) {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil // removed between the walk's stat and the visit's open
+		}
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, ErrScratchSkipped) {
 			unreadable = append(unreadable, filepath.ToSlash(rel))
 			return nil
 		}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
@@ -197,5 +198,35 @@ func TestRun_CleanCheckoutHasNoPatchMember(t *testing.T) {
 	}
 	if _, ok := members[worktree.CapturePatchMember("o/r/default")]; ok {
 		t.Error("a clean tree wrote a patch member")
+	}
+}
+
+// TestRun_ScratchPathTooLongForTheStreamIsSkipped: a path the agent made under
+// _tfac that cannot be named in the stream costs the snapshot that one file,
+// reported as unreadable, and not the capture.
+func TestRun_ScratchPathTooLongForTheStreamIsSkipped(t *testing.T) {
+	root := dirtyRoot(t)
+	dir := filepath.Join(root, worktree.ScratchDir)
+	for i := 0; i < 5; i++ {
+		dir = filepath.Join(dir, strings.Repeat(string(rune('a'+i)), 250))
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "deep.txt"), []byte("deep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	man, members := runCapture(t, root, "acme/app/default")
+
+	if got := members[worktree.CaptureScratchPrefix+"notes.txt"]; got != "scratch note" {
+		t.Errorf("the ordinary scratch file = %q, want it carried", got)
+	}
+	if len(man.Unreadable) != 1 || !strings.HasSuffix(man.Unreadable[0], "/deep.txt") {
+		t.Errorf("unreadable = %v, want the too-long path named", man.Unreadable)
+	}
+	for name := range members {
+		if strings.HasSuffix(name, "deep.txt") {
+			t.Errorf("the too-long path was carried as %q", name)
+		}
 	}
 }

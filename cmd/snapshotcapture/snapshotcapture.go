@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
@@ -69,23 +70,25 @@ func Run(ctx context.Context, root string, checkouts []string, stream io.Writer,
 	}
 
 	digest, omitted, unreadable, err := worktree.ScratchDigest(ctx, root, func(rel, path string, fi os.FileInfo) error {
+		name := worktree.CaptureScratchPrefix + rel
+		if len(name) > sandbox.CaptureMemberNameMax || strings.ContainsRune(name, 0) {
+			return fmt.Errorf("%w: name of %d bytes", worktree.ErrScratchSkipped, len(name))
+		}
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
 		defer func() { _ = f.Close() }()
-		m, err := sw.Member(worktree.CaptureScratchPrefix + rel)
+		m, err := sw.Member(name)
 		if err != nil {
 			return err
 		}
-		// Exactly the size the walk saw: a file that grew since is captured
-		// as it was at the stat, one that shrank is a short copy that fails
-		// the capture rather than a member padded with bytes it never held.
-		if n, err := io.Copy(m, io.LimitReader(f, fi.Size())); err != nil || n != fi.Size() {
+		// At most the size the walk saw: a file that grew since is captured as
+		// it was at the stat, and one that shrank is captured as far as it
+		// goes. The framing carries no size ahead of the bytes, so a member
+		// that ends early is a shorter file, never a torn stream.
+		if _, err := io.Copy(m, io.LimitReader(f, fi.Size())); err != nil {
 			_ = m.Close()
-			if err == nil {
-				err = io.ErrUnexpectedEOF
-			}
 			return fmt.Errorf("copy scratch %s: %w", rel, err)
 		}
 		return m.Close()
