@@ -235,7 +235,13 @@ func logCgroupFailOpenOnce(err error) {
 // (tfContainerIDRE) is built from it: the sweep delete-forces what it
 // matches, so a matcher looser than what this package can actually mint is
 // reach it has no use for.
-const containerIDRunFragmentMax = 11
+//
+// 36 is the length of a UUID, so a real conversation id is carried whole and
+// two runs never share a container id by sharing a prefix. The longest id this
+// allows, "tf-<36>-255-sc", is 46 characters, inside runsc's practical limit,
+// and its broker stdio socket path (/run/tf/<id>-sidecar-stdio.sock) is 73,
+// inside the 108 a unix socket address holds.
+const containerIDRunFragmentMax = 36
 
 // truncate cuts s to maxLen chars. Used for container IDs that
 // runsc imposes a 64-char practical limit on; we play it short.

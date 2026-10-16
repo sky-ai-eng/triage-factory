@@ -22,7 +22,9 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,6 +154,20 @@ func runToCompletion(t *testing.T, run LaunchedRun) ([]byte, error) {
 	return combined, readErr
 }
 
+// uniqueConversationID is distinct per call. The container id keeps up to
+// containerIDRunFragmentMax characters of it, so a name-derived id shared by
+// every test would share a container id, a cgroup and runsc state. It is kept
+// short because the run's socket directory is named for it and a test's
+// temporary root is already most of a unix socket address.
+func uniqueConversationID(t *testing.T) string {
+	t.Helper()
+	raw := make([]byte, 6)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatalf("conversation id: %v", err)
+	}
+	return "it" + hex.EncodeToString(raw)
+}
+
 // minimalConfig builds a Config for tests with sensible defaults +
 // a unique ConversationID. Caller can mutate Argv to choose the payload.
 func minimalConfig(t *testing.T) Config {
@@ -167,7 +183,7 @@ func minimalConfig(t *testing.T) Config {
 		t.Fatalf("chmod worktree: %v", err)
 	}
 	return Config{
-		ConversationID: "itest" + t.Name()[:min(len(t.Name()), 6)],
+		ConversationID: uniqueConversationID(t),
 		Worktree:       worktree,
 		Argv:           []string{"/bin/echo", "hello"},
 		Env: []string{
