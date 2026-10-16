@@ -519,7 +519,7 @@ type capturedSnapshot struct {
 
 // capturedScratch is the scratch a capture jail read and this process holds a
 // copy of. The archive tars the copy, never the tree: the tree is the agent's,
-// and nothing of it is read outside the jail.
+// and the capture reads none of it outside the jail.
 type capturedScratch struct {
 	// root is a directory shaped like a run tree whose _tfac holds the copy.
 	root string
