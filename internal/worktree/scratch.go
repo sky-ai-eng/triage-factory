@@ -40,6 +40,15 @@ var scratchExcludes = map[string]bool{
 	CILogsDir:       true,
 }
 
+// ScratchExcluded reports whether the scratch-relative path rel is under one of
+// the scratchExcludes, which a snapshot never carries. A reader of a capture
+// uses it to refuse such a member, since the walk that wrote the capture never
+// produces one.
+func ScratchExcluded(rel string) bool {
+	top, _, _ := strings.Cut(rel, "/")
+	return scratchExcludes[top]
+}
+
 // WalkScratch visits every regular file under wtPath/_tfac that a snapshot
 // carries, in lexical order, skipping the scratchExcludes subtrees — the one
 // definition of "the scratch a snapshot carries" that the archive and the
@@ -89,11 +98,7 @@ func WalkScratch(ctx context.Context, wtPath string, visit func(rel, path string
 		if rel == "." {
 			return nil
 		}
-		top := rel
-		if i := strings.IndexRune(rel, filepath.Separator); i >= 0 {
-			top = rel[:i]
-		}
-		if scratchExcludes[top] {
+		if ScratchExcluded(filepath.ToSlash(rel)) {
 			if fi.IsDir() {
 				if rel == CILogsDir && dirHasEntry(path) {
 					omittedCILogs = true

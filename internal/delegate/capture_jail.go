@@ -194,6 +194,13 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 			if !validScratchRel(rel) {
 				return unpackedCapture{}, fmt.Errorf("capture stream names a scratch member outside the scratch: %q", name)
 			}
+			// A subtree that comes back by its own route is never in a
+			// snapshot. One in the stream was not put there by the walk, and
+			// carrying ci-logs would also restore without the notice that
+			// says logs were left out.
+			if worktree.ScratchExcluded(rel) {
+				return unpackedCapture{}, fmt.Errorf("capture stream carries a scratch member from an excluded directory: %q", name)
+			}
 			if scratchFiles++; scratchFiles > maxScratchFiles {
 				return unpackedCapture{}, fmt.Errorf("capture stream carries more than %d scratch files", maxScratchFiles)
 			}

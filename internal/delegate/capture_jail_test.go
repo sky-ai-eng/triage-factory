@@ -126,6 +126,15 @@ func TestCaptureTreeInJail_RefusesWhatTheJailMayNotSay(t *testing.T) {
 		{"unclean scratch member", nil, func(m []streamMember) []streamMember {
 			return append(m, streamMember{worktree.CaptureScratchPrefix + "a/../b", "x"})
 		}, 0},
+		{"knowledge scratch member", nil, func(m []streamMember) []streamMember {
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.KnowledgeDir + "/team/k.md", "x"})
+		}, 0},
+		{"entity-memory scratch member", nil, func(m []streamMember) []streamMember {
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.EntityMemoryDir + "/e.md", "x"})
+		}, 0},
+		{"ci-logs scratch member", nil, func(m []streamMember) []streamMember {
+			return append(m, streamMember{worktree.CaptureScratchPrefix + worktree.CILogsDir + "/run1/log.txt", "x"})
+		}, 0},
 		{"scratch member named twice", nil, func(m []streamMember) []streamMember {
 			return append(m, streamMember{worktree.CaptureScratchPrefix + "notes.txt", "again"})
 		}, 0},
