@@ -154,15 +154,15 @@ func LaunchCaptureJail(ctx context.Context, p CaptureParams, stdout *os.File) (s
 		return "", err
 	}
 	defer closeFd(rootFD)
+	uid, gid, err := captureIdentity(p.Root, rootStat)
+	if err != nil {
+		return "", err
+	}
 	rootMount, unbind, err := bindPinnedRoot(rootFD)
 	if err != nil {
 		return "", err
 	}
 	defer unbind()
-	uid, gid, err := captureIdentity(p.Root, rootStat)
-	if err != nil {
-		return "", err
-	}
 	stream, err := openCaptureStaging(p.StagingDir)
 	if err != nil {
 		return "", err
