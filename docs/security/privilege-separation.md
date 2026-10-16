@@ -74,8 +74,12 @@ itself, and nothing else of any run is in view. Git runs there with
 `GIT_NO_LAZY_FETCH=1` and writes the objects a stage produces to a temporary
 directory on the jail's `/tmp`, so the tree is only ever read. The scratch walk
 runs in the same jail, so the orchestrator never reads a file the agent wrote;
-it unpacks the jail's stream under a bounded, validated framing into a staging
-directory it owns, and archives that copy. There is no host fallback: if the jail
+the output file is a host file, so the jail's memory limits do not bound it, and
+gVisor does not apply a file-size limit inside the jail to a host descriptor; the
+broker starts runsc under a file-size limit set to the stream's cap, and the unpacker returns
+the blocks of what it has read as it goes, so the stream and its unpacked copy
+are not on disk together. The orchestrator unpacks the stream under a bounded,
+validated framing into a staging directory it owns, and archives that copy. There is no host fallback: if the jail
 cannot launch, the snapshot fails.
 
 The tree also has to stand still while it is read. A conclusion stops the run's

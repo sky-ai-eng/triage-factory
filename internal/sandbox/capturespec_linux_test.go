@@ -3,6 +3,8 @@
 package sandbox
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -87,5 +89,28 @@ func TestNewCaptureContainerID_MatchesTheBootSweep(t *testing.T) {
 	}
 	if !tfContainerIDRE.MatchString(id) {
 		t.Errorf("capture container id %q would not be reaped by the boot sweep", id)
+	}
+}
+
+func TestNewRunscCaptureCommand_LimitsHostFileWrites(t *testing.T) {
+	cmd := newRunscCaptureCommand(context.Background(), "/b", "tf-cap1-0", nil)
+	want := []string{"prlimit", fmt.Sprintf("--fsize=%d", CaptureStreamMaxBytes), "--", "runsc"}
+	if len(cmd.Args) < len(want) || strings.Join(cmd.Args[:len(want)], "|") != strings.Join(want, "|") {
+		t.Errorf("args = %v, want to begin %v", cmd.Args, want)
+	}
+	joined := strings.Join(cmd.Args, " ")
+	for _, need := range []string{"--network=none", "--pass-fd 3:3"} {
+		if !strings.Contains(joined, need) {
+			t.Errorf("args %q lack %q", joined, need)
+		}
+	}
+}
+
+// TestCaptureStreamMaxBytes_LeavesRoomForTheSandbox: the stream cap is also the
+// file-size limit on runsc, whose memory file grows to the jail's working
+// memory, so a cap near the jail's memory ceiling would fail the jail itself.
+func TestCaptureStreamMaxBytes_LeavesRoomForTheSandbox(t *testing.T) {
+	if CaptureStreamMaxBytes < 2*int64(captureJailMemoryMB)<<20 {
+		t.Errorf("stream cap %d is under twice the jail's memory ceiling (%d MB)", CaptureStreamMaxBytes, captureJailMemoryMB)
 	}
 }

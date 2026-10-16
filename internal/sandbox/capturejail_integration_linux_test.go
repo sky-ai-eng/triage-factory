@@ -476,3 +476,59 @@ func TestIntegration_PauseResume_UnknownJailIsNothingToFreeze(t *testing.T) {
 		t.Errorf("ResumeRuntime of an unknown jail: %v", err)
 	}
 }
+
+// TestIntegration_CaptureJail_StreamWriteIsCapped: a capture that writes to its
+// output descriptor without end is stopped by the jail at the stream's cap, so
+// the host file never grows past it. The "capture" here is a shell script that
+// writes zeros to descriptor 3 forever.
+func TestIntegration_CaptureJail_StreamWriteIsCapped(t *testing.T) {
+	requireRunsc(t)
+	if os.Geteuid() != 0 {
+		t.Skip("a capture jail is launched with root's capabilities")
+	}
+	const idx = 13
+	uid := JailUID(idx)
+
+	script := filepath.Join(worldTempDir(t, "tf-flood-"), "flood")
+	writeFileT(t, script, "#!/bin/sh\nwhile :; do head -c 1048576 /dev/zero >&3 || exit 1; done\n")
+	if err := os.Chmod(script, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := captureBinaryPath
+	captureBinaryPath = func() (string, error) { return script, nil }
+	t.Cleanup(func() { captureBinaryPath = orig })
+
+	origMax := CaptureStreamMaxBytes
+	CaptureStreamMaxBytes = 1 << 30
+	t.Cleanup(func() { CaptureStreamMaxBytes = origMax })
+
+	root := worldTempDir(t, "tf-flood-tree-")
+	co := filepath.Join(root, "acme", "app", "default")
+	if err := os.MkdirAll(co, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	chownTree(t, root, uid)
+
+	staging := captureTestStaging(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, r); _ = r.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	start := time.Now()
+	tail, lerr := LaunchCaptureJail(ctx, CaptureParams{Root: root, Checkouts: []string{"acme/app/default"}, StagingDir: staging}, w)
+	info, err := os.Stat(filepath.Join(staging, CaptureStreamFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("capture jail ended with %v (stderr %q)", lerr, tail)
+	t.Logf("the flood ended after %v with the stream at %d bytes (cap %d)", time.Since(start).Round(time.Millisecond), info.Size(), CaptureStreamMaxBytes)
+	if info.Size() > CaptureStreamMaxBytes {
+		t.Errorf("the stream file grew to %d bytes, past its cap %d", info.Size(), CaptureStreamMaxBytes)
+	}
+	if info.Size() == 0 {
+		t.Error("the flood wrote nothing; the test would pass whatever the limit does")
+	}
+}

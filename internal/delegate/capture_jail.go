@@ -144,7 +144,7 @@ type unpackedCapture struct {
 // go, one the manifest did not announce, or a stream cut short is a failed
 // capture, never a partial one.
 func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.CaptureManifest) (unpackedCapture, error) {
-	f, err := os.Open(streamPath)
+	f, err := os.OpenFile(streamPath, os.O_RDWR, 0)
 	if err != nil {
 		return unpackedCapture{}, fmt.Errorf("open capture stream: %w", err)
 	}
@@ -170,7 +170,7 @@ func unpackCaptureStream(streamPath, stagingDir, treeDir string, man worktree.Ca
 	}
 	out := unpackedCapture{bundles: map[int]string{}, patches: map[int]string{}}
 	scratchFiles := 0
-	sr := sandbox.NewCaptureStreamReader(f)
+	sr := sandbox.NewCaptureStreamReader(newPunchingReader(f))
 	for {
 		name, body, err := sr.Next()
 		if errors.Is(err, io.EOF) {

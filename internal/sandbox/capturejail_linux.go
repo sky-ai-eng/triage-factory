@@ -86,12 +86,17 @@ func buildCaptureSpec(p CaptureParams, uid, gid int, tfBinary string) (*specs.Sp
 // static build of the same capture body; production never reassigns it.
 var captureBinaryPath = TrustedTFBinaryPath
 
-// newRunscCaptureCommand is the runsc invocation of the capture jail:
-// --network=none, so the sandbox has a loopback and nothing else, no
+// newRunscCaptureCommand is the runsc invocation of the capture jail, run
+// under prlimit so that runsc and everything it starts may write no file past
+// the stream's cap. The stream is a host file passed in as a descriptor, so
+// neither the jail's tmpfs and cgroup limits nor a file-size limit inside the
+// jail bound it (gVisor does not apply the latter to a host descriptor); the
+// limit on the process that does the host write does. prlimit execs runsc, so
+// the process the supervisor signals is runsc itself. --network=none, so the sandbox has a loopback and nothing else, no
 // --host-uds, so it can reach no host socket, and the capture's one output
 // passed in as descriptor CaptureStreamFD.
 func newRunscCaptureCommand(ctx context.Context, bundleDir, containerID string, stream *os.File) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "runsc",
+	cmd := exec.CommandContext(ctx, "prlimit", fmt.Sprintf("--fsize=%d", CaptureStreamMaxBytes), "--", "runsc",
 		"--platform=systrap",
 		"--ignore-cgroups",
 		"--network=none",

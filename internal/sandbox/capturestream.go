@@ -28,8 +28,11 @@ const (
 // CaptureStreamMaxBytes bounds everything a capture's stream may carry. The
 // jail is TF's own code run over files the agent wrote, and its output is read
 // as hostile all the same: without a bound a capture that went wrong could fill
-// the executor's disk. A var so tests can shrink it.
-var CaptureStreamMaxBytes int64 = 32 << 30
+// the executor's disk. It is enforced twice: runsc's file-size limit stops the
+// writer at it, and the reader refuses a stream past it. A var so tests can
+// shrink it, though not below what the sandbox itself needs: runsc's memory
+// file grows to the jail's working memory under the same limit.
+var CaptureStreamMaxBytes int64 = 8 << 30
 
 // CaptureStreamWriter frames named members onto w. A member is its name, then
 // its bytes in length-prefixed chunks, then a zero-length chunk. The framing
