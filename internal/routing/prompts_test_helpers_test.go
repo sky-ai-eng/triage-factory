@@ -195,6 +195,7 @@ func seedHandlerFKTargets(t *testing.T, database *sql.DB) map[string]string {
 		{"system-conflict-resolution", "Conflicts"},
 		{"system-ci-fix", "CI Fix"},
 		{"system-jira-implement", "Jira Implement"},
+		{"system-linear-implement", "Linear Implement"},
 		{"system-fix-review-feedback", "Fix Review"},
 	}
 	out := map[string]string{}

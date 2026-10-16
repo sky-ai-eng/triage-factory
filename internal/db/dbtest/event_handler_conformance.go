@@ -176,6 +176,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 			"system-conflict-resolution",
 			"system-ci-fix",
 			"system-jira-implement",
+			"system-linear-implement",
 			"system-fix-review-feedback",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
@@ -206,7 +207,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		store, orgID, teamID, seedBlueprints, _ := factory(t)
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-fix-review-feedback",
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
 		)
 		if err := store.Seed(context.Background(), orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed #1: %v", err)
@@ -821,7 +822,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ctx := context.Background()
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-fix-review-feedback",
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)
@@ -878,7 +879,7 @@ func RunEventHandlerStoreConformance(t *testing.T, factory EventHandlerStoreFact
 		ctx := context.Background()
 		ids := seedBlueprints(t,
 			"system-pr-review", "system-conflict-resolution", "system-ci-fix",
-			"system-jira-implement", "system-fix-review-feedback",
+			"system-jira-implement", "system-linear-implement", "system-fix-review-feedback",
 		)
 		if err := store.Seed(ctx, orgID, teamID, ids); err != nil {
 			t.Fatalf("Seed: %v", err)

@@ -14,6 +14,14 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Lint under the Go release go.mod names, which is the one CI's setup-go
+# installs. gofmt's output differs between Go releases, so a newer local Go
+# would flag files CI accepts; with GOTOOLCHAIN set, the go command downloads
+# and runs that release when it isn't the one installed. goimports and
+# golangci-lint format with the gofmt of the Go that built them, so they need
+# building with the same release.
+export GOTOOLCHAIN="go$(sed -n 's/^go //p' go.mod)"
+
 FIX=0
 if [[ "${1:-}" == "--fix" ]]; then
   FIX=1
