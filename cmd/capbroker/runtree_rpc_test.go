@@ -14,15 +14,14 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
-// withStubCaptureRunDeltaTo replaces the broker's real (uid-drop, netns)
-// capture with a stand-in that writes directly to the caller-supplied
-// *os.File — exercising the RPC/socket-passthrough wiring without needing
-// root.
-func withStubCaptureRunDeltaTo(t *testing.T, fn func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error)) {
+// withStubCaptureJail replaces the broker's real capture jail with a stand-in
+// that writes directly to the caller-supplied *os.File — exercising the
+// RPC/socket-passthrough wiring without needing root or gVisor.
+func withStubCaptureJail(t *testing.T, fn func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error)) {
 	t.Helper()
-	orig := captureRunDeltaTo
-	captureRunDeltaTo = fn
-	t.Cleanup(func() { captureRunDeltaTo = orig })
+	orig := captureJail
+	captureJail = fn
+	t.Cleanup(func() { captureJail = orig })
 }
 
 // withTempCaptureSocketDir redirects the per-capture stdout socket
@@ -149,79 +148,81 @@ func TestIPCRoundTrip_RemoveRunTree(t *testing.T) {
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_StreamsManifestByteIdentical pins the
+// TestIPCRoundTrip_CaptureRunTree_StreamsManifestByteIdentical pins the
 // socket control channel and the additive staging-dir argument together.
-func TestIPCRoundTrip_CaptureRunDelta_StreamsManifestByteIdentical(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_StreamsManifestByteIdentical(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	manifest := []byte(`{"delta":null,"session_id":"sess"}`)
-	var gotWorktree, gotStaging, gotSession string
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
-		gotWorktree, gotStaging, gotSession = worktree, stagingDir, sessionID
+	manifest := []byte(`{"checkouts":[]}`)
+	var gotWorktree, gotStaging string
+	var gotCheckouts []string
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
+		gotWorktree, gotStaging = p.Root, p.StagingDir
+		gotCheckouts = p.Checkouts
 		_, err := stdout.Write(manifest)
 		_ = stdout.Close()
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-5", "/tmp/capture-stage-5", "sess")
+	delta, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-5", StagingDir: "/tmp/capture-stage-5", Checkouts: []string{"acme/repo/default"}})
 	if err != nil {
-		t.Fatalf("CaptureRunDelta: %v", err)
+		t.Fatalf("CaptureRunTree: %v", err)
 	}
 	if gotWorktree != "/tmp/tf-runs/run-5" {
 		t.Errorf("broker saw worktree %q", gotWorktree)
 	}
-	if gotStaging != "/tmp/capture-stage-5" || gotSession != "sess" {
-		t.Errorf("broker saw staging=%q session=%q", gotStaging, gotSession)
+	if gotStaging != "/tmp/capture-stage-5" || len(gotCheckouts) != 1 || gotCheckouts[0] != "acme/repo/default" {
+		t.Errorf("broker saw staging=%q checkouts=%v", gotStaging, gotCheckouts)
 	}
 	if !bytes.Equal(delta, manifest) {
 		t.Errorf("manifest not preserved byte-identical: got %v, want %v", delta, manifest)
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta pins the "not a git
+// TestIPCRoundTrip_CaptureRunTree_EmptyMeansNoDelta pins the "not a git
 // worktree" shape: a capture that writes nothing arrives as empty bytes,
 // not an error — the caller's null-delta handling depends on it.
-func TestIPCRoundTrip_CaptureRunDelta_EmptyMeansNoDelta(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_EmptyMeansNoDelta(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", nil
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	delta, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-4", "/tmp/capture-stage-4", "")
+	delta, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-4", StagingDir: "/tmp/capture-stage-4"})
 	if err != nil {
-		t.Fatalf("CaptureRunDelta: %v", err)
+		t.Fatalf("CaptureRunTree: %v", err)
 	}
 	if len(delta) != 0 {
 		t.Errorf("delta = %d bytes, want empty", len(delta))
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly pins the loss
+// TestIPCRoundTrip_CaptureRunTree_OverCapFailsCleanly pins the loss
 // contract: a stream exceeding sandbox.CaptureManifestMaxBytes fails the capture
 // cleanly (the park degrades to snapshot-less) instead of buffering
 // arbitrarily. Shrinks the cap so the test doesn't need to push real
 // hundreds of MiB to exercise it.
-func TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_OverCapFailsCleanly(t *testing.T) {
 	withTempCaptureSocketDir(t)
 	origCap := sandbox.CaptureManifestMaxBytes
 	sandbox.CaptureManifestMaxBytes = 1024
 	t.Cleanup(func() { sandbox.CaptureManifestMaxBytes = origCap })
 
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
 		defer stdout.Close()
 		_, err := stdout.Write(bytes.Repeat([]byte{0x01}, 4096)) // well past the shrunk cap
 		return "", err
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-cap", "/tmp/capture-stage-cap", ""); err == nil {
+	if _, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-cap", StagingDir: "/tmp/capture-stage-cap"}); err == nil {
 		t.Fatal("expected an over-cap error, got nil")
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess pins the
+// TestIPCRoundTrip_CaptureRunTree_WaitsForStreamAfterRPCSuccess pins the
 // both-signals-required ordering: a successful RPC response alone must not
 // be enough to return bytes — the client also has to see the stream's EOF.
 // Shrinks captureTimeout so the test doesn't wait the full 5-minute
@@ -229,7 +230,7 @@ func TestIPCRoundTrip_CaptureRunDelta_OverCapFailsCleanly(t *testing.T) {
 // stdout open (via a goroutine gated on release) past that shrunk budget,
 // so a client that returned on RPC success alone would return well under
 // captureTimeout — this asserts on elapsed time to catch that.
-func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_WaitsForStreamAfterRPCSuccess(t *testing.T) {
 	withTempCaptureSocketDir(t)
 	origTimeout := captureTimeout
 	captureTimeout = 200 * time.Millisecond
@@ -237,7 +238,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
 		go func() {
 			<-release
 			_ = stdout.Close()
@@ -247,7 +248,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 	client := serveTestBroker(t, &fakeOps{})
 
 	start := time.Now()
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-wait", "/tmp/capture-stage-wait", "")
+	_, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-wait", StagingDir: "/tmp/capture-stage-wait"})
 	if err == nil {
 		t.Fatal("expected a timeout waiting for the stream after RPC success, got nil")
 	}
@@ -256,7 +257,7 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure pins
+// TestIPCRoundTrip_CaptureRunTree_ClosesStreamPromptlyOnRPCFailure pins
 // that an RPC failure closes an already-accepted stream connection right
 // away rather than leaving it to read (and buffer, toward
 // sandbox.CaptureManifestMaxBytes) a result nobody will use. The stub never closes
@@ -266,11 +267,11 @@ func TestIPCRoundTrip_CaptureRunDelta_WaitsForStreamAfterRPCSuccess(t *testing.T
 // captureTimeout (unmodified from production) with a much shorter assertion
 // window proves this happens promptly, not merely "eventually, on its own
 // timeout".
-func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_ClosesStreamPromptlyOnRPCFailure(t *testing.T) {
 	withTempCaptureSocketDir(t)
 
 	peerClosed := make(chan struct{})
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
 		t.Cleanup(func() { _ = stdout.Close() })
 		go func() {
 			buf := make([]byte, 16)
@@ -281,7 +282,7 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	if _, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-fail", "/tmp/capture-stage-fail", ""); err == nil {
+	if _, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-fail", StagingDir: "/tmp/capture-stage-fail"}); err == nil {
 		t.Fatal("expected the simulated RPC failure to propagate")
 	}
 
@@ -292,18 +293,18 @@ func TestIPCRoundTrip_CaptureRunDelta_ClosesStreamPromptlyOnRPCFailure(t *testin
 	}
 }
 
-// TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix pins that a
+// TestIPCRoundTrip_CaptureRunTree_ErrorHasNoEmptyStderrSuffix pins that a
 // capture failure with no stderr output doesn't surface an error string
 // with an always-appended, now-empty "(stderr: )" suffix.
-func TestIPCRoundTrip_CaptureRunDelta_ErrorHasNoEmptyStderrSuffix(t *testing.T) {
+func TestIPCRoundTrip_CaptureRunTree_ErrorHasNoEmptyStderrSuffix(t *testing.T) {
 	withTempCaptureSocketDir(t)
-	withStubCaptureRunDeltaTo(t, func(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (string, error) {
+	withStubCaptureJail(t, func(ctx context.Context, p sandbox.CaptureParams, stdout *os.File) (string, error) {
 		_ = stdout.Close()
 		return "", errors.New("simulated capture failure")
 	})
 	client := serveTestBroker(t, &fakeOps{})
 
-	_, err := client.CaptureRunDelta(context.Background(), "/tmp/tf-runs/run-errfmt", "/tmp/capture-stage-errfmt", "")
+	_, err := client.CaptureRunTree(context.Background(), sandbox.CaptureParams{Root: "/tmp/tf-runs/run-errfmt", StagingDir: "/tmp/capture-stage-errfmt"})
 	if err == nil {
 		t.Fatal("expected the simulated failure to propagate")
 	}

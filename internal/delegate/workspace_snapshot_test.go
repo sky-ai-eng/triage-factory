@@ -862,19 +862,24 @@ func TestEnsureWorkspace_TruncatedZstdErrors(t *testing.T) {
 	}
 }
 
-// TestWriteSnapshotTar_StreamsStagedCaptureMembers: members the capture child
-// staged on disk are streamed into the tar under the checkout's member names.
+// TestWriteSnapshotTar_StreamsStagedCaptureMembers: members a capture staged on
+// disk are streamed into the tar under the checkout's member names, and the
+// scratch is read off the capture's own copy, not off the tree.
 func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 	staging := t.TempDir()
-	bundlePath := filepath.Join(staging, worktree.CaptureBundleFile)
-	patchPath := filepath.Join(staging, worktree.CapturePatchFile)
-	transcriptPath := filepath.Join(staging, worktree.CaptureTranscriptFile)
+	bundlePath := filepath.Join(staging, "co0.bundle")
+	patchPath := filepath.Join(staging, "co0.patch")
 	writeFile(t, bundlePath, "bundle-bytes")
 	writeFile(t, patchPath, "patch-bytes")
-	writeFile(t, transcriptPath, "transcript-bytes")
+	copyRoot := filepath.Join(staging, "tree")
+	writeFile(t, filepath.Join(copyRoot, worktree.ScratchDir, "notes.txt"), "copied scratch")
+	// The tree the capture was taken from has different scratch, and a snapshot
+	// of the capture must not read it.
+	tree := t.TempDir()
+	writeFile(t, filepath.Join(tree, worktree.ScratchDir, "notes.txt"), "live scratch")
 
 	captured := &capturedSnapshot{
-		state: worktree.CapturedState{SessionID: "sess-staged", TranscriptPath: transcriptPath},
+		scratch: &capturedScratch{root: copyRoot, digest: "d"},
 		checkouts: []capturedCheckout{{
 			snapshotCheckout: snapshotCheckout{repoID: "acme/app", slug: "pr-7", rel: "acme/app/pr-7"},
 			state: worktree.CapturedState{
@@ -884,13 +889,13 @@ func TestWriteSnapshotTar_StreamsStagedCaptureMembers(t *testing.T) {
 		}},
 	}
 	var blob bytes.Buffer
-	if err := writeSnapshotTar(context.Background(), &blob, captured, t.TempDir(), snapshotManifest{}); err != nil {
+	if err := writeSnapshotTar(context.Background(), &blob, captured, tree, snapshotManifest{}); err != nil {
 		t.Fatalf("writeSnapshotTar: %v", err)
 	}
 	want := map[string]string{
 		snapCheckoutsPrefix + "acme/app/pr-7/bundle": "bundle-bytes",
 		snapCheckoutsPrefix + "acme/app/pr-7/patch":  "patch-bytes",
-		snapSession: "transcript-bytes",
+		snapScratchPrefix + "notes.txt":              "copied scratch",
 	}
 	tr := tar.NewReader(&blob)
 	for {

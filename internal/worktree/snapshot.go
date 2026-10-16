@@ -17,9 +17,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
-	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 )
 
 // GitDelta is the non-recoverable git state of one checkout at a dormancy
@@ -60,37 +57,27 @@ type GitDelta struct {
 	Patch []byte
 }
 
-// CapturedState is the manifest one snapshot-capture pass emits from inside the
-// agent-uid child. The large members are written into fixed files in a staging
-// directory prepared by the orchestrator; only their paths and the small git
-// metadata cross the JSON control channel. The byte fields remain the local-mode
-// representation, where capture is in-process and has no cross-uid/base64 hop.
+// CapturedState is one capture's result: a checkout's git delta, or the
+// session transcript the local, in-process capture reads. In multi mode the
+// delta's large members are staged on disk by the orchestrator, from the
+// capture jail's stream, and named by BundlePath and PatchPath; the byte
+// fields are the local-mode representation, where capture is in-process and
+// has no jail to cross.
 type CapturedState struct {
-	Delta          *GitDelta `json:"delta"`
-	SessionID      string    `json:"session_id,omitempty"`
-	BundlePath     string    `json:"bundle_path,omitempty"`
-	PatchPath      string    `json:"patch_path,omitempty"`
-	TranscriptPath string    `json:"transcript_path,omitempty"`
-	Transcript     []byte    `json:"transcript,omitempty"`
+	Delta      *GitDelta
+	SessionID  string
+	BundlePath string
+	PatchPath  string
+	Transcript []byte
 }
-
-// Capture staging member names are fixed at both ends of the cross-uid handoff.
-// The parent pre-creates exactly these files, and validates that the child
-// manifest points back to them before opening anything.
-const (
-	CaptureBundleFile     = sandbox.CaptureBundleFile
-	CapturePatchFile      = sandbox.CapturePatchFile
-	CaptureTranscriptFile = sandbox.CaptureTranscriptFile
-)
 
 // ReadClaudeSessionTranscript reads the Claude session transcript for sessionID
 // under wtPath's project encoding, returning (bytes, true) on success and
 // (nil, false) when there is no session id or the file is absent/unreadable.
-// This is the LOCAL / in-process reader (local + all modes): the transcript
-// lives under the operator's own ~/.claude and the reader shares the agent's
-// uid, so there is no cross-uid boundary. The sandboxed capture child uses
-// ReadSandboxSessionTranscript instead — it must not depend on this process's
-// runmode to find the file, and it must confine the read.
+// The transcript lives under the operator's own ~/.claude and the reader shares
+// the agent's uid, so there is no cross-uid boundary. Only the local SDK
+// runtime has a session transcript to carry; a native conversation's lives in
+// the database.
 func ReadClaudeSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
 	if sessionID == "" {
 		return nil, false
@@ -104,72 +91,6 @@ func ReadClaudeSessionTranscript(wtPath, sessionID string) ([]byte, bool) {
 		return nil, false
 	}
 	return data, true
-}
-
-// ReadSandboxSessionTranscript reads a SANDBOXED run's Claude session transcript
-// from under runRoot, for use in the snapshot-capture child. It differs from
-// ReadClaudeSessionTranscript in two load-bearing ways:
-//
-//   - It does NOT consult this process's runmode. The capture child is spawned
-//     with a deliberately minimal env (no TF_MODE, HOME=/nonexistent), so the
-//     mode-aware path would resolve as local mode and look under /nonexistent/
-//     .claude — where a sandboxed run's transcript never is. A sandboxed agent's
-//     HOME is the bind-mounted run root and its cwd is the sandbox work root, so
-//     the transcript is always at <runRoot>/.claude/projects/<encode(workRoot)>/
-//     <session>.jsonl. Compute that directly.
-//   - It reads CONFINED to runRoot. The child runs on the HOST filesystem as the
-//     run's jail uid, so a plain read would follow a symlink the hostile agent
-//     planted at the transcript path out of its own run root to any host file
-//     that uid can read, and land it in this run's persisted snapshot.
-//     readFileConfined rejects any resolution that escapes runRoot.
-func ReadSandboxSessionTranscript(runRoot, sessionID string) ([]byte, bool) {
-	if sessionID == "" {
-		return nil, false
-	}
-	root := ResolveClaudeProjectCwd(runRoot)
-	rel, err := filepath.Rel(root, SandboxClaudeSessionPath(runRoot, sessionID))
-	if err != nil {
-		return nil, false
-	}
-	data, err := readFileConfined(root, rel)
-	if err != nil {
-		return nil, false
-	}
-	return data, true
-}
-
-// CopySandboxSessionTranscript streams a sandboxed run's confined transcript
-// into w. A missing or unreadable transcript retains the existing best-effort
-// semantics and reports (false, nil); an error after the source is open is an
-// output failure and is returned.
-func CopySandboxSessionTranscript(runRoot, sessionID string, w io.Writer) (bool, error) {
-	if sessionID == "" {
-		return false, nil
-	}
-	root := ResolveClaudeProjectCwd(runRoot)
-	rel, err := filepath.Rel(root, SandboxClaudeSessionPath(runRoot, sessionID))
-	if err != nil {
-		return false, nil
-	}
-	f, err := openFileConfined(root, rel)
-	if err != nil {
-		return false, nil
-	}
-	defer func() { _ = f.Close() }()
-	if _, err := io.Copy(w, f); err != nil {
-		return false, fmt.Errorf("copy sandbox session transcript: %w", err)
-	}
-	return true, nil
-}
-
-// SandboxClaudeSessionPath is the host path of a sandboxed run's session
-// transcript — <runRoot>/.claude/projects/<encode(SandboxWorkRoot)>/<session>.jsonl
-// — the layout the jailed agent (HOME=run root, cwd=SandboxWorkRoot) writes it
-// under. Exported so a test can seed a transcript at exactly the location
-// ReadSandboxSessionTranscript reads.
-func SandboxClaudeSessionPath(runRoot, sessionID string) string {
-	root := ResolveClaudeProjectCwd(runRoot)
-	return filepath.Join(root, claudeProjectsDir, encodeClaudeProjectDir(agentproc.SandboxWorkRoot), sessionID+".jsonl")
 }
 
 // IsGitWorktree reports whether wtPath is the root of a git working tree (a
@@ -303,7 +224,12 @@ func bundleLocalCommitsTo(ctx context.Context, wtPath, branch string, w io.Write
 // objects. Their bytes need not match: git writes the pack on several threads
 // and chooses its deltas differently from one run to the next.
 func BundleHeader(r io.Reader) ([]byte, error) {
-	br := bufio.NewReader(r)
+	return readBundleHeader(bufio.NewReader(r))
+}
+
+// readBundleHeader is BundleHeader over a reader the caller keeps: on success
+// br is positioned at the first byte of the bundle's pack.
+func readBundleHeader(br *bufio.Reader) ([]byte, error) {
 	var header bytes.Buffer
 	for first := true; ; first = false {
 		line, err := br.ReadBytes('\n')
@@ -474,10 +400,30 @@ func captureUncommittedTo(ctx context.Context, wtPath string, w io.Writer) (bool
 	_ = idx.Close()
 	defer func() { _ = os.Remove(idxName) }()
 
+	// The objects the stage writes go to a throwaway directory too, with the
+	// checkout's own object store behind it as an alternate. Staging a change
+	// hashes and stores every changed file, and the capture runs where the
+	// checkout is mounted read-only: it must not need to write the thing it
+	// reads, and a capture that left loose objects in the repository on every
+	// run would grow it by the size of the uncommitted work each time.
+	objs, err := os.MkdirTemp("", "tf-objs-*")
+	if err != nil {
+		return false, fmt.Errorf("temp object dir: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(objs) }()
+	shared, err := gitCapture(ctx, wtPath, nil, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+	if err != nil {
+		return false, fmt.Errorf("locate object store: %w", err)
+	}
+
 	// Seed from gitBaseEnv() (not os.Environ()) so this throwaway-index env still
 	// carries GIT_TERMINAL_PROMPT=0, keeping every capture on the package's one
 	// base environment.
-	env := append(gitBaseEnv(), "GIT_INDEX_FILE="+idxName)
+	env := append(gitBaseEnv(),
+		"GIT_INDEX_FILE="+idxName,
+		"GIT_OBJECT_DIRECTORY="+objs,
+		"GIT_ALTERNATE_OBJECT_DIRECTORIES="+strings.TrimSpace(string(shared)),
+	)
 	if _, err := gitCapture(ctx, wtPath, env, "read-tree", "HEAD"); err != nil {
 		return false, fmt.Errorf("seed temp index: %w", err)
 	}
@@ -550,21 +496,15 @@ func ClaudeSessionPath(resolvedCwd, sessionID string) (string, error) {
 // or diff driver (status runs clean filters when a racy-stat file forces a
 // content compare).
 //
-// In multi mode this no longer runs as host root: captureWorkspaceGit's
-// dispatcher (internal/delegate/capture_isolated.go) routes every multi-mode
-// capture through sandbox.CaptureRunDelta, which runs the whole
-// CaptureWorkspaceGit — this included — inside a child dropped to the jail
-// identity that holds the tree, in an empty network namespace
-// (internal/sandbox/capture_linux.go). So a clean/smudge/diff filter a hostile
-// `.gitattributes` + `.git/config` pair could trigger executes only at that
-// run's own identity, with no network — not as the privileged capture host.
-//
-// Precisely BECAUSE that containment lives in the caller, this path must still
-// NOT be made ownership-tolerant against a chowned checkout in-process: doing
-// so would move filter execution back to whatever privilege the in-process
-// caller holds (a local-mode operator, or a dev running the binary directly).
-// Keep it strict; the isolation is the dropped-privilege child, not any check
-// here.
+// In multi mode these run inside the capture jail (sandbox.LaunchCaptureJail):
+// a one-shot gVisor sandbox with no network, the checkout mounted read-only,
+// and nothing of any run but the files it reads. So a clean/smudge/diff filter
+// a hostile `.gitattributes` + `.git/config` pair could trigger executes there,
+// where it can reach neither the host nor another run. This path must still NOT
+// be made ownership-tolerant against a chowned checkout in-process: doing so
+// would move filter execution back to whatever privilege the in-process caller
+// holds (a local-mode operator, or a dev running the binary directly). Keep it
+// strict; the isolation is the jail, not any check here.
 func gitCapture(ctx context.Context, dir string, env []string, args ...string) ([]byte, error) {
 	var out bytes.Buffer
 	if err := gitCaptureTo(ctx, dir, env, &out, args...); err != nil {

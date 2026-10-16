@@ -1,10 +1,12 @@
 package worktree
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -285,11 +287,7 @@ func restoreCheckoutLocked(ctx context.Context, r CheckoutRestore, ref string, p
 
 	// 2. The bundle's objects, then HEAD must resolve.
 	if r.BundlePath != "" {
-		rev := "HEAD"
-		if r.Branch != "" {
-			rev = "refs/heads/" + r.Branch
-		}
-		if err := gitRunCtx(ctx, bareDir, "fetch", r.BundlePath, rev); err != nil {
+		if err := importBundle(ctx, bareDir, r.BundlePath); err != nil {
 			return fmt.Errorf("import bundle: %w", err)
 		}
 	}
@@ -444,6 +442,20 @@ func validateBranchName(ctx context.Context, branch string) error {
 	return nil
 }
 
+// ValidateCapturedDelta holds a captured delta's HEAD and branch to the rules a
+// restore applies to them, for a reader that cannot trust the capture that
+// produced it. An empty HEAD or branch is a state a checkout can be in (nothing
+// committed, a detached HEAD) and is not an error here.
+func ValidateCapturedDelta(ctx context.Context, d *GitDelta) error {
+	if d.Head != "" && !commitSHAPattern.MatchString(d.Head) {
+		return fmt.Errorf("captured HEAD %q is not an object id", d.Head)
+	}
+	if d.Branch != "" {
+		return validateBranchName(ctx, d.Branch)
+	}
+	return nil
+}
+
 // PRBranchKey returns the key a run-namespaced PR branch
 // (triagefactory/<key>/pr-<N>) is namespaced by, when branch is one for
 // prNumber. It names the per-run push config a linked checkout on that branch
@@ -454,4 +466,43 @@ func PRBranchKey(branch string, prNumber int) (string, bool) {
 		return "", false
 	}
 	return key, true
+}
+
+// importBundle adds a captured bundle's objects to the shared bare, checking
+// every object before it lands. The bundle is agent-authored however it was
+// captured, and the bare it lands in is shared by every run of the repository,
+// so an object fsck would reject must fail the restore rather than enter it.
+//
+// It does what `git fetch <bundle>` does — verify the prerequisites, then
+// index the pack, completing its thin deltas from the bare — with the pack
+// indexed by --fsck-objects. fetch.fsckObjects would say the same thing, but
+// git before 2.48 does not apply it to a bundle, and the executor image's git
+// is older than that. --strict is not used either: it also checks that every
+// object the pack points at exists, which a blobless bare cannot answer
+// without fetching every unchanged blob of the checkout.
+func importBundle(ctx context.Context, bareDir, bundlePath string) error {
+	if err := gitRunCtx(ctx, bareDir, "bundle", "verify", "-q", bundlePath); err != nil {
+		return fmt.Errorf("verify: %w", err)
+	}
+	f, err := os.Open(bundlePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	br := bufio.NewReader(f)
+	if _, err := readBundleHeader(br); err != nil {
+		return err
+	}
+	args := []string{"index-pack", "--stdin", "--fix-thin", "--fsck-objects"}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = bareDir
+	cmd.Env = gitBaseEnv()
+	cmd.Stdin = br
+	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		return &GitError{Args: args, Output: string(out), Err: err}
+	}
+	return nil
 }

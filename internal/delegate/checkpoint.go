@@ -65,7 +65,7 @@ const (
 
 	// checkpointCaptureTimeout bounds the capture phase — the git capture and
 	// the archive — which is the part the next tool call waits for. The same
-	// five minutes the cap-broker gives the isolated capture child.
+	// five minutes the cap-broker gives the capture jail.
 	checkpointCaptureTimeout = 5 * time.Minute
 
 	// checkpointUploadTimeout bounds the background upload, so a PUT that
@@ -145,6 +145,23 @@ func (s *Spawner) releaseCheckpointSlot() {
 	slots := s.checkpointSlots
 	s.mu.Unlock()
 	<-slots
+}
+
+// treeFreezer holds a live engagement's jail still. A checkpoint freezes it for
+// the capture, so the tree it reads is one the run was not in the middle of
+// changing; the run's processes survive and carry on after.
+type treeFreezer interface {
+	Freeze(ctx context.Context) error
+	Thaw(ctx context.Context) error
+}
+
+// freezeWith makes this checkpointer's captures run with f frozen. Called once,
+// before the first boundary.
+func (c *checkpointer) freezeWith(f treeFreezer) {
+	if c == nil {
+		return
+	}
+	c.w.freezer = f
 }
 
 // checkpointer is one engagement's checkpoint schedule and its one checkpoint
@@ -406,6 +423,50 @@ func checkpointHooks(c *checkpointer, hooks agentloop.Hooks) agentloop.Hooks {
 // what waits for it and what does not.
 var checkpointCapture = captureSnapshot
 
+// thawTimeout bounds each attempt at the resume after a checkpoint's capture. It is detached
+// from the checkpoint's own context: a capture that timed out or was cancelled
+// is exactly the one that must still let the run go.
+var thawTimeout = 30 * time.Second
+
+// captureFrozen runs the capture with w's jail frozen, when it has one: pause,
+// capture, resume, and the resume happens on every path out, because a jail
+// left paused is a run that never answers its next tool call. The pause is
+// bounded by the capture's own timeout, which is the ctx.
+//
+// Once resumed the capture holds everything it needs — in multi mode it is a
+// copy in a staging directory this process owns — so the barrier the next tool
+// call waits on is released there, not after the archive. Without a freezer
+// (the in-process capture) the archive still reads the tree, and the caller
+// releases the barrier after it.
+func captureFrozen(ctx context.Context, w snapshotWrite, treeReleased func()) (*capturedSnapshot, error) {
+	if w.freezer == nil {
+		return checkpointCapture(ctx, w)
+	}
+	thaw := func() {
+		var err error
+		for attempt := 0; attempt < 2; attempt++ {
+			// Each attempt has its own deadline: one that ran out the first
+			// attempt's would leave the retry nothing to run in.
+			tctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), thawTimeout)
+			err = w.freezer.Thaw(tctx)
+			cancel()
+			if err == nil {
+				return
+			}
+		}
+		delegateLog.Error("could not resume the run's jail after a checkpoint; the run stays frozen until it is stopped",
+			"conversation", w.conversationID, "error", err)
+	}
+	if err := w.freezer.Freeze(ctx); err != nil {
+		thaw()
+		return nil, fmt.Errorf("freeze the run's jail: %w", err)
+	}
+	captured, err := checkpointCapture(ctx, w)
+	thaw()
+	treeReleased()
+	return captured, err
+}
+
 // checkpointResult is what one checkpoint came to.
 type checkpointResult struct {
 	outcome     string
@@ -449,7 +510,7 @@ func (s *Spawner) writeCheckpoint(ctx context.Context, w snapshotWrite, lastFing
 	if w.checkouts, err = s.snapshotCheckouts(capCtx, w.orgID, w.keyID, w.wtPath); err != nil {
 		return res
 	}
-	captured, err := checkpointCapture(capCtx, w)
+	captured, err := captureFrozen(capCtx, w, treeReleased)
 	if err != nil {
 		return res
 	}
@@ -552,16 +613,19 @@ func snapshotFingerprint(ctx context.Context, captured *capturedSnapshot, wtPath
 		}
 	}
 	field("session", captured.state.SessionID)
-	if err := hashMember(h, captured.state.Transcript, captured.state.TranscriptPath); err != nil {
+	if err := hashMember(h, captured.state.Transcript, ""); err != nil {
 		return "", fmt.Errorf("fingerprint transcript: %w", err)
 	}
-	omittedCILogs, _, err := walkScratch(ctx, wtPath, func(rel, _ string, fi os.FileInfo) error {
-		field("file", rel, strconv.FormatInt(fi.Size(), 10), strconv.FormatInt(fi.ModTime().UnixNano(), 10), scratchChangeStamp(fi))
-		return nil
-	})
-	if err != nil {
-		return "", fmt.Errorf("fingerprint scratch: %w", err)
+	digest, omittedCILogs := "", false
+	if captured.scratch != nil {
+		digest, omittedCILogs = captured.scratch.digest, captured.scratch.ciLogsOmitted
+	} else {
+		var err error
+		if digest, omittedCILogs, _, err = worktree.ScratchDigest(ctx, wtPath, nil); err != nil {
+			return "", fmt.Errorf("fingerprint scratch: %w", err)
+		}
 	}
+	field("scratch", digest)
 	field("ci-logs", strconv.FormatBool(omittedCILogs))
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

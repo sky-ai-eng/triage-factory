@@ -28,7 +28,6 @@ type fakeOps struct {
 	releaseSocketsFn  func(ctx context.Context, conversationID string, subnetIdx uint8) error
 	grantStagingFn    func(ctx context.Context, dir string, subnetIdx uint8) error
 	removeRunTreeFn   func(ctx context.Context, path string) error
-	captureRunDeltaFn func(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error)
 }
 
 func (f *fakeOps) SetupNetwork(ctx context.Context, conversationID string, subnetIdx uint8) (sandbox.NetworkState, error) {
@@ -60,9 +59,6 @@ func (f *fakeOps) GrantRunStaging(ctx context.Context, dir string, subnetIdx uin
 }
 func (f *fakeOps) RemoveRunTree(ctx context.Context, path string) error {
 	return f.removeRunTreeFn(ctx, path)
-}
-func (f *fakeOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
-	return f.captureRunDeltaFn(ctx, worktree, stagingDir, sessionID)
 }
 
 var _ sandbox.PrivilegedOps = (*fakeOps)(nil)

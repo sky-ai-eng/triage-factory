@@ -268,7 +268,7 @@ func withJailHost(t *testing.T) string {
 
 // TestJailIdentity_HostProcessesCannotReachAnotherRun is the host-side half of
 // per-run jail identity, with two live cells built the way production builds
-// them. A host process holding run A's jail identity — the capture child's —
+// them. A host process holding run A's jail identity
 // reaches run A's sockets, tree and staging and none of run B's. Run A's
 // sidecar reaches its own socket directory and nothing else of either run: it
 // carries no jail gid, so not even its own run's tool-host socket, tree or

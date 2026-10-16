@@ -18,17 +18,17 @@ import (
 // tree carried a stray `.triagefactory/triagefactory.db`.
 var sqliteHeader = append([]byte("SQLite format 3\x00"), bytes.Repeat([]byte{0x00, 0x01, 0x02, 0xff}, 16)...)
 
-// withCaptureChildEnv runs fn with this process's environment replaced by the
-// real isolated-capture child environment, restoring the original afterwards.
+// withCaptureJailEnv runs fn with this process's environment replaced by the
+// real capture jail environment, restoring the original afterwards.
 //
-// Production reaches git through two hops — the capture child gets
-// sandbox.CaptureChildEnv(), and the git subprocesses it spawns inherit that via
+// Production reaches git through two hops — the capture jail gets
+// sandbox.CaptureJailEnv(), and the git subprocesses it spawns inherit that via
 // gitBaseEnv() — so replacing the process env wholesale is what puts an
 // in-process CaptureWorkspaceGit under the same git config overrides the real
-// child runs with. Nothing here stubs or paraphrases that env: the empty
+// jail runs with. Nothing here stubs or paraphrases that env: the empty
 // `diff.external` crash survived because no test ever combined the actual env
 // with a tree that had changes to diff.
-func withCaptureChildEnv(t *testing.T, fn func()) {
+func withCaptureJailEnv(t *testing.T, fn func()) {
 	t.Helper()
 	saved := os.Environ()
 	setAll := func(env []string) {
@@ -44,7 +44,7 @@ func withCaptureChildEnv(t *testing.T, fn func()) {
 		}
 	}
 	defer setAll(saved)
-	setAll(sandbox.CaptureChildEnv())
+	setAll(sandbox.CaptureJailEnv())
 	fn()
 }
 
@@ -155,7 +155,7 @@ func TestCaptureWorkspaceGit_DirtyTreeUnderCaptureChildEnv(t *testing.T) {
 	wtDir, _ := dirtyCaptureTree(t, "capture-dirty-env-run")
 
 	var delta *GitDelta
-	withCaptureChildEnv(t, func() {
+	withCaptureJailEnv(t, func() {
 		var err error
 		if delta, err = CaptureWorkspaceGit(context.Background(), wtDir); err != nil {
 			t.Fatalf("CaptureWorkspaceGit under the real capture-child env: %v", err)
@@ -176,7 +176,7 @@ func TestCaptureWorkspaceGit_PlantedExternalDiffNeverRuns(t *testing.T) {
 	gitAt(t, wtDir, "config", "diff.external", script)
 
 	var delta *GitDelta
-	withCaptureChildEnv(t, func() {
+	withCaptureJailEnv(t, func() {
 		var err error
 		if delta, err = CaptureWorkspaceGit(context.Background(), wtDir); err != nil {
 			t.Fatalf("CaptureWorkspaceGit with a planted diff.external: %v", err)
@@ -203,7 +203,7 @@ func TestCaptureWorkspaceGit_PlantedTextconvNeverRuns(t *testing.T) {
 	gitAt(t, wtDir, "config", "diff.planted.textconv", script)
 
 	var delta *GitDelta
-	withCaptureChildEnv(t, func() {
+	withCaptureJailEnv(t, func() {
 		var err error
 		if delta, err = CaptureWorkspaceGit(context.Background(), wtDir); err != nil {
 			t.Fatalf("CaptureWorkspaceGit with a planted textconv: %v", err)

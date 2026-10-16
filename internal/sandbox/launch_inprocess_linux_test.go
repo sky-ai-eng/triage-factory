@@ -106,6 +106,18 @@ func (l *inProcessLaunch) Wait() error {
 	return err
 }
 
+// Pause and Resume freeze the jail through runsc directly, as the broker does
+// for the run it supervises.
+func (l *inProcessLaunch) Pause(ctx context.Context) error {
+	return PauseRuntime(ctx, l.params.ContainerID)
+}
+
+func (l *inProcessLaunch) Resume(ctx context.Context) error {
+	return ResumeRuntime(ctx, l.params.ContainerID)
+}
+
+var _ Freezer = (*inProcessLaunch)(nil)
+
 func (l *inProcessLaunch) OOMKilled() bool     { return l.oom }
 func (l *inProcessLaunch) Actuals() RunActuals { return l.actuals }
 

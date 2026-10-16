@@ -63,7 +63,7 @@ func runBroker(args []string) error {
 
 	if *orchestratorUID >= 0 {
 		// Accept the orchestrator's uid as a legitimate run-tree owner for
-		// the ChownRunTree/RemoveRunTree/CaptureRunDelta boundary
+		// the ChownRunTree/RemoveRunTree/CaptureRunTree boundary
 		// validation: this process (root) serves those ops against trees
 		// the orchestrator created. It is also the owner the broker gives
 		// each run's tool-host socket directory and requires of a staging

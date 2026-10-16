@@ -22,6 +22,7 @@ import (
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/kbstore"
+	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
 // The knowledge tree the agent reads, inside the run's scratch dir:
@@ -36,7 +37,7 @@ import (
 // only their published root, so there is no root level under org/ to name —
 // the team is the distinction there.
 const (
-	knowledgeDirName     = "knowledge"
+	knowledgeDirName     = worktree.KnowledgeDir
 	knowledgeTeamDirName = "team"
 	knowledgeOrgDirName  = "org"
 

@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// captureEnvMap parses CaptureChildEnv() into key→value, failing on a malformed
+// captureEnvMap parses CaptureJailEnv() into key→value, failing on a malformed
 // or duplicated entry: which of two entries for one key wins is the exec layer's
 // business, and this env's guarantees must not rest on that.
 func captureEnvMap(t *testing.T) map[string]string {
 	t.Helper()
 	out := map[string]string{}
-	for _, kv := range CaptureChildEnv() {
+	for _, kv := range CaptureJailEnv() {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok {
 			t.Fatalf("env entry %q is not KEY=VALUE", kv)
@@ -25,12 +25,13 @@ func captureEnvMap(t *testing.T) map[string]string {
 	return out
 }
 
-// TestCaptureChildEnv_CarriesOnlyGitLocals pins the two properties the capture
-// child's environment exists for: it inherits nothing from this process (the
-// orchestrator's env holds DB passwords and service tokens the child, running
-// attacker-influenceable git, must never see), and it pins git away from every
-// user/global/system config a shared writable HOME could plant.
-func TestCaptureChildEnv_CarriesOnlyGitLocals(t *testing.T) {
+// TestCaptureJailEnv_CarriesOnlyGitLocals pins the properties the capture
+// jail's environment exists for: it inherits nothing from this process (the
+// orchestrator's env holds DB passwords and service tokens the jail, running
+// attacker-influenceable git, must never see), it pins git away from every
+// user/global/system config, and it forbids the lazy fetch a missing object
+// would otherwise make through a remote the agent configured.
+func TestCaptureJailEnv_CarriesOnlyGitLocals(t *testing.T) {
 	t.Setenv("TF_SECRET_ENCRYPTION_KEY", "super-secret-should-not-travel")
 
 	env := captureEnvMap(t)
@@ -44,14 +45,17 @@ func TestCaptureChildEnv_CarriesOnlyGitLocals(t *testing.T) {
 		}
 	}
 	if env["PATH"] == "" {
-		t.Error("PATH is empty; the child could not locate the git binary")
+		t.Error("PATH is empty; the jail could not locate the git binary")
+	}
+	if env["GIT_NO_LAZY_FETCH"] != "1" {
+		t.Errorf("GIT_NO_LAZY_FETCH = %q, want 1: a missing object must not become a fetch", env["GIT_NO_LAZY_FETCH"])
 	}
 	if _, leaked := env["TF_SECRET_ENCRYPTION_KEY"]; leaked {
-		t.Error("the child env inherited a process secret; it must carry only what git needs")
+		t.Error("the jail env inherited a process secret; it must carry only what git needs")
 	}
 }
 
-// TestCaptureChildEnv_KeepsDiffExternalTripwire holds the empty `diff.external`
+// TestCaptureJailEnv_KeepsDiffExternalTripwire holds the empty `diff.external`
 // override in place. It is not protection — git reads an empty value as the
 // command "" and tries to exec it — which is exactly its job: a `git diff` that
 // reaches this key dies loudly instead of quietly running whatever program the
@@ -60,7 +64,7 @@ func TestCaptureChildEnv_CarriesOnlyGitLocals(t *testing.T) {
 // dropping this entry would leave a diff added later without those flags
 // silently trusting repo config. There is no value meaning "disabled" to swap in
 // — every non-empty one is a command git runs.
-func TestCaptureChildEnv_KeepsDiffExternalTripwire(t *testing.T) {
+func TestCaptureJailEnv_KeepsDiffExternalTripwire(t *testing.T) {
 	env := captureEnvMap(t)
 	if got := env["GIT_CONFIG_COUNT"]; got != "2" {
 		t.Errorf("GIT_CONFIG_COUNT = %q, want 2; git reads only the first COUNT overrides", got)

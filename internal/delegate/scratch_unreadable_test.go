@@ -74,7 +74,7 @@ func TestTarScratch_SkipsWhatItCannotRead(t *testing.T) {
 		t.Errorf("archive members = %v, want %v", got, want)
 	}
 
-	_, unreadable, err := walkScratch(context.Background(), wt, func(rel, path string, fi os.FileInfo) error {
+	_, unreadable, err := worktree.WalkScratch(context.Background(), wt, func(rel, path string, fi os.FileInfo) error {
 		f, err := os.Open(path)
 		if err != nil {
 			return err

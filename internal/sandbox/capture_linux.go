@@ -3,49 +3,22 @@
 package sandbox
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 
-	"github.com/sky-ai-eng/triage-factory/internal/capinfo"
 	"golang.org/x/sys/unix"
 )
 
-// captureCommand builds the child command that runs the git-delta capture. A
-// package var so tests can point it at a helper process instead of re-execing
-// the real binary. Production re-invokes this same binary's internal
-// `snapshot-capture` subcommand — os.Executable() resolves to the same
-// triagefactory binary; this capture runs inside the cap-broker, which is
-// itself a re-exec of that binary.
-var captureCommand = func(ctx context.Context, wtPath, stagingDir, sessionID string) (*exec.Cmd, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return nil, fmt.Errorf("locate self: %w", err)
-	}
-	argv := []string{"snapshot-capture", wtPath, stagingDir}
-	if sessionID != "" {
-		argv = append(argv, sessionID)
-	}
-	return exec.CommandContext(ctx, self, argv...), nil
-}
-
-// CaptureManifestMaxBytes bounds the capture child's small JSON manifest. The
-// bundle, patch, and transcript never cross stdout, so a manifest approaching
-// this ceiling is malformed rather than a legitimate large workspace.
+// CaptureManifestMaxBytes bounds the capture jail's small JSON manifest. The
+// bundles, patches and scratch files never cross stdout, so a manifest
+// approaching this ceiling is malformed rather than a legitimate large
+// workspace.
 var CaptureManifestMaxBytes int64 = 1 * 1024 * 1024
 
-// captureStderrTailBytes bounds how much of the capture child's stderr a
-// caller gets back. Diagnostics only — never run data — so a small fixed
-// tail is enough; the stdout stream is what needed the real cap above.
-const captureStderrTailBytes = 64 * 1024
-
-// ReadCaptureManifest reads the bounded JSON control message shared by the
-// fallback and brokered paths.
+// ReadCaptureManifest reads the capture jail's bounded JSON control message.
 func ReadCaptureManifest(r io.Reader) ([]byte, error) {
 	buf, err := io.ReadAll(io.LimitReader(r, CaptureManifestMaxBytes+1))
 	if err != nil {
@@ -58,10 +31,10 @@ func ReadCaptureManifest(r io.Reader) ([]byte, error) {
 }
 
 // tailBuffer retains only the last max bytes ever written to it — a bounded
-// diagnostic tail for the capture child's stderr, which is never run data
-// but is unbounded in principle (a hostile .git/config could make git chatty
-// on stderr), so it gets the same "bound it, don't trust it" treatment as
-// the stdout stream, just with a much smaller ceiling.
+// diagnostic tail for a jail's stderr, which is never run data but is
+// unbounded in principle (a hostile .git/config could make git chatty on
+// stderr), so it gets the same "bound it, don't trust it" treatment as the
+// manifest, just with a much smaller ceiling.
 type tailBuffer struct {
 	max       int
 	buf       []byte
@@ -105,127 +78,12 @@ func (t *tailBuffer) String() string {
 	return s
 }
 
-// CaptureRunDeltaTo runs CaptureWorkspaceGit for worktree inside a
-// dropped-privilege, network-isolated child exactly as the buffered
-// CaptureRunDelta below does, but streams the child's stdout directly into
-// the caller-supplied file instead of buffering it in this process.
-//
-// stdout MUST be a real *os.File assigned directly to cmd.Stdout, never
-// wrapped in another io.Writer: os/exec special-cases *os.File (dup2
-// straight into the child at exec time, no copy in this process); any other
-// io.Writer forces os/exec to fall back to an os.Pipe() plus a copy
-// goroutine RIGHT HERE. Keeping the passed-through fd preserves the broker's
-// payload-blind posture even though stdout now carries only the small manifest;
-// the large members go to stagingDir.
-//
-// The child drops to the jail identity that holds worktree — the uid the
-// ownership hand-off gave it to, which is the uid of the engagement that wrote
-// it, with that engagement's jail gid — and runs in a fresh, empty network
-// namespace. So: any clean/smudge/textconv/diff filter a hostile .git/config
-// could trigger executes only as that run's own identity with no network — not
-// as this (privileged) process, and not as any other run — and the reader's
-// uid matching the tree owner means git's own capture commands
-// (rev-parse/bundle/diff) no longer fail dubious-ownership. A worktree no jail
-// identity holds (never handed off, or parked after its engagement ended) is
-// refused: there is no identity to capture it as.
-//
-// The network namespace is defense in depth on top of the uid drop, not the
-// primary boundary — that's the uid drop itself (see below) — so it is
-// applied only when this process actually holds CAP_SYS_ADMIN (creating a
-// network namespace needs it). This method runs in the cap-broker, which
-// holds CAP_SYS_ADMIN in the container deployment. The gate survives for
-// the unprivileged bare-metal dev case, where it skips CLONE_NEWNET rather
-// than failing the whole capture on a syscall it can never make.
-//
-// Dropping to the sandbox uid is SUFFICIENT for the whole capture only
-// because a multi-mode delegated run's worktree is always a SELF-CONTAINED
-// clone: its .git is a real directory fully inside the run root, so the run
-// tree's ownership hand-off covers config, objects, and refs together. A
-// linked `git worktree` (the local-mode layout) keeps its objects
-// + config in a separate bare cache that is never re-owned — dropping to
-// a jail uid there would trade dubious-ownership for EACCES on the bare.
-// Multi mode never uses that layout (the sandbox can't see the shared
-// bare), a property pinned by worktree.TestCreateForPR_SelfContainedClone_MultiMode;
-// if that ever changes, this capture must resolve the commondir's ownership
-// too. The child receives a deliberately minimal environment: never this
-// process's env (the orchestrator's carries DB and service credentials; the
-// broker's carries its flags), plus the config overrides CaptureChildEnv
-// documents — defense in depth on top of the uid drop, never the boundary.
-//
-// Returns a bounded tail of the child's stderr (diagnostics, never run
-// data) regardless of outcome, plus the run's error if any.
-func CaptureRunDeltaTo(ctx context.Context, worktree, stagingDir, sessionID string, stdout *os.File) (stderrTail string, err error) {
-	// stdout is this function's to close, whichever way it returns: on a
-	// validation or captureCommand failure below nobody else will ever hold
-	// a reference to it, and once the child is spawned its own inherited
-	// dup is what keeps the pipe/socket alive — this process's copy must
-	// drop regardless so a reader blocked on EOF is not held open by us.
-	defer func() { _ = stdout.Close() }()
-
-	info, err := validateRunTreeRoot("capture run delta", worktree)
-	if err != nil {
-		return "", err
-	}
-	uid, gid, err := captureIdentity(worktree, info)
-	if err != nil {
-		return "", err
-	}
-	outputs, err := openCaptureStaging(stagingDir)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		for _, f := range outputs {
-			_ = f.Close()
-		}
-	}()
-
-	cmd, err := captureCommand(ctx, worktree, stagingDir, sessionID)
-	if err != nil {
-		return "", err
-	}
-	cmd.Dir = "/" // a neutral cwd; the child is passed the worktree path explicitly
-	cmd.Env = CaptureChildEnv()
-	cmd.ExtraFiles = outputs
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: uint32(uid),
-			Gid: uint32(gid),
-			// Empty Groups (NoSetGroups stays false) forces setgroups(0), shedding
-			// the parent process's supplementary groups — otherwise the child
-			// keeps group 0 (root) et al. and retains group-readable/writable host
-			// access it must not have.
-			Groups: []uint32{},
-		},
-	}
-	if hasSysAdmin() {
-		// Empty network namespace: capture is local-only. Skipped entirely
-		// when this process has no CAP_SYS_ADMIN (see the doc above) —
-		// creating a netns without it fails the clone, not just the
-		// isolation.
-		cmd.SysProcAttr.Cloneflags = syscall.CLONE_NEWNET
-	}
-
-	stderr := &tailBuffer{max: captureStderrTailBytes}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-
-	if err := cmd.Run(); err != nil {
-		return stderr.String(), fmt.Errorf("isolated capture: %w", err)
-	}
-	return stderr.String(), nil
-}
-
-// captureIdentity is the uid/gid the capture child runs as: the jail identity
-// that owns worktree, read from the stat validateRunTreeRoot already took.
-// Read from the tree rather than named by the caller because only this side
-// can make a jail uid own anything, so the owner is a statement of which
-// engagement wrote the tree that no caller can forge.
-func captureIdentity(worktree string, info os.FileInfo) (uid, gid int, err error) {
-	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0, 0, fmt.Errorf("sandbox: capture run delta: no stat for %s", worktree)
-	}
+// captureIdentity is the uid/gid the capture jail runs as: the jail identity
+// that owns the tree, read from the stat of the pinned descriptor. Read from the
+// tree rather than named by the caller because only this side can make a jail
+// uid own anything, so the owner is a statement of which engagement wrote the
+// tree that no caller can forge.
+func captureIdentity(worktree string, st unix.Stat_t) (uid, gid int, err error) {
 	idx, ok := jailSubnetIdx(int(st.Uid))
 	if !ok {
 		return 0, 0, fmt.Errorf("sandbox: capture run delta: %s is owned by uid %d, which is not a jail identity", worktree, st.Uid)
@@ -233,7 +91,10 @@ func captureIdentity(worktree string, info os.FileInfo) (uid, gid int, err error
 	return JailUID(idx), JailGID(idx), nil
 }
 
-func openCaptureStaging(dir string) ([]*os.File, error) {
+// openCaptureStaging opens the capture's one output file: the stream the jail
+// writes its members to. The orchestrator prepared it; this validates and
+// truncates it, and returns a descriptor the jail is handed.
+func openCaptureStaging(dir string) (*os.File, error) {
 	if err := validateRunTreeShape("capture staging", dir); err != nil {
 		return nil, err
 	}
@@ -242,7 +103,7 @@ func openCaptureStaging(dir string) ([]*os.File, error) {
 		return nil, err
 	}
 	defer closeFd(dirFD)
-	return openCaptureStagingMembers(dirFD, wantUID)
+	return openCaptureStagingMember(dirFD, CaptureStreamFile, wantUID)
 }
 
 // openCaptureStagingDir resolves every component through pinned directory
@@ -250,17 +111,9 @@ func openCaptureStaging(dir string) ([]*os.File, error) {
 // owns while the broker is serving the request; once this returns, later
 // member opens stay on the exact directory inode resolved here.
 func openCaptureStagingDir(path string) (fd, wantUID int, err error) {
-	fd, err = unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	fd, err = openAnchoredDir("capture staging", path)
 	if err != nil {
-		return -1, 0, fmt.Errorf("sandbox: capture staging: open root anchor: %w", err)
-	}
-	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
-		next, openErr := unix.Openat(fd, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		closeFd(fd)
-		if openErr != nil {
-			return -1, 0, fmt.Errorf("sandbox: capture staging: open anchored directory %s: %w", path, openErr)
-		}
-		fd = next
+		return -1, 0, err
 	}
 
 	var st unix.Stat_t
@@ -283,19 +136,78 @@ func openCaptureStagingDir(path string) (fd, wantUID int, err error) {
 	return fd, wantUID, nil
 }
 
-func openCaptureStagingMembers(dirFD, wantUID int) ([]*os.File, error) {
-	var files []*os.File
-	for _, name := range []string{CaptureBundleFile, CapturePatchFile, CaptureTranscriptFile} {
-		f, err := openCaptureStagingMember(dirFD, name, wantUID)
-		if err != nil {
-			for _, opened := range files {
-				_ = opened.Close()
-			}
-			return nil, err
-		}
-		files = append(files, f)
+// openAnchoredDir resolves every component of path through pinned directory
+// descriptors, refusing a symlink at any step, and returns an O_PATH descriptor
+// of the final directory. Nothing the caller can rename or replace afterwards
+// changes which inode the descriptor names.
+func openAnchoredDir(op, path string) (int, error) {
+	fd, err := unix.Open("/", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("sandbox: %s: open root anchor: %w", op, err)
 	}
-	return files, nil
+	for _, component := range strings.Split(strings.TrimPrefix(path, "/"), "/") {
+		next, openErr := unix.Openat(fd, component, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		closeFd(fd)
+		if openErr != nil {
+			return -1, fmt.Errorf("sandbox: %s: open anchored directory %s: %w", op, path, openErr)
+		}
+		fd = next
+	}
+	return fd, nil
+}
+
+// pinCaptureRoot resolves the run tree a capture reads to a descriptor and
+// checks that descriptor, not the path: a directory owned by an identity that
+// legitimately holds run trees. The jail is then given the tree through the
+// descriptor, so the tree it mounts is the tree checked here whatever the
+// orchestrator does to the path in between. The caller closes the descriptor
+// after the jail has exited.
+func pinCaptureRoot(path string) (fd int, st unix.Stat_t, err error) {
+	if err := validateRunTreeShape("capture run tree", path); err != nil {
+		return -1, st, err
+	}
+	fd, err = openAnchoredDir("capture run tree", path)
+	if err != nil {
+		return -1, st, err
+	}
+	if err := unix.Fstat(fd, &st); err != nil {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: fstat %s: %w", path, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: %s is not a directory", path)
+	}
+	if !allowedRunTreeOwner(st.Uid) {
+		closeFd(fd)
+		return -1, st, fmt.Errorf("sandbox: capture run tree: %s is owned by uid %d, not a run-tree owner", path, st.Uid)
+	}
+	return fd, st, nil
+}
+
+// bindPinnedRoot bind-mounts the directory rootFD names onto a fresh directory
+// only this process can reach, and returns that directory. The runtime mounts
+// its sources by path, and a /proc/<pid>/fd path is not one it can resolve from
+// inside its sandbox, so the descriptor's directory is given a path the
+// orchestrator cannot rename or replace. cleanup unmounts it and removes the
+// directory; it removes with rmdir, which refuses a mounted directory, so a
+// failed unmount leaves the mountpoint behind and never deletes through it.
+func bindPinnedRoot(rootFD int) (target string, cleanup func(), err error) {
+	target, err = os.MkdirTemp("", "tf-capture-root-")
+	if err != nil {
+		return "", nil, fmt.Errorf("sandbox: capture run tree: make mountpoint: %w", err)
+	}
+	if err := unix.Mount(fmt.Sprintf("/proc/self/fd/%d", rootFD), target, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+		_ = os.Remove(target)
+		return "", nil, fmt.Errorf("sandbox: capture run tree: bind the pinned tree: %w", err)
+	}
+	cleanup = func() {
+		if err := unix.Unmount(target, unix.MNT_DETACH); err != nil {
+			return
+		}
+		_ = os.Remove(target)
+	}
+	return target, cleanup, nil
 }
 
 // openCaptureStagingMember validates a harmless O_PATH handle before gaining
@@ -355,61 +267,4 @@ func openPinnedCaptureStagingMember(pathFD int, name string, wantUID int) (*os.F
 
 func validCaptureStagingMemberStat(st *unix.Stat_t, wantUID int) bool {
 	return st.Mode&unix.S_IFMT == unix.S_IFREG && st.Mode&0o7777 == 0o600 && int(st.Uid) == wantUID && st.Nlink == 1
-}
-
-// CaptureRunDelta is the unprivileged, in-process fallback used only when
-// no broker exists (unprivileged bare-metal dev): a thin buffered wrapper
-// over CaptureRunDeltaTo. It pipes the manifest into itself, reading
-// concurrently with the child's Run and enforcing the same small control-plane
-// ceiling the brokered path applies via ReadCaptureManifest.
-func (hostOps) CaptureRunDelta(ctx context.Context, worktree, stagingDir, sessionID string) ([]byte, error) {
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return nil, fmt.Errorf("isolated capture: create pipe: %w", err)
-	}
-
-	type readResult struct {
-		buf []byte
-		err error
-	}
-	readDone := make(chan readResult, 1)
-	go func() {
-		buf, err := ReadCaptureManifest(pr)
-		_ = pr.Close()
-		readDone <- readResult{buf, err}
-	}()
-
-	stderrTail, runErr := CaptureRunDeltaTo(ctx, worktree, stagingDir, sessionID, pw)
-	res := <-readDone
-	if runErr != nil {
-		if stderrTail != "" {
-			return nil, fmt.Errorf("%w: %s", runErr, stderrTail)
-		}
-		return nil, runErr
-	}
-	if res.err != nil {
-		return nil, fmt.Errorf("isolated capture: %w", res.err)
-	}
-	return res.buf, nil
-}
-
-// hasSysAdmin reports whether this process's own effective capability set
-// includes CAP_SYS_ADMIN — needed to create the capture child's network
-// namespace. A package var (like captureCommand above) so a test can
-// substitute it without needing to actually run with (or without) the
-// capability. Read fresh each call rather than cached: cheap (one small
-// /proc/self/status read) and correct even if a future caller somehow
-// changes this process's capability set between calls, which caching
-// would silently miss.
-var hasSysAdmin = func() bool {
-	names, err := capinfo.Effective()
-	if err != nil {
-		return false
-	}
-	for _, n := range names {
-		if n == "cap_sys_admin" {
-			return true
-		}
-	}
-	return false
 }

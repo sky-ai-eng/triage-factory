@@ -219,7 +219,7 @@ func TestRehydrate_RestoredTreeCarriesTheMemorySymlink(t *testing.T) {
 	setupGitTestEnv(t)
 	// Capture side runs in local mode: multi resolves the blob store to an object
 	// store this test has no business standing up, and takes its git delta through
-	// a dropped-privilege child. The blob is the same either way. The mode flips
+	// a capture jail. The blob is the same either way. The mode flips
 	// to the one that actually jails agents before the rehydrate, which is what
 	// the planting gate under test reads.
 	runmode.SetForTest(t, runmode.ModeLocal)

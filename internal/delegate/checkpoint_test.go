@@ -1094,3 +1094,168 @@ func (h *firstPutHeld) Put(ctx context.Context, key string, r io.Reader) error {
 	}
 	return h.Storage.Put(ctx, key, r)
 }
+
+// fakeFreezer records the order of a checkpoint's freeze, capture and thaw.
+type fakeFreezer struct {
+	mu        sync.Mutex
+	events    []string
+	freezeErr error
+	thawErrs  int
+	// thawHangs makes the first Thaw wait out its context before failing.
+	thawHangs bool
+	// lastThawErr is what the most recent Thaw returned.
+	lastThawErr error
+}
+
+func (f *fakeFreezer) note(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+
+func (f *fakeFreezer) Freeze(context.Context) error { f.note("freeze"); return f.freezeErr }
+func (f *fakeFreezer) Thaw(ctx context.Context) error {
+	f.note("thaw")
+	f.mu.Lock()
+	hang := f.thawHangs
+	f.thawHangs = false
+	f.mu.Unlock()
+	var err error
+	switch {
+	case hang:
+		<-ctx.Done()
+		err = ctx.Err()
+	case ctx.Err() != nil:
+		err = ctx.Err()
+	default:
+		f.mu.Lock()
+		if f.thawErrs > 0 {
+			f.thawErrs--
+			err = errors.New("resume refused")
+		}
+		f.mu.Unlock()
+	}
+	f.mu.Lock()
+	f.lastThawErr = err
+	f.mu.Unlock()
+	return err
+}
+func (f *fakeFreezer) log() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.events...)
+}
+
+// TestCheckpoint_CapturesWithTheJailFrozenAndAlwaysThaws: the capture runs
+// between a freeze and a thaw, the barrier opens at the thaw rather than after
+// the archive, and a failed capture still resumes the run.
+func TestCheckpoint_CapturesWithTheJailFrozenAndAlwaysThaws(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-freeze")
+	fr := &fakeFreezer{}
+	prev := checkpointCapture
+	checkpointCapture = func(ctx context.Context, w snapshotWrite) (*capturedSnapshot, error) {
+		fr.note("capture")
+		return prev(ctx, w)
+	}
+	t.Cleanup(func() { checkpointCapture = prev })
+
+	c := f.start()
+	defer c.stop()
+	c.freezeWith(fr)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+	if got := strings.Join(fr.log(), ","); got != "freeze,capture,thaw" {
+		t.Fatalf("order = %s, want freeze,capture,thaw", got)
+	}
+	if f.outcomes(checkpointWritten) != 1 {
+		t.Errorf("written = %d", f.outcomes(checkpointWritten))
+	}
+
+	// A capture that fails still thaws.
+	fr2 := &fakeFreezer{}
+	checkpointCapture = func(context.Context, snapshotWrite) (*capturedSnapshot, error) {
+		fr2.note("capture")
+		return nil, errors.New("capture failed")
+	}
+	c.freezeWith(fr2)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 6)
+	c.wg.Wait()
+	if got := strings.Join(fr2.log(), ","); got != "freeze,capture,thaw" {
+		t.Errorf("failed capture order = %s, want a thaw after it", got)
+	}
+	if f.outcomes(checkpointFailed) != 1 {
+		t.Errorf("failed = %d", f.outcomes(checkpointFailed))
+	}
+}
+
+// TestCheckpoint_FreezeFailureSkipsTheCaptureAndStillThaws: a jail that cannot
+// be frozen is not captured as if it were still, and nothing is left paused.
+func TestCheckpoint_FreezeFailureSkipsTheCaptureAndStillThaws(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-freeze-fail")
+	fr := &fakeFreezer{freezeErr: errors.New("pause refused")}
+	captured := false
+	prev := checkpointCapture
+	checkpointCapture = func(ctx context.Context, w snapshotWrite) (*capturedSnapshot, error) {
+		captured = true
+		return prev(ctx, w)
+	}
+	t.Cleanup(func() { checkpointCapture = prev })
+	c := f.start()
+	defer c.stop()
+	c.freezeWith(fr)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+	if captured {
+		t.Error("captured a jail that could not be frozen")
+	}
+	if got := strings.Join(fr.log(), ","); got != "freeze,thaw" {
+		t.Errorf("order = %s, want freeze,thaw", got)
+	}
+	if f.outcomes(checkpointFailed) != 1 || f.blobExists(t) {
+		t.Errorf("failed=%d blob=%v", f.outcomes(checkpointFailed), f.blobExists(t))
+	}
+}
+
+// TestCheckpoint_ThawIsRetriedOnce: a resume the broker refuses once is tried
+// again before the run is left frozen.
+func TestCheckpoint_ThawIsRetriedOnce(t *testing.T) {
+	f := newCheckpointFixture(t, "r-ckpt-thaw-retry")
+	fr := &fakeFreezer{thawErrs: 1}
+	c := f.start()
+	defer c.stop()
+	c.freezeWith(fr)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+	if got := strings.Join(fr.log(), ","); got != "freeze,thaw,thaw" {
+		t.Errorf("order = %s, want the thaw retried once", got)
+	}
+}
+
+// TestCheckpoint_ThawRetryHasItsOwnDeadline: a first resume that runs out its
+// whole timeout does not take the retry's time with it.
+func TestCheckpoint_ThawRetryHasItsOwnDeadline(t *testing.T) {
+	old := thawTimeout
+	thawTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { thawTimeout = old })
+
+	f := newCheckpointFixture(t, "r-ckpt-thaw-deadline")
+	fr := &fakeFreezer{thawHangs: true}
+	c := f.start()
+	defer c.stop()
+	c.freezeWith(fr)
+	f.due(c)
+	c.afterToolBatch(context.Background(), 5)
+	c.wg.Wait()
+	if got := strings.Join(fr.log(), ","); got != "freeze,thaw,thaw" {
+		t.Fatalf("order = %s, want the thaw retried", got)
+	}
+	fr.mu.Lock()
+	defer fr.mu.Unlock()
+	if fr.lastThawErr != nil {
+		t.Errorf("the retry failed: %v", fr.lastThawErr)
+	}
+}
