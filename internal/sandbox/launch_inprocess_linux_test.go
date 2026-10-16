@@ -76,7 +76,8 @@ type inProcessLaunch struct {
 	rt        *SupervisedRuntime
 	oom       bool
 	actuals   RunActuals
-	exitOnce  sync.Once
+	waitOnce  sync.Once
+	waitErr   error
 	started   bool
 	closeOnce sync.Once
 }
@@ -97,13 +98,17 @@ func (l *inProcessLaunch) Stdout() io.Reader     { return l.conn }
 func (l *inProcessLaunch) Stderr() string        { return l.stderr.String() }
 func (l *inProcessLaunch) Pid() int              { return 0 }
 
+// Wait reaps the runtime once, whoever asks first: Close reaps what it kills,
+// and a test may be waiting at the same time. Every caller gets the first
+// call's result, because only that call saw the cgroup before it was removed,
+// so a later one must not replace the exit facts with what a torn-down group
+// reads as.
 func (l *inProcessLaunch) Wait() error {
-	oom, err := l.rt.Wait()
-	// First Wait wins for both exit facts: only that call saw the cgroup
-	// before it was removed, so a second Wait must not overwrite them with
-	// what a torn-down group reads as.
-	l.exitOnce.Do(func() { l.oom, l.actuals = oom, l.rt.Actuals() })
-	return err
+	l.waitOnce.Do(func() {
+		oom, err := l.rt.Wait()
+		l.oom, l.actuals, l.waitErr = oom, l.rt.Actuals(), err
+	})
+	return l.waitErr
 }
 
 // Pause and Resume freeze the jail through runsc directly, as the broker does
@@ -124,7 +129,10 @@ func (l *inProcessLaunch) Actuals() RunActuals { return l.actuals }
 func (l *inProcessLaunch) Close() error {
 	l.closeOnce.Do(func() {
 		if l.rt != nil {
+			// Only the reap removes the run's cgroup, so a runtime that is
+			// killed and never waited on leaves its group behind.
 			_ = l.rt.Kill()
+			_ = l.Wait()
 		}
 		if l.conn != nil {
 			_ = l.conn.Close()

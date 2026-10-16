@@ -16,6 +16,7 @@ package sandbox
 
 import (
 	"context"
+	"io"
 	"testing"
 	"time"
 )
@@ -34,9 +35,9 @@ func TestIntegration_SampleRunCgroup_SeriesFromLiveJail(t *testing.T) {
 
 	cfg := minimalConfig(t)
 	cfg.MemoryLimitMB = sampleLimitMB
-	// A payload that keeps working long enough to be sampled several times and
-	// then exits on its own if the test dies before killing it.
-	cfg.Argv = []string{"/bin/sh", "-c", "i=0; while [ $i -lt 30 ]; do dd if=/dev/zero of=/dev/null bs=1M count=64 2>/dev/null; i=$((i+1)); done"}
+	// A payload that works until the test stops it, so the sampling window is
+	// never longer than the payload.
+	cfg.Argv = []string{"/bin/sh", "-c", "while :; do dd if=/dev/zero of=/dev/null bs=1M count=64 2>/dev/null; done"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -46,25 +47,52 @@ func TestIntegration_SampleRunCgroup_SeriesFromLiveJail(t *testing.T) {
 		t.Fatalf("Wrap: %v", err)
 	}
 	defer sb.Close()
-	defer run.Close()
 
 	if sb.ContainerID == "" {
 		t.Fatal("Wrap published no container id; the sampler has nothing to observe")
 	}
 	if err := run.Start(); err != nil {
+		_ = run.Close()
 		t.Fatalf("Start: %v", err)
+	}
+	// Drain the payload's output and note when it exits, so a payload that ends
+	// inside the window fails as that rather than as a flat counter.
+	started := time.Now()
+	var exitAfter time.Duration
+	exited := make(chan struct{})
+	go func() {
+		defer close(exited)
+		_, _ = io.Copy(io.Discard, run.Stdout())
+		_ = run.Wait()
+		exitAfter = time.Since(started)
+	}()
+	// Close kills and reaps the runtime, which removes its cgroup; the goroutine
+	// returns once the reap is done.
+	defer func() {
+		_ = run.Close()
+		<-exited
+	}()
+
+	checkRunning := func() {
+		select {
+		case <-exited:
+			t.Fatalf("payload exited at %v before the sampling window closed", exitAfter)
+		default:
+		}
 	}
 
 	const samples = 4
 	series := make([]RunSample, 0, samples)
 	for i := 0; i < samples; i++ {
 		time.Sleep(300 * time.Millisecond)
+		checkRunning()
 		s := SampleRunCgroup(sb.ContainerID)
 		if !s.Observed() {
 			t.Fatalf("sample %d observed nothing from a live jail's cgroup (%s)", i, sb.ContainerID)
 		}
 		series = append(series, s)
 	}
+	checkRunning()
 
 	for i, s := range series {
 		if s.CPUUsecCum == nil {
