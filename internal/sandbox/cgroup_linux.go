@@ -125,12 +125,17 @@ func requirePrivateCgroupNamespace() error {
 	if err != nil {
 		return fmt.Errorf("cgroup: read own cgroup: %w", err)
 	}
-	// The mount is read only when the namespace check has already passed, so
-	// an initial-namespace process never opens a file under it.
+	// The mount is read only once the namespace check can pass, so an
+	// initial-namespace process never opens a file under it.
 	var procs []byte
 	if st.Ino != initialCgroupNamespaceIno {
-		if path, err := ownCgroupPath(self); err == nil {
-			procs, _ = os.ReadFile(filepath.Join(cgroupRoot, path, "cgroup.procs"))
+		path, err := ownCgroupPath(self)
+		if err != nil {
+			return err
+		}
+		procs, err = os.ReadFile(filepath.Join(cgroupRoot, path, "cgroup.procs"))
+		if err != nil {
+			return fmt.Errorf("cgroup: read own cgroup's procs: %w", err)
 		}
 	}
 	return checkPrivateCgroupNamespace(st.Ino, self, procs, os.Getpid())
