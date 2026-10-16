@@ -23,7 +23,11 @@ import (
 //
 // The container environment needs three one-time steps, all performed
 // lazily on the first limited run and all fail-open (a host that can't
-// do them runs without ceilings, with one logged warning):
+// do them runs without ceilings, with one logged warning). The steps
+// reorganize whatever hierarchy /sys/fs/cgroup shows, so they run only
+// when that is this process's own private cgroup namespace
+// (checkPrivateCgroupNamespace): in the host's namespace the same steps
+// would move the host's processes and reconfigure its root cgroup.
 //
 //  1. Remount /sys/fs/cgroup read-write. runc mounts it ro even with a
 //     private cgroup namespace; with CAP_SYS_ADMIN the remount touches
@@ -40,6 +44,12 @@ const (
 	cgroupRoot    = "/sys/fs/cgroup"
 	cgroupRunsDir = cgroupRoot + "/tf-runs"
 	cgroupInitDir = cgroupRoot + "/init"
+
+	// initialCgroupNamespaceIno is the inode of the initial cgroup
+	// namespace, PROC_CGROUP_INIT_INO in the kernel's include/linux/proc_ns.h.
+	// A process whose /proc/self/ns/cgroup has this inode shares the host's
+	// view of the hierarchy.
+	initialCgroupNamespaceIno = 0xEFFFFFFB
 )
 
 var (
@@ -55,6 +65,9 @@ func setupRunCgroups() error {
 }
 
 func doSetupRunCgroups() error {
+	if err := requirePrivateCgroupNamespace(); err != nil {
+		return err
+	}
 	ctrl, err := os.ReadFile(cgroupRoot + "/cgroup.controllers")
 	if err != nil {
 		return fmt.Errorf("cgroup: read controllers: %w", err)
@@ -95,6 +108,86 @@ func doSetupRunCgroups() error {
 		return fmt.Errorf("cgroup: enable memory on tf-runs subtree: %w", err)
 	}
 	return nil
+}
+
+// requirePrivateCgroupNamespace reads the inputs of checkPrivateCgroupNamespace
+// from this process.
+func requirePrivateCgroupNamespace() error {
+	fi, err := os.Stat("/proc/self/ns/cgroup")
+	if err != nil {
+		return fmt.Errorf("cgroup: stat own cgroup namespace: %w", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("cgroup: own cgroup namespace has no inode")
+	}
+	self, err := os.ReadFile("/proc/self/cgroup")
+	if err != nil {
+		return fmt.Errorf("cgroup: read own cgroup: %w", err)
+	}
+	// The mount is read only once the namespace check can pass, so an
+	// initial-namespace process never opens a file under it.
+	var procs []byte
+	if st.Ino != initialCgroupNamespaceIno {
+		path, err := ownCgroupPath(self)
+		if err != nil {
+			return err
+		}
+		procs, err = os.ReadFile(filepath.Join(cgroupRoot, path, "cgroup.procs"))
+		if err != nil {
+			return fmt.Errorf("cgroup: read own cgroup's procs: %w", err)
+		}
+	}
+	return checkPrivateCgroupNamespace(st.Ino, self, procs, os.Getpid())
+}
+
+// checkPrivateCgroupNamespace decides whether /sys/fs/cgroup is the root of a
+// cgroup namespace this process owns, so that reorganizing it cannot reach the
+// host. Two things must hold:
+//
+//   - the process is not in the initial cgroup namespace (nsIno), whose
+//     hierarchy is the host's; and
+//   - the mount at /sys/fs/cgroup shows this namespace: the group the process
+//     is in, named by procSelfCgroup, lists the process in its cgroup.procs
+//     there (procsAtOwnPath). A namespace made with `unshare --cgroup` and no
+//     remount fails this, because the mount still shows the host's view. A
+//     process the setup already moved into init/ passes, so a broker
+//     respawned inside the container is not refused.
+//
+// A pure function of its inputs so the decision is testable without root.
+func checkPrivateCgroupNamespace(nsIno uint64, procSelfCgroup, procsAtOwnPath []byte, pid int) error {
+	if nsIno == initialCgroupNamespaceIno {
+		return fmt.Errorf("cgroup: in the host's cgroup namespace; per-run memory ceilings need a private one (compose cgroup: private)")
+	}
+	path, err := ownCgroupPath(procSelfCgroup)
+	if err != nil {
+		return err
+	}
+	want := strconv.Itoa(pid)
+	for _, f := range strings.Fields(string(procsAtOwnPath)) {
+		if f == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("cgroup: %s does not show this process's cgroup namespace (%s does not list pid %d); mount a cgroup2 filesystem from inside it (compose cgroup: private)", cgroupRoot, path, pid)
+}
+
+// ownCgroupPath returns the cgroup path of the cgroup v2 line ("0::<path>")
+// in a /proc/<pid>/cgroup body, relative to the reader's cgroup namespace
+// root. A path that leaves the namespace root ("/../…") is refused: it names
+// a group the mount at /sys/fs/cgroup cannot show.
+func ownCgroupPath(procSelfCgroup []byte) (string, error) {
+	for _, line := range strings.Split(string(procSelfCgroup), "\n") {
+		path, ok := strings.CutPrefix(line, "0::")
+		if !ok {
+			continue
+		}
+		if !strings.HasPrefix(path, "/") || strings.Contains(path, "/../") || strings.HasSuffix(path, "/..") {
+			return "", fmt.Errorf("cgroup: own cgroup %q is outside the namespace root", path)
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("cgroup: no cgroup v2 entry in /proc/self/cgroup")
 }
 
 // statReadOnly is ST_RDONLY per statfs(2) — package syscall doesn't
@@ -283,10 +376,14 @@ func removeRunCgroup(dir string) error {
 }
 
 // reapOrphanRunCgroups removes leftover tf-runs/* groups from a
-// previous process. Called from ReapOrphans; best-effort — a non-empty
-// group (still-running orphan runsc, itself about to be reaped) just
-// stays for the next sweep.
+// previous process. Called from ReapOrphans; does nothing outside a private
+// cgroup namespace, where tf-runs/ is not this package's to sweep.
+// Best-effort — a non-empty group (still-running orphan runsc, itself about
+// to be reaped) just stays for the next sweep.
 func reapOrphanRunCgroups() {
+	if requirePrivateCgroupNamespace() != nil {
+		return
+	}
 	entries, err := os.ReadDir(cgroupRunsDir)
 	if err != nil {
 		return
