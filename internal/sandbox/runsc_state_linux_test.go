@@ -148,6 +148,7 @@ func TestDeleteRuntimeState_EmptyIDIsANoop(t *testing.T) {
 // boot sweep, which delete-forces whatever this matches. It must recognize
 // both on-disk layouts gVisor has used and nothing else.
 func TestContainerIDFromRuntimeStateEntry(t *testing.T) {
+	tooLong := "tf-" + strings.Repeat("a", containerIDRunFragmentMax+1) + "-3"
 	cases := []struct {
 		name string
 		want string
@@ -177,8 +178,8 @@ func TestContainerIDFromRuntimeStateEntry(t *testing.T) {
 		// Longer than any id this package can mint (the fragment is a ConversationID
 		// cut to containerIDRunFragmentMax), so it belongs to someone else's
 		// runsc — matching it would delete a container we do not own.
-		{"tf-thisfragmentiswaytoolong-3", "", false},
-		{"tf-thisfragmentiswaytoolong-3_sandbox:tf-thisfragmentiswaytoolong-3.state", "", false},
+		{tooLong, "", false},
+		{tooLong + "_sandbox:" + tooLong + ".state", "", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

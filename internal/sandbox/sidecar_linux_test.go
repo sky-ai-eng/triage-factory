@@ -72,7 +72,7 @@ func TestLaunchSidecar_ContainerIDDistinctFromRunContainerID(t *testing.T) {
 		t.Fatalf("LaunchSidecar: %v", err)
 	}
 
-	runContainerID := "tf-" + truncate(conversationID, 11) + "-3" // mirrors wrap()'s own naming
+	runContainerID := "tf-" + truncate(conversationID, containerIDRunFragmentMax) + "-3" // mirrors wrap()'s own naming
 	if fake.gotParams.ContainerID == runContainerID {
 		t.Errorf("sidecar container id %q collides with the run's own %q", fake.gotParams.ContainerID, runContainerID)
 	}
