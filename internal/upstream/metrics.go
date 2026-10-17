@@ -18,21 +18,24 @@ var log = logging.Component("upstream")
 // under.
 const meterName = "internal/upstream"
 
-// instruments is the counters, created once per provider, beside the
-// rate-limit gauges (registerBudgetGauges). upstream and outcome are closed
-// vocabularies (Name, Class); org_id is not, so the series count grows with
-// the number of orgs, by at most 30 per counter for each (6 names × 5
-// classes). That per-org breakdown is what the metrics are for.
+// instruments is the counters and the query-cost histogram, created once per
+// provider, beside the rate-limit gauges (registerBudgetGauges). upstream and
+// outcome are closed vocabularies (Name, Class); org_id is not, so the series
+// count grows with the number of orgs, by at most 30 per counter for each (6
+// names × 5 classes). That per-org breakdown is what the metrics are for. The
+// histogram carries no org_id, so its series are bounded by the operations
+// TF's clients declare.
 type instruments struct {
-	requests metric.Int64Counter
-	retries  metric.Int64Counter
-	waited   metric.Float64Counter
+	requests  metric.Int64Counter
+	retries   metric.Int64Counter
+	waited    metric.Float64Counter
+	queryCost metric.Int64Histogram
 }
 
-// newInstruments creates the counters and the rate-limit gauges against a
-// provider. An instrument-creation error can only be a programmer error (an
-// invalid name), and the API hands back a usable no-op beside it, so it is
-// logged rather than propagated.
+// newInstruments creates the counters, the query-cost histogram and the
+// rate-limit gauges against a provider. An instrument-creation error can only
+// be a programmer error (an invalid name), and the API hands back a usable
+// no-op beside it, so it is logged rather than propagated.
 func newInstruments(provider metric.MeterProvider) *instruments {
 	m := provider.Meter(meterName)
 	in := &instruments{}
@@ -51,6 +54,12 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 		log.Warn("upstream counter setup failed", "instrument", "upstream.rate_limit.wait", "error", err)
 	}
 	in.waited = waited
+	queryCost, err := m.Int64Histogram("upstream.query.cost", metric.WithUnit("{point}"),
+		metric.WithDescription("What the upstream said one GraphQL query cost against its points budget, by operation."))
+	if err != nil {
+		log.Warn("upstream histogram setup failed", "instrument", "upstream.query.cost", "error", err)
+	}
+	in.queryCost = queryCost
 	registerBudgetGauges(m)
 	return in
 }
@@ -118,6 +127,16 @@ func progressFrom(ctx context.Context) func() {
 	}
 	report, _ := ctx.Value(progressKey{}).(func())
 	return report
+}
+
+// RecordQueryCost records what name said one GraphQL query cost against its
+// points budget (Linear's X-Complexity), under the operation the query's
+// document names. op must come from a document the client declares as a
+// constant, so the label stays a closed set. No org is recorded: a query's
+// cost follows from its document and variables, not from who sent it.
+func RecordQueryCost(name Name, op string, points int64) {
+	current().queryCost.Record(context.Background(), points,
+		metric.WithAttributes(telemetry.Upstream(string(name)), telemetry.Op(op)))
 }
 
 // RecordRetry counts one decision to retry a request against name; c is the

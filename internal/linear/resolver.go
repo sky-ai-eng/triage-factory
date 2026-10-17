@@ -226,15 +226,16 @@ func NewResolverWithOAuth(secrets db.SecretStore, orgs db.OrgsStore, install Ins
 }
 
 // ForSystem builds a client from the org's service credential, counted under
-// orgID. It is ErrNoLinearSystemCredential when the org has none; a failed
-// secret read is returned as itself, so a store outage is never reported as
-// Linear being unconfigured.
+// orgID, whose rate-limit readings are recorded under the credential's auth
+// method (Client.WithCredential). It is ErrNoLinearSystemCredential when the
+// org has none; a failed secret read is returned as itself, so a store outage
+// is never reported as Linear being unconfigured.
 func (r *resolver) ForSystem(ctx context.Context, orgID string) (*Client, error) {
 	cred, err := r.ResolveSystemCredential(ctx, orgID)
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(cred.Config()).WithOrg(orgID), nil
+	return NewClient(cred.Config()).WithOrg(orgID).WithCredential(string(cred.Method)), nil
 }
 
 // ResolveSystemCredential reads the org's service credential, dispatched on
@@ -274,11 +275,14 @@ func (r *resolver) ResolveSystemCredential(ctx context.Context, orgID string) (S
 }
 
 // ForUser builds a client from the acting user's own credential for the org's
-// Linear workspace, counted under orgID. With no workspace bound, no stored
-// credential, or a Connect credential its UserTokenSource reports as unusable
-// (Linear refused it, say) it is ErrNoLinearUserCredential, never a client
-// built from the org's credential instead. A failed read, a corrupt envelope
-// or a method this build does not know is returned as an error of its own.
+// Linear workspace, counted under orgID. The client names no credential, so
+// its rate-limit readings are not recorded: Linear meters each user's
+// credential separately, and the only id that tells them apart is the user.
+// With no workspace bound, no stored credential, or a Connect credential its
+// UserTokenSource reports as unusable (Linear refused it, say) it is
+// ErrNoLinearUserCredential, never a client built from the org's credential
+// instead. A failed read, a corrupt envelope or a method this build does not
+// know is returned as an error of its own.
 func (r *resolver) ForUser(ctx context.Context, orgID, userID string) (*Client, error) {
 	orgSet, err := r.orgs.GetSettingsSystem(ctx, orgID)
 	if err != nil {

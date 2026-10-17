@@ -76,3 +76,45 @@ func TestExportedNames_RealScrape(t *testing.T) {
 		t.Errorf("scrape carries unexpected %q", line)
 	}
 }
+
+// TestQueryCost_RealScrape pins the query-cost histogram's name and labels as
+// the monitoring doc uses them, through the same exporter configuration.
+func TestQueryCost_RealScrape(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	exporter, err := otelprom.New(
+		otelprom.WithRegisterer(registry),
+		otelprom.WithNamespace("tf"),
+		otelprom.WithoutScopeInfo(),
+		otelprom.WithTranslationStrategy(otlptranslator.UnderscoreEscapingWithSuffixes),
+	)
+	if err != nil {
+		t.Fatalf("exporter: %v", err)
+	}
+	SetMeterProviderForTest(t, sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter)))
+
+	RecordQueryCost(Linear, "IssuesByID", 5500)
+	RecordQueryCost(Linear, "IssuesByID", 110)
+
+	rec := httptest.NewRecorder()
+	promhttp.HandlerFor(registry, promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	got := map[string]bool{}
+	var lines []string
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, "tf_upstream_query_cost") {
+			got[line] = true
+			lines = append(lines, line)
+		}
+	}
+	t.Logf("scrape:\n%s", strings.Join(lines, "\n"))
+
+	for _, w := range []string{
+		`tf_upstream_query_cost_count{op="IssuesByID",upstream="linear"} 2`,
+		`tf_upstream_query_cost_sum{op="IssuesByID",upstream="linear"} 5610`,
+		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="250"} 1`,
+		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="7500"} 2`,
+	} {
+		if !got[w] {
+			t.Errorf("scrape lacks %q", w)
+		}
+	}
+}
