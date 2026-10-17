@@ -682,7 +682,7 @@ func startSandbox(ctx context.Context, cfg benchConfig, id int, driven bool) (*h
 	h.jail = jail
 	spawnDur := time.Since(start)
 
-	conn, err := jail.Accept(ctx, readyTimeout)
+	conn, err := jail.Connect(ctx, readyTimeout)
 	if err != nil {
 		return fail(fmt.Errorf("tool host never connected: %w", err))
 	}

@@ -32,12 +32,12 @@ func (deadRun) Close() error                { return nil }
 // Compile-time proof the stand-in still satisfies what the jail holds.
 var _ sandbox.LaunchedRun = deadRun{}
 
-// TestToolHostJail_AcceptReportsJailStderr pins the diagnosis this error is
+// TestToolHostJail_ConnectReportsJailStderr pins the diagnosis this error is
 // supposed to give. The jail's stderr is the only place runsc's own create
-// failure is written, so an Accept that reports a dead jail without it says
+// failure is written, so a Connect that reports a dead jail without it says
 // nothing a reader can act on — which is exactly how it rendered on every
 // brokered launch before the broker relayed its tail.
-func TestToolHostJail_AcceptReportsJailStderr(t *testing.T) {
+func TestToolHostJail_ConnectReportsJailStderr(t *testing.T) {
 	const runscErr = `creating container: container with id "tf-conv-0" already exists`
 
 	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "tools.sock"))
@@ -57,9 +57,9 @@ func TestToolHostJail_AcceptReportsJailStderr(t *testing.T) {
 		waitErr:  errors.New("exit status 128"),
 	}
 
-	_, err = jail.Accept(context.Background(), 5*time.Second)
+	_, err = jail.Connect(context.Background(), 5*time.Second)
 	if err == nil {
-		t.Fatal("Accept returned a connection for a jail that already exited")
+		t.Fatal("Connect returned a connection for a jail that already exited")
 	}
 	if !strings.Contains(err.Error(), "exited before connecting") {
 		t.Errorf("error = %v, want the fail-fast exited-before-connecting message", err)

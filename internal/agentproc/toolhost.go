@@ -94,8 +94,8 @@ type ToolHostOptions struct {
 	RecordSandboxActuals func(ctx context.Context, orgID, claimID string, actuals sandbox.RunActuals) error
 }
 
-// ToolHostJail is a launched tool-host sandbox. The caller Accepts the
-// in-jail host's connection, drives the engagement, then closes: the server
+// ToolHostJail is a launched tool-host sandbox, the gVisor backend's
+// cell.Jail. The caller Connects to the in-jail host, drives the engagement, then closes: the server
 // observes EOF at a frame boundary and exits, and Close reclaims the jail
 // either way.
 type ToolHostJail struct {
@@ -122,15 +122,17 @@ type ToolHostJail struct {
 	releaseLiveJail func()
 }
 
-// Accept waits for the in-jail tool host to dial in and returns the resulting
-// connection.
+// Connect waits for the in-jail tool host to dial in and returns the
+// resulting connection. The jail dials rather than listens because it runs
+// with --host-uds=open (see prepareToolHostSocket), so on this backend
+// connecting to the tool host means accepting its call.
 //
 // It fails early rather than waiting out the deadline when the jail exits
 // first. That case is otherwise indistinguishable from a slow start and was
 // the difference between a one-line diagnosis and a silent timeout: a tool
 // host that cannot exec, or refuses its arguments, dies immediately and would
 // leave the caller blocked on a connection nobody was ever going to make.
-func (j *ToolHostJail) Accept(ctx context.Context, timeout time.Duration) (net.Conn, error) {
+func (j *ToolHostJail) Connect(ctx context.Context, timeout time.Duration) (net.Conn, error) {
 	type accepted struct {
 		conn net.Conn
 		err  error

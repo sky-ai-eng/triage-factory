@@ -64,9 +64,9 @@ func TestTreeToCapture(t *testing.T) {
 				tree = makeRunTree(t, wsKey)
 			}
 			net := &recordingHandOff{}
-			park := liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: conversationID, namespace: wsKey, claudeCwd: tree, network: net}
+			park := liveParkContext{orgID: runmode.LocalDefaultOrgID, conversationID: conversationID, namespace: wsKey, claudeCwd: tree, cell: net}
 			if tc.noNetwork {
-				park.network = nil
+				park.cell = nil
 			}
 
 			capture, adopt := s.treeToCapture(context.Background(), park)
@@ -101,7 +101,7 @@ func TestTreeToCapture(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = os.Chown(tree, os.Getuid(), -1) })
-		capture, adopt := s.treeToCapture(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, namespace: wsKey, claudeCwd: tree, network: &recordingHandOff{}})
+		capture, adopt := s.treeToCapture(context.Background(), liveParkContext{orgID: runmode.LocalDefaultOrgID, namespace: wsKey, claudeCwd: tree, cell: &recordingHandOff{}})
 		if !capture || adopt != nil {
 			t.Errorf("a tree an engagement's jail holds: capture = %v, adopt set = %v; want it captured as it stands", capture, adopt != nil)
 		}

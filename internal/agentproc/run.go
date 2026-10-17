@@ -156,8 +156,8 @@ type RunOptions struct {
 
 	// GitConfigPairs are additional process-scoped git settings for the direct
 	// path. Local delegated runs use them to route GitHub remotes through their
-	// per-engagement credential proxy. The sandbox path carries its equivalent
-	// in PrebuiltProxyEnv.
+	// per-engagement credential proxy. A jailed run carries its equivalent in
+	// the sidecar's proxy env (cell.LaunchSpec.ProxyEnv).
 	GitConfigPairs [][2]string
 
 	// LocalSandbox, when non-nil, wraps the direct (non-gVisor) spawn in a
@@ -261,49 +261,6 @@ type RunOptions struct {
 	// resolves whichever one serves this run's model, so a resolver handed
 	// only the org would have to guess.
 	LLMResolver func(ctx context.Context, orgID, model string) (map[string]string, error)
-
-	// PrebuiltNetwork is the run network the caller stood up
-	// (sandbox.SetupRunNetwork) BEFORE calling Run, with the run's credential
-	// sidecar and its LLM/git/egress proxies already live on
-	// PrebuiltNetwork.HostIP. REQUIRED whenever the run sandboxes: multi mode
-	// is per-run-isolated by construction, so this process never resolves a
-	// run credential or hosts a run proxy itself — the former in-process
-	// bring-up no longer exists, and a sandboxed call without a prebuilt
-	// network fails before the subprocess spawns. Run launches the sandbox
-	// into this network (Config.Network) and does NOT tear it or the sidecar
-	// down — the caller owns both, closing them after Run returns. Ignored
-	// (and normally nil) on the non-sandbox local path.
-	PrebuiltNetwork *sandbox.RunNetwork
-
-	// PrebuiltProxyEnv is the non-secret sandbox env the sidecar bring-up
-	// produced (LLM/git/egress proxy URLs + per-run placeholders + the
-	// single GIT_CONFIG_* block). Folded verbatim into the sandbox env
-	// alongside PrebuiltNetwork.
-	PrebuiltProxyEnv []string
-
-	// StartAgentHost, when non-nil, starts the per-run host agenthost
-	// daemon in the sandbox branch. The daemon owns the run identity
-	// and serves the RPCs the sandboxed `triagefactory exec`
-	// subcommands send over /run/tf.sock; the callback returns the
-	// bind-mount entry agentproc adds to the sandbox spec plus a
-	// closer the deferred chain calls on Run exit (normal, error,
-	// or ctx cancellation).
-	//
-	// Callback indirection rather than an agenthost.Server-typed
-	// field because agentproc must NOT import cmd/exec/agenthost —
-	// that package transitively imports internal/agentmeta →
-	// internal/ai → internal/agentproc and the cycle would block
-	// compile. The closure shape lets the delegate spawner own all
-	// the agenthost wiring while agentproc stays library-style on
-	// the seam between sandbox setup and the agent subprocess.
-	//
-	// Local-mode + non-sandbox paths ignore this entirely. Callers
-	// whose argv never invokes `triagefactory exec` (classifier /
-	// scorer / profiler one-shot calls) leave this nil; the sandbox
-	// branch detects nil and skips the daemon setup. Skipping is safe
-	// because no agenthost client will ever try to dial in those
-	// flows.
-	StartAgentHost func() (mount sandbox.Mount, closer io.Closer, err error)
 
 	// GHChannel, when non-nil, wires the real-gh credential channel into the
 	// agent subprocess. On the sandbox path that means the pinned gh binary

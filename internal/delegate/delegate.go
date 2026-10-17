@@ -106,11 +106,11 @@ type runConfig struct {
 	// run root instead.
 	memorySourcePath string
 
-	// sidecar, when non-nil (TF_ROLE=executor), is the run network +
-	// credential sidecar + proxy coordinates the dispatcher stood up before
-	// workspace setup. runAgent threads it into agentproc.RunOptions
-	// (PrebuiltNetwork/PrebuiltProxyEnv) and the agenthost (ProxyCredentials);
-	// the dispatcher owns its teardown (after runAgent returns).
+	// sidecar, when non-nil (TF_ROLE=executor), is the engagement's cell with
+	// its credential sidecar brought up, plus the proxy coordinates, which the
+	// dispatcher stood up before workspace setup. The jail launches into the
+	// cell, and the agenthost gets the coordinates (ProxyCredentials); the
+	// dispatcher owns its teardown (after the agent run returns).
 	sidecar *runSidecar
 
 	// localGit is the local-mode per-engagement Git credential proxy. It starts

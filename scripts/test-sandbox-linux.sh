@@ -231,6 +231,21 @@ else
   integration_failed=1
 fi
 
+# ---------- Stage 4c: cell conformance suite (internal/cell/celltest) -------
+# The backend-neutral invariants every cell backend must hold, run against the
+# gVisor backend through a real cap-broker and real per-run sidecars. Needs
+# the tool host at /opt/tf/bin/tf-harness-tools (the path the broker trusts).
+blue "Stage 4c: cell conformance suite (gVisor backend)"
+conf_log="$LOG_DIR/conformance.log"
+if in_private_cgroupns go test -count=1 -v -tags integration -run TestConformance ./internal/cell/gvisor/ > "$conf_log" 2>&1; then
+  green "  conformance suite PASS"
+else
+  red   "  conformance suite FAIL — full log: $conf_log"
+  echo "---- last 80 lines ----"
+  tail -80 "$conf_log"
+  integration_failed=1
+fi
+
 # ---------- Per-test signal extraction --------------------------------------
 blue "Per-test signals (from integration log)"
 for test in \

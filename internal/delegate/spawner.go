@@ -22,6 +22,7 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/agentmeta"
 	"github.com/sky-ai-eng/triage-factory/internal/agentproc"
 	"github.com/sky-ai-eng/triage-factory/internal/artifactteardown"
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 	"github.com/sky-ai-eng/triage-factory/internal/db"
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
@@ -397,6 +398,11 @@ type Spawner struct {
 	// executorIdentity().
 	executorID string
 	bootEpoch  int64
+	// cells is the backend a multi-mode engagement builds its cell with,
+	// wired once at startup by SetCellBackend and read through cellBackend().
+	// Nil in local mode, which builds no cells; a multi-mode bring-up with
+	// none refuses rather than delegating without one.
+	cells cell.Backend
 	// placementResolver computes the (org, repo) rendezvous stamp at enqueue
 	// and, via placementClaim, the two-tier claim config (TFAC-587). Both nil/
 	// zero when placement is off (local N=1, or the layer feature-flagged

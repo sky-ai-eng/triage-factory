@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"time"
@@ -34,14 +33,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/toast"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
-
-// noopCloser is an io.Closer that closes nothing. The executor path returns it
-// from startAgentHost because the credential sidecar owns the exec-verb socket's
-// lifecycle — the orchestrator hosts no daemon there and so has nothing to shut
-// down. It is deliberately not an io.ReadCloser: there is no reader to read.
-type noopCloser struct{}
-
-func (noopCloser) Close() error { return nil }
 
 // sessionTranscriptExists reports whether the Claude session transcript for
 // sessionID is on disk for the agent's cwd — the cheap existence check the
@@ -438,22 +429,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 
 	s.updatePhase(ctx, orgID, conversationID, cfg.claimID, "")
 
-	// StartAgentHost is invoked from inside agentproc.Run's sandbox branch —
-	// which only a multi-mode dispatch reaches, and every multi dispatch
-	// stood up the per-run credential sidecar first. The sidecar HOSTS the
-	// exec-verb socket server (the relocation) and already created the
-	// socket during bring-up; the orchestrator only supplies the bind mount,
-	// keeping the hostile-input parser (with its all-orgs stores) out of its
-	// own address space entirely. Local (no sandbox) never invokes the
-	// closure, and the former in-process socket server over live stores is
-	// gone with the fused single-process shape.
-	var startAgentHost func() (sandbox.Mount, io.Closer, error)
-	if cfg.sidecar != nil {
-		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			return agenthost.SocketMountFor(conversationID), noopCloser{}, nil
-		}
-	}
-
 	// Crash re-claim: if the run already carries a session from a prior
 	// (crashed) invocation AND that session's transcript survived next to the
 	// warm worktree, resume it rather than starting fresh. buildStepConfig has
@@ -546,13 +521,6 @@ func (s *Spawner) runAgent(ctx context.Context, conversationID string, task doma
 		// records nothing.
 		ClaimID:              cfg.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
-		// Multi mode: hand agentproc the prebuilt run network and the
-		// sidecar's proxy env so it launches into them and holds no
-		// credential — the sidecar owns the LLM/git/egress proxies + the
-		// live SigV4 refresh. nil in local (no sandbox).
-		PrebuiltNetwork:  cfg.sidecar.runNetwork(),
-		PrebuiltProxyEnv: cfg.sidecar.jailEnv(),
-		StartAgentHost:   startAgentHost,
 		// Real-gh channel: the sidecar's injector + mounted binary in multi, the
 		// loopback injector + fetched binary in local. nil when neither could be
 		// provisioned, which keeps the run on the scoped exec verbs.

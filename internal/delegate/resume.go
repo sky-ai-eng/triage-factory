@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"time"
 
@@ -19,7 +18,6 @@ import (
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
 	"github.com/sky-ai-eng/triage-factory/internal/domain/events"
 	"github.com/sky-ai-eng/triage-factory/internal/githooks"
-	"github.com/sky-ai-eng/triage-factory/internal/sandbox"
 	"github.com/sky-ai-eng/triage-factory/internal/worktree"
 )
 
@@ -398,20 +396,6 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 	}
 	extraEnv = append(extraEnv, "TRIAGE_FACTORY_WORKSPACE_KEY="+opts.Namespace)
 
-	// Resume runs follow the same sandbox-branch path as the initial
-	// invocation, so wire the same per-run agenthost socket mount. The
-	// credential sidecar hosts the exec-verb socket server (the relocation)
-	// and already created the socket at bring-up; the orchestrator only
-	// supplies the bind mount. Local (no sandbox) never invokes the closure,
-	// so none is built — the former in-process socket server over live
-	// stores is gone with the fused single-process shape.
-	var startAgentHost func() (sandbox.Mount, io.Closer, error)
-	if opts.sidecar != nil {
-		startAgentHost = func() (sandbox.Mount, io.Closer, error) {
-			return agenthost.SocketMountFor(conversationID), noopCloser{}, nil
-		}
-	}
-
 	// A resumed run gets the same gh channel shape the initial invocation had:
 	// the sidecar's in multi, a fresh loopback injector in local (the channel is
 	// per-invocation, not per-run — a cold resume starts a new subprocess, so it
@@ -482,14 +466,9 @@ func (s *Spawner) ResumeWithMessage(ctx context.Context, orgID, conversationID, 
 		// This turn's own engagement pays for this turn's jail.
 		ClaimID:              opts.claimID,
 		RecordSandboxActuals: s.recordSandboxActuals,
-		// Multi mode: launch into the prebuilt network + the sidecar's proxy
-		// env; the sidecar holds the credentials. nil in local (no sandbox).
-		PrebuiltNetwork:  opts.sidecar.runNetwork(),
-		PrebuiltProxyEnv: opts.sidecar.jailEnv(),
-		StartAgentHost:   startAgentHost,
-		GHChannel:        ghChannel,
-		GitConfigPairs:   opts.localGit.configPairs(ghChannel),
-		LocalSandbox:     localSbx.runSpec(),
+		GHChannel:            ghChannel,
+		GitConfigPairs:       opts.localGit.configPairs(ghChannel),
+		LocalSandbox:         localSbx.runSpec(),
 		// Re-mount the step skill this run's original claim staged, when it's
 		// still on disk — a resume continues the same step, so it should see the
 		// same skill it started with.

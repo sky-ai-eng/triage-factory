@@ -4,6 +4,8 @@ import (
 	"context"
 	"io"
 	"sync"
+
+	"github.com/sky-ai-eng/triage-factory/internal/cell"
 )
 
 // Config is the per-run sandbox spec. Caller owns all field values;
@@ -237,27 +239,17 @@ type Sandbox struct {
 }
 
 // RunActuals is what one sandboxed run actually consumed, read from its
-// jail's cgroup at exit. Kernel truth for the whole sandbox tree — the
-// gVisor sentry and gofer as well as everything the agent allocates through
-// the sentry — so the CPU figure deliberately includes systrap overhead:
-// this is TF's cost view of a run, not a quantity anyone is billed for.
-// Whole-host sampling (instance_stats) cannot substitute, because a
-// concurrent workload on the same box lands in its numbers and not in
-// these.
+// jail's cgroup at exit: PeakMemMB from memory.peak, CPUUsec from cpu.stat's
+// usage_usec. Kernel truth for the whole sandbox tree — the gVisor sentry and
+// gofer as well as everything the agent allocates through the sentry — so the
+// CPU figure deliberately includes systrap overhead: this is TF's cost view
+// of a run, not a quantity anyone is billed for. Whole-host sampling
+// (instance_stats) cannot substitute, because a concurrent workload on the
+// same box lands in its numbers and not in these.
 //
-// Both fields are pointers so "not measured" stays distinguishable from any
-// measured value, a measured zero included. Absent means the kernel didn't
-// offer the number — memory.peak needs ≥ 5.19, and a teardown race can lose
-// either file — and the recorded actual then stays NULL rather than carrying
-// an understated figure that would read as real.
-type RunActuals struct {
-	// PeakMemMB is the run's high-water memory use in MiB (memory.peak),
-	// rounded up. nil when unmeasured.
-	PeakMemMB *int
-	// CPUUsec is cumulative CPU time in microseconds (cpu.stat's
-	// usage_usec), user + system across the whole jail. nil when unmeasured.
-	CPUUsec *int64
-}
+// A field is absent when the kernel didn't offer the number — memory.peak
+// needs ≥ 5.19, and a teardown race can lose either file.
+type RunActuals = cell.Actuals
 
 // LaunchedRun is a started (or startable) agent-runtime process — the
 // gVisor runsc child. Wrap returns one instead of a bare *exec.Cmd because

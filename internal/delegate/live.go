@@ -91,26 +91,17 @@ type liveParkContext struct {
 	// Nil for a caller with no tree — a cancel during bring-up, a fixture —
 	// where there is nothing to file.
 	mirror *memoryMirror
-	// network is the engagement's run network, which can hand the tree to the
+	// cell is the engagement's cell, which can hand the tree to the
 	// engagement's jail identity when the ending has to capture a tree no jail
 	// holds (treeToCapture). Nil unjailed, and for a caller with no cell.
-	network treeHandOff
+	cell treeHandOff
 }
 
-// treeHandOff is what an ending needs of its run network: handing the run tree
-// to the engagement's jail identity, to be taken back with the network's other
-// grants. *sandbox.RunNetwork in production.
+// treeHandOff is what an ending needs of its cell: handing the run tree to the
+// engagement's jail identity, to be taken back with the cell's other grants.
+// The engagement's cell.Cell in production.
 type treeHandOff interface {
 	HandOffRunTree(ctx context.Context, root string) error
-}
-
-// runTreeHandOff is n as a treeHandOff, nil when n is: a nil pointer stored in
-// the interface would read as a network that is there.
-func runTreeHandOff(n *sandbox.RunNetwork) treeHandOff {
-	if n == nil {
-		return nil
-	}
-	return n
 }
 
 // liveOutcome is the disposition of one agent invocation, produced
@@ -628,13 +619,13 @@ func (s *Spawner) treeToCapture(ctx context.Context, park liveParkContext) (capt
 	if st, err := s.snapshotStateFor(ctx, park.orgID, park.namespace); err == nil && st != nil && st.State == domain.WorkspaceSnapshotWritten {
 		return false, nil
 	}
-	if park.network == nil {
+	if park.cell == nil {
 		delegateLog.Warn("the run tree holds work its last snapshot does not, and this ending has no jail identity to capture it as",
 			"conversation", park.conversationID, "key_id", park.namespace)
 		return false, nil
 	}
 	return true, func(ctx context.Context) error {
-		return park.network.HandOffRunTree(ctx, park.claudeCwd)
+		return park.cell.HandOffRunTree(ctx, park.claudeCwd)
 	}
 }
 
