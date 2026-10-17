@@ -72,7 +72,8 @@ func (s *Server) userTeamsLocal(ctx context.Context, orgID, userID string) ([]gh
 	if creds.GitHubPAT == "" || orgSet.GitHubBaseURL == "" {
 		return nil, errNoGitHub
 	}
-	return ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID).ListMyTeamsDetailed(ctx)
+	return ghclient.NewClient(orgSet.GitHubBaseURL, creds.GitHubPAT).WithOrg(orgID).
+		WithCredential(ghclient.CredentialPAT).ListMyTeamsDetailed(ctx)
 }
 
 // userTeamsMulti reconstructs the caller's teams in multi mode. The

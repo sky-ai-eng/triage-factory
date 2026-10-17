@@ -105,19 +105,17 @@ type Client struct {
 	// NewProxyClient.
 	viaProxy bool
 
-	// Rate-limit state (see ratelimit.go), updated from the headers on every
-	// response the request core sees and read by RateLimit()/awaitBudget().
-	rlMu        sync.Mutex
-	rlRemaining int
-	rlReset     time.Time
-	rlUsed      int
-	rlOK        bool // true once a response has carried rate-limit headers
-	// rlObserver, when set via SetRateLimitObserver, is invoked on every
-	// update to the fields above — the resolver's hook for mirroring this
-	// client's (short-lived, per-resolve) state into its process-wide,
-	// per-org RateLimitRegistry (see ratelimit_registry.go). nil-safe: a
-	// *Client used directly (tests, other callers) simply has no observer.
-	rlObserver func(RateLimitState)
+	// credential names the credential the client's requests are metered
+	// against (CredentialPAT, InstallationCredential), the key its rate-limit
+	// readings are recorded under. Set by WithCredential; empty for a client
+	// whose readings are not recorded (see recordRateLimit).
+	credential string
+
+	// rl is the latest reading of each rate-limit bucket (see ratelimit.go),
+	// keyed by X-RateLimit-Resource, updated from the headers on every
+	// response the request core sees and read by RateLimit and awaitBudget.
+	rlMu sync.Mutex
+	rl   map[string]upstream.Budget
 }
 
 // NewClient creates a GitHub API client. baseURL is the user-facing URL
@@ -138,6 +136,25 @@ func NewClient(baseURL, pat string) *Client {
 // under that org, and returns c. Call it before c's first request.
 func (c *Client) WithOrg(orgID string) *Client {
 	c.orgID = orgID
+	return c
+}
+
+// CredentialPAT names an org's personal access token as the credential a
+// budget is metered against. GitHub meters a PAT by its user.
+const CredentialPAT = "pat"
+
+// InstallationCredential names a GitHub App installation as the credential a
+// budget is metered against. GitHub meters each installation separately, and
+// an org has one per GitHub account it connects.
+func InstallationCredential(installationID string) string {
+	return "installation:" + installationID
+}
+
+// WithCredential sets the credential c's requests are metered against, so
+// its rate-limit readings are recorded for its org under that credential, and
+// returns c. Call it before c's first request.
+func (c *Client) WithCredential(credential string) *Client {
+	c.credential = credential
 	return c
 }
 

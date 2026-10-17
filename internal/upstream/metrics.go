@@ -18,19 +18,21 @@ var log = logging.Component("upstream")
 // under.
 const meterName = "internal/upstream"
 
-// instruments is the counter pair, created once per provider. upstream and
-// outcome are closed vocabularies (Name, Class); org_id is not, so the series
-// count grows with the number of orgs, by at most 30 per counter for each
-// (6 names × 5 classes). That per-org breakdown is what the metrics are for.
+// instruments is the counters, created once per provider, beside the
+// rate-limit gauges (registerBudgetGauges). upstream and outcome are closed
+// vocabularies (Name, Class); org_id is not, so the series count grows with
+// the number of orgs, by at most 30 per counter for each (6 names × 5
+// classes). That per-org breakdown is what the metrics are for.
 type instruments struct {
 	requests metric.Int64Counter
 	retries  metric.Int64Counter
+	waited   metric.Float64Counter
 }
 
-// newInstruments creates the counters against a provider. An
-// instrument-creation error can only be a programmer error (an invalid name),
-// and the API hands back a usable no-op beside it, so it is logged rather
-// than propagated.
+// newInstruments creates the counters and the rate-limit gauges against a
+// provider. An instrument-creation error can only be a programmer error (an
+// invalid name), and the API hands back a usable no-op beside it, so it is
+// logged rather than propagated.
 func newInstruments(provider metric.MeterProvider) *instruments {
 	m := provider.Meter(meterName)
 	in := &instruments{}
@@ -43,6 +45,13 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 	}
 	mk(&in.requests, "upstream.requests", "HTTP attempts against an upstream system, by outcome; a retried call counts once per attempt.")
 	mk(&in.retries, "upstream.retries", "Decisions to retry a request, by the outcome that caused the retry.")
+	waited, err := m.Float64Counter("upstream.rate_limit.wait", metric.WithUnit("s"),
+		metric.WithDescription("Time spent waiting on an upstream's rate limit before sending a request."))
+	if err != nil {
+		log.Warn("upstream counter setup failed", "instrument", "upstream.rate_limit.wait", "error", err)
+	}
+	in.waited = waited
+	registerBudgetGauges(m)
 	return in
 }
 
