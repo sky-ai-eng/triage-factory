@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/domain"
-	ghclient "github.com/sky-ai-eng/triage-factory/internal/github"
 )
 
 // heartbeatStaleFactor is the multiple of basePollInterval past which a
@@ -24,15 +23,6 @@ type HealthSnapshot struct {
 	GitHub SourceHealth
 	Jira   SourceHealth
 	Linear SourceHealth
-	// GitHubRateLimit is the per-org last-observed GitHub primary
-	// rate-limit budget (TFAC-573 follow-up to the TFAC-569 rate-limit-
-	// aware client), read from m.resolver's RateLimitReader registry when
-	// the resolver implements it — never a live API call of its own. Keyed
-	// by org ID; an org absent from the map has no observation yet (never
-	// polled this process, or its host doesn't send rate-limit headers —
-	// e.g. GHES with rate limiting disabled). nil when m.resolver doesn't
-	// implement RateLimitReader (a test fake).
-	GitHubRateLimit map[string]ghclient.RateLimitState
 }
 
 // SourceHealth is one poll source's (github/jira/linear) liveness state.
@@ -75,11 +65,11 @@ type OrgPollHealth struct {
 // see the current set.
 //
 // The active-org list and each org's settings row are each read exactly
-// once here and shared across the per-source and rate-limit branches below —
-// not once per branch — since one settings read carries every source's poll
-// interval. A probe hit is meant to be cheap and frequent (an LB
-// health check can poll every few seconds), so avoiding N redundant reads
-// per org here matters at multi-mode scale.
+// once here and shared across the per-source branches below — not once per
+// branch — since one settings read carries every source's poll interval. A
+// probe hit is meant to be cheap and frequent (an LB health check can poll
+// every few seconds), so avoiding N redundant reads per org here matters at
+// multi-mode scale.
 func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 	orgIDs, err := m.orgs.ListActiveSystem(ctx)
 	if err != nil {
@@ -93,31 +83,10 @@ func (m *Manager) Health(ctx context.Context) HealthSnapshot {
 	}
 
 	return HealthSnapshot{
-		GitHub:          m.sourceHealth(orgIDs, settings, "github"),
-		Jira:            m.sourceHealth(orgIDs, settings, "jira"),
-		Linear:          m.sourceHealth(orgIDs, settings, "linear"),
-		GitHubRateLimit: m.rateLimitSnapshot(orgIDs, settings),
+		GitHub: m.sourceHealth(orgIDs, settings, "github"),
+		Jira:   m.sourceHealth(orgIDs, settings, "jira"),
+		Linear: m.sourceHealth(orgIDs, settings, "linear"),
 	}
-}
-
-// rateLimitSnapshot reads the resolver's per-org rate-limit registry for
-// every org in orgIDs, when the resolver implements RateLimitReader (the
-// production resolver always does; test fakes typically don't). An org
-// with no observation yet is simply absent from the returned map. Each org's
-// budget is read on its current GitHub host: a budget last observed on a host
-// the org has left says nothing about the one it polls now.
-func (m *Manager) rateLimitSnapshot(orgIDs []string, settings map[string]domain.OrgSettings) map[string]ghclient.RateLimitState {
-	reader, ok := m.resolver.(ghclient.RateLimitReader)
-	if !ok {
-		return nil
-	}
-	out := make(map[string]ghclient.RateLimitState, len(orgIDs))
-	for _, orgID := range orgIDs {
-		if s, ok := reader.RateLimitFor(orgID, domain.GitHubHost(settings[orgID].GitHubBaseURL)); ok {
-			out[orgID] = s
-		}
-	}
-	return out
 }
 
 // sourceHealth builds one source's liveness state from the shared orgIDs +

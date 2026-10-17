@@ -120,7 +120,7 @@ func coverageKey(orgID, host, owner, repo string) string {
 
 // RepoCoverageInvalidator is the optional Resolver extension that drops a
 // cached repo-coverage decision. Same optional-extension shape as
-// ScopedResolver / RateLimitReader: a Resolver that doesn't implement it (a
+// ScopedResolver: a Resolver that doesn't implement it (a
 // test fake) has no cache to evict from, so the caller type-asserts and skips.
 //
 // The one caller is the rename handler. Coverage is keyed on the slug, so a

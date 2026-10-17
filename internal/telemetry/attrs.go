@@ -39,6 +39,8 @@ const (
 	keyQueueWaitMS    = attribute.Key("queue.wait_ms")
 	keyProvider       = attribute.Key("provider")
 	keyUpstream       = attribute.Key("upstream")
+	keyBucket         = attribute.Key("bucket")
+	keyCredential     = attribute.Key("credential")
 	keyTransport      = attribute.Key("transport")
 	keyOp             = attribute.Key("op")
 	keyReason         = attribute.Key("reason")
@@ -99,6 +101,14 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //     name the caller chose.
 //   - Workspace — how a run's worktree came to exist ("fresh", "warm",
 //     "rehydrated"), i.e. domain.WorkspaceProvenance. Never the path.
+//   - Bucket — which of an upstream's rate-limit budgets a reading is of,
+//     in the upstream's own name for it (GitHub's X-RateLimit-Resource:
+//     "core", "graphql", "search"). A small set the upstream documents;
+//     never a host or a credential.
+//   - Credential — which credential a rate-limit budget is metered
+//     against, as an opaque id its client chooses: "pat", or
+//     "installation:<GitHub installation id>". Never a token, a login or a
+//     user id.
 func Source(name string) attribute.KeyValue       { return keySource.String(name) }
 func Disposition(value string) attribute.KeyValue { return keyDisposition.String(value) }
 func Runtime(value string) attribute.KeyValue     { return keyRuntime.String(value) }
@@ -108,6 +118,8 @@ func Upstream(name string) attribute.KeyValue     { return keyUpstream.String(na
 func Transport(name string) attribute.KeyValue    { return keyTransport.String(name) }
 func Op(name string) attribute.KeyValue           { return keyOp.String(name) }
 func Workspace(value string) attribute.KeyValue   { return keyWorkspace.String(value) }
+func Bucket(name string) attribute.KeyValue       { return keyBucket.String(name) }
+func Credential(id string) attribute.KeyValue     { return keyCredential.String(id) }
 
 // WorkKind names an adopting work table by its registered kind name, and
 // Reason says why a work item was parked. Both are closed vocabularies TF

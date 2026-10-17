@@ -311,7 +311,6 @@ type resolver struct {
 	agents     db.AgentStore
 	cache      TokenCache
 	coverage   *repoCoverageCache
-	rateLimits *rateLimitRegistry
 	deployment *deploymentAppSource
 }
 
@@ -353,21 +352,17 @@ func WithDeploymentAppFromEnv() ResolverOption {
 }
 
 // NewResolver builds a Resolver. A nil cache gets a fresh in-memory one.
-// Each instance owns its own rate-limit registry (see RateLimitReader) —
-// process-local, in-memory state, so there's nothing for a caller to
-// inject or share.
 func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsStore, agents db.AgentStore, cache TokenCache, opts ...ResolverOption) Resolver {
 	if cache == nil {
 		cache = NewMemoryTokenCache()
 	}
 	r := &resolver{
-		secrets:    secrets,
-		apps:       apps,
-		orgs:       orgs,
-		agents:     agents,
-		cache:      cache,
-		coverage:   newRepoCoverageCache(),
-		rateLimits: newRateLimitRegistry(),
+		secrets:  secrets,
+		apps:     apps,
+		orgs:     orgs,
+		agents:   agents,
+		cache:    cache,
+		coverage: newRepoCoverageCache(),
 		// A source over the zero App: no deployment App unless an option
 		// supplies one, but always something for the managed arm to ask. A nil
 		// here would make a construction site that never heard of tier 2 — the
@@ -388,30 +383,8 @@ func NewResolver(secrets db.SecretStore, apps db.GitHubAppsStore, orgs db.OrgsSt
 var (
 	_ ScopedResolver          = (*resolver)(nil)
 	_ ScopedRepoResolver      = (*resolver)(nil)
-	_ RateLimitReader         = (*resolver)(nil)
 	_ RepoCoverageInvalidator = (*resolver)(nil)
 )
-
-// RateLimitFor implements RateLimitReader, reading this resolver's
-// process-wide, per-org registry (see newObservedClient).
-func (r *resolver) RateLimitFor(orgID, host string) (RateLimitState, bool) {
-	return r.rateLimits.get(orgID, host)
-}
-
-// newObservedClient is the single *Client construction path every
-// resolver entry point (ClientFor, ClientForRepoWithIdentity,
-// ClientForRepoScoped, tier3PATClient) uses, so every credential tier —
-// App installation token or PAT — feeds the same per-org rate-limit
-// registry, and counts its requests under the org, without each call site
-// remembering to wire it.
-func (r *resolver) newObservedClient(orgID, base, token string) *Client {
-	c := NewClient(base, token).WithOrg(orgID)
-	host := domain.GitHubHost(base)
-	c.SetRateLimitObserver(func(s RateLimitState) {
-		r.rateLimits.record(orgID, host, s)
-	})
-	return c
-}
 
 func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client, error) {
 	oc, err := r.orgContextFor(ctx, orgID)
@@ -427,11 +400,11 @@ func (r *resolver) ClientFor(ctx context.Context, orgID, target string) (*Client
 		return nil, err
 	}
 	if app.present() {
-		tok, terr := r.appToken(ctx, orgID, app, target, base)
+		tok, installationID, terr := r.appToken(ctx, orgID, app, target, base)
 		if terr != nil {
 			return nil, terr
 		}
-		return r.newObservedClient(orgID, base, tok.Value), nil
+		return installationClient(base, orgID, tok, installationID), nil
 	}
 
 	// No active App → PAT-borrow. A backend read error propagates — there's no
@@ -731,14 +704,14 @@ func (r *resolver) activeApp(ctx context.Context, orgID string, class domain.Git
 }
 
 // appToken resolves the org's App installation token for target (the account
-// the work concerns), or an error — NO PAT fallback (the caller determined via
-// activeApp that the org's credential is the App). Shares the installation
-// TokenCache with ClientFor so the API client and the host-side git clone
-// resolve identically.
-func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, error) {
+// the work concerns) and the id of the installation it was minted from, or an
+// error — NO PAT fallback (the caller determined via activeApp that the org's
+// credential is the App). Shares the installation TokenCache with ClientFor so
+// the API client and the host-side git clone resolve identically.
+func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, target, base string) (githubapp.Token, string, error) {
 	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(target))
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, "", err
 	}
 	tok, err := r.installationToken(ctx, orgID, app, inst, base)
 	if err != nil {
@@ -748,9 +721,16 @@ func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, 
 		// anything else (a PEM that will not parse) keeps Warn.
 		ghResolverLog.Log(ctx, upstream.LogLevel(err, slog.LevelWarn), "mint installation token failed",
 			"org", orgID, "target", target, "installation", inst.InstallationID, "error", err)
-		return githubapp.Token{}, err
+		return githubapp.Token{}, "", err
 	}
-	return tok, nil
+	return tok, inst.InstallationID, nil
+}
+
+// installationClient builds a client on an installation token: its requests
+// are counted under orgID, and its rate-limit readings are recorded under the
+// installation it was minted from, since GitHub meters each one separately.
+func installationClient(base, orgID string, tok githubapp.Token, installationID string) *Client {
+	return NewClient(base, tok.Value).WithOrg(orgID).WithCredential(InstallationCredential(installationID))
 }
 
 // appClientForRepo resolves the App client for owner/repo, gated on coverage —
@@ -762,11 +742,11 @@ func (r *resolver) appToken(ctx context.Context, orgID string, app resolvedApp, 
 // a negative is not cached, so a repo newly added to the grant is picked up on
 // the next call.
 func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string) (*Client, Identity, error) {
-	tok, err := r.appToken(ctx, orgID, app, owner, base)
+	tok, installationID, err := r.appToken(ctx, orgID, app, owner, base)
 	if err != nil {
 		return nil, IdentityUnknown, err
 	}
-	client := r.newObservedClient(orgID, base, tok.Value)
+	client := installationClient(base, orgID, tok, installationID)
 	host := domain.GitHubHost(base)
 	if r.coverage.covered(orgID, host, owner, repo) {
 		return client, IdentityApp, nil // memoized: in the grant
@@ -789,21 +769,26 @@ func (r *resolver) appClientForRepo(ctx context.Context, orgID string, app resol
 // credential is the App). Unlike appToken it bypasses the installation
 // TokenCache: that cache is keyed by installation only, so a scoped token
 // written there would later be served to an unscoped caller. A scoped mint is
-// ~once per (run, repo); the gitproxy keeps its own per-repo cache.
-func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, error) {
+// ~once per (run, repo); the gitproxy keeps its own per-repo cache. The
+// installation id it was minted from is returned beside it, like appToken's.
+func (r *resolver) appScopedToken(ctx context.Context, orgID string, app resolvedApp, owner, repo, base string, permissions map[string]string) (githubapp.Token, string, error) {
 	inst, err := r.installationFor(ctx, orgID, installationHost(base), accountByLogin(owner))
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, "", err
 	}
 	minter, err := r.minterFor(ctx, orgID, app, base)
 	if err != nil {
-		return githubapp.Token{}, err
+		return githubapp.Token{}, "", err
 	}
 	installID, err := strconv.ParseInt(inst.InstallationID, 10, 64)
 	if err != nil {
-		return githubapp.Token{}, fmt.Errorf("parse installation id %q: %w", inst.InstallationID, err)
+		return githubapp.Token{}, "", fmt.Errorf("parse installation id %q: %w", inst.InstallationID, err)
 	}
-	return minter.MintScopedInstallationToken(ctx, installID, []string{repo}, permissions)
+	tok, err := minter.MintScopedInstallationToken(ctx, installID, []string{repo}, permissions)
+	if err != nil {
+		return githubapp.Token{}, "", err
+	}
+	return tok, inst.InstallationID, nil
 }
 
 // TokenFor mirrors ClientFor's credential resolution but returns the raw
@@ -824,7 +809,8 @@ func (r *resolver) TokenFor(ctx context.Context, orgID, target string) (githubap
 		return githubapp.Token{}, err
 	}
 	if app.present() {
-		return r.appToken(ctx, orgID, app, target, base)
+		tok, _, err := r.appToken(ctx, orgID, app, target, base)
+		return tok, err
 	}
 
 	// No active App → PAT-borrow, returned as a Token with no mint expiry. A
@@ -865,7 +851,8 @@ func (r *resolver) TokenForRepoScoped(ctx context.Context, orgID, owner, repo st
 		return githubapp.Token{}, err
 	}
 	if app.present() {
-		return r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
+		tok, _, err := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
+		return tok, err
 	}
 	pat, err := r.orgPAT(ctx, orgID)
 	if err != nil {
@@ -945,11 +932,11 @@ func (r *resolver) ClientForRepoScoped(ctx context.Context, orgID, owner, repo s
 		return nil, IdentityUnknown, err
 	}
 	if app.present() {
-		tok, terr := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
+		tok, installationID, terr := r.appScopedToken(ctx, orgID, app, owner, repo, base, permissions)
 		if terr != nil {
 			return nil, IdentityUnknown, terr
 		}
-		return r.newObservedClient(orgID, base, tok.Value), IdentityApp, nil
+		return installationClient(base, orgID, tok, installationID), IdentityApp, nil
 	}
 	client, err := r.tier3PATClient(ctx, orgID, base)
 	if err != nil {
@@ -1351,7 +1338,7 @@ func (r *resolver) tier3PATClient(ctx context.Context, orgID, base string) (*Cli
 	if pat == "" {
 		return nil, nil
 	}
-	return r.newObservedClient(orgID, base, pat), nil
+	return NewClient(base, pat).WithOrg(orgID).WithCredential(CredentialPAT), nil
 }
 
 // patBorrowUser is a human-readable identity for the tier-3 log line — the

@@ -212,8 +212,13 @@ func (h *Process) Close() error {
 	}
 	_ = h.cmd.Process.Signal(syscall.SIGTERM)
 
-	done := make(chan error, 1)
-	go func() { done <- h.cmd.Wait() }()
+	// Wait's error is the signal the broker exited on, which is what Close
+	// asked for, so only its return matters.
+	done := make(chan struct{})
+	go func() {
+		_ = h.cmd.Wait()
+		close(done)
+	}()
 
 	select {
 	case <-done:

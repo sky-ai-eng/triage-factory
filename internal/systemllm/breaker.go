@@ -64,7 +64,7 @@ func IsProviderBackoff(err error) bool {
 // shared across every completeDirect call regardless of which job or org
 // made it.
 //
-// In-memory only, mirroring internal/github's rateLimitRegistry: a restart
+// In-memory only, mirroring internal/upstream's rate-limit budgets: a restart
 // loses it and the next failure repopulates it — acceptable for a soft
 // signal that self-heals. A nil *providerBreaker is a safe no-op (never
 // gates, never records), matching internal/syslimit's nil-is-unlimited

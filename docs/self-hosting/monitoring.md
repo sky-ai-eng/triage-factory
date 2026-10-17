@@ -16,9 +16,8 @@ or integration check, by design, so a flapping dependency can't trip a platform'
 auto-restart-on-liveness-failure. `/readyz` is the readiness signal: it 503s on a
 **hard** failure (DB unreachable, migrations not applied, or a poller's base-tick
 loop stalled/crashed) and reports, without ever 503ing on them, **soft** signals —
-each org's last-successful-poll age vs its configured poll interval, each org's
-last-observed GitHub primary rate-limit budget, and a count of in-flight
-(`queued`/`running`) agent runs:
+each org's last-successful-poll age vs its configured poll interval, and a
+count of in-flight (`queued`/`running`) agent runs:
 
 ```sh
 curl -fsS http://localhost:3000/readyz | jq .
@@ -35,9 +34,6 @@ curl -fsS http://localhost:3000/readyz | jq .
     "jira":   {"<org_id>": {"last_success_unix": 1783299900, "age_seconds": 142, "interval_seconds": 300}},
     "linear": {"<org_id>": {"interval_seconds": 300}}
   },
-  "rate_limit": {
-    "github": {"<org_id>": {"remaining": 4321, "reset_unix": 1783303600, "used": 679}}
-  },
   "active_runs": 3
 }
 ```
@@ -48,10 +44,6 @@ to the upstream, waited on a rate limit or a retry backoff, or finished an
 org's poll. A cycle that runs longer than that while its requests keep
 completing (many orgs, or one org on a slow host), or while it waits out a
 `Retry-After` of up to five minutes, is not a failure.
-
-An org absent from `rate_limit.github` has no observation yet this process (never
-polled, or its host omits rate-limit headers — e.g. GHES with rate limiting
-disabled), not zero remaining budget.
 
 Webhook delivery health is deliberately **not** here. Workspace Settings →
 GitHub access reports it per workspace — whether the App's webhook is
@@ -643,6 +635,65 @@ the rules file into the Prometheus you already run. Every `*.yml` in
 `docker/observability/rules/` is loaded, so another rules file is a new file
 there. Prometheus reads rule files at start and on a reload, not when they
 change, so an edit takes effect after `docker compose restart prometheus`.
+
+### Rate-limit budgets
+
+After every response that states a rate-limit budget, TF keeps the reading,
+the latest for each upstream, org, credential and bucket, and exports it:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `tf_upstream_rate_limit_remaining` | `upstream`, `org_id`, `credential`, `bucket` | What the latest response said is left of the bucket. |
+| `tf_upstream_rate_limit_limit` | `upstream`, `org_id`, `credential`, `bucket` | The bucket's size. No series when the response did not state it. |
+| `tf_upstream_rate_limit_remaining_ratio` | `upstream`, `org_id`, `credential`, `bucket` | `remaining` divided by `limit`, from 0 to 1. No series when the size was not stated. |
+| `tf_upstream_rate_limit_until_reset_seconds` | `upstream`, `org_id`, `credential`, `bucket` | Seconds until the bucket refills. No series when the reset was not stated. |
+| `tf_upstream_rate_limit_wait_seconds_total` | `upstream`, `org_id` | Time spent waiting on a rate limit before sending a request: a spent budget's reset, or a rate-limited response's `Retry-After` or backoff. |
+
+A reading is reported until its bucket's reset. After that the bucket has
+refilled, so a credential nothing has used since then has no series until its
+next response, rather than its last window's low number.
+
+The rate-limited responses themselves are
+`tf_upstream_requests_total{outcome="rate_limited"}` (see
+[Source connections](#source-connections)).
+
+Only `github` reports budgets so far.
+
+- `credential` is what GitHub meters: `installation:<id>` for a GitHub App
+  installation, whether on the deployment's App or the workspace's own, and
+  `pat` for the workspace's personal access token. A workspace that connects
+  several GitHub accounts has one installation, and one budget, for each. The
+  id is GitHub's numeric installation id, which only the App's own key can
+  turn into an account name.
+- `bucket` is the name GitHub sends in `X-RateLimit-Resource`: `core` for
+  REST, `graphql`, `search`, and any other it returns. Buckets are separate
+  budgets in different units (`core` counts requests, `graphql` counts query
+  points), so compare a bucket only with itself.
+- GitHub's secondary limits state no budget: they arrive only as a 403 or 429
+  with `Retry-After`, so they show up in the `rate_limited` count and the time
+  waited, and nowhere else.
+
+A response states the upstream's own count of what is left for the
+credential, so each pod's latest reading is accurate as of when it was taken,
+and nothing is combined across pods. Do not sum these gauges. `min` gives the
+tightest reading any pod holds, which may be older than another pod's:
+
+```
+min by (upstream, org_id, credential, bucket) (tf_upstream_rate_limit_remaining_ratio)   # not an alert: the share left, per budget
+sum by (upstream, org_id) (rate(tf_upstream_rate_limit_wait_seconds_total[15m]))         # not an alert: how much of the time each org's requests spend waiting
+```
+
+In multi mode, the requests a delegated run makes from inside its sandbox spend
+the same budgets without reporting a reading. The next response a pod sees
+still states what that spending left.
+
+The log carries the same signal, for a deployment that serves no metrics (local
+mode without `TF_METRICS_ADDR`):
+
+| When | Level | Message and attributes |
+| --- | --- | --- |
+| A bucket's reading is below 20% left for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`. It is logged again once that window has reset, or after the bucket climbs back above 20%. |
+| A request waits on a rate limit | WARN | `waiting on a rate limit`, with `upstream`, `org` and `wait`. |
 
 ## Traces — `TF_TRACES_ENDPOINT`
 

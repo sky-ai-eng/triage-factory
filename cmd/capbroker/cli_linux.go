@@ -121,8 +121,9 @@ func runBroker(args []string) error {
 		if err := srv.Shutdown(drainCtx); err != nil {
 			return fmt.Errorf("capbroker: shutdown: %w", err)
 		}
-		<-serveErr
-		return nil
+		// Serve returns nil once Shutdown has closed it; anything else is a
+		// failure it met on the way out.
+		return <-serveErr
 	case err := <-serveErr:
 		// Accept loop died on its own (not via our shutdown) — surface it.
 		return err

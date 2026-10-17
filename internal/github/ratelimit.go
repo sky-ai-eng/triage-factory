@@ -8,7 +8,9 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
@@ -68,74 +70,99 @@ func (e *ErrRateLimited) Error() string {
 // UpstreamClass implements upstream.Classified.
 func (e *ErrRateLimited) UpstreamClass() upstream.Class { return upstream.RateLimited }
 
-// RateLimit returns the primary rate-limit budget from the most recent
-// response that carried x-ratelimit-* headers. ok is false until the first
-// such response is seen — a GHES host with rate limiting disabled never sets
-// it, and callers should treat that as unlimited rather than exhausted.
-func (c *Client) RateLimit() (remaining int, reset time.Time, ok bool) {
+// The rate-limit buckets GitHub names in X-RateLimit-Resource that TF reads
+// by name. GitHub returns others (integration_manifest, code_scanning_upload,
+// …); those are recorded under whatever name it sends.
+const (
+	bucketCore    = "core"
+	bucketGraphQL = "graphql"
+	bucketSearch  = "search"
+)
+
+// requestBucket is the rate-limit bucket a request to u draws on, as far as
+// its URL says: GraphQL and search are metered on their own, and everything
+// else TF calls draws on core. The response's X-RateLimit-Resource is the
+// authority; this is the bucket a pre-flight checks before there is a
+// response, and the one a response that omits the header is recorded under.
+func requestBucket(u *url.URL) string {
+	switch {
+	case strings.HasSuffix(u.Path, "/graphql"):
+		return bucketGraphQL
+	case strings.Contains(u.Path, "/search/"):
+		return bucketSearch
+	}
+	return bucketCore
+}
+
+// RateLimit returns the latest reading of bucket from this client's
+// responses. ok is false until a response for that bucket has carried
+// x-ratelimit-* headers — a GHES host with rate limiting disabled never sends
+// them, and callers should treat that as unlimited rather than exhausted.
+func (c *Client) RateLimit(bucket string) (remaining int, reset time.Time, ok bool) {
 	c.rlMu.Lock()
 	defer c.rlMu.Unlock()
-	return c.rlRemaining, c.rlReset, c.rlOK
+	b, ok := c.rl[bucket]
+	return b.Remaining, b.Reset, ok
 }
 
-// recordRateLimit updates the client's rate-limit state from a response's
-// headers. Called on every response the request core sees, successful or
-// not. x-ratelimit-remaining and x-ratelimit-reset are required for the
-// state to become valid (ok=true); x-ratelimit-used is stored best-effort
-// alongside them. Missing or unparsable headers leave the prior state
-// untouched — GHES may omit them entirely when rate limiting is disabled.
-func (c *Client) recordRateLimit(h http.Header) {
-	remStr := h.Get("X-RateLimit-Remaining")
-	resetStr := h.Get("X-RateLimit-Reset")
-	if remStr == "" || resetStr == "" {
-		return
+// recordRateLimit keeps a response's reading of the bucket its
+// X-RateLimit-Resource names, or of fallback (the request's bucket) when the
+// header is absent, and returns that bucket. Called on every response the
+// request core sees, successful or not. x-ratelimit-remaining and
+// x-ratelimit-reset are required for a reading; x-ratelimit-limit is read
+// alongside them, or derived from x-ratelimit-used when absent, and is 0
+// (unknown) when neither arrives. Missing or
+// unparsable headers leave the prior reading untouched — GHES may omit them
+// entirely when rate limiting is disabled.
+//
+// A client made for an org and a credential (WithOrg, WithCredential) also
+// reports the reading to the process-wide recorder (upstream.RecordBudget),
+// which the rate-limit gauges and the low-budget WARN read. A client that
+// names no credential reports nothing: an unauthenticated call has no budget
+// of the org's, and a run's credential-proxy client cannot say which of the
+// org's credentials the proxy attached.
+func (c *Client) recordRateLimit(h http.Header, fallback string) string {
+	bucket := h.Get("X-RateLimit-Resource")
+	if bucket == "" {
+		bucket = fallback
 	}
-	remaining, err := strconv.Atoi(remStr)
+	remaining, err := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
 	if err != nil {
-		return
+		return bucket
 	}
-	resetUnix, err := strconv.ParseInt(resetStr, 10, 64)
+	resetUnix, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64)
 	if err != nil {
-		return
+		return bucket
 	}
-	reset := time.Unix(resetUnix, 0)
-	used, _ := strconv.Atoi(h.Get("X-RateLimit-Used"))
+	limit, err := strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	if err != nil {
+		limit = 0
+		if used, err := strconv.Atoi(h.Get("X-RateLimit-Used")); err == nil {
+			limit = used + remaining
+		}
+	}
+	b := upstream.Budget{Remaining: remaining, Limit: limit, Reset: time.Unix(resetUnix, 0)}
 
 	c.rlMu.Lock()
-	c.rlRemaining = remaining
-	c.rlReset = reset
-	c.rlUsed = used
-	c.rlOK = true
-	observer := c.rlObserver
-	c.rlMu.Unlock()
-
-	// Invoked outside the lock: the observer (the resolver's registry
-	// write) takes its own lock, and calling out to arbitrary caller code
-	// while holding rlMu is an avoidable lock-ordering risk.
-	if observer != nil {
-		observer(RateLimitState{Remaining: remaining, Reset: reset, Used: used})
+	if c.rl == nil {
+		c.rl = make(map[string]upstream.Budget)
 	}
-}
-
-// SetRateLimitObserver registers fn to be invoked every time this client's
-// cached rate-limit state updates from a response's headers (see
-// recordRateLimit) — the hook the resolver uses to mirror a short-lived,
-// per-resolve *Client's state into its process-wide, per-org
-// RateLimitRegistry (GET /readyz's soft rate-limit signal, TFAC-573).
-// Optional; a *Client with no observer set is unaffected.
-func (c *Client) SetRateLimitObserver(fn func(RateLimitState)) {
-	c.rlMu.Lock()
-	c.rlObserver = fn
+	c.rl[bucket] = b
 	c.rlMu.Unlock()
+
+	if c.orgID != "" && c.credential != "" {
+		upstream.RecordBudget(upstream.GitHub, c.orgID, c.credential, bucket, b)
+	}
+	return bucket
 }
 
-// awaitBudget blocks until there is likely budget for an idempotent request,
-// using the most recently observed remaining/reset. It is a pre-flight
+// awaitBudget blocks until there is likely budget in bucket for an idempotent
+// request, using this client's latest reading of it. It is a pre-flight
 // check only — it never talks to GitHub — so a cycle that's already known to
 // be out of budget doesn't spend a request finding that out again. Mutations
 // never call this: see doMutation.
-func (c *Client) awaitBudget(ctx context.Context) error {
-	remaining, reset, ok := c.RateLimit()
+func (c *Client) awaitBudget(ctx context.Context, bucket string) error {
+	remaining, reset, ok := c.RateLimit(bucket)
 	if !ok || remaining > 0 {
 		return nil
 	}
@@ -153,7 +180,7 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 		span.SetAttributes(telemetry.Outcome("refused"))
 		return &ErrRateLimited{ResumeAt: reset}
 	}
-	if err := upstream.Sleep(ctx, wait); err != nil {
+	if err := upstream.WaitOnLimit(ctx, upstream.GitHub, c.orgID, wait); err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
@@ -169,13 +196,20 @@ func (c *Client) awaitBudget(ctx context.Context) error {
 // "one long wait" from "five short ones", and the disposition separates a
 // rate limit from a transient failure. Neither outcome is an error
 // status — waiting out a rate limit or a 503 is the client working, and a
-// cancelled wait is the caller leaving.
-func awaitRetry(ctx context.Context, attempt int, class upstream.Class, wait time.Duration) error {
+// cancelled wait is the caller leaving. A rate limit's wait is also logged and
+// counted (upstream.WaitOnLimit); a transient failure's backoff is not.
+func (c *Client) awaitRetry(ctx context.Context, attempt int, class upstream.Class, wait time.Duration) error {
 	ctx, span := tracer.Start(ctx, "github.ratelimit.backoff",
 		trace.WithAttributes(telemetry.Attempt(attempt), telemetry.Disposition(string(class))))
 	defer span.End()
 
-	if err := upstream.Sleep(ctx, wait); err != nil {
+	var err error
+	if class == upstream.RateLimited {
+		err = upstream.WaitOnLimit(ctx, upstream.GitHub, c.orgID, wait)
+	} else {
+		err = upstream.Sleep(ctx, wait)
+	}
+	if err != nil {
 		span.SetAttributes(telemetry.Outcome("cancelled"))
 		return err
 	}
@@ -258,21 +292,26 @@ func (c *Client) doStream(ctx context.Context, hc *http.Client, build reqBuilder
 // read ends. That read is never retried, because what it read is already in
 // the caller's hands.
 func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, stream bool, build reqBuilder) (*http.Response, []byte, error) {
-	if idempotent {
-		if err := c.awaitBudget(ctx); err != nil {
-			return nil, nil, err
-		}
-	}
-
 	maxAttempts := 1
 	if idempotent {
 		maxAttempts = 1 + maxRateLimitRetries
 	}
 
+	// bucket is the rate-limit bucket the request draws on: predicted from
+	// its URL until a response names it.
+	var bucket string
 	for attempt := 1; ; attempt++ {
 		req, err := build()
 		if err != nil {
 			return nil, nil, err
+		}
+		if attempt == 1 {
+			bucket = requestBucket(req.URL)
+			if idempotent {
+				if err := c.awaitBudget(ctx, bucket); err != nil {
+					return nil, nil, err
+				}
+			}
 		}
 		host := req.URL.Host
 		if upstream.Silent(ctx, host) {
@@ -303,7 +342,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			continue
 		}
 		upstream.MarkAnswered(ctx, host)
-		c.recordRateLimit(resp.Header)
+		bucket = c.recordRateLimit(resp.Header, bucket)
 		// The response came from the last hop of any redirect.
 		servedBy := host
 		if resp.Request != nil {
@@ -346,7 +385,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 			// Headers that report a spent primary budget mean the retry would
 			// be refused until it resets, so it waits as the next request
 			// would, or stops with ErrRateLimited.
-			if err := c.awaitBudget(ctx); err != nil {
+			if err := c.awaitBudget(ctx, bucket); err != nil {
 				return nil, nil, err
 			}
 			if err := c.retryAfter(ctx, attempt, class, wait); err != nil {
@@ -410,7 +449,7 @@ func (c *Client) doWithRetry(ctx context.Context, hc *http.Client, idempotent, s
 // retryAfter counts the decision to retry and then waits it out.
 func (c *Client) retryAfter(ctx context.Context, attempt int, class upstream.Class, wait time.Duration) error {
 	upstream.RecordRetry(ctx, upstream.GitHub, c.orgID, class)
-	return awaitRetry(ctx, attempt, class, wait)
+	return c.awaitRetry(ctx, attempt, class, wait)
 }
 
 // transientBackoff is the wait before retrying a transient failure.
