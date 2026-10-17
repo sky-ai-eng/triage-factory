@@ -106,8 +106,10 @@ func EventType(kind string) attribute.KeyValue { return keyEventType.String(kind
 //   - Bucket — which of an upstream's rate-limit budgets a reading is of,
 //     in the upstream's own name for it (GitHub's X-RateLimit-Resource:
 //     "core", "graphql", "search"; Linear's "requests", "complexity", and
-//     "endpoint:<X-RateLimit-Endpoint-Name>"). A small set the upstream
-//     documents; never a host or a credential.
+//     "endpoint:<X-RateLimit-Endpoint-Name>"). A small set: the names the
+//     upstream documents, plus Linear's endpoint names, which it does not
+//     publish, so its client checks each one and reports at most 32 per
+//     process. Never a host or a credential.
 //   - Credential — which credential a rate-limit budget is metered
 //     against, as an opaque id its client chooses: GitHub's "pat" or
 //     "installation:<GitHub installation id>", Linear's "api_key" or

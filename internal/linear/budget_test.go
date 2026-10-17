@@ -3,9 +3,11 @@ package linear
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,11 +27,27 @@ func (s *stub) systemClient() *Client {
 
 func millis(t time.Time) string { return strconv.FormatInt(t.UnixMilli(), 10) }
 
+// freshEndpointNames gives t an empty set of reported endpoint names, and
+// restores the process's set via t.Cleanup.
+func freshEndpointNames(t *testing.T) {
+	t.Helper()
+	endpointNames.Lock()
+	prevSeen, prevFull := endpointNames.seen, endpointNames.full
+	endpointNames.seen, endpointNames.full = map[string]struct{}{}, false
+	endpointNames.Unlock()
+	t.Cleanup(func() {
+		endpointNames.Lock()
+		endpointNames.seen, endpointNames.full = prevSeen, prevFull
+		endpointNames.Unlock()
+	})
+}
+
 // TestRecordBudgets_EachBucketOnItsOwn: requests, complexity and an
 // endpoint's own limit are three budgets, each recorded under its own bucket
 // with the limit, remaining and reset its headers state.
 func TestRecordBudgets_EachBucketOnItsOwn(t *testing.T) {
 	upstream.ResetBudgetsForTest(t)
+	freshEndpointNames(t)
 	reqReset := time.Now().Add(40 * time.Minute).Truncate(time.Millisecond)
 	cxReset := time.Now().Add(50 * time.Minute).Truncate(time.Millisecond)
 	epReset := time.Now().Add(time.Minute).Truncate(time.Millisecond)
@@ -89,6 +107,61 @@ func TestRecordBudgets_PartialHeaders(t *testing.T) {
 		if got, ok := upstream.BudgetForTest(upstream.Linear, "org-1", "api_key", bucket); ok {
 			t.Errorf("recorded %s = %+v from a response that stated no remaining for it", bucket, got)
 		}
+	}
+}
+
+// TestEndpointBucket_BoundsTheNames: an endpoint name becomes a label value
+// on every org's and credential's series, so one that does not look like a
+// name is refused, and so is a new one once the process has reported
+// maxEndpointNames; a name already reported still is.
+func TestEndpointBucket_BoundsTheNames(t *testing.T) {
+	freshEndpointNames(t)
+	for _, name := range []string{"issueCreate", "issue.create-v2_x", strings.Repeat("a", maxEndpointNameLen)} {
+		if got, ok := endpointBucket(name); !ok || got != "endpoint:"+name {
+			t.Errorf("endpointBucket(%q) = (%q, %v), want endpoint:%s", name, got, ok, name)
+		}
+	}
+	for _, name := range []string{"issue create", "a/b", "issué", `{"id":1}`, strings.Repeat("a", maxEndpointNameLen+1)} {
+		if got, ok := endpointBucket(name); ok {
+			t.Errorf("endpointBucket(%q) = %q, want it refused", name, got)
+		}
+	}
+
+	for i := 0; len(endpointNames.seen) < maxEndpointNames; i++ {
+		if _, ok := endpointBucket(fmt.Sprintf("ep%d", i)); !ok {
+			t.Fatalf("ep%d refused before the bound", i)
+		}
+	}
+	if got, ok := endpointBucket("oneMore"); ok {
+		t.Errorf("a new name past the bound = %q, want it refused", got)
+	}
+	if _, ok := endpointBucket("issueCreate"); !ok {
+		t.Error("a name already reported was refused once the bound was reached")
+	}
+}
+
+// TestRecordBudgets_RefusedEndpointName: a response whose endpoint name is
+// refused still reports its other buckets.
+func TestRecordBudgets_RefusedEndpointName(t *testing.T) {
+	upstream.ResetBudgetsForTest(t)
+	freshEndpointNames(t)
+	s := newStub(t, scripted(reply{
+		header: map[string]string{
+			"X-RateLimit-Requests-Remaining":          "40",
+			"X-RateLimit-Endpoint-Name":               "issue 7f3c",
+			"X-RateLimit-Endpoint-Requests-Remaining": "3",
+		},
+		body: viewerOK,
+	}))
+
+	if _, err := s.systemClient().Viewer(context.Background()); err != nil {
+		t.Fatalf("Viewer: %v", err)
+	}
+	if _, ok := upstream.BudgetForTest(upstream.Linear, "org-1", "api_key", "requests"); !ok {
+		t.Error("requests not recorded beside a refused endpoint name")
+	}
+	if b, ok := upstream.BudgetForTest(upstream.Linear, "org-1", "api_key", "endpoint:issue 7f3c"); ok {
+		t.Errorf("recorded %+v under a refused endpoint name", b)
 	}
 }
 

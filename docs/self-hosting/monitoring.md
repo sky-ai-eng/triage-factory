@@ -689,6 +689,10 @@ The rate-limited responses themselves are
   query points. When an endpoint's own limit applies, Linear states it too, as
   a count of requests to that endpoint, and it is reported as
   `endpoint:<name>`, with the name Linear sends in `X-RateLimit-Endpoint-Name`.
+  Linear does not publish those names, so each pod reports at most 32 of them,
+  each at most 64 letters, digits, `_`, `.` or `-`. A name outside that is not
+  reported, and the first one refused for the limit of 32 is logged at WARN
+  (`linear endpoint limit not reported: too many endpoint names`).
 - The sizes come from Linear's headers, not from TF. Linear publishes these
   hourly limits: 2,500 requests and 3,000,000 points for an API key, per user,
   and 5,000 requests and 2,000,000 points for an OAuth app, per user or app
@@ -723,7 +727,7 @@ request counters it is per process, so `sum` across pods:
 
 | Metric | Labels | Value |
 | --- | --- | --- |
-| `tf_upstream_query_cost` (histogram) | `upstream`, `op` | Points one query cost. `op` is the operation the query's document names (`IssuesByID`, `SearchIssues`, `CommentCreate`, …). Buckets run up to 10,000 points. Recorded whichever credential made the request, except for a delegated run's requests from inside its sandbox in multi mode. |
+| `tf_upstream_query_cost` (histogram) | `upstream`, `op` | Points one query cost. `op` is the operation the query's document names (`IssuesByID`, `SearchIssues`, `CommentCreate`, …). Bucket boundaries are 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500 and 10000 points; Linear refuses a query that would cost more than 10,000. Recorded whichever credential made the request, except for a delegated run's requests from inside its sandbox in multi mode. |
 
 ```
 sum by (op) (rate(tf_upstream_query_cost_sum{upstream="linear"}[1h])) / sum by (op) (rate(tf_upstream_query_cost_count{upstream="linear"}[1h]))   # not an alert: mean points per query, by operation

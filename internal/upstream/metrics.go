@@ -55,7 +55,8 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 	}
 	in.waited = waited
 	queryCost, err := m.Int64Histogram("upstream.query.cost", metric.WithUnit("{point}"),
-		metric.WithDescription("What the upstream said one GraphQL query cost against its points budget, by operation."))
+		metric.WithDescription("What the upstream said one GraphQL query cost against its points budget, by operation."),
+		metric.WithExplicitBucketBoundaries(queryCostBounds...))
 	if err != nil {
 		log.Warn("upstream histogram setup failed", "instrument", "upstream.query.cost", "error", err)
 	}
@@ -63,6 +64,11 @@ func newInstruments(provider metric.MeterProvider) *instruments {
 	registerBudgetGauges(m)
 	return in
 }
+
+// queryCostBounds are the query-cost histogram's bucket boundaries, in
+// points. They end at 10,000, the most Linear lets one query cost, and 7500
+// splits the top decade where a full 50-issue read lands (about 5,500).
+var queryCostBounds = []float64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500, 10000}
 
 var (
 	globalOnce sync.Once

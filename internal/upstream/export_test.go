@@ -110,11 +110,24 @@ func TestQueryCost_RealScrape(t *testing.T) {
 	for _, w := range []string{
 		`tf_upstream_query_cost_count{op="IssuesByID",upstream="linear"} 2`,
 		`tf_upstream_query_cost_sum{op="IssuesByID",upstream="linear"} 5610`,
+		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="100"} 0`,
 		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="250"} 1`,
+		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="5000"} 1`,
 		`tf_upstream_query_cost_bucket{op="IssuesByID",upstream="linear",le="7500"} 2`,
 	} {
 		if !got[w] {
 			t.Errorf("scrape lacks %q", w)
 		}
+	}
+	// The boundaries are queryCostBounds, not the SDK's default: no bucket
+	// below the first or above the last.
+	var les []string
+	for line := range got {
+		if strings.HasPrefix(line, "tf_upstream_query_cost_bucket{") {
+			les = append(les, line[strings.Index(line, `le="`)+4:strings.LastIndex(line, `"`)])
+		}
+	}
+	if len(les) != len(queryCostBounds)+1 {
+		t.Errorf("scrape has %d buckets %v, want queryCostBounds plus +Inf", len(les), les)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -199,12 +200,11 @@ func (c *Client) mutate(ctx context.Context, doc string, vars map[string]any, ou
 //
 // Each attempt is counted under the client's org, and each response's
 // rate-limit headers and query cost are recorded (recordBudgets,
-// recordQueryCost). A rate-limited attempt
-// waits for the later of Linear's request and complexity windows to reset,
-// as long as the request's rate-limit waits stay within rateLimitWaitCap in
-// total; a transient failure of an idempotent request waits out an
-// exponential backoff. No request gets more than maxAttempts attempts, and
-// every wait ends when ctx does.
+// recordQueryCost). A rate-limited attempt waits for the later of Linear's
+// request and complexity windows to reset, as long as the request's
+// rate-limit waits stay within rateLimitWaitCap in total; a transient failure
+// of an idempotent request waits out an exponential backoff. No request gets
+// more than maxAttempts attempts, and every wait ends when ctx does.
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks Linear unreachable for the rest of the scope, so
@@ -335,12 +335,57 @@ func (c *Client) wait(ctx context.Context, class upstream.Class, d time.Duration
 // requests counts requests and complexity counts query points. An endpoint
 // with a limit of its own also states it, as a count of requests to that
 // endpoint, reported as its own bucket, endpointBucketPrefix followed by the
-// name Linear sends in X-RateLimit-Endpoint-Name.
+// name Linear sends in X-RateLimit-Endpoint-Name (endpointBucket).
 const (
 	bucketRequests       = "requests"
 	bucketComplexity     = "complexity"
 	endpointBucketPrefix = "endpoint:"
 )
+
+// maxEndpointNames bounds how many distinct endpoint names a process reports
+// as buckets, and maxEndpointNameLen how long one may be. Linear does not
+// publish the names it sends, and each one is a label value on series for
+// every org and credential, so these are what keep that set small.
+const (
+	maxEndpointNames   = 32
+	maxEndpointNameLen = 64
+)
+
+// endpointNames is every endpoint name this process has reported, at most
+// maxEndpointNames of them.
+var endpointNames = struct {
+	sync.Mutex
+	seen map[string]struct{}
+	// full is whether a name has been refused for the bound, which is logged
+	// the first time only.
+	full bool
+}{seen: map[string]struct{}{}}
+
+// endpointBucket is the bucket an endpoint's own limit is reported under. ok
+// is false for a name longer than maxEndpointNameLen or with a character
+// other than a letter, a digit, '_', '.' or '-', and for a name not seen
+// before once maxEndpointNames have been.
+func endpointBucket(name string) (bucket string, ok bool) {
+	if len(name) > maxEndpointNameLen || strings.IndexFunc(name, func(r rune) bool {
+		return r > unicode.MaxASCII || (r != '_' && r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r))
+	}) >= 0 {
+		return "", false
+	}
+	endpointNames.Lock()
+	defer endpointNames.Unlock()
+	if _, seen := endpointNames.seen[name]; !seen {
+		if len(endpointNames.seen) >= maxEndpointNames {
+			if !endpointNames.full {
+				endpointNames.full = true
+				linearLog.Warn("linear endpoint limit not reported: too many endpoint names",
+					"endpoint", name, "max", maxEndpointNames)
+			}
+			return "", false
+		}
+		endpointNames.seen[name] = struct{}{}
+	}
+	return endpointBucketPrefix + name, true
+}
 
 // recordBudgets reports each bucket a response states to the process-wide
 // recorder (upstream.RecordBudget), which the rate-limit gauges and the
@@ -362,7 +407,9 @@ func (c *Client) recordBudgets(h http.Header) {
 	report(bucketRequests, "X-RateLimit-Requests-")
 	report(bucketComplexity, "X-RateLimit-Complexity-")
 	if name := strings.TrimSpace(h.Get("X-RateLimit-Endpoint-Name")); name != "" {
-		report(endpointBucketPrefix+name, "X-RateLimit-Endpoint-Requests-")
+		if bucket, ok := endpointBucket(name); ok {
+			report(bucket, "X-RateLimit-Endpoint-Requests-")
+		}
 	}
 }
 
@@ -488,6 +535,9 @@ func pathStrings(path []any) []string {
 // complexity windows' resets, each sent as UTC epoch milliseconds. Linear sends
 // no Retry-After, but a 429 from something in front of it may, so that is the
 // fallback. Zero when none of the headers is present.
+//
+// TODO(TFAC-1116): an endpoint's own limit states a reset of its own, which
+// this ignores, so a request only that limit refused waits for the wrong one.
 func rateLimitReset(h http.Header) time.Time {
 	var reset time.Time
 	for _, name := range []string{"X-RateLimit-Requests-Reset", "X-RateLimit-Complexity-Reset"} {
