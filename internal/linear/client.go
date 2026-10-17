@@ -18,7 +18,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 
 	"github.com/sky-ai-eng/triage-factory/internal/telemetry"
 	"github.com/sky-ai-eng/triage-factory/internal/upstream"
@@ -124,6 +126,11 @@ type Client struct {
 	// orgID is the org every request is counted under (upstream.Record). Set
 	// by WithOrg; empty for a client that makes its calls for no org.
 	orgID string
+	// credential names the credential the client's requests are metered
+	// against, the key its rate-limit readings are recorded under. Set by
+	// WithCredential; empty for a client whose readings are not recorded
+	// (see recordBudgets).
+	credential string
 }
 
 // NewClient builds a Client. Every Linear call in the process is made through
@@ -139,6 +146,19 @@ func NewClient(cfg Config) *Client {
 // under that org, and returns c. Call it before c's first request.
 func (c *Client) WithOrg(orgID string) *Client {
 	c.orgID = orgID
+	return c
+}
+
+// WithCredential sets the credential c's requests are metered against, so
+// its rate-limit readings are recorded for its org under that credential, and
+// returns c. Call it before c's first request.
+//
+// The org's service credential is named by its AuthMethod, api_key or
+// app_install: an org has one, and Linear meters a key by the user who made
+// it and an install by its app user, so a switch from one to the other is a
+// different budget.
+func (c *Client) WithCredential(credential string) *Client {
+	c.credential = credential
 	return c
 }
 
@@ -178,12 +198,13 @@ func (c *Client) mutate(ctx context.Context, doc string, vars map[string]any, ou
 // carrying any errors entry is an error, even when it carries data too, so a
 // partial answer is never read as a whole one.
 //
-// Each attempt is counted under the client's org. A rate-limited attempt
-// waits for the later of Linear's request and complexity windows to reset,
-// as long as the request's rate-limit waits stay within rateLimitWaitCap in
-// total; a transient failure of an idempotent request waits out an
-// exponential backoff. No request gets more than maxAttempts attempts, and
-// every wait ends when ctx does.
+// Each attempt is counted under the client's org, and each response's
+// rate-limit headers and query cost are recorded (recordBudgets,
+// recordQueryCost). A rate-limited attempt waits for the later of Linear's
+// request and complexity windows to reset, as long as the request's
+// rate-limit waits stay within rateLimitWaitCap in total; a transient failure
+// of an idempotent request waits out an exponential backoff. No request gets
+// more than maxAttempts attempts, and every wait ends when ctx does.
 //
 // Under a fail-fast scope (upstream.WithFailFast), a request that ends in a
 // transient failure marks Linear unreachable for the rest of the scope, so
@@ -197,6 +218,7 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 	if err != nil {
 		return fmt.Errorf("linear: encode request: %w", err)
 	}
+	op := operationName(doc)
 	var rateLimitWaited time.Duration
 	for attempt := 1; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.Endpoint, bytes.NewReader(body))
@@ -229,6 +251,8 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 			continue
 		}
 		upstream.MarkAnswered(ctx, host)
+		c.recordBudgets(resp.Header)
+		recordQueryCost(op, resp.Header)
 
 		var data []byte
 		if resp.StatusCode >= 300 {
@@ -297,10 +321,144 @@ func (c *Client) do(ctx context.Context, doc string, vars map[string]any, idempo
 }
 
 // wait counts the decision to retry after an attempt that ended in class,
-// then waits d or until ctx is done.
+// then waits d or until ctx is done. A rate limit's wait is also logged and
+// counted (upstream.WaitOnLimit); a transient failure's backoff is not.
 func (c *Client) wait(ctx context.Context, class upstream.Class, d time.Duration) error {
 	upstream.RecordRetry(ctx, upstream.Linear, c.orgID, class)
+	if class == upstream.RateLimited {
+		return upstream.WaitOnLimit(ctx, upstream.Linear, c.orgID, d)
+	}
 	return upstream.Sleep(ctx, d)
+}
+
+// The rate-limit buckets Linear meters for a credential, each per hour:
+// requests counts requests and complexity counts query points. An endpoint
+// with a limit of its own also states it, as a count of requests to that
+// endpoint, reported as its own bucket, endpointBucketPrefix followed by the
+// name Linear sends in X-RateLimit-Endpoint-Name (endpointBucket).
+const (
+	bucketRequests       = "requests"
+	bucketComplexity     = "complexity"
+	endpointBucketPrefix = "endpoint:"
+)
+
+// maxEndpointNames bounds how many distinct endpoint names a process reports
+// as buckets, and maxEndpointNameLen how long one may be. Linear does not
+// publish the names it sends, and each one is a label value on series for
+// every org and credential, so these are what keep that set small.
+const (
+	maxEndpointNames   = 32
+	maxEndpointNameLen = 64
+)
+
+// endpointNames is every endpoint name this process has reported, at most
+// maxEndpointNames of them.
+var endpointNames = struct {
+	sync.Mutex
+	seen map[string]struct{}
+	// full is whether a name has been refused for the bound, which is logged
+	// the first time only.
+	full bool
+}{seen: map[string]struct{}{}}
+
+// endpointBucket is the bucket an endpoint's own limit is reported under. ok
+// is false for a name longer than maxEndpointNameLen or with a character
+// other than a letter, a digit, '_', '.' or '-', and for a name not seen
+// before once maxEndpointNames have been.
+func endpointBucket(name string) (bucket string, ok bool) {
+	if len(name) > maxEndpointNameLen || strings.IndexFunc(name, func(r rune) bool {
+		return r > unicode.MaxASCII || (r != '_' && r != '.' && r != '-' && !unicode.IsLetter(r) && !unicode.IsDigit(r))
+	}) >= 0 {
+		return "", false
+	}
+	endpointNames.Lock()
+	defer endpointNames.Unlock()
+	if _, seen := endpointNames.seen[name]; !seen {
+		if len(endpointNames.seen) >= maxEndpointNames {
+			if !endpointNames.full {
+				endpointNames.full = true
+				linearLog.Warn("linear endpoint limit not reported: too many endpoint names",
+					"endpoint", name, "max", maxEndpointNames)
+			}
+			return "", false
+		}
+		endpointNames.seen[name] = struct{}{}
+	}
+	return endpointBucketPrefix + name, true
+}
+
+// recordBudgets reports each bucket a response states to the process-wide
+// recorder (upstream.RecordBudget), which the rate-limit gauges and the
+// low-budget WARN read. Called on every response, successful or not.
+//
+// A client that names no org or no credential reports nothing: a credential
+// being validated before it is stored is no org's, a user's own credential is
+// metered per Linear user, which a metric label may not name, and a run's
+// credential-proxy client cannot say which credential the proxy attached.
+func (c *Client) recordBudgets(h http.Header) {
+	if c.orgID == "" || c.credential == "" {
+		return
+	}
+	report := func(bucket, prefix string) {
+		if b, ok := readBudget(h, prefix); ok {
+			upstream.RecordBudget(upstream.Linear, c.orgID, c.credential, bucket, b)
+		}
+	}
+	report(bucketRequests, "X-RateLimit-Requests-")
+	report(bucketComplexity, "X-RateLimit-Complexity-")
+	if name := strings.TrimSpace(h.Get("X-RateLimit-Endpoint-Name")); name != "" {
+		if bucket, ok := endpointBucket(name); ok {
+			report(bucket, "X-RateLimit-Endpoint-Requests-")
+		}
+	}
+}
+
+// readBudget reads one bucket from the headers prefix+"Remaining",
+// prefix+"Limit" and prefix+"Reset". Remaining is required for a reading; a
+// limit or reset that is absent or unparsable is left unknown.
+func readBudget(h http.Header, prefix string) (upstream.Budget, bool) {
+	remaining, err := strconv.Atoi(strings.TrimSpace(h.Get(prefix + "Remaining")))
+	if err != nil {
+		return upstream.Budget{}, false
+	}
+	b := upstream.Budget{Remaining: remaining}
+	if limit, err := strconv.Atoi(strings.TrimSpace(h.Get(prefix + "Limit"))); err == nil {
+		b.Limit = limit
+	}
+	b.Reset, _ = epochMillis(h, prefix+"Reset")
+	return b, true
+}
+
+// recordQueryCost records the points Linear says a query cost (X-Complexity)
+// under its operation's name, for every client: the cost follows from the
+// document and its variables, whoever sends it.
+func recordQueryCost(op string, h http.Header) {
+	if op == "" {
+		return
+	}
+	points, err := strconv.ParseInt(strings.TrimSpace(h.Get("X-Complexity")), 10, 64)
+	if err != nil || points < 0 {
+		return
+	}
+	upstream.RecordQueryCost(upstream.Linear, op, points)
+}
+
+// operationName is the name a document gives its operation: IssuesByID for
+// "query IssuesByID($ids: [ID!]!, ...) {". Every document is a constant in
+// this package and names its operation, so the names are a closed set. Empty
+// for a document that names none.
+func operationName(doc string) string {
+	keyword, rest, ok := strings.Cut(strings.TrimSpace(doc), " ")
+	if !ok || (keyword != "query" && keyword != "mutation") {
+		return ""
+	}
+	end := strings.IndexFunc(rest, func(r rune) bool {
+		return r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	if end < 0 {
+		end = len(rest)
+	}
+	return rest[:end]
 }
 
 // classify is Linear's own reading of a response, ahead of the default. Linear
@@ -377,14 +535,13 @@ func pathStrings(path []any) []string {
 // complexity windows' resets, each sent as UTC epoch milliseconds. Linear sends
 // no Retry-After, but a 429 from something in front of it may, so that is the
 // fallback. Zero when none of the headers is present.
+//
+// TODO(TFAC-1116): an endpoint's own limit states a reset of its own, which
+// this ignores, so a request only that limit refused waits for the wrong one.
 func rateLimitReset(h http.Header) time.Time {
 	var reset time.Time
 	for _, name := range []string{"X-RateLimit-Requests-Reset", "X-RateLimit-Complexity-Reset"} {
-		ms, err := strconv.ParseInt(strings.TrimSpace(h.Get(name)), 10, 64)
-		if err != nil || ms <= 0 {
-			continue
-		}
-		if t := time.UnixMilli(ms); t.After(reset) {
+		if t, ok := epochMillis(h, name); ok && t.After(reset) {
 			reset = t
 		}
 	}
@@ -394,6 +551,17 @@ func rateLimitReset(h http.Header) time.Time {
 		}
 	}
 	return reset
+}
+
+// epochMillis reads header name as UTC epoch milliseconds, the form Linear
+// sends every reset in. ok is false when it is absent, unparsable or not
+// positive.
+func epochMillis(h http.Header, name string) (t time.Time, ok bool) {
+	ms, err := strconv.ParseInt(strings.TrimSpace(h.Get(name)), 10, 64)
+	if err != nil || ms <= 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(ms), true
 }
 
 // rateLimitWait is how long a rate-limited attempt would wait: until the

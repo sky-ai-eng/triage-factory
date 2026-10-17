@@ -104,6 +104,9 @@ func TestForSystem_BuildsAPIKeyClient(t *testing.T) {
 	if got := authorizationOf(t, c); got != "lin_api_org" {
 		t.Errorf("Authorization = %q, want the bare org key", got)
 	}
+	if c.credential != "api_key" {
+		t.Errorf("client records its readings under credential %q, want api_key", c.credential)
+	}
 }
 
 func TestForSystem_MissingCredential(t *testing.T) {
@@ -142,6 +145,9 @@ func TestForSystem_KeyWithoutMarkerIsAPIKey(t *testing.T) {
 	if got := authorizationOf(t, c); got != "lin_api_env" {
 		t.Errorf("Authorization = %q, want the key", got)
 	}
+	if c.credential != "api_key" {
+		t.Errorf("client records its readings under credential %q, want api_key", c.credential)
+	}
 }
 
 // fakeInstallTokens answers AccessTokenForOrg with a fixed token or error and
@@ -178,6 +184,9 @@ func TestForSystem_AppInstallBuildsBearerClient(t *testing.T) {
 	}
 	if tokens.gotOrg != testOrgID {
 		t.Errorf("token minted for org %q, want %q", tokens.gotOrg, testOrgID)
+	}
+	if c.credential != "app_install" {
+		t.Errorf("client records its readings under credential %q, want app_install", c.credential)
 	}
 
 	cred, err := r.ResolveSystemCredential(context.Background(), testOrgID)
@@ -293,6 +302,9 @@ func TestForUser_UsesUserToken(t *testing.T) {
 	if c.orgID != testOrgID {
 		t.Errorf("client counts under org %q, want %q", c.orgID, testOrgID)
 	}
+	if c.credential != "" {
+		t.Errorf("a user's client records its readings under credential %q, want none", c.credential)
+	}
 	if secrets.gotUserOrg != testOrgID || secrets.gotUserID != testUserID {
 		t.Errorf("user secret read for (org=%q user=%q), want (%q, %q)", secrets.gotUserOrg, secrets.gotUserID, testOrgID, testUserID)
 	}
@@ -385,6 +397,9 @@ func TestForUser_ConnectOAuthBuildsBearerClient(t *testing.T) {
 	}
 	if c.orgID != testOrgID {
 		t.Errorf("client counts under org %q, want %q", c.orgID, testOrgID)
+	}
+	if c.credential != "" {
+		t.Errorf("a user's client records its readings under credential %q, want none", c.credential)
 	}
 	if tokens.gotOrg != testOrgID || tokens.gotUser != testUserID || tokens.gotWork != testWorkspaceID {
 		t.Errorf("token minted for (%q, %q, %q), want (%q, %q, %q)", tokens.gotOrg, tokens.gotUser, tokens.gotWork, testOrgID, testUserID, testWorkspaceID)

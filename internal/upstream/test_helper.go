@@ -10,10 +10,10 @@ type TestT interface {
 	Cleanup(func())
 }
 
-// SetMeterProviderForTest points the request and retry counters at provider
-// for the duration of t, and restores the previous counters via t.Cleanup.
-// It lives in a non-_test.go file so a client's own tests can read what its
-// retry loop recorded. It swaps a process global, so tests that call it must
+// SetMeterProviderForTest points the counters, the query-cost histogram and
+// the rate-limit gauges at provider for the duration of t, and restores the
+// previous ones via t.Cleanup. It lives in a non-_test.go file so a client's
+// own tests can read what its requests recorded. It swaps a process global, so tests that call it must
 // not run in parallel with each other.
 func SetMeterProviderForTest(t TestT, provider metric.MeterProvider) {
 	t.Helper()

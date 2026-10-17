@@ -657,7 +657,9 @@ The rate-limited responses themselves are
 `tf_upstream_requests_total{outcome="rate_limited"}` (see
 [Source connections](#source-connections)).
 
-Only `github` reports budgets so far.
+`github` and `linear` report budgets so far.
+
+**GitHub**
 
 - `credential` is what GitHub meters: `installation:<id>` for a GitHub App
   installation, whether on the deployment's App or the workspace's own, and
@@ -672,6 +674,30 @@ Only `github` reports budgets so far.
 - GitHub's secondary limits state no budget: they arrive only as a 403 or 429
   with `Retry-After`, so they show up in the `rate_limited` count and the time
   waited, and nowhere else.
+
+**Linear**
+
+- `credential` is the workspace's service credential, named by how it was
+  connected: `api_key` for a personal API key, which Linear meters by the user
+  who created it, and `app_install` for TF installed as an OAuth app, which
+  Linear meters by the app user the install created. A workspace has one at a
+  time, so moving from one to the other starts a new series. Requests made with
+  a person's own Linear credential (their own key or their Connect, for a
+  write they make from TF) report no reading: Linear meters each user
+  separately, and a user is never a label.
+- `bucket` is `requests`, counted in requests, or `complexity`, counted in
+  query points. When an endpoint's own limit applies, Linear states it too, as
+  a count of requests to that endpoint, and it is reported as
+  `endpoint:<name>`, with the name Linear sends in `X-RateLimit-Endpoint-Name`.
+  Linear does not publish those names, so each pod reports at most 32 of them,
+  each at most 64 letters, digits, `_`, `.` or `-`. A name outside that is not
+  reported, and the first one refused for the limit of 32 is logged at WARN
+  (`linear endpoint limit not reported: too many endpoint names`).
+- The sizes come from Linear's headers, not from TF. Linear publishes these
+  hourly limits: 2,500 requests and 3,000,000 points for an API key, per user,
+  and 5,000 requests and 2,000,000 points for an OAuth app, per user or app
+  user. It raises an app install's limits with the workspace's paid seats, so
+  read `tf_upstream_rate_limit_limit` rather than the published figures.
 
 A response states the upstream's own count of what is left for the
 credential, so each pod's latest reading is accurate as of when it was taken,
@@ -694,6 +720,18 @@ mode without `TF_METRICS_ADDR`):
 | --- | --- | --- |
 | A bucket's reading is below 20% left for the first time in its window | WARN | `rate-limit budget low`, with `upstream`, `org`, `credential`, `bucket`, `remaining`, `limit` and `reset`. It is logged again once that window has reset, or after the bucket climbs back above 20%. |
 | A request waits on a rate limit | WARN | `waiting on a rate limit`, with `upstream`, `org` and `wait`. |
+
+Linear also states what each query cost against `complexity`, in
+`X-Complexity`. TF records it by the name of the query's operation. Like the
+request counters it is per process, so `sum` across pods:
+
+| Metric | Labels | Value |
+| --- | --- | --- |
+| `tf_upstream_query_cost` (histogram) | `upstream`, `op` | Points one query cost. `op` is the operation the query's document names (`IssuesByID`, `SearchIssues`, `CommentCreate`, …). Bucket boundaries are 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 7500 and 10000 points; Linear refuses a query that would cost more than 10,000. Recorded whichever credential made the request, except for a delegated run's requests from inside its sandbox in multi mode. |
+
+```
+sum by (op) (rate(tf_upstream_query_cost_sum{upstream="linear"}[1h])) / sum by (op) (rate(tf_upstream_query_cost_count{upstream="linear"}[1h]))   # not an alert: mean points per query, by operation
+```
 
 ## Traces — `TF_TRACES_ENDPOINT`
 
