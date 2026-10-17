@@ -45,10 +45,6 @@ org's poll. A cycle that runs longer than that while its requests keep
 completing (many orgs, or one org on a slow host), or while it waits out a
 `Retry-After` of up to five minutes, is not a failure.
 
-Rate-limit budgets are not on `/readyz`: they change nothing about whether a pod
-should take traffic, and each pod knows only the readings it took itself. They
-are on [`/metrics`](#rate-limit-budgets).
-
 Webhook delivery health is deliberately **not** here. Workspace Settings →
 GitHub access reports it per workspace — whether the App's webhook is
 configured, points at this deployment, and is being accepted — by asking GitHub
